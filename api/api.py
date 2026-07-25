@@ -188,6 +188,7 @@ from job_queue import (
     pending_depth,
     qualified_route_queues,
     queue_payloads,
+    stream_key,
 )
 from http_experiment import (
     ExperimentContractError,
@@ -7484,6 +7485,59 @@ def _run_ai_target_connectivity_probe(target: dict[str, Any], *, prompt: str, ti
 # ============================================================
 # OWNED FLEET FOUNDATION
 # ============================================================
+
+
+def _fleet_acceptance_lease_probe() -> dict[str, Any]:
+    """Exercise an isolated Stream lease loss/reclaim/ack sequence server-side."""
+    redis_client = get_redis()
+    queue = f"fleet_acceptance:{uuid.uuid4().hex}"
+    try:
+        message_id = enqueue_job(
+            redis_client,
+            queue,
+            {"kind": "fleet_acceptance", "nonce": uuid.uuid4().hex},
+        )
+        first = lease_job(
+            redis_client,
+            [queue],
+            consumer_name="acceptance-dead-consumer",
+            block_ms=10,
+            visibility_timeout_ms=50,
+        )
+        if not first or first.message_id != message_id:
+            raise RuntimeError("lease probe could not acquire its first delivery")
+        time.sleep(0.08)
+        reclaimed = lease_job(
+            redis_client,
+            [queue],
+            consumer_name="acceptance-recovery-consumer",
+            block_ms=10,
+            visibility_timeout_ms=50,
+        )
+        if not reclaimed or reclaimed.message_id != message_id or not reclaimed.reclaimed:
+            raise RuntimeError("lease probe did not reclaim the abandoned delivery")
+        return {
+            "reclaimed": True,
+            "delivery_attempts": reclaimed.delivery_attempts,
+            "heartbeat_ok": heartbeat_lease(redis_client, reclaimed, "acceptance-recovery-consumer"),
+            "first_ack": acknowledge_lease(redis_client, reclaimed),
+            "duplicate_ack": acknowledge_lease(redis_client, reclaimed),
+        }
+    finally:
+        try:
+            redis_client.delete(queue, stream_key(queue))
+        except Exception:
+            pass
+
+
+@app.post("/fleet/acceptance/lease-probe")
+async def run_fleet_acceptance_lease_probe(request: Request):
+    """Run the content-free lease failure probe inside the control plane."""
+    _require_fleet_operator(request)
+    try:
+        return await asyncio.to_thread(_fleet_acceptance_lease_probe)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"fleet lease probe failed: {type(exc).__name__}") from exc
 
 @app.post("/fleet/join-tokens")
 async def create_fleet_join_token(body: FleetJoinTokenRequest, request: Request, response: Response):

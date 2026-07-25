@@ -28,7 +28,6 @@ from pathlib import Path
 from typing import Any
 
 
-ROOT = Path(__file__).resolve().parents[1]
 TERMINAL_SCAN_STATUSES = {"completed", "failed", "cancelled"}
 
 
@@ -133,56 +132,6 @@ def _probe_public_data_stores(host: str, timeout: float = 2.0) -> dict[str, bool
         except OSError:
             results[str(port)] = True
     return results
-
-
-def _lease_failure_probe(redis_url: str) -> dict[str, Any]:
-    try:
-        import redis
-    except ImportError as exc:
-        raise AcceptanceError("redis package is required for --redis-url lease probing") from exc
-    sys.path.insert(0, str(ROOT / "api"))
-    try:
-        from job_queue import acknowledge_lease, enqueue_job, heartbeat_lease, lease_job, stream_key
-    finally:
-        sys.path.pop(0)
-    client = redis.from_url(redis_url, socket_connect_timeout=5, socket_timeout=5)
-    queue = f"fleet_acceptance:{uuid.uuid4().hex}"
-    try:
-        message_id = enqueue_job(client, queue, {"kind": "fleet_acceptance", "nonce": uuid.uuid4().hex})
-        first = lease_job(
-            client,
-            [queue],
-            consumer_name="acceptance-dead-consumer",
-            block_ms=10,
-            visibility_timeout_ms=50,
-        )
-        if not first or first.message_id != message_id:
-            raise AcceptanceError("lease probe could not acquire its first delivery")
-        time.sleep(0.08)
-        reclaimed = lease_job(
-            client,
-            [queue],
-            consumer_name="acceptance-recovery-consumer",
-            block_ms=10,
-            visibility_timeout_ms=50,
-        )
-        if not reclaimed or reclaimed.message_id != message_id or not reclaimed.reclaimed:
-            raise AcceptanceError("lease probe did not reclaim the abandoned delivery")
-        heartbeat_ok = heartbeat_lease(client, reclaimed, "acceptance-recovery-consumer")
-        first_ack = acknowledge_lease(client, reclaimed)
-        duplicate_ack = acknowledge_lease(client, reclaimed)
-        return {
-            "reclaimed": True,
-            "delivery_attempts": reclaimed.delivery_attempts,
-            "heartbeat_ok": heartbeat_ok,
-            "first_ack": first_ack,
-            "duplicate_ack": duplicate_ack,
-        }
-    finally:
-        try:
-            client.delete(queue, stream_key(queue))
-        except Exception:
-            pass
 
 
 def _poll_scan(client: ApiClient, scan_id: str, timeout_seconds: int, poll_seconds: float) -> dict[str, Any]:
@@ -392,24 +341,21 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     elif not args.preflight_only:
         _check(checks, "public_data_stores_closed", False, "provide --public-host for an external isolation probe")
 
-    if args.redis_url:
-        lease = _lease_failure_probe(args.redis_url)
-        lease_ok = (
-            lease.get("reclaimed")
-            and int(lease.get("delivery_attempts") or 0) >= 2
-            and lease.get("heartbeat_ok")
-            and lease.get("first_ack")
-            and not lease.get("duplicate_ack")
-        )
-        _check(
-            checks,
-            "lease_reclaim_and_duplicate_completion",
-            bool(lease_ok),
-            "abandoned lease reclaimed; completion acknowledged once",
-            **lease,
-        )
-    elif not args.preflight_only:
-        _check(checks, "lease_reclaim_and_duplicate_completion", False, "provide --redis-url on the control plane")
+    lease = client.request("POST", "/fleet/acceptance/lease-probe", {})
+    lease_ok = (
+        lease.get("reclaimed")
+        and int(lease.get("delivery_attempts") or 0) >= 2
+        and lease.get("heartbeat_ok")
+        and lease.get("first_ack")
+        and not lease.get("duplicate_ack")
+    )
+    _check(
+        checks,
+        "lease_reclaim_and_duplicate_completion",
+        bool(lease_ok),
+        "abandoned lease reclaimed; completion acknowledged once",
+        **lease,
+    )
 
     scan_id = None
     physical_fault: dict[str, Any] | None = None
@@ -487,7 +433,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--operator-token", default="")
     parser.add_argument("--node-id", action="append", default=[], help="limit acceptance to this node UUID (repeatable)")
     parser.add_argument("--public-host", help="public control-plane host from which 6379/5432 must be closed")
-    parser.add_argument("--redis-url", help="control-plane Redis URL used only for an isolated lease-reclaim probe")
+    parser.add_argument(
+        "--redis-url",
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument("--target", help="authorized passive web target for the cross-node scan")
     parser.add_argument("--authorized", action="store_true", help="confirm authorization to scan --target")
     parser.add_argument("--request-budget-mode", choices=["enforce", "off"], default="enforce")

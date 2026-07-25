@@ -202,6 +202,36 @@ def test_fleet_operator_actions_are_loopback_or_explicit_token_only(monkeypatch)
     assert exc.value.status_code == 403
 
 
+def test_server_side_fleet_lease_probe_reclaims_and_acknowledges_once(monkeypatch):
+    from tests.test_job_queue import FakeStreams
+
+    class ReclaimingStreams(FakeStreams):
+        def xautoclaim(self, name, group, consumer, min_idle_time, start_id, count):
+            for state in self.pending.values():
+                state["stale"] = True
+            return super().xautoclaim(name, group, consumer, min_idle_time, start_id, count)
+
+        def delete(self, *names):
+            for name in names:
+                self.streams.pop(name, None)
+                self.legacy.pop(name, None)
+
+    fake = ReclaimingStreams()
+    monkeypatch.setattr(api_module, "get_redis", lambda: fake)
+    monkeypatch.setattr(api_module.time, "sleep", lambda _seconds: None)
+
+    result = api_module._fleet_acceptance_lease_probe()
+
+    assert result == {
+        "reclaimed": True,
+        "delivery_attempts": 2,
+        "heartbeat_ok": True,
+        "first_ack": True,
+        "duplicate_ack": False,
+    }
+    assert fake.streams == {}
+
+
 def test_insecure_fleet_enrollment_escape_hatch_is_loopback_only(monkeypatch):
     monkeypatch.delenv("SHAKERSCAN_BIND_HOST", raising=False)
     monkeypatch.setenv("FLEET_ALLOW_INSECURE_ENROLLMENT", "true")

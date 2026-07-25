@@ -846,7 +846,6 @@ Run the acceptance matrix from the control plane after two real VPS nodes are he
 shakerscan fleet accept \
   --api-url https://scanner.example.com \
   --public-host scanner.example.com \
-  --redis-url redis://127.0.0.1:6379 \
   --node-id <worker-a-node-id> \
   --node-id <worker-b-node-id> \
   --fault-node-id <worker-a-node-id> \
@@ -857,8 +856,9 @@ shakerscan fleet accept \
 ```
 
 The acceptance scan is passive `standard` work. `--request-budget-mode enforce` is the default;
-operators retain `--request-budget-mode off` for intentionally unrestricted local labs. The Redis
-probe uses its own random queue and deletes it afterward; it never leases production work. The
+operators retain `--request-budget-mode off` for intentionally unrestricted local labs. The
+authenticated control-plane lease probe uses its own random Stream and deletes it afterward; it
+never leases production work and requires no host-side Redis client package. The
 physical fault gate waits for an attributed shard, drains that node, kills only the exact Docker
 worker over BatchMode SSH, and requires a different node to reclaim and finish its Stream delivery.
 The runner resumes the drained node in a `finally` path, and the container restart policy restores

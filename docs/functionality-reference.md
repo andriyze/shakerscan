@@ -1168,8 +1168,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 254 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 211 | `api/api.py` |
+| Public REST operations | 255 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 212 | `api/api.py` |
 | Check families | 14 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 13 | `api/command_arsenal.py` |
@@ -1313,6 +1313,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `PATCH` | `/findings/{finding_id:path}` | `update_finding` |
 | `POST` | `/findings/{finding_id:path}/retest` | `retest_finding` |
 | `GET` | `/findings/{finding_id}/evidence` | `list_finding_evidence` |
+| `POST` | `/fleet/acceptance/lease-probe` | `run_fleet_acceptance_lease_probe` |
 | `POST` | `/fleet/broker/nodes/{node_id}/lease` | `lease_broker_job` |
 | `PUT` | `/fleet/broker/nodes/{node_id}/leases/{lease_id}/artifacts` | `upload_broker_job_artifact` |
 | `POST` | `/fleet/broker/nodes/{node_id}/leases/{lease_id}/heartbeat` | `heartbeat_broker_job` |

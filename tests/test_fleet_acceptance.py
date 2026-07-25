@@ -7,9 +7,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 import fleet_acceptance  # noqa: E402
 sys.path.pop(0)
 
-from tests.test_job_queue import FakeStreams  # noqa: E402
-
-
 def test_safe_parallel_endpoints_remain_same_origin_and_bounded():
     endpoints = fleet_acceptance._safe_parallel_endpoints("https://lab.example.test/app", 8)
     assert len(endpoints) == 8
@@ -31,29 +28,6 @@ def test_node_selection_is_explicit_and_rejects_missing_identity():
         assert "not found" in str(exc)
     else:
         raise AssertionError("missing selected node was accepted")
-
-
-def test_live_lease_probe_reclaims_and_acknowledges_once(monkeypatch):
-    class ReclaimingStreams(FakeStreams):
-        def xautoclaim(self, name, group, consumer, min_idle_time, start_id, count):
-            for state in self.pending.values():
-                state["stale"] = True
-            return super().xautoclaim(name, group, consumer, min_idle_time, start_id, count)
-
-        def delete(self, *names):
-            for name in names:
-                self.streams.pop(name, None)
-                self.legacy.pop(name, None)
-
-    fake = ReclaimingStreams()
-    monkeypatch.setitem(sys.modules, "redis", types.SimpleNamespace(from_url=lambda *_a, **_k: fake))
-    monkeypatch.setattr(fleet_acceptance.time, "sleep", lambda _seconds: None)
-    result = fleet_acceptance._lease_failure_probe("redis://acceptance.invalid")
-    assert result["reclaimed"] is True
-    assert result["delivery_attempts"] == 2
-    assert result["heartbeat_ok"] is True
-    assert result["first_ack"] is True
-    assert result["duplicate_ack"] is False
 
 
 def test_scan_acceptance_requires_cross_node_context_dedupe_report_and_artifacts():
