@@ -112,6 +112,25 @@ class _Pool:
         return _Acquire(self.conn)
 
 
+def test_dedupe_api_accepts_json_body_and_query_takes_precedence(monkeypatch):
+    async def empty_plan(_conn):
+        return []
+
+    monkeypatch.setattr(api, "db_pool", _Pool(object()))
+    monkeypatch.setattr(api, "plan_canonical_merges", empty_plan)
+
+    body_result = asyncio.run(api.dedupe_targets(
+        payload=api.DedupeTargetsRequest(dry_run=False),
+    ))
+    query_result = asyncio.run(api.dedupe_targets(
+        payload=api.DedupeTargetsRequest(dry_run=False),
+        dry_run=True,
+    ))
+
+    assert body_result["dry_run"] is False
+    assert query_result["dry_run"] is True
+
+
 def test_dedupe_api_returns_clear_409_for_executing_retention_preview(monkeypatch):
     survivor_id = uuid.uuid4()
     dupe_id = uuid.uuid4()

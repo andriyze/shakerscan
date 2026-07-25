@@ -1,0 +1,55 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+
+import { deriveBuildIdentity, formatBuildIdentity } from './buildIdentity.ts'
+
+const uniformHealth = {
+  scanner_version: 'abc1234',
+  worker_build: {
+    available: true,
+    reported_count: 4,
+    stale_count: 0,
+    pending_count: 0,
+    fleet_uniform: true,
+    scanner_version: 'abc1234',
+  },
+}
+
+test('matching component identities collapse to one version', () => {
+  assert.equal(formatBuildIdentity(deriveBuildIdentity('abc1234', uniformHealth)), 'Version abc1234')
+})
+
+test('dirty UI retains its useful local-checkout marker without causing skew', () => {
+  assert.equal(formatBuildIdentity(deriveBuildIdentity('abc1234-dirty', uniformHealth)), 'Version abc1234-dirty')
+})
+
+test('raw compose dev placeholder is unknown rather than a false mismatch', () => {
+  const identity = deriveBuildIdentity('dev', uniformHealth)
+  assert.equal(identity.skew, false)
+  assert.equal(formatBuildIdentity(identity), 'Version abc1234')
+})
+
+test('fingerprint-authoritative stale workers produce an explicit mismatch', () => {
+  const identity = deriveBuildIdentity('abc1234', {
+    ...uniformHealth,
+    worker_build: {
+      available: true,
+      reported_count: 4,
+      stale_count: 1,
+      pending_count: 1,
+      fleet_uniform: false,
+      scanner_version: null,
+    },
+  })
+  assert.equal(identity.skew, true)
+  assert.equal(formatBuildIdentity(identity), 'UI abc1234 · API abc1234 · Workers mixed/stale (2)')
+})
+
+test('missing worker heartbeats do not invent a worker version or mismatch', () => {
+  const identity = deriveBuildIdentity('abc1234', {
+    scanner_version: 'abc1234',
+    worker_build: { available: false, reported_count: 0, fleet_uniform: false },
+  })
+  assert.equal(identity.skew, false)
+  assert.equal(formatBuildIdentity(identity), 'Version abc1234')
+})

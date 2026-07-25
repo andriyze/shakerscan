@@ -155,12 +155,13 @@ agree in **both** directions:
   `family_proof.canonical_family` has no alias for it, so claiming it 422s at the bridge. Use
   `workflow`. (`bfla` and `business_logic` *are* aliases, of `auth_bypass` and `workflow`.)
 
-When the moat cannot verify a family, `_agent_auto_verify` now records why rather than dropping it
+When the moat cannot verify a family, `_agent_auto_verify` records why rather than dropping it
 silently: `family_eligible_for_dast_retest` (a Path-A lead which may subsequently be queued by the
-retest pipeline) or
-`family_not_verifiable` (a taxonomy mismatch — the finding is stuck at SUSPECTED). These records carry
-no budget reservation and do not consume `_AGENT_AUTO_VERIFY_LIMIT`, which caps real verification
-traffic.
+retest pipeline) or `family_not_verifiable` (a taxonomy mismatch — the finding is stuck at
+SUSPECTED). These taxonomy records carry no budget reservation and do not consume
+`_AGENT_AUTO_VERIFY_LIMIT`, which caps real verification traffic. Taxonomy telemetry and operational
+skip telemetry each have an independent bounded report list, so approval/budget/cancellation noise
+cannot consume the taxonomy-report allowance.
 
 ### Auto-promotable today
 
@@ -216,7 +217,7 @@ need a DB + provider fixture) — `_run_agent_hunt`, `_agent_apply_reply`, `subm
 `start_agent_hunt_session`, `_agent_finalize_and_persist`, `_agent_auto_verify`,
 `_agent_auto_queue_dast_retests`, and the actual moat dispatch are unit-untested. The pure logic and
 workflow shapes are tested; the wiring that runs them is not. Closing this is the highest-value test
-  investment for the §5 work (backlog item 3).
+investment for the §5 work (backlog item 3).
 
 ## Improvement backlog (maps to proposed-next-steps.md §5)
 

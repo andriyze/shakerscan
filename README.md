@@ -325,6 +325,14 @@ SHAKERSCAN_PUBLIC_HOST=<server-ip-or-dns> \
 shakerscan start --remote
 ```
 
+The API accepts browser mutations from the UI origins derived from `SHAKERSCAN_PUBLIC_HOST`. If a
+reverse proxy or alternate DNS name makes the browser-visible UI origin different, add that exact
+origin with `SHAKERSCAN_CORS_ALLOW_ORIGINS=https://scanner.example.com` (comma-separated for more
+than one), or use `SHAKERSCAN_CORS_ALLOW_ORIGIN_REGEX` for a controlled pattern. CLI, curl, and agent
+requests without a browser `Origin` header are unaffected. On a trusted network, operators who
+intentionally accept browser requests from every origin can explicitly set
+`SHAKERSCAN_CORS_ALLOW_ORIGINS=*`.
+
 Use `0.0.0.0` only behind a firewall, VPN, or authenticated reverse proxy. Do not expose ShakerScan
 directly to the public internet. ShakerScan is a trusted-operator, self-hosted product: it does not
 provide application login, users, roles, tenant isolation, or comprehensive evidence-secret masking.

@@ -509,6 +509,26 @@ def test_ai_ops_router_unqualified_scan_defaults_to_quick_without_conflating_dee
     assert hunt_plan["planned_api_call"] is None
 
 
+@pytest.mark.parametrize(
+    ("prompt", "expected_intent"),
+    [
+        ("Enable ASM scanning", "enable_continuous_asm"),
+        ("Scan for SQL injection on /login", "focused_asm_sqli"),
+        ("Spend more budget on API scans", "increase_api_endpoint_budget"),
+        ("What's untested — should I scan it?", "explain_asm_gaps"),
+    ],
+)
+def test_ai_ops_router_scan_word_does_not_shadow_more_specific_intents(prompt, expected_intent):
+    target_id = str(uuid.uuid4())
+    plan = api_module._build_ai_ops_router_plan(
+        api_module.AIOpsRouterRequest(prompt=prompt, target_id=target_id)
+    )
+
+    assert plan["intent"] == expected_intent
+    assert plan["missing_inputs"] == []
+    assert plan["planned_api_call"]["path"].startswith(f"/targets/{target_id}/asm/")
+
+
 def test_ai_ops_router_scopes_api_budget_raise_to_api_endpoint_filter(monkeypatch):
     monkeypatch.setenv("AI_OPS_ROUTER_EXECUTE_ENABLED", "false")
     target_id = str(uuid.uuid4())

@@ -22,7 +22,7 @@ becoming stale prose. For product priority and phased order, see
 | Substrate piece | Status | Where (symbol) |
 |---|---|---|
 | Intra-target fan-out `scan_plan → scan_shard → scan_merge` (strategies: scope, family, coverage, coverage_family, auth_split, dynamic pull) | **Built** | `parallel_scan.py` planner; `worker.py` `process_scan_{plan,shard,merge}_job` |
-| Exactly-once merge trigger (Redis `SET NX` guard + DB non-terminal-shard source of truth) | **Built** | `reconcile_parallel_parent` (`parallel_scan.py`) |
+| Exactly-once merge trigger (atomic Redis Lua claim-and-enqueue + DB non-terminal-shard source of truth) | **Built** | `reconcile_parallel_parent` (`parallel_scan.py`) |
 | Race-safe concurrent finding writes | **Built** | `UNIQUE INDEX idx_findings_target_fingerprint` (`db/init.sql`) |
 | Fleet-wide active-scan concurrency cap (lease-based Redis ZSET semaphore; TTL frees a crashed holder) | **Built, but fail-OPEN** — `_take_scan_slot` returns granted on any Redis error and the bounded wait fails open, so the cap is an OOM guard on a healthy shared Redis, **not** an enforceable fleet limit. A partitioned node runs uncapped. | `ACTIVE_SCAN_SLOTS_KEY`, `_take_scan_slot` (`worker.py`) |
 | Per-root-domain request reservation (atomic Redis Lua; already coordinates every process on the shared Redis) | **Built** | `reserve_domain_rate` (`asm_inventory.py`) |
@@ -77,7 +77,7 @@ worker instances joined to the same fleet.
    fan-out (`scan_plan -> scan_shard -> scan_merge`, plus the `scope`/`family`/`coverage`
    strategies) is implemented today — see `docs/dast-asm-architecture.md`. Shard jobs are
    plain entries on the shared `scan_jobs` Redis list, so any fleet worker that consumes that
-   queue already runs shards of one logical scan; the merge reconciles regardless of which node
+queue already runs shards of one logical scan; the merge reconciles regardless of which node
    ran each shard. Multi-node therefore adds *capacity* (more workers draining the same shard
    queue → more concurrent shards, so `coverage` fan-outs finish faster); it does not change the
    orchestration. The remaining multi-node work is the transport/trust substrate (how remote
@@ -635,8 +635,9 @@ What exists today is at-most-once delivery on a plain Redis list (`RPUSH`/`BLPOP
 compensated *above* Redis rather than by Redis: a durable Postgres scan row, a worker heartbeat, a
 `processing_lease_at` hash marker stamped right after `BLPOP`, and API-side reconcilers that requeue
 or fail orphaned work once a heartbeat goes stale. A separate lease-based Redis ZSET semaphore caps
-fleet-wide active scans and frees a crashed holder's slot on TTL expiry, and the parallel merge is
-guarded exactly-once with `SET NX`. This is sufficient on a single trusted host, but a hard worker
+fleet-wide active scans and frees a crashed holder's slot on TTL expiry. The parallel merge uses one
+atomic Redis Lua claim-and-`LPUSH` operation, with the DB's non-terminal shard state as source of
+truth. This is sufficient on a single trusted host, but a hard worker
 loss between `BLPOP` and the first heartbeat still depends entirely on those DB reconcilers — there is
 no per-message Redis lease/ack/reclaim. Closing that gap is what the following semantics require.
 

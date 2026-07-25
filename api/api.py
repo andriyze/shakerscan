@@ -7448,9 +7448,87 @@ def _worker_freshness_snapshot() -> dict:
     return snap
 
 
+_WORKER_BUILD_REPORT_MAX_AGE_SECONDS = 120
+
+
+def _worker_build_report_summary(
+    raw_reports: Any,
+    *,
+    expected_fingerprint: Optional[str],
+    expected_version: Optional[str],
+    now: Optional[datetime] = None,
+) -> dict[str, Any]:
+    """Summarize fresh worker-authored build heartbeats without touching Docker.
+
+    This is lightweight display telemetry for /health, not the benchmark/submit authority. The
+    authoritative /workers endpoint still resolves running containers and fingerprints through
+    Docker. Freshness prevents stopped-container hash entries from poisoning the sidebar forever.
+    """
+    current_time = now or datetime.now(timezone.utc)
+    if current_time.tzinfo is None:
+        current_time = current_time.replace(tzinfo=timezone.utc)
+    reports: list[dict[str, Any]] = []
+    for raw in (raw_reports or {}).values():
+        value = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
+        try:
+            report = json.loads(value) if isinstance(value, str) else dict(value)
+            reported_at = datetime.fromisoformat(str(report.get("reported_at") or "").replace("Z", "+00:00"))
+            if reported_at.tzinfo is None:
+                reported_at = reported_at.replace(tzinfo=timezone.utc)
+            age = (current_time - reported_at.astimezone(timezone.utc)).total_seconds()
+            if 0 <= age <= _WORKER_BUILD_REPORT_MAX_AGE_SECONDS:
+                reports.append(report)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+
+    current_count = 0
+    stale_count = 0
+    pending_count = 0
+    for report in reports:
+        state = worker_build_current(
+            reported_fingerprint=report.get("build_fingerprint"),
+            reported_version=report.get("scanner_version"),
+            expected_fingerprint=expected_fingerprint,
+            expected_version=expected_version,
+        )
+        if state is True:
+            current_count += 1
+        elif state is False:
+            stale_count += 1
+        else:
+            pending_count += 1
+    uniform = bool(reports) and stale_count == 0 and pending_count == 0
+    return {
+        "available": bool(reports),
+        "reported_count": len(reports),
+        "current_count": current_count,
+        "stale_count": stale_count,
+        "pending_count": pending_count,
+        "fleet_uniform": uniform,
+        # Labels are presentation only. When fingerprints prove uniformity, use the API's expected
+        # label instead of comparing volatile worker snapshots as if they were safety authority.
+        "scanner_version": expected_version if uniform else None,
+    }
+
+
+def _orphaned_worker_build_report_hosts(
+    report_hosts: Any,
+    running_container_ids: Any,
+) -> list[str]:
+    """Return worker-report hash fields that do not map to a live scan worker."""
+    live_ids = [str(value or "").lower() for value in (running_container_ids or []) if value]
+    return [
+        str(host or "").lower()
+        for host in (report_hosts or [])
+        if host and not any(container_id.startswith(str(host).lower()) for container_id in live_ids)
+    ]
+
+
 @app.get("/health")
 async def health():
     """Health check."""
+    expected_fingerprint = expected_build_fingerprint()
+    expected_version = current_scanner_version()
     try:
         async with db_pool.acquire() as conn:
             await conn.fetchval("SELECT 1")
@@ -7462,8 +7540,18 @@ async def health():
         r = get_redis()
         r.ping()
         redis_ok = True
+        worker_build = _worker_build_report_summary(
+            r.hgetall("shakerscan:worker_build") or {},
+            expected_fingerprint=expected_fingerprint,
+            expected_version=expected_version,
+        )
     except Exception:
         redis_ok = False
+        worker_build = _worker_build_report_summary(
+            {},
+            expected_fingerprint=expected_fingerprint,
+            expected_version=expected_version,
+        )
 
     return {
         "status": "healthy" if db_ok and redis_ok else "degraded",
@@ -7473,8 +7561,9 @@ async def health():
         # when set, else "dev"); build_fingerprint is a source-tree checksum that
         # differs whenever the runtime code differs — so the UI can flag a scan or
         # worker on a stale image even when scanner_version is "dev" on both.
-        "scanner_version": current_scanner_version(),
-        "build_fingerprint": expected_build_fingerprint(),
+        "scanner_version": expected_version,
+        "build_fingerprint": expected_fingerprint,
+        "worker_build": worker_build,
     }
 
 
@@ -13512,18 +13601,27 @@ def _dedupe_canonical_target_rows(rows: list) -> list:
     return [survivors[k] for k in order]
 
 
+class DedupeTargetsRequest(BaseModel):
+    dry_run: bool = True
+
+
 @app.post("/targets/dedupe")
-async def dedupe_targets(dry_run: bool = True):
+async def dedupe_targets(
+    payload: Optional[DedupeTargetsRequest] = None,
+    dry_run: Optional[bool] = Query(default=None),
+):
     """Merge scheme/trailing-slash duplicate target rows that share a canonical origin
     into one survivor (active > most findings > most scans > https), reassigning all
     scans/findings/endpoints/graph/schedules/exceptions and deleting the duplicates.
-    Defaults to a dry run; pass dry_run=false to execute. Idempotent and per-group
-    transactional."""
+    Defaults to a dry run. JSON {"dry_run": false} and the backwards-compatible
+    ?dry_run=false query both execute; an explicit query value wins. Idempotent and
+    per-group transactional."""
+    effective_dry_run = dry_run if dry_run is not None else (payload.dry_run if payload else True)
     async with db_pool.acquire() as conn:
         plan = await plan_canonical_merges(conn)
 
         executed = 0
-        if not dry_run:
+        if not effective_dry_run:
             try:
                 # Preflight the full plan so a blocked later group cannot make an
                 # API request appear to fail after earlier groups already merged.
@@ -13543,7 +13641,7 @@ async def dedupe_targets(dry_run: bool = True):
                 raise HTTPException(status_code=409, detail=exc.api_detail()) from exc
 
         return {
-            "dry_run": dry_run,
+            "dry_run": effective_dry_run,
             "groups_found": len(plan),
             "targets_merged": sum(len(p["merged"]) for p in plan),
             "groups_executed": executed,
@@ -18605,9 +18703,10 @@ async def _agent_persist_suspected_findings(
 
 
 _AGENT_AUTO_VERIFY_LIMIT = 3
-# Bound the unverifiable-family telemetry so a large debrief cannot bloat the stored run summary.
-# These records cost no target traffic, so this is a report cap, not a work cap.
+# Bound taxonomy and operational-skip telemetry independently. Taxonomy records cost no target
+# traffic and must never be starved by approval, budget, cancellation, or execution skip noise.
 _AGENT_UNVERIFIABLE_FAMILY_REPORT_LIMIT = 10
+_AGENT_AUTO_VERIFY_SKIP_REPORT_LIMIT = 10
 _AGENT_VERIFY_REQUEST_RESERVATIONS: dict[str, int] = {
     "bola": 8,             # four requests, independently replayed
     "auth_bypass": 4,      # two requests, independently replayed
@@ -18646,11 +18745,19 @@ async def _agent_auto_verify(
     best-effort: a verify failure is recorded, never allowed to break the hunt. Bounded per run."""
     execution_enabled = _ai_ops_execute_enabled()
     attempts: list[dict[str, Any]] = []
-    # Telemetry for findings the bridge cannot verify AT ALL (unknown/unpromotable family). Kept in a
-    # SEPARATE list on purpose: _AGENT_AUTO_VERIFY_LIMIT caps real verification work (target traffic),
-    # and a taxonomy mismatch costs none. Counting these in `attempts` would let a debrief full of
-    # unpromotable families exhaust the cap and starve a genuinely verifiable finding later in the list.
-    unverifiable: list[dict[str, Any]] = []
+    # Taxonomy signals and operational skips have separate report budgets. A long run full of
+    # approval/budget skips must not hide a later family-name drift signal.
+    taxonomy_telemetry: list[dict[str, Any]] = []
+    skip_telemetry: list[dict[str, Any]] = []
+
+    def record_taxonomy(item: dict[str, Any]) -> None:
+        if len(taxonomy_telemetry) < _AGENT_UNVERIFIABLE_FAMILY_REPORT_LIMIT:
+            taxonomy_telemetry.append(item)
+
+    def record_skip(item: dict[str, Any]) -> None:
+        if len(skip_telemetry) < _AGENT_AUTO_VERIFY_SKIP_REPORT_LIMIT:
+            skip_telemetry.append(item)
+
     cancelled = False
     execution_stop_reason: str | None = None
     for entry in gated_findings:
@@ -18669,32 +18776,30 @@ async def _agent_auto_verify(
             # _agent_auto_queue_dast_retests instead) or a taxonomy mismatch that leaves the finding
             # permanently SUSPECTED. Both were previously indistinguishable from "nothing to verify",
             # which is how a doc/contract family-name drift could go unnoticed in every run summary.
-            if len(unverifiable) < _AGENT_UNVERIFIABLE_FAMILY_REPORT_LIMIT:
-                unverifiable.append({
-                    "finding_id": str(record["id"]),
-                    "verified": False,
-                    "skipped": (
-                        "family_eligible_for_dast_retest"
-                        if normalize_retest_type(claimed_family) in _AGENT_DAST_RETEST_FAMILIES
-                        else "family_not_verifiable"
-                    ),
-                    "claimed_family": claimed_family[:80],
-                    "canonical_family": family[:80],
-                })
+            record_taxonomy({
+                "finding_id": str(record["id"]),
+                "verified": False,
+                "skipped": (
+                    "family_eligible_for_dast_retest"
+                    if normalize_retest_type(claimed_family) in _AGENT_DAST_RETEST_FAMILIES
+                    else "family_not_verifiable"
+                ),
+                "claimed_family": claimed_family[:80],
+                "canonical_family": family[:80],
+            })
             continue
         if not approval_receipt_id or not execution_enabled:
-            if len(unverifiable) < _AGENT_UNVERIFIABLE_FAMILY_REPORT_LIMIT:
-                unverifiable.append({
-                    "finding_id": str(record["id"]),
-                    "verified": False,
-                    "skipped": (
-                        "auto_verify_requires_approval"
-                        if not approval_receipt_id
-                        else "auto_verify_execution_disabled"
-                    ),
-                    "claimed_family": claimed_family[:80],
-                    "canonical_family": family[:80],
-                })
+            record_skip({
+                "finding_id": str(record["id"]),
+                "verified": False,
+                "skipped": (
+                    "auto_verify_requires_approval"
+                    if not approval_receipt_id
+                    else "auto_verify_execution_disabled"
+                ),
+                "claimed_family": claimed_family[:80],
+                "canonical_family": family[:80],
+            })
             continue
         # BOLA is NOT auto-promoted. Its family_proof establishes a managed, distinct reference — not
         # OWNERSHIP — so an authenticated shared-behind-login collection (everyone may read any object)
@@ -18703,27 +18808,23 @@ async def _agent_auto_verify(
         # suspected BOLA stays SUSPECTED for a human to promote. The manual /agent/findings/{id}/verify
         # endpoint remains for an accountable human decision. (Zero-FP: unattended never promotes BOLA.)
         if family in _AGENT_AUTO_VERIFY_EXCLUDED_FAMILIES:
-            if len(unverifiable) < _AGENT_UNVERIFIABLE_FAMILY_REPORT_LIMIT:
-                unverifiable.append({"finding_id": str(record["id"]), "verified": False,
-                                     "skipped": "auto_verify_disabled_ownership_unprovable"})
+            record_skip({"finding_id": str(record["id"]), "verified": False,
+                         "skipped": "auto_verify_disabled_ownership_unprovable"})
             continue
         # A mutating verification (create-MA does live create POSTs) must not run from a read-only
         # hunt, even with a receipt — that would violate the hunt's no-writes invariant. The
         # GET-only families (auth_bypass/data_exposure) stay allowed. (External-audit BUG 3.)
         if family in _AGENT_MUTATING_VERIFY_FAMILIES and not allow_write:
-            if len(unverifiable) < _AGENT_UNVERIFIABLE_FAMILY_REPORT_LIMIT:
-                unverifiable.append({"finding_id": str(record["id"]), "verified": False,
-                                     "skipped": "mutating_verification_requires_gated_hunt"})
+            record_skip({"finding_id": str(record["id"]), "verified": False,
+                         "skipped": "mutating_verification_requires_gated_hunt"})
             continue
         if len(attempts) >= _AGENT_AUTO_VERIFY_LIMIT:
-            if len(unverifiable) < _AGENT_UNVERIFIABLE_FAMILY_REPORT_LIMIT:
-                unverifiable.append({"finding_id": str(record["id"]), "verified": False,
-                                     "skipped": "auto_verify_attempt_limit_reached"})
+            record_skip({"finding_id": str(record["id"]), "verified": False,
+                         "skipped": "auto_verify_attempt_limit_reached"})
             continue
         if execution_stop_reason:
-            if len(unverifiable) < _AGENT_UNVERIFIABLE_FAMILY_REPORT_LIMIT:
-                unverifiable.append({"finding_id": str(record["id"]), "verified": False,
-                                     "skipped": execution_stop_reason})
+            record_skip({"finding_id": str(record["id"]), "verified": False,
+                         "skipped": execution_stop_reason})
             continue
         # Re-check cancellation before EACH credential-tier verification. Continue classifying later
         # findings after cancellation so taxonomy/route telemetry is never silently dropped.
@@ -18733,9 +18834,8 @@ async def _agent_auto_verify(
             except Exception:
                 cancelled = False
         if cancelled:
-            if len(unverifiable) < _AGENT_UNVERIFIABLE_FAMILY_REPORT_LIMIT:
-                unverifiable.append({"finding_id": str(record["id"]), "verified": False,
-                                     "skipped": "cancelled_during_auto_verify"})
+            record_skip({"finding_id": str(record["id"]), "verified": False,
+                         "skipped": "cancelled_during_auto_verify"})
             continue
         request_reservation = int(_AGENT_VERIFY_REQUEST_RESERVATIONS.get(family) or 0)
         seconds_reservation = int(_AGENT_VERIFY_SECONDS_RESERVATIONS.get(family) or 0)
@@ -18745,27 +18845,23 @@ async def _agent_auto_verify(
         reserved_seconds = sum(int(item.get("seconds_reserved") or 0) for item in attempts)
         if request_budget is not None and reserved_requests + request_reservation > request_budget:
             execution_stop_reason = "budget_exhausted:requests"
-            if len(unverifiable) < _AGENT_UNVERIFIABLE_FAMILY_REPORT_LIMIT:
-                unverifiable.append({"finding_id": str(record["id"]), "verified": False,
-                                     "skipped": execution_stop_reason})
+            record_skip({"finding_id": str(record["id"]), "verified": False,
+                         "skipped": execution_stop_reason})
             continue
         if action_budget is not None and reserved_actions + 1 > action_budget:
             execution_stop_reason = "budget_exhausted:actions"
-            if len(unverifiable) < _AGENT_UNVERIFIABLE_FAMILY_REPORT_LIMIT:
-                unverifiable.append({"finding_id": str(record["id"]), "verified": False,
-                                     "skipped": execution_stop_reason})
+            record_skip({"finding_id": str(record["id"]), "verified": False,
+                         "skipped": execution_stop_reason})
             continue
         if active_action_budget is not None and reserved_active + 1 > active_action_budget:
             execution_stop_reason = "budget_exhausted:active_actions"
-            if len(unverifiable) < _AGENT_UNVERIFIABLE_FAMILY_REPORT_LIMIT:
-                unverifiable.append({"finding_id": str(record["id"]), "verified": False,
-                                     "skipped": execution_stop_reason})
+            record_skip({"finding_id": str(record["id"]), "verified": False,
+                         "skipped": execution_stop_reason})
             continue
         if seconds_budget is not None and reserved_seconds + seconds_reservation > seconds_budget:
             execution_stop_reason = "budget_exhausted:seconds"
-            if len(unverifiable) < _AGENT_UNVERIFIABLE_FAMILY_REPORT_LIMIT:
-                unverifiable.append({"finding_id": str(record["id"]), "verified": False,
-                                     "skipped": execution_stop_reason})
+            record_skip({"finding_id": str(record["id"]), "verified": False,
+                         "skipped": execution_stop_reason})
             continue
         try:
             result = await _verify_suspected_finding_workflow(
@@ -18806,7 +18902,7 @@ async def _agent_auto_verify(
                 "active_action_units_reserved": 1,
                 "seconds_reserved": seconds_reservation,
             })
-    return attempts + unverifiable
+    return attempts + taxonomy_telemetry + skip_telemetry
 
 
 async def _agent_auto_queue_dast_retests(
@@ -40453,6 +40549,9 @@ def _ai_ops_call(method: str, path: str, body: dict[str, Any] | None = None) -> 
 def _build_ai_ops_router_plan(request: AIOpsRouterRequest) -> dict[str, Any]:
     text = _ai_ops_prompt_text(request)
     lowered = text.lower()
+    explicit_scan_match = re.search(
+        r"\b(quick|standard|deep|full|aggressive|smart)\s+scan\b", lowered
+    )
     missing: list[str] = []
     non_goals = [
         "no implicit Lab/deep upgrade",
@@ -40473,7 +40572,7 @@ def _build_ai_ops_router_plan(request: AIOpsRouterRequest) -> dict[str, Any]:
 
     if not text:
         missing.append("prompt")
-    elif "full coverage" in lowered or ("coverage" in lowered and "scan" in lowered) or "scan all endpoint" in lowered:
+    elif "full coverage" in lowered or "scan all endpoint" in lowered:
         intent = "run_full_coverage"
         active_or_budget = True
         active_families = ["all"]
@@ -40495,13 +40594,11 @@ def _build_ai_ops_router_plan(request: AIOpsRouterRequest) -> dict[str, Any]:
             },
         )
         explanation = "Plan a one-shot Full Coverage scan with discover-once dynamic fan-out."
-    elif "scan" in lowered and not any(
-        phrase in lowered for phrase in ("deep hunt", "autonomous hunt", "investigate autonomously")
-    ):
+    elif explicit_scan_match:
         # Product vocabulary is intentionally exact: "deep scan" is DAST, while "Deep Hunt" is
-        # the separate /agent/hunt workflow. An unqualified "scan" uses the documented quick default.
-        scan_match = re.search(r"\b(quick|standard|deep|full|aggressive|smart)\s+scan\b", lowered)
-        scan_type = scan_match.group(1) if scan_match else "quick"
+        # the separate /agent/hunt workflow. Exact named DAST requests take precedence over
+        # more general family words that might also appear in the prompt.
+        scan_type = explicit_scan_match.group(1)
         intent = f"run_dast_{scan_type}"
         active_or_budget = True  # queueing any scan is a state-changing operation
         if scan_type in {"full", "smart"}:
@@ -40606,6 +40703,23 @@ def _build_ai_ops_router_plan(request: AIOpsRouterRequest) -> dict[str, Any]:
                 safety_preset = "balanced"
             planned_call = _ai_ops_call("POST", f"/targets/{request.target_id or '<target_id>'}/asm/improve", body)
             explanation = f"Queue a focused ASM endpoint batch for {family} only."
+        elif "scan" in lowered and not any(
+            phrase in lowered for phrase in ("deep hunt", "autonomous hunt", "investigate autonomously")
+        ):
+            # Only an otherwise-unqualified scan falls back to quick DAST. Keep this after ASM,
+            # gap, budget, and focused-family routing so ordinary wording such as "scan for SQL
+            # injection" cannot be swallowed by the generic DAST fallback.
+            intent = "run_dast_quick"
+            active_or_budget = True
+            safety_preset = "safe"
+            if not request.target:
+                missing.append("target")
+            planned_call = _ai_ops_call(
+                "POST",
+                "/scans",
+                {"target": request.target or "<target>", "options": {"scan_type": "quick"}},
+            )
+            explanation = "Plan the documented quick DAST default for an unqualified scan request."
 
     requires_confirmation = bool(active_or_budget or high_risk_families)
     execution_enabled = _ai_ops_execute_enabled()
@@ -46696,8 +46810,10 @@ def _stale_scan_worker_count_best_effort() -> int:
         ]
         if not running:
             return 0
+        worker_build_redis = None
         try:
-            worker_build_raw = get_redis().hgetall("shakerscan:worker_build") or {}
+            worker_build_redis = get_redis()
+            worker_build_raw = worker_build_redis.hgetall("shakerscan:worker_build") or {}
         except Exception:
             worker_build_raw = {}
         if not worker_build_raw:
@@ -46861,8 +46977,10 @@ async def get_workers():
         # into containers.
         expected_fp = expected_build_fingerprint()
         expected_version = current_scanner_version()
+        worker_build_redis = None
         try:
-            worker_build_raw = get_redis().hgetall("shakerscan:worker_build") or {}
+            worker_build_redis = get_redis()
+            worker_build_raw = worker_build_redis.hgetall("shakerscan:worker_build") or {}
         except Exception:
             worker_build_raw = {}
         worker_build: dict = {}
@@ -46883,11 +47001,14 @@ async def get_workers():
 
         # Filter and format worker containers (only shakerscan workers)
         worker_list = []
+        running_worker_ids: list[str] = []
         for c in containers:
             names = c.get('Names', [])
             name = names[0].lstrip('/') if names else 'unknown'
             if _is_scan_worker_container_name(name):
                 state = c.get('State', 'unknown')
+                if state == "running" and c.get("Id"):
+                    running_worker_ids.append(str(c["Id"]))
                 wb = _build_for_container(c.get('Id', '')) or {}
                 reported_fp = wb.get('build_fingerprint')
                 reported_version = wb.get('scanner_version')
@@ -46916,6 +47037,16 @@ async def get_workers():
                     ),
                 })
 
+        # The Docker-backed operational endpoint knows which containers are actually live. Prune
+        # hash fields left by crashed/removed workers so the lightweight /health summary converges
+        # immediately whenever an operator or dashboard asks for authoritative fleet state.
+        orphaned_hosts = _orphaned_worker_build_report_hosts(worker_build, running_worker_ids)
+        if orphaned_hosts and worker_build_redis is not None:
+            try:
+                worker_build_redis.hdel("shakerscan:worker_build", *orphaned_hosts)
+            except Exception:
+                pass
+
         summary = compute_fleet_summary(worker_list)
         max_allowed_workers = _compute_max_allowed_workers()
         # Refresh the per-scan active-scan concurrency cap for workers.
@@ -46940,6 +47071,7 @@ async def get_workers():
             "max_active_scans": _compute_max_active_scans(),
         }
     except Exception:
+        logger.exception("Failed to query Docker worker fleet")
         return {
             "count": -1,
             "error": "Failed to query Docker",

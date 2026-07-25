@@ -3,9 +3,15 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { usePathname } from 'next/navigation'
 import Link from 'next/link'
-import { Activity, BookOpen, Bot, Boxes, Compass, Crosshair, FileArchive, Lightbulb, Menu, Network, PackageCheck, Radar, ShieldAlert, ShieldCheck, Wand2, X } from 'lucide-react'
+import { Activity, BookOpen, Bot, Boxes, Compass, Crosshair, FileArchive, Lightbulb, Menu, Network, PackageCheck, Radar, ShieldAlert, ShieldCheck, TriangleAlert, Wand2, X } from 'lucide-react'
 import { buttonClasses, Toggle } from '@/components/ui'
 import { API_URL } from '@/lib/api'
+import {
+  deriveBuildIdentity,
+  formatBuildIdentity,
+  type BuildIdentity,
+  type HealthBuildIdentity,
+} from '@/lib/buildIdentity'
 
 const navGroups: {
   heading: string | null
@@ -124,16 +130,25 @@ const navGroups: {
   },
 ]
 
+// Root-layout remounts (including React StrictMode's development probe) share one lightweight
+// request. Worker display identity is part of /health, so the sidebar never opens the Docker socket.
+let healthBuildIdentityRequest: Promise<HealthBuildIdentity | null> | null = null
+
+function loadHealthBuildIdentity(): Promise<HealthBuildIdentity | null> {
+  if (!healthBuildIdentityRequest) {
+    healthBuildIdentityRequest = fetch(`${API_URL}/health`)
+      .then((response) => (response.ok ? response.json() : null))
+      .catch(() => null)
+  }
+  return healthBuildIdentityRequest
+}
+
 function BrandMark({ className = 'w-6 h-6' }: { className?: string }) {
   return (
     <svg className={`${className} text-blue-500`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
     </svg>
   )
-}
-
-function comparableBuildVersion(value?: string | null): string | undefined {
-  return value?.replace(/-dirty$/, '')
 }
 
 function NavContent({
@@ -145,25 +160,9 @@ function NavContent({
   pathname: string
   showAll: boolean
   onToggleShowAll: (value: boolean) => void
-  buildIdentity: { ui?: string; api?: string; workers?: string; skew: boolean }
+  buildIdentity: BuildIdentity
 }) {
-  const allBuildsMatch = Boolean(
-    !buildIdentity.skew
-    && buildIdentity.ui
-    && buildIdentity.api
-    && buildIdentity.workers
-    && comparableBuildVersion(buildIdentity.ui) === comparableBuildVersion(buildIdentity.api)
-    && comparableBuildVersion(buildIdentity.api) === comparableBuildVersion(buildIdentity.workers)
-  )
-  const commonVersion = [buildIdentity.ui, buildIdentity.api, buildIdentity.workers]
-    .find((value) => value?.endsWith('-dirty')) || buildIdentity.api
-  const buildLabel = allBuildsMatch
-    ? `Version ${commonVersion}`
-    : [
-        buildIdentity.ui && `UI ${buildIdentity.ui}`,
-        buildIdentity.api && `API ${buildIdentity.api}`,
-        buildIdentity.workers && `Workers ${buildIdentity.workers}`,
-      ].filter(Boolean).join(' · ')
+  const buildLabel = formatBuildIdentity(buildIdentity)
   // Default view hides advanced groups/items; the footer switch reveals them.
   const visibleGroups = navGroups
     .filter((group) => showAll || !group.advanced)
@@ -204,10 +203,13 @@ function NavContent({
         <p className="text-xs text-gray-500 mt-1">Open Source Edition</p>
         {(buildIdentity.ui || buildIdentity.api || buildIdentity.workers) && (
           <p
-            className={`mt-1 text-[10px] ${buildIdentity.skew ? 'text-amber-400' : 'text-gray-600'}`}
+            className={`mt-1 flex items-center gap-1 text-[11px] ${buildIdentity.skew ? 'text-amber-300' : 'text-gray-400'}`}
             title={buildIdentity.skew ? 'Component build mismatch detected' : 'Component build identities'}
+            role={buildIdentity.skew ? 'status' : undefined}
+            aria-live={buildIdentity.skew ? 'polite' : undefined}
           >
-            {buildLabel}
+            {buildIdentity.skew && <TriangleAlert className="h-3 w-3 shrink-0" aria-hidden="true" />}
+            <span>{buildIdentity.skew ? `Build mismatch: ${buildLabel}` : buildLabel}</span>
           </p>
         )}
       </div>
@@ -311,45 +313,17 @@ export default function Sidebar() {
   const [mobileOpen, setMobileOpen] = useState(false)
   const [showAll, setShowAll] = useState(false)
   const bakedVersion = process.env.NEXT_PUBLIC_APP_VERSION
-  const [buildIdentity, setBuildIdentity] = useState<{
-    ui?: string
-    api?: string
-    workers?: string
-    skew: boolean
-  }>({ ui: bakedVersion, skew: false })
+  const [buildIdentity, setBuildIdentity] = useState<BuildIdentity>({ ui: bakedVersion, skew: false })
   const openerRef = useRef<HTMLButtonElement>(null)
   const drawerRef = useRef<HTMLElement>(null)
 
   // Fetch once in the parent so opening the mobile drawer does not duplicate runtime requests.
-  // Keep UI, API, and worker identities separate: version skew is evidence, not something to hide.
+  // /health carries a fresh, fingerprint-authoritative worker summary without enumerating Docker.
   useEffect(() => {
     let cancelled = false
-    Promise.allSettled([
-      fetch(`${API_URL}/health`).then((r) => (r.ok ? r.json() : null)),
-      fetch(`${API_URL}/workers`).then((r) => (r.ok ? r.json() : null)),
-    ]).then(([healthResult, workersResult]) => {
+    loadHealthBuildIdentity().then((health) => {
       if (cancelled) return
-      const health = healthResult.status === 'fulfilled' ? healthResult.value : null
-      const workers = workersResult.status === 'fulfilled' ? workersResult.value : null
-      const apiVersion = typeof health?.scanner_version === 'string' ? health.scanner_version : undefined
-      const reportedWorkerVersions = Array.isArray(workers?.workers)
-        ? [...new Set(workers.workers.map((w: { scanner_version?: string }) => w.scanner_version).filter(Boolean))]
-        : []
-      const workerLabel = workers
-        ? workers.error || workers.count < 0
-          ? 'unavailable'
-          : workers.fleet_uniform
-          ? (reportedWorkerVersions[0] || workers.expected_scanner_version || 'current')
-          : workers.count === 0
-            ? 'none'
-            : `mixed/stale (${workers.stale_count || 0})`
-        : undefined
-      const concreteVersions = [bakedVersion, apiVersion, ...reportedWorkerVersions]
-        .map((value) => comparableBuildVersion(value))
-        .filter(Boolean)
-      const versionSkew = new Set(concreteVersions).size > 1
-        || Boolean(workers && !workers.error && workers.count > 0 && !workers.fleet_uniform)
-      setBuildIdentity({ ui: bakedVersion, api: apiVersion, workers: workerLabel, skew: versionSkew })
+      setBuildIdentity(deriveBuildIdentity(bakedVersion, health))
     })
     return () => { cancelled = true }
   }, [bakedVersion])

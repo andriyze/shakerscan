@@ -210,6 +210,70 @@ def test_worker_build_current_is_unknown_until_worker_registers():
     ) is None
 
 
+def test_worker_build_report_summary_uses_only_fresh_fingerprint_authority():
+    now = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc)
+    reports = {
+        b"current": json.dumps({
+            "build_fingerprint": "expected",
+            "scanner_version": "older-label",
+            "reported_at": (now - timedelta(seconds=20)).isoformat(),
+        }).encode(),
+        b"stale": json.dumps({
+            "build_fingerprint": "old-fingerprint",
+            "scanner_version": "expected-label",
+            "reported_at": (now - timedelta(seconds=30)).isoformat(),
+        }).encode(),
+        b"stopped-expired": json.dumps({
+            "build_fingerprint": "old-fingerprint",
+            "scanner_version": "old-label",
+            "reported_at": (now - timedelta(minutes=10)).isoformat(),
+        }).encode(),
+    }
+
+    summary = api_module._worker_build_report_summary(
+        reports,
+        expected_fingerprint="expected",
+        expected_version="expected-label",
+        now=now,
+    )
+
+    assert summary == {
+        "available": True,
+        "reported_count": 2,
+        "current_count": 1,
+        "stale_count": 1,
+        "pending_count": 0,
+        "fleet_uniform": False,
+        "scanner_version": None,
+    }
+
+
+def test_worker_build_report_summary_uses_api_label_only_for_uniform_fleet():
+    now = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc)
+    report = json.dumps({
+        "build_fingerprint": "expected",
+        "scanner_version": "volatile-old-label",
+        "reported_at": now.isoformat(),
+    })
+
+    summary = api_module._worker_build_report_summary(
+        {"worker": report},
+        expected_fingerprint="expected",
+        expected_version="display-label",
+        now=now,
+    )
+
+    assert summary["fleet_uniform"] is True
+    assert summary["scanner_version"] == "display-label"
+
+
+def test_orphaned_worker_build_reports_exclude_only_running_container_hosts():
+    assert api_module._orphaned_worker_build_report_hosts(
+        ["abc123", "def456", "stopped789"],
+        ["abc123000000full", "def456000000full"],
+    ) == ["stopped789"]
+
+
 def test_target_credential_profile_public_shape_never_returns_secret(monkeypatch):
     monkeypatch.setattr(api_module, "encryption_enabled", lambda: True)
     row = {
@@ -17013,6 +17077,33 @@ def test_auto_verify_classifies_findings_after_attempt_cap_and_without_approval(
     no_approval_by_id = {row.get("finding_id"): row for row in no_approval}
     assert no_approval_by_id["00000000-0000-4000-8000-000000000006"]["skipped"] == "family_not_verifiable"
     assert no_approval_by_id["00000000-0000-4000-8000-000000000007"]["skipped"] == "auto_verify_requires_approval"
+
+
+def test_auto_verify_skip_noise_cannot_starve_taxonomy_telemetry(monkeypatch):
+    monkeypatch.setattr(api_module, "_ai_ops_execute_enabled", lambda: True)
+
+    def _entry(family, suffix):
+        return {
+            "finding": {"family": family},
+            "persisted": {
+                "id": f"00000000-0000-4000-8000-{suffix:012d}",
+                "persisted": "created",
+            },
+        }
+
+    # More approval skips than the operational telemetry cap precede the taxonomy mismatch.
+    gated = [_entry("data_exposure", index) for index in range(1, 15)]
+    gated.append(_entry("unknown_family_name", 99))
+    out = asyncio.run(api_module._agent_auto_verify(
+        gated,
+        approval_receipt_id=None,
+        created_by="test",
+    ))
+
+    assert sum(row.get("skipped") == "auto_verify_requires_approval" for row in out) == 10
+    taxonomy = next(row for row in out if row.get("finding_id", "").endswith("000000000099"))
+    assert taxonomy["skipped"] == "family_not_verifiable"
+    assert taxonomy["claimed_family"] == "unknown_family_name"
 
 
 def test_context_pack_sections_render_observed_artifacts_and_invariant_candidates():

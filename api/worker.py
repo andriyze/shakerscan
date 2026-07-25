@@ -6,6 +6,7 @@ Redis-based job worker with PostgreSQL persistence.
 
 import asyncio
 import copy
+import functools
 import hashlib
 import ipaddress
 import json
@@ -6063,6 +6064,7 @@ def send_heartbeats(job_id: str, stop_event: threading.Event):
                 r = _hb_client()
             if r is not None:
                 r.hset(f"job:{job_id}", 'heartbeat', utc_now_iso())
+                _write_worker_build_report(r)
         except Exception as e:
             print(f"[{job_id[:8]}] Heartbeat error (reconnecting): {e}", flush=True)
             r = None  # force reconnect next tick instead of reusing a wedged socket
@@ -9630,29 +9632,52 @@ async def async_main():
         # Clean shutdown
         pass
     finally:
+        # A clean container replacement should disappear from lightweight fleet identity
+        # immediately. Crash/kill remnants still age out server-side, while graceful rebuilds do
+        # not leave a transient false mismatch in the sidebar.
+        try:
+            r.hdel("shakerscan:worker_build", _worker_build_hostname())
+        except Exception:
+            pass
         # Close database pool
         if db_pool:
             await db_pool.close()
         print("Worker shutdown complete", flush=True)
 
 
+@functools.lru_cache(maxsize=1)
 def _worker_build_fingerprint() -> str | None:
     """Source-tree checksum of this worker's runtime (keyed by basename so it
     matches the API's host-checkout fingerprint when the code is current)."""
     return hash_source_files(runtime_file_map(), require_all=True)
 
 
+def _worker_build_hostname() -> str:
+    import socket as _socket
+    return os.environ.get("HOSTNAME") or os.environ.get("WORKER_ID") or _socket.gethostname()
+
+
+def _worker_build_report_payload() -> tuple[str, str]:
+    hostname = _worker_build_hostname()
+    payload = json.dumps({
+        "build_fingerprint": _worker_build_fingerprint(),
+        "scanner_version": _published_scanner_version() or os.environ.get("SCANNER_VERSION") or os.environ.get("GIT_COMMIT") or "dev",
+        "reported_at": utc_now_iso(),
+    })
+    return hostname, payload
+
+
+def _write_worker_build_report(redis_client) -> str:
+    hostname, payload = _worker_build_report_payload()
+    redis_client.hset("shakerscan:worker_build", hostname, payload)
+    return hostname
+
+
 def report_worker_build_fingerprint() -> None:
     """Register this worker's build fingerprint in Redis so GET /workers can show
     per-worker current/stale status without shelling into containers."""
     try:
-        import socket as _socket
-        hostname = os.environ.get("HOSTNAME") or os.environ.get("WORKER_ID") or _socket.gethostname()
-        get_redis().hset("shakerscan:worker_build", hostname, json.dumps({
-            "build_fingerprint": _worker_build_fingerprint(),
-            "scanner_version": _published_scanner_version() or os.environ.get("SCANNER_VERSION") or os.environ.get("GIT_COMMIT") or "dev",
-            "reported_at": utc_now_iso(),
-        }))
+        hostname = _write_worker_build_report(get_redis())
         print(f"[worker] registered build fingerprint for {hostname}", flush=True)
     except Exception as e:
         print(f"[worker] build fingerprint report failed: {e}", file=sys.stderr, flush=True)

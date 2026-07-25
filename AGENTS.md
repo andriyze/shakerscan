@@ -14,7 +14,7 @@ For a remote VPS that should be opened from another machine over Tailscale, star
 ./scanner.sh start --remote
 ```
 
-Remote mode binds the UI/API to the VPS Tailscale IPv4 address and prints remote URLs. Local laptop mode intentionally binds to `127.0.0.1`. If Tailscale is unavailable, use `SHAKERSCAN_BIND_HOST=0.0.0.0 SHAKERSCAN_PUBLIC_HOST=<server-ip-or-dns> ./scanner.sh start --remote`, but only behind a firewall, VPN, or reverse proxy.
+Remote mode binds the UI/API to the VPS Tailscale IPv4 address and prints remote URLs. Local laptop mode intentionally binds to `127.0.0.1`. If Tailscale is unavailable, use `SHAKERSCAN_BIND_HOST=0.0.0.0 SHAKERSCAN_PUBLIC_HOST=<server-ip-or-dns> ./scanner.sh start --remote`, but only behind a firewall, VPN, or reverse proxy. When a proxy or alternate DNS name gives the browser UI a different origin than `SHAKERSCAN_PUBLIC_HOST`, add the exact origin to `SHAKERSCAN_CORS_ALLOW_ORIGINS` (or a controlled `SHAKERSCAN_CORS_ALLOW_ORIGIN_REGEX`). CLI/agent requests without `Origin` remain accepted; trusted-network operators can explicitly choose `SHAKERSCAN_CORS_ALLOW_ORIGINS=*`.
 
 Check status:
 ```bash
