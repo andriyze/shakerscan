@@ -2265,6 +2265,40 @@ async def cleanup_stale_scans(pool: asyncpg.Pool):
                 except Exception as e:
                     print(f"[cleanup] Failed to read checkpoint: {e}", flush=True)
 
+                # Cross-node workers mirror checkpoints to the central artifact
+                # plane. Recover the latest hash-verified object when the
+                # control plane cannot see that worker's local /results mount.
+                if partial_result is None:
+                    try:
+                        checkpoint_artifact = await conn.fetchrow(
+                            """
+                            SELECT storage_uri, content_sha256
+                            FROM scan_artifacts
+                            WHERE scan_id=$1 AND artifact_type='checkpoint'
+                              AND status='available' AND deleted_at IS NULL
+                            ORDER BY updated_at DESC
+                            LIMIT 1
+                            """,
+                            scan["id"],
+                        )
+                        if checkpoint_artifact:
+                            checkpoint_raw = await asyncio.to_thread(
+                                read_artifact_bytes,
+                                results_dir=RESULTS_DIR,
+                                storage_uri=str(checkpoint_artifact["storage_uri"]),
+                                expected_sha256=str(checkpoint_artifact["content_sha256"]),
+                            )
+                            checkpoint_data = json.loads(checkpoint_raw.decode("utf-8"))
+                            partial_result = checkpoint_data.get("report")
+                            checkpoint_phase = checkpoint_data.get("phase")
+                            print(
+                                f"[cleanup] Recovered central checkpoint at phase "
+                                f"'{checkpoint_phase}' for scan {scan_id[:8]}",
+                                flush=True,
+                            )
+                    except Exception as e:
+                        print(f"[cleanup] Failed to read central checkpoint: {e}", flush=True)
+
                 # Try to get last few log lines for debugging
                 last_logs = None
                 try:

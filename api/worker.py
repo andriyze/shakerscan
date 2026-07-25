@@ -68,12 +68,18 @@ except ModuleNotFoundError:
 from evidence_storage import serialize_evidence_content, store_evidence_content
 from artifact_storage import (
     ArtifactStorageError,
+    guess_content_type as artifact_content_type,
     object_key as artifact_object_key,
     remote_required as artifact_remote_required,
+    store_bytes as store_artifact_bytes,
     store_json as store_artifact_json,
     upsert_manifest as upsert_artifact_manifest,
 )
 from secret_store import decrypt_secret
+try:
+    from redaction import redact_text
+except ModuleNotFoundError:
+    from scanner.redaction import redact_text
 try:
     from action_scope import evaluate_runtime_destination_scope
 except ImportError:
@@ -123,6 +129,18 @@ QUEUE_MAX_DELIVERY_ATTEMPTS = max(
 QUEUE_LEASE_HEARTBEAT_FAILURE_LIMIT = max(
     1,
     int(os.environ.get("SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_FAILURE_LIMIT", "3")),
+)
+ARTIFACT_CHECKPOINT_INTERVAL_SECONDS = max(
+    2,
+    int(os.environ.get("ARTIFACT_CHECKPOINT_INTERVAL_SECONDS", "15")),
+)
+ARTIFACT_REFERENCED_FILE_MAX_BYTES = max(
+    1024,
+    int(os.environ.get("ARTIFACT_REFERENCED_FILE_MAX_BYTES", str(25 * 1024 * 1024))),
+)
+ARTIFACT_REFERENCED_FILE_MAX_COUNT = max(
+    1,
+    int(os.environ.get("ARTIFACT_REFERENCED_FILE_MAX_COUNT", "50")),
 )
 WORKER_REDIS_SOCKET_TIMEOUT_SECONDS = max(
     WORKER_QUEUE_BLOCK_SECONDS + 5,
@@ -2366,6 +2384,53 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
 
     cancel_task = asyncio.create_task(_watchdog_cancel())
 
+    checkpoint_signature: tuple[int, int] | None = None
+
+    async def _upload_checkpoint_if_changed(*, force: bool = False) -> bool:
+        nonlocal checkpoint_signature
+        if not checkpoint_file or not scan_id:
+            return False
+        try:
+            stat = await asyncio.to_thread(checkpoint_file.stat)
+        except OSError:
+            return False
+        signature = (int(stat.st_mtime_ns), int(stat.st_size))
+        if not force and signature == checkpoint_signature:
+            return False
+        raw = await asyncio.to_thread(checkpoint_file.read_bytes)
+        # Atomic scanner writes mean a visible checkpoint should always be valid
+        # JSON. Validate before replacing the last known-good remote copy.
+        await asyncio.to_thread(json.loads, raw.decode("utf-8"))
+        await persist_scan_artifact_bytes(
+            raw,
+            scan_id=scan_id,
+            artifact_type="checkpoint",
+            filename="checkpoint.json",
+            content_type="application/json",
+            metadata={"job_id": job_id, "live_mirror": True},
+        )
+        checkpoint_signature = signature
+        return True
+
+    async def _mirror_checkpoint() -> None:
+        while proc.returncode is None:
+            await asyncio.sleep(ARTIFACT_CHECKPOINT_INTERVAL_SECONDS)
+            try:
+                await _upload_checkpoint_if_changed()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # Keep scanning and retry the latest atomic checkpoint. The
+                # final upload below is authoritative and fails closed on fleet
+                # nodes if the object plane never recovers.
+                print(
+                    f"[{(job_id or scan_id)[:8]}] checkpoint mirror retry: "
+                    f"{type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+
+    checkpoint_task = asyncio.create_task(_mirror_checkpoint())
+
     stdout_chunks: list[bytes] = []
     stderr_lines: list[str] = []
     last_progress: tuple[str | None, int | None] = (None, None)
@@ -2482,11 +2547,12 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
         if _slot_held and _slot_r is not None:
             _release_scan_slot(_slot_r, _slot_id)
             _slot_held = False
-        for task in (watchdog_task, cancel_task, stdout_task, stderr_task):
+        for task in (watchdog_task, cancel_task, checkpoint_task, stdout_task, stderr_task):
             task.cancel()
         await asyncio.gather(
             watchdog_task,
             cancel_task,
+            checkpoint_task,
             stdout_task,
             stderr_task,
             return_exceptions=True,
@@ -2502,7 +2568,7 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
     if _slot_held and _slot_r is not None:
         _release_scan_slot(_slot_r, _slot_id)
         _slot_held = False
-    for task in (watchdog_task, cancel_task):
+    for task in (watchdog_task, cancel_task, checkpoint_task):
         task.cancel()
         try:
             await task
@@ -2518,6 +2584,49 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
 
     stdout_text = b"".join(stdout_chunks).decode(errors="replace") if stdout_chunks else ""
     stderr_text = "\n".join(stderr_lines)
+
+    if checkpoint_file and checkpoint_file.exists():
+        try:
+            await _upload_checkpoint_if_changed(force=True)
+        except Exception as exc:
+            if artifact_remote_required():
+                raise
+            print(
+                f"[{(job_id or scan_id)[:8]}] local checkpoint artifact unavailable: "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+
+    if scan_id and (cancel_reason or timeout_reason or proc.returncode not in (0, None)):
+        diagnostics = {
+            "scan_id": scan_id,
+            "job_id": job_id,
+            "exit_code": proc.returncode,
+            "cancel_reason": cancel_reason,
+            "timeout_reason": timeout_reason,
+            "masked_command": " ".join(cmd_masked),
+            "stdout_len": len(stdout_text),
+            "stderr_len": len(stderr_text),
+            "stderr_tail": redact_text(stderr_text[-20000:]),
+            "recorded_at": utc_now_iso(),
+        }
+        try:
+            await persist_scan_artifact_bytes(
+                json.dumps(diagnostics, sort_keys=True, default=str, indent=2).encode("utf-8"),
+                scan_id=scan_id,
+                artifact_type="diagnostic",
+                filename="scanner-exit.json",
+                content_type="application/json",
+                metadata={"job_id": job_id, "terminal": True},
+            )
+        except Exception as exc:
+            if artifact_remote_required():
+                raise
+            print(
+                f"[{(job_id or scan_id)[:8]}] local diagnostic artifact unavailable: "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
 
     try:
         result = json.loads(stdout_text)
@@ -6103,6 +6212,169 @@ def save_result_file(result: dict, job_id: str) -> str:
     return str(filepath)
 
 
+async def persist_scan_artifact_bytes(
+    data: bytes,
+    *,
+    scan_id: str,
+    artifact_type: str,
+    filename: str,
+    parent_scan_id: str | None = None,
+    shard_index: int | None = None,
+    content_type: str = "application/octet-stream",
+    metadata: dict[str, Any] | None = None,
+    conn: Any | None = None,
+) -> dict[str, Any]:
+    """Upload bytes and commit the matching manifest as one worker contract."""
+    if parent_scan_id is None and shard_index is None:
+        try:
+            if conn is not None:
+                lineage = await conn.fetchrow(
+                    "SELECT parent_scan_id, shard_index FROM scans WHERE id=$1",
+                    uuid.UUID(scan_id),
+                )
+            else:
+                async with db_pool.acquire() as lineage_conn:
+                    lineage = await lineage_conn.fetchrow(
+                        "SELECT parent_scan_id, shard_index FROM scans WHERE id=$1",
+                        uuid.UUID(scan_id),
+                    )
+            if lineage:
+                parent_scan_id = str(lineage["parent_scan_id"]) if lineage["parent_scan_id"] else None
+                shard_index = lineage["shard_index"]
+        except Exception:
+            if artifact_remote_required():
+                raise
+
+    key = artifact_object_key(
+        scan_id=scan_id,
+        artifact_type=artifact_type,
+        shard_index=shard_index,
+        filename=filename,
+    )
+    descriptor = await asyncio.to_thread(
+        store_artifact_bytes,
+        data,
+        results_dir=RESULTS_DIR,
+        scan_id=scan_id,
+        artifact_type=artifact_type,
+        shard_index=shard_index,
+        filename=filename,
+        content_type=content_type,
+    )
+
+    async def record(active_conn):
+        return await upsert_artifact_manifest(
+            active_conn,
+            scan_id=scan_id,
+            parent_scan_id=parent_scan_id,
+            shard_index=shard_index,
+            artifact_type=artifact_type,
+            artifact_key=key,
+            descriptor=descriptor,
+            metadata=metadata,
+        )
+
+    if conn is not None:
+        row = await record(conn)
+    else:
+        async with db_pool.acquire() as artifact_conn:
+            row = await record(artifact_conn)
+    return {**descriptor, "manifest": row}
+
+
+def _referenced_artifact_path(key: str, value: Any) -> Path | None:
+    if not isinstance(value, str) or not value.startswith("/"):
+        return None
+    lowered = str(key or "").lower()
+    if "screenshot" not in lowered and not lowered.endswith(("_path", "_file")):
+        return None
+    candidate = Path(value)
+    if candidate.is_symlink():
+        return None
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError:
+        return None
+    if not resolved.is_file():
+        return None
+    allowed = False
+    for root in (RESULTS_DIR, Path(tempfile.gettempdir())):
+        try:
+            resolved.relative_to(root.resolve())
+            allowed = True
+            break
+        except (OSError, ValueError):
+            continue
+    if not allowed:
+        return None
+    try:
+        size = resolved.stat().st_size
+    except OSError:
+        return None
+    if size < 0 or size > ARTIFACT_REFERENCED_FILE_MAX_BYTES:
+        return None
+    return resolved
+
+
+async def centralize_referenced_artifacts(
+    value: Any,
+    *,
+    scan_id: str,
+    parent_scan_id: str | None = None,
+    shard_index: int | None = None,
+) -> int:
+    """Replace bounded worker-local result paths with API-proxied references."""
+    references: list[tuple[Any, Any, str, Path]] = []
+
+    def collect(current: Any) -> None:
+        if len(references) >= ARTIFACT_REFERENCED_FILE_MAX_COUNT:
+            return
+        if isinstance(current, dict):
+            for key, item in list(current.items()):
+                path = _referenced_artifact_path(str(key), item)
+                if path is not None:
+                    references.append((current, key, str(key), path))
+                else:
+                    collect(item)
+        elif isinstance(current, list):
+            for index, item in enumerate(list(current)):
+                path = _referenced_artifact_path("artifact_file", item)
+                if path is not None:
+                    references.append((current, index, "artifact_file", path))
+                else:
+                    collect(item)
+
+    collect(value)
+    uploaded: dict[str, str] = {}
+    for container, key, source_key, path in references:
+        cache_key = str(path)
+        download_url = uploaded.get(cache_key)
+        if download_url is None:
+            artifact_type = "screenshot" if "screenshot" in source_key.lower() else "attachment"
+            try:
+                persisted = await persist_scan_artifact_bytes(
+                    await asyncio.to_thread(path.read_bytes),
+                    scan_id=scan_id,
+                    parent_scan_id=parent_scan_id,
+                    shard_index=shard_index,
+                    artifact_type=artifact_type,
+                    filename=path.name,
+                    content_type=artifact_content_type(path.name),
+                    metadata={"source_key": source_key, "source_filename": path.name},
+                )
+            except Exception:
+                if artifact_remote_required():
+                    raise
+                continue
+            artifact_id = str((persisted.get("manifest") or {}).get("id") or "")
+            if not artifact_id:
+                raise ArtifactStorageError("referenced artifact manifest has no id")
+            download_url = f"/scans/{scan_id}/artifacts/{artifact_id}"
+            uploaded[cache_key] = download_url
+        container[key] = download_url
+    return len(uploaded)
+
+
 async def persist_result_artifact(
     result: dict,
     job_id: str,
@@ -6118,6 +6390,12 @@ async def persist_result_artifact(
     durable manifest cannot be committed. Standalone mode keeps the historical
     local result path and treats a manifest failure as degraded compatibility.
     """
+    await centralize_referenced_artifacts(
+        result,
+        scan_id=scan_id,
+        parent_scan_id=parent_scan_id,
+        shard_index=shard_index,
+    )
     local_result_path = save_result_file(result, job_id)
     artifact_key = artifact_object_key(
         scan_id=scan_id,

@@ -10,9 +10,10 @@ per-scan worker/node attribution, current-vs-desired node drift derivation, flee
 per-node activity APIs are implemented. The Fleet operations UI is implemented with health/drift,
 capacity, current-work, per-node scaling, drain/resume, and revoke controls. The physical two-VPS
 proof is not complete. Redis Stream lease/heartbeat/ack/reclaim delivery is implemented. The
-general artifact manifest, deterministic result-object upload, hash-verified proxy download, and
-fleet-worker fail-closed persistence contract are implemented. Checkpoint/diagnostic capture,
-retention, referenced binary artifacts, placement, rolling lifecycle, and the Phase-3 broker remain.
+general artifact manifest, deterministic result/checkpoint/diagnostic upload, referenced screenshot
+centralization, hash-verified proxy download, cross-node stale recovery, and fleet-worker fail-closed
+persistence contract are implemented. Retention, bundled MinIO, placement, rolling lifecycle, and
+the Phase-3 broker remain.
 **Scope:** run a coordinated ShakerScan fleet across multiple VMs/VPS hosts so one UI/API
 can scan more targets at once and run high-budget Full Coverage scans by using workers
 from many machines.
@@ -34,7 +35,7 @@ becoming stale prose. For product priority and phased order, see
 | Race-safe concurrent finding writes | **Built** | `UNIQUE INDEX idx_findings_target_fingerprint` (`db/init.sql`) |
 | Fleet-wide active-scan concurrency cap (lease-based Redis ZSET semaphore; TTL frees a crashed holder) | **Built, but fail-OPEN** — `_take_scan_slot` returns granted on any Redis error and the bounded wait fails open, so the cap is an OOM guard on a healthy shared Redis, **not** an enforceable fleet limit. A partitioned node runs uncapped. | `ACTIVE_SCAN_SLOTS_KEY`, `_take_scan_slot` (`worker.py`) |
 | Per-root-domain request reservation (atomic Redis Lua; already coordinates every process on the shared Redis) | **Built** | `reserve_domain_rate` (`asm_inventory.py`) |
-| Central artifact plane | **Partially built** — Compose forwards the existing S3/MinIO settings; scan/shard result JSON uses deterministic object keys plus a durable `scan_artifacts` manifest and hash-verified API proxy. Joined nodes fail closed when remote upload/manifest persistence fails. Checkpoint/diagnostic capture, referenced binaries, retention, and bundled MinIO remain. | `artifact_storage.py`; `worker.py` `persist_result_artifact`; `GET /scans/{id}/artifacts` |
+| Central artifact plane | **Partially built** — Compose forwards S3/MinIO settings; result JSON, live checkpoints, terminal diagnostics, and bounded referenced screenshots/files use deterministic keys plus a durable `scan_artifacts` manifest. Joined nodes fail closed when required upload/manifest persistence fails; the API hash-verifies proxy downloads and stale recovery reads remote checkpoints. Retention and bundled MinIO remain. | `artifact_storage.py`; `worker.py` `persist_result_artifact`, `_mirror_checkpoint`; `GET /scans/{id}/artifacts` |
 | Job-queue delivery | **Built with leased delivery** — Redis Streams consumer groups, explicit ack/delete after successful dispatch, lease heartbeats, visibility-timeout reclaim, bounded delivery attempts, and fail-closed execution cancellation when lease ownership/heartbeat authority is lost. Pre-upgrade list entries remain drainable. | `job_queue.py`; `worker.py` `_run_job_under_lease` |
 | Remote worker scaling | **Built per node** — the control plane changes versioned desired count/drain state; each authenticated pull agent reconciles only its local labeled containers | `PATCH /fleet/nodes/{id}/state`; `fleet_agent.py` `reconcile_workers` |
 | Node identity, enrollment, join tokens, heartbeat, credential rotation/revocation, CA bootstrap, overlay TLS edge, `nodes` table | **Foundation built** — physical two-VPS acceptance remains incomplete | `fleet.py`; `/fleet/*`; `fleet-edge`; `nodes`, `node_join_tokens`, `node_credentials` |
@@ -676,14 +677,15 @@ Recommended first implementation: MinIO for self-hosted deployments, using S3-co
 APIs so cloud S3 can be used later without changing application code.
 
 **Implementation status:** the reusable hand-rolled SigV4 S3/MinIO client now backs both managed
-`evidence_objects` and the general `scan_artifacts` manifest. Ordinary result JSON is uploaded under
-a deterministic `scan-id/shard/artifact-type` key before terminal job acknowledgement; the API lists
-manifests and proxies downloads only after SHA-256 verification. All Compose variants forward the
-S3 settings, artifact-specific settings may override them, and joined nodes require remote storage
-by default. Standalone mode deliberately retains local `/results` compatibility. Checkpoints,
-cancellation files, screenshots/HARs, every diagnostic artifact, centralized retention, and a
-bundled MinIO profile are not complete yet. Reusing the SigV4 client reduces the work; it does not
-make it configuration-only.
+`evidence_objects` and the general `scan_artifacts` manifest. Result JSON, live atomic checkpoints,
+terminal scanner diagnostics, and bounded worker-local screenshot/file references are uploaded under
+deterministic `scan-id/shard/artifact-type` keys before terminal job acknowledgement. Referenced
+paths are rewritten to manifest-bound API URLs. The API lists manifests, proxies downloads only
+after SHA-256 verification, and recovers stale scans from a remote checkpoint when the worker-local
+mount is unavailable. All Compose variants forward the S3 settings, artifact-specific settings may
+override them, and joined nodes require remote storage by default. Standalone mode deliberately
+retains local `/results` compatibility. Centralized retention and a bundled MinIO profile are not
+complete yet. Reusing the SigV4 client reduces the work; it does not make it configuration-only.
 
 Evidence centralization should happen before advertising cross-VM parallel scans as
 production-ready. Without it, the logical scan may complete but its report can point at
