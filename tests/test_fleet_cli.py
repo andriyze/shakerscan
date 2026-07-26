@@ -595,6 +595,88 @@ def test_broker_auto_preflight_selects_managed_https_when_url_is_not_ready(tmp_p
     assert prepared["https_mode"] == "managed"
 
 
+def test_broker_auto_preflight_selects_managed_when_healthy_proxy_lacks_trust_boundary(
+    tmp_path, monkeypatch, capsys
+):
+    paths = fleet_cli.RuntimePaths(tmp_path)
+    monkeypatch.setattr(fleet_cli, "_require_linux", lambda: None)
+    monkeypatch.setattr(fleet_cli, "_require_commands", lambda _names: None)
+    monkeypatch.setattr(fleet_cli, "_docker_compose_command", lambda: ["docker", "compose"])
+    monkeypatch.setattr(fleet_cli, "_require_healthy_api", lambda *_args: None)
+    monkeypatch.setattr(
+        fleet_cli,
+        "_require_public_fleet_auth_boundary",
+        lambda *_args: (_ for _ in ()).throw(fleet_cli.FleetCLIError("protected route returned HTTP 400")),
+    )
+    monkeypatch.setattr(fleet_cli, "_resolved_public_addresses", lambda _url: ["203.0.113.8"])
+    monkeypatch.setattr(fleet_cli, "_assert_port_available", lambda *_args, **_kwargs: None)
+
+    prepared = fleet_cli.run_init_preflight(
+        paths,
+        types.SimpleNamespace(
+            network="broker",
+            public_url="https://fleet.example.test",
+            ca_cert=None,
+            skip_public_check=False,
+            https_mode="auto",
+            worker_image=IMAGE,
+            workers=1,
+        ),
+    )
+
+    assert prepared["https_mode"] == "managed"
+    output = capsys.readouterr().out
+    assert "HTTPS is reachable but its fleet trust boundary is not ready" in output
+    assert "[FAIL]" not in output
+
+
+def test_broker_auto_preflight_reuses_only_verified_external_proxy(tmp_path, monkeypatch, capsys):
+    paths = fleet_cli.RuntimePaths(tmp_path)
+    boundary_calls = []
+    monkeypatch.setattr(fleet_cli, "_require_linux", lambda: None)
+    monkeypatch.setattr(fleet_cli, "_require_commands", lambda _names: None)
+    monkeypatch.setattr(fleet_cli, "_docker_compose_command", lambda: ["docker", "compose"])
+    monkeypatch.setattr(fleet_cli, "_require_healthy_api", lambda *_args: None)
+    monkeypatch.setattr(
+        fleet_cli,
+        "_require_public_fleet_auth_boundary",
+        lambda *args: boundary_calls.append(args),
+    )
+
+    prepared = fleet_cli.run_init_preflight(
+        paths,
+        types.SimpleNamespace(
+            network="broker",
+            public_url="https://fleet.example.test",
+            ca_cert=None,
+            skip_public_check=False,
+            https_mode="auto",
+            worker_image=IMAGE,
+            workers=1,
+        ),
+    )
+
+    assert prepared["https_mode"] == "external"
+    assert boundary_calls == [("https://fleet.example.test", None)]
+    output = capsys.readouterr().out
+    assert output.count("Broker HTTPS authentication boundary") == 1
+
+
+def test_managed_gateway_state_recognizes_pre_secret_gateway_file(tmp_path):
+    paths = fleet_cli.RuntimePaths(tmp_path)
+    paths.control.mkdir(parents=True)
+    paths.gateway_config.write_text(
+        "# Managed by ShakerScan. Local UI and operator APIs are intentionally not public.\n",
+        encoding="utf-8",
+    )
+
+    assert fleet_cli._managed_gateway_state_present(paths, {}) is True
+    assert fleet_cli._managed_gateway_state_present(
+        fleet_cli.RuntimePaths(tmp_path / "other"),
+        {"COMPOSE_PROFILES": "artifacts,fleet-gateway"},
+    ) is True
+
+
 def test_broker_managed_https_writes_gateway_and_rolls_back_on_failed_verification(tmp_path, monkeypatch):
     paths = fleet_cli.RuntimePaths(tmp_path)
     scanner = tmp_path / "scanner.sh"

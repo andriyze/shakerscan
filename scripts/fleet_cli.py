@@ -789,6 +789,18 @@ def render_managed_caddyfile(public_url: str, proxy_secret: str) -> str:
 """
 
 
+def _managed_gateway_state_present(paths: RuntimePaths, env: dict[str, str]) -> bool:
+    """Recognize current and pre-proxy-secret managed gateway installations."""
+    profiles = {item.strip() for item in env.get("COMPOSE_PROFILES", "").split(",")}
+    if CADDY_PROFILE in profiles:
+        return True
+    try:
+        first_line = paths.gateway_config.read_text(encoding="utf-8").splitlines()[0]
+    except (FileNotFoundError, IndexError, OSError, UnicodeError):
+        return False
+    return first_line.strip() == "# Managed by ShakerScan. Local UI and operator APIs are intentionally not public."
+
+
 def _connection_bundle(control_ip: str, env: dict[str, str]) -> dict[str, Any]:
     worker_environment: dict[str, str] = {}
     evidence_keys = (
@@ -956,11 +968,9 @@ def run_init_preflight(paths: RuntimePaths, args: argparse.Namespace) -> dict[st
         hint="Pass a readable PEM CA with --ca-cert when the public URL uses private PKI.",
     )
     requested_https_mode = str(getattr(args, "https_mode", "auto") or "auto")
-    existing_managed_gateway = (
-        env.get("FLEET_HTTPS_MODE") == "managed"
-        and CADDY_PROFILE in {item.strip() for item in env.get("COMPOSE_PROFILES", "").split(",")}
-    )
+    existing_managed_gateway = _managed_gateway_state_present(paths, env)
     https_mode = "external"
+    external_boundary_verified = False
     if requested_https_mode == "managed" and network_mode != "broker":
         checks.append(PreflightCheck(
             "Managed HTTPS",
@@ -1002,11 +1012,34 @@ def run_init_preflight(paths: RuntimePaths, args: argparse.Namespace) -> dict[st
                 f"not ready yet ({exc}); the managed HTTPS gateway will be provisioned",
             ))
         else:
-            checks.append(PreflightCheck(
-                "Public API reachability",
-                "pass",
-                "healthy existing API and certificate chain verified",
-            ))
+            try:
+                _require_public_fleet_auth_boundary(public_url, enrollment_ca)
+            except FleetCLIError as exc:
+                https_mode = "managed"
+                checks.append(PreflightCheck(
+                    "Public API reachability",
+                    "warn",
+                    "HTTPS is reachable but its fleet trust boundary is not ready; "
+                    "the managed gateway will be provisioned",
+                ))
+                checks.append(PreflightCheck(
+                    "Existing HTTPS authentication boundary",
+                    "warn",
+                    str(exc),
+                    "ShakerScan will replace this incomplete path with its restricted managed gateway.",
+                ))
+            else:
+                external_boundary_verified = True
+                checks.append(PreflightCheck(
+                    "Public API reachability",
+                    "pass",
+                    "healthy existing API and certificate chain verified",
+                ))
+                checks.append(PreflightCheck(
+                    "Broker HTTPS authentication boundary",
+                    "pass",
+                    "protected node route reaches HTTPS enforcement and requires authentication",
+                ))
     elif public_url:
         _run_check(
             checks,
@@ -1020,6 +1053,7 @@ def run_init_preflight(paths: RuntimePaths, args: argparse.Namespace) -> dict[st
         public_url
         and network_mode == "broker"
         and https_mode == "external"
+        and not external_boundary_verified
         and not getattr(args, "skip_public_check", False)
     ):
         _run_check(

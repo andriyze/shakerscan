@@ -60,10 +60,12 @@ published. The built-in gateway's public `/health` returns only `{"status":"heal
 `degraded`; build identity and worker counts remain local. The UI and operator API remain on
 loopback and are not made public.
 
-If an existing reverse proxy already provides valid HTTPS, ShakerScan detects and reuses it. Select
-`--https-mode external` to require that topology or `--https-mode managed` to require the built-in
-gateway. Managed HTTPS is currently for broker fleets; WireGuard enrollment continues to use an
-operator-provided HTTPS endpoint.
+If an existing reverse proxy already provides valid HTTPS *and* the protected fleet route passes the
+proxy-trust/authentication probe, ShakerScan detects and reuses it. A healthy `/health` response alone
+is not enough: when the protected route is missing or cannot convey trusted HTTPS, automatic mode
+provisions the built-in gateway instead. Select `--https-mode external` to require an existing-proxy
+topology or `--https-mode managed` to require the built-in gateway. Managed HTTPS is currently for
+broker fleets; WireGuard enrollment continues to use an operator-provided HTTPS endpoint.
 
 An external proxy must forward every documented worker route and preserve the HTTPS trust boundary.
 `fleet preflight` verifies this by requesting a protected node route without credentials and requiring
