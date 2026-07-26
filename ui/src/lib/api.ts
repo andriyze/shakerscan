@@ -1896,6 +1896,7 @@ export interface FleetNode {
   rollout_in_progress?: boolean
   state_current: boolean
   image_current: boolean
+  local_build_active?: boolean
   wireguard_connection_pending?: boolean
   last_error?: string | null
   last_heartbeat_at?: string | null

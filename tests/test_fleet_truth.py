@@ -149,6 +149,38 @@ def test_execution_capacity_separates_local_remote_and_unavailable_nodes():
     }
 
 
+def test_local_build_remote_node_is_schedulable_but_not_image_current():
+    node = {
+        "status": "healthy",
+        "drain": False,
+        "rollout_in_progress": False,
+        "state_current": True,
+        "image_current": False,
+        "local_build_active": True,
+        "active_worker_count": 2,
+    }
+
+    assert api_module._fleet_node_is_schedulable(node) is True
+    assert api_module.compute_execution_capacity(
+        {"count": 1, "current_count": 1},
+        [node],
+    )["total_available"] == 3
+
+
+def test_unexplained_image_drift_remote_node_is_not_schedulable():
+    node = {
+        "status": "healthy",
+        "drain": False,
+        "rollout_in_progress": False,
+        "state_current": True,
+        "image_current": False,
+        "local_build_active": False,
+        "active_worker_count": 2,
+    }
+
+    assert api_module._fleet_node_is_schedulable(node) is False
+
+
 def test_worker_freshness_snapshot_marks_running_pending_as_unsafe(monkeypatch):
     containers = [
         {"Id": "aaa111", "Names": ["/shakerscan-worker-1"], "State": "running"},

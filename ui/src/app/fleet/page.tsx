@@ -167,7 +167,7 @@ export default function FleetPage() {
   const availableRemoteNodes = nodes.filter((node) => (
     node.status === 'healthy'
     && node.state_current
-    && node.image_current
+    && (node.image_current || node.local_build_active)
     && !node.drain
     && node.active_worker_count > 0
   ))
@@ -449,7 +449,8 @@ export default function FleetPage() {
                         </Badge>
                         {!node.state_current && !disabled && <Badge className="bg-amber-500/15 text-amber-300">state drift</Badge>}
                         {node.wireguard_connection_pending && !disabled && <Badge className="bg-amber-500/15 text-amber-300">awaiting WireGuard</Badge>}
-                        {!node.image_current && node.active_worker_count > 0 && !disabled && <Badge className="bg-amber-500/15 text-amber-300">image drift</Badge>}
+                        {node.local_build_active && node.active_worker_count > 0 && !disabled && <Badge className="bg-amber-500/15 text-amber-300">local test build</Badge>}
+                        {!node.image_current && !node.local_build_active && node.active_worker_count > 0 && !disabled && <Badge className="bg-amber-500/15 text-amber-300">image drift</Badge>}
                         {node.rollout_in_progress && <Badge className="bg-blue-500/15 text-blue-300">rolling update</Badge>}
                       </div>
                       <p className="mt-1 text-sm text-gray-500">

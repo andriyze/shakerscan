@@ -8209,6 +8209,22 @@ async def _broker_reserve_request_budget(
     }
 
 
+def _fleet_node_is_schedulable(node: Mapping[str, Any]) -> bool:
+    """Return whether a remote node may accept work right now.
+
+    A verified local-build tag is an explicit development mode. It is allowed to
+    execute scans, but ``image_current`` remains false so image-drift telemetry
+    and benchmark safeguards continue to expose that it is not the pinned image.
+    """
+    return (
+        node.get("status") == "healthy"
+        and not bool(node.get("drain"))
+        and not bool(node.get("rollout_in_progress"))
+        and bool(node.get("state_current"))
+        and (bool(node.get("image_current")) or bool(node.get("local_build_active")))
+    )
+
+
 async def _broker_authenticated_node(
     node_id: str,
     request: Request,
@@ -8229,13 +8245,7 @@ async def _broker_authenticated_node(
     if require_schedulable:
         stale_after = max(60, _int_env("FLEET_HEARTBEAT_TIMEOUT_SECONDS", HEARTBEAT_TIMEOUT_MINUTES * 60))
         public = _public_fleet_node(node, stale_after_seconds=stale_after)
-        schedulable = (
-            public.get("status") == "healthy"
-            and not bool(public.get("drain"))
-            and not bool(public.get("rollout_in_progress"))
-            and bool(public.get("state_current"))
-            and bool(public.get("image_current"))
-        )
+        schedulable = _fleet_node_is_schedulable(public)
         if not schedulable:
             raise HTTPException(status_code=409, detail="node is not healthy and current for scheduling")
     return node
@@ -49211,16 +49221,15 @@ def compute_execution_capacity(
 
     ``count`` remains the local Docker worker count for backwards-compatible
     local scaling. This companion summary makes the actual execution pool
-    explicit without pretending that a stale, draining, or drifted remote node
-    is available to accept a scan.
+    explicit without pretending that a stale, draining, or unexplained-drift
+    remote node is available to accept a scan. An explicitly reported local
+    source build remains schedulable for development while retaining image-drift
+    telemetry so benchmark and production operators can see it.
     """
     active_nodes = [node for node in fleet_nodes if node.get("status") != "disabled"]
     available_nodes = [
         node for node in active_nodes
-        if node.get("status") == "healthy"
-        and not bool(node.get("drain"))
-        and bool(node.get("state_current"))
-        and bool(node.get("image_current"))
+        if _fleet_node_is_schedulable(node)
         and int(node.get("active_worker_count") or 0) > 0
     ]
     local_running = max(0, int(local_summary.get("count") or 0))

@@ -257,7 +257,10 @@ control plane's immutable production digest as its desired-image identity while 
 runtime override explicitly; the node agent uses that override for local scaling. A later fleet image
 rollout replaces the development override with the selected registry digest. Local build mode is a
 broker development facility, not a production deployment mechanism, and the Docker build can still
-download base images and pinned tool dependencies.
+download base images and pinned tool dependencies. A healthy local-build node remains schedulable
+and selectable in **New Scan**, but Fleet labels it **local test build** and keeps it in the image-drift
+count. This preserves development freedom without presenting unpublished code as a production-pinned
+or benchmark-safe worker.
 
 Do not run `./scanner.sh start` on a dedicated worker first. `join` starts the isolated worker and
 node-agent project itself; the worker host does not need its own API, UI, Redis, or PostgreSQL stack.
@@ -325,7 +328,7 @@ A ready fleet should show:
 
 - every intended node as `healthy`;
 - active workers equal to desired workers;
-- no state or image drift;
+- no state drift, and no image drift unless the node intentionally uses `--local-build` for testing;
 - recent heartbeats without `last_error`;
 - the expected image digest and placement labels.
 

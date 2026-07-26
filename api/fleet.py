@@ -12,6 +12,7 @@ import binascii
 import hashlib
 import ipaddress
 import json
+import re
 import secrets
 import urllib.parse
 import uuid
@@ -23,6 +24,7 @@ from typing import Any, Mapping
 OVERLAY_ALLOCATION_LOCK = 8_675_310
 MAX_OVERLAY_ADDRESSES = 65_536
 MAX_WORKERS_PER_NODE = 128
+LOCAL_WORKER_IMAGE_RE = re.compile(r"^shakerscan-fleet-local:[a-z0-9][a-z0-9_.-]{0,127}$")
 
 
 class FleetConfigurationError(ValueError):
@@ -517,6 +519,10 @@ def public_node(row: Mapping[str, Any], *, stale_after_seconds: int) -> dict[str
     desired_image = str(result.get("worker_image_digest") or "").strip()
     active_image = str(result.get("active_worker_image_digest") or "").strip()
     result["image_current"] = bool(desired_image and active_image and desired_image == active_image)
+    # Local source builds intentionally differ from the fleet's pinned production
+    # digest. Keep that drift visible while distinguishing the supported test mode
+    # from an arbitrary or unexplained image mismatch.
+    result["local_build_active"] = bool(LOCAL_WORKER_IMAGE_RE.fullmatch(active_image))
     result["id"] = str(result["id"])
     for key in ("labels", "capacity"):
         if isinstance(result.get(key), str):

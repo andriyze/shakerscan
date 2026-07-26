@@ -286,6 +286,27 @@ def test_public_node_derives_state_and_image_currency():
     )
     assert result["state_current"] is True
     assert result["image_current"] is True
+    assert result["local_build_active"] is False
+
+
+def test_public_node_exposes_supported_local_build_without_hiding_image_drift():
+    digest = "registry/shakerscan@sha256:" + "a" * 64
+    result = public_node(
+        {
+            "id": uuid.uuid4(),
+            "status": "healthy",
+            "last_heartbeat_at": utcnow(),
+            "desired_state_version": 1,
+            "applied_state_version": 1,
+            "worker_image_digest": digest,
+            "active_worker_image_digest": "shakerscan-fleet-local:03a2178f01b9",
+            "last_error": None,
+        },
+        stale_after_seconds=60,
+    )
+    assert result["state_current"] is True
+    assert result["image_current"] is False
+    assert result["local_build_active"] is True
 
 
 def test_public_node_uses_an_explicit_allow_list():
