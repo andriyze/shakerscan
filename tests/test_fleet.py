@@ -20,6 +20,7 @@ from fleet import (  # noqa: E402
     enroll_node,
     hash_secret,
     public_node,
+    record_heartbeat,
     socket_peer_is_overlay,
     utcnow,
     validate_wireguard_public_key,
@@ -329,3 +330,43 @@ def test_public_node_surfaces_heartbeating_reconciliation_error_as_unhealthy():
     )
     assert result["status"] == "unhealthy"
     assert result["state_current"] is False
+
+
+def test_heartbeat_query_explicitly_types_nullable_status_parameters():
+    class HeartbeatConnection:
+        def __init__(self):
+            self.sql = ""
+            self.args = ()
+
+        async def fetchrow(self, sql, *args):
+            self.sql = " ".join(sql.split())
+            self.args = args
+            return {
+                "id": args[0],
+                "status": "healthy",
+                "desired_worker_count": 1,
+                "last_heartbeat_at": utcnow(),
+            }
+
+    async def run():
+        conn = HeartbeatConnection()
+        node_id = uuid.uuid4()
+        result = await record_heartbeat(
+            conn,
+            node_id=str(node_id),
+            active_worker_count=1,
+            capacity={"cpu_count": 2},
+            build_fingerprint=None,
+            active_worker_image_digest=None,
+            agent_version=None,
+            applied_state_version=1,
+            last_error=None,
+            egress_ip=None,
+        )
+
+        assert result["status"] == "healthy"
+        assert "last_error = $8::text" in conn.sql
+        assert "WHEN $8::text IS NOT NULL" in conn.sql
+        assert conn.args[7] is None
+
+    asyncio.run(run())

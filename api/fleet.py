@@ -438,17 +438,17 @@ async def record_heartbeat(
     row = await conn.fetchrow(
         """
         UPDATE nodes
-        SET active_worker_count = $2,
+        SET active_worker_count = $2::integer,
             capacity = $3::jsonb,
-            build_fingerprint = COALESCE($4, build_fingerprint),
-            active_worker_image_digest = COALESCE($5, active_worker_image_digest),
-            agent_version = COALESCE($6, agent_version),
-            applied_state_version = $7,
-            last_error = $8,
+            build_fingerprint = COALESCE($4::text, build_fingerprint),
+            active_worker_image_digest = COALESCE($5::text, active_worker_image_digest),
+            agent_version = COALESCE($6::text, agent_version),
+            applied_state_version = $7::integer,
+            last_error = $8::text,
             egress_ip = COALESCE($9::inet, egress_ip),
             status = CASE
                 WHEN drain THEN 'draining'
-                WHEN $8 IS NOT NULL OR $7 < desired_state_version THEN 'joining'
+                WHEN $8::text IS NOT NULL OR $7::integer < desired_state_version THEN 'joining'
                 ELSE 'healthy'
             END,
             last_heartbeat_at = NOW(),
