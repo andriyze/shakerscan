@@ -223,10 +223,14 @@ configure_access_mode() {
                 echo "[remote] Tailscale IP changed: ${cached_bind} → ${tailscale_ip}"
             fi
             export SHAKERSCAN_BIND_HOST="$tailscale_ip"
-            # Only override PUBLIC_HOST when it was tracking BIND_HOST (or empty).
-            if [ -z "${SHAKERSCAN_PUBLIC_HOST:-}" ] || [ "${SHAKERSCAN_PUBLIC_HOST:-}" = "$cached_bind" ]; then
-                export SHAKERSCAN_PUBLIC_HOST="$tailscale_ip"
-            fi
+            # Refresh display/browser URLs when they were tracking BIND_HOST or
+            # still contain a local-only sentinel from an earlier start. Keep a
+            # real operator-supplied DNS name intact.
+            case "${SHAKERSCAN_PUBLIC_HOST:-}" in
+                ""|localhost|127.0.0.1|0.0.0.0|"$cached_bind")
+                    export SHAKERSCAN_PUBLIC_HOST="$tailscale_ip"
+                    ;;
+            esac
         elif [ -n "$cached_bind" ]; then
             echo "[remote] No live Tailscale IPv4; reusing ${cached_bind} from environment/.env"
             export SHAKERSCAN_PUBLIC_HOST="${SHAKERSCAN_PUBLIC_HOST:-$cached_bind}"
@@ -374,6 +378,22 @@ api_base_url() {
 
 ui_base_url() {
     echo "http://$(format_url_host "$(public_access_host)"):${SHAKERSCAN_UI_PORT:-3000}"
+}
+
+probe_access_host() {
+    local host="${SHAKERSCAN_BIND_HOST:-127.0.0.1}"
+    case "$host" in
+        ""|0.0.0.0) host="127.0.0.1" ;;
+    esac
+    echo "$host"
+}
+
+api_probe_url() {
+    echo "http://$(format_url_host "$(probe_access_host)"):${SHAKERSCAN_API_PORT:-8080}"
+}
+
+ui_probe_url() {
+    echo "http://$(format_url_host "$(probe_access_host)"):${SHAKERSCAN_UI_PORT:-3000}"
 }
 
 run_with_sudo() {
@@ -1555,8 +1575,8 @@ start_services() {
     fi
     compose_up -d --scale worker=$start_workers
     echo ""
-    wait_for_url "API" "$(api_base_url)/health" 120 || true
-    wait_for_url "UI" "$(ui_base_url)" 120 || true
+    wait_for_url "API" "$(api_probe_url)/health" 120 || true
+    wait_for_url "UI" "$(ui_probe_url)" 120 || true
     echo -e "${GREEN}Services started.${NC}"
     echo "  UI:  $(ui_base_url)"
     echo "  API: $(api_base_url)"
@@ -1630,7 +1650,7 @@ reload_services() {
 
 show_status() {
     local api_url
-    api_url="$(api_base_url)"
+    api_url="$(api_probe_url)"
     echo -e "${BLUE}Service Status:${NC}"
     compose ps
     echo ""
