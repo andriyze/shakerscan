@@ -2,7 +2,8 @@
 
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { submitScan, submitBatch, getFleetNodes, getScanExecutionSettings, getTargets, getWorkers, type FleetNode, type Target } from '@/lib/api'
+import Link from 'next/link'
+import { submitScan, submitBatch, getFleetNodes, getScanExecutionSettings, getTargets, getWorkers, type FleetNode, type Target, type WorkerStats } from '@/lib/api'
 import {
   BUDGET_PROFILES,
   PARALLEL_STRATEGIES,
@@ -74,6 +75,8 @@ export default function NewScanPage() {
   const [runningWorkers, setRunningWorkers] = useState<number | null>(null)
   const [staleWorkers, setStaleWorkers] = useState<number>(0)
   const [fleetNodes, setFleetNodes] = useState<FleetNode[]>([])
+  const [workerStats, setWorkerStats] = useState<WorkerStats | null>(null)
+  const [executionTarget, setExecutionTarget] = useState('auto')
 
   useEffect(() => {
     const requestedTarget = new URLSearchParams(window.location.search).get('target')?.trim()
@@ -87,7 +90,12 @@ export default function NewScanPage() {
       .catch(() => { /* worker count is advisory; ignore failures */ })
     // §2: warn before launching active scans on a build-stale fleet.
     getWorkers()
-      .then((w) => { if (!cancelled) setStaleWorkers(w.stale_workers?.length ?? 0) })
+      .then((w) => {
+        if (cancelled) return
+        setWorkerStats(w)
+        setStaleWorkers(w.stale_workers?.length ?? 0)
+        if (w.execution_capacity) setRunningWorkers(w.execution_capacity.total_available)
+      })
       .catch(() => { /* freshness is advisory; ignore failures */ })
     getTargets()
       .then((rows) => {
@@ -123,7 +131,6 @@ export default function NewScanPage() {
   const [enforceRequestBudget, setEnforceRequestBudget] = useState(false)
   const [placementEnabled, setPlacementEnabled] = useState(false)
   const [placement, setPlacement] = useState({
-    node_id: '',
     region: '',
     network: '',
     egress_group: '',
@@ -265,6 +272,11 @@ export default function NewScanPage() {
           ])
           .filter(([, value]) => Array.isArray(value) ? value.length > 0 : value !== '')
       )
+      const selectedNodeId = executionTarget === 'auto' ? '' : executionTarget
+      const resolvedPlacementPayload = {
+        ...(showAdvanced && placementEnabled ? placementPayload : {}),
+        ...(selectedNodeId ? { node_id: selectedNodeId } : {})
+      }
       const scanOptions: Record<string, unknown> = {
         ...getScanOptions(scanType),
         budget_profile: isCoverageMode ? (isDeepCoverage ? 'exhaustive' : 'thorough') : budgetProfile,
@@ -288,8 +300,8 @@ export default function NewScanPage() {
         ...(shardAuthStates ? { auth_state_shards: true } : {}),
         ...authPayload,
         ...(showAdvanced ? options : {}),
-        ...(showAdvanced && placementEnabled && Object.keys(placementPayload).length > 0
-          ? { placement: placementPayload }
+        ...(Object.keys(resolvedPlacementPayload).length > 0
+          ? { placement: resolvedPlacementPayload }
           : {}),
         ...(Object.keys(effectiveCustomBudget).length > 0
           ? { custom_budget: effectiveCustomBudget }
@@ -471,6 +483,62 @@ export default function NewScanPage() {
               </button>
             ))}
           </div>
+        </Card>
+
+        {/* Execution Mode */}
+        <Card className="p-4">
+          <label className="block text-sm font-medium text-gray-400 mb-3">
+            Execution location
+          </label>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <button
+              type="button"
+              onClick={() => setExecutionTarget('auto')}
+              className={`rounded-lg border p-3 text-left transition-colors ${executionTarget === 'auto' ? 'border-blue-500 bg-blue-500/10' : 'border-gray-700 bg-gray-800 hover:border-gray-600'}`}
+            >
+              <div className="font-medium text-white">Automatic</div>
+              <div className="mt-1 text-xs text-gray-500">
+                Any available worker · {workerStats?.execution_capacity?.total_available ?? workerStats?.count ?? '—'} currently available
+              </div>
+            </button>
+            <button
+              type="button"
+              onClick={() => setExecutionTarget('local')}
+              disabled={(workerStats?.execution_capacity?.local_available ?? workerStats?.count ?? 0) < 1}
+              className={`rounded-lg border p-3 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${executionTarget === 'local' ? 'border-blue-500 bg-blue-500/10' : 'border-gray-700 bg-gray-800 hover:border-gray-600'}`}
+            >
+              <div className="font-medium text-white">Control plane (local)</div>
+              <div className="mt-1 text-xs text-gray-500">
+                {workerStats?.execution_capacity?.local_available ?? workerStats?.count ?? '—'} local workers available
+              </div>
+            </button>
+          </div>
+          <label className="mt-3 block space-y-1">
+            <span className="block text-xs text-gray-500">Specific remote node</span>
+            <select
+              value={executionTarget !== 'auto' && executionTarget !== 'local' ? executionTarget : ''}
+              onChange={(event) => setExecutionTarget(event.target.value || 'auto')}
+              className="w-full rounded border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+            >
+              <option value="">Choose a remote node (optional)</option>
+              {fleetNodes.filter((node) => node.status !== 'disabled').map((node) => {
+                const available = node.status === 'healthy' && node.state_current && node.image_current && !node.drain && node.active_worker_count > 0
+                return (
+                  <option key={node.id} value={node.id} disabled={!available}>
+                    {node.name} · {available ? `${node.active_worker_count} workers available` : node.status}
+                  </option>
+                )
+              })}
+            </select>
+          </label>
+          {fleetNodes.length === 0 && (
+            <p className="mt-2 text-xs text-gray-500">
+              No remote inventory is visible. Enter the operator token on the <Link href="/fleet" className="text-blue-400 hover:text-blue-300">Fleet page</Link> to select a joined node.
+            </p>
+          )}
+          <p className="mt-3 text-xs text-gray-500">
+            Automatic preserves failover. Selecting a location keeps the scan on local workers or on any healthy worker replica within the chosen remote node.
+          </p>
         </Card>
 
         {/* Execution Mode */}
@@ -736,26 +804,13 @@ export default function NewScanPage() {
                 onChange={setEnforceRequestBudget}
               />
               <OptionToggle
-                label="Fleet Placement"
-                description="Run only on nodes matching region, network, egress, or tool constraints"
+                label="Advanced placement constraints"
+                description="Additionally require a matching region, network, egress, residency, or tool set"
                 checked={placementEnabled}
                 onChange={setPlacementEnabled}
               />
               {placementEnabled && (
                 <div className="grid grid-cols-1 gap-3 border-t border-gray-800 pt-3 sm:grid-cols-2">
-                  <label className="space-y-1 sm:col-span-2">
-                    <span className="block text-xs text-gray-500">Specific node (optional)</span>
-                    <select
-                      value={placement.node_id}
-                      onChange={(event) => setPlacement({ ...placement, node_id: event.target.value })}
-                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:border-blue-500"
-                    >
-                      <option value="">Any matching node</option>
-                      {fleetNodes.filter((node) => node.status !== 'disabled').map((node) => (
-                        <option key={node.id} value={node.id}>{node.name} · {node.status}</option>
-                      ))}
-                    </select>
-                  </label>
                   {([
                     ['region', 'Region', 'eu-west'],
                     ['network', 'Network', 'customer-vpn'],

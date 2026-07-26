@@ -234,6 +234,10 @@ export default function Dashboard() {
   const queueRunning = queue ? queue.running : '--'
   const workerCount = workers?.count
   const workersKnown = workerCount !== undefined && workerCount >= 0
+  const executionCapacity = workers?.execution_capacity
+  const localAvailable = executionCapacity?.local_available ?? (workers?.current_count ?? workerCount ?? 0)
+  const remoteAvailable = executionCapacity?.remote_available ?? 0
+  const totalAvailable = executionCapacity?.total_available ?? localAvailable
   const maxWorkers = workers?.max_allowed && workers.max_allowed > 0 ? workers.max_allowed : 20
   const staleCount = workers?.stale_workers?.length ?? 0
   const coverage = useMemo(() => buildCoverageRollup(groupedTargets), [groupedTargets])
@@ -292,13 +296,23 @@ export default function Dashboard() {
           <div
             id="workers"
             className="flex h-10 items-center gap-2 rounded-lg border border-gray-800 bg-gray-900 px-2.5"
-            title={workersError || `${workerCount ?? '--'} of ${maxWorkers} workers running`}
+            title={workersError || `${totalAvailable} available: ${localAvailable} local, ${remoteAvailable} remote`}
           >
             <Server className="h-4 w-4 shrink-0 text-gray-500" aria-hidden="true" />
             <span className="min-w-6 text-center text-sm font-medium tabular-nums text-white">
-              {workersKnown ? workerCount : '--'}
+              {workersKnown ? totalAvailable : '--'}
             </span>
-            <span className="hidden text-xs text-gray-500 sm:inline">workers</span>
+            <span className="hidden text-xs text-gray-500 sm:inline">available</span>
+            <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] font-medium text-gray-300" title={`${workerCount ?? 0} local workers running`}>
+              {localAvailable} local
+            </span>
+            <Link
+              href="/fleet"
+              className="rounded bg-blue-500/10 px-1.5 py-0.5 text-[10px] font-medium text-blue-300 hover:bg-blue-500/20"
+              title={`${executionCapacity?.remote_nodes_available ?? 0} remote nodes available`}
+            >
+              {remoteAvailable} remote
+            </Link>
             {staleCount > 0 && (
               <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-300" title="Workers running an outdated build">
                 {staleCount} stale
@@ -309,8 +323,8 @@ export default function Dashboard() {
               type="button"
               onClick={() => handleScale(Math.max(1, (workerCount || 1) - 1))}
               disabled={scaling || !workersKnown || (workerCount || 0) <= 1}
-              aria-label="Decrease worker count"
-              title="Decrease worker count"
+              aria-label="Decrease local worker count"
+              title="Decrease local worker count"
               className={`flex h-7 w-7 items-center justify-center rounded text-gray-400 transition-colors hover:bg-gray-800 hover:text-white disabled:cursor-not-allowed disabled:opacity-30 ${FOCUS_RING}`}
             >
               <Minus className="h-3.5 w-3.5" aria-hidden="true" />
@@ -319,8 +333,8 @@ export default function Dashboard() {
               type="button"
               onClick={() => handleScale(Math.min(maxWorkers, (workerCount || 1) + 1))}
               disabled={scaling || !workersKnown || (workerCount || 0) >= maxWorkers}
-              aria-label="Increase worker count"
-              title="Increase worker count"
+              aria-label="Increase local worker count"
+              title="Increase local worker count"
               className={`flex h-7 w-7 items-center justify-center rounded text-gray-400 transition-colors hover:bg-gray-800 hover:text-white disabled:cursor-not-allowed disabled:opacity-30 ${FOCUS_RING}`}
             >
               <Plus className="h-3.5 w-3.5" aria-hidden="true" />

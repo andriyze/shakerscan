@@ -1851,6 +1851,7 @@ export interface WorkerInfo {
 
 export interface WorkerStats {
   count: number
+  current_count?: number
   workers: WorkerInfo[]
   max_allowed: number
   stale_workers?: string[]
@@ -1858,6 +1859,17 @@ export interface WorkerStats {
   stale_count?: number
   pending_count?: number
   expected_scanner_version?: string
+  execution_capacity?: {
+    local_running: number
+    local_available: number
+    remote_running: number
+    remote_available: number
+    total_running: number
+    total_available: number
+    remote_nodes: number
+    remote_nodes_available: number
+    remote_inventory_available: boolean
+  }
   error?: string
 }
 

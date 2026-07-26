@@ -23,6 +23,7 @@ import {
   getFleetNodeActivity,
   getFleetNodeEvents,
   getFleetNodes,
+  getWorkers,
   revokeFleetNode,
   scaleFleetWorkers,
   updateFleetNodeState,
@@ -30,6 +31,7 @@ import {
   type FleetNodeActivityResponse,
   type FleetNodeEventsResponse,
   type FleetSummary,
+  type WorkerStats,
 } from '@/lib/api'
 import {
   Badge,
@@ -135,12 +137,19 @@ export default function FleetPage() {
   const [rolloutDigests, setRolloutDigests] = useState<Record<string, string>>({})
   const [fleetWorkerTarget, setFleetWorkerTarget] = useState('')
   const [fleetScaling, setFleetScaling] = useState(false)
+  const [workers, setWorkers] = useState<WorkerStats | null>(null)
 
   const loadFleet = useCallback(async (background = false) => {
     if (background) setRefreshing(true)
     else setLoading(true)
     try {
-      const response = await getFleetNodes(operatorToken)
+      const [fleetResult, workersResult] = await Promise.allSettled([
+        getFleetNodes(operatorToken),
+        getWorkers(),
+      ])
+      if (workersResult.status === 'fulfilled') setWorkers(workersResult.value)
+      if (fleetResult.status === 'rejected') throw fleetResult.reason
+      const response = fleetResult.value
       setNodes(response.nodes)
       setSummary(response.summary)
       setStaleAfterSeconds(response.stale_after_seconds)
@@ -154,6 +163,20 @@ export default function FleetPage() {
       setRefreshing(false)
     }
   }, [operatorToken])
+
+  const availableRemoteNodes = nodes.filter((node) => (
+    node.status === 'healthy'
+    && node.state_current
+    && node.image_current
+    && !node.drain
+    && node.active_worker_count > 0
+  ))
+  const availableRemoteWorkers = availableRemoteNodes.reduce(
+    (total, node) => total + node.active_worker_count,
+    0,
+  )
+  const localAvailableWorkers = workers?.execution_capacity?.local_available ?? workers?.current_count ?? workers?.count ?? 0
+  const localRunningWorkers = workers?.execution_capacity?.local_running ?? workers?.count ?? 0
 
   useEffect(() => {
     setOperatorToken(sessionStorage.getItem(OPERATOR_TOKEN_KEY) || '')
@@ -258,18 +281,30 @@ export default function FleetPage() {
         }
       />
 
-      <div className="mb-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="mb-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
         <SummaryCard
-          label="Nodes online"
-          value={`${summary.healthy_nodes}/${summary.active_nodes}`}
+          label="Remote nodes available"
+          value={`${availableRemoteNodes.length}/${summary.active_nodes}`}
           detail={`${summary.unhealthy_nodes} unhealthy · ${summary.stale_nodes} stale · ${summary.draining_nodes} draining`}
-          tone={summary.unhealthy_nodes || summary.stale_nodes ? 'warning' : summary.healthy_nodes ? 'good' : 'normal'}
+          tone={summary.active_nodes === 0 ? 'normal' : availableRemoteNodes.length === summary.active_nodes ? 'good' : 'warning'}
         />
         <SummaryCard
-          label="Workers active"
-          value={`${summary.active_workers}/${summary.desired_workers}`}
-          detail="active / desired across the fleet"
-          tone={summary.desired_workers === 0 ? 'normal' : summary.active_workers === summary.desired_workers ? 'good' : 'warning'}
+          label="Remote workers available"
+          value={`${availableRemoteWorkers}/${summary.desired_workers}`}
+          detail={`${summary.active_workers} reported active across remote nodes`}
+          tone={summary.desired_workers === 0 ? 'normal' : availableRemoteWorkers === summary.desired_workers ? 'good' : 'warning'}
+        />
+        <SummaryCard
+          label="Local workers available"
+          value={`${localAvailableWorkers}/${localRunningWorkers}`}
+          detail="current / running on this control plane"
+          tone={localRunningWorkers === 0 ? 'warning' : localAvailableWorkers === localRunningWorkers ? 'good' : 'warning'}
+        />
+        <SummaryCard
+          label="Total execution capacity"
+          value={localAvailableWorkers + availableRemoteWorkers}
+          detail={`${localAvailableWorkers} local · ${availableRemoteWorkers} remote workers available`}
+          tone={localAvailableWorkers + availableRemoteWorkers > 0 ? 'good' : 'warning'}
         />
         <SummaryCard
           label="State drift"
@@ -320,9 +355,9 @@ export default function FleetPage() {
       <Card className="mb-6 p-4">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
           <div>
-            <div className="text-sm font-medium text-gray-200">Fleet worker target</div>
+            <div className="text-sm font-medium text-gray-200">Remote fleet worker target</div>
             <p className="mt-1 max-w-2xl text-xs text-gray-500">
-              Set one worker total. The control plane assigns integer shares by each healthy node&apos;s reported CPU or worker weight while honoring optional per-node caps.
+              Set the remote-worker total. The control plane assigns integer shares by each healthy remote node&apos;s reported CPU or worker weight. Local workers are scaled separately from the Dashboard.
             </p>
           </div>
           <div className="flex w-full gap-2 lg:w-80">
@@ -381,11 +416,20 @@ export default function FleetPage() {
         </div>
       ) : nodes.length === 0 ? (
         <EmptyState
-          message="No worker nodes have joined this fleet yet."
+          message="No remote worker nodes have joined this fleet yet."
           hint="Run shakerscan fleet join-token on the control plane, then shakerscan join on a worker VPS."
         />
       ) : (
         <div className="space-y-4">
+          <div className="flex flex-wrap items-end justify-between gap-2">
+            <div>
+              <h2 className="text-sm font-semibold text-gray-200">Remote worker nodes</h2>
+              <p className="mt-1 text-xs text-gray-500">{availableRemoteNodes.length} nodes and {availableRemoteWorkers} workers are currently schedulable.</p>
+            </div>
+            <Link href="/scan/new" className="text-xs font-medium text-blue-400 hover:text-blue-300">
+              Start a scan on a selected node →
+            </Link>
+          </div>
           {nodes.map((node) => {
             const busy = pendingNodeId === node.id
             const disabled = node.status === 'disabled'
@@ -426,7 +470,7 @@ export default function FleetPage() {
                           >
                             <Minus className="h-4 w-4" />
                           </Button>
-                          <span className="min-w-20 px-2 text-center text-xs text-gray-300" title="Active / desired workers">
+                          <span className="min-w-20 px-2 text-center text-xs text-gray-300" title="Active / desired remote workers">
                             {node.active_worker_count} / {node.desired_worker_count}
                           </span>
                           <Button
