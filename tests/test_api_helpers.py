@@ -116,10 +116,11 @@ if "fastapi" not in sys.modules:
         get = post = patch = put = delete = on_event = exception_handler = _decorator
 
     class _FakeHTTPException(Exception):
-        def __init__(self, status_code: int = 500, detail=None):
+        def __init__(self, status_code: int = 500, detail=None, headers=None):
             super().__init__(detail)
             self.status_code = status_code
             self.detail = detail
+            self.headers = headers
 
     def _fake_query(default=None, **kwargs):
         return default
@@ -253,6 +254,44 @@ def test_server_side_fleet_lease_probe_rejects_unauthenticated_remote_call(monke
             _fleet_request(host="192.168.65.1", scheme="http")
         ))
     assert exc.value.status_code == 403
+
+
+def test_fleet_placement_reachability_allows_unknown_tools_but_rejects_impossible_constraints():
+    class Conn:
+        def __init__(self, rows):
+            self.rows = rows
+
+        async def fetch(self, query, *args):
+            assert "FROM nodes" in query
+            return self.rows
+
+    matching = Conn([{
+        "id": uuid.uuid4(),
+        "region": "eu-west",
+        "labels": {"network": "customer-vpc"},
+    }])
+    asyncio.run(api_module._require_reachable_fleet_placement(
+        matching,
+        {"region": "eu-west", "network": "customer-vpc", "requires": ["nuclei"]},
+    ))
+
+    with pytest.raises(api_module.HTTPException) as exc:
+        asyncio.run(api_module._require_reachable_fleet_placement(
+            matching,
+            {"region": "us-east", "network": "customer-vpc"},
+        ))
+    assert exc.value.status_code == 422
+    assert exc.value.detail["error"] == "unreachable_fleet_placement"
+
+
+def test_route_capacity_maps_to_actionable_rate_limit_response():
+    exc = api_module._route_capacity_http_exception(
+        api_module.RouteCapacityExceeded("scan_jobs", 512)
+    )
+    assert exc.status_code == 429
+    assert exc.detail["error"] == "fleet_route_capacity_exceeded"
+    assert exc.detail["route_limit"] == 512
+    assert exc.headers == {"Retry-After": "30"}
 
 
 def test_insecure_fleet_enrollment_escape_hatch_is_loopback_only(monkeypatch):

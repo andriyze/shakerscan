@@ -83,6 +83,24 @@ redis.call('DEL', KEYS[1])
 return 1
 """
 
+_CLEAN_ORPHANED_ROUTE_STREAM_LUA = """
+-- shakerscan:clean-orphaned-route-stream
+if redis.call('SISMEMBER', KEYS[1], ARGV[1]) == 1 then
+  return 1
+end
+if redis.call('XLEN', KEYS[2]) == 0 then
+  redis.call('DEL', KEYS[2])
+end
+return 0
+"""
+
+
+class RouteCapacityExceeded(RuntimeError):
+    def __init__(self, queue_name: str, limit: int):
+        super().__init__(f"route registry for {queue_name} reached its {limit}-route capacity")
+        self.queue_name = queue_name
+        self.limit = limit
+
 
 @dataclass(frozen=True)
 class QueueLease:
@@ -230,6 +248,19 @@ def _known_routes(redis_client: Any, queue_name: str) -> list[str]:
         return []
 
 
+def _prune_route_registry_at_capacity(redis_client: Any, queue_name: str) -> None:
+    if not callable(getattr(redis_client, "smembers", None)):
+        return
+    try:
+        routes = [_text(item) for item in (redis_client.smembers(route_set_key(queue_name)) or [])]
+    except Exception:
+        return
+    if len(routes) < route_registry_max():
+        return
+    for route in routes:
+        _prune_empty_route(redis_client, route)
+
+
 def _text(value: Any) -> str:
     return value.decode("utf-8", "replace") if isinstance(value, bytes) else str(value)
 
@@ -242,14 +273,35 @@ def _has_streams(redis_client: Any) -> bool:
     )
 
 
-def ensure_consumer_group(redis_client: Any, queue_name: str) -> None:
+def ensure_consumer_group(redis_client: Any, queue_name: str) -> bool:
     if not _has_streams(redis_client):
-        return
+        return True
     try:
         redis_client.xgroup_create(stream_key(queue_name), CONSUMER_GROUP, id="0-0", mkstream=True)
     except Exception as exc:
         if "BUSYGROUP" not in str(exc):
             raise
+    base = _route_base(queue_name)
+    if not base:
+        return True
+    evaluator = getattr(redis_client, "eval", None)
+    if callable(evaluator):
+        return bool(evaluator(
+            _CLEAN_ORPHANED_ROUTE_STREAM_LUA,
+            2,
+            route_set_key(base),
+            stream_key(queue_name),
+            queue_name,
+        ))
+    try:
+        registered = queue_name in {
+            _text(item) for item in (redis_client.smembers(route_set_key(base)) or [])
+        }
+        if not registered and int(redis_client.xlen(stream_key(queue_name)) or 0) == 0:
+            redis_client.delete(stream_key(queue_name))
+        return registered
+    except Exception:
+        return False
 
 
 def enqueue_job(redis_client: Any, queue_name: str, payload: str | dict[str, Any]) -> str:
@@ -258,15 +310,19 @@ def enqueue_job(redis_client: Any, queue_name: str, payload: str | dict[str, Any
     if isinstance(payload, dict):
         placement = placement_from_payload(payload)
         if placement and callable(getattr(redis_client, "sadd", None)):
+            _prune_route_registry_at_capacity(redis_client, queue_name)
             routed_queue = routed_queue_name(queue_name, placement)
             normalized_payload = dict(payload)
             normalized_payload["placement"] = placement
             normalized_payload["_base_queue_name"] = queue_name
             canonical = json.dumps(placement, sort_keys=True, separators=(",", ":"))
             if not _has_streams(redis_client) or not callable(getattr(redis_client, "eval", None)):
-                existing = routed_queue in {_text(item) for item in (redis_client.smembers(route_set_key(queue_name)) or [])}
-                if not existing and len(redis_client.smembers(route_set_key(queue_name)) or []) >= route_registry_max():
-                    raise RuntimeError("SHAKERSCAN_ROUTE_CAPACITY_EXCEEDED")
+                routes = {
+                    _text(item) for item in (redis_client.smembers(route_set_key(queue_name)) or [])
+                }
+                existing = routed_queue in routes
+                if not existing and len(routes) >= route_registry_max():
+                    raise RouteCapacityExceeded(queue_name, route_registry_max())
                 redis_client.sadd(route_set_key(queue_name), routed_queue)
                 redis_client.set(route_requirements_key(routed_queue), canonical)
     encoded = normalized_payload if isinstance(normalized_payload, str) else json.dumps(normalized_payload)
@@ -274,17 +330,22 @@ def enqueue_job(redis_client: Any, queue_name: str, payload: str | dict[str, Any
         redis_client.rpush(routed_queue, encoded)
         return "legacy-list"
     if routed_queue != queue_name and callable(getattr(redis_client, "eval", None)):
-        message_id = redis_client.eval(
-            _ROUTED_ENQUEUE_LUA,
-            3,
-            route_set_key(queue_name),
-            route_requirements_key(routed_queue),
-            stream_key(routed_queue),
-            routed_queue,
-            canonical,
-            encoded,
-            route_registry_max(),
-        )
+        try:
+            message_id = redis_client.eval(
+                _ROUTED_ENQUEUE_LUA,
+                3,
+                route_set_key(queue_name),
+                route_requirements_key(routed_queue),
+                stream_key(routed_queue),
+                routed_queue,
+                canonical,
+                encoded,
+                route_registry_max(),
+            )
+        except Exception as exc:
+            if "SHAKERSCAN_ROUTE_CAPACITY_EXCEEDED" in str(exc):
+                raise RouteCapacityExceeded(queue_name, route_registry_max()) from exc
+            raise
         ensure_consumer_group(redis_client, routed_queue)
         return _text(message_id)
     ensure_consumer_group(redis_client, routed_queue)
@@ -340,8 +401,9 @@ def lease_job(
         queue_name, payload = result
         return QueueLease(queue_name=_text(queue_name), payload=_text(payload))
 
-    for queue_name in queues:
-        ensure_consumer_group(redis_client, queue_name)
+    queues = [queue_name for queue_name in queues if ensure_consumer_group(redis_client, queue_name)]
+    if not queues:
+        return None
 
     # Reclaim one abandoned delivery before accepting fresh work. XAUTOCLAIM is
     # atomic and increments Redis' delivery counter for bounded retry policy.

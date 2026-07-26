@@ -17,6 +17,9 @@ jobs:
   smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      POSTGRES_PASSWORD: ci-postgres-credential-0000000000000001
+      REDIS_PASSWORD: ci-redis-credential-000000000000000001
     steps:
       - uses: actions/checkout@v6
         with:

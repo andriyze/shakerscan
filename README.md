@@ -496,6 +496,11 @@ AI_VERIFY_MODEL=...
 AI_OPS_ROUTER_EXECUTE_ENABLED=true
 ```
 
+`shakerscan start` generates owner-only random `POSTGRES_PASSWORD` and `REDIS_PASSWORD` values when
+they are missing or weak, including when upgrading an older standalone install. The Compose files
+have no well-known datastore-password fallback. Keep data services on the default loopback bind
+unless you are using the documented private fleet overlay.
+
 See the [Functionality Reference](https://github.com/andriyze/shakerscan/blob/main/docs/functionality-reference.md#14-configuration-and-integrated-tools)
 for the current configuration map. Never commit real credentials.
 

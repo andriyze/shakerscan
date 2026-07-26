@@ -44,7 +44,6 @@ def normalize_tls_ca_state(state: dict[str, Any]) -> str:
         raise FleetTLSConfigurationError(
             "tls_ca_mode=system cannot be combined with ca_cert_path"
         )
-    state["tls_ca_mode"] = mode
     return mode
 
 

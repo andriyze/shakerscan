@@ -72,8 +72,9 @@ def rotate_postgres_password_if_running(password: str) -> None:
     compose = _docker_compose_command()
     running = _run([*compose, "ps", "-q", "postgres"], check=False)
     if running.returncode == 0 and running.stdout.strip():
-        # fleet-generated passwords are hex, so the fixed SQL literal cannot be
-        # escaped into another statement. The secret travels on stdin, not argv.
+        # Generated passwords are hex; preserved operator values pass the
+        # URL_SAFE_SECRET_RE guard above. Neither form can escape this literal.
+        # The secret travels on stdin, not argv.
         _run(
             [*compose, "exec", "-T", "postgres", "psql", "-U", "scanner", "-d", "scanner", "-v", "ON_ERROR_STOP=1"],
             input_text=f"ALTER ROLE scanner PASSWORD '{password}';\n",

@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 
 from job_queue import (  # noqa: E402
     CONSUMER_GROUP,
+    RouteCapacityExceeded,
     acknowledge_lease,
     clear_unleased,
     enqueue_job,
@@ -173,6 +174,12 @@ class FakeStreams:
             self.srem(keys[1], args[0])
             self.delete(keys[2], keys[0])
             return 1
+        if "shakerscan:clean-orphaned-route-stream" in script:
+            if args[0] in self.smembers(keys[0]):
+                return 1
+            if self.xlen(keys[1]) == 0:
+                self.delete(keys[1])
+            return 0
         raise AssertionError("unknown Lua script")
 
 
@@ -321,5 +328,33 @@ def test_route_registry_has_a_hard_capacity(monkeypatch):
     monkeypatch.setenv("SHAKERSCAN_QUEUE_ROUTE_MAX", "16")
     for index in range(16):
         enqueue_job(redis, "scan_jobs", {"job_id": str(index), "placement": {"region": f"r-{index}"}})
-    with pytest.raises(RuntimeError, match="ROUTE_CAPACITY_EXCEEDED"):
+    with pytest.raises(RouteCapacityExceeded, match="reached its 16-route capacity"):
         enqueue_job(redis, "scan_jobs", {"job_id": "overflow", "placement": {"region": "overflow"}})
+
+
+def test_stale_worker_route_snapshot_does_not_recreate_orphan_stream():
+    redis = FakeStreams()
+    placement = {"region": "eu-west"}
+    route = routed_queue_name("scan_jobs", placement)
+    enqueue_job(redis, "scan_jobs", {"job_id": "placed", "placement": placement})
+    lease = lease_job(
+        redis,
+        [route],
+        consumer_name="worker-a",
+        block_ms=10,
+        visibility_timeout_ms=1000,
+    )
+    assert lease is not None
+    assert acknowledge_lease(redis, lease) is True
+    assert stream_key(route) not in redis.streams
+
+    # A worker may still hold the route name from its previous qualified-route
+    # snapshot. Group creation must clean its mkstream side effect and skip it.
+    assert lease_job(
+        redis,
+        [route],
+        consumer_name="worker-a",
+        block_ms=10,
+        visibility_timeout_ms=1000,
+    ) is None
+    assert stream_key(route) not in redis.streams

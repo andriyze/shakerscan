@@ -124,7 +124,78 @@ write_dotenv_value() {
             }
         }
     ' "$file" > "$tmp"
+    chmod 600 "$tmp"
     mv "$tmp" "$file"
+}
+
+generate_datastore_secret() {
+    if command_exists openssl; then
+        openssl rand -hex 32
+        return
+    fi
+    od -An -N32 -tx1 /dev/urandom | tr -d ' \n'
+}
+
+ensure_runtime_datastore_credentials() {
+    local current_postgres current_redis next_postgres next_redis ready_attempt
+
+    touch "$SCRIPT_DIR/.env"
+    chmod 600 "$SCRIPT_DIR/.env"
+    current_postgres="${POSTGRES_PASSWORD:-$(read_dotenv_value POSTGRES_PASSWORD)}"
+    current_redis="${REDIS_PASSWORD:-$(read_dotenv_value REDIS_PASSWORD)}"
+    if { [ "${#current_postgres}" -ge 32 ] && ! [[ "$current_postgres" =~ ^[A-Za-z0-9._~-]+$ ]]; } || \
+       { [ "${#current_redis}" -ge 32 ] && ! [[ "$current_redis" =~ ^[A-Za-z0-9._~-]+$ ]]; }; then
+        echo -e "${RED}Error: datastore passwords must use URL-safe letters, numbers, dot, underscore, tilde, or hyphen.${NC}" >&2
+        return 1
+    fi
+    next_postgres="$current_postgres"
+    next_redis="$current_redis"
+    if [ "${#next_postgres}" -lt 32 ]; then
+        next_postgres="$(generate_datastore_secret)"
+    fi
+    if [ "${#next_redis}" -lt 32 ]; then
+        next_redis="$(generate_datastore_secret)"
+    fi
+    if [ "${#next_postgres}" -lt 32 ] || [ "${#next_redis}" -lt 32 ]; then
+        echo -e "${RED}Error: could not generate strong datastore credentials.${NC}" >&2
+        return 1
+    fi
+
+    # Compose files fail closed without these values. Build-only commands use
+    # ephemeral generated values; start/restart persist them after PostgreSQL's
+    # durable role has been rotated. This keeps upgrades from the historical
+    # weak default working even when the old container was removed but its
+    # volume remains.
+    export POSTGRES_PASSWORD="$next_postgres"
+    export REDIS_PASSWORD="$next_redis"
+    if [ "$next_postgres" != "$current_postgres" ]; then
+        case "${COMMAND:-}" in
+            start|restart)
+                compose up -d postgres > /dev/null
+                ready_attempt=0
+                until compose exec -T postgres pg_isready -U scanner > /dev/null 2>&1; do
+                    ready_attempt=$((ready_attempt + 1))
+                    if [ "$ready_attempt" -ge 30 ]; then
+                        echo -e "${RED}Error: PostgreSQL did not become ready for credential rotation.${NC}" >&2
+                        return 1
+                    fi
+                    sleep 1
+                done
+                if ! printf "ALTER ROLE scanner PASSWORD '%s';\n" "$next_postgres" | \
+                    compose exec -T postgres psql -U scanner -d scanner -v ON_ERROR_STOP=1 > /dev/null; then
+                    echo -e "${RED}Error: could not rotate the existing PostgreSQL credential.${NC}" >&2
+                    return 1
+                fi
+                ;;
+            *)
+                return 0
+                ;;
+        esac
+    fi
+
+    write_dotenv_value POSTGRES_PASSWORD "$next_postgres"
+    write_dotenv_value REDIS_PASSWORD "$next_redis"
+    chmod 600 "$SCRIPT_DIR/.env"
 }
 
 persist_remote_access_env() {
@@ -1280,11 +1351,10 @@ prepare_runtime_files() {
     mkdir -p results
     mkdir -p .shakerscan-fleet
     chmod 700 .shakerscan-fleet
+    ensure_runtime_datastore_credentials
 
     if [ "$USE_PREBUILT" -eq 1 ]; then
         mkdir -p db
-        touch .env
-        chmod 600 .env
 
         if [ ! -f "$SCRIPT_DIR/$PREBUILT_COMPOSE_FILE" ]; then
             echo -e "${RED}Error: $PREBUILT_COMPOSE_FILE is missing.${NC}"
@@ -1490,6 +1560,7 @@ stop_services() {
 
 restart_services() {
     local restart_workers
+    prepare_runtime_files
     restart_workers="$(restart_worker_count)"
     stop_services
     start_services "$restart_workers"

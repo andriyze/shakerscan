@@ -179,6 +179,7 @@ import agent_text_toolcalls
 import agent_tools
 from job_queue import (
     QueueLease,
+    RouteCapacityExceeded,
     acknowledge_lease,
     clear_unleased,
     enqueue_job,
@@ -189,6 +190,7 @@ from job_queue import (
     qualified_route_queues,
     queue_payloads,
     stream_key,
+    worker_matches_placement,
 )
 from http_experiment import (
     ExperimentContractError,
@@ -14201,6 +14203,89 @@ async def exposure_attack_paths(
 # SCANS
 # ============================================================
 
+def _fleet_node_placement_labels(row: Any, placement: dict[str, Any]) -> dict[str, Any]:
+    raw_labels = row.get("labels") or {}
+    if isinstance(raw_labels, str):
+        try:
+            raw_labels = json.loads(raw_labels)
+        except json.JSONDecodeError:
+            raw_labels = {}
+    labels = dict(raw_labels) if isinstance(raw_labels, dict) else {}
+    labels["node_id"] = str(row.get("id") or "").lower()
+    if row.get("region"):
+        labels["region"] = str(row.get("region"))
+    # Fleet images report their actual tools at execution time. An enrollment
+    # without an explicit capability allowlist is unknown, not incapable.
+    if "tools" not in labels and "capabilities" not in labels:
+        labels["tools"] = list(placement.get("requires") or [])
+    if "scan_tiers" not in labels:
+        labels["scan_tiers"] = sorted(VALID_DAST_SCAN_TYPES)
+    return labels
+
+
+async def _require_reachable_fleet_placement(conn: Any, placement: dict[str, Any]) -> None:
+    normalized = normalize_placement(placement)
+    if not normalized:
+        return
+    rows = await conn.fetch(
+        "SELECT id, region, labels FROM nodes WHERE status <> 'disabled' ORDER BY created_at ASC"
+    )
+    if any(
+        worker_matches_placement(_fleet_node_placement_labels(row, normalized), normalized)
+        for row in rows
+    ):
+        return
+    raise HTTPException(
+        status_code=422,
+        detail={
+            "error": "unreachable_fleet_placement",
+            "message": "No enrolled fleet node can satisfy every requested placement constraint.",
+            "placement": normalized,
+            "hint": "Join or relabel a matching node, or change the Fleet Placement constraints.",
+        },
+    )
+
+
+async def _mark_scan_enqueue_failed(scan_id: str, message: str, command_result_id: Any = None) -> None:
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE scans
+                SET status='failed', error_message=$1, completed_at=NOW()
+                WHERE id=$2 AND status='pending'
+                """,
+                message[:1000],
+                uuid.UUID(scan_id),
+            )
+            if command_result_id:
+                await conn.execute(
+                    """
+                    UPDATE command_results
+                    SET status='failed', operator_message=$1
+                    WHERE id=$2
+                    """,
+                    message[:1000],
+                    uuid.UUID(str(command_result_id)),
+                )
+    except Exception:
+        logger.exception("Failed to persist enqueue failure for scan %s", scan_id)
+
+
+def _route_capacity_http_exception(exc: RouteCapacityExceeded) -> HTTPException:
+    return HTTPException(
+        status_code=429,
+        detail={
+            "error": "fleet_route_capacity_exceeded",
+            "message": (
+                f"Fleet placement route capacity ({exc.limit}) is currently exhausted; "
+                "existing routed work must drain or be cleared before adding a new route."
+            ),
+            "route_limit": exc.limit,
+        },
+        headers={"Retry-After": "30"},
+    )
+
 def normalize_dast_scan_options(options: ScanOptions) -> str:
     """Resolve scan_type from explicit or legacy options and mutate options consistently.
 
@@ -14331,6 +14416,7 @@ async def submit_scan(request: ScanRequest):
             request.options.approval_receipt_id,
             action_name=f"scan.submit:{scan_type}",
         )
+        await _require_reachable_fleet_placement(conn, options_payload.get("placement") or {})
         # Check if target exists
         target = await conn.fetchrow(
             "SELECT id FROM targets WHERE url = $1", normalized_target
@@ -14410,7 +14496,29 @@ async def submit_scan(request: ScanRequest):
         job_data['plan_version'] = parallel_scan.PLAN_VERSION
         if parallel_worker_count is not None:
             job_data['parallel_worker_count'] = parallel_worker_count
-    enqueue_job(r, QUEUE_NAME, job_data)
+    try:
+        enqueue_job(r, QUEUE_NAME, job_data)
+    except RouteCapacityExceeded as exc:
+        await _mark_scan_enqueue_failed(
+            scan_id,
+            "Scan was not queued because the fleet placement-route registry is at capacity.",
+            command_result.get("id") if command_result else None,
+        )
+        raise _route_capacity_http_exception(exc) from exc
+    except Exception as exc:
+        logger.exception("Failed to enqueue submitted scan %s", scan_id)
+        await _mark_scan_enqueue_failed(
+            scan_id,
+            "Scan was not queued because the queue service was unavailable.",
+            command_result.get("id") if command_result else None,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "scan_queue_unavailable",
+                "message": "The scan was recorded as failed because the queue did not accept it.",
+            },
+        ) from exc
     r.hset(f"job:{job_id}", mapping={'status': 'queued', 'target': scan_target})
 
     response = {

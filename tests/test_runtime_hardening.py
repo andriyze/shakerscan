@@ -330,3 +330,15 @@ def test_scanner_sh_backup_is_private_and_fail_closed():
     assert 'runtime.env' in script
     assert '.incomplete' in script
     assert 'backup)' in script
+
+
+def test_standalone_datastore_credentials_are_generated_and_compose_has_no_known_fallback():
+    script = (ROOT / "scanner.sh").read_text()
+    assert "ensure_runtime_datastore_credentials" in script
+    assert "generate_datastore_secret" in script
+    for compose_name in ("docker-compose.yml", "docker-compose.release.yml"):
+        compose = (ROOT / compose_name).read_text()
+        assert "${POSTGRES_PASSWORD:-scanner}" not in compose
+        assert "${REDIS_PASSWORD:-scanner}" not in compose
+        assert "POSTGRES_PASSWORD is required" in compose
+        assert "REDIS_PASSWORD is required" in compose

@@ -512,8 +512,9 @@ only the data bind to the control-plane overlay IP, so those ports have no publi
 Before making that bind non-loopback, `fleet init` generates owner-only Redis/Postgres credentials,
 rotates an initialized Postgres role through stdin, enables Redis authentication, and writes only
 credentialed URLs to the one-time connection bundle. Strong operator-provided URL-safe passwords
-are preserved. Standalone/local-lab Compose remains usable with its backward-compatible local
-defaults, which are still protected by the loopback bind unless the operator deliberately changes it.
+are preserved. Standalone/local-lab startup also generates owner-only random Redis/Postgres
+credentials and migrates the historical Postgres default before startup; Compose has no known
+password fallback. The data bind remains loopback unless the operator deliberately changes it.
 Public exposure of 6379/5432 remains a non-goal (§11).
 
 **4. Fleet CLI + pre-overlay bootstrap contract.** These verbs are implemented in `scanner.sh` and
@@ -809,7 +810,7 @@ Implementation options:
 | Option | Fit |
 |---|---|
 | Queue per capability | Simple and compatible with the current Stream model. Workers can read only streams they qualify for. |
-| Redis Streams with routing fields | **Implemented.** Producers atomically register and enqueue to a deterministic Stream for each normalized constraint set; matching workers discover and subscribe to it. Empty routes and their requirement metadata are removed after drain, and the live registry is capped by `SHAKERSCAN_QUEUE_ROUTE_MAX` (default 512, configurable through 4096). |
+| Redis Streams with routing fields | **Implemented.** Producers atomically register and enqueue to a deterministic Stream for each normalized constraint set; matching workers discover and subscribe to it. Submissions reject constraint sets that no active enrollment can satisfy. Empty routes and their requirement metadata are removed after drain, stale worker snapshots cannot recreate orphan streams, and the live registry is capped by `SHAKERSCAN_QUEUE_ROUTE_MAX` (default 512, configurable through 4096). Capacity exhaustion returns an actionable HTTP 429 rather than an internal error. |
 | Broker-side scheduler | Best in Phase 3. The broker leases only jobs a node is allowed to run. |
 
 Rate limiting is global, not per node. Known-endpoint ASM and Full Coverage batches use Redis
