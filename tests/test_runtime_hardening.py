@@ -283,6 +283,14 @@ def test_scanner_sh_local_build_marker_controls_default_runtime_mode():
     assert 'rm -f "$LOCAL_BUILD_MARKER"' in script
 
 
+def test_scanner_sh_forwards_join_local_build_instead_of_consuming_it():
+    script = (ROOT / "scanner.sh").read_text()
+
+    local_build_case = script.split("        --local-build)", 1)[1].split("            ;;", 1)[0]
+    assert 'if [ "$COMMAND" = "join" ]' in local_build_case
+    assert 'ARGS+=("$1")' in local_build_case
+
+
 def test_scanner_sh_worker_logs_aggregate_api_scaled_containers():
     script = (ROOT / "scanner.sh").read_text()
 

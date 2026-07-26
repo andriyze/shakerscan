@@ -2549,9 +2549,20 @@ while [[ $# -gt 0 ]]; do
             ASSUME_YES=1
             shift
             ;;
-        --local|--local-build)
+        --local)
             USE_PREBUILT=0
             RUNTIME_MODE_EXPLICIT=1
+            shift
+            ;;
+        --local-build)
+            if [ "$COMMAND" = "join" ]; then
+                # `join --local-build` belongs to the fleet provisioner. Do not
+                # consume it as the scanner wrapper's local runtime alias.
+                ARGS+=("$1")
+            else
+                USE_PREBUILT=0
+                RUNTIME_MODE_EXPLICIT=1
+            fi
             shift
             ;;
         --prebuilt)

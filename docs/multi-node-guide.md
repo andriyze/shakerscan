@@ -247,6 +247,11 @@ rollout replaces the development override with the selected registry digest. Loc
 broker development facility, not a production deployment mechanism, and the Docker build can still
 download base images and pinned tool dependencies.
 
+Do not run `./scanner.sh start` on a dedicated worker first. `join` starts the isolated worker and
+node-agent project itself; the worker host does not need its own API, UI, Redis, or PostgreSQL stack.
+Fleet Compose projects are forced to a per-node name so they cannot collide with a standalone
+`shakerscan` project that happens to exist on the same host.
+
 For a private-CA endpoint, add `--ca-cert /path/to/ca.pem`. The node persists that CA and both the
 broker worker and its node agent use it. Without `--ca-cert`, broker mode explicitly uses the system
 CA store.

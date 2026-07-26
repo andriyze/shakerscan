@@ -410,6 +410,32 @@ def test_worker_compose_env_separates_local_runtime_from_expected_digest(tmp_pat
     assert values["FLEET_EXPECTED_WORKER_IMAGE_DIGEST"] == IMAGE
 
 
+def test_broker_runtime_forces_per_node_compose_project_and_skips_pull_for_local_image(
+    tmp_path, monkeypatch
+):
+    paths = fleet_cli.RuntimePaths(tmp_path)
+    paths.broker_worker_compose.write_text("services: {}\n", encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(fleet_cli, "_docker_compose_command", lambda: ["docker", "compose"])
+    monkeypatch.setattr(
+        fleet_cli,
+        "_run",
+        lambda argv, **kwargs: calls.append((argv, kwargs))
+        or types.SimpleNamespace(returncode=0, stdout=""),
+    )
+
+    fleet_cli._start_broker_runtime(
+        paths,
+        {"node_id": NODE_ID, "worker_image_digest": IMAGE},
+        runtime_image="shakerscan-fleet-local:abc1234",
+    )
+
+    assert len(calls) == 1
+    argv = calls[0][0]
+    assert argv[:4] == ["docker", "compose", "--project-name", "shakerscan-fleet-11111111"]
+    assert "pull" not in argv
+
+
 def test_broker_join_can_pin_a_private_enrollment_ca(tmp_path, monkeypatch):
     paths = fleet_cli.RuntimePaths(tmp_path)
     paths.broker_worker_compose.write_text("services: {}\n", encoding="utf-8")

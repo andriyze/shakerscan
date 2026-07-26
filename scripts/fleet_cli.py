@@ -1666,11 +1666,22 @@ def _start_worker_runtime(paths: RuntimePaths, response: dict[str, Any]) -> None
         raise FleetCLIError("docker-compose.worker.yml is missing from the runtime")
     compose = _docker_compose_command()
     compose_env = paths.node / "compose.env"
-    _write_compose_env(compose_env, _worker_compose_env(paths, response))
+    compose_values = _worker_compose_env(paths, response)
+    _write_compose_env(compose_env, compose_values)
     image = validate_digest_image(str(response["worker_image_digest"]))
     _run(["docker", "pull", image], capture=False)
     _run(
-        [*compose, "--env-file", str(compose_env), "-f", str(paths.worker_compose), "up", "-d"],
+        [
+            *compose,
+            "--project-name",
+            compose_values["FLEET_COMPOSE_PROJECT_NAME"],
+            "--env-file",
+            str(compose_env),
+            "-f",
+            str(paths.worker_compose),
+            "up",
+            "-d",
+        ],
         capture=False,
     )
 
@@ -1712,14 +1723,22 @@ def _start_broker_runtime(
     compose = _docker_compose_command()
     compose_env = paths.node / "compose.env"
     expected_image = validate_digest_image(str(response["worker_image_digest"]))
-    _write_compose_env(
-        compose_env,
-        _worker_compose_env(paths, response, runtime_image=runtime_image),
-    )
+    compose_values = _worker_compose_env(paths, response, runtime_image=runtime_image)
+    _write_compose_env(compose_env, compose_values)
     if runtime_image is None:
         _run(["docker", "pull", expected_image], capture=False)
     _run(
-        [*compose, "--env-file", str(compose_env), "-f", str(paths.broker_worker_compose), "up", "-d"],
+        [
+            *compose,
+            "--project-name",
+            compose_values["FLEET_COMPOSE_PROJECT_NAME"],
+            "--env-file",
+            str(compose_env),
+            "-f",
+            str(paths.broker_worker_compose),
+            "up",
+            "-d",
+        ],
         capture=False,
     )
 
