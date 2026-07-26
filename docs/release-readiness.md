@@ -1,6 +1,8 @@
 # Release Readiness
 
-**Status (2026-07-21):** `0.7.0` candidate in preparation on `v7`; `VERSION` is `0.7.0`.
+**Status (2026-07-26):** `0.7.0` candidate preparation continues on `v8`; `VERSION` remains
+`0.7.0`. Multi-node is now in candidate scope, but the branch is not release-ready until its
+physical fleet, upgrade, installer, benchmark, and full E2E gates pass on one frozen SHA.
 This is the single live release scope, stop-ship, validation, installer, and publication checklist.
 It is not a claim that the branch is release-ready: it is release-ready only when every applicable
 item below is green on the **frozen candidate SHA**.
@@ -42,6 +44,7 @@ multi-tenant security platform.
 | **BUILD-01** | Release-critical tools, assets, templates, base images, source SHA, and final image digests are reproducible and auditable. | Immutable references/checksums, repeat-build inventory comparison, and published multi-architecture digests. |
 | **VAL-01** | One exact frozen candidate passes every applicable release gate and current-fleet acceptance run. | Candidate SHA, uniform worker fingerprints, content-free artifacts, installer smoke, E2E, and benchmark evidence. |
 | **REL-01** | Publication fails closed on the wrong SHA/version and the public docs describe the scoped product consistently. | Release workflow checks plus README, walkthrough, agent instructions, installer, API reference, release notes, and this checklist in agreement. |
+| **FLEET-01** | Multi-node enrollment, broker/overlay transport, placement, leases, artifacts, lifecycle controls, and build truth fail closed across real hosts. A local test build must remain visible as drift, and enrollment throttling must not trust caller-controlled forwarding metadata. | Two-VPS physical acceptance for the supported topology, worker-loss/reclaim and duplicate-result probes, reusable-token exhaustion/revocation, remote placement, artifact verification, and a clean/current fleet receipt. |
 
 The release owner may accept a candidate exception only with rationale, compensating control, owner,
 and expiry. Known high/critical production dependency findings, untrustworthy proof, unsafe unbounded
@@ -113,6 +116,11 @@ candidate SHA.
 - [ ] A single current-fleet Smart Juice Shop scorecard is recorded.
 - [ ] A current-fleet authenticated crAPI scorecard is recorded with distinct-principal and
       accepted-auth receipts; seeded detector-isolation evidence must remain labeled as seeded.
+- [ ] Broker multi-node physical acceptance passes on the frozen candidate, including a bounded
+      multi-use token, explicit revocation of unused enrollment capacity, node-specific placement,
+      local-build drift visibility, lease loss/reclaim, and central artifact/result verification.
+- [ ] WireGuard mode either passes its physical acceptance matrix or is explicitly excluded from
+      the candidate's supported deployment boundary before release.
 - [ ] Open P0/P1 audit items are fixed or explicitly accepted by the release owner with rationale.
 
 The implemented-versus-planned E2E matrix is maintained in [`E2E_TEST_PLAN.md`](E2E_TEST_PLAN.md).

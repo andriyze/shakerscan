@@ -34,6 +34,23 @@ async def _assert_common(conn) -> None:
     if not await conn.fetchval("SELECT to_regclass('public.app_schema_migrations') IS NOT NULL"):
         raise RuntimeError("app_schema_migrations is missing after migration")
 
+    join_token_columns = {
+        row["column_name"]
+        for row in await conn.fetch(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'node_join_tokens'
+            """
+        )
+    }
+    required_join_token_columns = {
+        "token_id", "transport", "max_uses", "use_count", "last_used_at", "revoked_at",
+    }
+    missing = sorted(required_join_token_columns - join_token_columns)
+    if missing:
+        raise RuntimeError(f"reusable fleet join-token migration is incomplete: {missing}")
+
 
 async def _assert_dirty_merge(conn) -> None:
     rows = await conn.fetch(
@@ -53,6 +70,18 @@ async def _assert_dirty_merge(conn) -> None:
             "duplicate merge did not preserve scan/finding ownership: "
             f"scan={scan_target}, finding={finding_target}"
         )
+
+    legacy_token = await conn.fetchrow(
+        """
+        SELECT token_id::text, transport, max_uses, use_count, consumed_at IS NOT NULL AS consumed
+        FROM node_join_tokens
+        WHERE token_hash = 'upgrade-consumed-token'
+        """
+    )
+    if not legacy_token or not legacy_token["token_id"] or legacy_token["transport"] is not None:
+        raise RuntimeError(f"legacy fleet join token was not upgraded safely: {legacy_token!r}")
+    if legacy_token["max_uses"] != 1 or legacy_token["use_count"] != 1 or not legacy_token["consumed"]:
+        raise RuntimeError(f"consumed legacy fleet token was reactivated: {legacy_token!r}")
 
 
 async def _run(database_url: str, scenario: str) -> None:

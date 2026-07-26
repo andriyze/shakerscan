@@ -65,6 +65,19 @@ VALUES (
     '22222222-2222-4222-8222-222222222222',
     'upgrade-smoke-finding', 'Preserved upgrade finding', 'medium'
 );
+
+-- Reproduce the one-use fleet-token table shipped before bounded reusable
+-- tokens. Current migrations must upgrade it in place without reactivating a
+-- consumed credential.
+CREATE TABLE IF NOT EXISTS node_join_tokens (
+    token_hash TEXT PRIMARY KEY,
+    role TEXT NOT NULL CHECK (role = 'worker'),
+    expires_at TIMESTAMPTZ NOT NULL,
+    consumed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+INSERT INTO node_join_tokens (token_hash, role, expires_at, consumed_at)
+VALUES ('upgrade-consumed-token', 'worker', NOW() + INTERVAL '1 hour', NOW());
 SQL
 docker exec -i "$SMOKE_CONTAINER" psql -v ON_ERROR_STOP=1 -U scanner -d scanner_dirty \
     < "$SMOKE_TMP/dirty.sql" >/dev/null

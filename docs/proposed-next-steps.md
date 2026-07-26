@@ -1,35 +1,30 @@
 # Proposed Next Steps
 
-**Status (2026-07-21):** future-only product roadmap. Shipped behavior belongs in the
+**Status (2026-07-26):** future-only product roadmap. Shipped behavior belongs in the
 [functionality reference](functionality-reference.md), release gates and candidate evidence belong in
 [release readiness](release-readiness.md), while implementation history remains available in Git.
 
-The next largest functional improvement after 0.7.0 is a coordinated **Multi-Node ShakerScan
-fleet**. DAST quality and execution correctness remain continuous release requirements, but they
-should support—not displace—the multi-node product initiative.
+The coordinated **Multi-Node ShakerScan fleet is implemented** in both owned-WireGuard and
+outbound-HTTPS broker forms. It is no longer future roadmap work. The immediate priority is proving
+that implementation on the frozen release candidate, then improving DAST quality and operational
+truth without weakening operator capability.
 
-## 1. Multi-Node fleet — primary post-0.7 initiative
+## 1. Multi-node fleet acceptance and operations
 
-One control plane should coordinate workers across multiple owned VMs/VPS hosts. This increases
-concurrent-target capacity and lets one Full Coverage scan consume workers from several machines
-without creating independent databases, queues, or findings stores.
+One control plane now coordinates local and remote workers, central state/artifacts, bounded
+enrollment, placement, leases, reclaim, lifecycle changes, and build truth. Remaining work is
+release evidence and operational hardening:
 
-The shipped parent → plan → shard → merge model is the execution substrate. The missing product
-work is the remote fleet trust and lifecycle layer:
-
-1. Add `shakerscan fleet init`, expiring join tokens, and a copy/paste `fleet join` workflow.
-2. Start with an owned-fleet WireGuard overlay; keep Tailscale as an operator-managed alternative.
-3. Persist node identity, role, capabilities, build fingerprint, heartbeat, health, and drain state.
-4. Replace receive-and-forget queue ownership with lease, acknowledgement, reclaim, idempotency, and
-   stale-owner fencing before production claims.
-5. Add evidence/artifact upload contracts so remote workers never depend on local control-plane
-   paths and partial uploads cannot become proof.
-6. Add placement, target affinity, fleet-wide rate limits, cancellation, rolling upgrades, and
-   mixed/stale-build rejection.
-7. Prove a two-VPS owned fleet under worker loss, network partition, clock skew, duplicate delivery,
-   cancellation, and Full Coverage merge.
-8. Introduce an HTTPS broker with short-lived worker authority only after the owned-fleet model is
-   stable; remote workers should not receive Redis or PostgreSQL credentials in that model.
+1. Preserve a passing two-VPS broker acceptance receipt on the frozen candidate, including physical
+   worker loss, reclaim, duplicate completion, remote placement, cancellation, and central artifacts.
+2. Run the equivalent owned-WireGuard acceptance or explicitly exclude that topology from the
+   candidate boundary; an implemented but unproven topology must not be implied release-ready.
+3. Exercise controlled multi-host enrollment with one expiring `--max-uses` token, then revoke its
+   unused capacity and prove exhaustion/revocation under concurrent joins.
+4. Test upgrade and rollback from the previous published database and from the earlier one-use fleet
+   token schema; preserve nodes, credentials, desired state, scans, and artifacts.
+5. Add operator-visible backup/restore and node-replacement exercises for a lost control plane or
+   worker disk, without copying node identity between hosts.
 
 The detailed design authority is [Multi-Node Architecture](multi-node-architecture.md). Do not
 duplicate its topology, protocol, or security design here. Production enablement is gated by the
@@ -64,7 +59,8 @@ worker to Redis.
   next campaign rather than treating endpoint touch count as coverage.
 - Expand focused families only when their scanner integrations, proof contracts, budgets, and
   cancellation paths are runnable and tested.
-- Complete large-target parity, rate, lease, and cancellation soak before multi-node ASM placement.
+- Complete large-target parity, rate, lease, cancellation, and placement soak before calling
+  multi-node ASM campaigns release-proven.
 
 ## 5. Deep Hunt acceptance
 
@@ -97,8 +93,7 @@ backlog mapped to concrete seams — is [deep-hunt-architecture.md](deep-hunt-ar
 
 ## Delivery order
 
-1. Freeze and validate 0.7.0 using `release-readiness.md`; do not add release scope here.
-2. Begin the Multi-Node owned-fleet foundation as the next major feature line.
-3. Land queue lease/fencing and evidence-transfer prerequisites before calling remote workers safe.
-4. Continue DAST/auth quality and execution-contract work as acceptance gates for every fleet phase.
-5. Add the HTTPS broker and broader placement automation only after the two-VPS owned-fleet proof.
+1. Finish audit cleanup, then freeze and validate 0.7.0 using `release-readiness.md`.
+2. Obtain physical broker and WireGuard acceptance evidence for the exact frozen SHA.
+3. Run upgrade/rollback, installer, full E2E, and current-fleet benchmark gates without code changes.
+4. Continue DAST/auth quality and execution-contract work only on a new post-candidate branch.

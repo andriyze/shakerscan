@@ -1,6 +1,6 @@
 # Documentation Index
 
-**Reconciled:** 2026-07-25. This directory contains maintained product references, operating policy,
+**Reconciled:** 2026-07-26. This directory contains maintained product references, operating policy,
 release material, and active architecture. Point-in-time audits, completed prompts, implementation
 ledgers, and obsolete screenshots are kept in Git history rather than copied into the release docs.
 Code, database schemas, runtime receipts, and tests remain authoritative when a document disagrees.
