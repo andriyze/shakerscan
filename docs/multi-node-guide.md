@@ -67,7 +67,7 @@ Give the control plane a DNS name such as `scanner.example.com`, create its A/AA
 `https://scanner.example.com` as the public URL. In broker mode, ShakerScan automatically starts a
 digest-pinned Caddy gateway and obtains and renews a public certificate when that URL does not
 already work. Open inbound TCP 80 and 443 in the VPS firewall and cloud security group. Only health,
-single-use enrollment, authenticated node state/heartbeat, and authenticated broker routes are
+bounded enrollment, authenticated node state/heartbeat, and authenticated broker routes are
 published. The built-in gateway's public `/health` returns only `{"status":"healthy"}` or
 `degraded`; build identity and worker counts remain local. The UI and operator API remain on
 loopback and are not made public.
@@ -191,9 +191,10 @@ hairpin-DNS limitation. It does not permit HTTP, disable later TLS verification,
 enrollment. Managed broker initialization must verify its public HTTPS URL and restricted routes
 after certificate issuance.
 
-## 2. Create a Single-Use Join Token
+## 2. Create an Enrollment Token
 
-Create a new token for each worker. Tokens are stored only as hashes, returned once, and expire.
+Single-use is the safest default: create a new token for each worker. Tokens are stored only as
+hashes, returned once, and expire.
 
 WireGuard:
 
@@ -211,6 +212,41 @@ The command prints the worker-side join command. Treat the token as a short-live
 it in tickets, shell tracing, logs, or shared chat. If it expires or a join fails before state is
 durable, create a fresh token.
 
+### Enroll several workers with one bounded token
+
+For a controlled rollout, the control plane can print one command that may be run on several worker
+hosts. Set `--max-uses` to the exact number of workers and keep the TTL as short as the rollout permits:
+
+```bash
+shakerscan fleet join-token \
+  --ttl 1h \
+  --max-uses 5 \
+  --transport broker
+```
+
+The command prints one `shakerscan join ...` command. Run that same command on each of the five
+intended workers. Enrollment atomically consumes one use, so concurrent joins cannot exceed the
+limit. Each successful worker receives its own unique node identity and durable node credential;
+workers do not share credentials after enrollment. The token becomes unusable when its use count is
+exhausted or its TTL expires. The token is also bound to the transport selected when it is created;
+a broker token cannot be exchanged for a WireGuard enrollment or vice versa.
+
+The output also includes a non-secret token ID and a revocation command. Revoke unused capacity as
+soon as the rollout is complete:
+
+```bash
+shakerscan fleet revoke-join-token <token-id>
+```
+
+Best practices:
+
+- prefer the default single-use token for one-off additions;
+- set `--max-uses` to the exact host count, never an open-ended allowance;
+- prefer a one-hour or shorter TTL for automated rollouts;
+- deliver the command through an approved secret channel, not source control, tickets, or chat logs;
+- revoke remaining uses immediately if a host is removed from the rollout or the command may have leaked;
+- never reuse a node credential—every host must complete enrollment and receive its own credential.
+
 ## 3. Join a Worker Host
 
 Run the printed command on the worker VPS.
@@ -219,7 +255,7 @@ Run the printed command on the worker VPS.
 
 ```bash
 shakerscan join https://scanner.example.com \
-  --token <single-use-token> \
+  --token <enrollment-token> \
   --name worker-us-1 \
   --region us-central
 ```
@@ -235,7 +271,7 @@ inbound UDP is the likely cause.
 
 ```bash
 shakerscan join https://scanner.example.com \
-  --token <single-use-token> \
+  --token <enrollment-token> \
   --transport broker \
   --name broker-customer-1 \
   --region eu-west
@@ -246,7 +282,7 @@ a full source checkout on the broker worker without publishing an image first, a
 
 ```bash
 ./scanner.sh join https://scanner.example.com \
-  --token <single-use-token> \
+  --token <enrollment-token> \
   --transport broker \
   --name broker-local-dev \
   --local-build
@@ -278,7 +314,7 @@ tier:
 
 ```bash
 shakerscan join https://scanner.example.com \
-  --token <single-use-token> \
+  --token <enrollment-token> \
   --transport broker \
   --name customer-vpc-a \
   --region eu-west \
@@ -511,7 +547,8 @@ fleet_api -X POST "http://127.0.0.1:8080/fleet/nodes/$NODE_ID/revoke"
 ```
 
 Revocation is permanent for that node identity: it disables scheduling and revokes every node
-credential. Stop the worker runtime on the removed host. Rejoining requires a fresh single-use token.
+credential. Stop the worker runtime on the removed host. Rejoining requires an unexpired enrollment
+token with a remaining use, normally a fresh single-use token.
 
 The WireGuard connection bundle is deliberately one-shot. If a node crashes after the bundle is
 delivered but before its owner-only local state is durable, revoke the incomplete node and enroll it
@@ -526,6 +563,7 @@ again. Do not copy shared credentials or weaken the delivery gate.
 | `fleet CA is not configured` | Overlay state must contain the enrolled CA at `.shakerscan-fleet/node/ca.crt`. Do not switch it to system trust; revoke and rejoin if state is incomplete. |
 | Broker reports certificate verification failure | Confirm the public certificate chain and hostname. Supply the correct private CA with `--ca-cert` when applicable. Never disable TLS verification. |
 | Broker preflight expects HTTP 401 | The proxy does not publish the protected node route or the API cannot authenticate its HTTPS signal. Use managed HTTPS or configure the external proxy trust secret described above. |
+| Join token is expired, revoked, or exhausted | Mint a fresh token. For a multi-worker rollout, verify `--max-uses` matches the intended host count and revoke any superseded token ID. |
 | Node is `stale` | Check the node-agent container, host clock, DNS/network reachability, and its `last_error`. A stale node is excluded from fleet-wide scaling. |
 | State or image drift persists | Inspect node-agent logs, Docker pull access, local disk/memory, and the digest. A mutable image tag is invalid. |
 | Routed scan remains pending | Confirm at least one recently heartbeating, non-draining node with active workers matches every placement constraint and supports the requested scan tier/tools. |

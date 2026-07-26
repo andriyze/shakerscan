@@ -1514,16 +1514,38 @@ def command_join_token(paths: RuntimePaths, args: argparse.Namespace) -> None:
         args.local_api.rstrip("/"),
         "POST",
         "/fleet/join-tokens",
-        payload={"role": "worker", "ttl_seconds": ttl_seconds},
+        payload={
+            "role": args.role,
+            "transport": args.transport,
+            "ttl_seconds": ttl_seconds,
+            "max_uses": args.max_uses,
+        },
         bearer=env.get("FLEET_OPERATOR_TOKEN"),
     )
     token = str(result.get("token") or "")
     if not token.startswith("ssj_"):
         raise FleetCLIError("control plane did not return a join token")
-    print("Single-use join token created. Run on the worker VPS:")
+    token_id = str(result.get("token_id") or "")
+    try:
+        uuid.UUID(token_id)
+    except ValueError as exc:
+        raise FleetCLIError("control plane did not return a join token identity") from exc
+    max_uses = int(result.get("max_uses") or 1)
+    if max_uses == 1:
+        print("Single-use join token created. Run on the worker VPS:")
+    else:
+        print(f"Bounded multi-use join token created for up to {max_uses} workers.")
+        print("Run the same command on each intended worker VPS:")
     transport_flag = " --transport broker" if getattr(args, "transport", "overlay") == "broker" else ""
     print(f"shakerscan join {public_url} --token {token}{transport_flag}")
     print(f"Expires: {result.get('expires_at')}")
+    print(f"Token ID: {token_id}")
+    print(f"Revoke remaining uses: shakerscan fleet revoke-join-token {token_id}")
+    if max_uses > 1:
+        print(
+            "Security: share only with the intended workers, revoke it after enrollment, "
+            "and never store it in source control or chat history."
+        )
     if (
         getattr(args, "transport", "overlay") == "overlay"
         and env.get("FLEET_RECONCILE_MODE") == "manual"
@@ -1532,6 +1554,23 @@ def command_join_token(paths: RuntimePaths, args: argparse.Namespace) -> None:
             "Manual reconciliation is enabled: after starting join on the worker, run "
             "`shakerscan fleet reconcile` on this control plane."
         )
+
+
+def command_revoke_join_token(paths: RuntimePaths, args: argparse.Namespace) -> None:
+    env = load_dotenv(paths.dotenv)
+    try:
+        token_id = str(uuid.UUID(str(args.token_id)))
+    except ValueError as exc:
+        raise FleetCLIError("join token ID must be a UUID") from exc
+    result = api_json(
+        args.local_api.rstrip("/"),
+        "DELETE",
+        f"/fleet/join-tokens/{token_id}",
+        bearer=env.get("FLEET_OPERATOR_TOKEN"),
+    )
+    if result.get("revoked") is not True:
+        raise FleetCLIError("control plane did not confirm join token revocation")
+    print(f"Join token {token_id} revoked; no remaining uses can enroll.")
 
 
 def _read_node_state(path: Path) -> dict[str, Any]:
@@ -1804,7 +1843,7 @@ def run_join_preflight(
         checks.append(PreflightCheck(
             "Join token",
             "fail",
-            "missing or malformed single-use token",
+            "missing or malformed enrollment token",
             "Create a fresh token with shakerscan fleet join-token.",
         ))
     _run_check(
@@ -1907,7 +1946,7 @@ def command_join(paths: RuntimePaths, args: argparse.Namespace) -> None:
         print(f"Fleet node {response['node_id']} resumed")
         return
     if not args.token or not str(args.token).startswith("ssj_"):
-        raise FleetCLIError("--token must contain the single-use ssj_ join token")
+        raise FleetCLIError("--token must contain the ssj_ enrollment token")
     runtime_image = (
         _build_local_broker_worker_image(paths)
         if transport == "broker" and getattr(args, "local_build", False)
@@ -2185,12 +2224,27 @@ def build_parser() -> argparse.ArgumentParser:
     preflight.add_argument("--workers", type=int, default=1)
     preflight.add_argument("--no-reconcile-service", action="store_true")
 
-    token = subparsers.add_parser("join-token", help="mint a single-use worker join command")
+    token = subparsers.add_parser("join-token", help="mint a bounded worker join command")
     token.add_argument("--role", choices=["worker"], default="worker")
     token.add_argument("--transport", choices=["overlay", "broker"], default="overlay")
     token.add_argument("--ttl", default="24h")
+    token.add_argument(
+        "--max-uses",
+        type=int,
+        default=1,
+        choices=range(1, 129),
+        metavar="N",
+        help="maximum workers that may enroll with this token (default: 1)",
+    )
     token.add_argument("--public-url")
     token.add_argument("--local-api", default="http://127.0.0.1:8080")
+
+    revoke_token = subparsers.add_parser(
+        "revoke-join-token",
+        help="revoke the remaining uses of a join token",
+    )
+    revoke_token.add_argument("token_id")
+    revoke_token.add_argument("--local-api", default="http://127.0.0.1:8080")
 
     join = subparsers.add_parser("join", help="join this Linux host as a worker node")
     join.add_argument("control_plane_url")
@@ -2237,6 +2291,8 @@ def main(argv: list[str] | None = None) -> int:
             command_preflight(paths, args)
         elif args.command == "join-token":
             command_join_token(paths, args)
+        elif args.command == "revoke-join-token":
+            command_revoke_join_token(paths, args)
         elif args.command == "join":
             command_join(paths, args)
         elif args.command == "reconcile":

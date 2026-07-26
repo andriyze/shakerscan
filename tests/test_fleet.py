@@ -21,6 +21,7 @@ from fleet import (  # noqa: E402
     hash_secret,
     public_node,
     record_heartbeat,
+    revoke_join_token,
     socket_peer_is_overlay,
     utcnow,
     validate_wireguard_public_key,
@@ -55,7 +56,21 @@ class FakeFleetConnection:
         compact = " ".join(sql.split())
         self.calls.append((compact, args))
         if "INSERT INTO node_join_tokens" in compact:
-            self.join_tokens[args[0]] = {"role": args[1], "expires_at": args[2], "consumed": False}
+            self.join_tokens[args[0]] = {
+                "token_id": args[1],
+                "role": args[2],
+                "transport": args[3],
+                "expires_at": args[4],
+                "max_uses": args[5],
+                "use_count": 0,
+                "revoked": False,
+            }
+        elif "SET revoked_at" in compact:
+            for token in self.join_tokens.values():
+                if token["token_id"] == args[0] and not token["revoked"] and token["use_count"] < token["max_uses"]:
+                    token["revoked"] = True
+                    return "UPDATE 1"
+            return "UPDATE 0"
         elif "INSERT INTO nodes" in compact:
             self.nodes.append(
                 {
@@ -84,10 +99,22 @@ class FakeFleetConnection:
         self.calls.append((compact, args))
         if "UPDATE node_join_tokens" in compact:
             token = self.join_tokens.get(args[0])
-            if not token or token["consumed"] or token["expires_at"] <= utcnow():
+            if (
+                not token
+                or token["revoked"]
+                or token["transport"] != args[1]
+                or token["use_count"] >= token["max_uses"]
+                or token["expires_at"] <= utcnow()
+            ):
                 return None
-            token["consumed"] = True
-            return {"role": token["role"]}
+            token["use_count"] += 1
+            return {
+                "role": token["role"],
+                "transport": token["transport"],
+                "token_id": token["token_id"],
+                "use_count": token["use_count"],
+                "max_uses": token["max_uses"],
+            }
         if "connection_bundle_delivered_at = NOW()" in compact:
             for node in self.nodes:
                 if node["id"] == args[0] and node["connection_bundle_delivered_at"] is None:
@@ -131,7 +158,7 @@ def test_join_token_is_single_use_and_raw_secrets_are_never_stored():
 def test_broker_node_enrollment_allocates_no_overlay_or_wireguard_identity():
     async def run():
         conn = FakeFleetConnection()
-        token = (await create_join_token(conn, ttl_seconds=600))["token"]
+        token = (await create_join_token(conn, ttl_seconds=600, transport="broker"))["token"]
         joined = await enroll_node(
             conn,
             token=token,
@@ -210,7 +237,7 @@ async def _test_join_token_is_single_use_and_raw_secrets_are_never_stored():
     assert raw_token not in stored_call_text
     assert joined["node_credential"] not in stored_call_text
 
-    with pytest.raises(FleetEnrollmentError, match="already consumed"):
+    with pytest.raises(FleetEnrollmentError, match="exhausted"):
         await enroll_node(
             conn,
             token=raw_token,
@@ -223,6 +250,101 @@ async def _test_join_token_is_single_use_and_raw_secrets_are_never_stored():
             build_fingerprint=None,
             config=bootstrap_config(),
         )
+
+
+def test_join_token_can_be_bounded_to_multiple_workers_and_then_exhausts():
+    async def run():
+        conn = FakeFleetConnection()
+        created = await create_join_token(conn, ttl_seconds=600, max_uses=3, transport="broker")
+        assert created["max_uses"] == 3
+        assert created["uses_remaining"] == 3
+        assert uuid.UUID(created["token_id"])
+
+        for index in range(3):
+            await enroll_node(
+                conn,
+                token=created["token"],
+                name=f"broker-{index}",
+                hostname=None,
+                region=None,
+                wireguard_public_key=None,
+                transport="broker",
+                labels={},
+                capacity={},
+                build_fingerprint=None,
+                config=bootstrap_config(),
+            )
+
+        with pytest.raises(FleetEnrollmentError, match="exhausted"):
+            await enroll_node(
+                conn,
+                token=created["token"],
+                name="broker-over-limit",
+                hostname=None,
+                region=None,
+                wireguard_public_key=None,
+                transport="broker",
+                labels={},
+                capacity={},
+                build_fingerprint=None,
+                config=bootstrap_config(),
+            )
+
+    asyncio.run(run())
+
+
+def test_join_token_is_bound_to_its_enrollment_transport():
+    async def run():
+        conn = FakeFleetConnection()
+        created = await create_join_token(conn, ttl_seconds=600, max_uses=2, transport="broker")
+        with pytest.raises(FleetEnrollmentError, match="invalid"):
+            await enroll_node(
+                conn,
+                token=created["token"],
+                name="wrong-transport",
+                hostname=None,
+                region=None,
+                wireguard_public_key=WG_KEY_2,
+                transport="overlay",
+                labels={},
+                capacity={},
+                build_fingerprint=None,
+                config=bootstrap_config(),
+            )
+        assert next(iter(conn.join_tokens.values()))["use_count"] == 0
+
+    asyncio.run(run())
+
+
+def test_join_token_rejects_unbounded_use_counts():
+    conn = FakeFleetConnection()
+    with pytest.raises(FleetEnrollmentError, match="between 1 and 128"):
+        asyncio.run(create_join_token(conn, ttl_seconds=600, max_uses=129))
+
+
+def test_join_token_revocation_blocks_remaining_uses_without_raw_secret():
+    async def run():
+        conn = FakeFleetConnection()
+        created = await create_join_token(conn, ttl_seconds=600, max_uses=3)
+        assert await revoke_join_token(conn, token_id=created["token_id"]) is True
+        assert await revoke_join_token(conn, token_id=created["token_id"]) is False
+
+        with pytest.raises(FleetEnrollmentError, match="revoked"):
+            await enroll_node(
+                conn,
+                token=created["token"],
+                name="broker-revoked",
+                hostname=None,
+                region=None,
+                wireguard_public_key=None,
+                transport="broker",
+                labels={},
+                capacity={},
+                build_fingerprint=None,
+                config=bootstrap_config(),
+            )
+
+    asyncio.run(run())
 
 
 def test_connection_bundle_consumption_is_one_time():

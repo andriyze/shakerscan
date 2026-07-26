@@ -41,7 +41,8 @@ def test_multi_node_doc_is_build_spec_and_honest_about_fleet_status():
     # operational acceptance gate. Do not regress to claiming that shipped fleet layers are drafts.
     assert "implementation complete; physical deployment acceptance pending" in text
     assert "Phase 1 implemented vertical-slice contract" in text
-    assert "single-use enrollment" in text
+    assert "bounded enrollment" in text
+    assert "single-use remains the default" in text
     assert "awaiting execution on two actual VPSs" in text
     assert "different node to reclaim" in text
     assert "pre-overlay bootstrap contract" in text

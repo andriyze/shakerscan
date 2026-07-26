@@ -24,6 +24,7 @@ from typing import Any, Mapping
 OVERLAY_ALLOCATION_LOCK = 8_675_310
 MAX_OVERLAY_ADDRESSES = 65_536
 MAX_WORKERS_PER_NODE = 128
+MAX_JOIN_TOKEN_USES = 128
 LOCAL_WORKER_IMAGE_RE = re.compile(r"^shakerscan-fleet-local:[a-z0-9][a-z0-9_.-]{0,127}$")
 
 
@@ -233,23 +234,66 @@ def socket_peer_is_overlay(peer_host: str | None, overlay_cidr: str) -> bool:
     return peer in parse_overlay_network(overlay_cidr)
 
 
-async def create_join_token(conn: Any, *, role: str = "worker", ttl_seconds: int = 3600) -> dict[str, Any]:
+async def create_join_token(
+    conn: Any,
+    *,
+    role: str = "worker",
+    ttl_seconds: int = 3600,
+    max_uses: int = 1,
+    transport: str = "overlay",
+) -> dict[str, Any]:
     if role != "worker":
         raise FleetEnrollmentError("only worker join tokens are supported")
     if not 60 <= int(ttl_seconds) <= 604_800:
         raise FleetEnrollmentError("join token TTL must be between 60 seconds and 7 days")
+    if not 1 <= int(max_uses) <= MAX_JOIN_TOKEN_USES:
+        raise FleetEnrollmentError(f"join token max uses must be between 1 and {MAX_JOIN_TOKEN_USES}")
+    normalized_transport = str(transport or "overlay").strip().lower()
+    if normalized_transport not in {"overlay", "broker"}:
+        raise FleetEnrollmentError("join token transport must be overlay or broker")
     raw_token = generate_secret("ssj_")
+    token_id = uuid.uuid4()
     expires_at = utcnow() + timedelta(seconds=int(ttl_seconds))
     await conn.execute(
         """
-        INSERT INTO node_join_tokens (token_hash, role, expires_at)
-        VALUES ($1, $2, $3)
+        INSERT INTO node_join_tokens (token_hash, token_id, role, transport, expires_at, max_uses)
+        VALUES ($1, $2, $3, $4, $5, $6)
         """,
         hash_secret(raw_token, "join-token"),
+        token_id,
         role,
+        normalized_transport,
         expires_at,
+        int(max_uses),
     )
-    return {"token": raw_token, "role": role, "expires_at": expires_at}
+    return {
+        "token": raw_token,
+        "token_id": str(token_id),
+        "role": role,
+        "transport": normalized_transport,
+        "expires_at": expires_at,
+        "max_uses": int(max_uses),
+        "uses_remaining": int(max_uses),
+    }
+
+
+async def revoke_join_token(conn: Any, *, token_id: str) -> bool:
+    try:
+        parsed_id = uuid.UUID(str(token_id))
+    except ValueError as exc:
+        raise FleetEnrollmentError("invalid join token identity") from exc
+    result = await conn.execute(
+        """
+        UPDATE node_join_tokens
+        SET revoked_at = COALESCE(revoked_at, NOW()),
+            consumed_at = COALESCE(consumed_at, NOW())
+        WHERE token_id = $1
+          AND revoked_at IS NULL
+          AND use_count < max_uses
+        """,
+        parsed_id,
+    )
+    return str(result).rsplit(" ", 1)[-1] == "1"
 
 
 async def _allocate_overlay_ip(conn: Any, overlay_cidr: str) -> str:
@@ -306,16 +350,24 @@ async def enroll_node(
     token_row = await conn.fetchrow(
         """
         UPDATE node_join_tokens
-        SET consumed_at = NOW()
+        SET use_count = use_count + 1,
+            last_used_at = NOW(),
+            consumed_at = CASE
+                WHEN use_count + 1 >= max_uses THEN NOW()
+                ELSE consumed_at
+            END
         WHERE token_hash = $1
-          AND consumed_at IS NULL
+          AND revoked_at IS NULL
+          AND (transport IS NULL OR transport = $2)
+          AND use_count < max_uses
           AND expires_at > NOW()
-        RETURNING role
+        RETURNING role, transport, token_id, use_count, max_uses
         """,
         hash_secret(token, "join-token"),
+        normalized_transport,
     )
     if not token_row:
-        raise FleetEnrollmentError("join token is invalid, expired, or already consumed")
+        raise FleetEnrollmentError("join token is invalid, expired, revoked, or exhausted")
 
     overlay_ip = (
         await _allocate_overlay_ip(conn, config.overlay_cidr)
@@ -370,6 +422,10 @@ async def enroll_node(
             "region": str(region or "").strip()[:128] or None,
             "desired_worker_count": int(config.desired_worker_count),
             "worker_image_digest": config.worker_image_digest,
+            "join_token_id": str(token_row["token_id"]),
+            "join_token_transport": str(token_row["transport"] or normalized_transport),
+            "join_token_use": int(token_row["use_count"]),
+            "join_token_max_uses": int(token_row["max_uses"]),
         },
     )
     return {

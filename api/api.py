@@ -253,6 +253,7 @@ try:
         public_node as _public_fleet_node,
         record_heartbeat as _record_fleet_heartbeat,
         record_node_event as _record_fleet_node_event,
+        revoke_join_token as _revoke_fleet_join_token,
         socket_peer_is_overlay as _fleet_peer_is_overlay,
     )
 except ModuleNotFoundError:
@@ -272,6 +273,7 @@ except ModuleNotFoundError:
         public_node as _public_fleet_node,
         record_heartbeat as _record_fleet_heartbeat,
         record_node_event as _record_fleet_node_event,
+        revoke_join_token as _revoke_fleet_join_token,
         socket_peer_is_overlay as _fleet_peer_is_overlay,
     )
 
@@ -4617,7 +4619,9 @@ class AISettingsProbeRequest(BaseModel):
 
 class FleetJoinTokenRequest(BaseModel):
     role: str = Field(default="worker", pattern="^worker$")
+    transport: str = Field(default="overlay", pattern="^(overlay|broker)$")
     ttl_seconds: int = Field(default=3600, ge=60, le=604800)
+    max_uses: int = Field(default=1, ge=1, le=128)
 
 
 class FleetNodeJoinRequest(BaseModel):
@@ -7608,7 +7612,7 @@ async def run_fleet_acceptance_lease_probe(request: Request):
 
 @app.post("/fleet/join-tokens")
 async def create_fleet_join_token(body: FleetJoinTokenRequest, request: Request, response: Response):
-    """Mint one single-use worker enrollment token; the raw value is returned once."""
+    """Mint a bounded worker enrollment token; the raw value is returned once."""
     _require_fleet_operator(request)
     response.headers["Cache-Control"] = "no-store"
     try:
@@ -7616,16 +7620,29 @@ async def create_fleet_join_token(body: FleetJoinTokenRequest, request: Request,
             result = await _create_fleet_join_token(
                 conn,
                 role=body.role,
+                transport=body.transport,
                 ttl_seconds=body.ttl_seconds,
+                max_uses=body.max_uses,
             )
         return result
     except FleetEnrollmentError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.delete("/fleet/join-tokens/{token_id}")
+async def revoke_fleet_join_token(token_id: uuid.UUID, request: Request):
+    """Revoke the remaining uses of an enrollment token without receiving its secret."""
+    _require_fleet_operator(request)
+    async with db_pool.acquire() as conn:
+        revoked = await _revoke_fleet_join_token(conn, token_id=str(token_id))
+    if not revoked:
+        raise HTTPException(status_code=404, detail="active join token was not found")
+    return {"token_id": str(token_id), "revoked": True}
+
+
 @app.post("/fleet/nodes/join")
 async def join_fleet_node(body: FleetNodeJoinRequest, request: Request, response: Response):
-    """Exchange a single-use token for overlay bootstrap data and node identity."""
+    """Exchange one bounded token use for bootstrap data and a unique node identity."""
     _require_fleet_https(request)
     _require_fleet_join_rate_limit(request)
     response.headers["Cache-Control"] = "no-store"

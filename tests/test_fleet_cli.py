@@ -176,6 +176,9 @@ def test_fleet_datastore_credentials_rotate_defaults_without_putting_secret_in_a
 def test_parser_exposes_documented_commands():
     parser = fleet_cli.build_parser()
     assert parser.parse_args(["join-token"]).command == "join-token"
+    reusable = parser.parse_args(["join-token", "--max-uses", "5"])
+    assert reusable.max_uses == 5
+    assert parser.parse_args(["revoke-join-token", NODE_ID]).command == "revoke-join-token"
     assert parser.parse_args(["reconcile"]).command == "reconcile"
     assert parser.parse_args([
         "preflight",
@@ -213,6 +216,72 @@ def test_parser_exposes_documented_commands():
         "--local-build",
     ])
     assert local_join.local_build is True
+
+
+def test_join_token_command_prints_one_shareable_bounded_command(tmp_path, monkeypatch, capsys):
+    paths = fleet_cli.RuntimePaths(tmp_path)
+    paths.dotenv.write_text(
+        "FLEET_PUBLIC_URL=https://fleet.example.test\nFLEET_OPERATOR_TOKEN=operator-secret\n",
+        encoding="utf-8",
+    )
+    payloads = []
+
+    def fake_api(_base, method, path, **kwargs):
+        assert method == "POST"
+        assert path == "/fleet/join-tokens"
+        assert kwargs["bearer"] == "operator-secret"
+        payloads.append(kwargs["payload"])
+        return {
+            "token": "ssj_" + "x" * 40,
+            "token_id": NODE_ID,
+            "expires_at": "2026-07-26T10:00:00Z",
+            "max_uses": 5,
+        }
+
+    monkeypatch.setattr(fleet_cli, "api_json", fake_api)
+    fleet_cli.command_join_token(
+        paths,
+        types.SimpleNamespace(
+            ttl="1h",
+            role="worker",
+            max_uses=5,
+            public_url=None,
+            local_api="http://127.0.0.1:8080",
+            transport="broker",
+        ),
+    )
+
+    output = capsys.readouterr().out
+    assert payloads == [{
+        "role": "worker",
+        "transport": "broker",
+        "ttl_seconds": 3600,
+        "max_uses": 5,
+    }]
+    assert "up to 5 workers" in output
+    assert output.count("shakerscan join https://fleet.example.test") == 1
+    assert "--transport broker" in output
+    assert f"shakerscan fleet revoke-join-token {NODE_ID}" in output
+
+
+def test_revoke_join_token_command_uses_identifier_not_secret(tmp_path, monkeypatch, capsys):
+    paths = fleet_cli.RuntimePaths(tmp_path)
+    paths.dotenv.write_text("FLEET_OPERATOR_TOKEN=operator-secret\n", encoding="utf-8")
+    calls = []
+
+    def fake_api(base, method, path, **kwargs):
+        calls.append((base, method, path, kwargs))
+        return {"token_id": NODE_ID, "revoked": True}
+
+    monkeypatch.setattr(fleet_cli, "api_json", fake_api)
+    fleet_cli.command_revoke_join_token(
+        paths,
+        types.SimpleNamespace(token_id=NODE_ID, local_api="http://127.0.0.1:8080"),
+    )
+
+    assert calls[0][1:3] == ("DELETE", f"/fleet/join-tokens/{NODE_ID}")
+    assert calls[0][3]["bearer"] == "operator-secret"
+    assert "revoked" in capsys.readouterr().out
 
 
 def test_join_persists_one_time_bundle_before_starting_runtime(tmp_path, monkeypatch):

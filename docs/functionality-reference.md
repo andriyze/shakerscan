@@ -442,14 +442,14 @@ coverage over time within safe budgets and allowed windows (`api/asm_inventory.p
 Current execution design: [`docs/dast-asm-architecture.md`](dast-asm-architecture.md).
 
 **Multi-node boundary:** the first owned-fleet trust foundation is implemented: durable node identity,
-hashed single-use join tokens, HTTPS enrollment, authenticated heartbeat, one-time overlay connection
+hashed usage-bounded join tokens (single-use by default), HTTPS enrollment, authenticated heartbeat, one-time overlay connection
 bundles, and credential rotation/revocation. A digest-pinned worker/agent-only Compose runtime and
 pull-based local node-agent now apply versioned worker-count/drain desired state without an inbound
 listener or remote Docker API. The opt-in fleet Compose profile adds a CA-verified HTTPS listener on
 the private data address, preserves the real overlay socket peer with Linux host networking, and
 disables duplicate background controllers in that edge process. Linux host automation now implements
 persistent `fleet init`, aggregated read-only `fleet preflight`, tag-to-digest image resolution,
-automatic pre-conversion backup, single-use `fleet join-token`, automatic/manual peer reconciliation,
+automatic pre-conversion backup, bounded/revocable `fleet join-token`, automatic/manual peer reconciliation,
 automatic restricted public HTTPS for broker fleets with pinned Caddy, certificate renewal and
 secret-bound proxy trust, minimal public health, protected-route/rollback verification, bounded
 enrollment attempts, and worker-only `join` with HTTPS preflight and WireGuard handshake
@@ -825,7 +825,7 @@ how-to with request bodies is in [`CLAUDE.md`](../CLAUDE.md) / [`AGENTS.md`](../
 **Health & settings**: `GET /` · `GET /health` · `GET|PUT /settings/ai` · `POST /settings/ai/test` ·
 `GET|PUT /settings/scan-execution` · `GET|PUT /settings/automation`
 
-**Multi-node fleet**: `POST /fleet/join-tokens` · `POST /fleet/nodes/join` ·
+**Multi-node fleet**: `POST|DELETE /fleet/join-tokens[/{token_id}]` · `POST /fleet/nodes/join` ·
 `GET /fleet/nodes` · `POST /fleet/scale` · `GET|PATCH /fleet/nodes/{id}/state` ·
 `GET /fleet/nodes/{id}/activity` · `GET /fleet/nodes/{id}/events` · `POST /fleet/nodes/{id}/heartbeat` ·
 `POST /fleet/nodes/{id}/connection-bundle` · `POST /fleet/nodes/{id}/credentials/rotate` ·
@@ -1182,8 +1182,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 256 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 213 | `api/api.py` |
+| Public REST operations | 257 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 214 | `api/api.py` |
 | Check families | 14 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 13 | `api/command_arsenal.py` |
@@ -1333,6 +1333,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `POST` | `/fleet/broker/nodes/{node_id}/leases/{lease_id}/heartbeat` | `heartbeat_broker_job` |
 | `POST` | `/fleet/broker/nodes/{node_id}/leases/{lease_id}/result` | `submit_broker_job_result` |
 | `POST` | `/fleet/join-tokens` | `create_fleet_join_token` |
+| `DELETE` | `/fleet/join-tokens/{token_id}` | `revoke_fleet_join_token` |
 | `GET` | `/fleet/nodes` | `list_fleet_nodes` |
 | `POST` | `/fleet/nodes/join` | `join_fleet_node` |
 | `GET` | `/fleet/nodes/{node_id}/activity` | `get_fleet_node_activity` |

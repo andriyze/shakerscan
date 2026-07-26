@@ -367,6 +367,19 @@ shakerscan fleet join-token --ttl 24h --transport broker
 shakerscan join https://scanner.example.com --token <join-token> --transport broker
 ```
 
+Join tokens are single-use by default. For a controlled multi-worker rollout, generate one bounded
+command with the exact host count, share it through an approved secret channel, and revoke unused
+capacity immediately after enrollment:
+
+```bash
+shakerscan fleet join-token --ttl 1h --max-uses 5 --transport broker
+shakerscan fleet revoke-join-token <token-id>
+```
+
+Every enrolled worker still receives its own node identity and durable credential. See the
+[multi-node guide](docs/multi-node-guide.md#enroll-several-workers-with-one-bounded-token) for the
+security and concurrency model.
+
 For source-checkout testing on a broker worker, append `--local-build`. This builds the worker image
 on that host and skips pulling the fleet image; production joins remain digest-pinned registry pulls.
 
@@ -452,7 +465,7 @@ env                           Show runtime, PATH, and agent-launch guidance
 agent [codex|claude|opencode] Launch an agent in the runtime
 mcp                           Start the read-only Command Arsenal MCP adapter
 research <episode-id> [N]     Drive bounded local Codex decisions
-fleet init|join-token|accept  Provision a fleet or run physical acceptance
+fleet init|join-token|revoke-join-token|accept  Provision a fleet or run physical acceptance
 gungnir <command>             Manage certificate-transparency monitoring
 build | rebuild               Build local images
 reset                         Delete scanner data and recreate the database

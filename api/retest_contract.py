@@ -2975,11 +2975,75 @@ async def run_schema_migrations(pool) -> None:
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS node_join_tokens (
                     token_hash TEXT PRIMARY KEY,
+                    token_id UUID NOT NULL UNIQUE DEFAULT gen_random_uuid(),
                     role TEXT NOT NULL CHECK (role = 'worker'),
+                    transport TEXT NOT NULL CHECK (transport IN ('overlay', 'broker')),
                     expires_at TIMESTAMPTZ NOT NULL,
+                    max_uses INTEGER NOT NULL DEFAULT 1 CHECK (max_uses BETWEEN 1 AND 128),
+                    use_count INTEGER NOT NULL DEFAULT 0 CHECK (use_count BETWEEN 0 AND max_uses),
+                    last_used_at TIMESTAMPTZ,
+                    revoked_at TIMESTAMPTZ,
                     consumed_at TIMESTAMPTZ,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
+            """)
+            await conn.execute("""
+                ALTER TABLE node_join_tokens
+                    ADD COLUMN IF NOT EXISTS token_id UUID DEFAULT gen_random_uuid(),
+                    ADD COLUMN IF NOT EXISTS transport TEXT,
+                    ADD COLUMN IF NOT EXISTS max_uses INTEGER NOT NULL DEFAULT 1,
+                    ADD COLUMN IF NOT EXISTS use_count INTEGER NOT NULL DEFAULT 0,
+                    ADD COLUMN IF NOT EXISTS last_used_at TIMESTAMPTZ,
+                    ADD COLUMN IF NOT EXISTS revoked_at TIMESTAMPTZ
+            """)
+            await conn.execute("""
+                UPDATE node_join_tokens
+                SET token_id = COALESCE(token_id, gen_random_uuid()),
+                    use_count = CASE
+                        WHEN consumed_at IS NOT NULL AND use_count = 0 THEN 1
+                        ELSE use_count
+                    END
+            """)
+            await conn.execute("""
+                ALTER TABLE node_join_tokens
+                    ALTER COLUMN token_id SET NOT NULL
+            """)
+            await conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_node_join_tokens_token_id
+                ON node_join_tokens(token_id)
+            """)
+            await conn.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'node_join_tokens_max_uses_check'
+                          AND conrelid = 'node_join_tokens'::regclass
+                    ) THEN
+                        ALTER TABLE node_join_tokens
+                        ADD CONSTRAINT node_join_tokens_max_uses_check
+                        CHECK (max_uses BETWEEN 1 AND 128);
+                    END IF;
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'node_join_tokens_use_count_check'
+                          AND conrelid = 'node_join_tokens'::regclass
+                    ) THEN
+                        ALTER TABLE node_join_tokens
+                        ADD CONSTRAINT node_join_tokens_use_count_check
+                        CHECK (use_count BETWEEN 0 AND max_uses);
+                    END IF;
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'node_join_tokens_transport_check'
+                          AND conrelid = 'node_join_tokens'::regclass
+                    ) THEN
+                        ALTER TABLE node_join_tokens
+                        ADD CONSTRAINT node_join_tokens_transport_check
+                        CHECK (transport IS NULL OR transport IN ('overlay', 'broker'));
+                    END IF;
+                END
+                $$
             """)
             await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_node_join_tokens_expires

@@ -2,7 +2,7 @@
 
 **Status:** Design authority + implementation complete; physical deployment acceptance pending. The fan-out
 substrate is shipped (see the code-grounded capability table below), and the durable node identity,
-single-use enrollment, authenticated heartbeat, and one-time connection-bundle API foundation is now
+bounded enrollment, authenticated heartbeat, and one-time connection-bundle API foundation is now
 implemented. The digest-pinned worker-only Compose runtime, pull-based node-agent, and versioned
 desired-state API are also implemented, along with the fleet-profile CA-verified overlay TLS listener.
 The Linux `fleet init` / `fleet join-token` / `join` WireGuard and HTTPS-broker host workflows are
@@ -130,6 +130,11 @@ shakerscan join <control-plane-url> --token <join-token>
 shakerscan fleet init --network broker --public-url https://scanner.example.com
 shakerscan fleet join-token --role worker --ttl 24h --transport broker
 shakerscan join <control-plane-url> --token <join-token> --transport broker
+
+# Optional controlled rollout: one expiring command, exactly five successful enrollments
+shakerscan fleet join-token --role worker --ttl 1h --max-uses 5 --transport broker
+# Revoke unused capacity after the rollout
+shakerscan fleet revoke-join-token <token-id>
 ```
 
 Those commands are implemented product workflows.
@@ -452,9 +457,15 @@ CREATE TABLE IF NOT EXISTS nodes (
 
 CREATE TABLE IF NOT EXISTS node_join_tokens (
   token_hash  TEXT PRIMARY KEY,           -- store only a hash; the raw token is shown once
+  token_id    UUID NOT NULL UNIQUE,        -- non-secret operator handle for revocation/audit
   role        TEXT NOT NULL CHECK (role IN ('worker')),
+  transport   TEXT NOT NULL CHECK (transport IN ('overlay', 'broker')),
   expires_at  TIMESTAMPTZ NOT NULL,
-  consumed_at TIMESTAMPTZ,                 -- single-use
+  max_uses    INTEGER NOT NULL DEFAULT 1,
+  use_count   INTEGER NOT NULL DEFAULT 0,
+  last_used_at TIMESTAMPTZ,
+  revoked_at  TIMESTAMPTZ,
+  consumed_at TIMESTAMPTZ,                 -- set when exhausted or revoked
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -470,9 +481,13 @@ CREATE TABLE IF NOT EXISTS node_credentials (
 );
 ```
 
-Consume a join token with one conditional `UPDATE ... WHERE consumed_at IS NULL AND expires_at >
-NOW() RETURNING ...`, then create the node and its credential in the same database transaction. A
-concurrent second consumer must receive no row. The API must authenticate heartbeat and lifecycle
+Consume a join-token use with one conditional `UPDATE ... SET use_count = use_count + 1 WHERE
+revoked_at IS NULL AND use_count < max_uses AND expires_at > NOW() RETURNING ...`, then create the
+node and its credential in the same database transaction. The default `max_uses = 1` preserves the
+single-use workflow; a bounded higher value supports controlled parallel rollouts. Atomic updates
+must prevent concurrent consumers from exceeding the cap. New tokens are bound to their intended
+transport so a broker enrollment secret cannot be upgraded into an overlay credential exchange.
+The API must authenticate heartbeat and lifecycle
 calls by hashing the presented node credential and checking expiry/revocation; `node_id` alone is
 never authority.
 
@@ -525,8 +540,10 @@ the bounded Linux host provisioner in `scripts/fleet_cli.py`:
 ```text
 shakerscan fleet init [--network wireguard]
     # control plane: create the overlay + control peer, flip data-store bind to the overlay IP, enable fleet mode
-shakerscan fleet join-token --role worker --ttl 24h
-    # mint a single-use, hashed, expiring token; print the ready-to-paste join command
+shakerscan fleet join-token --role worker --ttl 24h [--max-uses N]
+    # mint a hashed, expiring, usage-bounded token; print the ready-to-paste join command
+shakerscan fleet revoke-join-token <token-id>
+    # revoke every unused enrollment from that token without presenting its raw secret
 shakerscan join <control-plane-https-url> --token <join-token>
     # worker VPS: bootstrap over HTTPS, establish the overlay, then start the worker-only profile
 ```
@@ -555,7 +572,7 @@ roll out any syntactically valid digest-pinned worker image; authentication, aud
 digest enforcement are the security boundary rather than a repository policy imposed by ShakerScan.
 
 The connection bundle is deliberately one-shot. If a node fails after delivery but before its
-owner-only bundle file is durable, revoke that incomplete node, mint a fresh single-use join token,
+owner-only bundle file is durable, revoke that incomplete node, mint a fresh enrollment token,
 and run `shakerscan join` again. Do not weaken the delivery gate or copy a shared bundle by hand.
 
 `fleet init` first runs the same aggregated checks exposed by read-only `fleet preflight`: Linux and
@@ -574,7 +591,7 @@ local-lab insecure-enrollment escape hatch.
 For a broker fleet, HTTPS mode defaults to automatic. A healthy existing HTTPS origin is reused. If
 none is reachable, fleet init verifies DNS and TCP 80/443, enables a digest-pinned Caddy profile,
 generates a route-restricted configuration, and lets Caddy obtain and renew the public certificate.
-The public gateway permits only `/health`, single-use join, authenticated node state/heartbeat, and
+The public gateway permits only `/health`, bounded join, authenticated node state/heartbeat, and
 authenticated `/fleet/broker/*` operations; it returns 404 for the UI and operator API. Public
 health is a content-minimal projection. A generated owner-only secret authenticates Caddy's HTTPS
 signal to the API without trusting forwarded headers from workers or the whole Docker network.
@@ -596,7 +613,7 @@ node_credential
 The raw `node_credential`, overlay CIDR, and public fleet CA certificate are returned once over HTTPS, and the
 credential is persisted with restrictive filesystem
 permissions. It authorizes only node API operations. Join verifies public HTTPS before consuming the
-single-use token. After installing WireGuard and proving overlay
+bounded enrollment token. After installing WireGuard and proving overlay
 reachability, the worker calls `POST /fleet/nodes/{id}/connection-bundle` over **overlay HTTPS**, using
 that credential. The control plane returns the Phase-1 Redis/Postgres URLs and any artifact-store
 credentials once; the response is never available over the public listener and is not logged. Thus
@@ -716,8 +733,10 @@ observable. Heartbeats centralize bounded capacity, worker count, image, version
 state; meaningful transitions are durable audit events, and broker scan logs stream to the central
 scan log. Full arbitrary host-log aggregation remains outside the trust-minimized node-agent scope.
 
-Join tokens are short-lived and single-use. After registration, the node uses its own
-rotatable node credential and does not retain or reuse the enrollment token.
+Join tokens are short-lived and usage-bounded; single-use remains the default. A controlled rollout
+may set `max_uses` to the exact worker count and revoke remaining uses by non-secret token ID. Each
+successful registration receives its own rotatable node credential and does not retain or reuse the
+enrollment token.
 
 Example node labels:
 
