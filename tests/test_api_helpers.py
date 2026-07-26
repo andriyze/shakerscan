@@ -399,32 +399,65 @@ def test_fleet_https_trusts_only_secret_bound_gateway_forwarding(monkeypatch):
 
 def test_fleet_join_rate_limit_uses_trusted_forwarded_identity_and_rejects_excess(monkeypatch):
     calls = []
+    counts = {}
 
     class Redis:
         def eval(self, script, key_count, key, ttl):
             calls.append((script, key_count, key, ttl))
-            return len(calls)
+            counts[key] = counts.get(key, 0) + 1
+            return counts[key]
 
     monkeypatch.setenv("FLEET_GATEWAY_PROXY_SECRET", "g" * 48)
     monkeypatch.setenv("FLEET_JOIN_RATE_LIMIT_PER_MINUTE", "2")
     monkeypatch.setattr(api_module, "get_redis", lambda: Redis())
     monkeypatch.setattr(api_module.time, "time", lambda: 120.0)
-    request = _fleet_request(
-        host="172.20.0.8",
-        headers={
-            "x-shakerscan-gateway-secret": "g" * 48,
-            "x-forwarded-for": "203.0.113.9",
-        },
-    )
-    api_module._require_fleet_join_rate_limit(request)
-    api_module._require_fleet_join_rate_limit(request)
+    def request(attacker_prefix):
+        return _fleet_request(
+            host="172.20.0.8",
+            headers={
+                "x-shakerscan-gateway-secret": "g" * 48,
+                "x-forwarded-for": f"{attacker_prefix}, 203.0.113.9",
+            },
+        )
+
+    api_module._require_fleet_join_rate_limit(request("198.51.100.1"))
+    api_module._require_fleet_join_rate_limit(request("198.51.100.2"))
     with pytest.raises(api_module.HTTPException) as exc:
-        api_module._require_fleet_join_rate_limit(request)
+        api_module._require_fleet_join_rate_limit(request("198.51.100.3"))
     assert exc.value.status_code == 429
     assert exc.value.headers == {"Retry-After": "60"}
+    assert len(counts) == 1
     assert calls[0][1] == 1
     assert calls[0][3] == 120
     assert "203.0.113.9" not in calls[0][2]
+
+
+def test_fleet_join_rate_limit_ignores_invalid_trusted_forwarding_metadata(monkeypatch):
+    keys = []
+
+    class Redis:
+        def eval(self, _script, _key_count, key, _ttl):
+            keys.append(key)
+            return 1
+
+    monkeypatch.setenv("FLEET_GATEWAY_PROXY_SECRET", "g" * 48)
+    monkeypatch.setattr(api_module, "get_redis", lambda: Redis())
+    monkeypatch.setattr(api_module.time, "time", lambda: 120.0)
+    api_module._require_fleet_join_rate_limit(_fleet_request(
+        host="172.20.0.8",
+        headers={
+            "x-shakerscan-gateway-secret": "g" * 48,
+            "x-forwarded-for": "attacker-selected-bucket",
+        },
+    ))
+    api_module._require_fleet_join_rate_limit(_fleet_request(
+        host="172.20.0.8",
+        headers={
+            "x-shakerscan-gateway-secret": "g" * 48,
+            "x-forwarded-for": "another-attacker-bucket",
+        },
+    ))
+    assert keys[0] == keys[1]
 
 
 def test_default_fleet_scan_tiers_are_all_supported_but_tools_are_bounded():

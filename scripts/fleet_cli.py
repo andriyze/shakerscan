@@ -738,6 +738,7 @@ def render_managed_caddyfile(public_url: str, proxy_secret: str) -> str:
         rewrite * /fleet/public-health
         reverse_proxy api:8080 {{
             header_up X-Forwarded-Proto https
+            header_up X-Forwarded-For {{remote_host}}
             header_up X-ShakerScan-Gateway-Secret {proxy_secret}
         }}
     }}
@@ -749,6 +750,7 @@ def render_managed_caddyfile(public_url: str, proxy_secret: str) -> str:
     handle @join {{
         reverse_proxy api:8080 {{
             header_up X-Forwarded-Proto https
+            header_up X-Forwarded-For {{remote_host}}
             header_up X-ShakerScan-Gateway-Secret {proxy_secret}
         }}
     }}
@@ -760,6 +762,7 @@ def render_managed_caddyfile(public_url: str, proxy_secret: str) -> str:
     handle @node_state {{
         reverse_proxy api:8080 {{
             header_up X-Forwarded-Proto https
+            header_up X-Forwarded-For {{remote_host}}
             header_up X-ShakerScan-Gateway-Secret {proxy_secret}
         }}
     }}
@@ -771,6 +774,7 @@ def render_managed_caddyfile(public_url: str, proxy_secret: str) -> str:
     handle @node_heartbeat {{
         reverse_proxy api:8080 {{
             header_up X-Forwarded-Proto https
+            header_up X-Forwarded-For {{remote_host}}
             header_up X-ShakerScan-Gateway-Secret {proxy_secret}
         }}
     }}
@@ -779,6 +783,7 @@ def render_managed_caddyfile(public_url: str, proxy_secret: str) -> str:
     handle @broker {{
         reverse_proxy api:8080 {{
             header_up X-Forwarded-Proto https
+            header_up X-Forwarded-For {{remote_host}}
             header_up X-ShakerScan-Gateway-Secret {proxy_secret}
         }}
     }}

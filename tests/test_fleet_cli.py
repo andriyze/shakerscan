@@ -756,6 +756,7 @@ def test_managed_gateway_caddyfile_only_exposes_worker_routes():
     assert 'respond "Not found" 404' in rendered
     assert "rewrite * /fleet/public-health" in rendered
     assert "header_up X-Forwarded-Proto https" in rendered
+    assert rendered.count("header_up X-Forwarded-For {remote_host}") == 5
     assert f"header_up X-ShakerScan-Gateway-Secret {secret}" in rendered
     assert "/targets" not in rendered
     assert "/docs" not in rendered

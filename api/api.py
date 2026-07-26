@@ -4768,9 +4768,18 @@ def _require_fleet_join_rate_limit(request: Request) -> None:
     limit = max(1, min(configured_limit, 1000))
     peer = str(getattr(getattr(request, "client", None), "host", None) or "unknown")
     if _trusted_fleet_gateway_request(request):
-        forwarded = request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
-        if forwarded:
-            peer = forwarded[:128]
+        # A reverse proxy appends its direct client to X-Forwarded-For. Earlier
+        # entries may be supplied by the caller, so the left-most value is not
+        # an authentication or rate-limit identity. Managed Caddy also replaces
+        # the header with {remote_host}; the right-most parse is defense in depth
+        # for existing/custom trusted gateways that still append it.
+        forwarded = request.headers.get("x-forwarded-for", "").rsplit(",", 1)[-1].strip()
+        try:
+            peer = str(ipaddress.ip_address(forwarded))
+        except ValueError:
+            # Invalid forwarding metadata collapses to the trusted gateway's
+            # socket peer rather than creating attacker-selected buckets.
+            pass
     identity = hashlib.sha256(peer.encode("utf-8", "replace")).hexdigest()[:24]
     window = int(time.time()) // 60
     key = f"shakerscan:fleet:join-rate:{window}:{identity}"
