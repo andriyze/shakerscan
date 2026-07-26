@@ -8,6 +8,7 @@ import os
 import sys
 import types
 import uuid
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -18,6 +19,14 @@ sys.modules.setdefault("redis", types.SimpleNamespace(from_url=lambda *a, **k: N
 import worker  # noqa: E402
 
 CURRENT_FP = "deadbeefcafef00d"
+
+
+def test_db_timestamps_are_normalized_to_naive_utc_for_duration_math():
+    aware = datetime(2026, 7, 26, 7, 30, tzinfo=timezone(timedelta(hours=2)))
+
+    assert worker._naive_utc_timestamp(aware) == datetime(2026, 7, 26, 5, 30)
+    assert worker._naive_utc_timestamp(datetime(2026, 7, 26, 5, 30)) == datetime(2026, 7, 26, 5, 30)
+    assert worker._naive_utc_timestamp(None) is None
 
 
 def test_worker_redis_socket_timeout_exceeds_blocking_pop(monkeypatch):

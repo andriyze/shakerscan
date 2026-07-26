@@ -221,6 +221,15 @@ def utc_now_iso() -> str:
     return utc_now().isoformat()
 
 
+def _naive_utc_timestamp(value: Any) -> datetime | None:
+    """Normalize PostgreSQL TIMESTAMPTZ values to the worker's naive-UTC clock."""
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is not None:
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
+
+
 def _scanner_auth_config_from_options(options: dict[str, Any]) -> dict[str, Any]:
     """Extract DAST auth material for scanner subprocess file handoff."""
     if not isinstance(options, dict):
@@ -7082,8 +7091,9 @@ async def process_scan_job(job_data: dict):
                     "SELECT created_at FROM broker_job_leases WHERE id=$1",
                     uuid.UUID(str(job_data["_broker_lease_id"])),
                 )
-            if leased_at:
-                now = leased_at
+            normalized_lease_time = _naive_utc_timestamp(leased_at)
+            if normalized_lease_time:
+                now = normalized_lease_time
         except (ValueError, TypeError):
             pass
 
@@ -8524,8 +8534,9 @@ async def process_scan_shard_job(job_data: dict):
                     "SELECT created_at FROM broker_job_leases WHERE id=$1",
                     uuid.UUID(str(job_data["_broker_lease_id"])),
                 )
-            if leased_at:
-                now = leased_at
+            normalized_lease_time = _naive_utc_timestamp(leased_at)
+            if normalized_lease_time:
+                now = normalized_lease_time
         except (ValueError, TypeError):
             pass
     print(f"[{job_id[:8]}] Shard '{label}' ({idx}/{total}) start: {target}", flush=True)
