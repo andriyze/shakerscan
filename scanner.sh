@@ -240,6 +240,18 @@ configure_access_mode() {
         export SHAKERSCAN_BIND_HOST="${SHAKERSCAN_BIND_HOST:-127.0.0.1}"
     fi
 
+    # Fleet operator traffic may use token-authenticated HTTP only when the
+    # host has positively matched the bind address to its live Tailscale IPv4.
+    # Recompute this on every invocation so a stale .env value fails closed.
+    if [ -z "$tailscale_ip" ]; then
+        tailscale_ip="$(first_tailscale_ipv4)"
+    fi
+    if [ -n "$tailscale_ip" ] && [ "${SHAKERSCAN_BIND_HOST:-}" = "$tailscale_ip" ]; then
+        export SHAKERSCAN_TRUSTED_REMOTE_TRANSPORT=tailscale
+    elif [ "${SHAKERSCAN_TRUSTED_REMOTE_TRANSPORT:-}" = "tailscale" ]; then
+        unset SHAKERSCAN_TRUSTED_REMOTE_TRANSPORT
+    fi
+
     export SHAKERSCAN_PUBLIC_API_URL="${SHAKERSCAN_PUBLIC_API_URL:-http://$(format_url_host "$(public_access_host)"):${SHAKERSCAN_API_PORT:-8080}}"
 }
 

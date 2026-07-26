@@ -380,6 +380,9 @@ backs up a running standalone control plane before its first fleet conversion. F
 private-CA endpoint, pass `--ca-cert /path/to/ca.pem` to initialization and join; broker nodes persist
 that CA and use it explicitly instead of the system trust store. Overlay traffic always requires the
 private fleet CA returned during enrollment and fails with a configuration error if that CA is unavailable.
+When the control-plane UI is opened over a verified Tailscale bind, enter the generated fleet operator
+token on the Fleet page. Token-authenticated HTTP is accepted only when the live Tailscale IPv4 exactly
+matches the published bind; other remote operator paths still require HTTPS.
 The broker needs only outbound HTTPS from the worker; WireGuard additionally needs its configured UDP
 port. Follow the [Multi-Node Fleet Guide](https://github.com/andriyze/shakerscan/blob/main/docs/multi-node-guide.md)
 for setup and operations. See the

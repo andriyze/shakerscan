@@ -4810,11 +4810,21 @@ def _require_fleet_operator(request: Request) -> None:
     if peer_is_loopback:
         return
     try:
-        host_publish_is_loopback = bool(configured_bind) and ipaddress.ip_address(configured_bind).is_loopback
+        configured_bind_ip = ipaddress.ip_address(configured_bind) if configured_bind else None
+        host_publish_is_loopback = bool(configured_bind_ip and configured_bind_ip.is_loopback)
     except ValueError:
+        configured_bind_ip = None
         host_publish_is_loopback = False
-    if request.url.scheme != "https" and not host_publish_is_loopback:
-        raise HTTPException(status_code=403, detail="fleet operator access requires loopback or authenticated HTTPS")
+    trusted_tailscale_http = bool(
+        os.environ.get("SHAKERSCAN_TRUSTED_REMOTE_TRANSPORT", "").strip().lower() == "tailscale"
+        and isinstance(configured_bind_ip, ipaddress.IPv4Address)
+        and configured_bind_ip in ipaddress.ip_network("100.64.0.0/10")
+    )
+    if request.url.scheme != "https" and not host_publish_is_loopback and not trusted_tailscale_http:
+        raise HTTPException(
+            status_code=403,
+            detail="fleet operator access requires loopback, verified Tailscale, or authenticated HTTPS",
+        )
     expected = os.environ.get("FLEET_OPERATOR_TOKEN", "")
     if len(expected) < 32:
         raise HTTPException(status_code=403, detail="fleet operator access is not enabled remotely")

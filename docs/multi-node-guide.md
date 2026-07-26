@@ -303,7 +303,11 @@ API calls must use HTTPS and the `FLEET_OPERATOR_TOKEN` generated in the control
 
 In the UI, open **Fleet**. If the browser reaches the API through a non-loopback path, enter the fleet
 operator token in **Operator access**. It is kept in browser session storage and is cleared when the
-tab session ends.
+tab session ends. A control plane started with `./scanner.sh start --remote` may use its Tailscale UI
+and API addresses directly: `scanner.sh` verifies that the published bind equals the host's live
+Tailscale IPv4, and then permits token-authenticated fleet operations over that Tailscale-encrypted
+HTTP transport. The exception does not apply to wildcard, public, stale, or manually asserted bind
+addresses; those still require HTTPS.
 
 A ready fleet should show:
 

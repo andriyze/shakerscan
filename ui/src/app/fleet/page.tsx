@@ -293,7 +293,7 @@ export default function FleetPage() {
               Operator access
             </div>
             <p className="mt-1 max-w-2xl text-xs text-gray-500">
-              Fleet init creates the operator token. This Docker-host UI uses it for fleet reads and changes; direct socket-loopback clients are the only tokenless exception, and remote calls also require HTTPS. The token stays in this browser tab only.
+              Fleet init creates the operator token. Enter it for fleet reads and changes from this browser. Remote access requires HTTPS or ShakerScan&apos;s verified Tailscale bind; direct API loopback is the only tokenless exception. The token stays in this browser tab only.
             </p>
           </div>
           <div className="flex w-full gap-2 lg:w-[28rem]">

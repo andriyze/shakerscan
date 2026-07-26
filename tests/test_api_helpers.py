@@ -180,6 +180,7 @@ def _fleet_request(
 
 def test_fleet_operator_actions_are_loopback_or_explicit_token_only(monkeypatch):
     monkeypatch.delenv("SHAKERSCAN_BIND_HOST", raising=False)
+    monkeypatch.delenv("SHAKERSCAN_TRUSTED_REMOTE_TRANSPORT", raising=False)
     monkeypatch.delenv("FLEET_OPERATOR_TOKEN", raising=False)
     assert api_module._require_fleet_operator(_fleet_request(host="127.0.0.1", scheme="http")) is None
 
@@ -214,6 +215,23 @@ def test_fleet_operator_actions_are_loopback_or_explicit_token_only(monkeypatch)
         _fleet_request(host="192.168.65.1", scheme="http", authorization=f"Bearer {operator_token}")
     ) is None
     monkeypatch.setenv("SHAKERSCAN_BIND_HOST", "100.64.0.10")
+    with pytest.raises(api_module.HTTPException) as exc:
+        api_module._require_fleet_operator(
+            _fleet_request(host="192.168.65.1", scheme="http", authorization=f"Bearer {operator_token}")
+        )
+    assert exc.value.status_code == 403
+
+    # scanner.sh marks HTTP as Tailscale-trusted only after its live Tailscale
+    # IPv4 exactly matches the published bind address. Authentication remains
+    # mandatory, and the marker cannot authorize public/wildcard binds.
+    monkeypatch.setenv("SHAKERSCAN_TRUSTED_REMOTE_TRANSPORT", "tailscale")
+    assert api_module._require_fleet_operator(
+        _fleet_request(host="192.168.65.1", scheme="http", authorization=f"Bearer {operator_token}")
+    ) is None
+    with pytest.raises(api_module.HTTPException) as exc:
+        api_module._require_fleet_operator(_fleet_request(host="192.168.65.1", scheme="http"))
+    assert exc.value.status_code == 401
+    monkeypatch.setenv("SHAKERSCAN_BIND_HOST", "0.0.0.0")
     with pytest.raises(api_module.HTTPException) as exc:
         api_module._require_fleet_operator(
             _fleet_request(host="192.168.65.1", scheme="http", authorization=f"Bearer {operator_token}")

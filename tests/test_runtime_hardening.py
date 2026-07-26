@@ -291,6 +291,14 @@ def test_scanner_sh_forwards_join_local_build_instead_of_consuming_it():
     assert 'ARGS+=("$1")' in local_build_case
 
 
+def test_scanner_sh_marks_only_a_live_matching_tailscale_bind_as_trusted():
+    script = (ROOT / "scanner.sh").read_text()
+
+    assert '[ "${SHAKERSCAN_BIND_HOST:-}" = "$tailscale_ip" ]' in script
+    assert "export SHAKERSCAN_TRUSTED_REMOTE_TRANSPORT=tailscale" in script
+    assert "unset SHAKERSCAN_TRUSTED_REMOTE_TRANSPORT" in script
+
+
 def test_scanner_sh_worker_logs_aggregate_api_scaled_containers():
     script = (ROOT / "scanner.sh").read_text()
 
