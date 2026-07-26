@@ -450,9 +450,12 @@ the private data address, preserves the real overlay socket peer with Linux host
 disables duplicate background controllers in that edge process. Linux host automation now implements
 persistent `fleet init`, aggregated read-only `fleet preflight`, tag-to-digest image resolution,
 automatic pre-conversion backup, single-use `fleet join-token`, automatic/manual peer reconciliation,
-and worker-only `join` with HTTPS preflight and WireGuard handshake diagnostics. The Fleet UI also
-flags WireGuard nodes awaiting their first connection. Leased delivery and fencing, central artifact
-transfer, placement, capacity-weighted scaling, rolling lifecycle, outbound-only HTTPS broker transport, and fleet-wide
+automatic restricted public HTTPS for broker fleets with pinned Caddy, certificate renewal and
+rollback verification, and worker-only `join` with HTTPS preflight and WireGuard handshake
+diagnostics. The installed worker image is derived automatically; `--worker-image` selects a custom
+build. The Fleet UI also flags WireGuard nodes awaiting their first connection. Leased delivery and
+fencing, central artifact transfer, placement, capacity-weighted scaling, rolling lifecycle,
+outbound-only HTTPS broker transport, and fleet-wide
 admission/request controls are implemented. The remaining release-topology gate is executing the
 physical two-VPS acceptance. Follow the [operator guide](multi-node-guide.md); the design authority is
 [`docs/multi-node-architecture.md`](multi-node-architecture.md).
@@ -1188,7 +1191,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Scanner wrapper commands | 26 | `scanner.sh` |
 | Make targets | 11 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
-| Runtime environment keys | 259 | Python sources + Compose manifests |
+| Runtime environment keys | 260 | Python sources + Compose manifests |
 | Scanner modules | 83 | `scanner/scanner_tools/` |
 | UI pages | 31 | `ui/src/app/` |
 | Skills | 6 | `skills/` |
@@ -1867,6 +1870,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `FLEET_DESIRED_WORKER_COUNT` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_DRAIN_GRACE_SECONDS` | `api/fleet_agent.py` |
 | `FLEET_EDGE_MODE` | `api/api.py` |
+| `FLEET_GATEWAY_BIND_HOST` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_HEARTBEAT_TIMEOUT_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_NODE_ID` | `api/worker.py`, `docker-compose.broker-worker.yml`, `docker-compose.worker.yml` |
 | `FLEET_OPERATOR_TOKEN` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scripts/fleet_acceptance.py` |

@@ -45,13 +45,23 @@ Before initializing a fleet:
 | ShakerScan runtime | Required | Required |
 | Docker + Compose | Required | Required |
 | `wg`, `wg-quick`, `ip` | WireGuard only | WireGuard only |
-| `openssl`, `ss` | WireGuard only | Not required |
+| `ss` | Required | Not required |
+| `openssl` | WireGuard only | Not required |
 | Stable HTTPS control-plane URL | Hosts it | Must reach it |
+| Inbound TCP `80` and `443` | Broker with managed HTTPS only | Not required |
 | Inbound UDP, normally `51820` | WireGuard only | Not required |
 
-Give the control plane a stable HTTPS URL, such as `https://scanner.example.com`. Put it behind a
-firewall, VPN, or authenticated reverse proxy; ShakerScan is a trusted-operator product, not a
-public multi-user service.
+Give the control plane a DNS name such as `scanner.example.com`, create its A/AAAA record, and use
+`https://scanner.example.com` as the public URL. In broker mode, ShakerScan automatically starts a
+digest-pinned Caddy gateway and obtains and renews a public certificate when that URL does not
+already work. Open inbound TCP 80 and 443 in the VPS firewall and cloud security group. Only health,
+single-use enrollment, authenticated node state/heartbeat, and authenticated broker routes are
+published. The UI and operator API remain on loopback and are not made public.
+
+If an existing reverse proxy already provides valid HTTPS, ShakerScan detects and reuses it. Select
+`--https-mode external` to require that topology or `--https-mode managed` to require the built-in
+gateway. Managed HTTPS is currently for broker fleets; WireGuard enrollment continues to use an
+operator-provided HTTPS endpoint.
 
 `fleet init` runs a complete preflight before changing state. It checks the host, dependencies,
 Docker Compose, HTTPS/certificate verification, worker image, ports, overlay routes, enrollment
@@ -59,15 +69,14 @@ policy, and reconciliation service. To run the same checks without initializing 
 
 ```bash
 shakerscan fleet preflight \
-  --network wireguard \
-  --endpoint fleet.example.com:51820 \
-  --public-url https://scanner.example.com \
-  --worker-image registry.example/shakerscan:latest
+  --network broker \
+  --public-url https://scanner.example.com
 ```
 
-The command reports every failed check together instead of stopping at the first one. A supplied
-image tag is resolved through the registry and displayed, but ShakerScan persists and distributes
-only its immutable digest. You may also supply
+The command reports every failed check together instead of stopping at the first one. Normally it
+derives the installed scanner image and persists its immutable digest automatically. Use
+`--worker-image registry.example/shakerscan:tag` only when remote nodes should run a custom worker
+build; ShakerScan resolves the tag once and stores the digest. You may also supply
 `registry.example/shakerscan@sha256:<64 hexadecimal characters>` directly.
 
 When converting a running standalone control plane for the first time, `fleet init` automatically
@@ -101,12 +110,11 @@ shakerscan fleet init \
   --network wireguard \
   --endpoint fleet.example.com:51820 \
   --public-url https://scanner.example.com \
-  --worker-image registry.example/shakerscan:latest \
   --workers 1
 ```
 
-`--endpoint` is the externally reachable WireGuard `host:port`. Before mutation, the tag above is
-resolved and pinned to a digest. The default private overlay is
+`--endpoint` is the externally reachable WireGuard `host:port`. The installed worker image is
+resolved and pinned to a digest before mutation. The default private overlay is
 `10.77.0.0/24`, and the default private TLS port is `8443`. Set `--overlay` or `--tls-port` during the
 first initialization if those defaults conflict with your network. An existing fleet identity
 refuses an overlay-CIDR change.
@@ -129,12 +137,15 @@ shakerscan fleet reconcile
 shakerscan fleet init \
   --network broker \
   --public-url https://scanner.example.com \
-  --worker-image registry.example/shakerscan:latest \
   --workers 1
 ```
 
-Broker initialization verifies the public HTTPS API and central artifact storage. It does not create
-a WireGuard overlay or distribute data-store credentials.
+On a fresh VPS, this is the complete HTTPS setup command. If the URL is not already serving a valid
+ShakerScan health response, initialization verifies DNS and ports 80/443, enables the pinned Caddy
+profile, obtains a public certificate, and then verifies both public health and the route denylist.
+It also verifies central artifact storage. If any step fails, ShakerScan restores the previous
+configuration and runtime. Broker mode does not create a WireGuard overlay or distribute data-store
+credentials.
 
 ### Private-CA public URL
 
@@ -145,12 +156,13 @@ shakerscan fleet init \
   --network broker \
   --public-url https://scanner.internal.example \
   --ca-cert /etc/shakerscan/internal-ca.pem \
-  --worker-image registry.example/shakerscan@sha256:<digest>
+  --https-mode external
 ```
 
 For a WireGuard deployment, use `--skip-public-check` only for a verified split-horizon or
 hairpin-DNS limitation. It does not permit HTTP, disable later TLS verification, or weaken
-enrollment. Broker initialization must be able to verify its public HTTPS URL after restart.
+enrollment. Managed broker initialization must verify its public HTTPS URL and restricted routes
+after certificate issuance.
 
 ## 2. Create a Single-Use Join Token
 

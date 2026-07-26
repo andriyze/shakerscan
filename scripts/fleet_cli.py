@@ -37,6 +37,7 @@ DEFAULT_OVERLAY = "10.77.0.0/24"
 DEFAULT_WG_PORT = 51820
 DEFAULT_TLS_PORT = 8443
 MAX_HTTP_BODY = 2 * 1024 * 1024
+CADDY_PROFILE = "fleet-gateway"
 DIGEST_IMAGE_RE = re.compile(r"^\S+@sha256:[0-9a-fA-F]{64}$")
 IMAGE_REFERENCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/:~-]*$")
 ENV_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
@@ -53,6 +54,13 @@ class PreflightCheck:
     status: str
     detail: str
     hint: str = ""
+
+
+@dataclass(frozen=True)
+class FileSnapshot:
+    existed: bool
+    content: bytes = b""
+    mode: int = 0o600
 
 
 def _run_check(
@@ -151,6 +159,10 @@ class RuntimePaths:
     def broker_worker_compose(self) -> Path:
         return self.root / "docker-compose.broker-worker.yml"
 
+    @property
+    def gateway_config(self) -> Path:
+        return self.control / "Caddyfile"
+
 
 def _run(
     argv: list[str],
@@ -217,6 +229,19 @@ def atomic_write(path: Path, content: str, mode: int) -> None:
             temp_path.unlink()
         except FileNotFoundError:
             pass
+
+
+def _snapshot_file(path: Path) -> FileSnapshot:
+    if not path.exists():
+        return FileSnapshot(False)
+    return FileSnapshot(True, path.read_bytes(), path.stat().st_mode & 0o777)
+
+
+def _restore_file(path: Path, snapshot: FileSnapshot) -> None:
+    if snapshot.existed:
+        atomic_write(path, snapshot.content.decode("utf-8"), snapshot.mode)
+    else:
+        path.unlink(missing_ok=True)
 
 
 def parse_duration(value: str) -> int:
@@ -372,6 +397,28 @@ def api_json(
                 "verify the CA chain and that the certificate hostname matches the control-plane URL"
             ) from exc
         raise FleetCLIError(f"control plane request failed: {exc}") from exc
+
+
+def http_status(
+    base_url: str,
+    method: str,
+    path: str,
+    *,
+    ca_file: Path | None = None,
+    timeout: float = 10.0,
+) -> int:
+    """Return an HTTPS response status, including deliberate error responses."""
+    request = urllib.request.Request(f"{base_url.rstrip('/')}{path}", method=method)
+    context = ssl.create_default_context(cafile=str(ca_file)) if ca_file else ssl.create_default_context()
+    try:
+        with urllib.request.urlopen(request, timeout=timeout, context=context) as response:
+            response.read(4096)
+            return int(response.status)
+    except urllib.error.HTTPError as exc:
+        exc.read(4096)
+        return int(exc.code)
+    except (urllib.error.URLError, TimeoutError, ssl.SSLError, OSError) as exc:
+        raise FleetCLIError(f"public gateway request failed: {exc}") from exc
 
 
 def generate_wireguard_keypair(private_path: Path, public_path: Path) -> tuple[str, str]:
@@ -530,7 +577,14 @@ def resolve_worker_image(value: str | None, env: dict[str, str]) -> tuple[str, s
     """Return a pinned image and the mutable source reference, when resolved."""
     raw = str(value or "").strip()
     if not raw:
-        return _discover_digest_image(env), None
+        if str(env.get("FLEET_WORKER_IMAGE_DIGEST") or "").strip():
+            return _discover_digest_image(env), None
+        try:
+            return _discover_digest_image(env), None
+        except FleetCLIError:
+            repository = env.get("SCANNER_IMAGE_REPO", "shakerscan/shakerscan-scanner")
+            tag = env.get("SCANNER_IMAGE_TAG", "latest")
+            raw = f"{repository}:{tag}"
     if DIGEST_IMAGE_RE.fullmatch(raw):
         return validate_digest_image(raw), None
     if not IMAGE_REFERENCE_RE.fullmatch(raw) or "@" in raw:
@@ -616,6 +670,84 @@ def _assert_overlay_available(network: IPv4Network, *, existing_fleet: bool) -> 
             f"overlay {network} overlaps existing route{'s' if len(conflicts) != 1 else ''}: "
             + ", ".join(conflicts[:4])
         )
+
+
+def _resolved_public_addresses(public_url: str) -> list[str]:
+    parsed = urllib.parse.urlparse(public_url)
+    if parsed.port not in {None, 443}:
+        raise FleetCLIError("managed HTTPS requires the standard public HTTPS port 443")
+    hostname = str(parsed.hostname or "")
+    try:
+        ip_address(hostname)
+    except ValueError:
+        pass
+    else:
+        raise FleetCLIError("managed public HTTPS requires a DNS hostname, not an IP address")
+    try:
+        answers = socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise FleetCLIError(f"DNS does not resolve {hostname}: {exc}") from exc
+    addresses = sorted({str(answer[4][0]) for answer in answers if answer[4]})
+    if not addresses:
+        raise FleetCLIError(f"DNS returned no addresses for {hostname}")
+    if not any(ip_address(address).is_global for address in addresses):
+        raise FleetCLIError(
+            f"managed public HTTPS requires a publicly routable DNS address; {hostname} resolves to "
+            + ", ".join(addresses)
+        )
+    return addresses
+
+
+def render_managed_caddyfile(public_url: str) -> str:
+    """Render the narrow public ingress used by HTTPS-broker workers."""
+    validated = validate_https_url(public_url)
+    hostname = str(urllib.parse.urlparse(validated).hostname or "")
+    return f"""# Managed by ShakerScan. Local UI and operator APIs are intentionally not public.
+{hostname} {{
+    encode zstd gzip
+
+    @health {{
+        method GET
+        path /health
+    }}
+    handle @health {{
+        reverse_proxy api:8080
+    }}
+
+    @join {{
+        method POST
+        path /fleet/nodes/join
+    }}
+    handle @join {{
+        reverse_proxy api:8080
+    }}
+
+    @node_state {{
+        method GET
+        path_regexp node_state ^/fleet/nodes/[0-9a-fA-F-]+/state$
+    }}
+    handle @node_state {{
+        reverse_proxy api:8080
+    }}
+
+    @node_heartbeat {{
+        method POST
+        path_regexp node_heartbeat ^/fleet/nodes/[0-9a-fA-F-]+/heartbeat$
+    }}
+    handle @node_heartbeat {{
+        reverse_proxy api:8080
+    }}
+
+    @broker path /fleet/broker/*
+    handle @broker {{
+        reverse_proxy api:8080
+    }}
+
+    handle {{
+        respond "Not found" 404
+    }}
+}}
+"""
 
 
 def _connection_bundle(control_ip: str, env: dict[str, str]) -> dict[str, Any]:
@@ -753,7 +885,7 @@ def run_init_preflight(paths: RuntimePaths, args: argparse.Namespace) -> dict[st
         success="supported",
         hint="Run fleet provisioning on a Linux control-plane host.",
     )
-    required_commands = ("docker",) if network_mode == "broker" else (
+    required_commands = ("docker", "ss") if network_mode == "broker" else (
         "wg", "wg-quick", "ip", "ss", "openssl", "docker"
     )
     _run_check(
@@ -784,7 +916,59 @@ def run_init_preflight(paths: RuntimePaths, args: argparse.Namespace) -> dict[st
         success="system trust or supplied PEM is usable",
         hint="Pass a readable PEM CA with --ca-cert when the public URL uses private PKI.",
     )
-    if public_url and not getattr(args, "skip_public_check", False):
+    requested_https_mode = str(getattr(args, "https_mode", "auto") or "auto")
+    existing_managed_gateway = (
+        env.get("FLEET_HTTPS_MODE") == "managed"
+        and CADDY_PROFILE in {item.strip() for item in env.get("COMPOSE_PROFILES", "").split(",")}
+    )
+    https_mode = "external"
+    if requested_https_mode == "managed" and network_mode != "broker":
+        checks.append(PreflightCheck(
+            "Managed HTTPS",
+            "fail",
+            "the built-in public gateway is currently supported for broker fleets",
+            "Use --network broker, or configure external HTTPS for WireGuard enrollment.",
+        ))
+    if getattr(args, "skip_public_check", False) and requested_https_mode == "managed":
+        checks.append(PreflightCheck(
+            "Managed HTTPS",
+            "fail",
+            "--skip-public-check cannot verify certificate provisioning",
+            "Remove --skip-public-check when ShakerScan manages HTTPS.",
+        ))
+    if public_url and getattr(args, "skip_public_check", False):
+        checks.append(PreflightCheck(
+            "Public API reachability",
+            "warn",
+            "skipped by operator for a split-horizon/hairpin limitation",
+            "Verify the public HTTPS endpoint from a worker before issuing a join token.",
+        ))
+    elif public_url and network_mode == "broker" and (
+        requested_https_mode == "managed" or (requested_https_mode == "auto" and existing_managed_gateway)
+    ):
+        https_mode = "managed"
+        checks.append(PreflightCheck(
+            "Public API reachability",
+            "warn",
+            "will be verified after the managed HTTPS gateway obtains its certificate",
+        ))
+    elif public_url and network_mode == "broker" and requested_https_mode == "auto":
+        try:
+            _require_healthy_api(public_url, enrollment_ca)
+        except FleetCLIError as exc:
+            https_mode = "managed"
+            checks.append(PreflightCheck(
+                "Public API reachability",
+                "warn",
+                f"not ready yet ({exc}); the managed HTTPS gateway will be provisioned",
+            ))
+        else:
+            checks.append(PreflightCheck(
+                "Public API reachability",
+                "pass",
+                "healthy existing API and certificate chain verified",
+            ))
+    elif public_url:
         _run_check(
             checks,
             "Public API reachability",
@@ -792,13 +976,38 @@ def run_init_preflight(paths: RuntimePaths, args: argparse.Namespace) -> dict[st
             success="healthy API and certificate chain verified",
             hint="Fix DNS/HTTPS/firewall access; for private PKI, pass --ca-cert.",
         )
-    elif getattr(args, "skip_public_check", False):
-        checks.append(PreflightCheck(
-            "Public API reachability",
-            "warn",
-            "skipped by operator for a split-horizon/hairpin limitation",
-            "Verify the public HTTPS endpoint from a worker before issuing a join token.",
-        ))
+
+    if public_url and https_mode == "managed":
+        if enrollment_ca is not None:
+            checks.append(PreflightCheck(
+                "Managed HTTPS trust",
+                "fail",
+                "--ca-cert selects private PKI but the managed gateway obtains a public certificate",
+                "Remove --ca-cert, or use --https-mode external for a private-CA reverse proxy.",
+            ))
+        addresses = _run_check(
+            checks,
+            "Public DNS",
+            lambda: _resolved_public_addresses(public_url),
+            success="hostname resolves and is eligible for public certificate issuance",
+            hint="Create an A/AAAA record pointing the hostname at this VPS and wait for DNS propagation.",
+        )
+        if addresses:
+            checks.append(PreflightCheck("Public DNS answers", "pass", ", ".join(addresses)))
+        _run_check(
+            checks,
+            "HTTP port 80",
+            lambda: _assert_port_available("tcp", 80, existing_fleet=existing_managed_gateway),
+            success="available for ACME validation and HTTPS redirects",
+            hint="Stop the service using TCP 80 or select --https-mode external and configure that proxy.",
+        )
+        _run_check(
+            checks,
+            "HTTPS port 443",
+            lambda: _assert_port_available("tcp", 443, existing_fleet=existing_managed_gateway),
+            success="available for fleet traffic",
+            hint="Stop the service using TCP 443 or select --https-mode external and configure that proxy.",
+        )
 
     image_result = _run_check(
         checks,
@@ -830,6 +1039,7 @@ def run_init_preflight(paths: RuntimePaths, args: argparse.Namespace) -> dict[st
         "enrollment_ca": enrollment_ca,
         "worker_image": image_result[0] if image_result else None,
         "worker_image_source": image_result[1] if image_result else None,
+        "https_mode": https_mode,
     }
     if network_mode == "wireguard":
         overlay = _run_check(
@@ -933,6 +1143,28 @@ def _require_healthy_api(public_url: str, ca_file: Path | None) -> None:
         raise FleetCLIError("public HTTPS API did not report healthy")
 
 
+def _wait_for_healthy_api(public_url: str, ca_file: Path | None, timeout: float = 120.0) -> None:
+    deadline = time.monotonic() + timeout
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            _require_healthy_api(public_url, ca_file)
+            return
+        except FleetCLIError as exc:
+            last_error = exc
+            time.sleep(2)
+    raise FleetCLIError(f"public HTTPS did not become healthy within {int(timeout)}s: {last_error}")
+
+
+def _verify_managed_gateway_isolation(public_url: str, ca_file: Path | None) -> None:
+    for path in ("/", "/targets", "/fleet/nodes", "/docs"):
+        status = http_status(public_url, "GET", path, ca_file=ca_file)
+        if status != 404:
+            raise FleetCLIError(
+                f"managed HTTPS route isolation failed: GET {path} returned {status}, expected 404"
+            )
+
+
 def command_preflight(paths: RuntimePaths, args: argparse.Namespace) -> None:
     run_init_preflight(paths, args)
     print("Preflight passed. No fleet state was changed.")
@@ -960,38 +1192,79 @@ def command_init(paths: RuntimePaths, args: argparse.Namespace) -> None:
         public_url = prepared["public_url"]
         env = prepared["env"]
         worker_image = prepared["worker_image"]
+        https_mode = prepared["https_mode"]
+        scanner = paths.root / "scanner.sh"
+        if not scanner.is_file():
+            raise FleetCLIError("scanner.sh is missing from the runtime")
         _backup_standalone_if_running(paths, env)
+        dotenv_snapshot = _snapshot_file(paths.dotenv)
+        gateway_snapshot = _snapshot_file(paths.gateway_config)
         operator_token = fleet_operator_token(env)
         profiles = {item.strip() for item in env.get("COMPOSE_PROFILES", "").split(",") if item.strip()}
         artifact_updates, bundled_minio = _fleet_artifact_environment("127.0.0.1", env)
         if bundled_minio:
             profiles.add("artifacts")
-        update_dotenv(paths.dotenv, {
-            "COMPOSE_PROFILES": ",".join(sorted(profiles)),
-            "FLEET_NETWORK_BACKEND": "broker",
-            "FLEET_WORKER_IMAGE_DIGEST": worker_image,
-            "FLEET_DESIRED_WORKER_COUNT": str(args.workers),
-            "FLEET_PUBLIC_URL": public_url,
-            "FLEET_ALLOW_INSECURE_ENROLLMENT": "false",
-            "FLEET_OPERATOR_TOKEN": operator_token,
-            **artifact_updates,
-        })
-        scanner = paths.root / "scanner.sh"
-        if not scanner.is_file():
-            raise FleetCLIError("scanner.sh is missing from the runtime")
-        _run([str(scanner), "restart"], capture=False)
-        health = api_json(public_url, "GET", "/health", ca_file=enrollment_ca, timeout=30)
-        if health.get("status") != "healthy":
-            raise FleetCLIError("public HTTPS broker API did not report healthy after restart")
-        artifact_health = api_json(
-            "http://127.0.0.1:8080",
-            "GET",
-            "/artifacts/storage/health?probe=true",
-            timeout=15,
-        )
-        if artifact_health.get("status") != "ok":
-            raise FleetCLIError("artifact store write probe did not pass")
+        if https_mode == "managed":
+            profiles.add(CADDY_PROFILE)
+        try:
+            if https_mode == "managed":
+                atomic_write(paths.gateway_config, render_managed_caddyfile(public_url), 0o600)
+            update_dotenv(paths.dotenv, {
+                "COMPOSE_PROFILES": ",".join(sorted(profiles)),
+                "FLEET_NETWORK_BACKEND": "broker",
+                "FLEET_HTTPS_MODE": https_mode,
+                "FLEET_WORKER_IMAGE_DIGEST": worker_image,
+                "FLEET_DESIRED_WORKER_COUNT": str(args.workers),
+                "FLEET_PUBLIC_URL": public_url,
+                "FLEET_ALLOW_INSECURE_ENROLLMENT": "false",
+                "FLEET_OPERATOR_TOKEN": operator_token,
+                **artifact_updates,
+            })
+            _run([str(scanner), "restart"], capture=False)
+            _wait_for_healthy_api(public_url, enrollment_ca)
+            if https_mode == "managed":
+                _verify_managed_gateway_isolation(public_url, enrollment_ca)
+            artifact_health = api_json(
+                "http://127.0.0.1:8080",
+                "GET",
+                "/artifacts/storage/health?probe=true",
+                timeout=15,
+            )
+            if artifact_health.get("status") != "ok":
+                raise FleetCLIError("artifact store write probe did not pass")
+        except Exception as exc:
+            print("Fleet initialization failed; restoring the previous runtime configuration...", file=sys.stderr)
+            stop_error: Exception | None = None
+            try:
+                _run([str(scanner), "stop"], check=False, capture=False)
+            except Exception as rollback_stop_exc:
+                stop_error = rollback_stop_exc
+            try:
+                _restore_file(paths.dotenv, dotenv_snapshot)
+                _restore_file(paths.gateway_config, gateway_snapshot)
+            except Exception as restore_exc:
+                raise FleetCLIError(
+                    f"broker initialization failed ({exc}) and automatic configuration restore failed: "
+                    f"{restore_exc}"
+                ) from exc
+            try:
+                _run([str(scanner), "restart"], capture=False)
+            except FleetCLIError as rollback_exc:
+                raise FleetCLIError(
+                    f"broker initialization failed ({exc}); configuration was restored but restart failed: "
+                    f"{rollback_exc}"
+                ) from exc
+            if stop_error:
+                raise FleetCLIError(
+                    f"broker initialization failed and configuration was restored; the failed stack could not "
+                    f"be stopped cleanly before restart ({stop_error}): {exc}"
+                ) from exc
+            raise FleetCLIError(
+                f"broker initialization failed and was rolled back to the previous configuration: {exc}"
+            ) from exc
         print(f"HTTPS broker control plane initialized: {public_url}")
+        if https_mode == "managed":
+            print("HTTPS certificate and restricted fleet gateway are managed by ShakerScan")
         print("Next: shakerscan fleet join-token --ttl 24h --transport broker")
         return
     network, control_ip = prepared["overlay"]
@@ -1621,7 +1894,17 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--endpoint", help="public WireGuard endpoint host:port (required for wireguard)")
     init.add_argument("--listen-port", type=int, default=DEFAULT_WG_PORT)
     init.add_argument("--tls-port", type=int, default=DEFAULT_TLS_PORT)
-    init.add_argument("--public-url", required=True, help="existing HTTPS URL used before overlay setup")
+    init.add_argument(
+        "--public-url",
+        required=True,
+        help="public HTTPS hostname; broker mode provisions HTTPS automatically when needed",
+    )
+    init.add_argument(
+        "--https-mode",
+        choices=["auto", "managed", "external"],
+        default="auto",
+        help="reuse working HTTPS or provision it automatically (default: auto)",
+    )
     init.add_argument(
         "--ca-cert",
         help="PEM CA certificate for a private-CA public URL (system CA store is the default)",
@@ -1652,6 +1935,7 @@ def build_parser() -> argparse.ArgumentParser:
     preflight.add_argument("--listen-port", type=int, default=DEFAULT_WG_PORT)
     preflight.add_argument("--tls-port", type=int, default=DEFAULT_TLS_PORT)
     preflight.add_argument("--public-url", required=True)
+    preflight.add_argument("--https-mode", choices=["auto", "managed", "external"], default="auto")
     preflight.add_argument("--ca-cert")
     preflight.add_argument("--skip-public-check", action="store_true")
     preflight.add_argument("--worker-image", help="registry tag or digest-pinned scanner image")

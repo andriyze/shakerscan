@@ -283,3 +283,16 @@ def test_control_plane_compose_defines_overlay_tls_edge():
         assert "FLEET_CA_CERT_PATH=/run/shakerscan-fleet/control/ca.crt" in text
         assert "--ssl-keyfile" in text
         assert "--ssl-certfile" in text
+
+
+def test_control_plane_compose_defines_pinned_opt_in_fleet_gateway():
+    root = Path(__file__).resolve().parents[1]
+    expected_digest = "sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648"
+    for filename in ("docker-compose.yml", "docker-compose.release.yml"):
+        text = (root / filename).read_text(encoding="utf-8")
+        assert "  fleet-gateway:" in text
+        assert 'profiles: ["fleet-gateway"]' in text
+        assert f"caddy:2.11.4-alpine@{expected_digest}" in text
+        assert '.shakerscan-fleet/control/Caddyfile:/etc/caddy/Caddyfile:ro' in text
+        assert '${FLEET_GATEWAY_BIND_HOST:-0.0.0.0}:80:80' in text
+        assert '${FLEET_GATEWAY_BIND_HOST:-0.0.0.0}:443:443' in text

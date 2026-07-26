@@ -5,7 +5,8 @@ substrate is shipped (see the code-grounded capability table below), and the dur
 single-use enrollment, authenticated heartbeat, and one-time connection-bundle API foundation is now
 implemented. The digest-pinned worker-only Compose runtime, pull-based node-agent, and versioned
 desired-state API are also implemented, along with the fleet-profile CA-verified overlay TLS listener.
-The Linux `fleet init` / `fleet join-token` / `join` WireGuard host workflow is implemented. Durable
+The Linux `fleet init` / `fleet join-token` / `join` WireGuard and HTTPS-broker host workflows are
+implemented, including automatic restricted public HTTPS for broker control planes. Durable
 per-scan worker/node attribution, current-vs-desired node drift derivation, fleet summary, and recent
 per-node activity APIs are implemented. The Fleet operations UI is implemented with health/drift,
 capacity, current-work, per-node scaling, drain/resume, and revoke controls. The physical two-VPS
@@ -50,7 +51,7 @@ becoming stale prose. For product priority and phased order, see
 | Fleet-wide scaling and node audit trail | **Built** — one operator request distributes an exact worker total across healthy schedulable nodes using reported CPU/worker weights and optional per-node caps. State changes, join, credential rotation, bundle delivery, heartbeat transitions, rollout completion, broker leases/results, and revocation create bounded credential-free node events. Every scan snapshots node, worker build/image, egress, transport, and credential scope at execution time. | `POST /fleet/scale`; `fleet.py` `distribute_worker_count`; `GET /fleet/nodes/{id}/events`; `fleet_node_events`; `scans.execution_context` |
 | Fleet UI | **Built** — unified health/capacity/drift view (including an explicit derived unhealthy state for a heartbeating node with reconciliation errors and a first-WireGuard-connection warning), recent attributed work, desired worker scaling, graceful drain/resume, digest-pinned rollout, revoke confirmation, placement labels, and session-only remote operator credential handling | `ui/src/app/fleet/page.tsx`; sidebar `/fleet` |
 | Capability/region/egress placement | **Built** — scan options accept normalized placement constraints; jobs enter deterministic capability Streams; workers dynamically subscribe only to routes matching their node/region/network/residency/tier/tool labels. Equivalent eligible workers retain normal lease failover. Fleet join persists labels and the UI exposes both submission and node labels. | `job_queue.py` `routed_queue_name`, `qualified_route_queues`; `ScanOptions.placement`; `fleet_cli.py`; `/scan/new`; `/fleet` |
-| HTTPS broker for zero-trust nodes | **Built** — `--transport broker` enrolls an outbound-only node without WireGuard, Redis, PostgreSQL, or object-store credentials. Node/job-scoped HTTPS leases use hashed single-job tokens, Stream ownership heartbeat/reclaim, bounded delivery, global admission and root-domain reservations, progress/log forwarding, cancellation, lease-bound proxy artifact uploads, immutable result hashes, and idempotent control-plane ingestion for normal and shard scans. | `broker_worker.py`; `docker-compose.broker-worker.yml`; `/fleet/broker/*`; `broker_job_leases`; `broker_job_results` |
+| HTTPS broker for zero-trust nodes | **Built** — `--transport broker` enrolls an outbound-only node without WireGuard, Redis, PostgreSQL, or object-store credentials. Automatic HTTPS mode can provision a digest-pinned Caddy gateway with public-CA certificate renewal, a worker-route allowlist, post-start isolation checks, and rollback. Node/job-scoped HTTPS leases use hashed single-job tokens, Stream ownership heartbeat/reclaim, bounded delivery, global admission and root-domain reservations, progress/log forwarding, cancellation, lease-bound proxy artifact uploads, immutable result hashes, and idempotent control-plane ingestion for normal and shard scans. | `broker_worker.py`; `docker-compose.broker-worker.yml`; `fleet-gateway`; `/fleet/broker/*`; `broker_job_leases`; `broker_job_results` |
 | Physical acceptance automation | **Built, awaiting execution on two actual VPSs** — one command validates node/current-image health, heartbeat/capacity, artifact-store writes, public Redis/PostgreSQL isolation, an isolated Redis server-time lease loss/reclaim/heartbeat/ack sequence, duplicate completion behavior, passive cross-node parallel shards, execution snapshots, finding dedupe, and central result/artifact manifests. It emits a content-free hashed receipt. | `shakerscan fleet accept`; `scripts/fleet_acceptance.py`; `tests/test_fleet_acceptance.py` |
 
 The takeaways that shape the plan:
@@ -124,8 +125,7 @@ curl -fsSL https://install.shakerscan.com | sh
 shakerscan join <control-plane-url> --token <join-token>
 
 # Or, for an outbound-only node that receives no shared-store credentials
-shakerscan fleet init --network broker --public-url https://scanner.example.com \
-  --worker-image registry.example/shakerscan@sha256:<digest>
+shakerscan fleet init --network broker --public-url https://scanner.example.com
 shakerscan fleet join-token --role worker --ttl 24h --transport broker
 shakerscan join <control-plane-url> --token <join-token> --transport broker
 ```
@@ -557,7 +557,8 @@ owner-only bundle file is durable, revoke that incomplete node, mint a fresh sin
 and run `shakerscan join` again. Do not weaken the delivery gate or copy a shared bundle by hand.
 
 `fleet init` first runs the same aggregated checks exposed by read-only `fleet preflight`: Linux and
-host dependencies, Docker Compose, verified public HTTPS, worker tag-to-digest resolution, requested
+host dependencies, Docker Compose, public HTTPS or managed-gateway prerequisites, worker
+tag-to-digest resolution, requested
 port availability, overlay route collisions, enrollment policy, and reconciliation support. A
 running standalone deployment is backed up before the first fleet mutation. It then persists the control keypair, fleet CA, server certificate, private connection-bundle
 JSON, generated operator token, and rendered WireGuard configuration with restrictive modes; refuses an existing fleet CIDR
@@ -567,6 +568,14 @@ on Linux systems without systemd can select `--no-reconcile-service` and run `fl
 manually; the join-token output reminds those operators and the API/UI flag overlay nodes awaiting
 their first connection. The CLI never silently falls back to plaintext enrollment and production init refuses the
 local-lab insecure-enrollment escape hatch.
+
+For a broker fleet, HTTPS mode defaults to automatic. A healthy existing HTTPS origin is reused. If
+none is reachable, fleet init verifies DNS and TCP 80/443, enables a digest-pinned Caddy profile,
+generates a route-restricted configuration, and lets Caddy obtain and renew the public certificate.
+The public gateway permits only `/health`, single-use join, authenticated node state/heartbeat, and
+authenticated `/fleet/broker/*` operations; it returns 404 for the UI and operator API. Public
+health, the denylist, and artifact writes are verified after restart. Any failure restores the prior
+environment and gateway configuration and restarts the previous runtime.
 
 **5. Bootstrap response + post-overlay connection bundle.** `POST /fleet/nodes/join` returns only
 the material needed to establish the overlay plus the one-time node credential (the worker persists

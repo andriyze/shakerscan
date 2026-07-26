@@ -71,6 +71,24 @@ services:
         condition: service_healthy
     restart: "no"
 
+  # Opt-in public ingress for HTTPS-broker fleets. fleet init generates the
+  # Caddyfile with a strict route allowlist; the UI and operator API stay local.
+  fleet-gateway:
+    profiles: ["fleet-gateway"]
+    image: caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+    ports:
+      - "${FLEET_GATEWAY_BIND_HOST:-0.0.0.0}:80:80"
+      - "${FLEET_GATEWAY_BIND_HOST:-0.0.0.0}:443:443"
+    volumes:
+      - ./.shakerscan-fleet/control/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - api
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
   api:
     image: ${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}:${SCANNER_IMAGE_TAG:-latest}
     ports:
@@ -334,3 +352,5 @@ volumes:
   postgres-data:
   redis-data:
   minio-data:
+  caddy-data:
+  caddy-config:

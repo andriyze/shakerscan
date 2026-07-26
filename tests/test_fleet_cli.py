@@ -508,6 +508,163 @@ def test_worker_image_tag_resolves_to_manifest_digest(monkeypatch):
     assert calls[0][:4] == ["docker", "buildx", "imagetools", "inspect"]
 
 
+def test_default_worker_image_resolves_without_cli_flag(monkeypatch):
+    monkeypatch.setattr(
+        fleet_cli,
+        "_discover_digest_image",
+        lambda _env: (_ for _ in ()).throw(fleet_cli.FleetCLIError("not local")),
+    )
+    monkeypatch.setattr(
+        fleet_cli,
+        "_run",
+        lambda argv, **_kwargs: types.SimpleNamespace(
+            returncode=0,
+            stdout="Name: shakerscan/shakerscan-scanner:latest\nDigest: sha256:" + "c" * 64 + "\n",
+        ),
+    )
+    pinned, source = fleet_cli.resolve_worker_image(None, {})
+    assert source == "shakerscan/shakerscan-scanner:latest"
+    assert pinned == "shakerscan/shakerscan-scanner@sha256:" + "c" * 64
+
+
+def test_managed_gateway_caddyfile_only_exposes_worker_routes():
+    rendered = fleet_cli.render_managed_caddyfile("https://fleet.example.test")
+    assert rendered.startswith("# Managed by ShakerScan")
+    assert "fleet.example.test {" in rendered
+    assert "path /fleet/nodes/join" in rendered
+    assert "path /fleet/broker/*" in rendered
+    assert "/fleet/nodes/[0-9a-fA-F-]+/state" in rendered
+    assert "/fleet/nodes/[0-9a-fA-F-]+/heartbeat" in rendered
+    assert 'respond "Not found" 404' in rendered
+    assert "/targets" not in rendered
+    assert "/docs" not in rendered
+
+
+def test_managed_gateway_requires_public_dns_address(monkeypatch):
+    monkeypatch.setattr(
+        fleet_cli.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [(2, 1, 6, "", ("10.0.0.8", 443))],
+    )
+    with pytest.raises(fleet_cli.FleetCLIError, match="publicly routable"):
+        fleet_cli._resolved_public_addresses("https://fleet.internal.example")
+
+
+def test_broker_auto_preflight_selects_managed_https_when_url_is_not_ready(tmp_path, monkeypatch):
+    paths = fleet_cli.RuntimePaths(tmp_path)
+    monkeypatch.setattr(fleet_cli, "_require_linux", lambda: None)
+    monkeypatch.setattr(fleet_cli, "_require_commands", lambda _names: None)
+    monkeypatch.setattr(fleet_cli, "_docker_compose_command", lambda: ["docker", "compose"])
+    monkeypatch.setattr(
+        fleet_cli,
+        "_require_healthy_api",
+        lambda *_args: (_ for _ in ()).throw(fleet_cli.FleetCLIError("connection refused")),
+    )
+    monkeypatch.setattr(fleet_cli, "_resolved_public_addresses", lambda _url: ["203.0.113.8"])
+    monkeypatch.setattr(fleet_cli, "_assert_port_available", lambda *_args, **_kwargs: None)
+    prepared = fleet_cli.run_init_preflight(
+        paths,
+        types.SimpleNamespace(
+            network="broker",
+            public_url="https://fleet.example.test",
+            ca_cert=None,
+            skip_public_check=False,
+            https_mode="auto",
+            worker_image=IMAGE,
+            workers=1,
+        ),
+    )
+    assert prepared["https_mode"] == "managed"
+
+
+def test_broker_managed_https_writes_gateway_and_rolls_back_on_failed_verification(tmp_path, monkeypatch):
+    paths = fleet_cli.RuntimePaths(tmp_path)
+    scanner = tmp_path / "scanner.sh"
+    scanner.write_text("#!/bin/sh\n", encoding="utf-8")
+    scanner.chmod(0o755)
+    paths.dotenv.write_text("EXISTING=value\n", encoding="utf-8")
+    paths.control.mkdir(parents=True)
+    paths.gateway_config.write_text("old gateway\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        fleet_cli,
+        "run_init_preflight",
+        lambda *_args: {
+            "public_url": "https://fleet.example.test",
+            "enrollment_ca": None,
+            "env": {"EXISTING": "value"},
+            "worker_image": IMAGE,
+            "https_mode": "managed",
+        },
+    )
+    monkeypatch.setattr(fleet_cli, "_backup_standalone_if_running", lambda *_args: None)
+    monkeypatch.setattr(
+        fleet_cli,
+        "_fleet_artifact_environment",
+        lambda *_args: ({"ARTIFACT_STORAGE_REQUIRED": "true"}, False),
+    )
+    monkeypatch.setattr(fleet_cli, "_run", lambda *_args, **_kwargs: types.SimpleNamespace(returncode=0, stdout=""))
+    monkeypatch.setattr(
+        fleet_cli,
+        "_wait_for_healthy_api",
+        lambda *_args: (_ for _ in ()).throw(fleet_cli.FleetCLIError("ACME failed")),
+    )
+
+    with pytest.raises(fleet_cli.FleetCLIError, match="rolled back"):
+        fleet_cli.command_init(
+            paths,
+            types.SimpleNamespace(network="broker", workers=1),
+        )
+
+    assert paths.dotenv.read_text(encoding="utf-8") == "EXISTING=value\n"
+    assert paths.gateway_config.read_text(encoding="utf-8") == "old gateway\n"
+
+
+def test_broker_managed_https_persists_profile_after_all_verification_passes(tmp_path, monkeypatch):
+    paths = fleet_cli.RuntimePaths(tmp_path)
+    scanner = tmp_path / "scanner.sh"
+    scanner.write_text("#!/bin/sh\n", encoding="utf-8")
+    scanner.chmod(0o755)
+    isolation_checks = []
+
+    monkeypatch.setattr(
+        fleet_cli,
+        "run_init_preflight",
+        lambda *_args: {
+            "public_url": "https://fleet.example.test",
+            "enrollment_ca": None,
+            "env": {},
+            "worker_image": IMAGE,
+            "https_mode": "managed",
+        },
+    )
+    monkeypatch.setattr(fleet_cli, "_backup_standalone_if_running", lambda *_args: None)
+    monkeypatch.setattr(
+        fleet_cli,
+        "_fleet_artifact_environment",
+        lambda *_args: ({"ARTIFACT_STORAGE_REQUIRED": "true"}, False),
+    )
+    monkeypatch.setattr(fleet_cli, "_run", lambda *_args, **_kwargs: types.SimpleNamespace(returncode=0, stdout=""))
+    monkeypatch.setattr(fleet_cli, "_wait_for_healthy_api", lambda *_args: None)
+    monkeypatch.setattr(
+        fleet_cli,
+        "_verify_managed_gateway_isolation",
+        lambda *args: isolation_checks.append(args),
+    )
+    monkeypatch.setattr(fleet_cli, "api_json", lambda *_args, **_kwargs: {"status": "ok"})
+
+    fleet_cli.command_init(paths, types.SimpleNamespace(network="broker", workers=2))
+
+    env = fleet_cli.load_dotenv(paths.dotenv)
+    assert env["COMPOSE_PROFILES"] == "fleet-gateway"
+    assert env["FLEET_HTTPS_MODE"] == "managed"
+    assert env["FLEET_NETWORK_BACKEND"] == "broker"
+    assert env["FLEET_WORKER_IMAGE_DIGEST"] == IMAGE
+    assert paths.gateway_config.stat().st_mode & 0o777 == 0o600
+    assert "fleet.example.test {" in paths.gateway_config.read_text(encoding="utf-8")
+    assert isolation_checks == [("https://fleet.example.test", None)]
+
+
 def test_preflight_reports_all_failures_before_mutation(tmp_path, monkeypatch, capsys):
     paths = fleet_cli.RuntimePaths(tmp_path)
     monkeypatch.setattr(fleet_cli, "_require_linux", lambda: (_ for _ in ()).throw(fleet_cli.FleetCLIError("not Linux")))
