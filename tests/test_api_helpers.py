@@ -318,6 +318,33 @@ def test_fleet_placement_reachability_requires_live_nodes_and_known_tools():
     assert exc.value.detail["error"] == "unreachable_fleet_placement"
 
 
+def test_local_placement_is_reachable_without_an_enrolled_node(monkeypatch):
+    class Conn:
+        async def fetch(self, *_args):
+            raise AssertionError("local placement must not query remote nodes")
+
+    monkeypatch.setattr(api_module, "_current_scan_worker_count_best_effort", lambda: 2)
+    asyncio.run(api_module._require_reachable_fleet_placement(
+        Conn(),
+        {"node_id": "local", "scan_tier": "smart", "requires": ["nuclei"]},
+    ))
+
+
+def test_local_placement_rejects_when_no_local_worker_is_available(monkeypatch):
+    class Conn:
+        async def fetch(self, *_args):
+            return []
+
+    monkeypatch.setattr(api_module, "_current_scan_worker_count_best_effort", lambda: 0)
+    with pytest.raises(api_module.HTTPException) as exc:
+        asyncio.run(api_module._require_reachable_fleet_placement(
+            Conn(),
+            {"node_id": "local"},
+        ))
+    assert exc.value.status_code == 422
+    assert exc.value.detail["placement"] == {"node_id": "local"}
+
+
 def test_route_capacity_maps_to_actionable_rate_limit_response():
     exc = api_module._route_capacity_http_exception(
         api_module.RouteCapacityExceeded("scan_jobs", 512)
@@ -408,6 +435,20 @@ def test_default_fleet_scan_tiers_are_all_supported_but_tools_are_bounded():
     assert set(labels["scan_tiers"]) == api_module.VALID_DAST_SCAN_TYPES
     assert "nuclei" in labels["tools"]
     assert "invented-tool" not in labels["tools"]
+
+
+def test_broker_worker_placement_labels_include_selectable_node_identity():
+    node_id = uuid.uuid4()
+    labels = api_module._broker_node_labels({
+        "id": node_id,
+        "region": "eu-west",
+        "labels": {"transport": "broker", "network": "lab"},
+    })
+    assert labels["node_id"] == str(node_id)
+    assert labels["region"] == "eu-west"
+    assert labels["transport"] == "broker"
+    assert labels["network"] == "lab"
+    assert "nuclei" in labels["tools"]
 
 
 def test_public_fleet_health_omits_build_and_worker_telemetry(monkeypatch):

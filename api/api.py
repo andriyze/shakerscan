@@ -30,7 +30,7 @@ from collections import Counter
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional, Sequence, Union
+from typing import Any, Mapping, Optional, Sequence, Union
 from zoneinfo import ZoneInfo
 
 import asyncpg
@@ -3372,7 +3372,7 @@ class ScanOptions(BaseModel):
     zero_rediscovery: bool = False
     placement: Optional[dict[str, Any]] = Field(
         default=None,
-        description="Fleet placement constraints: region, egress_group, network, scan_tier, data_residency, node_id, and required tools.",
+        description="Execution placement constraints: use node_id='local' for control-plane workers, a fleet node UUID for one remote node, or region/egress/network/tool constraints.",
     )
 
     @field_validator("placement", mode="before")
@@ -8048,7 +8048,19 @@ def _broker_node_labels(node: dict[str, Any]) -> dict[str, Any]:
             labels = json.loads(labels)
         except json.JSONDecodeError:
             labels = {}
-    return labels if isinstance(labels, dict) else {}
+    labels = dict(labels) if isinstance(labels, dict) else {}
+    # Broker workers do not subscribe to Redis routes themselves; the control
+    # plane leases on their behalf. Give that broker-side matcher the same
+    # canonical identity/capability labels used by overlay workers and
+    # placement admission, including the node UUID selected by the user.
+    labels["node_id"] = str(node.get("id") or "").strip().lower()
+    if node.get("region"):
+        labels["region"] = str(node.get("region"))
+    if "tools" not in labels and "capabilities" not in labels:
+        labels["tools"] = sorted(DEFAULT_WORKER_TOOL_COMMANDS)
+    if "scan_tiers" not in labels:
+        labels["scan_tiers"] = sorted(VALID_DAST_SCAN_TYPES)
+    return labels
 
 
 def _broker_target_key(value: Any) -> str:
@@ -14300,9 +14312,26 @@ def _fleet_node_placement_labels(row: Any, _placement: dict[str, Any]) -> dict[s
     return labels
 
 
+def _local_worker_placement_labels() -> dict[str, Any]:
+    """Placement identity guaranteed by the bundled control-plane worker image."""
+    return {
+        "node_id": "local",
+        "transport": "local",
+        "tools": sorted(DEFAULT_WORKER_TOOL_COMMANDS),
+        "scan_tiers": sorted(VALID_DAST_SCAN_TYPES),
+    }
+
+
 async def _require_reachable_fleet_placement(conn: Any, placement: dict[str, Any]) -> None:
     normalized = normalize_placement(placement)
     if not normalized:
+        return
+    local_workers = _current_scan_worker_count_best_effort()
+    if (
+        local_workers is not None
+        and local_workers > 0
+        and worker_matches_placement(_local_worker_placement_labels(), normalized)
+    ):
         return
     stale_after = max(60, _int_env("FLEET_HEARTBEAT_TIMEOUT_SECONDS", HEARTBEAT_TIMEOUT_MINUTES * 60))
     rows = await conn.fetch(
@@ -49172,6 +49201,65 @@ def compute_fleet_summary(worker_list: list[dict]) -> dict[str, Any]:
     }
 
 
+def compute_execution_capacity(
+    local_summary: Mapping[str, Any],
+    fleet_nodes: list[Mapping[str, Any]],
+    *,
+    remote_inventory_available: bool = True,
+) -> dict[str, Any]:
+    """Combine control-plane-local and schedulable remote worker capacity.
+
+    ``count`` remains the local Docker worker count for backwards-compatible
+    local scaling. This companion summary makes the actual execution pool
+    explicit without pretending that a stale, draining, or drifted remote node
+    is available to accept a scan.
+    """
+    active_nodes = [node for node in fleet_nodes if node.get("status") != "disabled"]
+    available_nodes = [
+        node for node in active_nodes
+        if node.get("status") == "healthy"
+        and not bool(node.get("drain"))
+        and bool(node.get("state_current"))
+        and bool(node.get("image_current"))
+        and int(node.get("active_worker_count") or 0) > 0
+    ]
+    local_running = max(0, int(local_summary.get("count") or 0))
+    local_available = max(0, int(local_summary.get("current_count") or 0))
+    remote_running = sum(max(0, int(node.get("active_worker_count") or 0)) for node in active_nodes)
+    remote_available = sum(
+        max(0, int(node.get("active_worker_count") or 0)) for node in available_nodes
+    )
+    return {
+        "local_running": local_running,
+        "local_available": local_available,
+        "remote_running": remote_running,
+        "remote_available": remote_available,
+        "total_running": local_running + remote_running,
+        "total_available": local_available + remote_available,
+        "remote_nodes": len(active_nodes),
+        "remote_nodes_available": len(available_nodes),
+        "remote_inventory_available": remote_inventory_available,
+    }
+
+
+async def _execution_capacity_snapshot(local_summary: Mapping[str, Any]) -> dict[str, Any]:
+    stale_after = max(60, _int_env("FLEET_HEARTBEAT_TIMEOUT_SECONDS", HEARTBEAT_TIMEOUT_MINUTES * 60))
+    try:
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch("SELECT * FROM nodes ORDER BY created_at ASC")
+        nodes = [
+            _public_fleet_node(row, stale_after_seconds=stale_after)
+            for row in rows
+        ]
+        return compute_execution_capacity(local_summary, nodes)
+    except Exception:
+        return compute_execution_capacity(
+            local_summary,
+            [],
+            remote_inventory_available=False,
+        )
+
+
 @app.get("/workers")
 async def get_workers():
     """Get current worker count and status via Docker socket API."""
@@ -49300,6 +49388,7 @@ async def get_workers():
                 pass
 
         summary = compute_fleet_summary(worker_list)
+        execution_capacity = await _execution_capacity_snapshot(summary)
         max_allowed_workers = _compute_max_allowed_workers()
         # Refresh the per-scan active-scan concurrency cap for workers.
         max_active_scans = _publish_max_active_scans(max_allowed=max_allowed_workers)
@@ -49313,6 +49402,7 @@ async def get_workers():
             "max_active_scans": max_active_scans,
             "expected_build_fingerprint": expected_fp,
             "expected_scanner_version": expected_version,
+            "execution_capacity": execution_capacity,
         }
     except FileNotFoundError:
         return {
@@ -49321,6 +49411,9 @@ async def get_workers():
             "workers": [],
             "max_allowed": _compute_max_allowed_workers(),
             "max_active_scans": _compute_max_active_scans(),
+            "execution_capacity": compute_execution_capacity(
+                {"count": 0, "current_count": 0}, [], remote_inventory_available=False
+            ),
         }
     except Exception:
         logger.exception("Failed to query Docker worker fleet")
@@ -49330,6 +49423,9 @@ async def get_workers():
             "workers": [],
             "max_allowed": _compute_max_allowed_workers(),
             "max_active_scans": _compute_max_active_scans(),
+            "execution_capacity": compute_execution_capacity(
+                {"count": 0, "current_count": 0}, [], remote_inventory_available=False
+            ),
         }
 
 

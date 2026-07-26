@@ -10814,8 +10814,12 @@ def _worker_placement_labels() -> dict[str, Any]:
         labels = {}
     labels = dict(labels)
     node_id = str(os.environ.get("SHAKERSCAN_NODE_ID") or "").strip().lower()
-    if node_id:
-        labels["node_id"] = node_id
+    # The control plane is a real execution location even though it is not an
+    # enrolled remote node. A stable reserved identity lets users explicitly
+    # keep a scan local while preserving the same routed-queue machinery and
+    # failover between all local worker replicas.
+    labels["node_id"] = node_id or "local"
+    labels.setdefault("transport", "fleet" if node_id else "local")
     detected_tools = {
         tool for tool, command in DEFAULT_WORKER_TOOL_COMMANDS.items() if shutil.which(command)
     }

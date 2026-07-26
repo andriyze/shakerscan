@@ -104,6 +104,51 @@ def test_empty_fleet_not_uniform():
     assert s["fleet_uniform"] is False
 
 
+def test_execution_capacity_separates_local_remote_and_unavailable_nodes():
+    local = {"count": 2, "current_count": 1}
+    nodes = [
+        {
+            "status": "healthy",
+            "drain": False,
+            "state_current": True,
+            "image_current": True,
+            "active_worker_count": 3,
+        },
+        {
+            "status": "stale",
+            "drain": False,
+            "state_current": True,
+            "image_current": True,
+            "active_worker_count": 4,
+        },
+        {
+            "status": "healthy",
+            "drain": True,
+            "state_current": True,
+            "image_current": True,
+            "active_worker_count": 2,
+        },
+        {
+            "status": "disabled",
+            "active_worker_count": 9,
+        },
+    ]
+
+    capacity = api_module.compute_execution_capacity(local, nodes)
+
+    assert capacity == {
+        "local_running": 2,
+        "local_available": 1,
+        "remote_running": 9,
+        "remote_available": 3,
+        "total_running": 11,
+        "total_available": 4,
+        "remote_nodes": 3,
+        "remote_nodes_available": 1,
+        "remote_inventory_available": True,
+    }
+
+
 def test_worker_freshness_snapshot_marks_running_pending_as_unsafe(monkeypatch):
     containers = [
         {"Id": "aaa111", "Names": ["/shakerscan-worker-1"], "State": "running"},

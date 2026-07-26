@@ -96,6 +96,18 @@ def test_worker_runtime_identity_preserves_configured_node_and_unique_replica(mo
     assert worker._worker_runtime_identity() == "node-123-worker:fallback-hos"
 
 
+def test_local_worker_has_a_stable_placement_identity(monkeypatch):
+    monkeypatch.delenv("SHAKERSCAN_NODE_ID", raising=False)
+    monkeypatch.delenv("SHAKERSCAN_NODE_LABELS_JSON", raising=False)
+    worker._worker_placement_labels.cache_clear()
+    try:
+        labels = worker._worker_placement_labels()
+        assert labels["node_id"] == "local"
+        assert labels["transport"] == "local"
+    finally:
+        worker._worker_placement_labels.cache_clear()
+
+
 class _AcquireContext:
     def __init__(self, conn):
         self.conn = conn
