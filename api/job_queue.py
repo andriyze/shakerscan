@@ -15,7 +15,6 @@ import os
 from dataclasses import dataclass
 from typing import Any, Iterable
 
-
 CONSUMER_GROUP = os.environ.get("SHAKERSCAN_QUEUE_CONSUMER_GROUP", "shakerscan-workers")
 STREAM_SUFFIX = ":leased"
 PAYLOAD_FIELD = "payload"
@@ -437,13 +436,28 @@ def lease_job(
                 reclaimed=True,
             )
 
-    response = redis_client.xreadgroup(
-        CONSUMER_GROUP,
-        consumer_name,
-        {stream_key(queue_name): ">" for queue_name in queues},
-        count=1,
-        block=max(1, block_ms),
-    )
+    try:
+        response = redis_client.xreadgroup(
+            CONSUMER_GROUP,
+            consumer_name,
+            {stream_key(queue_name): ">" for queue_name in queues},
+            count=1,
+            block=max(1, block_ms),
+        )
+    except Exception as exc:
+        is_timeout = (
+            exc.__class__.__name__ == "TimeoutError"
+            and (
+                exc.__class__.__module__ == "builtins"
+                or exc.__class__.__module__.startswith("redis.")
+            )
+        )
+        if not is_timeout:
+            raise
+        # redis-py can expire its socket at the same boundary as a blocking
+        # XREADGROUP. For a lease long-poll this is the ordinary "no work"
+        # outcome, not an API failure; the caller will open the next poll.
+        return None
     messages = _decode_messages(response)
     if not messages:
         # Drain pre-upgrade list jobs without letting the blocking legacy read

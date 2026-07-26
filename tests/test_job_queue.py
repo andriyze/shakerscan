@@ -183,6 +183,11 @@ class FakeStreams:
         raise AssertionError("unknown Lua script")
 
 
+class LongPollTimeoutStreams(FakeStreams):
+    def xreadgroup(self, group, consumer, streams, count, block):
+        raise TimeoutError("blocking read reached its socket timeout")
+
+
 def test_stream_job_is_leased_heartbeated_and_acknowledged():
     redis = FakeStreams()
     payload = {"job_id": "job-1", "scan_id": "scan-1"}
@@ -204,6 +209,18 @@ def test_stream_job_is_leased_heartbeated_and_acknowledged():
     assert pending_depth(redis, "scan_jobs") == 0
     assert acknowledge_lease(redis, lease) is True
     assert queue_payloads(redis, "scan_jobs") == []
+
+
+def test_stream_long_poll_socket_timeout_is_an_empty_lease():
+    lease = lease_job(
+        LongPollTimeoutStreams(),
+        ["scan_jobs"],
+        consumer_name="broker-node:worker-1",
+        block_ms=20_000,
+        visibility_timeout_ms=60_000,
+    )
+
+    assert lease is None
 
 
 def test_stale_delivery_is_reclaimed_and_attempt_is_visible():
