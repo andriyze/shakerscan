@@ -9,7 +9,9 @@ The Linux `fleet init` / `fleet join-token` / `join` WireGuard and HTTPS-broker 
 implemented, including automatic restricted public HTTPS for broker control planes. Durable
 per-scan worker/node attribution, current-vs-desired node drift derivation, fleet summary, and recent
 per-node activity APIs are implemented. The Fleet operations UI is implemented with health/drift,
-capacity, current-work, per-node scaling, drain/resume, and revoke controls. The physical two-VPS
+separate local/remote capacity, current-work, per-node scaling, drain/resume, and revoke controls.
+Scan submission exposes automatic, control-plane-local, and specific-remote-node execution location.
+The physical two-VPS
 proof is not complete. Redis Stream lease/heartbeat/ack/reclaim delivery is implemented. The
 general artifact manifest, deterministic result/checkpoint/diagnostic upload, referenced screenshot
 centralization, hash-verified proxy download, cross-node stale recovery, fleet-worker fail-closed
@@ -49,8 +51,8 @@ becoming stale prose. For product priority and phased order, see
 | WireGuard/CLI host provisioning | **Built, awaiting physical two-VPS acceptance** — aggregated preflight before mutation, tag-to-digest image resolution, route/port collision checks, automatic standalone backup, persistent identity, CA/server certificates, overlay/data binding, automatic or explicitly manual peer reconciliation, actionable TLS/handshake diagnostics, public HTTPS enrollment, overlay proof, one-time bundle persistence, worker-only startup | `scripts/fleet_cli.py`; `scanner.sh fleet`; `scanner.sh join` |
 | Per-node execution attribution and fleet rollup | **Built** — scan/shard rows record the executing node and unique worker replica; revoked nodes fail closed and re-enqueue refused work; node API derives state/image drift and exposes recent activity | `scans.executing_node_id`; `worker.py` `_attribute_job_execution`; `GET /fleet/nodes`; `GET /fleet/nodes/{id}/activity` |
 | Fleet-wide scaling and node audit trail | **Built** — one operator request distributes an exact worker total across healthy schedulable nodes using reported CPU/worker weights and optional per-node caps. State changes, join, credential rotation, bundle delivery, heartbeat transitions, rollout completion, broker leases/results, and revocation create bounded credential-free node events. Every scan snapshots node, worker build/image, egress, transport, and credential scope at execution time. | `POST /fleet/scale`; `fleet.py` `distribute_worker_count`; `GET /fleet/nodes/{id}/events`; `fleet_node_events`; `scans.execution_context` |
-| Fleet UI | **Built** — unified health/capacity/drift view (including an explicit derived unhealthy state for a heartbeating node with reconciliation errors and a first-WireGuard-connection warning), recent attributed work, desired worker scaling, graceful drain/resume, digest-pinned rollout, revoke confirmation, placement labels, and session-only remote operator credential handling | `ui/src/app/fleet/page.tsx`; sidebar `/fleet` |
-| Capability/region/egress placement | **Built** — scan options accept normalized placement constraints; jobs enter deterministic capability Streams; workers dynamically subscribe only to routes matching their node/region/network/residency/tier/tool labels. Equivalent eligible workers retain normal lease failover. Fleet join persists labels and the UI exposes both submission and node labels. | `job_queue.py` `routed_queue_name`, `qualified_route_queues`; `ScanOptions.placement`; `fleet_cli.py`; `/scan/new`; `/fleet` |
+| Fleet UI | **Built** — unified remote-node health/capacity/drift view (including an explicit derived unhealthy state for a heartbeating node with reconciliation errors and a first-WireGuard-connection warning), separate local/remote/total available-worker capacity, recent attributed work, desired remote-worker scaling, graceful drain/resume, digest-pinned rollout, revoke confirmation, placement labels, and session-only remote operator credential handling | `ui/src/app/fleet/page.tsx`; `GET /workers` `execution_capacity`; sidebar `/fleet` |
+| Capability/region/egress placement | **Built** — scan options accept normalized placement constraints; jobs enter deterministic capability Streams; workers dynamically subscribe only to routes matching their node/region/network/residency/tier/tool labels. `node_id=local` selects control-plane workers; a Fleet UUID selects any healthy replica on that remote node. Broker-side leasing adds the canonical node identity before matching, so broker and overlay selection are equivalent. Equivalent eligible workers retain normal lease failover. Fleet join persists labels and the UI exposes execution location as a first-class scan decision plus advanced constraints. | `job_queue.py` `routed_queue_name`, `qualified_route_queues`; `ScanOptions.placement`; `_broker_node_labels`; `_worker_placement_labels`; `/scan/new`; `/fleet` |
 | HTTPS broker for zero-trust nodes | **Built** — `--transport broker` enrolls an outbound-only node without WireGuard, Redis, PostgreSQL, or object-store credentials. Automatic HTTPS mode can provision a digest-pinned Caddy gateway with public-CA certificate renewal, a worker-route allowlist, post-start isolation checks, and rollback. Node/job-scoped HTTPS leases use hashed single-job tokens, Stream ownership heartbeat/reclaim, bounded delivery, global admission and root-domain reservations, progress/log forwarding, cancellation, lease-bound proxy artifact uploads, immutable result hashes, and idempotent control-plane ingestion for normal and shard scans. | `broker_worker.py`; `docker-compose.broker-worker.yml`; `fleet-gateway`; `/fleet/broker/*`; `broker_job_leases`; `broker_job_results` |
 | Physical acceptance automation | **Built, awaiting execution on two actual VPSs** — one command validates node/current-image health, heartbeat/capacity, artifact-store writes, public Redis/PostgreSQL isolation, an isolated Redis server-time lease loss/reclaim/heartbeat/ack sequence, duplicate completion behavior, passive cross-node parallel shards, execution snapshots, finding dedupe, and central result/artifact manifests. It emits a content-free hashed receipt. | `shakerscan fleet accept`; `scripts/fleet_acceptance.py`; `tests/test_fleet_acceptance.py` |
 
@@ -245,7 +247,7 @@ worker-count changes.
 | Job queue | Scan/retest jobs use Redis Streams consumer groups with ack, heartbeat, bounded reclaim, and a legacy-list drain bridge. | A worker on another VPS can participate if it can reach the same queue; hard loss is reclaimed after the visibility timeout. |
 | Finding writes | Findings are deduped with a database uniqueness constraint and conflict-safe inserts. | Concurrent workers can scan the same target without inventing a distributed lock. |
 | Parallel scan plan | Parent, shard, and merge jobs are implemented on the queue. | Shard jobs are naturally host-agnostic when remote workers can safely reach the shared queue and state. |
-| Worker scaling | Local `POST /workers` remains for standalone; fleet desired state scales/drains each remote node through its pull agent. | Graceful rolling image rollout and capacity-weighted aggregate fleet count distribution are built. |
+| Worker scaling | Local `POST /workers` scales only control-plane workers; fleet desired state scales/drains each remote node through its pull agent. `GET /workers.execution_capacity` reports local, remote, and total running/available capacity without changing the local `count` compatibility field. | Graceful rolling image rollout and capacity-weighted aggregate remote-fleet count distribution are built; UI controls label the two scopes separately. |
 | Evidence | Standalone retains `./results`; fleet workers upload to S3/MinIO and commit a durable manifest before completion. | The control plane can proxy artifacts from every node without a shared filesystem. |
 | Queue reliability | Stream messages remain pending while leased, heartbeat during execution, are acknowledged only after successful dispatch, and are reclaimed after owner loss. | The acceptance runner automates isolated loss/reclaim and duplicate completion; it must still be executed on the release fleet for a physical production claim. |
 | Networking | The local stack binds API/UI to the configured host; remote mode already parameterizes public/private bind addresses. | Built-in WireGuard is the default owned-fleet overlay; fleet init binds Redis/Postgres privately and acceptance verifies their public ports are closed. |
@@ -656,6 +658,8 @@ Build the fleet layer:
    request metering off for authorized local labs.
 6. **Routing and affinity:** **built.** Deterministic capability Streams place jobs by region,
    egress group, private-network reachability, scan tier, data residency, node, and required tools.
+   The reserved `local` node identity selects control-plane workers; remote UUID selection retains
+   replica failover within the selected node and works identically for broker and overlay transport.
 7. **Fleet operations:** **built.** Drain, disable, rolling image upgrade, version mismatch
    refusal, per-node audit logs, and a fleet-level worker count distributed across healthy nodes by
    reported capacity are available through the API and Fleet UI.
@@ -815,6 +819,8 @@ Production placement uses job labels and node labels.
 
 Common routing labels:
 
+- `node_id=local` (control-plane workers);
+- `node_id=<fleet UUID>` (one remote node);
 - `region=eu`;
 - `egress_group=residential-lab`;
 - `network=customer-x-vpn`;

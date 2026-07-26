@@ -24,6 +24,18 @@ The control plane owns targets, scans, findings, the queue, scheduling, and arti
 only execute jobs assigned by that control plane. A scan can be placed on a particular node or class
 of nodes, and parallel scan shards can execute across several nodes.
 
+The UI uses these terms deliberately:
+
+| Term | Meaning |
+|---|---|
+| **Local worker** | A scanner worker running on the control-plane machine. |
+| **Remote node** | A joined Linux machine with one node identity and heartbeat. |
+| **Remote worker** | A replaceable scanner process/slot running inside a remote node. |
+
+Users select an execution **location** (automatic, the local control plane, or a remote node), not
+an individual worker process. Worker processes can be replaced during scaling or upgrades; keeping
+selection at node level preserves failover between replicas on the selected machine.
+
 ## Choose a Transport
 
 | Transport | Use it when | Worker receives | Network requirement |
@@ -317,6 +329,28 @@ A ready fleet should show:
 - recent heartbeats without `last_error`;
 - the expected image digest and placement labels.
 
+The Dashboard worker indicator separates available local and remote workers. The Fleet page shows
+remote-node availability, available/desired remote workers, local control-plane workers, and total
+execution capacity. `GET /workers` exposes the same aggregate under `execution_capacity`:
+
+```json
+{
+  "execution_capacity": {
+    "local_running": 1,
+    "local_available": 1,
+    "remote_running": 3,
+    "remote_available": 2,
+    "total_available": 3,
+    "remote_nodes": 2,
+    "remote_nodes_available": 1
+  }
+}
+```
+
+"Available" excludes stale, draining, state-drifted, image-drifted, and zero-worker remote nodes.
+The top-level `/workers.count` remains the local Docker worker count so existing local scaling
+clients remain compatible.
+
 Do not benchmark or rely on scan coverage while `/workers` reports stale or pending builds.
 
 ## 5. Scale and Operate Nodes
@@ -324,10 +358,11 @@ Do not benchmark or rely on scan coverage while `/workers` reports stale or pend
 The Fleet UI is the normal operating surface. It supports fleet-wide and per-node scaling,
 drain/resume, rolling image updates, activity, lifecycle events, and revocation.
 
-### Set one fleet-wide worker target
+### Set one remote-fleet worker target
 
-The control plane distributes the requested total across healthy, non-draining nodes according to
-reported capacity:
+The control plane distributes the requested remote-worker total across healthy, non-draining nodes
+according to reported capacity. Scale local control-plane workers separately from the Dashboard or
+`POST /workers`:
 
 ```bash
 fleet_api -X POST http://127.0.0.1:8080/fleet/scale \
@@ -375,9 +410,17 @@ and `state_current` before updating the next node.
 
 ## 6. Route a Scan
 
-On **New Scan**, open **Advanced Options**, enable **Fleet Placement**, and optionally select a node,
-region, network, egress group, data-residency label, or required tools. A routed scan waits for an
-eligible healthy worker rather than silently running on the wrong node.
+On **New Scan**, choose **Execution location**:
+
+- **Automatic** lets any available local or remote worker execute the scan and provides the widest
+  failover.
+- **Control plane (local)** keeps the scan on local workers.
+- **Specific remote node** keeps it on any healthy worker replica within that node.
+
+Advanced placement constraints can additionally require a region, network, egress group,
+data-residency label, scan tier, or tool. A routed scan waits for an eligible healthy worker rather
+than silently running in the wrong place. Unavailable remote nodes are visible but cannot be chosen.
+Remote inventory requires the session-only operator token entered on the Fleet page.
 
 API example:
 
@@ -398,12 +441,36 @@ curl -sS -X POST http://127.0.0.1:8080/scans \
   }'
 ```
 
+Keep a scan on the control plane:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8080/scans \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "target":"https://authorized.example",
+    "options":{"scan_type":"standard","placement":{"node_id":"local"}}
+  }'
+```
+
+Select one remote node by its Fleet UUID:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8080/scans \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "target":"https://authorized.example",
+    "options":{"scan_type":"standard","placement":{"node_id":"<remote-node-uuid>"}}
+  }'
+```
+
 Placement can use `node_id`, `region`, `network`, `egress_group`, `data_residency`, `scan_tier`, and
-`requires`. Placement restricts execution location; it does not grant authorization to scan a
-target. A node with no `--scan-tier` flags supports every built-in scan tier. The standard worker
+`requires`. `node_id=local` is the reserved control-plane location; every other `node_id` is an
+enrolled remote-node UUID. HTTPS broker leasing and WireGuard workers use the same canonical node
+identity, so node selection behaves consistently across transports. Placement restricts execution
+location; it does not grant authorization to scan a target. A node with no `--scan-tier` flags supports every built-in scan tier. The standard worker
 image automatically advertises its packaged tool baseline; custom images must use `--capability`
-for additional tools. Admission considers only non-draining nodes with active workers and a recent
-heartbeat. Continue to use only targets you are authorized to test.
+for additional tools. Admission considers current local workers plus non-draining remote nodes with
+active workers and a recent heartbeat. Continue to use only targets you are authorized to test.
 
 ## 7. Run Physical Acceptance
 
