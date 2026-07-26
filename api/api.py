@@ -702,6 +702,11 @@ def _decode_json_value(value: Any) -> Any:
     return value
 
 
+def _json_object(value: Any) -> dict[str, Any]:
+    decoded = _decode_json_value(value)
+    return dict(decoded) if isinstance(decoded, Mapping) else {}
+
+
 def _decode_jsonb_scalar(value: Any) -> Any:
     """Decode a JSONB column value that may be a SCALAR (number/bool/quoted string) as well as an
     object/array. asyncpg returns jsonb as raw text; the general :func:`_decode_json_value` only parses
@@ -14837,6 +14842,7 @@ async def list_scans(
         scan = dict(row)
         if scan.get("options") is not None:
             scan["options"] = _sanitize_scan_options(scan["options"])
+        scan["execution_context"] = _json_object(scan.get("execution_context"))
         # Drop the heavy full report from list rows. The Scans page only needs
         # summary columns (status/grade/score/findings_count); returning the full
         # result for every row made this response ~9 MB for 50 scans (slow load +
@@ -14888,6 +14894,7 @@ async def get_scan(scan_id: str, verified_only: bool = False):
         """, uuid.UUID(scan_id))
 
     result = dict(scan)
+    result['execution_context'] = _json_object(result.get('execution_context'))
     if result.get('result') is not None:
         result['result'] = _normalize_scan_result_for_api(_decode_json_value(result['result']))
     verification_overrides = _scan_result_verification_overrides(result.get('result'))
@@ -14926,6 +14933,8 @@ async def get_scan(scan_id: str, verified_only: bool = False):
                 ORDER BY shard_index
         """, uuid.UUID(scan_id))
         shards = [row_to_dict(row) for row in shard_rows]
+        for shard in shards:
+            shard['execution_context'] = _json_object(shard.get('execution_context'))
         _attach_parallel_shard_rollup(result, shards)
     return result
 

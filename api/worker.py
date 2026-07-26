@@ -6377,25 +6377,27 @@ async def persist_scan_artifact_bytes(
     shard_index: int | None = None,
     content_type: str = "application/octet-stream",
     metadata: dict[str, Any] | None = None,
+    executing_node_id: str | None = None,
     conn: Any | None = None,
 ) -> dict[str, Any]:
     """Upload bytes and commit the matching manifest as one worker contract."""
-    if parent_scan_id is None and shard_index is None:
+    if (parent_scan_id is None and shard_index is None) or executing_node_id is None:
         try:
             if conn is not None:
                 lineage = await conn.fetchrow(
-                    "SELECT parent_scan_id, shard_index FROM scans WHERE id=$1",
+                    "SELECT parent_scan_id, shard_index, executing_node_id FROM scans WHERE id=$1",
                     uuid.UUID(scan_id),
                 )
             else:
                 async with db_pool.acquire() as lineage_conn:
                     lineage = await lineage_conn.fetchrow(
-                        "SELECT parent_scan_id, shard_index FROM scans WHERE id=$1",
+                        "SELECT parent_scan_id, shard_index, executing_node_id FROM scans WHERE id=$1",
                         uuid.UUID(scan_id),
                     )
             if lineage:
                 parent_scan_id = str(lineage["parent_scan_id"]) if lineage["parent_scan_id"] else None
                 shard_index = lineage["shard_index"]
+                executing_node_id = str(lineage.get("executing_node_id") or "") or None
         except Exception:
             if artifact_remote_required():
                 raise
@@ -6427,6 +6429,7 @@ async def persist_scan_artifact_bytes(
             artifact_key=key,
             descriptor=descriptor,
             metadata=metadata,
+            executing_node_id=executing_node_id,
         )
 
     if conn is not None:
@@ -6545,6 +6548,29 @@ async def persist_result_artifact(
     durable manifest cannot be committed. Standalone mode keeps the historical
     local result path and treats a manifest failure as degraded compatibility.
     """
+    executing_node_id: str | None = None
+    try:
+        if conn is not None:
+            lineage = await conn.fetchrow(
+                "SELECT parent_scan_id, shard_index, executing_node_id FROM scans WHERE id=$1",
+                uuid.UUID(scan_id),
+            )
+        else:
+            async with db_pool.acquire() as lineage_conn:
+                lineage = await lineage_conn.fetchrow(
+                    "SELECT parent_scan_id, shard_index, executing_node_id FROM scans WHERE id=$1",
+                    uuid.UUID(scan_id),
+                )
+        if lineage:
+            parent_scan_id = parent_scan_id or (
+                str(lineage["parent_scan_id"]) if lineage["parent_scan_id"] else None
+            )
+            shard_index = shard_index if shard_index is not None else lineage["shard_index"]
+            executing_node_id = str(lineage.get("executing_node_id") or "") or None
+    except Exception:
+        if artifact_remote_required():
+            raise
+
     await centralize_referenced_artifacts(
         result,
         scan_id=scan_id,
@@ -6578,6 +6604,7 @@ async def persist_result_artifact(
                 artifact_key=artifact_key,
                 descriptor=descriptor,
                 metadata={"job_id": job_id, "canonical": True},
+                executing_node_id=executing_node_id,
             )
         if conn is not None:
             await record(conn)
@@ -7382,7 +7409,8 @@ async def process_scan_job(job_data: dict):
                         findings_count = $4,
                         completed_at = $5,
                         duration_seconds = $6,
-                        progress = 100
+                        progress = 100,
+                        current_phase = 'completed'
                     WHERE id = $7
                 """, json.dumps(result), score, grade, len(findings),
                      completed_at, duration, uuid.UUID(scan_id))

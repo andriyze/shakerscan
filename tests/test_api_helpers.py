@@ -342,6 +342,14 @@ def test_broker_result_ingest_drops_remote_execution_placement():
     assert original["options"]["placement"] == {"node_id": "remote-node"}
 
 
+def test_json_object_decodes_jsonb_strings_for_execution_context():
+    context = {"transport": "broker", "node_id": str(uuid.uuid4())}
+
+    assert api_module._json_object(json.dumps(context)) == context
+    assert api_module._json_object(context) == context
+    assert api_module._json_object(None) == {}
+
+
 def test_local_placement_is_reachable_without_an_enrolled_node(monkeypatch):
     class Conn:
         async def fetch(self, *_args):
