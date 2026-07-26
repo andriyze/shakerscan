@@ -374,3 +374,13 @@ def test_compose_passes_secret_bound_gateway_and_join_rate_limit_to_api_processe
         compose = (ROOT / compose_name).read_text()
         assert "FLEET_GATEWAY_PROXY_SECRET=${FLEET_GATEWAY_PROXY_SECRET:-}" in compose
         assert "FLEET_JOIN_RATE_LIMIT_PER_MINUTE=${FLEET_JOIN_RATE_LIMIT_PER_MINUTE:-30}" in compose
+
+
+def test_scanner_help_describes_bounded_fleet_tokens_and_safe_restart_path():
+    scanner = (ROOT / "scanner.sh").read_text()
+    assert "fleet join-token   Mint a bounded ready-to-paste worker join command" in scanner
+    assert "fleet revoke-join-token  Revoke unused enrollment-token capacity" in scanner
+    assert "fleet accept       Run physical multi-node acceptance checks" in scanner
+    assert "--max-uses 5 --transport broker" in scanner
+    assert "Use scanner.sh rather than raw 'docker compose up' so remote-access trust is re-derived." in scanner
+    assert "Mint a single-use ready-to-paste worker join command" not in scanner

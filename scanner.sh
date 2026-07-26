@@ -1494,8 +1494,10 @@ print_help() {
     echo "  gungnir <cmd>      CT monitor: start, stop, status, logs"
     echo "  fleet init [...]   Initialize a WireGuard or outbound-HTTPS broker fleet"
     echo "  fleet preflight    Validate fleet prerequisites without changing state"
-    echo "  fleet join-token   Mint a single-use ready-to-paste worker join command"
+    echo "  fleet join-token   Mint a bounded ready-to-paste worker join command"
+    echo "  fleet revoke-join-token  Revoke unused enrollment-token capacity"
     echo "  fleet reconcile    Reconcile registered workers into local WireGuard state"
+    echo "  fleet accept       Run physical multi-node acceptance checks"
     echo "  join <url> [...]   Join this Linux host as a worker-only fleet node"
     echo "  build              Build Docker images"
     echo "  rebuild [opts]     Rebuild Docker images (cached by default)"
@@ -1534,6 +1536,7 @@ print_help() {
     echo "  ./scanner.sh fleet init --endpoint fleet.example.com:51820 --public-url https://fleet.example.com"
     echo "  ./scanner.sh fleet init --network broker --public-url https://fleet.example.com"
     echo "  ./scanner.sh fleet join-token --ttl 24h"
+    echo "  ./scanner.sh fleet join-token --ttl 1h --max-uses 5 --transport broker"
     echo "  ./scanner.sh start --local            # Build locally and start"
     echo "  ./scanner.sh start -w 10              # Start with 10 workers"
     echo "  ./scanner.sh start --image-tag $(get_release_version)  # Use this release's published tag"
@@ -2256,8 +2259,10 @@ rebuild_images() {
     if [ "$REFRESH_WORKERS" -eq 1 ] && [ "${existing_workers:-0}" -gt 0 ]; then
         echo -e "${BLUE}Local-build mode recorded. Running worker containers were recreated from the rebuilt image.${NC}"
         echo -e "${BLUE}Run './scanner.sh restart' if you also need to recreate API/UI containers.${NC}"
+        echo -e "${BLUE}Use scanner.sh rather than raw 'docker compose up' so remote-access trust is re-derived.${NC}"
     else
         echo -e "${BLUE}Local-build mode recorded. Run './scanner.sh restart' to use the new local images.${NC}"
+        echo -e "${BLUE}Use scanner.sh rather than raw 'docker compose up' so remote-access trust is re-derived.${NC}"
     fi
     echo -e "${BLUE}Use './scanner.sh restart --prebuilt' only when you intentionally want Docker Hub images.${NC}"
 }
