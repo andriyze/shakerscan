@@ -574,7 +574,11 @@ none is reachable, fleet init verifies DNS and TCP 80/443, enables a digest-pinn
 generates a route-restricted configuration, and lets Caddy obtain and renew the public certificate.
 The public gateway permits only `/health`, single-use join, authenticated node state/heartbeat, and
 authenticated `/fleet/broker/*` operations; it returns 404 for the UI and operator API. Public
-health, the denylist, and artifact writes are verified after restart. Any failure restores the prior
+health is a content-minimal projection. A generated owner-only secret authenticates Caddy's HTTPS
+signal to the API without trusting forwarded headers from workers or the whole Docker network.
+Preflight and post-restart acceptance require a credential-free protected-route probe to return 401;
+public health, the denylist, and artifact writes are also verified. Enrollment attempts are bounded
+per source through Redis. Any failure restores the prior
 environment and gateway configuration and restarts the previous runtime.
 
 **5. Bootstrap response + post-overlay connection bundle.** `POST /fleet/nodes/join` returns only

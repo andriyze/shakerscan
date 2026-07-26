@@ -102,6 +102,18 @@ def fleet_operator_token(env: dict[str, str]) -> str:
     return current if len(current) >= 32 else secrets.token_urlsafe(48)
 
 
+def fleet_gateway_proxy_secret(env: dict[str, str]) -> str:
+    """Return an internal Caddy-to-API trust secret safe for an HTTP header."""
+    current = str(env.get("FLEET_GATEWAY_PROXY_SECRET") or "").strip()
+    if current:
+        if len(current) < 32 or not URL_SAFE_SECRET_RE.fullmatch(current):
+            raise FleetCLIError(
+                "FLEET_GATEWAY_PROXY_SECRET must contain at least 32 URL-safe unreserved characters"
+            )
+        return current
+    return secrets.token_urlsafe(48)
+
+
 def fleet_datastore_credentials(env: dict[str, str]) -> dict[str, str]:
     """Return strong URL-safe credentials, preserving strong operator values."""
     current_postgres = str(env.get("POSTGRES_PASSWORD") or "").strip()
@@ -399,6 +411,26 @@ def api_json(
         raise FleetCLIError(f"control plane request failed: {exc}") from exc
 
 
+def http_response(
+    base_url: str,
+    method: str,
+    path: str,
+    *,
+    ca_file: Path | None = None,
+    timeout: float = 10.0,
+) -> tuple[int, bytes]:
+    """Return a bounded response status/body, including deliberate HTTP errors."""
+    request = urllib.request.Request(f"{base_url.rstrip('/')}{path}", method=method)
+    context = ssl.create_default_context(cafile=str(ca_file)) if ca_file else ssl.create_default_context()
+    try:
+        with urllib.request.urlopen(request, timeout=timeout, context=context) as response:
+            return int(response.status), response.read(64 * 1024)
+    except urllib.error.HTTPError as exc:
+        return int(exc.code), exc.read(64 * 1024)
+    except (urllib.error.URLError, TimeoutError, ssl.SSLError, OSError) as exc:
+        raise FleetCLIError(f"public gateway request failed: {exc}") from exc
+
+
 def http_status(
     base_url: str,
     method: str,
@@ -407,18 +439,7 @@ def http_status(
     ca_file: Path | None = None,
     timeout: float = 10.0,
 ) -> int:
-    """Return an HTTPS response status, including deliberate error responses."""
-    request = urllib.request.Request(f"{base_url.rstrip('/')}{path}", method=method)
-    context = ssl.create_default_context(cafile=str(ca_file)) if ca_file else ssl.create_default_context()
-    try:
-        with urllib.request.urlopen(request, timeout=timeout, context=context) as response:
-            response.read(4096)
-            return int(response.status)
-    except urllib.error.HTTPError as exc:
-        exc.read(4096)
-        return int(exc.code)
-    except (urllib.error.URLError, TimeoutError, ssl.SSLError, OSError) as exc:
-        raise FleetCLIError(f"public gateway request failed: {exc}") from exc
+    return http_response(base_url, method, path, ca_file=ca_file, timeout=timeout)[0]
 
 
 def generate_wireguard_keypair(private_path: Path, public_path: Path) -> tuple[str, str]:
@@ -698,10 +719,12 @@ def _resolved_public_addresses(public_url: str) -> list[str]:
     return addresses
 
 
-def render_managed_caddyfile(public_url: str) -> str:
+def render_managed_caddyfile(public_url: str, proxy_secret: str) -> str:
     """Render the narrow public ingress used by HTTPS-broker workers."""
     validated = validate_https_url(public_url)
     hostname = str(urllib.parse.urlparse(validated).hostname or "")
+    if len(proxy_secret) < 32 or not URL_SAFE_SECRET_RE.fullmatch(proxy_secret):
+        raise FleetCLIError("managed gateway proxy secret is invalid")
     return f"""# Managed by ShakerScan. Local UI and operator APIs are intentionally not public.
 {hostname} {{
     encode zstd gzip
@@ -711,7 +734,11 @@ def render_managed_caddyfile(public_url: str) -> str:
         path /health
     }}
     handle @health {{
-        reverse_proxy api:8080
+        rewrite * /fleet/public-health
+        reverse_proxy api:8080 {{
+            header_up X-Forwarded-Proto https
+            header_up X-ShakerScan-Gateway-Secret {proxy_secret}
+        }}
     }}
 
     @join {{
@@ -719,7 +746,10 @@ def render_managed_caddyfile(public_url: str) -> str:
         path /fleet/nodes/join
     }}
     handle @join {{
-        reverse_proxy api:8080
+        reverse_proxy api:8080 {{
+            header_up X-Forwarded-Proto https
+            header_up X-ShakerScan-Gateway-Secret {proxy_secret}
+        }}
     }}
 
     @node_state {{
@@ -727,7 +757,10 @@ def render_managed_caddyfile(public_url: str) -> str:
         path_regexp node_state ^/fleet/nodes/[0-9a-fA-F-]+/state$
     }}
     handle @node_state {{
-        reverse_proxy api:8080
+        reverse_proxy api:8080 {{
+            header_up X-Forwarded-Proto https
+            header_up X-ShakerScan-Gateway-Secret {proxy_secret}
+        }}
     }}
 
     @node_heartbeat {{
@@ -735,12 +768,18 @@ def render_managed_caddyfile(public_url: str) -> str:
         path_regexp node_heartbeat ^/fleet/nodes/[0-9a-fA-F-]+/heartbeat$
     }}
     handle @node_heartbeat {{
-        reverse_proxy api:8080
+        reverse_proxy api:8080 {{
+            header_up X-Forwarded-Proto https
+            header_up X-ShakerScan-Gateway-Secret {proxy_secret}
+        }}
     }}
 
     @broker path /fleet/broker/*
     handle @broker {{
-        reverse_proxy api:8080
+        reverse_proxy api:8080 {{
+            header_up X-Forwarded-Proto https
+            header_up X-ShakerScan-Gateway-Secret {proxy_secret}
+        }}
     }}
 
     handle {{
@@ -977,6 +1016,23 @@ def run_init_preflight(paths: RuntimePaths, args: argparse.Namespace) -> dict[st
             hint="Fix DNS/HTTPS/firewall access; for private PKI, pass --ca-cert.",
         )
 
+    if (
+        public_url
+        and network_mode == "broker"
+        and https_mode == "external"
+        and not getattr(args, "skip_public_check", False)
+    ):
+        _run_check(
+            checks,
+            "Broker HTTPS authentication boundary",
+            lambda: _require_public_fleet_auth_boundary(public_url, enrollment_ca),
+            success="protected node route reaches HTTPS enforcement and requires authentication",
+            hint=(
+                "Configure the reverse proxy to publish the documented fleet worker routes and preserve "
+                "the verified HTTPS scheme."
+            ),
+        )
+
     if public_url and https_mode == "managed":
         if enrollment_ca is not None:
             checks.append(PreflightCheck(
@@ -1143,6 +1199,24 @@ def _require_healthy_api(public_url: str, ca_file: Path | None) -> None:
         raise FleetCLIError("public HTTPS API did not report healthy")
 
 
+def _require_public_fleet_auth_boundary(public_url: str, ca_file: Path | None) -> None:
+    probe_node = "00000000-0000-0000-0000-000000000000"
+    status, body = http_response(
+        public_url,
+        "GET",
+        f"/fleet/nodes/{probe_node}/state",
+        ca_file=ca_file,
+    )
+    try:
+        detail = str(json.loads(body or b"{}").get("detail") or "")
+    except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
+        detail = ""
+    if status != 401 or detail != "node bearer credential is required":
+        raise FleetCLIError(
+            f"protected fleet route returned HTTP {status} without the expected ShakerScan node-auth response"
+        )
+
+
 def _wait_for_healthy_api(public_url: str, ca_file: Path | None, timeout: float = 120.0) -> None:
     deadline = time.monotonic() + timeout
     last_error: Exception | None = None
@@ -1157,6 +1231,7 @@ def _wait_for_healthy_api(public_url: str, ca_file: Path | None, timeout: float 
 
 
 def _verify_managed_gateway_isolation(public_url: str, ca_file: Path | None) -> None:
+    _require_public_fleet_auth_boundary(public_url, ca_file)
     for path in ("/", "/targets", "/fleet/nodes", "/docs"):
         status = http_status(public_url, "GET", path, ca_file=ca_file)
         if status != 404:
@@ -1206,9 +1281,18 @@ def command_init(paths: RuntimePaths, args: argparse.Namespace) -> None:
             profiles.add("artifacts")
         if https_mode == "managed":
             profiles.add(CADDY_PROFILE)
+        gateway_secret = (
+            fleet_gateway_proxy_secret(env)
+            if https_mode == "managed"
+            else str(env.get("FLEET_GATEWAY_PROXY_SECRET") or "").strip()
+        )
         try:
             if https_mode == "managed":
-                atomic_write(paths.gateway_config, render_managed_caddyfile(public_url), 0o600)
+                atomic_write(
+                    paths.gateway_config,
+                    render_managed_caddyfile(public_url, gateway_secret),
+                    0o600,
+                )
             update_dotenv(paths.dotenv, {
                 "COMPOSE_PROFILES": ",".join(sorted(profiles)),
                 "FLEET_NETWORK_BACKEND": "broker",
@@ -1218,12 +1302,15 @@ def command_init(paths: RuntimePaths, args: argparse.Namespace) -> None:
                 "FLEET_PUBLIC_URL": public_url,
                 "FLEET_ALLOW_INSECURE_ENROLLMENT": "false",
                 "FLEET_OPERATOR_TOKEN": operator_token,
+                "FLEET_GATEWAY_PROXY_SECRET": gateway_secret,
                 **artifact_updates,
             })
             _run([str(scanner), "restart"], capture=False)
             _wait_for_healthy_api(public_url, enrollment_ca)
             if https_mode == "managed":
                 _verify_managed_gateway_isolation(public_url, enrollment_ca)
+            else:
+                _require_public_fleet_auth_boundary(public_url, enrollment_ca)
             artifact_health = api_json(
                 "http://127.0.0.1:8080",
                 "GET",

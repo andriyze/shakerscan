@@ -342,3 +342,19 @@ def test_standalone_datastore_credentials_are_generated_and_compose_has_no_known
         assert "${REDIS_PASSWORD:-scanner}" not in compose
         assert "POSTGRES_PASSWORD is required" in compose
         assert "REDIS_PASSWORD is required" in compose
+
+
+def test_go_tool_builder_retries_transient_network_failures_with_buildkit_caches():
+    dockerfile = (ROOT / "scanner" / "Dockerfile").read_text()
+    assert "ARG GO_INSTALL_ATTEMPTS=4" in dockerfile
+    assert "--mount=type=cache,target=/go/pkg/mod" in dockerfile
+    assert "--mount=type=cache,target=/root/.cache/go-build" in dockerfile
+    assert "until install_tools" in dockerfile
+    assert "Go module download failed" in dockerfile
+
+
+def test_compose_passes_secret_bound_gateway_and_join_rate_limit_to_api_processes():
+    for compose_name in ("docker-compose.yml", "docker-compose.release.yml"):
+        compose = (ROOT / compose_name).read_text()
+        assert "FLEET_GATEWAY_PROXY_SECRET=${FLEET_GATEWAY_PROXY_SECRET:-}" in compose
+        assert "FLEET_JOIN_RATE_LIMIT_PER_MINUTE=${FLEET_JOIN_RATE_LIMIT_PER_MINUTE:-30}" in compose

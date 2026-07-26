@@ -395,6 +395,11 @@ cd shakerscan
 Local-build mode is remembered for later starts. Use `./scanner.sh start --prebuilt` to switch
 explicitly to the published images.
 
+The source build downloads version-pinned Go scanner modules. It retries transient module-proxy or
+DNS failures four times and preserves the Go module/build cache between attempts. A repeated error
+such as `lookup proxy.golang.org ... i/o timeout` is a host/Docker DNS or internet-connectivity
+failure, not a source compilation error; restore DNS/network access and rerun the build.
+
 ### Upgrade
 
 Create a database/results/configuration backup, then re-run the installer:

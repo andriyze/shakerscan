@@ -56,12 +56,21 @@ Give the control plane a DNS name such as `scanner.example.com`, create its A/AA
 digest-pinned Caddy gateway and obtains and renews a public certificate when that URL does not
 already work. Open inbound TCP 80 and 443 in the VPS firewall and cloud security group. Only health,
 single-use enrollment, authenticated node state/heartbeat, and authenticated broker routes are
-published. The UI and operator API remain on loopback and are not made public.
+published. The built-in gateway's public `/health` returns only `{"status":"healthy"}` or
+`degraded`; build identity and worker counts remain local. The UI and operator API remain on
+loopback and are not made public.
 
 If an existing reverse proxy already provides valid HTTPS, ShakerScan detects and reuses it. Select
 `--https-mode external` to require that topology or `--https-mode managed` to require the built-in
 gateway. Managed HTTPS is currently for broker fleets; WireGuard enrollment continues to use an
 operator-provided HTTPS endpoint.
+
+An external proxy must forward every documented worker route and preserve the HTTPS trust boundary.
+`fleet preflight` verifies this by requesting a protected node route without credentials and requiring
+HTTP 401. If the proxy uses plaintext HTTP upstream, set the same owner-only
+`FLEET_GATEWAY_PROXY_SECRET` in ShakerScan and have the proxy overwrite
+`X-ShakerScan-Gateway-Secret` with that value and `X-Forwarded-Proto` with `https`. Never trust
+forwarded headers from every Docker-network caller.
 
 `fleet init` runs a complete preflight before changing state. It checks the host, dependencies,
 Docker Compose, HTTPS/certificate verification, worker image, ports, overlay routes, enrollment
@@ -78,6 +87,10 @@ derives the installed scanner image and persists its immutable digest automatica
 `--worker-image registry.example/shakerscan:tag` only when remote nodes should run a custom worker
 build; ShakerScan resolves the tag once and stores the digest. You may also supply
 `registry.example/shakerscan@sha256:<64 hexadecimal characters>` directly.
+
+Public enrollment is limited to 30 attempts per source address per minute by default. Override it
+with `FLEET_JOIN_RATE_LIMIT_PER_MINUTE` when a controlled provisioning workflow needs a different
+bounded rate.
 
 When converting a running standalone control plane for the first time, `fleet init` automatically
 runs `shakerscan backup` before writing fleet configuration. Initialization stops if that backup
@@ -358,7 +371,10 @@ curl -sS -X POST http://127.0.0.1:8080/scans \
 
 Placement can use `node_id`, `region`, `network`, `egress_group`, `data_residency`, `scan_tier`, and
 `requires`. Placement restricts execution location; it does not grant authorization to scan a
-target. Continue to use only targets you are authorized to test.
+target. A node with no `--scan-tier` flags supports every built-in scan tier. The standard worker
+image automatically advertises its packaged tool baseline; custom images must use `--capability`
+for additional tools. Admission considers only non-draining nodes with active workers and a recent
+heartbeat. Continue to use only targets you are authorized to test.
 
 ## 7. Run Physical Acceptance
 
@@ -410,9 +426,10 @@ again. Do not copy shared credentials or weaken the delivery gate.
 | WireGuard join times out after enrollment | Read the endpoint/handshake/interface diagnostics printed by `join`; allow inbound UDP and run `shakerscan fleet reconcile` if automatic reconciliation was disabled. The Fleet UI marks nodes awaiting their first WireGuard connection. |
 | `fleet CA is not configured` | Overlay state must contain the enrolled CA at `.shakerscan-fleet/node/ca.crt`. Do not switch it to system trust; revoke and rejoin if state is incomplete. |
 | Broker reports certificate verification failure | Confirm the public certificate chain and hostname. Supply the correct private CA with `--ca-cert` when applicable. Never disable TLS verification. |
+| Broker preflight expects HTTP 401 | The proxy does not publish the protected node route or the API cannot authenticate its HTTPS signal. Use managed HTTPS or configure the external proxy trust secret described above. |
 | Node is `stale` | Check the node-agent container, host clock, DNS/network reachability, and its `last_error`. A stale node is excluded from fleet-wide scaling. |
 | State or image drift persists | Inspect node-agent logs, Docker pull access, local disk/memory, and the digest. A mutable image tag is invalid. |
-| Routed scan remains pending | Confirm at least one healthy node matches every placement constraint and supports the requested scan tier/tools. |
+| Routed scan remains pending | Confirm at least one recently heartbeating, non-draining node with active workers matches every placement constraint and supports the requested scan tier/tools. |
 | Bundle retry returns a conflict | The one-time response was already consumed. Revoke and re-enroll the incomplete node. |
 | Fleet API returns `403` remotely | Use HTTPS and the control plane's operator token. Binding a host port to loopback does not authenticate Docker-network callers. |
 | Redis/PostgreSQL is reachable publicly | Treat this as a deployment failure. Close the ports immediately and rerun physical preflight acceptance. |

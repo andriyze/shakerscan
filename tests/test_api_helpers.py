@@ -165,11 +165,16 @@ from scan_verification_state import scan_time_verification_fields  # noqa: E402
 sys.path.pop(0)
 
 
-def _fleet_request(*, host: str, scheme: str = "https", authorization: str = ""):
+def _fleet_request(
+    *, host: str, scheme: str = "https", authorization: str = "", headers: dict | None = None
+):
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["authorization"] = authorization
     return types.SimpleNamespace(
         client=types.SimpleNamespace(host=host),
         url=types.SimpleNamespace(scheme=scheme),
-        headers={"authorization": authorization} if authorization else {},
+        headers=request_headers,
     )
 
 
@@ -256,13 +261,17 @@ def test_server_side_fleet_lease_probe_rejects_unauthenticated_remote_call(monke
     assert exc.value.status_code == 403
 
 
-def test_fleet_placement_reachability_allows_unknown_tools_but_rejects_impossible_constraints():
+def test_fleet_placement_reachability_requires_live_nodes_and_known_tools():
     class Conn:
         def __init__(self, rows):
             self.rows = rows
 
         async def fetch(self, query, *args):
             assert "FROM nodes" in query
+            assert "last_heartbeat_at" in query
+            assert "COALESCE(drain, false) = false" in query
+            assert "COALESCE(active_worker_count, 0) > 0" in query
+            assert args == (300,)
             return self.rows
 
     matching = Conn([{
@@ -274,6 +283,13 @@ def test_fleet_placement_reachability_allows_unknown_tools_but_rejects_impossibl
         matching,
         {"region": "eu-west", "network": "customer-vpc", "requires": ["nuclei"]},
     ))
+
+    with pytest.raises(api_module.HTTPException) as exc:
+        asyncio.run(api_module._require_reachable_fleet_placement(
+            matching,
+            {"region": "eu-west", "network": "customer-vpc", "requires": ["custom-tool"]},
+        ))
+    assert exc.value.status_code == 422
 
     with pytest.raises(api_module.HTTPException) as exc:
         asyncio.run(api_module._require_reachable_fleet_placement(
@@ -304,6 +320,89 @@ def test_insecure_fleet_enrollment_escape_hatch_is_loopback_only(monkeypatch):
     assert api_module._fleet_request_is_https(_fleet_request(host="192.168.65.1", scheme="http")) is True
     monkeypatch.setenv("SHAKERSCAN_BIND_HOST", "100.64.0.10")
     assert api_module._fleet_request_is_https(_fleet_request(host="127.0.0.1", scheme="http")) is False
+
+
+def test_fleet_https_trusts_only_secret_bound_gateway_forwarding(monkeypatch):
+    monkeypatch.setenv("FLEET_GATEWAY_PROXY_SECRET", "g" * 48)
+    monkeypatch.setenv("FLEET_ALLOW_INSECURE_ENROLLMENT", "false")
+    forwarded = {"x-forwarded-proto": "https", "x-shakerscan-gateway-secret": "g" * 48}
+    assert api_module._fleet_request_is_https(
+        _fleet_request(host="172.20.0.8", scheme="http", headers=forwarded)
+    ) is True
+    assert api_module._fleet_request_is_https(
+        _fleet_request(
+            host="172.20.0.8",
+            scheme="http",
+            headers={**forwarded, "x-shakerscan-gateway-secret": "wrong"},
+        )
+    ) is False
+    assert api_module._fleet_request_is_https(
+        _fleet_request(
+            host="172.20.0.8",
+            scheme="http",
+            headers={**forwarded, "x-shakerscan-gateway-secret": "nön-ascii"},
+        )
+    ) is False
+    assert api_module._fleet_request_is_https(
+        _fleet_request(
+            host="172.20.0.8",
+            scheme="http",
+            headers={"x-forwarded-proto": "https"},
+        )
+    ) is False
+
+
+def test_fleet_join_rate_limit_uses_trusted_forwarded_identity_and_rejects_excess(monkeypatch):
+    calls = []
+
+    class Redis:
+        def eval(self, script, key_count, key, ttl):
+            calls.append((script, key_count, key, ttl))
+            return len(calls)
+
+    monkeypatch.setenv("FLEET_GATEWAY_PROXY_SECRET", "g" * 48)
+    monkeypatch.setenv("FLEET_JOIN_RATE_LIMIT_PER_MINUTE", "2")
+    monkeypatch.setattr(api_module, "get_redis", lambda: Redis())
+    monkeypatch.setattr(api_module.time, "time", lambda: 120.0)
+    request = _fleet_request(
+        host="172.20.0.8",
+        headers={
+            "x-shakerscan-gateway-secret": "g" * 48,
+            "x-forwarded-for": "203.0.113.9",
+        },
+    )
+    api_module._require_fleet_join_rate_limit(request)
+    api_module._require_fleet_join_rate_limit(request)
+    with pytest.raises(api_module.HTTPException) as exc:
+        api_module._require_fleet_join_rate_limit(request)
+    assert exc.value.status_code == 429
+    assert exc.value.headers == {"Retry-After": "60"}
+    assert calls[0][1] == 1
+    assert calls[0][3] == 120
+    assert "203.0.113.9" not in calls[0][2]
+
+
+def test_default_fleet_scan_tiers_are_all_supported_but_tools_are_bounded():
+    labels = api_module._fleet_node_placement_labels(
+        {"id": uuid.uuid4(), "region": "us-east", "labels": {}},
+        {"requires": ["invented-tool"]},
+    )
+    assert set(labels["scan_tiers"]) == api_module.VALID_DAST_SCAN_TYPES
+    assert "nuclei" in labels["tools"]
+    assert "invented-tool" not in labels["tools"]
+
+
+def test_public_fleet_health_omits_build_and_worker_telemetry(monkeypatch):
+    async def fake_health():
+        return {
+            "status": "healthy",
+            "scanner_version": "secret-build",
+            "build_fingerprint": "fingerprint",
+            "worker_build": {"expected_count": 12},
+        }
+
+    monkeypatch.setattr(api_module, "health", fake_health)
+    assert asyncio.run(api_module.fleet_public_health()) == {"status": "healthy"}
 
 
 def test_fleet_ca_certificate_loader_is_bounded_and_validated(tmp_path, monkeypatch):

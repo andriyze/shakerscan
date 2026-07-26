@@ -11,18 +11,37 @@
 # dependency (go-tree-sitter) compiles cleanly.
 FROM golang:1.25@sha256:9006890ecba0a168034d99516084099ae3114d9f2b7d6572c77f2dde57ebc980 AS go-builder
 
-# Install ProjectDiscovery tools + Gungnir (CT log scanner). Separate installs
-# because Go requires all packages in a single `go install` to share one
-# module@version.
-RUN go install github.com/projectdiscovery/tlsx/cmd/tlsx@v1.2.2 \
- && go install github.com/projectdiscovery/httpx/cmd/httpx@v1.9.0 \
- && go install github.com/projectdiscovery/katana/cmd/katana@v1.5.0 \
- && go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@v2.13.0 \
- && go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@v3.8.0 \
- && go install github.com/hahwul/dalfox/v2@v2.12.0 \
- && go install github.com/ffuf/ffuf/v2@v2.1.0 \
- && go install github.com/tomnomnom/meg@v0.3.0 \
- && go install github.com/g0ldencybersec/gungnir/cmd/gungnir@v1.4.0
+# Install ProjectDiscovery tools + Gungnir (CT log scanner). Versions remain
+# immutable, while bounded retries tolerate transient DNS/module-proxy outages.
+# Cache mounts preserve completed downloads and compilations across retries and
+# subsequent builds. Separate installs are required because Go expects packages
+# in one `go install` invocation to share a module version.
+ARG GO_INSTALL_ATTEMPTS=4
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    set -eu; \
+    install_tools() { \
+      go install github.com/projectdiscovery/tlsx/cmd/tlsx@v1.2.2 && \
+      go install github.com/projectdiscovery/httpx/cmd/httpx@v1.9.0 && \
+      go install github.com/projectdiscovery/katana/cmd/katana@v1.5.0 && \
+      go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@v2.13.0 && \
+      go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@v3.8.0 && \
+      go install github.com/hahwul/dalfox/v2@v2.12.0 && \
+      go install github.com/ffuf/ffuf/v2@v2.1.0 && \
+      go install github.com/tomnomnom/meg@v0.3.0 && \
+      go install github.com/g0ldencybersec/gungnir/cmd/gungnir@v1.4.0; \
+    }; \
+    attempt=1; \
+    until install_tools; do \
+      if [ "$attempt" -ge "$GO_INSTALL_ATTEMPTS" ]; then \
+        echo "Go tool installation failed after ${GO_INSTALL_ATTEMPTS} attempts" >&2; \
+        exit 1; \
+      fi; \
+      delay=$((attempt * 5)); \
+      echo "Go module download failed (attempt ${attempt}/${GO_INSTALL_ATTEMPTS}); retrying in ${delay}s" >&2; \
+      sleep "$delay"; \
+      attempt=$((attempt + 1)); \
+    done
 
 # --- Stage 2: Runtime with Playwright (Chromium) ---
 FROM mcr.microsoft.com/playwright/python:v1.59.0-noble@sha256:d8d9811a0e7cfac967f0c2f55d12b739087ae4b0808577b794c2a29ed5124938

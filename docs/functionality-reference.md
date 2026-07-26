@@ -451,7 +451,8 @@ disables duplicate background controllers in that edge process. Linux host autom
 persistent `fleet init`, aggregated read-only `fleet preflight`, tag-to-digest image resolution,
 automatic pre-conversion backup, single-use `fleet join-token`, automatic/manual peer reconciliation,
 automatic restricted public HTTPS for broker fleets with pinned Caddy, certificate renewal and
-rollback verification, and worker-only `join` with HTTPS preflight and WireGuard handshake
+secret-bound proxy trust, minimal public health, protected-route/rollback verification, bounded
+enrollment attempts, and worker-only `join` with HTTPS preflight and WireGuard handshake
 diagnostics. The installed worker image is derived automatically; `--worker-image` selects a custom
 build. The Fleet UI also flags WireGuard nodes awaiting their first connection. Leased delivery and
 fencing, central artifact transfer, placement, capacity-weighted scaling, rolling lifecycle,
@@ -1181,8 +1182,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 255 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 212 | `api/api.py` |
+| Public REST operations | 256 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 213 | `api/api.py` |
 | Check families | 14 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 13 | `api/command_arsenal.py` |
@@ -1191,7 +1192,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Scanner wrapper commands | 26 | `scanner.sh` |
 | Make targets | 11 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
-| Runtime environment keys | 260 | Python sources + Compose manifests |
+| Runtime environment keys | 262 | Python sources + Compose manifests |
 | Scanner modules | 83 | `scanner/scanner_tools/` |
 | UI pages | 31 | `ui/src/app/` |
 | Skills | 6 | `skills/` |
@@ -1342,6 +1343,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `POST` | `/fleet/nodes/{node_id}/revoke` | `revoke_fleet_node` |
 | `GET` | `/fleet/nodes/{node_id}/state` | `get_fleet_node_state` |
 | `PATCH` | `/fleet/nodes/{node_id}/state` | `update_fleet_node_state` |
+| `GET` | `/fleet/public-health` | `fleet_public_health` |
 | `POST` | `/fleet/scale` | `scale_fleet_workers` |
 | `POST` | `/gungnir/start` | `gungnir_start` |
 | `GET` | `/gungnir/status` | `gungnir_status` |
@@ -1871,7 +1873,9 @@ Only key names and declaring sources are documented; secret values are never rea
 | `FLEET_DRAIN_GRACE_SECONDS` | `api/fleet_agent.py` |
 | `FLEET_EDGE_MODE` | `api/api.py` |
 | `FLEET_GATEWAY_BIND_HOST` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `FLEET_GATEWAY_PROXY_SECRET` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_HEARTBEAT_TIMEOUT_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `FLEET_JOIN_RATE_LIMIT_PER_MINUTE` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_NODE_ID` | `api/worker.py`, `docker-compose.broker-worker.yml`, `docker-compose.worker.yml` |
 | `FLEET_OPERATOR_TOKEN` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scripts/fleet_acceptance.py` |
 | `FLEET_OVERLAY_CIDR` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |

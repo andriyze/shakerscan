@@ -52,6 +52,15 @@ def test_fleet_operator_token_preserves_strong_values_and_replaces_weak_ones():
     assert generated != "weak"
 
 
+def test_fleet_gateway_proxy_secret_is_strong_preserved_and_header_safe():
+    generated = fleet_cli.fleet_gateway_proxy_secret({})
+    assert len(generated) >= 32
+    assert fleet_cli.URL_SAFE_SECRET_RE.fullmatch(generated)
+    assert fleet_cli.fleet_gateway_proxy_secret({"FLEET_GATEWAY_PROXY_SECRET": generated}) == generated
+    with pytest.raises(fleet_cli.FleetCLIError, match="at least 32"):
+        fleet_cli.fleet_gateway_proxy_secret({"FLEET_GATEWAY_PROXY_SECRET": "weak"})
+
+
 def test_wireguard_rendering_is_deterministic_and_scoped():
     rendered = fleet_cli.render_control_wireguard(
         private_key=WG_KEY,
@@ -458,6 +467,11 @@ def test_broker_init_uses_private_ca_for_public_health_checks(tmp_path, monkeypa
     monkeypatch.setattr(fleet_cli, "_docker_compose_command", lambda: ["docker", "compose"])
     monkeypatch.setattr(fleet_cli, "_run", lambda *a, **k: types.SimpleNamespace(returncode=0, stdout=""))
     monkeypatch.setattr(fleet_cli, "api_json", fake_api)
+    monkeypatch.setattr(
+        fleet_cli,
+        "http_response",
+        lambda *_args, **_kwargs: (401, b'{"detail":"node bearer credential is required"}'),
+    )
 
     fleet_cli.command_init(
         paths,
@@ -528,7 +542,8 @@ def test_default_worker_image_resolves_without_cli_flag(monkeypatch):
 
 
 def test_managed_gateway_caddyfile_only_exposes_worker_routes():
-    rendered = fleet_cli.render_managed_caddyfile("https://fleet.example.test")
+    secret = "g" * 48
+    rendered = fleet_cli.render_managed_caddyfile("https://fleet.example.test", secret)
     assert rendered.startswith("# Managed by ShakerScan")
     assert "fleet.example.test {" in rendered
     assert "path /fleet/nodes/join" in rendered
@@ -536,6 +551,9 @@ def test_managed_gateway_caddyfile_only_exposes_worker_routes():
     assert "/fleet/nodes/[0-9a-fA-F-]+/state" in rendered
     assert "/fleet/nodes/[0-9a-fA-F-]+/heartbeat" in rendered
     assert 'respond "Not found" 404' in rendered
+    assert "rewrite * /fleet/public-health" in rendered
+    assert "header_up X-Forwarded-Proto https" in rendered
+    assert f"header_up X-ShakerScan-Gateway-Secret {secret}" in rendered
     assert "/targets" not in rendered
     assert "/docs" not in rendered
 
@@ -660,9 +678,27 @@ def test_broker_managed_https_persists_profile_after_all_verification_passes(tmp
     assert env["FLEET_HTTPS_MODE"] == "managed"
     assert env["FLEET_NETWORK_BACKEND"] == "broker"
     assert env["FLEET_WORKER_IMAGE_DIGEST"] == IMAGE
+    assert len(env["FLEET_GATEWAY_PROXY_SECRET"]) >= 32
     assert paths.gateway_config.stat().st_mode & 0o777 == 0o600
     assert "fleet.example.test {" in paths.gateway_config.read_text(encoding="utf-8")
+    assert env["FLEET_GATEWAY_PROXY_SECRET"] in paths.gateway_config.read_text(encoding="utf-8")
     assert isolation_checks == [("https://fleet.example.test", None)]
+
+
+def test_public_fleet_auth_boundary_requires_unauthenticated_401(monkeypatch):
+    monkeypatch.setattr(
+        fleet_cli,
+        "http_response",
+        lambda *_args, **_kwargs: (401, b'{"detail":"node bearer credential is required"}'),
+    )
+    fleet_cli._require_public_fleet_auth_boundary("https://fleet.example.test", None)
+    monkeypatch.setattr(
+        fleet_cli,
+        "http_response",
+        lambda *_args, **_kwargs: (401, b'{"detail":"proxy authentication required"}'),
+    )
+    with pytest.raises(fleet_cli.FleetCLIError, match="expected ShakerScan"):
+        fleet_cli._require_public_fleet_auth_boundary("https://fleet.example.test", None)
 
 
 def test_preflight_reports_all_failures_before_mutation(tmp_path, monkeypatch, capsys):

@@ -48,6 +48,7 @@ from retest_contract import (
 import parallel_scan
 import asm_inventory
 from job_queue import (
+    DEFAULT_WORKER_TOOL_COMMANDS,
     QueueLease,
     acknowledge_lease,
     enqueue_job,
@@ -10816,15 +10817,7 @@ def _worker_placement_labels() -> dict[str, Any]:
     if node_id:
         labels["node_id"] = node_id
     detected_tools = {
-        tool
-        for tool, command in {
-            "nuclei": "nuclei",
-            "playwright": "node",
-            "sqlmap": "sqlmap",
-            "nmap": "nmap",
-            "subfinder": "subfinder",
-        }.items()
-        if shutil.which(command)
+        tool for tool, command in DEFAULT_WORKER_TOOL_COMMANDS.items() if shutil.which(command)
     }
     configured_tools = labels.get("tools") or labels.get("capabilities") or []
     if isinstance(configured_tools, str):

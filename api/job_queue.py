@@ -31,6 +31,13 @@ PLACEMENT_SCALAR_KEYS = {
     "data_residency",
     "node_id",
 }
+DEFAULT_WORKER_TOOL_COMMANDS = {
+    "nuclei": "nuclei",
+    "playwright": "node",
+    "sqlmap": "sqlmap",
+    "nmap": "nmap",
+    "subfinder": "subfinder",
+}
 
 _HEARTBEAT_LEASE_LUA = """
 -- shakerscan:heartbeat-owned-lease

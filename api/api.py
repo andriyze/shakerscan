@@ -178,6 +178,7 @@ import agent_provenance
 import agent_text_toolcalls
 import agent_tools
 from job_queue import (
+    DEFAULT_WORKER_TOOL_COMMANDS,
     QueueLease,
     RouteCapacityExceeded,
     acknowledge_lease,
@@ -4711,6 +4712,12 @@ def _fleet_bootstrap_config() -> FleetBootstrapConfig:
 def _fleet_request_is_https(request: Request) -> bool:
     if request.url.scheme == "https":
         return True
+    if _trusted_fleet_gateway_request(request):
+        forwarded_proto = (
+            request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip().lower()
+        )
+        if forwarded_proto == "https":
+            return True
     allow_lab_http = os.environ.get("FLEET_ALLOW_INSECURE_ENROLLMENT", "").strip().lower() in {
         "1", "true", "yes", "on",
     }
@@ -4728,6 +4735,51 @@ def _fleet_request_is_https(request: Request) -> bool:
     else:
         local_transport = peer_is_loopback
     return allow_lab_http and local_transport
+
+
+def _trusted_fleet_gateway_request(request: Request) -> bool:
+    configured = os.environ.get("FLEET_GATEWAY_PROXY_SECRET", "").strip()
+    presented = request.headers.get("x-shakerscan-gateway-secret", "").strip()
+    return bool(
+        configured
+        and presented
+        and secrets.compare_digest(configured.encode("utf-8"), presented.encode("utf-8"))
+    )
+
+
+_FLEET_JOIN_RATE_LIMIT_LUA = """
+local count = redis.call('INCR', KEYS[1])
+if count == 1 then
+  redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return count
+"""
+
+
+def _require_fleet_join_rate_limit(request: Request) -> None:
+    try:
+        configured_limit = int(os.environ.get("FLEET_JOIN_RATE_LIMIT_PER_MINUTE", "30"))
+    except (TypeError, ValueError):
+        configured_limit = 30
+    limit = max(1, min(configured_limit, 1000))
+    peer = str(getattr(getattr(request, "client", None), "host", None) or "unknown")
+    if _trusted_fleet_gateway_request(request):
+        forwarded = request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
+        if forwarded:
+            peer = forwarded[:128]
+    identity = hashlib.sha256(peer.encode("utf-8", "replace")).hexdigest()[:24]
+    window = int(time.time()) // 60
+    key = f"shakerscan:fleet:join-rate:{window}:{identity}"
+    try:
+        count = int(get_redis().eval(_FLEET_JOIN_RATE_LIMIT_LUA, 1, key, 120))
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="fleet enrollment rate limiter is unavailable") from exc
+    if count > limit:
+        raise HTTPException(
+            status_code=429,
+            detail="too many fleet enrollment attempts; retry after the current rate-limit window",
+            headers={"Retry-After": "60"},
+        )
 
 
 def _require_fleet_https(request: Request) -> None:
@@ -7565,6 +7617,7 @@ async def create_fleet_join_token(body: FleetJoinTokenRequest, request: Request,
 async def join_fleet_node(body: FleetNodeJoinRequest, request: Request, response: Response):
     """Exchange a single-use token for overlay bootstrap data and node identity."""
     _require_fleet_https(request)
+    _require_fleet_join_rate_limit(request)
     response.headers["Cache-Control"] = "no-store"
     try:
         if body.transport == "broker":
@@ -9480,6 +9533,13 @@ async def health():
         "build_fingerprint": expected_fingerprint,
         "worker_build": worker_build,
     }
+
+
+@app.get("/fleet/public-health", include_in_schema=False)
+async def fleet_public_health():
+    """Content-minimal health projection for the managed public gateway."""
+    result = await health()
+    return {"status": result.get("status", "degraded")}
 
 
 @app.get("/artifacts/storage/health")
@@ -14210,7 +14270,7 @@ async def exposure_attack_paths(
 # SCANS
 # ============================================================
 
-def _fleet_node_placement_labels(row: Any, placement: dict[str, Any]) -> dict[str, Any]:
+def _fleet_node_placement_labels(row: Any, _placement: dict[str, Any]) -> dict[str, Any]:
     raw_labels = row.get("labels") or {}
     if isinstance(raw_labels, str):
         try:
@@ -14221,10 +14281,10 @@ def _fleet_node_placement_labels(row: Any, placement: dict[str, Any]) -> dict[st
     labels["node_id"] = str(row.get("id") or "").lower()
     if row.get("region"):
         labels["region"] = str(row.get("region"))
-    # Fleet images report their actual tools at execution time. An enrollment
-    # without an explicit capability allowlist is unknown, not incapable.
+    # The standard image guarantees this baseline. Custom images must advertise
+    # additional capabilities explicitly so admission never invents a requested tool.
     if "tools" not in labels and "capabilities" not in labels:
-        labels["tools"] = list(placement.get("requires") or [])
+        labels["tools"] = sorted(DEFAULT_WORKER_TOOL_COMMANDS)
     if "scan_tiers" not in labels:
         labels["scan_tiers"] = sorted(VALID_DAST_SCAN_TYPES)
     return labels
@@ -14234,8 +14294,18 @@ async def _require_reachable_fleet_placement(conn: Any, placement: dict[str, Any
     normalized = normalize_placement(placement)
     if not normalized:
         return
+    stale_after = max(60, _int_env("FLEET_HEARTBEAT_TIMEOUT_SECONDS", HEARTBEAT_TIMEOUT_MINUTES * 60))
     rows = await conn.fetch(
-        "SELECT id, region, labels FROM nodes WHERE status <> 'disabled' ORDER BY created_at ASC"
+        """
+        SELECT id, region, labels
+        FROM nodes
+        WHERE status <> 'disabled'
+          AND COALESCE(drain, false) = false
+          AND COALESCE(active_worker_count, 0) > 0
+          AND last_heartbeat_at >= NOW() - ($1::int * INTERVAL '1 second')
+        ORDER BY created_at ASC
+        """,
+        stale_after,
     )
     if any(
         worker_matches_placement(_fleet_node_placement_labels(row, normalized), normalized)
