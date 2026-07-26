@@ -13,6 +13,7 @@ import argparse
 import http.client
 import json
 import os
+import re
 import socket
 import ssl
 import time
@@ -29,6 +30,7 @@ from fleet_tls import FleetTLSConfigurationError, create_fleet_ssl_context, norm
 AGENT_VERSION = "2"
 DOCKER_SOCKET = "/var/run/docker.sock"
 DRAIN_GRACE_SECONDS = max(2, int(os.environ.get("FLEET_DRAIN_GRACE_SECONDS", "45")))
+LOCAL_WORKER_IMAGE_RE = re.compile(r"^shakerscan-fleet-local:[a-z0-9][a-z0-9_.-]{0,127}$")
 
 
 class AgentError(RuntimeError):
@@ -98,6 +100,9 @@ def load_state(path: Path) -> dict[str, Any]:
     image_name, separator, digest = str(state["worker_image_digest"]).rpartition("@sha256:")
     if not separator or not image_name or len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest.lower()):
         raise AgentError("worker_image_digest must be digest-pinned")
+    runtime_override = str(state.get("runtime_image_override") or "").strip()
+    if runtime_override and not LOCAL_WORKER_IMAGE_RE.fullmatch(runtime_override):
+        raise AgentError("runtime_image_override must be a ShakerScan local-build image")
     try:
         normalize_tls_ca_state(state)
     except FleetTLSConfigurationError as exc:
@@ -459,6 +464,13 @@ def run_once(state: dict[str, Any], client: DockerClient) -> dict[str, Any]:
     rollout_complete = False
     try:
         desired_image = str(desired_state.get("worker_image_digest") or "").strip()
+        enrolled_image = str(state.get("worker_image_digest") or "").strip()
+        runtime_override = str(state.get("runtime_image_override") or "").strip()
+        effective_image = (
+            runtime_override
+            if runtime_override and desired_image == enrolled_image and not rolling
+            else desired_image
+        )
         if (rolling or draining) and not drain_grace_elapsed(desired_state):
             reconciliation_complete = False
         elif rolling:
@@ -484,7 +496,7 @@ def run_once(state: dict[str, Any], client: DockerClient) -> dict[str, Any]:
                 client,
                 node_id=node_id,
                 desired_count=configured_count,
-                desired_image=desired_image or None,
+                desired_image=effective_image or None,
             )
             reconciliation_complete = True
     except Exception as exc:

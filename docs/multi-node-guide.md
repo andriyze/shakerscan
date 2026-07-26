@@ -229,6 +229,24 @@ shakerscan join https://scanner.example.com \
   --region eu-west
 ```
 
+Production joins pull the immutable worker image selected by the control plane. To test changes from
+a full source checkout on the broker worker without publishing an image first, add `--local-build`:
+
+```bash
+./scanner.sh join https://scanner.example.com \
+  --token <single-use-token> \
+  --transport broker \
+  --name broker-local-dev \
+  --local-build
+```
+
+This builds `scanner/Dockerfile` on the worker and skips the registry image pull. The node keeps the
+control plane's immutable production digest as its desired-image identity while recording the local
+runtime override explicitly; the node agent uses that override for local scaling. A later fleet image
+rollout replaces the development override with the selected registry digest. Local build mode is a
+broker development facility, not a production deployment mechanism, and the Docker build can still
+download base images and pinned tool dependencies.
+
 For a private-CA endpoint, add `--ca-cert /path/to/ca.pem`. The node persists that CA and both the
 broker worker and its node agent use it. Without `--ca-cert`, broker mode explicitly uses the system
 CA store.

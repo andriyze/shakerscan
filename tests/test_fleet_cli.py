@@ -205,6 +205,14 @@ def test_parser_exposes_documented_commands():
     ])
     assert broker.network == "broker"
     assert broker.endpoint is None
+    local_join = parser.parse_args([
+        "join",
+        "https://fleet.example.test",
+        "--transport",
+        "broker",
+        "--local-build",
+    ])
+    assert local_join.local_build is True
 
 
 def test_join_persists_one_time_bundle_before_starting_runtime(tmp_path, monkeypatch):
@@ -297,7 +305,11 @@ def test_broker_join_installs_no_database_or_redis_credentials(tmp_path, monkeyp
     monkeypatch.setattr(fleet_cli, "_require_commands", lambda _names: None)
     monkeypatch.setattr(fleet_cli, "_docker_compose_command", lambda: ["docker", "compose"])
     monkeypatch.setattr(fleet_cli, "api_json", fake_api)
-    monkeypatch.setattr(fleet_cli, "_start_broker_runtime", lambda _paths, result: started.append(result["node_id"]))
+    monkeypatch.setattr(
+        fleet_cli,
+        "_start_broker_runtime",
+        lambda _paths, result, **_kwargs: started.append(result["node_id"]),
+    )
 
     fleet_cli.command_join(
         paths,
@@ -324,6 +336,78 @@ def test_broker_join_installs_no_database_or_redis_credentials(tmp_path, monkeyp
     assert "DATABASE_URL" not in state_text
     assert '"tls_ca_mode": "system"' in state_text
     assert not (paths.node / "worker.env").exists()
+
+
+def test_broker_join_local_build_skips_registry_runtime_and_persists_override(tmp_path, monkeypatch):
+    paths = fleet_cli.RuntimePaths(tmp_path)
+    paths.broker_worker_compose.write_text("services: {}\n", encoding="utf-8")
+    (tmp_path / "scanner").mkdir()
+    (tmp_path / "scanner" / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+    (tmp_path / "api").mkdir()
+    (tmp_path / "api" / "broker_worker.py").write_text("", encoding="utf-8")
+    payloads = []
+    starts = []
+
+    def fake_api(_base, _method, path, **kwargs):
+        if path == "/health":
+            return {"status": "healthy"}
+        payloads.append(kwargs["payload"])
+        return {
+            "node_id": NODE_ID,
+            "node_credential": "node-secret",
+            "transport": "broker",
+            "worker_image_digest": IMAGE,
+        }
+
+    monkeypatch.setattr(fleet_cli, "_require_linux", lambda: None)
+    monkeypatch.setattr(fleet_cli, "_require_commands", lambda _names: None)
+    monkeypatch.setattr(fleet_cli, "_docker_compose_command", lambda: ["docker", "compose"])
+    monkeypatch.setattr(fleet_cli, "api_json", fake_api)
+    monkeypatch.setattr(
+        fleet_cli,
+        "_build_local_broker_worker_image",
+        lambda _paths: "shakerscan-fleet-local:abc1234",
+    )
+    monkeypatch.setattr(
+        fleet_cli,
+        "_start_broker_runtime",
+        lambda _paths, _response, **kwargs: starts.append(kwargs.get("runtime_image")),
+    )
+
+    fleet_cli.command_join(
+        paths,
+        types.SimpleNamespace(
+            control_plane_url="https://fleet.example.test",
+            token="ssj_" + "x" * 40,
+            name="broker-local",
+            transport="broker",
+            local_build=True,
+            region=None,
+            egress_group=None,
+            network_label=None,
+            data_residency=None,
+            capability=[],
+            scan_tier=[],
+            label=[],
+        ),
+    )
+
+    assert starts == ["shakerscan-fleet-local:abc1234"]
+    assert payloads[0]["labels"]["runtime_mode"] == "local-build"
+    state = json.loads((paths.node / "state.json").read_text(encoding="utf-8"))
+    assert state["runtime_image_override"] == "shakerscan-fleet-local:abc1234"
+    assert state["worker_image_digest"] == IMAGE
+
+
+def test_worker_compose_env_separates_local_runtime_from_expected_digest(tmp_path):
+    paths = fleet_cli.RuntimePaths(tmp_path)
+    values = fleet_cli._worker_compose_env(
+        paths,
+        {"node_id": NODE_ID, "worker_image_digest": IMAGE},
+        runtime_image="shakerscan-fleet-local:abc1234",
+    )
+    assert values["FLEET_WORKER_IMAGE"] == "shakerscan-fleet-local:abc1234"
+    assert values["FLEET_EXPECTED_WORKER_IMAGE_DIGEST"] == IMAGE
 
 
 def test_broker_join_can_pin_a_private_enrollment_ca(tmp_path, monkeypatch):
@@ -354,7 +438,7 @@ def test_broker_join_can_pin_a_private_enrollment_ca(tmp_path, monkeypatch):
     monkeypatch.setattr(fleet_cli, "_require_commands", lambda _names: None)
     monkeypatch.setattr(fleet_cli, "_docker_compose_command", lambda: ["docker", "compose"])
     monkeypatch.setattr(fleet_cli, "api_json", fake_api)
-    monkeypatch.setattr(fleet_cli, "_start_broker_runtime", lambda *_args: None)
+    monkeypatch.setattr(fleet_cli, "_start_broker_runtime", lambda *_args, **_kwargs: None)
 
     fleet_cli.command_join(
         paths,

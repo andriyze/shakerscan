@@ -42,6 +42,7 @@ DIGEST_IMAGE_RE = re.compile(r"^\S+@sha256:[0-9a-fA-F]{64}$")
 IMAGE_REFERENCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/:~-]*$")
 ENV_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 URL_SAFE_SECRET_RE = re.compile(r"^[A-Za-z0-9._~-]+$")
+LOCAL_WORKER_IMAGE_RE = re.compile(r"^shakerscan-fleet-local:[a-z0-9][a-z0-9_.-]{0,127}$")
 
 
 class FleetCLIError(RuntimeError):
@@ -1634,11 +1635,19 @@ def _write_worker_environment(
     atomic_write(path, "".join(f"{key}={value}\n" for key, value in sorted(values.items())), 0o600)
 
 
-def _worker_compose_env(paths: RuntimePaths, response: dict[str, Any]) -> dict[str, str]:
+def _worker_compose_env(
+    paths: RuntimePaths,
+    response: dict[str, Any],
+    *,
+    runtime_image: str | None = None,
+) -> dict[str, str]:
+    expected_image = str(response["worker_image_digest"])
+    selected_image = str(runtime_image or expected_image)
     return {
         "FLEET_COMPOSE_PROJECT_NAME": f"shakerscan-fleet-{str(response['node_id'])[:8]}",
         "FLEET_NODE_ID": str(response["node_id"]),
-        "FLEET_WORKER_IMAGE": str(response["worker_image_digest"]),
+        "FLEET_WORKER_IMAGE": selected_image,
+        "FLEET_EXPECTED_WORKER_IMAGE_DIGEST": expected_image,
         "FLEET_WORKER_ENV_FILE": str(paths.node / "worker.env"),
         "FLEET_RUNTIME_DIR": str(paths.node),
         "FLEET_RESULTS_DIR": str(paths.root / "results"),
@@ -1666,14 +1675,49 @@ def _start_worker_runtime(paths: RuntimePaths, response: dict[str, Any]) -> None
     )
 
 
-def _start_broker_runtime(paths: RuntimePaths, response: dict[str, Any]) -> None:
+def _build_local_broker_worker_image(paths: RuntimePaths) -> str:
+    """Build the broker worker from this checkout without registry distribution."""
+    dockerfile = paths.root / "scanner" / "Dockerfile"
+    if not dockerfile.is_file() or not (paths.root / "api" / "broker_worker.py").is_file():
+        raise FleetCLIError("--local-build requires a full ShakerScan source checkout")
+    revision = (
+        _run(
+            ["git", "-C", str(paths.root), "rev-parse", "--short=12", "HEAD"],
+            check=False,
+        )
+        if shutil.which("git")
+        else None
+    )
+    suffix = str(revision.stdout or "").strip().lower() if revision is not None else ""
+    if not re.fullmatch(r"[0-9a-f]{7,12}", suffix):
+        suffix = "dev"
+    image = f"shakerscan-fleet-local:{suffix}"
+    _run(
+        ["docker", "build", "--tag", image, "--file", str(dockerfile), str(paths.root)],
+        capture=False,
+    )
+    return image
+
+
+def _start_broker_runtime(
+    paths: RuntimePaths,
+    response: dict[str, Any],
+    *,
+    runtime_image: str | None = None,
+) -> None:
     if not paths.broker_worker_compose.is_file():
         raise FleetCLIError("docker-compose.broker-worker.yml is missing from the runtime")
+    if runtime_image is not None and not LOCAL_WORKER_IMAGE_RE.fullmatch(runtime_image):
+        raise FleetCLIError("local broker worker image reference is invalid")
     compose = _docker_compose_command()
     compose_env = paths.node / "compose.env"
-    _write_compose_env(compose_env, _worker_compose_env(paths, response))
-    image = validate_digest_image(str(response["worker_image_digest"]))
-    _run(["docker", "pull", image], capture=False)
+    expected_image = validate_digest_image(str(response["worker_image_digest"]))
+    _write_compose_env(
+        compose_env,
+        _worker_compose_env(paths, response, runtime_image=runtime_image),
+    )
+    if runtime_image is None:
+        _run(["docker", "pull", expected_image], capture=False)
     _run(
         [*compose, "--env-file", str(compose_env), "-f", str(paths.broker_worker_compose), "up", "-d"],
         capture=False,
@@ -1711,6 +1755,29 @@ def run_join_preflight(
         success="available",
         hint="Install the Docker Compose plugin and start Docker.",
     )
+    if getattr(args, "local_build", False):
+        if transport != "broker":
+            checks.append(PreflightCheck(
+                "Local worker build",
+                "fail",
+                "--local-build is currently supported only by the HTTPS broker transport",
+                "Use --transport broker for source-checkout testing.",
+            ))
+        elif not (paths.root / "scanner" / "Dockerfile").is_file() or not (
+            paths.root / "api" / "broker_worker.py"
+        ).is_file():
+            checks.append(PreflightCheck(
+                "Local worker build",
+                "fail",
+                "the runtime is not a full ShakerScan source checkout",
+                "Clone the repository on this worker before using --local-build.",
+            ))
+        else:
+            checks.append(PreflightCheck(
+                "Local worker build",
+                "pass",
+                "worker image will be built from this checkout without a registry pull",
+            ))
     token = str(getattr(args, "token", "") or "")
     if token.startswith("ssj_"):
         checks.append(PreflightCheck("Join token", "pass", "format is valid"))
@@ -1792,8 +1859,15 @@ def command_join(paths: RuntimePaths, args: argparse.Namespace) -> None:
             else _validated_join_response(dict(state["bootstrap"]))
         )
         if transport == "broker":
-            _start_broker_runtime(paths, response)
+            runtime_image = str(state.get("runtime_image_override") or "").strip() or None
+            if getattr(args, "local_build", False):
+                runtime_image = _build_local_broker_worker_image(paths)
+                state["runtime_image_override"] = runtime_image
+                atomic_write(state_path, json.dumps(state, sort_keys=True, indent=2) + "\n", 0o600)
+            _start_broker_runtime(paths, response, runtime_image=runtime_image)
             print(f"HTTPS broker node {response['node_id']} resumed")
+            if runtime_image:
+                print(f"Local worker build active: {runtime_image} (registry pull skipped)")
             return
         install_wireguard(paths.node / f"{INTERFACE_NAME}.conf")
         if not (paths.node / "worker.env").exists():
@@ -1815,6 +1889,11 @@ def command_join(paths: RuntimePaths, args: argparse.Namespace) -> None:
         return
     if not args.token or not str(args.token).startswith("ssj_"):
         raise FleetCLIError("--token must contain the single-use ssj_ join token")
+    runtime_image = (
+        _build_local_broker_worker_image(paths)
+        if transport == "broker" and getattr(args, "local_build", False)
+        else None
+    )
     private_key = public_key = None
     if transport == "overlay":
         private_key, public_key = generate_wireguard_keypair(
@@ -1823,6 +1902,8 @@ def command_join(paths: RuntimePaths, args: argparse.Namespace) -> None:
     hostname = socket.gethostname()[:255]
     labels: dict[str, Any] = {}
     labels["transport"] = transport
+    if runtime_image:
+        labels["runtime_mode"] = "local-build"
     if getattr(args, "region", None):
         labels["region"] = args.region
     for key, value in (
@@ -1884,11 +1965,15 @@ def command_join(paths: RuntimePaths, args: argparse.Namespace) -> None:
             "enrollment_url": public_url,
             "bootstrap": response,
         }
+        if runtime_image:
+            bootstrap_state["runtime_image_override"] = runtime_image
         if enrollment_ca is not None:
             bootstrap_state["ca_cert_path"] = "/run/shakerscan-fleet/ca.crt"
         atomic_write(state_path, json.dumps(bootstrap_state, sort_keys=True, indent=2) + "\n", 0o600)
-        _start_broker_runtime(paths, response)
+        _start_broker_runtime(paths, response, runtime_image=runtime_image)
         print(f"Joined fleet as outbound-only HTTPS broker node {response['node_id']}")
+        if runtime_image:
+            print(f"Local worker build active: {runtime_image} (registry pull skipped)")
         print("No Redis or PostgreSQL credentials were installed")
         return
     ca_path = paths.node / "ca.crt"
@@ -2097,6 +2182,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     join.add_argument("--name")
     join.add_argument("--transport", choices=["overlay", "broker"], default="overlay")
+    join.add_argument(
+        "--local-build",
+        action="store_true",
+        help="broker development only: build the worker from this checkout and skip the registry pull",
+    )
     join.add_argument("--region")
     join.add_argument("--egress-group")
     join.add_argument("--network", dest="network_label")

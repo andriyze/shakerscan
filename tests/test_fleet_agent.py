@@ -138,6 +138,20 @@ def test_overlay_state_requires_configured_ca_but_broker_can_use_system_store(tm
     }), encoding="utf-8")
     assert fleet_agent.load_state(state_path)["tls_ca_mode"] == "system"
 
+    local_state = {
+        **base,
+        "control_plane_url": "https://fleet.example.test",
+        "transport": "broker",
+        "tls_ca_mode": "system",
+        "runtime_image_override": "shakerscan-fleet-local:abc1234",
+    }
+    state_path.write_text(json.dumps(local_state), encoding="utf-8")
+    assert fleet_agent.load_state(state_path)["runtime_image_override"].endswith("abc1234")
+    local_state["runtime_image_override"] = "attacker.example/worker:latest"
+    state_path.write_text(json.dumps(local_state), encoding="utf-8")
+    with pytest.raises(fleet_agent.AgentError, match="local-build image"):
+        fleet_agent.load_state(state_path)
+
 
 def test_worker_reconciliation_scales_up_from_safe_template():
     client = FakeDocker()
@@ -209,6 +223,39 @@ def test_run_once_rolls_worker_image_without_stopping_capacity_first(monkeypatch
     assert posts[0]["rollout_complete"] is True
 
 
+def test_run_once_scales_local_build_with_explicit_runtime_override(monkeypatch):
+    posts = []
+    expected = "registry/shakerscan@sha256:" + "a" * 64
+    local_image = "shakerscan-fleet-local:abc1234"
+
+    def fake_api(_state, method, _path, payload=None):
+        if method == "GET":
+            return {
+                "desired_worker_count": 2,
+                "desired_state_version": 1,
+                "applied_state_version": 0,
+                "worker_image_digest": expected,
+                "rollout_in_progress": False,
+                "drain": False,
+            }
+        posts.append(payload)
+        return {"id": NODE_ID, "status": "healthy"}
+
+    monkeypatch.setattr(fleet_agent, "api_request", fake_api)
+    state = {
+        "node_id": NODE_ID,
+        "worker_image_digest": expected,
+        "runtime_image_override": local_image,
+    }
+    client = FakeDocker()
+    client.containers[0]["ImageName"] = local_image
+    fleet_agent.run_once(state, client)
+
+    assert len([item for item in client.containers if item["State"] == "running"]) == 2
+    assert {item["ImageName"] for item in client.containers} == {local_image}
+    assert posts[0]["active_worker_image_digest"] == local_image
+
+
 def test_drain_workers_keeps_busy_container_running(tmp_path):
     client = FakeDocker()
     client.containers.append(client._container("two", 2, "running"))
@@ -256,7 +303,7 @@ def test_worker_compose_contains_only_worker_and_agent_services(tmp_path):
     assert "  postgres:" not in text
     assert "  redis:" not in text
     assert "depends_on:" in text
-    assert "FLEET_WORKER_IMAGE must be a digest-pinned scanner image" in text
+    assert "FLEET_EXPECTED_WORKER_IMAGE_DIGEST is required" in text
     assert "format: raw" in text
 
 

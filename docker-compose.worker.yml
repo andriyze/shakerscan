@@ -5,13 +5,13 @@ name: ${FLEET_COMPOSE_PROJECT_NAME:-shakerscan-fleet-worker}
 services:
   worker:
     init: true
-    image: ${FLEET_WORKER_IMAGE:?FLEET_WORKER_IMAGE must be a digest-pinned scanner image}
+    image: ${FLEET_WORKER_IMAGE:?FLEET_WORKER_IMAGE is required}
     env_file:
       - path: ${FLEET_WORKER_ENV_FILE:-./.shakerscan-fleet/worker.env}
         format: raw
     environment:
       - PYTHONUNBUFFERED=1
-      - FLEET_WORKER_IMAGE_DIGEST=${FLEET_WORKER_IMAGE:?FLEET_WORKER_IMAGE must be a digest-pinned scanner image}
+      - FLEET_WORKER_IMAGE_DIGEST=${FLEET_EXPECTED_WORKER_IMAGE_DIGEST:?FLEET_EXPECTED_WORKER_IMAGE_DIGEST is required}
       - SHAKERSCAN_NODE_ID=${FLEET_NODE_ID:?FLEET_NODE_ID is required}
       - WORKER_ID=${FLEET_NODE_ID:?FLEET_NODE_ID is required}-worker
       - SHAKERSCAN_QUEUE_CONSUMER_GROUP=${SHAKERSCAN_QUEUE_CONSUMER_GROUP:-shakerscan-workers}
@@ -34,7 +34,7 @@ services:
     restart: unless-stopped
 
   node-agent:
-    image: ${FLEET_WORKER_IMAGE:?FLEET_WORKER_IMAGE must be a digest-pinned scanner image}
+    image: ${FLEET_WORKER_IMAGE:?FLEET_WORKER_IMAGE is required}
     environment:
       - PYTHONUNBUFFERED=1
       - FLEET_STATE_PATH=/run/shakerscan-fleet/state.json

@@ -367,6 +367,9 @@ shakerscan fleet join-token --ttl 24h --transport broker
 shakerscan join https://scanner.example.com --token <join-token> --transport broker
 ```
 
+For source-checkout testing on a broker worker, append `--local-build`. This builds the worker image
+on that host and skips pulling the fleet image; production joins remain digest-pinned registry pulls.
+
 Both transports require a CA-verified HTTPS enrollment URL. For broker fleets, point the hostname at
 the VPS and open TCP 80/443; when HTTPS is not already configured, `fleet init` provisions a pinned
 Caddy gateway, obtains/renews the certificate, and exposes only worker enrollment and authenticated
