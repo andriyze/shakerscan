@@ -494,7 +494,7 @@ def public_node(row: Mapping[str, Any], *, stale_after_seconds: int) -> dict[str
         "active_worker_image_digest", "agent_version", "desired_state_version",
         "applied_state_version", "last_error", "desired_worker_count",
         "active_worker_count", "capacity", "status", "drain", "rollout_in_progress",
-        "last_heartbeat_at", "created_at", "updated_at",
+        "last_heartbeat_at", "connection_bundle_delivered_at", "created_at", "updated_at",
     }
     result = {key: value for key, value in dict(row).items() if key in public_fields}
     last_heartbeat = result.get("last_heartbeat_at")
@@ -524,6 +524,15 @@ def public_node(row: Mapping[str, Any], *, stale_after_seconds: int) -> dict[str
                 result[key] = json.loads(result[key])
             except json.JSONDecodeError:
                 result[key] = {}
+    labels = result.get("labels") if isinstance(result.get("labels"), dict) else {}
+    transport = str(labels.get("transport") or ("overlay" if result.get("overlay_ip") else "broker"))
+    result["wireguard_connection_pending"] = bool(
+        transport == "overlay"
+        and status != "disabled"
+        and result.get("last_heartbeat_at") is None
+        and result.get("connection_bundle_delivered_at") is None
+    )
+    result.pop("connection_bundle_delivered_at", None)
     for key, value in list(result.items()):
         if isinstance(value, (datetime, ipaddress.IPv4Address, ipaddress.IPv6Address)):
             result[key] = value.isoformat() if isinstance(value, datetime) else str(value)

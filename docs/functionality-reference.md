@@ -448,9 +448,11 @@ pull-based local node-agent now apply versioned worker-count/drain desired state
 listener or remote Docker API. The opt-in fleet Compose profile adds a CA-verified HTTPS listener on
 the private data address, preserves the real overlay socket peer with Linux host networking, and
 disables duplicate background controllers in that edge process. Linux host automation now implements
-persistent `fleet init`, single-use `fleet join-token`, automatic/manual peer reconciliation, and
-worker-only `join`. The Fleet UI, leased delivery and fencing, central artifact transfer, placement,
-capacity-weighted scaling, rolling lifecycle, outbound-only HTTPS broker transport, and fleet-wide
+persistent `fleet init`, aggregated read-only `fleet preflight`, tag-to-digest image resolution,
+automatic pre-conversion backup, single-use `fleet join-token`, automatic/manual peer reconciliation,
+and worker-only `join` with HTTPS preflight and WireGuard handshake diagnostics. The Fleet UI also
+flags WireGuard nodes awaiting their first connection. Leased delivery and fencing, central artifact
+transfer, placement, capacity-weighted scaling, rolling lifecycle, outbound-only HTTPS broker transport, and fleet-wide
 admission/request controls are implemented. The remaining release-topology gate is executing the
 physical two-VPS acceptance. Follow the [operator guide](multi-node-guide.md); the design authority is
 [`docs/multi-node-architecture.md`](multi-node-architecture.md).
@@ -1186,7 +1188,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Scanner wrapper commands | 26 | `scanner.sh` |
 | Make targets | 11 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
-| Runtime environment keys | 258 | Python sources + Compose manifests |
+| Runtime environment keys | 259 | Python sources + Compose manifests |
 | Scanner modules | 83 | `scanner/scanner_tools/` |
 | UI pages | 31 | `ui/src/app/` |
 | Skills | 6 | `skills/` |
@@ -1869,6 +1871,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `FLEET_NODE_ID` | `api/worker.py`, `docker-compose.broker-worker.yml`, `docker-compose.worker.yml` |
 | `FLEET_OPERATOR_TOKEN` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scripts/fleet_acceptance.py` |
 | `FLEET_OVERLAY_CIDR` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `FLEET_RECONCILE_MODE` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_RESULTS_DIR` | `docker-compose.broker-worker.yml`, `docker-compose.worker.yml` |
 | `FLEET_RUNTIME_DIR` | `docker-compose.broker-worker.yml`, `docker-compose.worker.yml` |
 | `FLEET_STATE_PATH` | `api/fleet_agent.py` |

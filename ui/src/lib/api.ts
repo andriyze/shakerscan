@@ -1884,6 +1884,7 @@ export interface FleetNode {
   rollout_in_progress?: boolean
   state_current: boolean
   image_current: boolean
+  wireguard_connection_pending?: boolean
   last_error?: string | null
   last_heartbeat_at?: string | null
   created_at: string
@@ -1901,11 +1902,13 @@ export interface FleetSummary {
   active_workers: number
   state_drift_nodes: number
   image_drift_nodes: number
+  wireguard_connection_pending_nodes: number
 }
 
 export interface FleetNodesResponse {
   nodes: FleetNode[]
   stale_after_seconds: number
+  reconciliation_mode?: 'automatic' | 'manual'
   summary: FleetSummary
 }
 

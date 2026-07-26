@@ -301,6 +301,22 @@ def test_public_node_uses_an_explicit_allow_list():
     assert "future_private_material" not in result
 
 
+def test_public_node_marks_wireguard_peer_awaiting_first_connection():
+    result = public_node(
+        {
+            "id": uuid.uuid4(),
+            "status": "joining",
+            "overlay_ip": "10.77.0.2",
+            "labels": {"transport": "overlay"},
+            "last_heartbeat_at": None,
+            "connection_bundle_delivered_at": None,
+        },
+        stale_after_seconds=60,
+    )
+    assert result["wireguard_connection_pending"] is True
+    assert "connection_bundle_delivered_at" not in result
+
+
 def test_public_node_surfaces_heartbeating_reconciliation_error_as_unhealthy():
     result = public_node(
         {

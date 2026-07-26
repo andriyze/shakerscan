@@ -7618,6 +7618,10 @@ async def list_fleet_nodes(request: Request):
     return {
         "nodes": nodes,
         "stale_after_seconds": stale_after,
+        "reconciliation_mode": (
+            "manual" if os.environ.get("FLEET_RECONCILE_MODE", "systemd").strip().lower() == "manual"
+            else "automatic"
+        ),
         "summary": {
             "total_nodes": len(nodes),
             "active_nodes": len(active_nodes),
@@ -7628,6 +7632,9 @@ async def list_fleet_nodes(request: Request):
             "desired_workers": sum(int(node.get("desired_worker_count") or 0) for node in active_nodes),
             "active_workers": sum(int(node.get("active_worker_count") or 0) for node in active_nodes),
             "state_drift_nodes": sum(not bool(node.get("state_current")) for node in active_nodes),
+            "wireguard_connection_pending_nodes": sum(
+                bool(node.get("wireguard_connection_pending")) for node in active_nodes
+            ),
             "image_drift_nodes": sum(
                 int(node.get("active_worker_count") or 0) > 0 and not bool(node.get("image_current"))
                 for node in active_nodes

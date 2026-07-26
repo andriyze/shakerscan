@@ -59,6 +59,7 @@ const EMPTY_SUMMARY: FleetSummary = {
   active_workers: 0,
   state_drift_nodes: 0,
   image_drift_nodes: 0,
+  wireguard_connection_pending_nodes: 0,
 }
 
 function relativeTime(value?: string | null): string {
@@ -117,6 +118,7 @@ export default function FleetPage() {
   const [nodes, setNodes] = useState<FleetNode[]>([])
   const [summary, setSummary] = useState<FleetSummary>(EMPTY_SUMMARY)
   const [staleAfterSeconds, setStaleAfterSeconds] = useState(0)
+  const [reconciliationMode, setReconciliationMode] = useState<'automatic' | 'manual'>('automatic')
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -142,6 +144,7 @@ export default function FleetPage() {
       setNodes(response.nodes)
       setSummary(response.summary)
       setStaleAfterSeconds(response.stale_after_seconds)
+      setReconciliationMode(response.reconciliation_mode || 'automatic')
       setUpdatedAt(new Date())
       setError(null)
     } catch (err) {
@@ -346,6 +349,32 @@ export default function FleetPage() {
 
       {error && <div className="mb-4"><ErrorState message={error} onRetry={() => void loadFleet()} /></div>}
 
+      {reconciliationMode === 'manual' && (
+        <div className="mb-4 flex gap-3 rounded-lg border border-blue-500/25 bg-blue-500/10 p-4 text-sm text-blue-100" role="status">
+          <TriangleAlert className="mt-0.5 h-5 w-5 shrink-0 text-blue-300" aria-hidden="true" />
+          <div>
+            <p className="font-medium">Manual WireGuard peer reconciliation is enabled</p>
+            <p className="mt-1 text-xs text-blue-200/75">
+              Run <code>shakerscan fleet reconcile</code> on the control plane after every WireGuard join or revocation.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {summary.wireguard_connection_pending_nodes > 0 && (
+        <div className="mb-4 flex gap-3 rounded-lg border border-amber-500/25 bg-amber-500/10 p-4 text-sm text-amber-100" role="status">
+          <TriangleAlert className="mt-0.5 h-5 w-5 shrink-0 text-amber-300" aria-hidden="true" />
+          <div>
+            <p className="font-medium">
+              {summary.wireguard_connection_pending_nodes} WireGuard node{summary.wireguard_connection_pending_nodes === 1 ? '' : 's'} awaiting first connection
+            </p>
+            <p className="mt-1 text-xs text-amber-200/75">
+              Check control-plane peer reconciliation and inbound UDP reachability. On a host initialized with <code>--no-reconcile-service</code>, run <code>shakerscan fleet reconcile</code> now.
+            </p>
+          </div>
+        </div>
+      )}
+
       {loading && nodes.length === 0 ? (
         <div className="space-y-3" aria-label="Loading fleet nodes">
           {[0, 1].map((item) => <Card key={item} className="h-56 animate-pulse bg-gray-900/70" />)}
@@ -375,6 +404,7 @@ export default function FleetPage() {
                           {node.status}
                         </Badge>
                         {!node.state_current && !disabled && <Badge className="bg-amber-500/15 text-amber-300">state drift</Badge>}
+                        {node.wireguard_connection_pending && !disabled && <Badge className="bg-amber-500/15 text-amber-300">awaiting WireGuard</Badge>}
                         {!node.image_current && node.active_worker_count > 0 && !disabled && <Badge className="bg-amber-500/15 text-amber-300">image drift</Badge>}
                         {node.rollout_in_progress && <Badge className="bg-blue-500/15 text-blue-300">rolling update</Badge>}
                       </div>

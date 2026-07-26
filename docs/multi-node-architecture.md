@@ -45,10 +45,10 @@ becoming stale prose. For product priority and phased order, see
 | Remote worker scaling and rolling lifecycle | **Built per node** — the control plane changes versioned desired count/drain/image state; workers fail closed on drain before leasing and publish host-visible busy markers while executing; the pull agent waits a race-closure grace period, preserves busy workers, starts each digest-pinned successor before stopping its idle predecessor, and resumes scheduling only after the final image-confirming heartbeat. | `PATCH /fleet/nodes/{id}/state`; `worker.py` `_fleet_node_accepts_work`, `_fleet_busy_marker`; `fleet_agent.py` `drain_workers`, `rollout_worker_once` |
 | Node identity, enrollment, join tokens, heartbeat, credential rotation/revocation, CA bootstrap, overlay TLS edge, `nodes` table | **Foundation built** — physical two-VPS acceptance remains incomplete | `fleet.py`; `/fleet/*`; `fleet-edge`; `nodes`, `node_join_tokens`, `node_credentials` |
 | Worker-only deployment and pull-based node-agent | **Built for owned-fleet lifecycle** — digest-pinned worker/agent-only Compose, owner-only local state, versioned desired state, local Docker reconciliation, graceful drain-to-zero, rolling image replacement, capacity/error heartbeat | `docker-compose.worker.yml`; `fleet_agent.py`; `GET|PATCH /fleet/nodes/{id}/state` |
-| WireGuard/CLI host provisioning | **Built, awaiting physical two-VPS acceptance** — persistent identity, CA/server certificates, overlay/data binding, automatic or manual peer reconciliation, public HTTPS enrollment, overlay proof, one-time bundle persistence, worker-only startup | `scripts/fleet_cli.py`; `scanner.sh fleet`; `scanner.sh join` |
+| WireGuard/CLI host provisioning | **Built, awaiting physical two-VPS acceptance** — aggregated preflight before mutation, tag-to-digest image resolution, route/port collision checks, automatic standalone backup, persistent identity, CA/server certificates, overlay/data binding, automatic or explicitly manual peer reconciliation, actionable TLS/handshake diagnostics, public HTTPS enrollment, overlay proof, one-time bundle persistence, worker-only startup | `scripts/fleet_cli.py`; `scanner.sh fleet`; `scanner.sh join` |
 | Per-node execution attribution and fleet rollup | **Built** — scan/shard rows record the executing node and unique worker replica; revoked nodes fail closed and re-enqueue refused work; node API derives state/image drift and exposes recent activity | `scans.executing_node_id`; `worker.py` `_attribute_job_execution`; `GET /fleet/nodes`; `GET /fleet/nodes/{id}/activity` |
 | Fleet-wide scaling and node audit trail | **Built** — one operator request distributes an exact worker total across healthy schedulable nodes using reported CPU/worker weights and optional per-node caps. State changes, join, credential rotation, bundle delivery, heartbeat transitions, rollout completion, broker leases/results, and revocation create bounded credential-free node events. Every scan snapshots node, worker build/image, egress, transport, and credential scope at execution time. | `POST /fleet/scale`; `fleet.py` `distribute_worker_count`; `GET /fleet/nodes/{id}/events`; `fleet_node_events`; `scans.execution_context` |
-| Fleet UI | **Built** — unified health/capacity/drift view (including an explicit derived unhealthy state for a heartbeating node with reconciliation errors), recent attributed work, desired worker scaling, graceful drain/resume, digest-pinned rollout, revoke confirmation, placement labels, and session-only remote operator credential handling | `ui/src/app/fleet/page.tsx`; sidebar `/fleet` |
+| Fleet UI | **Built** — unified health/capacity/drift view (including an explicit derived unhealthy state for a heartbeating node with reconciliation errors and a first-WireGuard-connection warning), recent attributed work, desired worker scaling, graceful drain/resume, digest-pinned rollout, revoke confirmation, placement labels, and session-only remote operator credential handling | `ui/src/app/fleet/page.tsx`; sidebar `/fleet` |
 | Capability/region/egress placement | **Built** — scan options accept normalized placement constraints; jobs enter deterministic capability Streams; workers dynamically subscribe only to routes matching their node/region/network/residency/tier/tool labels. Equivalent eligible workers retain normal lease failover. Fleet join persists labels and the UI exposes both submission and node labels. | `job_queue.py` `routed_queue_name`, `qualified_route_queues`; `ScanOptions.placement`; `fleet_cli.py`; `/scan/new`; `/fleet` |
 | HTTPS broker for zero-trust nodes | **Built** — `--transport broker` enrolls an outbound-only node without WireGuard, Redis, PostgreSQL, or object-store credentials. Node/job-scoped HTTPS leases use hashed single-job tokens, Stream ownership heartbeat/reclaim, bounded delivery, global admission and root-domain reservations, progress/log forwarding, cancellation, lease-bound proxy artifact uploads, immutable result hashes, and idempotent control-plane ingestion for normal and shard scans. | `broker_worker.py`; `docker-compose.broker-worker.yml`; `/fleet/broker/*`; `broker_job_leases`; `broker_job_results` |
 | Physical acceptance automation | **Built, awaiting execution on two actual VPSs** — one command validates node/current-image health, heartbeat/capacity, artifact-store writes, public Redis/PostgreSQL isolation, an isolated Redis server-time lease loss/reclaim/heartbeat/ack sequence, duplicate completion behavior, passive cross-node parallel shards, execution snapshots, finding dedupe, and central result/artifact manifests. It emits a content-free hashed receipt. | `shakerscan fleet accept`; `scripts/fleet_acceptance.py`; `tests/test_fleet_acceptance.py` |
@@ -556,12 +556,16 @@ The connection bundle is deliberately one-shot. If a node fails after delivery b
 owner-only bundle file is durable, revoke that incomplete node, mint a fresh single-use join token,
 and run `shakerscan join` again. Do not weaken the delivery gate or copy a shared bundle by hand.
 
-`fleet init` persists the control keypair, fleet CA, server certificate, private connection-bundle
+`fleet init` first runs the same aggregated checks exposed by read-only `fleet preflight`: Linux and
+host dependencies, Docker Compose, verified public HTTPS, worker tag-to-digest resolution, requested
+port availability, overlay route collisions, enrollment policy, and reconciliation support. A
+running standalone deployment is backed up before the first fleet mutation. It then persists the control keypair, fleet CA, server certificate, private connection-bundle
 JSON, generated operator token, and rendered WireGuard configuration with restrictive modes; refuses an existing fleet CIDR
 change; verifies the operator-provided public HTTPS URL; enables the fleet Compose profile; binds the
 data stores to the first overlay address; and installs a 10-second systemd peer reconciler. Operators
 on Linux systems without systemd can select `--no-reconcile-service` and run `fleet reconcile`
-manually. The CLI never silently falls back to plaintext enrollment and production init refuses the
+manually; the join-token output reminds those operators and the API/UI flag overlay nodes awaiting
+their first connection. The CLI never silently falls back to plaintext enrollment and production init refuses the
 local-lab insecure-enrollment escape hatch.
 
 **5. Bootstrap response + post-overlay connection bundle.** `POST /fleet/nodes/join` returns only
@@ -576,7 +580,8 @@ node_credential
 
 The raw `node_credential`, overlay CIDR, and public fleet CA certificate are returned once over HTTPS, and the
 credential is persisted with restrictive filesystem
-permissions. It authorizes only node API operations. After installing WireGuard and proving overlay
+permissions. It authorizes only node API operations. Join verifies public HTTPS before consuming the
+single-use token. After installing WireGuard and proving overlay
 reachability, the worker calls `POST /fleet/nodes/{id}/connection-bundle` over **overlay HTTPS**, using
 that credential. The control plane returns the Phase-1 Redis/Postgres URLs and any artifact-store
 credentials once; the response is never available over the public listener and is not logged. Thus

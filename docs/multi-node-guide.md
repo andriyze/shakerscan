@@ -39,17 +39,41 @@ centralized artifacts, and control-plane admission limits.
 
 Before initializing a fleet:
 
-- Use Linux for the control plane and worker hosts. The fleet host provisioner is Linux-only.
-- Install ShakerScan on the control plane and every worker host.
-- Install Docker. WireGuard mode also needs `wg`, `wg-quick`, and `ip`.
-- Give the control plane a stable HTTPS URL, such as `https://scanner.example.com`. Put it behind a
-  firewall, VPN, or authenticated reverse proxy; ShakerScan is a trusted-operator product, not a
-  public multi-user service.
-- Select a worker image by immutable digest:
-  `registry.example/shakerscan@sha256:<64 hexadecimal characters>`. A mutable tag such as `latest`
-  is rejected.
-- Back up the control plane before converting an existing standalone installation. Follow
-  [Upgrade and Rollback](upgrade-and-rollback.md).
+| Requirement | Control plane | Worker host |
+|---|---|---|
+| Operating system | Linux | Linux |
+| ShakerScan runtime | Required | Required |
+| Docker + Compose | Required | Required |
+| `wg`, `wg-quick`, `ip` | WireGuard only | WireGuard only |
+| `openssl`, `ss` | WireGuard only | Not required |
+| Stable HTTPS control-plane URL | Hosts it | Must reach it |
+| Inbound UDP, normally `51820` | WireGuard only | Not required |
+
+Give the control plane a stable HTTPS URL, such as `https://scanner.example.com`. Put it behind a
+firewall, VPN, or authenticated reverse proxy; ShakerScan is a trusted-operator product, not a
+public multi-user service.
+
+`fleet init` runs a complete preflight before changing state. It checks the host, dependencies,
+Docker Compose, HTTPS/certificate verification, worker image, ports, overlay routes, enrollment
+policy, and reconciliation service. To run the same checks without initializing anything:
+
+```bash
+shakerscan fleet preflight \
+  --network wireguard \
+  --endpoint fleet.example.com:51820 \
+  --public-url https://scanner.example.com \
+  --worker-image registry.example/shakerscan:latest
+```
+
+The command reports every failed check together instead of stopping at the first one. A supplied
+image tag is resolved through the registry and displayed, but ShakerScan persists and distributes
+only its immutable digest. You may also supply
+`registry.example/shakerscan@sha256:<64 hexadecimal characters>` directly.
+
+When converting a running standalone control plane for the first time, `fleet init` automatically
+runs `shakerscan backup` before writing fleet configuration. Initialization stops if that backup
+fails. Keep the resulting owner-only backup according to [Upgrade and
+Rollback](upgrade-and-rollback.md).
 
 Network policy:
 
@@ -63,6 +87,7 @@ Network policy:
 The public HTTPS URL normally uses the operating system's CA store. If it uses a private CA, copy
 the public CA certificate to the host and add `--ca-cert /path/to/ca.pem` to both `fleet init` and
 `join`. This adds trust for that CA; it does not disable certificate or hostname verification.
+Preflight reports an explicit `--ca-cert` hint when system trust cannot verify the endpoint.
 
 ## 1. Initialize the Control Plane
 
@@ -76,11 +101,12 @@ shakerscan fleet init \
   --network wireguard \
   --endpoint fleet.example.com:51820 \
   --public-url https://scanner.example.com \
-  --worker-image registry.example/shakerscan@sha256:<digest> \
+  --worker-image registry.example/shakerscan:latest \
   --workers 1
 ```
 
-`--endpoint` is the externally reachable WireGuard `host:port`. The default private overlay is
+`--endpoint` is the externally reachable WireGuard `host:port`. Before mutation, the tag above is
+resolved and pinned to a digest. The default private overlay is
 `10.77.0.0/24`, and the default private TLS port is `8443`. Set `--overlay` or `--tls-port` during the
 first initialization if those defaults conflict with your network. An existing fleet identity
 refuses an overlay-CIDR change.
@@ -89,8 +115,9 @@ Initialization creates the WireGuard control identity, fleet CA, private TLS cer
 token, strong Redis/PostgreSQL credentials, and artifact-store configuration. It restarts the stack
 and verifies the private TLS and artifact paths before succeeding.
 
-On a Linux host without systemd, add `--no-reconcile-service`. You must then run this on the control
-plane after every WireGuard node joins or is revoked:
+On a Linux host without systemd, add `--no-reconcile-service`. This is an explicit manual fallback;
+the join-token command reminds you and the Fleet UI flags nodes awaiting their first WireGuard
+connection. Run this on the control plane after every WireGuard node joins or is revoked:
 
 ```bash
 shakerscan fleet reconcile
@@ -102,7 +129,7 @@ shakerscan fleet reconcile
 shakerscan fleet init \
   --network broker \
   --public-url https://scanner.example.com \
-  --worker-image registry.example/shakerscan@sha256:<digest> \
+  --worker-image registry.example/shakerscan:latest \
   --workers 1
 ```
 
@@ -158,9 +185,12 @@ shakerscan join https://scanner.example.com \
   --region us-central
 ```
 
-The join workflow creates a WireGuard peer, verifies the private fleet API with the enrolled CA,
-retrieves the connection bundle exactly once, pulls the digest-pinned image, and starts only the
-worker and node-agent containers.
+The join workflow first verifies Linux, dependencies, Docker Compose, the token shape, and public
+HTTPS without consuming the token. It then creates a WireGuard peer, verifies the private fleet API
+with the enrolled CA, asserts a recent WireGuard handshake, retrieves the connection bundle exactly
+once, pulls the digest-pinned image, and starts only the worker and node-agent containers. A timeout
+reports the endpoint, handshake state, interface state, and whether control-plane reconciliation or
+inbound UDP is the likely cause.
 
 ### Broker worker
 
@@ -365,7 +395,7 @@ again. Do not copy shared credentials or weaken the delivery gate.
 | Symptom | Check and action |
 |---|---|
 | Join cannot reach the control plane | Verify DNS, HTTPS, firewall rules, and the public URL. For a private CA, pass the same `--ca-cert` to initialization and join. |
-| WireGuard join times out after enrollment | Confirm UDP reachability to `--endpoint`, inspect `wg show`, and run `shakerscan fleet reconcile` if automatic reconciliation was disabled. |
+| WireGuard join times out after enrollment | Read the endpoint/handshake/interface diagnostics printed by `join`; allow inbound UDP and run `shakerscan fleet reconcile` if automatic reconciliation was disabled. The Fleet UI marks nodes awaiting their first WireGuard connection. |
 | `fleet CA is not configured` | Overlay state must contain the enrolled CA at `.shakerscan-fleet/node/ca.crt`. Do not switch it to system trust; revoke and rejoin if state is incomplete. |
 | Broker reports certificate verification failure | Confirm the public certificate chain and hostname. Supply the correct private CA with `--ca-cert` when applicable. Never disable TLS verification. |
 | Node is `stale` | Check the node-agent container, host clock, DNS/network reachability, and its `last_error`. A stale node is excluded from fleet-wide scaling. |

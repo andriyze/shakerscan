@@ -29,7 +29,7 @@ import uuid
 from dataclasses import dataclass
 from ipaddress import IPv4Address, IPv4Network, ip_address, ip_network
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 
 INTERFACE_NAME = "shakerscan"
@@ -38,12 +38,54 @@ DEFAULT_WG_PORT = 51820
 DEFAULT_TLS_PORT = 8443
 MAX_HTTP_BODY = 2 * 1024 * 1024
 DIGEST_IMAGE_RE = re.compile(r"^\S+@sha256:[0-9a-fA-F]{64}$")
+IMAGE_REFERENCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/:~-]*$")
 ENV_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 URL_SAFE_SECRET_RE = re.compile(r"^[A-Za-z0-9._~-]+$")
 
 
 class FleetCLIError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class PreflightCheck:
+    name: str
+    status: str
+    detail: str
+    hint: str = ""
+
+
+def _run_check(
+    checks: list[PreflightCheck],
+    name: str,
+    action: Callable[[], Any],
+    *,
+    success: str,
+    hint: str,
+) -> Any | None:
+    try:
+        result = action()
+    except (FleetCLIError, OSError, ValueError) as exc:
+        checks.append(PreflightCheck(name, "fail", str(exc), hint))
+        return None
+    checks.append(PreflightCheck(name, "pass", success))
+    return result
+
+
+def _print_preflight(checks: Iterable[PreflightCheck]) -> None:
+    print("Fleet preflight")
+    for check in checks:
+        marker = {"pass": "PASS", "warn": "WARN", "fail": "FAIL"}.get(check.status, check.status.upper())
+        print(f"  [{marker}] {check.name}: {check.detail}")
+        if check.hint and check.status != "pass":
+            print(f"         Fix: {check.hint}")
+
+
+def _require_preflight(checks: list[PreflightCheck]) -> None:
+    failures = [check for check in checks if check.status == "fail"]
+    _print_preflight(checks)
+    if failures:
+        raise FleetCLIError(f"preflight failed ({len(failures)} check{'s' if len(failures) != 1 else ''})")
 
 
 def fleet_operator_token(env: dict[str, str]) -> str:
@@ -315,6 +357,20 @@ def api_json(
             detail = raw.decode("utf-8", errors="replace")[:500]
         raise FleetCLIError(f"control plane returned HTTP {exc.code}: {detail}") from exc
     except (urllib.error.URLError, TimeoutError, ssl.SSLError, OSError, json.JSONDecodeError) as exc:
+        reason = getattr(exc, "reason", exc)
+        tls_failure = isinstance(reason, (ssl.SSLCertVerificationError, ssl.CertificateError)) or (
+            "CERTIFICATE_VERIFY_FAILED" in str(exc).upper()
+        )
+        if tls_failure:
+            if ca_file is None:
+                raise FleetCLIError(
+                    "control-plane TLS verification failed; if this endpoint uses a private CA, "
+                    "pass --ca-cert /path/to/ca.pem (certificate and hostname verification cannot be disabled)"
+                ) from exc
+            raise FleetCLIError(
+                f"control-plane TLS verification failed with the supplied CA {ca_file}; "
+                "verify the CA chain and that the certificate hostname matches the control-plane URL"
+            ) from exc
         raise FleetCLIError(f"control plane request failed: {exc}") from exc
 
 
@@ -459,6 +515,109 @@ def _discover_digest_image(env: dict[str, str]) -> str:
     raise FleetCLIError("cannot derive a pinned worker image; pass --worker-image repository@sha256:...")
 
 
+def _image_repository(reference: str) -> str:
+    candidate = reference.split("@", 1)[0]
+    slash = candidate.rfind("/")
+    colon = candidate.rfind(":")
+    if colon > slash:
+        candidate = candidate[:colon]
+    if not candidate:
+        raise FleetCLIError("worker image repository is empty")
+    return candidate
+
+
+def resolve_worker_image(value: str | None, env: dict[str, str]) -> tuple[str, str | None]:
+    """Return a pinned image and the mutable source reference, when resolved."""
+    raw = str(value or "").strip()
+    if not raw:
+        return _discover_digest_image(env), None
+    if DIGEST_IMAGE_RE.fullmatch(raw):
+        return validate_digest_image(raw), None
+    if not IMAGE_REFERENCE_RE.fullmatch(raw) or "@" in raw:
+        raise FleetCLIError(
+            "worker image must be a safe registry tag or repository@sha256:<64 hex characters>"
+        )
+
+    inspected = _run(
+        ["docker", "buildx", "imagetools", "inspect", raw],
+        check=False,
+    )
+    if inspected.returncode == 0:
+        match = re.search(r"(?m)^Digest:\s*(sha256:[0-9a-fA-F]{64})\s*$", inspected.stdout or "")
+        if match:
+            return f"{_image_repository(raw)}@{match.group(1).lower()}", raw
+
+    # Older Docker installations may not have buildx. Pulling is a safe
+    # compatibility fallback; RepoDigests is still immutable once persisted.
+    pulled = _run(["docker", "pull", raw], check=False, capture=False)
+    if pulled.returncode == 0:
+        local = _run(
+            ["docker", "image", "inspect", raw, "--format", "{{json .RepoDigests}}"],
+            check=False,
+        )
+        if local.returncode == 0:
+            try:
+                digests = json.loads(local.stdout)
+            except json.JSONDecodeError:
+                digests = []
+            repository = _image_repository(raw)
+            for digest in digests or []:
+                digest_text = str(digest)
+                if DIGEST_IMAGE_RE.fullmatch(digest_text):
+                    _repo, _separator, sha = digest_text.rpartition("@sha256:")
+                    return f"{repository}@sha256:{sha.lower()}", raw
+    raise FleetCLIError(
+        f"could not resolve worker image tag {raw!r} to an immutable digest; "
+        "authenticate to the registry or pass repository@sha256:<digest>"
+    )
+
+
+def _listening_port(protocol: str, port: int) -> bool:
+    flag = "-ltn" if protocol == "tcp" else "-lun"
+    result = _run(["ss", "-H", flag], check=False)
+    if result.returncode != 0:
+        raise FleetCLIError(f"could not inspect local {protocol.upper()} listeners with ss")
+    return bool(re.search(rf"(?:\]:|:){port}\b", result.stdout or ""))
+
+
+def _overlay_route_conflicts(network: IPv4Network) -> list[str]:
+    result = _run(["ip", "-json", "route", "show", "table", "all"], check=False)
+    if result.returncode != 0:
+        raise FleetCLIError("could not inspect local routes with ip")
+    try:
+        routes = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError as exc:
+        raise FleetCLIError("ip returned invalid route data") from exc
+    conflicts: list[str] = []
+    for route in routes if isinstance(routes, list) else []:
+        if not isinstance(route, dict) or route.get("dev") == INTERFACE_NAME:
+            continue
+        destination = str(route.get("dst") or "")
+        if not destination or destination == "default":
+            continue
+        try:
+            existing = ip_network(destination, strict=False)
+        except ValueError:
+            continue
+        if isinstance(existing, IPv4Network) and existing.overlaps(network):
+            conflicts.append(f"{existing} via {route.get('dev') or route.get('gateway') or 'unknown'}")
+    return sorted(set(conflicts))
+
+
+def _assert_port_available(protocol: str, port: int, *, existing_fleet: bool) -> None:
+    if _listening_port(protocol, port) and not existing_fleet:
+        raise FleetCLIError(f"{protocol.upper()} port {port} is already in use")
+
+
+def _assert_overlay_available(network: IPv4Network, *, existing_fleet: bool) -> None:
+    conflicts = _overlay_route_conflicts(network)
+    if conflicts and not existing_fleet:
+        raise FleetCLIError(
+            f"overlay {network} overlaps existing route{'s' if len(conflicts) != 1 else ''}: "
+            + ", ".join(conflicts[:4])
+        )
+
+
 def _connection_bundle(control_ip: str, env: dict[str, str]) -> dict[str, Any]:
     worker_environment: dict[str, str] = {}
     evidence_keys = (
@@ -575,23 +734,233 @@ def _install_reconcile_timer(paths: RuntimePaths) -> None:
     _run(["systemctl", "enable", "--now", timer.name], privileged=True, capture=False)
 
 
+def _validated_range(value: int, label: str, minimum: int, maximum: int) -> int:
+    if not minimum <= value <= maximum:
+        raise FleetCLIError(f"{label} must be between {minimum} and {maximum}")
+    return value
+
+
+def run_init_preflight(paths: RuntimePaths, args: argparse.Namespace) -> dict[str, Any]:
+    """Validate a fleet conversion completely before any durable mutation."""
+    checks: list[PreflightCheck] = []
+    network_mode = str(getattr(args, "network", "wireguard") or "wireguard")
+    env = load_dotenv(paths.dotenv)
+
+    _run_check(
+        checks,
+        "Linux host",
+        _require_linux,
+        success="supported",
+        hint="Run fleet provisioning on a Linux control-plane host.",
+    )
+    required_commands = ("docker",) if network_mode == "broker" else (
+        "wg", "wg-quick", "ip", "ss", "openssl", "docker"
+    )
+    _run_check(
+        checks,
+        "Host dependencies",
+        lambda: _require_commands(required_commands),
+        success="all required commands are installed",
+        hint="Install Docker; WireGuard mode also needs wireguard-tools and iproute2.",
+    )
+    _run_check(
+        checks,
+        "Docker Compose",
+        _docker_compose_command,
+        success="available",
+        hint="Install the Docker Compose plugin and ensure the Docker daemon is running.",
+    )
+    public_url = _run_check(
+        checks,
+        "Public HTTPS URL",
+        lambda: validate_https_url(args.public_url),
+        success="URL syntax is valid",
+        hint="Use a stable origin such as https://scanner.example.com with no path or credentials.",
+    )
+    enrollment_ca = _run_check(
+        checks,
+        "Enrollment CA",
+        lambda: validate_ca_certificate_path(getattr(args, "ca_cert", None)),
+        success="system trust or supplied PEM is usable",
+        hint="Pass a readable PEM CA with --ca-cert when the public URL uses private PKI.",
+    )
+    if public_url and not getattr(args, "skip_public_check", False):
+        _run_check(
+            checks,
+            "Public API reachability",
+            lambda: _require_healthy_api(public_url, enrollment_ca),
+            success="healthy API and certificate chain verified",
+            hint="Fix DNS/HTTPS/firewall access; for private PKI, pass --ca-cert.",
+        )
+    elif getattr(args, "skip_public_check", False):
+        checks.append(PreflightCheck(
+            "Public API reachability",
+            "warn",
+            "skipped by operator for a split-horizon/hairpin limitation",
+            "Verify the public HTTPS endpoint from a worker before issuing a join token.",
+        ))
+
+    image_result = _run_check(
+        checks,
+        "Worker image",
+        lambda: resolve_worker_image(getattr(args, "worker_image", None), env),
+        success="resolved to an immutable digest",
+        hint="Authenticate to the registry or provide repository@sha256:<digest>.",
+    )
+    _run_check(
+        checks,
+        "Worker count",
+        lambda: _validated_range(int(args.workers), "--workers", 1, 128),
+        success="within supported range",
+        hint="Choose between 1 and 128 initial workers.",
+    )
+    if env.get("FLEET_ALLOW_INSECURE_ENROLLMENT", "").lower() in {"1", "true", "yes", "on"}:
+        checks.append(PreflightCheck(
+            "Enrollment policy",
+            "fail",
+            "FLEET_ALLOW_INSECURE_ENROLLMENT is enabled",
+            "Remove the insecure override before production fleet initialization.",
+        ))
+    else:
+        checks.append(PreflightCheck("Enrollment policy", "pass", "secure enrollment is enforced"))
+
+    prepared: dict[str, Any] = {
+        "env": env,
+        "public_url": public_url,
+        "enrollment_ca": enrollment_ca,
+        "worker_image": image_result[0] if image_result else None,
+        "worker_image_source": image_result[1] if image_result else None,
+    }
+    if network_mode == "wireguard":
+        overlay = _run_check(
+            checks,
+            "Overlay CIDR",
+            lambda: parse_overlay(args.overlay),
+            success="canonical private route is valid",
+            hint="Choose a canonical unused IPv4 CIDR, for example 10.77.0.0/24.",
+        )
+        endpoint_result = _run_check(
+            checks,
+            "WireGuard endpoint",
+            lambda: validate_endpoint(args.endpoint),
+            success="host and port are valid",
+            hint="Pass --endpoint with the externally reachable host:port.",
+        )
+        _run_check(
+            checks,
+            "Private TLS port",
+            lambda: _validated_range(int(args.tls_port), "--tls-port", 1, 65535),
+            success="valid",
+            hint="Choose an unused TCP port between 1 and 65535.",
+        )
+        if endpoint_result and endpoint_result[1] != args.listen_port:
+            checks.append(PreflightCheck(
+                "WireGuard listen port",
+                "fail",
+                "--endpoint port and --listen-port do not match",
+                "Use the same UDP port in --endpoint and --listen-port.",
+            ))
+        else:
+            checks.append(PreflightCheck("WireGuard listen port", "pass", "endpoint and listener agree"))
+
+        existing_overlay = str(env.get("FLEET_OVERLAY_CIDR") or "")
+        if overlay and existing_overlay and existing_overlay != str(overlay[0]):
+            checks.append(PreflightCheck(
+                "Existing fleet identity",
+                "fail",
+                f"existing overlay is {existing_overlay}, requested overlay is {overlay[0]}",
+                "Keep the existing overlay or perform a documented fleet reset/migration.",
+            ))
+        else:
+            checks.append(PreflightCheck("Existing fleet identity", "pass", "no incompatible overlay change"))
+        existing_fleet = bool(existing_overlay and overlay and existing_overlay == str(overlay[0]))
+        if overlay:
+            _run_check(
+                checks,
+                "Overlay route collision",
+                lambda: _assert_overlay_available(overlay[0], existing_fleet=existing_fleet),
+                success="no conflicting local route",
+                hint="Choose a different --overlay CIDR or remove the conflicting local route.",
+            )
+        if endpoint_result:
+            _run_check(
+                checks,
+                "WireGuard UDP port",
+                lambda: _assert_port_available("udp", endpoint_result[1], existing_fleet=existing_fleet),
+                success="available",
+                hint="Choose another --listen-port/--endpoint port or stop the conflicting listener.",
+            )
+        _run_check(
+            checks,
+            "Private TLS TCP port",
+            lambda: _assert_port_available("tcp", int(args.tls_port), existing_fleet=existing_fleet),
+            success="available",
+            hint="Choose another --tls-port or stop the conflicting listener.",
+        )
+        has_systemd = bool(shutil.which("systemctl") and Path("/run/systemd/system").is_dir())
+        if has_systemd:
+            checks.append(PreflightCheck("Peer reconciliation", "pass", "systemd timer can be installed"))
+        elif getattr(args, "no_reconcile_service", False):
+            checks.append(PreflightCheck(
+                "Peer reconciliation",
+                "warn",
+                "automatic systemd reconciliation is unavailable",
+                "Run shakerscan fleet reconcile after joins/revocations; Fleet UI will flag pending peers.",
+            ))
+        else:
+            checks.append(PreflightCheck(
+                "Peer reconciliation",
+                "fail",
+                "systemd is unavailable",
+                "Use a systemd host or explicitly accept manual reconciliation with --no-reconcile-service.",
+            ))
+        prepared.update({
+            "overlay": overlay,
+            "endpoint": endpoint_result,
+        })
+
+    _require_preflight(checks)
+    if prepared.get("worker_image_source"):
+        print(
+            f"Pinned worker image: {prepared['worker_image_source']} -> {prepared['worker_image']}"
+        )
+    return prepared
+
+
+def _require_healthy_api(public_url: str, ca_file: Path | None) -> None:
+    health = api_json(public_url, "GET", "/health", ca_file=ca_file, timeout=10)
+    if health.get("status") != "healthy":
+        raise FleetCLIError("public HTTPS API did not report healthy")
+
+
+def command_preflight(paths: RuntimePaths, args: argparse.Namespace) -> None:
+    run_init_preflight(paths, args)
+    print("Preflight passed. No fleet state was changed.")
+
+
+def _backup_standalone_if_running(paths: RuntimePaths, env: dict[str, str]) -> None:
+    """Create a recoverable snapshot before the first standalone-to-fleet conversion."""
+    if str(env.get("FLEET_NETWORK_BACKEND") or "").strip():
+        return
+    compose = _docker_compose_command()
+    postgres = _run([*compose, "ps", "-q", "postgres"], check=False)
+    if postgres.returncode != 0 or not (postgres.stdout or "").strip():
+        return
+    scanner = paths.root / "scanner.sh"
+    if not scanner.is_file():
+        raise FleetCLIError("scanner.sh is missing; cannot create the required pre-conversion backup")
+    print("Existing standalone control plane detected; creating a pre-conversion backup...")
+    _run([str(scanner), "backup"], capture=False)
+
+
 def command_init(paths: RuntimePaths, args: argparse.Namespace) -> None:
-    _require_linux()
-    enrollment_ca = validate_ca_certificate_path(getattr(args, "ca_cert", None))
+    prepared = run_init_preflight(paths, args)
+    enrollment_ca = prepared["enrollment_ca"]
     if getattr(args, "network", "wireguard") == "broker":
-        _require_commands(("docker",))
-        _docker_compose_command()
-        public_url = validate_https_url(args.public_url)
-        if not 1 <= args.workers <= 128:
-            raise FleetCLIError("--workers must be between 1 and 128")
-        if not args.skip_public_check:
-            health = api_json(public_url, "GET", "/health", ca_file=enrollment_ca, timeout=10)
-            if health.get("status") != "healthy":
-                raise FleetCLIError("public HTTPS API did not report healthy")
-        env = load_dotenv(paths.dotenv)
-        if env.get("FLEET_ALLOW_INSECURE_ENROLLMENT", "").lower() in {"1", "true", "yes", "on"}:
-            raise FleetCLIError("production fleet init refuses FLEET_ALLOW_INSECURE_ENROLLMENT")
-        worker_image = validate_digest_image(args.worker_image) if args.worker_image else _discover_digest_image(env)
+        public_url = prepared["public_url"]
+        env = prepared["env"]
+        worker_image = prepared["worker_image"]
+        _backup_standalone_if_running(paths, env)
         operator_token = fleet_operator_token(env)
         profiles = {item.strip() for item in env.get("COMPOSE_PROFILES", "").split(",") if item.strip()}
         artifact_updates, bundled_minio = _fleet_artifact_environment("127.0.0.1", env)
@@ -625,29 +994,12 @@ def command_init(paths: RuntimePaths, args: argparse.Namespace) -> None:
         print(f"HTTPS broker control plane initialized: {public_url}")
         print("Next: shakerscan fleet join-token --ttl 24h --transport broker")
         return
-    _require_commands(("wg", "wg-quick", "ip", "openssl", "docker"))
-    _docker_compose_command()
-    network, control_ip = parse_overlay(args.overlay)
-    if not args.endpoint:
-        raise FleetCLIError("--endpoint is required for WireGuard fleet init")
-    endpoint, listen_port = validate_endpoint(args.endpoint)
-    if listen_port != args.listen_port:
-        raise FleetCLIError("--endpoint port and --listen-port must match")
-    public_url = validate_https_url(args.public_url)
-    if not 1 <= args.tls_port <= 65535:
-        raise FleetCLIError("--tls-port must be between 1 and 65535")
-    if not 1 <= args.workers <= 128:
-        raise FleetCLIError("--workers must be between 1 and 128")
-    if not args.skip_public_check:
-        health = api_json(public_url, "GET", "/health", ca_file=enrollment_ca, timeout=10)
-        if health.get("status") != "healthy":
-            raise FleetCLIError("public HTTPS API did not report healthy")
-    env = load_dotenv(paths.dotenv)
-    if env.get("FLEET_OVERLAY_CIDR") and env["FLEET_OVERLAY_CIDR"] != str(network):
-        raise FleetCLIError("refusing to change the overlay CIDR of an existing fleet identity")
-    if env.get("FLEET_ALLOW_INSECURE_ENROLLMENT", "").lower() in {"1", "true", "yes", "on"}:
-        raise FleetCLIError("production fleet init refuses FLEET_ALLOW_INSECURE_ENROLLMENT")
-    worker_image = validate_digest_image(args.worker_image) if args.worker_image else _discover_digest_image(env)
+    network, control_ip = prepared["overlay"]
+    endpoint, listen_port = prepared["endpoint"]
+    public_url = prepared["public_url"]
+    env = prepared["env"]
+    worker_image = prepared["worker_image"]
+    _backup_standalone_if_running(paths, env)
     operator_token = fleet_operator_token(env)
     datastore_updates = fleet_datastore_credentials(env)
     _ensure_private_dir(paths.control)
@@ -689,6 +1041,7 @@ def command_init(paths: RuntimePaths, args: argparse.Namespace) -> None:
         "FLEET_TLS_PORT": str(args.tls_port),
         "FLEET_PUBLIC_URL": public_url,
         "FLEET_ALLOW_INSECURE_ENROLLMENT": "false",
+        "FLEET_RECONCILE_MODE": "manual" if args.no_reconcile_service else "systemd",
         "FLEET_OPERATOR_TOKEN": operator_token,
         "FLEET_CONNECTION_BUNDLE_PATH": "/run/shakerscan-fleet/control/connection-bundle.json",
         "FLEET_CONNECTION_BUNDLE_JSON": "",
@@ -758,6 +1111,14 @@ def command_join_token(paths: RuntimePaths, args: argparse.Namespace) -> None:
     transport_flag = " --transport broker" if getattr(args, "transport", "overlay") == "broker" else ""
     print(f"shakerscan join {public_url} --token {token}{transport_flag}")
     print(f"Expires: {result.get('expires_at')}")
+    if (
+        getattr(args, "transport", "overlay") == "overlay"
+        and env.get("FLEET_RECONCILE_MODE") == "manual"
+    ):
+        print(
+            "Manual reconciliation is enabled: after starting join on the worker, run "
+            "`shakerscan fleet reconcile` on this control plane."
+        )
 
 
 def _read_node_state(path: Path) -> dict[str, Any]:
@@ -907,15 +1268,105 @@ def _start_broker_runtime(paths: RuntimePaths, response: dict[str, Any]) -> None
     )
 
 
+def run_join_preflight(
+    paths: RuntimePaths,
+    args: argparse.Namespace,
+    *,
+    transport: str,
+    public_url: str,
+    enrollment_ca: Path | None,
+) -> None:
+    checks: list[PreflightCheck] = []
+    _run_check(
+        checks,
+        "Linux host",
+        _require_linux,
+        success="supported",
+        hint="Run fleet workers on Linux.",
+    )
+    required = ("docker",) if transport == "broker" else ("wg", "wg-quick", "ip", "docker")
+    _run_check(
+        checks,
+        "Worker dependencies",
+        lambda: _require_commands(required),
+        success="installed",
+        hint="Install Docker; WireGuard workers also need wireguard-tools and iproute2.",
+    )
+    _run_check(
+        checks,
+        "Docker Compose",
+        _docker_compose_command,
+        success="available",
+        hint="Install the Docker Compose plugin and start Docker.",
+    )
+    token = str(getattr(args, "token", "") or "")
+    if token.startswith("ssj_"):
+        checks.append(PreflightCheck("Join token", "pass", "format is valid"))
+    else:
+        checks.append(PreflightCheck(
+            "Join token",
+            "fail",
+            "missing or malformed single-use token",
+            "Create a fresh token with shakerscan fleet join-token.",
+        ))
+    _run_check(
+        checks,
+        "Control-plane HTTPS",
+        lambda: _require_healthy_api(public_url, enrollment_ca),
+        success="reachable with a verified certificate",
+        hint="Fix DNS/firewall access; for a private CA, pass --ca-cert /path/to/ca.pem.",
+    )
+    _require_preflight(checks)
+
+
+def _wireguard_handshake_age() -> int:
+    result = _run(
+        ["wg", "show", INTERFACE_NAME, "latest-handshakes"],
+        check=False,
+        privileged=True,
+    )
+    if result.returncode != 0:
+        raise FleetCLIError("could not inspect the WireGuard handshake")
+    epochs: list[int] = []
+    for line in (result.stdout or "").splitlines():
+        fields = line.split()
+        if len(fields) >= 2 and fields[1].isdigit() and int(fields[1]) > 0:
+            epochs.append(int(fields[1]))
+    if not epochs:
+        raise FleetCLIError("WireGuard has not completed a handshake")
+    return max(0, int(time.time()) - max(epochs))
+
+
+def _wireguard_failure_diagnostics(endpoint: str) -> str:
+    details = [f"endpoint={endpoint}"]
+    try:
+        details.append(f"latest_handshake_age={_wireguard_handshake_age()}s")
+    except FleetCLIError as exc:
+        details.append(str(exc))
+    interface = _run(["ip", "-brief", "address", "show", INTERFACE_NAME], check=False, privileged=True)
+    if interface.returncode == 0 and (interface.stdout or "").strip():
+        details.append((interface.stdout or "").strip())
+    return "; ".join(details)
+
+
 def command_join(paths: RuntimePaths, args: argparse.Namespace) -> None:
-    _require_linux()
     transport = str(getattr(args, "transport", "overlay") or "overlay")
-    _require_commands(("docker",) if transport == "broker" else ("wg", "wg-quick", "ip", "docker"))
-    _docker_compose_command()
     public_url = validate_https_url(args.control_plane_url)
     enrollment_ca = validate_ca_certificate_path(getattr(args, "ca_cert", None))
-    _ensure_private_dir(paths.node)
     state_path = paths.node / "state.json"
+    if not state_path.exists():
+        run_join_preflight(
+            paths,
+            args,
+            transport=transport,
+            public_url=public_url,
+            enrollment_ca=enrollment_ca,
+        )
+    else:
+        _require_linux()
+        _require_commands(("docker",) if transport == "broker" else ("wg", "wg-quick", "ip", "docker"))
+        _docker_compose_command()
+    _ensure_private_dir(paths.node)
     if state_path.exists():
         state = _read_node_state(state_path)
         if str(state.get("enrollment_url") or "") != public_url:
@@ -1064,7 +1515,19 @@ def command_join(paths: RuntimePaths, args: argparse.Namespace) -> None:
             last_error = exc
         time.sleep(2)
     else:
-        raise FleetCLIError(f"WireGuard overlay did not become ready: {last_error}")
+        diagnostics = _wireguard_failure_diagnostics(
+            str(response["wireguard_control_plane_endpoint"])
+        )
+        raise FleetCLIError(
+            "WireGuard overlay did not become ready. Confirm the control-plane peer was reconciled "
+            f"and inbound UDP reaches it ({diagnostics}). Last HTTPS error: {last_error}"
+        )
+    handshake_age = _wireguard_handshake_age()
+    if handshake_age > max(120, int(args.overlay_timeout) + 30):
+        raise FleetCLIError(
+            f"WireGuard overlay health succeeded but the latest handshake is stale ({handshake_age}s); "
+            "check for an overlapping route before starting workers"
+        )
     bundle_response = api_json(
         overlay_url,
         "POST",
@@ -1168,13 +1631,32 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="allow split-horizon/hairpin-limited DNS after manually verifying the public HTTPS URL",
     )
-    init.add_argument("--worker-image", help="digest-pinned scanner image")
+    init.add_argument(
+        "--worker-image",
+        help="scanner image tag or digest (tags are resolved and persisted by immutable digest)",
+    )
     init.add_argument("--workers", type=int, default=1)
     init.add_argument(
         "--no-reconcile-service",
         action="store_true",
         help="skip systemd timer installation and reconcile peers manually",
     )
+
+    preflight = subparsers.add_parser(
+        "preflight",
+        help="check a planned fleet initialization without changing fleet state",
+    )
+    preflight.add_argument("--network", choices=["wireguard", "broker"], default="wireguard")
+    preflight.add_argument("--overlay", default=DEFAULT_OVERLAY)
+    preflight.add_argument("--endpoint", help="public WireGuard endpoint host:port")
+    preflight.add_argument("--listen-port", type=int, default=DEFAULT_WG_PORT)
+    preflight.add_argument("--tls-port", type=int, default=DEFAULT_TLS_PORT)
+    preflight.add_argument("--public-url", required=True)
+    preflight.add_argument("--ca-cert")
+    preflight.add_argument("--skip-public-check", action="store_true")
+    preflight.add_argument("--worker-image", help="registry tag or digest-pinned scanner image")
+    preflight.add_argument("--workers", type=int, default=1)
+    preflight.add_argument("--no-reconcile-service", action="store_true")
 
     token = subparsers.add_parser("join-token", help="mint a single-use worker join command")
     token.add_argument("--role", choices=["worker"], default="worker")
@@ -1219,6 +1701,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "init":
             command_init(paths, args)
+        elif args.command == "preflight":
+            command_preflight(paths, args)
         elif args.command == "join-token":
             command_join_token(paths, args)
         elif args.command == "join":

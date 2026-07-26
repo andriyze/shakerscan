@@ -3,6 +3,8 @@ import json
 import os
 import sys
 import types
+import urllib.error
+import ssl
 from pathlib import Path
 
 import pytest
@@ -166,6 +168,13 @@ def test_parser_exposes_documented_commands():
     parser = fleet_cli.build_parser()
     assert parser.parse_args(["join-token"]).command == "join-token"
     assert parser.parse_args(["reconcile"]).command == "reconcile"
+    assert parser.parse_args([
+        "preflight",
+        "--endpoint", "fleet.example.test:51820",
+        "--public-url", "https://fleet.example.test",
+        "--worker-image", IMAGE,
+        "--no-reconcile-service",
+    ]).command == "preflight"
     args = parser.parse_args([
         "init",
         "--endpoint",
@@ -233,6 +242,7 @@ def test_join_persists_one_time_bundle_before_starting_runtime(tmp_path, monkeyp
     monkeypatch.setattr(fleet_cli, "generate_wireguard_keypair", fake_keys)
     monkeypatch.setattr(fleet_cli, "install_wireguard", lambda _path: None)
     monkeypatch.setattr(fleet_cli, "api_json", fake_api)
+    monkeypatch.setattr(fleet_cli, "_wireguard_handshake_age", lambda: 1)
     monkeypatch.setattr(fleet_cli, "_start_worker_runtime", lambda _paths, result: started.append(result["node_id"]))
 
     fleet_cli.command_join(
@@ -250,6 +260,7 @@ def test_join_persists_one_time_bundle_before_starting_runtime(tmp_path, monkeyp
     assert (paths.node / "state.json").stat().st_mode & 0o777 == 0o600
     worker_env = (paths.node / "worker.env").read_text(encoding="utf-8")
     assert "REDIS_URL=redis://10.77.0.1:6379" in worker_env
+    assert calls[0][2] == "/health"
     assert calls[-1][2].endswith("/connection-bundle")
 
 
@@ -266,6 +277,8 @@ def test_broker_join_installs_no_database_or_redis_credentials(tmp_path, monkeyp
     payloads = []
 
     def fake_api(_base, _method, path, **kwargs):
+        if path == "/health":
+            return {"status": "healthy"}
         assert path == "/fleet/nodes/join"
         payloads.append(kwargs["payload"])
         return dict(response)
@@ -321,6 +334,9 @@ def test_broker_join_can_pin_a_private_enrollment_ca(tmp_path, monkeypatch):
     observed_ca_files = []
 
     def fake_api(_base, _method, path, **kwargs):
+        if path == "/health":
+            observed_ca_files.append(kwargs.get("ca_file"))
+            return {"status": "healthy"}
         assert path == "/fleet/nodes/join"
         observed_ca_files.append(kwargs.get("ca_file"))
         return dict(response)
@@ -349,7 +365,7 @@ def test_broker_join_can_pin_a_private_enrollment_ca(tmp_path, monkeypatch):
         ),
     )
 
-    assert observed_ca_files == [source_ca.resolve()]
+    assert observed_ca_files == [source_ca.resolve(), source_ca.resolve()]
     state = json.loads((paths.node / "state.json").read_text(encoding="utf-8"))
     assert state["tls_ca_mode"] == "file"
     assert state["ca_cert_path"] == "/run/shakerscan-fleet/ca.crt"
@@ -473,3 +489,105 @@ def test_fleet_artifact_environment_preserves_external_s3():
     )
     assert bundled is False
     assert updates == {"ARTIFACT_STORAGE_REQUIRED": "true"}
+
+
+def test_worker_image_tag_resolves_to_manifest_digest(monkeypatch):
+    calls = []
+
+    def fake_run(argv, **_kwargs):
+        calls.append(argv)
+        return types.SimpleNamespace(
+            returncode=0,
+            stdout="Name: registry.example/shakerscan:v8\nDigest: sha256:" + "b" * 64 + "\n",
+        )
+
+    monkeypatch.setattr(fleet_cli, "_run", fake_run)
+    pinned, source = fleet_cli.resolve_worker_image("registry.example/shakerscan:v8", {})
+    assert source == "registry.example/shakerscan:v8"
+    assert pinned == "registry.example/shakerscan@sha256:" + "b" * 64
+    assert calls[0][:4] == ["docker", "buildx", "imagetools", "inspect"]
+
+
+def test_preflight_reports_all_failures_before_mutation(tmp_path, monkeypatch, capsys):
+    paths = fleet_cli.RuntimePaths(tmp_path)
+    monkeypatch.setattr(fleet_cli, "_require_linux", lambda: (_ for _ in ()).throw(fleet_cli.FleetCLIError("not Linux")))
+    monkeypatch.setattr(fleet_cli, "_require_commands", lambda _names: (_ for _ in ()).throw(fleet_cli.FleetCLIError("missing tools")))
+    monkeypatch.setattr(fleet_cli, "_docker_compose_command", lambda: (_ for _ in ()).throw(fleet_cli.FleetCLIError("no Compose")))
+    monkeypatch.setattr(fleet_cli, "api_json", lambda *_a, **_k: {"status": "healthy"})
+    with pytest.raises(fleet_cli.FleetCLIError, match="preflight failed"):
+        fleet_cli.command_preflight(
+            paths,
+            types.SimpleNamespace(
+                network="wireguard",
+                overlay="not-a-cidr",
+                endpoint=None,
+                listen_port=51820,
+                tls_port=8443,
+                public_url="http://not-https.example",
+                ca_cert=None,
+                skip_public_check=False,
+                worker_image="bad image",
+                workers=0,
+                no_reconcile_service=False,
+            ),
+        )
+    output = capsys.readouterr().out
+    assert output.count("[FAIL]") >= 6
+    assert not paths.fleet.exists()
+
+
+def test_standalone_backup_runs_before_fleet_mutation(tmp_path, monkeypatch):
+    paths = fleet_cli.RuntimePaths(tmp_path)
+    scanner = tmp_path / "scanner.sh"
+    scanner.write_text("#!/bin/sh\n", encoding="utf-8")
+    calls = []
+
+    def fake_run(argv, **_kwargs):
+        calls.append(argv)
+        stdout = "postgres-container\n" if argv[-3:] == ["ps", "-q", "postgres"] else ""
+        return types.SimpleNamespace(returncode=0, stdout=stdout)
+
+    monkeypatch.setattr(fleet_cli, "_docker_compose_command", lambda: ["docker", "compose"])
+    monkeypatch.setattr(fleet_cli, "_run", fake_run)
+    fleet_cli._backup_standalone_if_running(paths, {})
+    assert calls[-1] == [str(scanner), "backup"]
+
+
+def test_api_json_gives_private_ca_hint(monkeypatch):
+    verification = ssl.SSLCertVerificationError("certificate verify failed")
+
+    def fail(*_args, **_kwargs):
+        raise urllib.error.URLError(verification)
+
+    monkeypatch.setattr(fleet_cli.urllib.request, "urlopen", fail)
+    with pytest.raises(fleet_cli.FleetCLIError, match="pass --ca-cert"):
+        fleet_cli.api_json("https://fleet.internal", "GET", "/health")
+
+
+def test_port_and_overlay_collision_detection(monkeypatch):
+    def fake_run(argv, **_kwargs):
+        if argv[0] == "ss":
+            return types.SimpleNamespace(
+                returncode=0,
+                stdout="LISTEN 0 4096 0.0.0.0:8443 0.0.0.0:*\n",
+            )
+        return types.SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps([
+                {"dst": "10.77.0.0/16", "dev": "eth0"},
+                {"dst": "192.168.1.0/24", "dev": "eth0"},
+            ]),
+        )
+
+    monkeypatch.setattr(fleet_cli, "_run", fake_run)
+    assert fleet_cli._listening_port("tcp", 8443) is True
+    assert fleet_cli._overlay_route_conflicts(fleet_cli.ip_network("10.77.0.0/24")) == [
+        "10.77.0.0/16 via eth0"
+    ]
+    with pytest.raises(fleet_cli.FleetCLIError, match="already in use"):
+        fleet_cli._assert_port_available("tcp", 8443, existing_fleet=False)
+    with pytest.raises(fleet_cli.FleetCLIError, match="overlaps existing route"):
+        fleet_cli._assert_overlay_available(
+            fleet_cli.ip_network("10.77.0.0/24"),
+            existing_fleet=False,
+        )

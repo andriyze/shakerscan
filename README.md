@@ -348,7 +348,7 @@ machines you own and trust with scoped Redis/PostgreSQL access:
 shakerscan fleet init --network wireguard \
   --endpoint fleet.example.com:51820 \
   --public-url https://scanner.example.com \
-  --worker-image ghcr.io/andriyze/shakerscan@sha256:<digest>
+  --worker-image ghcr.io/andriyze/shakerscan:latest
 shakerscan fleet join-token --ttl 24h
 
 # Worker VPS
@@ -362,14 +362,16 @@ workers receive no Redis, PostgreSQL, or object-store credentials:
 # Control plane
 shakerscan fleet init --network broker \
   --public-url https://scanner.example.com \
-  --worker-image ghcr.io/andriyze/shakerscan@sha256:<digest>
+  --worker-image ghcr.io/andriyze/shakerscan:latest
 shakerscan fleet join-token --ttl 24h --transport broker
 
 # Worker VPS
 shakerscan join https://scanner.example.com --token <join-token> --transport broker
 ```
 
-Both transports require a CA-verified HTTPS enrollment URL and a digest-pinned worker image. For a
+Both transports require a CA-verified HTTPS enrollment URL. `fleet init` preflights the host before
+mutation, resolves an explicitly supplied image tag, and persists only its immutable digest. It also
+backs up a running standalone control plane before its first fleet conversion. For a
 private-CA endpoint, pass `--ca-cert /path/to/ca.pem` to initialization and join; broker nodes persist
 that CA and use it explicitly instead of the system trust store. Overlay traffic always requires the
 private fleet CA returned during enrollment and fails with a configuration error if that CA is unavailable.

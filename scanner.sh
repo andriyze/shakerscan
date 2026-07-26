@@ -1461,6 +1461,7 @@ print_help() {
     echo "  research <id> [N]  Run up to N bounded Codex decisions for a research episode"
     echo "  gungnir <cmd>      CT monitor: start, stop, status, logs"
     echo "  fleet init [...]   Initialize the owned-fleet WireGuard control plane"
+    echo "  fleet preflight    Validate fleet prerequisites without changing state"
     echo "  fleet join-token   Mint a single-use ready-to-paste worker join command"
     echo "  fleet reconcile    Reconcile registered workers into local WireGuard state"
     echo "  join <url> [...]   Join this Linux host as a worker-only fleet node"
