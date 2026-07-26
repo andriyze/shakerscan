@@ -8678,6 +8678,22 @@ async def heartbeat_broker_job(
     }
 
 
+def _control_plane_broker_ingest_payload(job_payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a broker result job that is intentionally local to the control plane.
+
+    The original execution placement selects the remote scanner. Result ingestion
+    is a separate trusted control-plane operation; carrying that placement into
+    the ingest queue creates a route no local worker can satisfy.
+    """
+    ingest_payload = copy.deepcopy(dict(job_payload))
+    ingest_payload.pop("placement", None)
+    ingest_payload.pop("_base_queue_name", None)
+    options = ingest_payload.get("options")
+    if isinstance(options, dict):
+        options.pop("placement", None)
+    return ingest_payload
+
+
 @app.post("/fleet/broker/nodes/{node_id}/leases/{lease_id}/result", status_code=202)
 async def submit_broker_job_result(
     node_id: str,
@@ -8758,7 +8774,7 @@ async def submit_broker_job_result(
         raise HTTPException(status_code=500, detail="broker queue payload cannot be recovered") from exc
     job_payload["_broker_result_id"] = str(result_row["id"])
     job_payload["_broker_lease_id"] = lease_id
-    job_payload.pop("_base_queue_name", None)
+    job_payload = _control_plane_broker_ingest_payload(job_payload)
     reservation = parse_json_field(row.get("budget_reservation")) or {}
     if isinstance(reservation, dict) and reservation:
         options = dict(job_payload.get("options") or {})

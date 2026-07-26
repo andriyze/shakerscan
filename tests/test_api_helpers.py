@@ -318,6 +318,30 @@ def test_fleet_placement_reachability_requires_live_nodes_and_known_tools():
     assert exc.value.detail["error"] == "unreachable_fleet_placement"
 
 
+def test_broker_result_ingest_drops_remote_execution_placement():
+    original = {
+        "scan_id": str(uuid.uuid4()),
+        "target": "http://juice-shop:3000",
+        "placement": {"node_id": "remote-node"},
+        "_base_queue_name": "scan_jobs",
+        "options": {
+            "scan_type": "quick",
+            "placement": {"node_id": "remote-node"},
+            "custom_budget": {"max_requests": 100},
+        },
+    }
+
+    ingest = api_module._control_plane_broker_ingest_payload(original)
+
+    assert "placement" not in ingest
+    assert "_base_queue_name" not in ingest
+    assert "placement" not in ingest["options"]
+    assert ingest["options"]["scan_type"] == "quick"
+    assert ingest["options"]["custom_budget"] == {"max_requests": 100}
+    assert original["placement"] == {"node_id": "remote-node"}
+    assert original["options"]["placement"] == {"node_id": "remote-node"}
+
+
 def test_local_placement_is_reachable_without_an_enrolled_node(monkeypatch):
     class Conn:
         async def fetch(self, *_args):

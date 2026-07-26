@@ -15,45 +15,13 @@ import {
   type ScanType
 } from '@/lib/constants'
 import { Button, Card, useToast } from '@/components/ui'
+import { validateScanTarget } from '@/lib/targetValidation'
 
-const HOSTNAME_PATTERN = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/i
-const IPV4_PATTERN = /^\d{1,3}(\.\d{1,3}){3}$/
 type ExecutionMode = 'auto' | 'normal' | 'parallel' | 'coverage'
 type ShardSelection = 'auto' | '2' | '3' | '4' | '6' | '12' | '20'
 type CoveragePerShardSelection = '50' | '100' | '150' | '250'
 type CoverageMaxShardSelection = '32' | '64' | '128'
 type CoverageDepth = 'standard' | 'deep'
-
-function validateTarget(value: string): string | null {
-  const trimmed = value.trim()
-  if (!trimmed) {
-    return 'Please enter a target URL'
-  }
-  if (/\s/.test(trimmed)) {
-    return 'Target cannot contain spaces'
-  }
-  const candidate = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`
-  let url: URL
-  try {
-    url = new URL(candidate)
-  } catch {
-    return 'Enter a valid URL or domain (e.g., https://example.com)'
-  }
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    return 'Only http(s) targets are supported'
-  }
-  const host = url.hostname
-  if (!host) {
-    return 'Enter a valid URL or domain (e.g., https://example.com)'
-  }
-  const isLocalhost = host === 'localhost'
-  const isIPv6 = host.startsWith('[') || host.includes(':')
-  const isIPv4 = IPV4_PATTERN.test(host)
-  if (!isLocalhost && !isIPv4 && !isIPv6 && (!HOSTNAME_PATTERN.test(host) || !host.includes('.'))) {
-    return 'Enter a valid URL or domain (e.g., https://example.com)'
-  }
-  return null
-}
 
 export default function NewScanPage() {
   const router = useRouter()
@@ -188,7 +156,7 @@ export default function NewScanPage() {
         setTargetError('Enter at least one target URL (one per line).')
         return
       }
-      const firstInvalid = batchList.map((t) => validateTarget(t)).find(Boolean)
+      const firstInvalid = batchList.map((t) => validateScanTarget(t)).find(Boolean)
       if (firstInvalid) {
         setTargetError(firstInvalid)
         return
@@ -198,7 +166,7 @@ export default function NewScanPage() {
         return
       }
     } else {
-      const validationError = validateTarget(target)
+    const validationError = validateScanTarget(target)
       if (validationError) {
         setTargetError(validationError)
         return
