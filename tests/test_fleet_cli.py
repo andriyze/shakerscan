@@ -488,6 +488,9 @@ def test_broker_init_uses_private_ca_for_public_health_checks(tmp_path, monkeypa
     public_checks = [item for item in calls if item[0] == "https://fleet.internal.example"]
     assert len(public_checks) == 2
     assert all(item[2] == ca_path.resolve() for item in public_checks)
+    env = fleet_cli.load_dotenv(paths.dotenv)
+    assert env["EVIDENCE_S3_ENDPOINT_URL"] == "http://minio:9000"
+    assert env["COMPOSE_PROFILES"] == "artifacts"
 
 
 def test_fleet_artifact_environment_preserves_external_s3():
@@ -503,6 +506,27 @@ def test_fleet_artifact_environment_preserves_external_s3():
     )
     assert bundled is False
     assert updates == {"ARTIFACT_STORAGE_REQUIRED": "true"}
+
+
+def test_broker_artifact_environment_repairs_legacy_loopback_minio_endpoint():
+    updates, bundled = fleet_cli._fleet_artifact_environment(
+        "minio",
+        {
+            "COMPOSE_PROFILES": "artifacts,fleet-gateway",
+            "EVIDENCE_STORAGE_BACKEND": "s3",
+            "EVIDENCE_S3_ENDPOINT_URL": "http://127.0.0.1:9000",
+            "EVIDENCE_S3_BUCKET": "shakerscan-artifacts",
+            "EVIDENCE_S3_ACCESS_KEY_ID": "generated-user",
+            "EVIDENCE_S3_SECRET_ACCESS_KEY": "generated-password",
+            "MINIO_ROOT_USER": "generated-user",
+            "MINIO_ROOT_PASSWORD": "generated-password",
+        },
+    )
+
+    assert bundled is True
+    assert updates["EVIDENCE_S3_ENDPOINT_URL"] == "http://minio:9000"
+    assert updates["MINIO_ROOT_USER"] == "generated-user"
+    assert updates["MINIO_ROOT_PASSWORD"] == "generated-password"
 
 
 def test_worker_image_tag_resolves_to_manifest_digest(monkeypatch):

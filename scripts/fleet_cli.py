@@ -842,7 +842,7 @@ def _connection_bundle(control_ip: str, env: dict[str, str]) -> dict[str, Any]:
     }
 
 
-def _fleet_artifact_environment(control_ip: str, env: dict[str, str]) -> tuple[dict[str, str], bool]:
+def _fleet_artifact_environment(artifact_host: str, env: dict[str, str]) -> tuple[dict[str, str], bool]:
     """Resolve external S3 settings or provision the bundled private MinIO."""
     backend = str(
         env.get("ARTIFACT_STORAGE_BACKEND")
@@ -862,13 +862,29 @@ def _fleet_artifact_environment(control_ip: str, env: dict[str, str]) -> tuple[d
         or env.get("AWS_SECRET_ACCESS_KEY")
         or ""
     )
-    if backend in {"s3", "minio", "s3-compatible", "s3_compatible"} and bucket and access_key and secret_key:
+    profiles = {item.strip() for item in env.get("COMPOSE_PROFILES", "").split(",")}
+    configured_minio_user = str(env.get("MINIO_ROOT_USER") or "")
+    configured_minio_password = str(env.get("MINIO_ROOT_PASSWORD") or "")
+    bundled_minio = bool(
+        "artifacts" in profiles
+        and configured_minio_user
+        and configured_minio_password
+        and access_key == configured_minio_user
+        and secret_key == configured_minio_password
+    )
+    if (
+        not bundled_minio
+        and backend in {"s3", "minio", "s3-compatible", "s3_compatible"}
+        and bucket
+        and access_key
+        and secret_key
+    ):
         return {"ARTIFACT_STORAGE_REQUIRED": "true"}, False
 
-    minio_user = str(env.get("MINIO_ROOT_USER") or f"ss-{secrets.token_hex(8)}")
-    minio_password = str(env.get("MINIO_ROOT_PASSWORD") or secrets.token_urlsafe(36))
+    minio_user = configured_minio_user or f"ss-{secrets.token_hex(8)}"
+    minio_password = configured_minio_password or secrets.token_urlsafe(36)
     minio_bucket = str(env.get("EVIDENCE_S3_BUCKET") or "shakerscan-artifacts")
-    endpoint = f"http://{control_ip}:9000"
+    endpoint = f"http://{artifact_host}:9000"
     return {
         "MINIO_ROOT_USER": minio_user,
         "MINIO_ROOT_PASSWORD": minio_password,
@@ -1310,7 +1326,9 @@ def command_init(paths: RuntimePaths, args: argparse.Namespace) -> None:
         gateway_snapshot = _snapshot_file(paths.gateway_config)
         operator_token = fleet_operator_token(env)
         profiles = {item.strip() for item in env.get("COMPOSE_PROFILES", "").split(",") if item.strip()}
-        artifact_updates, bundled_minio = _fleet_artifact_environment("127.0.0.1", env)
+        # Broker control-plane services share the Compose network. Loopback here
+        # would point each API/worker container at itself, not bundled MinIO.
+        artifact_updates, bundled_minio = _fleet_artifact_environment("minio", env)
         if bundled_minio:
             profiles.add("artifacts")
         if https_mode == "managed":
