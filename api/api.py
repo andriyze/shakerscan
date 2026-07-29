@@ -3653,6 +3653,13 @@ class BatchRequest(BaseModel):
 class ModelIntakeScanRequest(BaseModel):
     artifact_url: str
     name: Optional[str] = None
+    intake_mode: Literal["admission", "preflight"] = Field(
+        default="admission",
+        description=(
+            "Admission applies the server-owned minimum policy and can produce deployable evidence. "
+            "Preflight is an explicitly non-admissible exploratory review."
+        ),
+    )
     metadata_url: Optional[str] = None
     metadata_json: dict[str, Any] = Field(default_factory=dict)
     expected_sha256: Optional[str] = None
@@ -3690,7 +3697,13 @@ class ModelIntakeScanRequest(BaseModel):
     )
     require_hash: bool = True
     require_model_governance: bool = True
-    policy_profile: Optional[str] = None
+    policy_profile: Optional[str] = Field(
+        default=None,
+        description=(
+            "Requested profile for preflight. Admission ignores this field and applies "
+            "MODEL_INTAKE_ADMISSION_POLICY_PROFILE (production by default)."
+        ),
+    )
     policy_exceptions: Optional[list[dict[str, Any]]] = None
     max_download_bytes: int = Field(default=10_000_000, ge=1024, le=100_000_000)
     complete_artifact_download: bool = Field(
@@ -5825,25 +5838,9 @@ def _exception_records(
     result: dict[str, Any],
     db_exceptions: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    raw_options = _decode_json_value(scan.get("options")) if scan.get("options") is not None else {}
-    candidates: list[Any] = []
-    if isinstance(raw_options, dict):
-        candidates.append(raw_options.get("policy_exceptions"))
-        candidates.append(raw_options.get("exceptions"))
-    if isinstance(result, dict):
-        candidates.append(result.get("policy_exceptions"))
-        for product_key in ("ai_gate", "model_intake"):
-            product = result.get(product_key)
-            if isinstance(product, dict):
-                candidates.append(product.get("policy_exceptions"))
-    exceptions: list[dict[str, Any]] = []
-    for candidate in candidates:
-        if isinstance(candidate, list):
-            exceptions.extend(item for item in candidate if isinstance(item, dict))
-    # Durable DB-backed exceptions (R4) take precedence and are merged in.
-    if db_exceptions:
-        exceptions.extend(item for item in db_exceptions if isinstance(item, dict))
-    return exceptions
+    # Requests, scanner output, and imported reports are evidence, not authority
+    # sources. Only durable exception rows loaded by the API may weaken a gate.
+    return [item for item in (db_exceptions or []) if isinstance(item, dict)]
 
 
 def _parse_iso_datetime(value: Any) -> datetime | None:
@@ -10438,9 +10435,24 @@ def _apply_model_intake_policy_profile_requirements(
 
 
 async def _expand_model_intake_policy_profile_requirements(request: ModelIntakeScanRequest) -> ModelIntakeScanRequest:
-    profile_key = str(request.policy_profile or "").strip().lower()
-    if not profile_key:
-        return request
+    requested_profile = str(request.policy_profile or "").strip().lower() or None
+    metadata = dict(request.metadata_json or {})
+    metadata["intake_mode"] = request.intake_mode
+    if requested_profile:
+        metadata["requested_policy_profile"] = requested_profile
+
+    if request.intake_mode == "preflight":
+        metadata["admission_eligible"] = False
+        metadata["policy_requirements_enforced"] = False
+        return request.model_copy(update={
+            "metadata_json": metadata,
+            "require_signed_admission": False,
+        })
+
+    profile_key = (
+        os.environ.get("MODEL_INTAKE_ADMISSION_POLICY_PROFILE", "production").strip().lower()
+        or "production"
+    )
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow(
             """
@@ -10455,10 +10467,30 @@ async def _expand_model_intake_policy_profile_requirements(request: ModelIntakeS
             """,
             profile_key,
         )
-    return _apply_model_intake_policy_profile_requirements(
-        request,
-        row_to_dict(row) if row else None,
-    )
+    profile = row_to_dict(row) if row else None
+    if profile is None and profile_key in POLICY_PROFILES:
+        profile = {
+            **POLICY_PROFILES[profile_key],
+            "environment": profile_key,
+            "product_area": "model_intake",
+            "required_trust_anchor_ids": [],
+        }
+    if not profile or not bool(profile.get("strict_model_intake")):
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Model Intake admission policy '{profile_key}' is missing, inactive, or not strict; "
+                "configure an active strict_model_intake profile"
+            ),
+        )
+    metadata["admission_eligible"] = True
+    metadata["server_policy_profile"] = profile_key
+    governed = request.model_copy(update={
+        "policy_profile": profile_key,
+        "policy_exceptions": None,
+        "metadata_json": metadata,
+    })
+    return _apply_model_intake_policy_profile_requirements(governed, profile)
 
 
 async def _expand_model_intake_saved_trust_anchors(request: ModelIntakeScanRequest) -> ModelIntakeScanRequest:
@@ -11364,6 +11396,7 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
         )
     options = {
         "run_kind": "model_intake",
+        "intake_mode": request.intake_mode,
         "artifact_name": request.name,
         "metadata_url": request.metadata_url,
         "metadata_json": request.metadata_json or {},
@@ -15812,7 +15845,8 @@ async def list_policy_profiles():
 
 
 @app.post("/policy-profiles")
-async def create_policy_profile(req: PolicyProfileRequest):
+async def create_policy_profile(req: PolicyProfileRequest, http_request: Request):
+    _require_model_intake_operator(http_request)
     async with db_pool.acquire() as conn:
         required_anchor_ids = await _validate_policy_profile_required_anchor_ids(conn, req)
         try:
@@ -15836,7 +15870,8 @@ async def create_policy_profile(req: PolicyProfileRequest):
 
 
 @app.patch("/policy-profiles/{profile_id}")
-async def update_policy_profile(profile_id: str, req: PolicyProfileRequest):
+async def update_policy_profile(profile_id: str, req: PolicyProfileRequest, http_request: Request):
+    _require_model_intake_operator(http_request)
     async with db_pool.acquire() as conn:
         required_anchor_ids = await _validate_policy_profile_required_anchor_ids(conn, req)
         row = await conn.fetchrow(
@@ -15858,7 +15893,8 @@ async def update_policy_profile(profile_id: str, req: PolicyProfileRequest):
 
 
 @app.delete("/policy-profiles/{profile_id}")
-async def delete_policy_profile(profile_id: str):
+async def delete_policy_profile(profile_id: str, http_request: Request):
+    _require_model_intake_operator(http_request)
     async with db_pool.acquire() as conn:
         result = await conn.execute("DELETE FROM policy_profiles WHERE id=$1", uuid.UUID(profile_id))
     if result.endswith("0"):

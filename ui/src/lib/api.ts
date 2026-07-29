@@ -1281,6 +1281,7 @@ export interface Scan {
 export interface ModelIntakeScanRequest {
   artifact_url: string
   name?: string
+  intake_mode?: 'admission' | 'preflight'
   metadata_url?: string
   metadata_json?: Record<string, unknown>
   expected_sha256?: string
@@ -4408,28 +4409,37 @@ export async function getPolicyProfiles(): Promise<{ policy_profiles: PolicyProf
   return res.json()
 }
 
-export async function createPolicyProfile(data: PolicyProfilePayload): Promise<PolicyProfile> {
+export async function createPolicyProfile(data: PolicyProfilePayload, operatorToken?: string): Promise<PolicyProfile> {
   const res = await fetch(`${API_URL}/policy-profiles`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(operatorToken ? { Authorization: `Bearer ${operatorToken}` } : {}),
+    },
     body: JSON.stringify(data),
   })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to create policy profile'))
   return res.json()
 }
 
-export async function updatePolicyProfile(id: string, data: PolicyProfilePayload): Promise<PolicyProfile> {
+export async function updatePolicyProfile(id: string, data: PolicyProfilePayload, operatorToken?: string): Promise<PolicyProfile> {
   const res = await fetch(`${API_URL}/policy-profiles/${id}`, {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(operatorToken ? { Authorization: `Bearer ${operatorToken}` } : {}),
+    },
     body: JSON.stringify(data),
   })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to update policy profile'))
   return res.json()
 }
 
-export async function deletePolicyProfile(id: string): Promise<{ deleted: boolean; id: string }> {
-  const res = await fetch(`${API_URL}/policy-profiles/${id}`, { method: 'DELETE' })
+export async function deletePolicyProfile(id: string, operatorToken?: string): Promise<{ deleted: boolean; id: string }> {
+  const res = await fetch(`${API_URL}/policy-profiles/${id}`, {
+    method: 'DELETE',
+    headers: operatorToken ? { Authorization: `Bearer ${operatorToken}` } : undefined,
+  })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to delete policy profile'))
   return res.json()
 }

@@ -354,6 +354,7 @@ function ModelIntakeSettingsContent() {
   const [requireGeneratedEvaluation, setRequireGeneratedEvaluation] = useState(false)
   const [requireSignedAdmission, setRequireSignedAdmission] = useState(false)
   const [timeoutSeconds, setTimeoutSeconds] = useState('20')
+  const [intakeMode, setIntakeMode] = useState<'admission' | 'preflight'>('admission')
   const [policyProfile, setPolicyProfile] = useState<string>('production')
   const [savedPolicyProfiles, setSavedPolicyProfiles] = useState<SavedPolicyProfile[]>([])
   const [policyProfilesLoading, setPolicyProfilesLoading] = useState(true)
@@ -530,6 +531,7 @@ function ModelIntakeSettingsContent() {
   function applyScanPayload(payload: ModelIntakeScanRequest) {
     setFieldErrors({})
     setArtifactUrl(payload.artifact_url || '')
+    setIntakeMode(payload.intake_mode || 'admission')
     setName(payload.name || '')
     setMetadataUrl(payload.metadata_url || '')
     setMetadataJson(payload.metadata_json ? JSON.stringify(payload.metadata_json, null, 2) : '')
@@ -647,6 +649,7 @@ function ModelIntakeSettingsContent() {
     if (!Number.isFinite(timeout) || timeout < 1) throw new Error('Timeout must be at least 1 second')
     const payload: ModelIntakeScanRequest = {
       artifact_url: artifactUrl.trim(),
+      intake_mode: intakeMode,
       name: optionalText(name),
       metadata_url: optionalText(metadataUrl),
       metadata_json: parseOptionalJsonObject(metadataJson),
@@ -1212,12 +1215,31 @@ function ModelIntakeSettingsContent() {
             Manage
           </Link>
         </div>
+        <div className="mt-4 grid gap-2 sm:grid-cols-2">
+          <button
+            type="button"
+            onClick={() => setIntakeMode('admission')}
+            className={`rounded-lg border p-3 text-left ${intakeMode === 'admission' ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-950 hover:border-gray-700'}`}
+          >
+            <div className="text-sm font-medium text-white">Admission</div>
+            <div className="mt-1 text-xs text-gray-500">Server-enforced corporate minimums; eligible for a deployable signed allow statement.</div>
+          </button>
+          <button
+            type="button"
+            onClick={() => setIntakeMode('preflight')}
+            className={`rounded-lg border p-3 text-left ${intakeMode === 'preflight' ? 'border-yellow-500 bg-yellow-950/30' : 'border-gray-800 bg-gray-950 hover:border-gray-700'}`}
+          >
+            <div className="text-sm font-medium text-white">Preflight</div>
+            <div className="mt-1 text-xs text-gray-500">Exploratory scanner run only. It can never approve deployment.</div>
+          </button>
+        </div>
         <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
           {POLICY_PROFILES.map((profile) => (
             <button
               key={profile.value}
               type="button"
               onClick={() => applyPolicyProfile(profile.value)}
+              disabled={intakeMode === 'admission'}
               className={`min-w-0 rounded-lg border p-3 text-left ${
                 policyProfile === profile.value ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-950 hover:border-gray-700'
               }`}
@@ -1231,6 +1253,7 @@ function ModelIntakeSettingsContent() {
               key={profile.id}
               type="button"
               onClick={() => applyPolicyProfile(profile.environment)}
+              disabled={intakeMode === 'admission'}
               className={`min-w-0 rounded-lg border p-3 text-left ${
                 policyProfile === profile.environment ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-950 hover:border-gray-700'
               }`}
@@ -1250,6 +1273,11 @@ function ModelIntakeSettingsContent() {
             </button>
           ))}
         </div>
+        {intakeMode === 'admission' && (
+          <div className="mt-3 text-xs text-cyan-200">
+            The API applies its configured admission profile (production by default); caller-selected profiles and inline exceptions cannot weaken it.
+          </div>
+        )}
         {policyProfilesLoading && <div className="mt-3 text-xs text-gray-500">Loading saved profiles...</div>}
         {!policyProfilesLoading && policyProfilesError && (
           <div role="alert" className="mt-3 break-words text-xs text-red-400">

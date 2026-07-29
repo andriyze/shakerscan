@@ -2617,6 +2617,83 @@ def test_model_intake_policy_profile_requirements_add_required_anchor_ids():
     assert updated.require_attestation_verification is True
 
 
+def test_model_intake_admission_uses_server_policy_and_discards_caller_weakening(monkeypatch):
+    class Conn:
+        async def fetchrow(self, *_args):
+            return None
+
+    class Acquire:
+        async def __aenter__(self):
+            return Conn()
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Pool:
+        def acquire(self):
+            return Acquire()
+
+    monkeypatch.setattr(api_module, "db_pool", Pool())
+    monkeypatch.delenv("MODEL_INTAKE_ADMISSION_POLICY_PROFILE", raising=False)
+    request = api_module.ModelIntakeScanRequest(
+        artifact_url="hf://acme/ranker/model.safetensors",
+        policy_profile="development",
+        policy_exceptions=[{"finding_id": "unsafe", "status": "approved"}],
+        complete_artifact_download=False,
+        run_generated_scanners=False,
+    )
+
+    updated = asyncio.run(api_module._expand_model_intake_policy_profile_requirements(request))
+
+    assert updated.intake_mode == "admission"
+    assert updated.policy_profile == "production"
+    assert updated.policy_exceptions is None
+    assert updated.complete_artifact_download is True
+    assert updated.complete_repository_snapshot is True
+    assert updated.run_generated_scanners is True
+    assert updated.require_signed_admission is True
+    assert updated.metadata_json["requested_policy_profile"] == "development"
+    assert updated.metadata_json["server_policy_profile"] == "production"
+
+
+def test_model_intake_preflight_is_explicitly_non_admissible():
+    request = api_module.ModelIntakeScanRequest(
+        artifact_url="https://models.example/model.safetensors",
+        intake_mode="preflight",
+        policy_profile="development",
+        require_signed_admission=True,
+    )
+
+    updated = asyncio.run(api_module._expand_model_intake_policy_profile_requirements(request))
+
+    assert updated.policy_profile == "development"
+    assert updated.require_signed_admission is False
+    assert updated.metadata_json["admission_eligible"] is False
+    assert updated.metadata_json["policy_requirements_enforced"] is False
+
+
+def test_policy_profile_mutation_requires_model_intake_operator(monkeypatch):
+    def deny(_request):
+        raise api_module.HTTPException(status_code=403, detail="denied")
+
+    monkeypatch.setattr(api_module, "_require_model_intake_operator", deny)
+    request = api_module.PolicyProfileRequest(
+        name="corp-prod",
+        product_area="model_intake",
+        environment="production",
+        minimum_block_severity="high",
+        expires_days=30,
+        strict_model_intake=True,
+        owner="security",
+        version="1",
+    )
+
+    with pytest.raises(api_module.HTTPException) as exc_info:
+        asyncio.run(api_module.create_policy_profile(request, _fleet_request(host="203.0.113.2")))
+
+    assert exc_info.value.status_code == 403
+
+
 def test_model_intake_policy_profile_requirements_ignore_non_strict_or_other_products():
     request = api_module.ModelIntakeScanRequest(
         artifact_url="https://models.example/model.safetensors",

@@ -46,6 +46,7 @@ def run_model_intake() -> H.Scorecard:
     fx_large = f"{FIXTURES_BASE}/models/large.safetensors"
 
     def _mi_scan(opts: dict, label: str, timeout: int = 180) -> dict:
+        opts = {"intake_mode": "preflight", **opts}
         artifact_url = str(opts.get("artifact_url") or "")
         if artifact_url.startswith(FIXTURES_BASE) and not opts.get("approval_receipt_id"):
             host = artifact_url.split("/", 3)[2].split(":", 1)[0]

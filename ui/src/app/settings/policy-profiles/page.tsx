@@ -21,6 +21,7 @@ const selectClass = inputClass
 
 const SEVERITIES = ['critical', 'high', 'medium', 'low', 'info']
 const PRODUCT_AREAS = ['ai_gate', 'model_intake', 'dast']
+const MODEL_INTAKE_OPERATOR_TOKEN_KEY = 'shakerscan:model-intake-operator-token'
 
 interface ProfileFormState {
   id?: string
@@ -104,6 +105,17 @@ export default function PolicyProfilesPage() {
   const [error, setError] = useState<string | null>(null)
   const [form, setForm] = useState<ProfileFormState>(EMPTY_FORM)
   const [deleteTarget, setDeleteTarget] = useState<PolicyProfile | null>(null)
+  const [operatorToken, setOperatorToken] = useState('')
+
+  useEffect(() => {
+    setOperatorToken(sessionStorage.getItem(MODEL_INTAKE_OPERATOR_TOKEN_KEY) || '')
+  }, [])
+
+  function updateOperatorToken(value: string) {
+    setOperatorToken(value)
+    if (value) sessionStorage.setItem(MODEL_INTAKE_OPERATOR_TOKEN_KEY, value)
+    else sessionStorage.removeItem(MODEL_INTAKE_OPERATOR_TOKEN_KEY)
+  }
 
   const loadProfiles = useCallback(async () => {
     setLoading(true)
@@ -169,11 +181,11 @@ export default function PolicyProfilesPage() {
     try {
       const payload = formToPayload(form)
       if (form.id) {
-        const updated = await updatePolicyProfile(form.id, payload)
+        const updated = await updatePolicyProfile(form.id, payload, operatorToken.trim())
         setProfiles((prev) => prev.map((profile) => (profile.id === updated.id ? updated : profile)))
         toast.success('Policy profile updated')
       } else {
-        const created = await createPolicyProfile(payload)
+        const created = await createPolicyProfile(payload, operatorToken.trim())
         setProfiles((prev) => [created, ...prev])
         toast.success('Policy profile created')
       }
@@ -191,7 +203,7 @@ export default function PolicyProfilesPage() {
   async function confirmDelete() {
     if (!deleteTarget) return
     try {
-      await deletePolicyProfile(deleteTarget.id)
+      await deletePolicyProfile(deleteTarget.id, operatorToken.trim())
       setProfiles((prev) => prev.filter((profile) => profile.id !== deleteTarget.id))
       toast.success('Policy profile deleted')
       if (form.id === deleteTarget.id) setForm(EMPTY_FORM)
@@ -217,6 +229,21 @@ export default function PolicyProfilesPage() {
       />
 
       {error && <div role="alert" className="rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-sm text-red-300">{error}</div>}
+
+      <Card className="p-4">
+        <label className="block text-sm text-gray-300">
+          Model Intake operator token
+          <input
+            type="password"
+            autoComplete="off"
+            value={operatorToken}
+            onChange={(event) => updateOperatorToken(event.target.value)}
+            className={`${inputClass} mt-2`}
+            placeholder="Required for remote create, update, and delete"
+          />
+        </label>
+        <div className="mt-2 text-xs text-gray-500">Kept only in this browser session. Loopback administration does not require a token.</div>
+      </Card>
 
       <div className="grid gap-3 sm:grid-cols-3">
         <Card className="p-4">

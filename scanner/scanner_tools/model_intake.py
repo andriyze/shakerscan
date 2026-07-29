@@ -544,8 +544,18 @@ def _finding(
     }
 
 
-def _intake_decision(findings: list[dict[str, Any]]) -> dict[str, Any]:
+def _intake_decision(
+    findings: list[dict[str, Any]],
+    *,
+    intake_mode: str = "admission",
+) -> dict[str, Any]:
+    preflight = str(intake_mode or "").strip().lower() == "preflight"
     if not findings:
+        if preflight:
+            return {
+                "decision": "review",
+                "decision_reason": "Preflight completed without findings; run server-governed admission before deployment.",
+            }
         return {
             "decision": "allow",
             "decision_reason": "No model-intake findings were detected.",
@@ -557,6 +567,11 @@ def _intake_decision(findings: list[dict[str, Any]]) -> dict[str, Any]:
             "decision_reason": "One or more critical/high model-intake findings require blocking deployment.",
         }
     if not (severities - {"", "info", "low"}):
+        if preflight:
+            return {
+                "decision": "review",
+                "decision_reason": "Preflight is non-admissible; run server-governed admission before deployment.",
+            }
         return {
             "decision": "allow",
             "decision_reason": "Only advisory low/info model-intake findings were detected.",
@@ -3889,7 +3904,8 @@ async def run_model_intake_scan(
         format_specific_ok = None
 
     score = max(0, 100 - sum(_severity_score(f.get("severity", "info")) for f in findings))
-    decision = _intake_decision(findings)
+    intake_mode = str(options.get("intake_mode") or "admission").strip().lower()
+    decision = _intake_decision(findings, intake_mode=intake_mode)
     findings_digest = hashlib.sha256(
         json.dumps(findings, sort_keys=True, separators=(",", ":"), default=str).encode()
     ).hexdigest()
@@ -3935,6 +3951,8 @@ async def run_model_intake_scan(
     ]
     summary = {
         "artifact_name": name,
+        "intake_mode": intake_mode,
+        "admission_eligible": intake_mode == "admission",
         "artifact_ref": safe_artifact_ref,
         "source_kind": _source_kind(artifact_ref, metadata),
         "registry": safe_registry_reference,

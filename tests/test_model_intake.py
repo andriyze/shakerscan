@@ -327,6 +327,8 @@ def test_model_intake_treats_truncated_safetensors_without_total_size_as_indeter
 def test_model_intake_allows_low_and_info_advisories():
     assert _intake_decision([{"severity": "low"}, {"severity": "info"}])["decision"] == "allow"
     assert _intake_decision([{"severity": "medium"}])["decision"] == "review"
+    assert _intake_decision([], intake_mode="preflight")["decision"] == "review"
+    assert _intake_decision([{"severity": "low"}], intake_mode="preflight")["decision"] == "review"
 
 
 def test_download_http_206_without_content_range_is_truncated(monkeypatch):

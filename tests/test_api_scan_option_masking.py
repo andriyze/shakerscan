@@ -1947,7 +1947,7 @@ def test_deployment_decision_reports_model_intake_blockers():
     assert {item["id"] for item in decision["required_evidence_missing"]} >= {"checksum", "sbom_dependencies"}
 
 
-def test_deployment_decision_applies_time_bound_policy_exception():
+def test_deployment_decision_ignores_caller_supplied_policy_exception():
     future = "2999-01-01T00:00:00Z"
     decision = api_module.build_deployment_decision({
         "id": "scan-id",
@@ -1972,9 +1972,9 @@ def test_deployment_decision_applies_time_bound_policy_exception():
         },
     })
 
-    assert decision["decision"] == "needs_approval"
-    assert decision["blocking_findings"] == []
-    assert decision["applied_exceptions"][0]["id"] == "model_intake:unsafe_serialization"
+    assert decision["decision"] == "block"
+    assert decision["blocking_findings"][0]["id"] == "model_intake:unsafe_serialization"
+    assert decision["applied_exceptions"] == []
     assert decision["policy_profile"] == "production"
 
 
