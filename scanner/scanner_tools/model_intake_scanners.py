@@ -9,9 +9,9 @@ import os
 import pickletools
 import pwd
 import re
-import resource
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import zipfile
@@ -32,8 +32,10 @@ NORMALIZED_STATUSES = {
     "CRASHED",
     "INCOMPLETE",
     "SKIPPED_BY_POLICY",
+    "REVIEW_REQUIRED",
+    "NOT_RUN",
 }
-NON_PASS_STATUSES = {"FAIL", "UNSUPPORTED", "TIMEOUT", "CRASHED", "INCOMPLETE"}
+NON_PASS_STATUSES = {"FAIL", "UNSUPPORTED", "TIMEOUT", "CRASHED", "INCOMPLETE", "REVIEW_REQUIRED", "NOT_RUN"}
 REQUIRED_NON_PASS_STATUSES = NON_PASS_STATUSES | {"SKIPPED_BY_POLICY"}
 MAX_SCANNER_OUTPUT_BYTES = 20_000_000
 MAX_SOURCE_FILE_BYTES = 2_000_000
@@ -116,23 +118,9 @@ def _scanner_result(
     return payload
 
 
-def _bounded_preexec() -> None:
-    resource.setrlimit(resource.RLIMIT_CPU, (300, 300))
-    resource.setrlimit(resource.RLIMIT_AS, (2 * 1024**3, 2 * 1024**3))
-    resource.setrlimit(resource.RLIMIT_FSIZE, (100 * 1024**2, 100 * 1024**2))
-    resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256))
-    try:
-        resource.setrlimit(resource.RLIMIT_NPROC, (128, 128))
-    except (ValueError, OSError):
-        pass
-    if os.geteuid() == 0:
-        try:
-            account = pwd.getpwnam("scanner")
-        except KeyError:
-            return
-        os.setgroups([])
-        os.setgid(account.pw_gid)
-        os.setuid(account.pw_uid)
+def _bounded_command(executable: str, args: tuple[str, ...] | list[str]) -> list[str]:
+    launcher = Path(__file__).with_name("bounded_exec.py")
+    return [sys.executable, str(launcher), "--", executable, *args]
 
 
 def _safe_environment(scratch: Path) -> dict[str, str]:
@@ -194,7 +182,7 @@ def _output_digest(paths: list[Path]) -> str:
 def _tool_version(executable: str, args: tuple[str, ...], env: dict[str, str], cwd: Path) -> str | None:
     try:
         completed = subprocess.run(
-            [executable, *args],
+            _bounded_command(executable, args),
             cwd=cwd,
             env=env,
             stdin=subprocess.DEVNULL,
@@ -202,7 +190,6 @@ def _tool_version(executable: str, args: tuple[str, ...], env: dict[str, str], c
             text=True,
             timeout=5,
             check=False,
-            preexec_fn=_bounded_preexec,
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -211,29 +198,12 @@ def _tool_version(executable: str, args: tuple[str, ...], env: dict[str, str], c
 
 
 def _default_external_parser(stdout: str, stderr: str, exit_code: int) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
-    parsed: Any = None
-    try:
-        parsed = json.loads(stdout) if stdout.strip() else None
-    except json.JSONDecodeError:
-        parsed = None
-    if exit_code == 0:
-        status = "PASS"
-    elif exit_code == 1:
-        status = "FAIL"
-    else:
-        status = "CRASHED"
-    findings: list[dict[str, Any]] = []
-    if status == "FAIL":
-        findings.append({
-            "id": "scanner_reported_issue",
-            "severity": "high",
-            "message": (stderr or stdout or "Scanner reported a policy-relevant issue")[:2000],
-        })
-    summary = {
-        "json_output": parsed is not None,
-        "top_level_type": type(parsed).__name__ if parsed is not None else None,
+    return "INCOMPLETE", [], {
+        "error": "scanner_parser_contract_missing",
+        "exit_code": exit_code,
+        "stdout_sha256": hashlib.sha256(stdout.encode()).hexdigest(),
+        "stderr_sha256": hashlib.sha256(stderr.encode()).hexdigest(),
     }
-    return status, findings, summary
 
 
 def _json_output(stdout: str) -> Any:
@@ -383,7 +353,7 @@ def run_external_scanner(spec: ScannerSpec, subject_path: Path, subject: dict[st
         try:
             with stdout_path.open("wb") as stdout_handle, stderr_path.open("wb") as stderr_handle:
                 completed = subprocess.run(
-                    argv,
+                    _bounded_command(executable, argv[1:]),
                     cwd=scratch,
                     env=env,
                     stdin=subprocess.DEVNULL,
@@ -391,7 +361,6 @@ def run_external_scanner(spec: ScannerSpec, subject_path: Path, subject: dict[st
                     stderr=stderr_handle,
                     timeout=spec.timeout_seconds,
                     check=False,
-                    preexec_fn=_bounded_preexec,
                 )
         except subprocess.TimeoutExpired:
             return _scanner_result(

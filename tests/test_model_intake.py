@@ -211,6 +211,35 @@ def test_model_intake_does_not_compare_full_hash_to_truncated_sample(monkeypatch
     assert aibom["observed_artifact_hash"] is None
 
 
+def test_truncated_archive_prefix_reports_incomplete_archive_inspection(monkeypatch):
+    prefix = b"PK\x03\x04" + b"partial central directory unavailable"
+
+    def fake_download_http(url, max_bytes, timeout_seconds, headers=None):
+        return prefix, {
+            "source": "http",
+            "status": 206,
+            "bytes_observed": len(prefix),
+            "truncated": True,
+        }
+
+    monkeypatch.setattr(model_intake, "_download_http", fake_download_http)
+    result = asyncio.run(run_model_intake_scan(
+        "https://models.example.test/model.zip",
+        {
+            "require_hash": False,
+            "require_signature": False,
+            "require_model_governance": False,
+            "require_deployment_approval": False,
+        },
+    ))
+
+    archive = result["model_intake"]["artifact"]["archive"]
+    assert archive["is_archive"] is True
+    assert archive["complete"] is False
+    assert archive["limit_reasons"] == ["artifact_truncated_before_archive_inventory"]
+    assert "model_intake:archive_inspection_incomplete" in {item["id"] for item in result["findings"]}
+
+
 def test_model_intake_validates_truncated_safetensors_against_declared_artifact_size(monkeypatch):
     header = b'{"weight":{"dtype":"F32","shape":[25],"data_offsets":[0,100]}}'
     prefix = len(header).to_bytes(8, "little") + header + b"\0\0\0\0"
@@ -520,6 +549,25 @@ def test_model_intake_pickle_detection_does_not_match_ordinary_words():
 
 def test_model_intake_pickle_detection_recognizes_protocol_zero():
     assert model_intake._looks_like_pickle(b"(dp0\nVsafe\np1\nVvalue\np2\ns.", ".bin") is True
+
+
+def test_pickle_marker_fallback_is_review_signal_not_critical_proof(tmp_path):
+    artifact = tmp_path / "malformed.dat"
+    artifact.write_bytes(b"not-a-pickle-prefix cposix\nsystem trailing-garbage")
+
+    result = asyncio.run(run_model_intake_scan(
+        str(artifact),
+        _local_options({
+            "require_hash": False,
+            "require_signature": False,
+            "require_model_governance": False,
+            "require_deployment_approval": False,
+        }),
+    ))
+
+    finding = next(item for item in result["findings"] if item["id"] == "model_intake:unsafe_serialization")
+    assert finding["severity"] == "high"
+    assert finding["evidence"]["pickle_detection_method"] == "marker_fallback"
 
 
 def test_model_intake_large_observed_safetensors_header_is_validated():

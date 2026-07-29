@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import re
 import tarfile
 import zipfile
@@ -19,6 +20,8 @@ MAX_COMPRESSION_RATIO = 100
 PICKLE_NAMES = (".pkl", ".pickle", "data.pkl")
 NESTED_NAMES = (".zip", ".tar", ".tar.gz", ".tgz", ".tar.xz", ".tar.bz2")
 EXECUTABLE_EXTENSIONS = {".exe", ".dll", ".so", ".dylib", ".sh", ".bash", ".ps1", ".bat", ".cmd"}
+RISKY_CONFIG_NAMES = {"config.json", "tokenizer_config.json", "generation_config.json"}
+MAX_CONFIG_BYTES = 262_144
 
 
 def _unsafe_path(name: str) -> bool:
@@ -47,6 +50,7 @@ def _new_result() -> dict[str, Any]:
         "archive_link_entries": [],
         "archive_device_entries": [],
         "zip_bomb_entries": [],
+        "risky_config_entries": [],
         "members_discovered": 0,
         "members_inspected": 0,
         "expanded_bytes": 0,
@@ -61,6 +65,32 @@ def _append_unique(result: dict[str, Any], key: str, value: Any, *, limit: int =
     values = result[key]
     if value not in values and len(values) < limit:
         values.append(value)
+
+
+def _record_risky_config(result: dict[str, Any], name: str, raw: bytes) -> None:
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        result["complete"] = False
+        _append_unique(result, "errors", {"path": name, "error": "model_config_json_invalid"}, limit=100)
+        return
+
+    def walk(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                lowered = str(key).lower()
+                if lowered == "trust_remote_code" and child is True:
+                    _append_unique(result, "risky_config_entries", {"entry": name, "risk": "trust_remote_code"})
+                if lowered == "chat_template" and isinstance(child, str) and any(
+                    marker in child.lower() for marker in ("tool_call", "system", "developer")
+                ):
+                    _append_unique(result, "risky_config_entries", {"entry": name, "risk": "risky_chat_template"})
+                walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+
+    walk(parsed)
 
 
 def _record_member(
@@ -112,6 +142,16 @@ def _inspect_zip(handle: Any, result: dict[str, Any], *, prefix: str, depth: int
             name = f"{prefix}!/{info.filename}" if prefix else info.filename
             if not _record_member(result, name, info.file_size, depth=depth, compressed_size=info.compress_size):
                 return
+            if not info.is_dir() and Path(info.filename).name.lower() in RISKY_CONFIG_NAMES:
+                if info.file_size > MAX_CONFIG_BYTES:
+                    result["complete"] = False
+                    _append_unique(result, "limit_reasons", "model_config_size_limit")
+                else:
+                    try:
+                        _record_risky_config(result, name, archive.read(info))
+                    except Exception as exc:
+                        result["complete"] = False
+                        _append_unique(result, "errors", {"path": name, "error": f"{type(exc).__name__}: {exc}"}, limit=100)
             if info.is_dir() or not info.filename.lower().endswith(NESTED_NAMES):
                 continue
             if depth >= MAX_ARCHIVE_DEPTH or info.file_size > MAX_NESTED_MEMBER_BYTES:
@@ -139,6 +179,17 @@ def _inspect_tar(handle: Any, result: dict[str, Any], *, prefix: str, depth: int
                 device=member.isdev() or member.isfifo(),
             ):
                 return
+            if member.isfile() and Path(member.name).name.lower() in RISKY_CONFIG_NAMES:
+                if member.size > MAX_CONFIG_BYTES:
+                    result["complete"] = False
+                    _append_unique(result, "limit_reasons", "model_config_size_limit")
+                else:
+                    config_handle = archive.extractfile(member)
+                    if config_handle is None:
+                        result["complete"] = False
+                        _append_unique(result, "errors", {"path": name, "error": "model_config_unreadable"}, limit=100)
+                    else:
+                        _record_risky_config(result, name, config_handle.read(MAX_CONFIG_BYTES + 1))
             if not member.isfile() or not member.name.lower().endswith(NESTED_NAMES):
                 continue
             if depth >= MAX_ARCHIVE_DEPTH or member.size > MAX_NESTED_MEMBER_BYTES:
@@ -193,6 +244,7 @@ def inspect_archive(path: str | Path) -> dict[str, Any]:
             "archive_link_entries",
             "archive_device_entries",
             "zip_bomb_entries",
+            "risky_config_entries",
         )
     ) or not result["complete"]
     return result

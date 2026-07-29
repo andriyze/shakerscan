@@ -1,4 +1,5 @@
 import io
+import json
 import tarfile
 import zipfile
 
@@ -53,3 +54,18 @@ def test_archive_member_budget_fails_closed(monkeypatch, tmp_path):
 
     assert result["complete"] is False
     assert "member_count_limit" in result["limit_reasons"]
+
+
+def test_complete_archive_path_detects_risky_model_configuration(tmp_path):
+    artifact = tmp_path / "model.zip"
+    with zipfile.ZipFile(artifact, "w") as archive:
+        archive.writestr("config.json", json.dumps({"trust_remote_code": True}))
+        archive.writestr("tokenizer_config.json", json.dumps({"chat_template": "system tool_call"}))
+
+    result = archives.inspect_archive(artifact)
+
+    assert result["complete"] is True
+    assert result["risky_config_entries"] == [
+        {"entry": "config.json", "risk": "trust_remote_code"},
+        {"entry": "tokenizer_config.json", "risk": "risky_chat_template"},
+    ]

@@ -1374,22 +1374,26 @@ async def _fetch_json(
     return parsed, fetch_meta
 
 
-def _looks_like_pickle(data: bytes, ext: str = "") -> bool:
+def _pickle_detection(data: bytes, ext: str = "") -> tuple[bool, str | None]:
     if data.startswith(PICKLE_MAGIC_PREFIXES):
-        return True
+        return True, "protocol_magic"
     if ext in SAFER_MODEL_EXTENSIONS or data.startswith(b"PK\x03\x04"):
-        return False
+        return False, None
     # Do not classify arbitrary binary text such as "evaluation" or "execution"
     # as pickle. pickletools disassembles opcodes without importing or executing
     # the payload and also recognizes protocols 0 and 1, which have no magic.
     try:
         for opcode, _argument, _position in pickletools.genops(data):
             if opcode.name == "STOP":
-                return True
-        return False
+                return True, "pickletools_semantic"
+        return False, None
     except Exception:
         sample = data[:65536]
-        return any(marker in sample for marker in PICKLE_OPCODE_MARKERS)
+        return (True, "marker_fallback") if any(marker in sample for marker in PICKLE_OPCODE_MARKERS) else (False, None)
+
+
+def _looks_like_pickle(data: bytes, ext: str = "") -> bool:
+    return _pickle_detection(data, ext)[0]
 
 
 def _inspect_zip_path(path: str | Path) -> dict[str, Any]:
@@ -2637,6 +2641,15 @@ async def run_model_intake_scan(
     )
     artifact_truncated = bool(artifact_meta.get("truncated"))
     inspection_truncated = bool(artifact_meta.get("inspection_truncated") or artifact_truncated)
+    if artifact_truncated and artifact_bytes.startswith(b"PK\x03\x04") and not zip_info.get("is_archive"):
+        zip_info = {
+            **zip_info,
+            "is_archive": True,
+            "is_zip": True,
+            "complete": False,
+            "limit_reasons": ["artifact_truncated_before_archive_inventory"],
+            "errors": [],
+        }
 
     findings: list[dict[str, Any]] = []
     expected_sha256 = options.get("expected_sha256") or metadata.get("sha256")
@@ -2806,18 +2819,24 @@ async def run_model_intake_scan(
                     if selected_snapshot_path is not None and selected_snapshot_path.is_file()
                     else subject_path
                 )
-                scanner_results.append(_model_intake_scanners.run_builtin_pickle_scan(artifact_scan_path, subject))
+                scanner_results.append(await asyncio.to_thread(
+                    _model_intake_scanners.run_builtin_pickle_scan, artifact_scan_path, subject,
+                ))
                 scanner_results.append(
-                    _model_intake_scanners.run_builtin_source_scan(
+                    await asyncio.to_thread(
+                        _model_intake_scanners.run_builtin_source_scan,
                         subject_path if subject_path.is_dir() else None,
                         subject,
                     )
                 )
-                scanner_results.append(_model_intake_scanners.run_builtin_secret_scan(subject_path, subject))
-                scanner_results.append(_model_intake_scanners.run_builtin_malware_scan(subject_path, subject))
-                scanner_results.append(_model_intake_scanners.run_builtin_sbom_scan(subject_path, subject))
-                scanner_results.append(_model_intake_scanners.run_builtin_binary_inventory(subject_path, subject))
-                scanner_results.append(_model_intake_scanners.run_builtin_license_inventory(subject_path, subject))
+                for builtin_scanner in (
+                    _model_intake_scanners.run_builtin_secret_scan,
+                    _model_intake_scanners.run_builtin_malware_scan,
+                    _model_intake_scanners.run_builtin_sbom_scan,
+                    _model_intake_scanners.run_builtin_binary_inventory,
+                    _model_intake_scanners.run_builtin_license_inventory,
+                ):
+                    scanner_results.append(await asyncio.to_thread(builtin_scanner, subject_path, subject))
                 requested_scanners = options.get("generated_scanner_names")
                 requested_names = {
                     str(item).strip()
@@ -2840,7 +2859,12 @@ async def run_model_intake_scan(
                         ))
                         continue
                     scanner_results.append(
-                        _model_intake_scanners.run_external_scanner(spec, subject_path, subject)
+                        await asyncio.to_thread(
+                            _model_intake_scanners.run_external_scanner,
+                            spec,
+                            subject_path,
+                            subject,
+                        )
                     )
         generated_evidence = {
             **_model_intake_scanners.generated_evidence_summary(scanner_results),
@@ -3407,20 +3431,21 @@ async def run_model_intake_scan(
         ))
 
     risky_ext = ext in RISKY_EXTENSIONS
-    pickle_like = _looks_like_pickle(artifact_bytes, ext)
+    pickle_like, pickle_detection_method = _pickle_detection(artifact_bytes, ext)
     zip_pickle_entries = zip_info.get("pickle_entries") or []
     zip_risky_entries = zip_info.get("risky_entries") or []
     if risky_ext or pickle_like or zip_pickle_entries:
         findings.append(_finding(
             finding_id="unsafe_serialization",
             title="Unsafe model serialization format detected",
-            severity="critical" if pickle_like or zip_pickle_entries else "high",
+            severity="critical" if pickle_detection_method in {"protocol_magic", "pickletools_semantic"} or zip_pickle_entries else "high",
             description="The model artifact appears to use pickle-like or framework serialization that can execute code during load.",
             artifact_ref=artifact_ref,
             evidence={
                 "artifact": name,
                 "extension": ext,
                 "pickle_like_header": pickle_like,
+                "pickle_detection_method": pickle_detection_method,
                 "zip_pickle_entries": zip_pickle_entries,
                 "risky_entries": zip_risky_entries,
             },

@@ -38,6 +38,28 @@ def test_skipped_required_scanner_is_a_required_non_pass():
     assert summary["required_non_pass"] == ["required-tool"]
 
 
+def test_external_scanner_without_parser_contract_can_never_pass_from_exit_zero():
+    status, findings, summary = scanners._default_external_parser('{"looks":"clean"}', "", 0)
+
+    assert status == "INCOMPLETE"
+    assert findings == []
+    assert summary["error"] == "scanner_parser_contract_missing"
+
+
+def test_published_review_and_not_run_statuses_fail_closed_when_required():
+    for status in ("REVIEW_REQUIRED", "NOT_RUN"):
+        result = scanners._scanner_result(
+            name="fixture",
+            version="1",
+            status=status,
+            subject=_subject(),
+            started_at="2026-01-01T00:00:00+00:00",
+            finished_at="2026-01-01T00:00:01+00:00",
+            execution={"required": True},
+        )
+        assert result["execution"]["status"] in scanners.REQUIRED_NON_PASS_STATUSES
+
+
 def test_builtin_pickle_scanner_detects_executable_opcodes(tmp_path):
     artifact = tmp_path / "model.pkl"
     artifact.write_bytes(b"\x80\x04cposix\nsystem\nq\x00.")
