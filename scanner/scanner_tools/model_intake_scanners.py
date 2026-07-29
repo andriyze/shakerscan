@@ -156,6 +156,12 @@ def scanner_applicability(spec: ScannerSpec, subject_path: Path) -> dict[str, An
     elif spec.applicability == "pickle_model":
         applicable = bool(suffixes & PICKLE_MODEL_EXTENSIONS)
         reason = "pickle_backed_artifact_present" if applicable else "no_pickle_backed_artifact"
+        if applicable and spec.name == "fickling" and any(
+            path.suffix.lower() in PICKLE_MODEL_EXTENSIONS and zipfile.is_zipfile(path)
+            for path in files
+        ):
+            applicable = False
+            reason = "pytorch_zip_not_supported_by_fickling"
     elif spec.applicability == "repository_code":
         applicable = subject_path.is_dir() and any(
             path.suffix.lower() in CODE_AND_CONFIG_EXTENSIONS or path.name.lower() in {"dockerfile", "containerfile"}
@@ -294,7 +300,19 @@ def _prepare_unprivileged_paths(subject_path: Path, scratch: Path) -> None:
         return
     # TemporaryDirectory creates its root as 0700. The scanner only needs
     # traversal to the copied, read-only subject view beneath it.
-    os.chmod(subject_path.parent, 0o711)
+    # Selected artifacts can live at
+    # /tmp/model-intake-subject-*/snapshot/model.bin. Make every directory
+    # inside that disposable view traversable; changing only the immediate
+    # parent leaves the outer TemporaryDirectory at 0700.
+    disposable_parents: list[Path] = []
+    disposable_root_found = False
+    for parent in subject_path.parents:
+        disposable_parents.append(parent)
+        if parent.name.startswith("model-intake-subject-"):
+            disposable_root_found = True
+            break
+    for parent in disposable_parents if disposable_root_found else [subject_path.parent]:
+        os.chmod(parent, 0o711)
     if subject_path.is_dir():
         for root, directories, filenames in os.walk(subject_path):
             os.chmod(root, 0o555)
@@ -518,11 +536,21 @@ def _parse_external_scanner(
             return "CRASHED", findings, {"infected_files": infected, "error": "clamav_engine_error"}
         return ("FAIL" if infected else "PASS"), findings, {"infected_files": infected}
     if scanner == "fickling":
-        if not text:
-            return "INCOMPLETE", [], {"error": "fickling_output_empty"}
-        unsafe = exit_code != 0 or any(marker in text.lower() for marker in ("unsafe", "malicious", "overtly bad"))
-        findings = [_external_finding(scanner, {"output_sha256": hashlib.sha256(text.encode()).hexdigest()}, "critical")] if unsafe else []
-        return ("FAIL" if unsafe else "PASS"), findings, {"output_sha256": hashlib.sha256(text.encode()).hexdigest()}
+        output_sha256 = hashlib.sha256(text.encode()).hexdigest()
+        if exit_code == 0:
+            return "PASS", [], {"output_sha256": output_sha256}
+        unsafe = exit_code == 1 and any(
+            marker in text.lower() for marker in ("may be unsafe", "malicious pickle", "is suspicious")
+        )
+        if unsafe:
+            return "FAIL", [_external_finding(scanner, {"output_sha256": output_sha256}, "critical")], {
+                "output_sha256": output_sha256,
+            }
+        return "INCOMPLETE" if exit_code in {1, 2} else "CRASHED", [], {
+            "error": "fickling_analysis_failed",
+            "exit_code": exit_code,
+            "output_sha256": output_sha256,
+        }
     return _default_external_parser(stdout, stderr, exit_code)
 
 
@@ -591,17 +619,29 @@ def run_external_scanner(spec: ScannerSpec, subject_path: Path, subject: dict[st
         result_path = scratch / spec.result_file if spec.result_file else None
         result_output = stdout
         result_truncated = False
+        result_missing = False
         if result_path is not None:
             if result_path.is_file():
                 result_output, result_truncated = _read_bounded(result_path)
             else:
                 result_output = ""
-                result_truncated = True
+                result_missing = True
         raw_digest = _output_digest(
             [stdout_path, stderr_path, *([result_path] if result_path is not None else [])]
         )
-        if stdout_truncated or stderr_truncated or result_truncated:
-            status, findings, summary = "INCOMPLETE", [], {"error": "scanner_output_limit_exceeded"}
+        if result_missing:
+            status, findings, summary = "INCOMPLETE", [], {
+                "error": "scanner_result_file_missing",
+                "exit_code": completed.returncode,
+                "stderr_sha256": hashlib.sha256(stderr.encode()).hexdigest(),
+            }
+        elif stdout_truncated or stderr_truncated or result_truncated:
+            status, findings, summary = "INCOMPLETE", [], {
+                "error": "scanner_output_limit_exceeded",
+                "stdout_truncated": stdout_truncated,
+                "stderr_truncated": stderr_truncated,
+                "result_truncated": result_truncated,
+            }
         else:
             parser = spec.parser
             try:
@@ -948,12 +988,40 @@ OPAQUE_MODEL_EXTENSIONS = {
 }
 
 
+def _stream_secret_matches(path: Path) -> list[tuple[str, int, bytes]]:
+    """Scan arbitrary-size text files with bounded memory and boundary overlap."""
+    matches: list[tuple[str, int, bytes]] = []
+    carry = b""
+    offset = 0
+    overlap = 4096
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            window = carry + chunk
+            window_offset = offset - len(carry)
+            for rule_id, pattern in SECRET_RULES.items():
+                remaining = 20 - sum(1 for existing, _, _ in matches if existing == rule_id)
+                if remaining <= 0:
+                    continue
+                for match in pattern.finditer(window):
+                    absolute = window_offset + match.start()
+                    # Matches wholly inside carry were already reported.
+                    if match.end() <= len(carry):
+                        continue
+                    matches.append((rule_id, absolute, match.group(0)))
+                    remaining -= 1
+                    if remaining == 0:
+                        break
+            offset += len(chunk)
+            carry = window[-overlap:]
+    return matches
+
+
 def run_builtin_secret_scan(subject_path: Path, subject: dict[str, Any]) -> dict[str, Any]:
     started_at = _utc_iso()
     files, files_discovered, inventory_truncated = _subject_file_inventory(subject_path)
     findings: list[dict[str, Any]] = []
     analyzed = 0
-    skipped_large = 0
+    streamed_large = 0
     excluded_by_type = 0
     root = subject_path if subject_path.is_dir() else subject_path.parent
     for path in files:
@@ -963,27 +1031,26 @@ def run_builtin_secret_scan(subject_path: Path, subject: dict[str, Any]) -> dict
             continue
         if path.stat().st_size > MAX_SOURCE_FILE_BYTES:
             if extension in SECRET_TEXT_EXTENSIONS or path.name.lower().startswith(("license", "readme", "requirements")):
-                skipped_large += 1
+                streamed_large += 1
             else:
                 excluded_by_type += 1
-            continue
-        raw = path.read_bytes()
-        if b"\0" in raw[:4096] and extension not in SECRET_TEXT_EXTENSIONS:
+                continue
+        with path.open("rb") as handle:
+            prefix = handle.read(4096)
+        if b"\0" in prefix and extension not in SECRET_TEXT_EXTENSIONS:
             excluded_by_type += 1
             continue
         analyzed += 1
-        for rule_id, pattern in SECRET_RULES.items():
-            for match in list(pattern.finditer(raw))[:20]:
-                value = match.group(0)
-                findings.append({
-                    "id": rule_id,
-                    "severity": "critical" if rule_id == "private_key" else "high",
-                    "path": path.relative_to(root).as_posix(),
-                    "offset": match.start(),
-                    "match_sha256": hashlib.sha256(value).hexdigest(),
-                    "match_length": len(value),
-                })
-    status = "INCOMPLETE" if skipped_large or inventory_truncated else "FAIL" if findings else "PASS"
+        for rule_id, match_offset, value in _stream_secret_matches(path):
+            findings.append({
+                "id": rule_id,
+                "severity": "critical" if rule_id == "private_key" else "high",
+                "path": path.relative_to(root).as_posix(),
+                "offset": match_offset,
+                "match_sha256": hashlib.sha256(value).hexdigest(),
+                "match_length": len(value),
+            })
+    status = "INCOMPLETE" if inventory_truncated else "FAIL" if findings else "PASS"
     return _scanner_result(
         name="shakerscan-secret-rules",
         version="1",
@@ -996,7 +1063,8 @@ def run_builtin_secret_scan(subject_path: Path, subject: dict[str, Any]) -> dict
             "files_discovered": files_discovered,
             "files_enumerated": len(files),
             "files_analyzed": analyzed,
-            "files_skipped_large": skipped_large,
+            "files_skipped_large": 0,
+            "files_streamed_large": streamed_large,
             "files_excluded_by_type": excluded_by_type,
             "inventory_truncated": inventory_truncated,
         },

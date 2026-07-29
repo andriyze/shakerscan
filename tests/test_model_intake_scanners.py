@@ -22,6 +22,29 @@ def test_missing_required_external_scanner_is_unsupported_and_fail_closed(monkey
     assert summary["required_non_pass"] == ["required-tool"]
 
 
+def test_unprivileged_selected_artifact_can_traverse_disposable_snapshot(monkeypatch, tmp_path):
+    disposable = tmp_path / "model-intake-subject-fixture"
+    snapshot = disposable / "snapshot"
+    snapshot.mkdir(parents=True)
+    artifact = snapshot / "pytorch_model.bin"
+    artifact.write_bytes(b"fixture")
+    scratch = tmp_path / "scanner-scratch"
+    scratch.mkdir()
+    disposable.chmod(0o700)
+    snapshot.chmod(0o700)
+
+    account = type("Account", (), {"pw_uid": 1002, "pw_gid": 1002})()
+    monkeypatch.setattr(scanners.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(scanners.os, "chown", lambda *args: None)
+    monkeypatch.setattr(scanners.pwd, "getpwnam", lambda name: account)
+
+    scanners._prepare_unprivileged_paths(artifact, scratch)
+
+    assert disposable.stat().st_mode & 0o777 == 0o711
+    assert snapshot.stat().st_mode & 0o777 == 0o711
+    assert artifact.stat().st_mode & 0o777 == 0o444
+
+
 def test_skipped_required_scanner_is_a_required_non_pass():
     result = scanners._scanner_result(
         name="required-tool",
@@ -161,6 +184,19 @@ def test_large_opaque_weights_are_explicitly_excluded_from_text_secret_scan(monk
     assert result["execution"]["status"] == "PASS"
     assert result["coverage"]["files_excluded_by_type"] == 1
     assert result["coverage"]["files_skipped_large"] == 0
+
+
+def test_large_text_files_are_streamed_for_secrets(monkeypatch, tmp_path):
+    tokenizer = tmp_path / "tokenizer.json"
+    tokenizer.write_bytes(b"x" * 64 + b'\n"token":"AKIAABCDEFGHIJKLMNOP"\n')
+    monkeypatch.setattr(scanners, "MAX_SOURCE_FILE_BYTES", 32)
+
+    result = scanners.run_builtin_secret_scan(tokenizer, _subject())
+
+    assert result["execution"]["status"] == "FAIL"
+    assert result["coverage"]["files_streamed_large"] == 1
+    assert result["coverage"]["files_skipped_large"] == 0
+    assert result["findings"][0]["id"] == "aws_access_key"
 
 
 def test_malware_scan_streams_large_files_without_incomplete_status(monkeypatch, tmp_path):

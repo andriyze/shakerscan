@@ -1,4 +1,5 @@
 import json
+import zipfile
 from pathlib import Path
 
 from scanner.scanner_tools import model_intake_scanners as scanners
@@ -38,9 +39,10 @@ def test_secret_model_and_malware_adapters_are_fail_closed():
 
 
 def test_fickling_requires_semantic_output():
-    assert _parse_external_scanner("fickling", "", "", 0)[0] == "INCOMPLETE"
+    assert _parse_external_scanner("fickling", "", "", 0)[0] == "PASS"
     assert _parse_external_scanner("fickling", "analysis completed safely", "", 0)[0] == "PASS"
-    assert _parse_external_scanner("fickling", "unsafe import detected", "", 1)[0] == "FAIL"
+    assert _parse_external_scanner("fickling", "Warning: file may be unsafe", "", 1)[0] == "FAIL"
+    assert _parse_external_scanner("fickling", "failed to parse", "", 2)[0] == "INCOMPLETE"
 
 
 def test_semgrep_parser_requires_schema_and_preserves_findings():
@@ -100,6 +102,16 @@ def test_scanner_plan_is_format_and_repository_fact_driven(tmp_path):
     assert pickle_by_name["modelscan"]["required"] is True
     assert pickle_by_name["fickling"]["required"] is True
     assert pickle_by_name["semgrep"]["applicable"] is False
+
+    torch_zip = tmp_path / "torch"
+    torch_zip.mkdir()
+    with zipfile.ZipFile(torch_zip / "pytorch_model.bin", "w") as archive:
+        archive.writestr("archive/data.pkl", b"pickle")
+    zip_plan = scanners.resolve_scanner_plan(torch_zip, profile="strict")
+    zip_by_name = {item["spec"].name: item for item in zip_plan}
+    assert zip_by_name["modelscan"]["applicable"] is True
+    assert zip_by_name["fickling"]["applicable"] is False
+    assert zip_by_name["fickling"]["reason"] == "pytorch_zip_not_supported_by_fickling"
 
 
 def test_requested_adapter_is_required_and_unknown_names_are_not_in_plan(tmp_path):
