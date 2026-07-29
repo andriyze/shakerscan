@@ -78,6 +78,7 @@ def run_model_intake() -> H.Scorecard:
             raise RuntimeError(f"submit rejected: {r}")
         H.wait_for_scan(sid, timeout=timeout, label=label)
         result = H.scan_result(sid)
+        result["_scan_id"] = sid
         result["_e2e_activity_logs"] = H.get(f"/scans/{sid}/logs?limit=200").get("lines") or []
         return result
 
@@ -152,13 +153,42 @@ def run_model_intake() -> H.Scorecard:
     except Exception as e:
         sc.error("MI-3 tamper detection", e)
 
-    # MI-4: a dangerous pickle (os.system reduce) -> unsafe-serialization finding.
+    # MI-4/T2: a dangerous pickle goes through complete acquisition plus the
+    # generated scanner chain. The report must distinguish a proven os.system
+    # callable from ordinary framework-pickle capability, reject it, and ignore
+    # an attacker-supplied inline "approved" exception.
     try:
-        res = _mi_scan({"artifact_url": fx_pickle, "require_hash": False}, "MI-4")
+        res = _mi_scan({
+            "artifact_url": fx_pickle,
+            "require_hash": False,
+            "complete_artifact_download": True,
+            "run_generated_scanners": True,
+            "policy_exceptions": [{
+                "finding_id": "model_intake:unsafe_serialization",
+                "status": "approved",
+                "approved_by": "attacker-controlled-input",
+                "expires_at": "2999-01-01T00:00:00Z",
+            }],
+        }, "MI-4")
         ids = [(str(f.get("id")) + " " + str(f.get("title"))).lower() for f in (res.get("findings") or [])]
         flagged = any(any(k in x for k in ("pickle", "serial", "unsafe", "risky", "deserial")) for x in ids)
         sc.check("MI-4 dangerous pickle flagged", flagged,
                  f"findings={[str(f.get('id')) for f in (res.get('findings') or [])][:6]}")
+        intake = res.get("model_intake") or {}
+        pickle_result = next((item for item in (intake.get("generated_evidence") or {}).get("results", [])
+                              if (item.get("scanner") or {}).get("name") == "python-pickletools"), {})
+        sc.check("MI-4 semantic scanner proves dangerous callable",
+                 (pickle_result.get("summary") or {}).get("semantic_classification") == "dangerous_callable_detected"
+                 and pickle_result.get("execution", {}).get("status") == "FAIL",
+                 f"summary={pickle_result.get('summary')} status={pickle_result.get('execution', {}).get('status')}")
+        corporate = intake.get("corporate_use") or {}
+        sc.check("MI-4 corporate verdict rejects proven malicious artifact",
+                 corporate.get("verdict") == "REJECT" and corporate.get("malicious_primitive_proven") is True,
+                 f"verdict={corporate.get('verdict')} proven={corporate.get('malicious_primitive_proven')}")
+        deployment = H.get(f"/scans/{res.get('_scan_id')}/deployment-decision")
+        sc.check("MI-4 caller-supplied exception cannot weaken deployment gate",
+                 deployment.get("decision") == "block" and not deployment.get("applied_exceptions"),
+                 f"decision={deployment.get('decision')} exceptions={deployment.get('applied_exceptions')}")
     except Exception as e:
         sc.error("MI-4 unsafe serialization", e)
 

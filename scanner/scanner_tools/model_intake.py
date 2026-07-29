@@ -681,10 +681,10 @@ def _corporate_use_assessment(
     )
 
     raw_decision = str(decision.get("decision") or "review")
-    if intake_mode == "preflight":
-        verdict = "PREFLIGHT_ONLY"
-    elif proven_malicious:
+    if proven_malicious:
         verdict = "REJECT"
+    elif intake_mode == "preflight":
+        verdict = "PREFLIGHT_ONLY"
     elif raw_decision == "allow":
         verdict = "APPROVED"
     elif raw_decision == "block":
