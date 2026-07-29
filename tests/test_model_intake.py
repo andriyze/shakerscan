@@ -5,6 +5,8 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from scanner.scanner_tools import model_intake
 from scanner.scanner_tools.model_intake import (
     _intake_decision,
@@ -813,7 +815,18 @@ def test_huggingface_repository_snapshot_acquires_every_manifest_file(monkeypatc
             "quarantine_object": f"sha256:{code_sha}",
         }
 
+    async def fake_authoritative_manifest(*_args, **_kwargs):
+        return {
+            "complete": True,
+            "manifest_sha256": "e" * 64,
+            "files": [
+                {"path": "model.safetensors", "size_bytes": len(selected_bytes), "sha256": selected_sha},
+                {"path": "modeling.py", "size_bytes": len(code_bytes), "blob_id": "git-blob"},
+            ],
+        }
+
     monkeypatch.setattr(model_intake, "_safe_download_http_to_quarantine", fake_complete_download)
+    monkeypatch.setattr(model_intake, "_fetch_authoritative_huggingface_manifest", fake_authoritative_manifest)
     metadata = {
         "huggingface_repo": "acme/ranker",
         "huggingface_file": "model.safetensors",
@@ -853,6 +866,65 @@ def test_huggingface_repository_snapshot_acquires_every_manifest_file(monkeypatc
     assert snapshot["bytes_acquired"] == len(selected_bytes) + len(code_bytes)
     assert len(snapshot["snapshot_sha256"]) == 64
     assert observed_urls == [f"https://huggingface.co/acme/ranker/resolve/{revision}/modeling.py"]
+    assert snapshot["authoritative_manifest_sha256"] == "e" * 64
+    assert snapshot["declared_manifest_sha256"] == "f" * 64
+
+
+def test_huggingface_repository_snapshot_ignores_caller_truncated_manifest(monkeypatch, tmp_path):
+    revision = "a" * 40
+    model_bytes = b"weights"
+    code_bytes = b"import os\nos.system('id')\n"
+    model_sha = hashlib.sha256(model_bytes).hexdigest()
+    code_sha = hashlib.sha256(code_bytes).hexdigest()
+
+    async def authoritative(*_args, **_kwargs):
+        return {
+            "complete": True,
+            "manifest_sha256": "1" * 64,
+            "files": [
+                {"path": "model.safetensors", "size_bytes": len(model_bytes), "sha256": model_sha},
+                {"path": "modeling.py", "size_bytes": len(code_bytes), "sha256": code_sha},
+            ],
+        }
+
+    def download(url, *_args, **_kwargs):
+        assert url.endswith("/modeling.py")
+        return code_bytes, {
+            "complete": True,
+            "sha256": code_sha,
+            "bytes_total": len(code_bytes),
+            "quarantine_object": f"sha256:{code_sha}",
+        }
+
+    monkeypatch.setattr(model_intake, "_fetch_authoritative_huggingface_manifest", authoritative)
+    monkeypatch.setattr(model_intake, "_safe_download_http_to_quarantine", download)
+    snapshot = asyncio.run(model_intake._acquire_huggingface_repository_snapshot(
+        {
+            "huggingface_repo": "acme/ranker",
+            "huggingface_file": "model.safetensors",
+            "revision": revision,
+            "repository_manifest": {
+                "complete": True,
+                "manifest_sha256": "2" * 64,
+                "files": [{"path": "model.safetensors", "sha256": model_sha}],
+            },
+        },
+        timeout_seconds=5,
+        quarantine_dir=tmp_path,
+        fetch_policy=None,
+        max_repository_bytes=10_000,
+        max_repository_files=10,
+        selected_artifact_meta={
+            "complete": True,
+            "sha256": model_sha,
+            "bytes_total": len(model_bytes),
+            "quarantine_object": f"sha256:{model_sha}",
+        },
+    ))
+
+    assert snapshot["complete"] is True
+    assert snapshot["files_expected"] == 2
+    assert {item["path"] for item in snapshot["files"]} == {"model.safetensors", "modeling.py"}
 
 
 def test_huggingface_repository_snapshot_rejects_mutable_revision(tmp_path):
@@ -878,6 +950,19 @@ def test_huggingface_repository_snapshot_rejects_mutable_revision(tmp_path):
 
     assert snapshot["status"] == "INCOMPLETE"
     assert snapshot["error"] == "repository_revision_not_immutable"
+
+
+def test_selected_huggingface_artifact_path_must_remain_inside_snapshot(tmp_path):
+    root = tmp_path / "snapshot"
+    root.mkdir()
+    model = root / "model.safetensors"
+    model.write_bytes(b"weights")
+
+    assert model_intake._contained_snapshot_path(root, "model.safetensors") == model
+    with pytest.raises(ValueError, match="escapes_snapshot"):
+        model_intake._contained_snapshot_path(root, "../outside.bin")
+    with pytest.raises(ValueError, match="escapes_snapshot"):
+        model_intake._contained_snapshot_path(root, "/etc/passwd")
 
 
 def test_generated_scanners_require_complete_quarantined_subject(tmp_path):

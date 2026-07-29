@@ -11176,6 +11176,20 @@ async def _enrich_model_intake_scan_request(request: ModelIntakeScanRequest) -> 
     scan_payload = resolved.get("scan_payload") if isinstance(resolved.get("scan_payload"), dict) else {}
     resolved_metadata = scan_payload.get("metadata_json") if isinstance(scan_payload.get("metadata_json"), dict) else {}
     merged_metadata = {**resolved_metadata, **metadata}
+    # Provider-derived identity and inventory fields are authoritative. Request
+    # metadata may add declarations, but it must never replace the pinned Hub
+    # revision, selected path, or complete file manifest produced by the
+    # hardened resolver.
+    for key in (
+        "huggingface_repo",
+        "revision",
+        "huggingface_file",
+        "huggingface_file_inventory",
+        "repository_manifest",
+        "source_repo",
+    ):
+        if key in resolved_metadata:
+            merged_metadata[key] = resolved_metadata[key]
     expected_sha = request.expected_sha256 or scan_payload.get("expected_sha256") or merged_metadata.get("sha256")
     model_card_url = request.model_card_url or scan_payload.get("model_card_url") or merged_metadata.get("model_card_url")
     artifact_url = scan_payload.get("artifact_url") or request.artifact_url

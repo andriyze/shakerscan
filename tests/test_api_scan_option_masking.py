@@ -2264,6 +2264,45 @@ def test_direct_huggingface_scan_request_is_auto_enriched(monkeypatch):
     assert enriched.metadata_json["license"] == "apache-2.0"
 
 
+def test_direct_huggingface_scan_cannot_override_resolved_manifest_or_subject(monkeypatch):
+    authoritative_manifest = {
+        "complete": True,
+        "repository": "acme/ranker",
+        "revision": "a" * 40,
+        "files": [
+            {"path": "model.safetensors"},
+            {"path": "modeling.py"},
+        ],
+    }
+    monkeypatch.setattr(api_module, "_resolve_huggingface_model_intake", lambda request: {
+        "scan_payload": {
+            "artifact_url": f"https://huggingface.co/acme/ranker/resolve/{'a' * 40}/model.safetensors",
+            "metadata_json": {
+                "huggingface_repo": "acme/ranker",
+                "huggingface_file": "model.safetensors",
+                "revision": "a" * 40,
+                "repository_manifest": authoritative_manifest,
+            },
+        },
+    })
+    request = api_module.ModelIntakeScanRequest(
+        artifact_url="acme/ranker",
+        metadata_json={
+            "huggingface_repo": "attacker/other",
+            "huggingface_file": "/etc/passwd",
+            "revision": "b" * 40,
+            "repository_manifest": {"complete": True, "files": [{"path": "model.safetensors"}]},
+        },
+    )
+
+    enriched = asyncio.run(api_module._enrich_model_intake_scan_request(request))
+
+    assert enriched.metadata_json["huggingface_repo"] == "acme/ranker"
+    assert enriched.metadata_json["huggingface_file"] == "model.safetensors"
+    assert enriched.metadata_json["revision"] == "a" * 40
+    assert enriched.metadata_json["repository_manifest"] == authoritative_manifest
+
+
 # --- Focused check_family auto-sharding policy (locked: this path has regressed) ---
 
 def test_focused_family_runs_direct_without_explicit_parallel(monkeypatch):

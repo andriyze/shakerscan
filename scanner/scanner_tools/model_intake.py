@@ -812,6 +812,7 @@ def _download_huggingface_complete(
 async def _acquire_huggingface_repository_snapshot(
     metadata: dict[str, Any],
     *,
+    artifact_ref: str | None = None,
     timeout_seconds: int,
     quarantine_dir: Path,
     fetch_policy: dict[str, Any] | None,
@@ -821,15 +822,36 @@ async def _acquire_huggingface_repository_snapshot(
 ) -> dict[str, Any]:
     """Acquire every file in a pinned Hugging Face manifest into quarantine."""
     declared = metadata.get("repository_manifest") if isinstance(metadata.get("repository_manifest"), dict) else {}
-    repo_id = str(declared.get("repository") or metadata.get("huggingface_repo") or "").strip()
-    revision = str(declared.get("revision") or metadata.get("revision") or "").strip()
-    files = declared.get("files") if isinstance(declared.get("files"), list) else []
-    if not declared or not declared.get("complete"):
-        return {"status": "INCOMPLETE", "complete": False, "error": "declared_manifest_incomplete"}
+    hf_ref = parse_huggingface_ref(artifact_ref or "", metadata)
+    repo_id = str(hf_ref.get("repo_id") or metadata.get("huggingface_repo") or "").strip()
+    revision = str(hf_ref.get("revision") or metadata.get("revision") or "").strip()
     if not repo_id or not re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+", repo_id):
         return {"status": "INCOMPLETE", "complete": False, "error": "invalid_huggingface_repository"}
     if not re.fullmatch(r"[0-9a-fA-F]{40,64}", revision):
         return {"status": "INCOMPLETE", "complete": False, "error": "repository_revision_not_immutable"}
+    try:
+        authoritative = await _fetch_authoritative_huggingface_manifest(
+            repo_id,
+            revision,
+            timeout_seconds=timeout_seconds,
+            fetch_policy=fetch_policy,
+            max_repository_files=max_repository_files,
+            metadata=metadata,
+        )
+    except Exception as exc:
+        return {
+            "status": "INCOMPLETE",
+            "complete": False,
+            "error": f"authoritative_manifest_fetch_failed:{type(exc).__name__}:{exc}",
+        }
+    files = authoritative.get("files") if isinstance(authoritative.get("files"), list) else []
+    if not authoritative.get("complete"):
+        return {
+            "status": "INCOMPLETE",
+            "complete": False,
+            "error": "authoritative_manifest_incomplete",
+            "repository_manifest": authoritative,
+        }
     if len(files) > max_repository_files:
         return {
             "status": "INCOMPLETE",
@@ -943,6 +965,8 @@ async def _acquire_huggingface_repository_snapshot(
         "repository": repo_id,
         "revision": revision,
         "declared_manifest_sha256": declared.get("manifest_sha256"),
+        "authoritative_manifest_sha256": authoritative.get("manifest_sha256"),
+        "repository_manifest": authoritative,
         "snapshot_sha256": snapshot_sha256,
         "files_expected": len(files),
         "files_acquired": len(acquired),
@@ -953,6 +977,154 @@ async def _acquire_huggingface_repository_snapshot(
         "failures": failures[:20],
         "files": acquired,
     }
+
+
+def _normalize_huggingface_manifest(
+    model_info: dict[str, Any],
+    repo_id: str,
+    revision: str,
+    *,
+    max_repository_files: int,
+) -> dict[str, Any]:
+    if str(model_info.get("sha") or "").lower() != revision.lower():
+        raise ValueError("resolved_revision_does_not_match_requested_revision")
+    siblings = model_info.get("siblings") if isinstance(model_info.get("siblings"), list) else []
+    files: list[dict[str, Any]] = []
+    invalid_paths: list[dict[str, str]] = []
+    duplicate_paths: list[str] = []
+    case_collisions: list[list[str]] = []
+    seen: set[str] = set()
+    seen_case: dict[str, str] = {}
+    for sibling in siblings[:max_repository_files]:
+        if not isinstance(sibling, dict):
+            invalid_paths.append({"path": "", "reason": "invalid_file_record"})
+            continue
+        path = str(sibling.get("rfilename") or sibling.get("path") or "")
+        parts = path.split("/")
+        if (
+            not path
+            or "\x00" in path
+            or "\\" in path
+            or path.startswith("/")
+            or re.match(r"^[A-Za-z]:", path)
+            or any(part in {"", ".", ".."} for part in parts)
+        ):
+            invalid_paths.append({"path": path[:512], "reason": "unsafe_or_non_normalized_path"})
+            continue
+        if path in seen:
+            duplicate_paths.append(path)
+            continue
+        folded = path.casefold()
+        if folded in seen_case and seen_case[folded] != path:
+            case_collisions.append([seen_case[folded], path])
+        else:
+            seen_case[folded] = path
+        seen.add(path)
+        lfs = sibling.get("lfs") if isinstance(sibling.get("lfs"), dict) else {}
+        extension = Path(path).suffix.lower()
+        categories = []
+        if extension == ".py":
+            categories.append("python_source")
+        if extension in EXECUTABLE_EXTENSIONS:
+            categories.append("executable")
+        files.append({
+            "path": path,
+            "size_bytes": sibling.get("size") or lfs.get("size"),
+            "sha256": lfs.get("sha256"),
+            "blob_id": sibling.get("blobId"),
+            "categories": categories or ["other"],
+        })
+    files.sort(key=lambda item: item["path"])
+    canonical = {
+        "provider": "huggingface",
+        "repository": repo_id,
+        "revision": revision,
+        "files": [
+            {key: item.get(key) for key in ("path", "size_bytes", "sha256", "blob_id") if item.get(key) not in (None, "")}
+            for item in files
+        ],
+    }
+    manifest_sha256 = hashlib.sha256(
+        json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    config = model_info.get("config") if isinstance(model_info.get("config"), dict) else {}
+    tags = model_info.get("tags") if isinstance(model_info.get("tags"), list) else []
+    python_files = [item["path"] for item in files if "python_source" in item["categories"]]
+    executable_files = [item["path"] for item in files if "executable" in item["categories"]]
+    complete = (
+        bool(siblings)
+        and len(siblings) <= max_repository_files
+        and len(files) + len(invalid_paths) + len(duplicate_paths) == len(siblings)
+        and not invalid_paths
+        and not duplicate_paths
+        and not case_collisions
+    )
+    return {
+        "schema_version": "model-intake-repository-manifest/v1",
+        "provenance_class": "shakerscan_generated",
+        "provider": "huggingface",
+        "repository": repo_id,
+        "revision": revision,
+        "manifest_sha256": manifest_sha256,
+        "complete": complete,
+        "files_discovered": len(siblings),
+        "files_recorded": len(files),
+        "truncated_by_limit": len(siblings) > max_repository_files,
+        "invalid_paths": invalid_paths[:100],
+        "duplicate_paths": duplicate_paths[:100],
+        "case_collisions": case_collisions[:100],
+        "python_files": python_files,
+        "executable_files": executable_files,
+        "auto_map": config.get("auto_map"),
+        "custom_code_required": bool(config.get("auto_map") or python_files or "custom_code" in tags),
+        "files": files,
+    }
+
+
+async def _fetch_authoritative_huggingface_manifest(
+    repo_id: str,
+    revision: str,
+    *,
+    timeout_seconds: int,
+    fetch_policy: dict[str, Any] | None,
+    max_repository_files: int,
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    url = (
+        f"https://huggingface.co/api/models/{urllib.parse.quote(repo_id, safe='/')}"
+        f"/revision/{urllib.parse.quote(revision, safe='')}?blobs=true"
+    )
+    token = str(metadata.get("hf_token") or os.getenv("HF_TOKEN") or "").strip()
+    headers = {"Accept": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    raw, fetch_meta = await asyncio.to_thread(
+        _download_http,
+        url,
+        20_000_000,
+        timeout_seconds,
+        headers,
+        fetch_policy,
+    )
+    if fetch_meta.get("truncated"):
+        raise ValueError("authoritative_manifest_response_truncated")
+    model_info = json.loads(raw.decode("utf-8"))
+    if not isinstance(model_info, dict):
+        raise ValueError("authoritative_manifest_response_not_object")
+    return _normalize_huggingface_manifest(
+        model_info,
+        repo_id,
+        revision,
+        max_repository_files=max_repository_files,
+    )
+
+
+def _contained_snapshot_path(subject_root: Path, selected_path: Any) -> Path:
+    root = subject_root.resolve()
+    candidate = (subject_root / str(selected_path or "")).resolve()
+    if not candidate.is_relative_to(root):
+        raise ValueError("selected_artifact_path_escapes_snapshot")
+    return candidate
 
 
 def _download_cloud_object(
@@ -2533,6 +2705,7 @@ async def run_model_intake_scan(
         else:
             repository_snapshot = await _acquire_huggingface_repository_snapshot(
                 metadata,
+                artifact_ref=artifact_ref,
                 timeout_seconds=timeout_seconds,
                 quarantine_dir=quarantine_dir,
                 fetch_policy=fetch_policy,
@@ -2541,6 +2714,8 @@ async def run_model_intake_scan(
                 selected_artifact_meta=artifact_meta,
             )
             repository_snapshot["requested"] = True
+            if isinstance(repository_snapshot.get("repository_manifest"), dict):
+                repository_manifest = repository_snapshot["repository_manifest"]
     await _emit_model_intake_activity(
         activity,
         event_callback,
@@ -2609,11 +2784,23 @@ async def run_model_intake_scan(
                 ))
 
             if subject_path is not None:
-                selected_snapshot_path = (
-                    subject_path / str(metadata.get("huggingface_file") or "")
-                    if subject_path.is_dir() and metadata.get("huggingface_file")
-                    else None
-                )
+                selected_snapshot_path = None
+                if subject_path.is_dir() and metadata.get("huggingface_file"):
+                    try:
+                        selected_snapshot_path = _contained_snapshot_path(
+                            subject_path,
+                            metadata.get("huggingface_file"),
+                        )
+                    except ValueError:
+                        scanner_results.append(_model_intake_scanners._scanner_result(
+                            name="subject-selection",
+                            version=None,
+                            status="INCOMPLETE",
+                            subject=subject,
+                            started_at=datetime.now(timezone.utc).isoformat(),
+                            finished_at=datetime.now(timezone.utc).isoformat(),
+                            execution={"error": "selected_artifact_path_escapes_snapshot", "required": True},
+                        ))
                 artifact_scan_path = (
                     selected_snapshot_path
                     if selected_snapshot_path is not None and selected_snapshot_path.is_file()
