@@ -582,6 +582,161 @@ def _intake_decision(
     }
 
 
+def _corporate_use_assessment(
+    *,
+    findings: list[dict[str, Any]],
+    decision: dict[str, Any],
+    intake_mode: str,
+    acquisition_complete: bool,
+    checksum_status: str,
+    generated_evidence: dict[str, Any],
+    dynamic_sandbox: dict[str, Any],
+    generated_evaluation: dict[str, Any],
+    signature_status: dict[str, Any],
+    attestation_verification: dict[str, Any],
+    deployment_approved: bool,
+    custom_code_required: bool,
+) -> dict[str, Any]:
+    scanner_results = generated_evidence.get("results") if isinstance(generated_evidence.get("results"), list) else []
+    scanner_statuses = {
+        str(item.get("scanner", {}).get("name") or "unknown"): str(item.get("execution", {}).get("status") or "NOT_RUN")
+        for item in scanner_results if isinstance(item, dict)
+    }
+    pickle_result = next(
+        (item for item in scanner_results if item.get("scanner", {}).get("name") == "python-pickletools"),
+        {},
+    )
+    pickle_classification = str(pickle_result.get("summary", {}).get("semantic_classification") or "not_run")
+    finding_ids = {str(item.get("id") or "") for item in findings}
+    proven_malicious = (
+        pickle_classification == "dangerous_callable_detected"
+        or scanner_statuses.get("modelscan") == "FAIL"
+        or "model_intake:sha256_mismatch" in finding_ids
+    )
+    controls: list[dict[str, Any]] = []
+
+    def control(identifier: str, label: str, status: str, detail: str) -> None:
+        controls.append({"id": identifier, "label": label, "status": status, "detail": detail})
+
+    control(
+        "complete_acquisition", "Complete immutable acquisition",
+        "PASS" if acquisition_complete else "FAIL",
+        "The complete subject was acquired and digest-bound." if acquisition_complete else "Only a partial or incomplete subject was inspected.",
+    )
+    control(
+        "integrity", "Artifact integrity",
+        "PASS" if checksum_status == "verified" else "FAIL" if checksum_status == "mismatch" else "INDETERMINATE",
+        f"Checksum status: {checksum_status}.",
+    )
+    control(
+        "malicious_primitives", "Known malicious serialization primitives",
+        "FAIL" if proven_malicious else "PASS" if pickle_classification == "expected_framework_pickle" or scanner_statuses.get("modelscan") == "PASS" else "INDETERMINATE",
+        (
+            "A dangerous callable, known malicious primitive, or digest mismatch was proven."
+            if proven_malicious
+            else "No known malicious callable was proven; executable-format capability is assessed separately."
+            if pickle_classification == "expected_framework_pickle"
+            else "Semantic malicious-primitive coverage is incomplete."
+        ),
+    )
+    serialization_finding = next((item for item in findings if item.get("id") == "model_intake:unsafe_serialization"), None)
+    control(
+        "serialization_policy", "Corporate serialization policy",
+        "FAIL" if serialization_finding else "PASS",
+        str(serialization_finding.get("description") if serialization_finding else "No executable-capable model serialization was detected."),
+    )
+    semgrep_status = scanner_statuses.get("semgrep", "NOT_APPLICABLE" if not custom_code_required else "NOT_RUN")
+    control(
+        "repository_code", "Custom repository code",
+        "NOT_APPLICABLE" if not custom_code_required else "FAIL" if semgrep_status == "FAIL" else "REVIEW" if semgrep_status == "WARNING" else "PASS" if semgrep_status == "PASS" else "INDETERMINATE",
+        f"Semgrep status: {semgrep_status}; custom code still requires a recorded human ownership/review decision." if custom_code_required else "The repository manifest did not require custom executable code.",
+    )
+    dependency_status = scanner_statuses.get("trivy") or scanner_statuses.get("pip-audit") or scanner_statuses.get("osv-scanner")
+    control(
+        "dependencies", "Dependency and CVE review",
+        "PASS" if dependency_status == "PASS" else "FAIL" if dependency_status == "FAIL" else "INDETERMINATE",
+        f"Dependency scanner status: {dependency_status or 'NOT_RUN'}.",
+    )
+    sandbox_status = str(dynamic_sandbox.get("status") or "NOT_RUN")
+    runtime = dynamic_sandbox.get("inspection", {}).get("runtime") if isinstance(dynamic_sandbox.get("inspection"), dict) else {}
+    load_level = str((runtime or {}).get("load_level") or "none")
+    control(
+        "isolated_runtime", "No-egress isolated runtime",
+        "PASS" if sandbox_status == "PASS" else "FAIL" if sandbox_status in {"FAIL", "BLOCKED_BY_POLICY"} else "INDETERMINATE",
+        f"Sandbox status: {sandbox_status}; proven load level: {load_level}.",
+    )
+    security_eval_status = str(generated_evaluation.get("security_status") or generated_evaluation.get("status") or "NOT_RUN")
+    quality_status = str(generated_evaluation.get("quality_status") or "NOT_MEASURED")
+    control("security_evaluation", "Embedding and data-plane security evaluation", security_eval_status, "Covers digest binding, ACL leakage, poisoning, stability, graph boundaries, deletion, and cache authorization.")
+    control("retrieval_quality", "Organization-specific retrieval quality", quality_status, "Recall, latency, memory, and corpus relevance are a separate organizational acceptance decision.")
+    control(
+        "publisher_trust", "Publisher signature and provenance",
+        "PASS" if signature_status.get("verified") and attestation_verification.get("verified") else "FAIL",
+        f"Signature: {signature_status.get('status')}; attestation: {attestation_verification.get('status')}.",
+    )
+    control(
+        "deployment_approval", "Recorded deployment approval",
+        "PASS" if deployment_approved else "FAIL",
+        "A recorded corporate owner approved this exact subject." if deployment_approved else "Corporate deployment approval is missing.",
+    )
+
+    raw_decision = str(decision.get("decision") or "review")
+    if intake_mode == "preflight":
+        verdict = "PREFLIGHT_ONLY"
+    elif proven_malicious:
+        verdict = "REJECT"
+    elif raw_decision == "allow":
+        verdict = "APPROVED"
+    elif raw_decision == "block":
+        verdict = "NOT_APPROVED"
+    else:
+        verdict = "REVIEW_REQUIRED"
+    blocking_findings = [
+        {
+            "id": item.get("id"),
+            "title": item.get("title"),
+            "severity": item.get("severity"),
+            "remediation": item.get("remediation") or item.get("evidence", {}).get("remediation"),
+        }
+        for item in findings if str(item.get("severity") or "").lower() in {"critical", "high"}
+    ]
+    next_actions = list(dict.fromkeys(
+        str(item.get("remediation") or "").strip()
+        for item in blocking_findings
+        if str(item.get("remediation") or "").strip()
+    ))
+    return {
+        "schema_version": "model-intake-corporate-use/v1",
+        "verdict": verdict,
+        "can_use_in_corporate_environment": verdict == "APPROVED",
+        "admission_mode": intake_mode,
+        "decision": raw_decision,
+        "plain_language": (
+            "Approved for corporate use under the recorded policy and exact artifact digest."
+            if verdict == "APPROVED"
+            else "Reject this artifact: a malicious primitive or integrity failure was proven."
+            if verdict == "REJECT"
+            else "This was only a preflight and cannot approve corporate use."
+            if verdict == "PREFLIGHT_ONLY"
+            else "Do not deploy yet; resolve the failed controls and rerun admission."
+        ),
+        "controls": controls,
+        "control_counts": {
+            status: sum(1 for item in controls if item["status"] == status)
+            for status in ("PASS", "FAIL", "REVIEW", "INDETERMINATE", "NOT_APPLICABLE", "NOT_MEASURED", "WARNING")
+        },
+        "malicious_primitive_proven": proven_malicious,
+        "pickle_semantic_classification": pickle_classification,
+        "primary_blockers": blocking_findings[:20],
+        "next_actions": next_actions[:20],
+        "limitations": list(dict.fromkeys([
+            *(["custom_model_code_not_executed"] if load_level == "weights" else []),
+            *(["embedding_known_answers_not_executed"] if load_level != "model" else []),
+            *(["retrieval_quality_not_organization_approved"] if quality_status not in {"PASS"} else []),
+        ])),
+    }
+
+
 def _grade(score: int) -> str:
     if score >= 90:
         return "A"
@@ -3288,19 +3443,38 @@ async def run_model_intake_scan(
         ))
 
     if repository_manifest.get("custom_code_required"):
+        semgrep_result = next(
+            (
+                item for item in generated_evidence.get("results") or []
+                if item.get("scanner", {}).get("name") == "semgrep"
+            ),
+            {},
+        )
+        semgrep_status = str(semgrep_result.get("execution", {}).get("status") or "NOT_RUN")
         findings.append(_finding(
             finding_id="custom_model_code_requires_review",
             title="Model repository contains custom executable code",
-            severity="high" if strict_governance else "medium",
-            description="The repository contains executable files that can run during model or tokenizer loading and has no ShakerScan-generated code-review evidence yet.",
+            severity=(
+                "high" if semgrep_status in {"FAIL", "INCOMPLETE", "CRASHED", "UNSUPPORTED", "NOT_RUN"} and strict_governance
+                else "medium"
+            ),
+            description=(
+                f"The repository contains executable files that can run during model or tokenizer loading. Semgrep finished with {semgrep_status}; static analysis does not replace recorded human ownership and review."
+            ),
             artifact_ref=artifact_ref,
             evidence={
                 "manifest_sha256": repository_manifest.get("manifest_sha256"),
                 "auto_map": repository_manifest.get("auto_map"),
                 "python_files": (repository_manifest.get("python_files") or [])[:100],
                 "executable_files": (repository_manifest.get("executable_files") or [])[:100],
+                "semgrep_status": semgrep_status,
+                "semgrep_evidence_sha256": semgrep_result.get("evidence_sha256"),
             },
-            remediation="Acquire the complete repository, run generated static analysis, perform recorded manual review, and load only in a no-egress sandbox.",
+            remediation=(
+                "Resolve Semgrep blockers, record a human review of every executable repository file, and load only in a no-egress pinned runtime."
+                if semgrep_status == "FAIL"
+                else "Record a human review of every executable repository file, constrain the exact digest to a no-egress runtime, and document accepted warning paths."
+            ),
         ))
 
     if complete_repository_snapshot and not repository_snapshot.get("complete"):
@@ -4063,6 +4237,23 @@ async def run_model_intake_scan(
         "findings_count": len(findings),
     }
 
+    corporate_use = _corporate_use_assessment(
+        findings=findings,
+        decision=decision,
+        intake_mode=intake_mode,
+        acquisition_complete=bool(artifact_meta.get("complete")) and not artifact_truncated,
+        checksum_status=checksum_status,
+        generated_evidence=generated_evidence,
+        dynamic_sandbox=dynamic_sandbox,
+        generated_evaluation=generated_evaluation,
+        signature_status=signature_status,
+        attestation_verification=attestation_verification,
+        deployment_approved=deployment_approved,
+        custom_code_required=bool(repository_manifest.get("custom_code_required")),
+    )
+    summary["corporate_use_verdict"] = corporate_use["verdict"]
+    summary["can_use_in_corporate_environment"] = corporate_use["can_use_in_corporate_environment"]
+
     await _emit_model_intake_activity(
         activity,
         event_callback,
@@ -4081,6 +4272,7 @@ async def run_model_intake_scan(
         "target": safe_artifact_ref,
         "model_intake": {
             "summary": summary,
+            "corporate_use": redact_model_intake_value(corporate_use),
             "activity": activity,
             "source_adapter": source_adapter,
             "attestation": redact_model_intake_value(attestation_verification),
@@ -4122,7 +4314,14 @@ async def run_model_intake_scan(
                 "repository_snapshot": repository_snapshot.get("complete") if complete_repository_snapshot else None,
                 "generated_scanners": generated_evidence.get("status") == "PASS" if run_generated_scanners else None,
                 "dynamic_sandbox": dynamic_sandbox.get("status") == "PASS" if (run_dynamic_sandbox or require_dynamic_sandbox) else None,
-                "custom_code_review": False if repository_manifest.get("custom_code_required") else None,
+                "custom_code_review": (
+                    any(
+                        item.get("scanner", {}).get("name") == "semgrep"
+                        and item.get("execution", {}).get("status") in {"PASS", "WARNING"}
+                        for item in generated_evidence.get("results") or []
+                    )
+                    if repository_manifest.get("custom_code_required") else None
+                ),
                 "format_specific_inspection": format_specific_ok,
                 "license_policy": None if metadata_unavailable or not license_ref else license_policy["status"] == "permissive",
                 "approval": (None if metadata_unavailable else deployment_approved) if require_approval else None,

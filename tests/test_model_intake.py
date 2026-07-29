@@ -9,12 +9,68 @@ import pytest
 
 from scanner.scanner_tools import model_intake
 from scanner.scanner_tools.model_intake import (
+    _corporate_use_assessment,
     _intake_decision,
     _sandbox_artifact_filename,
     normalize_model_artifact_reference,
     parse_huggingface_ref,
     run_model_intake_scan,
 )
+
+
+def test_corporate_use_report_distinguishes_malicious_proof_from_format_capability():
+    base = {
+        "decision": {"decision": "block"},
+        "intake_mode": "admission",
+        "acquisition_complete": True,
+        "checksum_status": "verified",
+        "dynamic_sandbox": {"status": "BLOCKED_BY_POLICY"},
+        "generated_evaluation": {"status": "SKIPPED_BY_POLICY"},
+        "signature_status": {"status": "missing", "verified": False},
+        "attestation_verification": {"status": "SKIPPED_BY_POLICY", "verified": False},
+        "deployment_approved": False,
+        "custom_code_required": False,
+    }
+    capability_only = _corporate_use_assessment(
+        findings=[{
+            "id": "model_intake:unsafe_serialization",
+            "title": "Executable serialization",
+            "severity": "high",
+            "description": "Framework pickle capability.",
+            "remediation": "Convert to safetensors.",
+        }],
+        generated_evidence={"results": [{
+            "scanner": {"name": "python-pickletools"},
+            "execution": {"status": "PASS"},
+            "summary": {"semantic_classification": "expected_framework_pickle"},
+        }, {
+            "scanner": {"name": "modelscan"},
+            "execution": {"status": "PASS"},
+        }]},
+        **base,
+    )
+    malicious = _corporate_use_assessment(
+        findings=[{
+            "id": "model_intake:unsafe_serialization",
+            "title": "Dangerous callable",
+            "severity": "critical",
+            "description": "Command execution callable.",
+            "remediation": "Reject.",
+        }],
+        generated_evidence={"results": [{
+            "scanner": {"name": "python-pickletools"},
+            "execution": {"status": "FAIL"},
+            "summary": {"semantic_classification": "dangerous_callable_detected"},
+        }]},
+        **base,
+    )
+
+    assert capability_only["verdict"] == "NOT_APPROVED"
+    assert capability_only["malicious_primitive_proven"] is False
+    assert capability_only["pickle_semantic_classification"] == "expected_framework_pickle"
+    assert "Convert to safetensors." in capability_only["next_actions"]
+    assert malicious["verdict"] == "REJECT"
+    assert malicious["malicious_primitive_proven"] is True
 
 
 def _local_options(options=None):

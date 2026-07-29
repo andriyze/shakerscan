@@ -568,6 +568,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   const modelIntakeAibom = model_intake?.aibom || null
   const modelIntakeSupplyChain = model_intake?.supply_chain || null
   const modelIntakeEvaluation = model_intake?.generated_evaluation || null
+  const modelIntakeCorporateUse = model_intake?.corporate_use || null
   const modelIntakeActivity = Array.isArray(model_intake?.activity) ? model_intake.activity : []
   const modelIntakeScannerResults = Array.isArray(model_intake?.generated_evidence?.results)
     ? model_intake.generated_evidence.results
@@ -1486,6 +1487,57 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
               </span>
             )}
           </div>
+
+          {modelIntakeCorporateUse && (
+            <div className={`mb-5 rounded-lg border p-4 ${
+              modelIntakeCorporateUse.verdict === 'APPROVED'
+                ? 'border-green-500/40 bg-green-950/30 text-green-100'
+                : modelIntakeCorporateUse.verdict === 'REJECT'
+                  ? 'border-red-500/40 bg-red-950/30 text-red-100'
+                  : 'border-yellow-500/40 bg-yellow-950/20 text-yellow-100'
+            }`}>
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <div className="text-xs uppercase tracking-wide opacity-80">Corporate use verdict</div>
+                  <div className="mt-1 text-xl font-semibold">{String(modelIntakeCorporateUse.verdict).replace(/_/g, ' ')}</div>
+                  <div className="mt-1 max-w-3xl text-sm opacity-90">{modelIntakeCorporateUse.plain_language}</div>
+                </div>
+                <div className="text-right text-xs opacity-80">
+                  <div>{modelIntakeCorporateUse.malicious_primitive_proven ? 'Malicious primitive proven' : 'No malicious primitive proven'}</div>
+                  <div>Mode: {modelIntakeCorporateUse.admission_mode}</div>
+                </div>
+              </div>
+              {Array.isArray(modelIntakeCorporateUse.controls) && (
+                <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                  {modelIntakeCorporateUse.controls.map((control: any) => {
+                    const status = String(control.status || 'INDETERMINATE').toUpperCase()
+                    const statusClass = status === 'PASS'
+                      ? 'text-green-300'
+                      : status === 'FAIL'
+                        ? 'text-red-300'
+                        : 'text-yellow-300'
+                    return (
+                      <div key={control.id} className="rounded border border-white/10 bg-black/20 p-3">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="text-xs font-medium text-gray-200">{control.label}</div>
+                          <div className={`text-xs font-semibold ${statusClass}`}>{status}</div>
+                        </div>
+                        <div className="mt-1 text-xs text-gray-400">{control.detail}</div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+              {Array.isArray(modelIntakeCorporateUse.next_actions) && modelIntakeCorporateUse.next_actions.length > 0 && (
+                <div className="mt-4">
+                  <div className="text-xs font-semibold uppercase tracking-wide opacity-80">Required next actions</div>
+                  <ul className="mt-2 list-disc space-y-1 pl-5 text-sm opacity-90">
+                    {modelIntakeCorporateUse.next_actions.slice(0, 8).map((action: string, index: number) => <li key={`${index}-${action}`}>{action}</li>)}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )}
 
           {modelIntakeDecision && (
             <div className={`mb-5 rounded-lg border p-4 ${modelIntakeDecisionClass}`}>
