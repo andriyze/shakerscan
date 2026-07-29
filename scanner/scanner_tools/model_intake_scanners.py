@@ -44,6 +44,10 @@ MAX_PICKLE_MEMBER_BYTES = 100_000_000
 MAX_PICKLE_ARCHIVE_MEMBERS = 5_000
 MAX_SOURCE_FILES = 10_000
 MAX_SUBJECT_FILES = 10_000
+ADAPTER_SELF_TEST_PATH = os.getenv(
+    "SHAKERSCAN_MODEL_INTAKE_ADAPTER_SELF_TEST",
+    "/opt/model-intake-tools/self-test.json",
+)
 
 
 @dataclass(frozen=True)
@@ -67,9 +71,11 @@ class ScannerSpec:
 
 EXTERNAL_SCANNERS: tuple[ScannerSpec, ...] = (
     ScannerSpec(
-        "modelscan", "modelscan", ("-p", "{subject}", "-r", "json"),
+        "modelscan", "modelscan",
+        ("-p", "{subject}", "-r", "json", "-o", "{scratch}/modelscan.json"),
         applicability="serialized_model", target_scope="artifact", enabled_by_default=True,
         required_profiles=("strict",),
+        result_file="modelscan.json",
     ),
     ScannerSpec(
         "semgrep", "semgrep",
@@ -84,7 +90,12 @@ EXTERNAL_SCANNERS: tuple[ScannerSpec, ...] = (
     ),
     ScannerSpec(
         "trivy", "trivy",
-        ("fs", "--scanners", "vuln,secret,misconfig,license", "--format", "json", "--skip-db-update", "--cache-dir", "/opt/trivy-cache", "{subject}"),
+        (
+            "fs", "--scanners", "vuln,secret,misconfig,license", "--format", "json",
+            "--skip-db-update", "--skip-java-db-update", "--skip-check-update",
+            "--offline-scan", "--disable-telemetry", "--skip-version-check",
+            "--cache-dir", "/opt/trivy-cache", "{subject}",
+        ),
         applicability="dependency_repository", enabled_by_default=True, required_profiles=("strict",),
         database_path="/opt/trivy-cache/db/metadata.json",
     ),
@@ -244,7 +255,8 @@ def _scanner_result(
 
 def _bounded_command(executable: str, args: tuple[str, ...] | list[str]) -> list[str]:
     launcher = Path(__file__).with_name("bounded_exec.py")
-    return [sys.executable, str(launcher), "--", executable, *args]
+    options = ["--no-address-space-limit"] if Path(executable).name in {"semgrep", "trivy"} else []
+    return [sys.executable, str(launcher), *options, "--", executable, *args]
 
 
 def _safe_environment(scratch: Path) -> dict[str, str]:
@@ -259,8 +271,8 @@ def _safe_environment(scratch: Path) -> dict[str, str]:
     }
 
 
-def _prepare_unprivileged_paths(subject_path: Path, scratch: Path) -> None:
-    """Make the disposable scan view readable and scratch writable after UID drop."""
+def _prepare_unprivileged_scratch(scratch: Path) -> None:
+    """Make a temporary working directory writable after the scanner UID drop."""
     if os.geteuid() != 0:
         return
     try:
@@ -269,6 +281,17 @@ def _prepare_unprivileged_paths(subject_path: Path, scratch: Path) -> None:
         return
     os.chown(scratch, account.pw_uid, account.pw_gid)
     os.chmod(scratch, 0o700)
+
+
+def _prepare_unprivileged_paths(subject_path: Path, scratch: Path) -> None:
+    """Make the disposable scan view readable and scratch writable after UID drop."""
+    _prepare_unprivileged_scratch(scratch)
+    if os.geteuid() != 0:
+        return
+    try:
+        pwd.getpwnam("scanner")
+    except KeyError:
+        return
     # TemporaryDirectory creates its root as 0700. The scanner only needs
     # traversal to the copied, read-only subject view beneath it.
     os.chmod(subject_path.parent, 0o711)
@@ -336,6 +359,25 @@ def _json_output(stdout: str) -> Any:
     return json.loads(stdout)
 
 
+def _modelscan_json_output(stdout: str) -> Any:
+    """Parse ModelScan's JSON after its documented human-readable preamble."""
+    offsets = [offset for marker in ("{", "[") if (offset := stdout.find(marker)) >= 0]
+    if not offsets:
+        raise ValueError("modelscan JSON payload missing")
+    offset = min(offsets)
+    preamble = stdout[:offset].strip()
+    if preamble and any(
+        not line.startswith(("No settings file detected", "Scanning "))
+        for line in preamble.splitlines()
+        if line.strip()
+    ):
+        raise ValueError("unexpected modelscan output preamble")
+    parsed, end = json.JSONDecoder().raw_decode(stdout[offset:])
+    if stdout[offset + end:].strip():
+        raise ValueError("unexpected modelscan output trailer")
+    return parsed
+
+
 def _external_finding(scanner: str, item: Any, severity: str = "high") -> dict[str, Any]:
     return {
         "id": f"{scanner}_finding",
@@ -350,7 +392,7 @@ def _parse_external_scanner(
     """Validate each tool's output contract; exit zero alone is never PASS."""
     if scanner in {"modelscan", "semgrep", "gitleaks", "syft", "trivy", "osv-scanner", "pip-audit"}:
         try:
-            parsed = _json_output(stdout)
+            parsed = _modelscan_json_output(stdout) if scanner == "modelscan" else _json_output(stdout)
         except (ValueError, json.JSONDecodeError) as exc:
             return "INCOMPLETE" if exit_code in {0, 1} else "CRASHED", [], {"error": f"invalid_json_output:{exc}"}
         findings: list[dict[str, Any]] = []
@@ -382,7 +424,16 @@ def _parse_external_scanner(
                 )
                 for item in candidates[:1000]
             ]
-            summary.update({"finding_count": len(candidates), "error_count": len(errors)})
+            blocking_count = sum(
+                1 for item in candidates
+                if isinstance(item, dict) and str((item.get("extra") or {}).get("severity") or "ERROR").upper() == "ERROR"
+            )
+            summary.update({
+                "finding_count": len(candidates),
+                "blocking_finding_count": blocking_count,
+                "error_count": len(errors),
+                "warning_only": bool(candidates) and blocking_count == 0,
+            })
             if errors:
                 return "INCOMPLETE", findings, {**summary, "errors_sha256": _sha256_json(errors)}
         elif scanner == "gitleaks":
@@ -438,10 +489,10 @@ def _parse_external_scanner(
             summary["vulnerability_count"] = len(vulnerabilities)
         if exit_code not in {0, 1}:
             return "CRASHED", findings, {**summary, "error": (stderr or "unexpected exit code")[:1000]}
+        if summary.get("warning_only"):
+            return "WARNING", findings, summary
         if findings:
             return "FAIL", findings, summary
-        if summary.get("warning_only"):
-            return "WARNING", [], summary
         return "PASS", [], summary
 
     text = f"{stdout}\n{stderr}".strip()
@@ -591,6 +642,21 @@ def scanner_adapter_catalog() -> list[dict[str, Any]]:
 
 def scanner_adapter_readiness() -> dict[str, Any]:
     """Return content-free runtime readiness for operators and policy diagnostics."""
+    self_test_checks: dict[str, dict[str, Any]] = {}
+    self_test_path = Path(ADAPTER_SELF_TEST_PATH)
+    self_test_receipt: dict[str, Any] | None = None
+    if self_test_path.is_file():
+        try:
+            parsed_receipt = json.loads(self_test_path.read_text("utf-8"))
+            if isinstance(parsed_receipt, dict):
+                self_test_receipt = parsed_receipt
+                self_test_checks = {
+                    str(item.get("name")): item
+                    for item in parsed_receipt.get("checks") or []
+                    if isinstance(item, dict) and item.get("name")
+                }
+        except (OSError, ValueError):
+            self_test_receipt = {"status": "INVALID"}
     adapters: list[dict[str, Any]] = []
     for spec in EXTERNAL_SCANNERS:
         executable = shutil.which(spec.executable)
@@ -613,8 +679,16 @@ def scanner_adapter_readiness() -> dict[str, Any]:
         if executable:
             with tempfile.TemporaryDirectory(prefix=f"model-intake-readiness-{spec.name}-") as scratch_raw:
                 scratch = Path(scratch_raw)
+                _prepare_unprivileged_scratch(scratch)
                 version = _tool_version(executable, spec.version_args, _safe_environment(scratch), scratch)
-        ready = bool(executable and (not spec.rules_path or rules_digest) and (not database or database.get("present")))
+        self_test = self_test_checks.get(spec.name)
+        self_test_required = spec.enabled_by_default or bool(spec.required_profiles)
+        ready = bool(
+            executable
+            and (not spec.rules_path or rules_digest)
+            and (not database or database.get("present"))
+            and (not self_test_required or (self_test and self_test.get("passed") is True))
+        )
         adapters.append({
             **next(item for item in scanner_adapter_catalog() if item["name"] == spec.name),
             "ready": ready,
@@ -622,6 +696,7 @@ def scanner_adapter_readiness() -> dict[str, Any]:
             "version": version,
             "rules_sha256": rules_digest,
             "database": database,
+            "last_self_test": self_test,
             "status": "READY" if ready else "UNAVAILABLE",
         })
     required = [item for item in adapters if item["required_profiles"]]
@@ -630,6 +705,11 @@ def scanner_adapter_readiness() -> dict[str, Any]:
         "status": "READY" if all(item["ready"] for item in required) else "DEGRADED",
         "required_ready": sum(1 for item in required if item["ready"]),
         "required_total": len(required),
+        "self_test": {
+            "status": (self_test_receipt or {}).get("status") or "MISSING",
+            "tested_at": (self_test_receipt or {}).get("tested_at"),
+            "receipt_sha256": (self_test_receipt or {}).get("receipt_sha256"),
+        },
         "adapters": adapters,
     }
 

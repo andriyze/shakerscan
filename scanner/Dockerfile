@@ -54,7 +54,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     whois netcat-openbsd traceroute \
     dirb gobuster hydra medusa \
     dnsrecon \
-    libcurl4-openssl-dev libssl-dev python3-dev \
+    libcurl4-openssl-dev libssl-dev python3-dev python3-venv \
     bsdmainutils \
  && rm -rf /var/lib/apt/lists/*
 
@@ -143,6 +143,40 @@ COPY scanner/requirements.lock /app/requirements.lock
 RUN pip install --no-cache-dir --break-system-packages --ignore-installed --require-hashes \
     -r /app/requirements.lock
 
+# Model-intake evidence adapters live in separate, hash-locked virtual
+# environments. Their dependency graphs cannot alter the API/worker runtime.
+COPY scanner/model_intake_tools /opt/model-intake-locks
+RUN set -eu; \
+    for tool in modelscan fickling semgrep; do \
+      python3 -m venv "/opt/model-intake-tools/${tool}"; \
+      "/opt/model-intake-tools/${tool}/bin/pip" install \
+        --no-cache-dir --require-hashes -r "/opt/model-intake-locks/${tool}.lock"; \
+      ln -s "/opt/model-intake-tools/${tool}/bin/${tool}" "/opt/tools/${tool}"; \
+    done
+
+# Trivy is a checksum-pinned native adapter. The vulnerability database is
+# captured in the image and scanned offline; readiness exposes its metadata.
+ARG TARGETARCH
+ARG TRIVY_VERSION=0.72.0
+ARG TRIVY_AMD64_SHA256=bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea
+ARG TRIVY_ARM64_SHA256=2ca2c023109c2db6b2b77366b6717291452d4531167377d95c79547f0c8e3467
+RUN set -eu; \
+    case "${TARGETARCH}" in \
+      amd64) trivy_arch="64bit"; trivy_sha="${TRIVY_AMD64_SHA256}" ;; \
+      arm64) trivy_arch="ARM64"; trivy_sha="${TRIVY_ARM64_SHA256}" ;; \
+      *) echo "Unsupported Trivy architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    trivy_archive="trivy_${TRIVY_VERSION}_Linux-${trivy_arch}.tar.gz"; \
+    curl -fsSL "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/${trivy_archive}" -o "/tmp/${trivy_archive}"; \
+    echo "${trivy_sha}  /tmp/${trivy_archive}" | sha256sum -c -; \
+    tar -xzf "/tmp/${trivy_archive}" -C /opt/tools trivy; \
+    rm "/tmp/${trivy_archive}"; \
+    chmod 755 /opt/tools/trivy; \
+    mkdir -p /opt/trivy-cache; \
+    /opt/tools/trivy image --download-db-only --cache-dir /opt/trivy-cache; \
+    /opt/tools/trivy fs --scanners misconfig --format json \
+      --cache-dir /opt/trivy-cache /opt/model-intake-locks >/dev/null
+
 # Playwright browser path
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
@@ -177,6 +211,10 @@ COPY api/ai_gate /app/ai_gate
 # Ensure scanner files are readable
 RUN chmod -R 755 /app/scanner_tools /app/wordlists
 
+# The adapter harness always drops tool subprocesses to this account, including
+# during the image's functional self-test.
+RUN useradd -m scanner
+
 # Fail image builds where the scanner/import graph is inconsistent.
 RUN python3 /app/scanner.py --help >/dev/null && \
     python3 -c "from findings import apply_dast_precision_policy; from constants import resolve_scan_budget"
@@ -202,7 +240,13 @@ RUN set -e && \
     /opt/tools/subfinder -version && \
     /opt/tools/nuclei -version && \
     /opt/tools/dalfox version && \
+    /opt/tools/modelscan --version && \
+    /opt/tools/fickling --version && \
+    /opt/tools/semgrep --version && \
+    /opt/tools/trivy --version && \
     /opt/tools/gungnir -h | head -1 && \
+    python3 /app/scanner_tools/model_intake_adapter_self_test.py \
+      --output /opt/model-intake-tools/self-test.json && \
     echo "ALL TOOLS VERIFIED OK"
 
 # Create config directories
@@ -212,8 +256,6 @@ RUN mkdir -p /tmp/.config/subfinder && \
     cp /opt/nuclei-config/.templates-config.json /tmp/.config/nuclei/ && \
     chmod -R 777 /tmp/.config
 
-# Non-root user for security
-RUN useradd -m scanner
 ENV HOME=/tmp
 
 # Entry point

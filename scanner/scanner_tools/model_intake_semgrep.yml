@@ -1,0 +1,109 @@
+rules:
+  - id: shakerscan.model-intake.command-execution
+    languages: [python]
+    message: Model repository code can execute a command or arbitrary Python.
+    severity: ERROR
+    pattern-either:
+      - pattern: os.system(...)
+      - pattern: os.popen(...)
+      - pattern: subprocess.run(...)
+      - pattern: subprocess.call(...)
+      - pattern: subprocess.check_call(...)
+      - pattern: subprocess.check_output(...)
+      - pattern: subprocess.Popen(...)
+      - pattern: eval(...)
+      - pattern: exec(...)
+
+  - id: shakerscan.model-intake.dynamic-import
+    languages: [python]
+    message: Model repository code performs a dynamic import that requires manual review.
+    severity: ERROR
+    pattern-either:
+      - pattern: __import__(...)
+      - pattern: importlib.import_module(...)
+      - pattern: importlib.util.module_from_spec(...)
+
+  - id: shakerscan.model-intake.unsafe-torch-load
+    languages: [python]
+    message: torch.load can execute pickle payloads unless weights_only=True is enforced.
+    severity: ERROR
+    patterns:
+      - pattern: torch.load(...)
+      - pattern-not: torch.load(..., weights_only=True, ...)
+
+  - id: shakerscan.model-intake.unsafe-deserialization
+    languages: [python]
+    message: Model repository code deserializes a Python object with an executable format.
+    severity: ERROR
+    pattern-either:
+      - pattern: pickle.load(...)
+      - pattern: pickle.loads(...)
+      - pattern: dill.load(...)
+      - pattern: dill.loads(...)
+      - pattern: cloudpickle.load(...)
+      - pattern: cloudpickle.loads(...)
+      - pattern: joblib.load(...)
+
+  - id: shakerscan.model-intake.remote-code-opt-in
+    languages: [python]
+    message: Model repository code enables trust_remote_code and must not fetch executable code at runtime.
+    severity: ERROR
+    pattern: $LOADER(..., trust_remote_code=True, ...)
+
+  - id: shakerscan.model-intake.network-access
+    languages: [python]
+    message: Model repository code initiates network access and is prohibited in the no-egress runtime.
+    severity: ERROR
+    pattern-either:
+      - pattern: requests.get(...)
+      - pattern: requests.post(...)
+      - pattern: requests.request(...)
+      - pattern: httpx.get(...)
+      - pattern: httpx.post(...)
+      - pattern: urllib.request.urlopen(...)
+      - pattern: socket.create_connection(...)
+      - pattern: $SOCKET.connect(...)
+
+  - id: shakerscan.model-intake.unsafe-yaml-load
+    languages: [python]
+    message: yaml.load without SafeLoader can construct attacker-controlled Python objects.
+    severity: ERROR
+    patterns:
+      - pattern: yaml.load(...)
+      - pattern-not: yaml.load(..., Loader=yaml.SafeLoader, ...)
+      - pattern-not: yaml.load(..., Loader=SafeLoader, ...)
+
+  - id: shakerscan.model-intake.environment-secret-access
+    languages: [python]
+    message: Model repository code reads process environment values; verify that it cannot access credentials.
+    severity: WARNING
+    pattern-either:
+      - pattern: os.getenv(...)
+      - pattern: os.environ[...]
+      - pattern: os.environ.get(...)
+
+  - id: shakerscan.model-intake.filesystem-write
+    languages: [python]
+    message: Model repository code opens a writable file; verify the path is confined to approved scratch storage.
+    severity: WARNING
+    pattern-either:
+      - pattern: open(..., "w", ...)
+      - pattern: open(..., "a", ...)
+      - pattern: open(..., "wb", ...)
+      - pattern: open(..., "ab", ...)
+
+  - id: shakerscan.model-intake.shell-script-download-execute
+    languages: [bash]
+    paths:
+      include: ["*.sh", "*.bash"]
+    message: Repository script downloads or pipes remote content into a shell.
+    severity: ERROR
+    pattern-regex: '(?i)(curl|wget).{0,200}(\\||bash|sh|chmod\\s+\\+x)'
+
+  - id: shakerscan.model-intake.container-download-execute
+    languages: [dockerfile]
+    paths:
+      include: ["Dockerfile", "Containerfile", "*.Dockerfile"]
+    message: Container build downloads or executes remote content and requires supply-chain review.
+    severity: ERROR
+    pattern-regex: '(?i)(curl|wget).{0,200}(\\||bash|sh|chmod\\s+\\+x)'
