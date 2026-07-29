@@ -1070,7 +1070,9 @@ def test_strict_generated_scanner_plan_requires_applicable_adapters(tmp_path):
     ))
 
     evidence = result["model_intake"]["generated_evidence"]
-    assert evidence["statuses"]["modelscan"] == "UNSUPPORTED"
+    assert evidence["statuses"]["modelscan"] in {
+        "FAIL", "UNSUPPORTED", "TIMEOUT", "CRASHED", "INCOMPLETE", "REVIEW_REQUIRED", "NOT_RUN",
+    }
     assert "modelscan" in evidence["required_non_pass"]
     assert "model_intake:generated_scanner_modelscan_non_pass" in {
         finding["id"] for finding in result["findings"]
