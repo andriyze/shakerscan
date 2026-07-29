@@ -10415,6 +10415,10 @@ def _apply_model_intake_policy_profile_requirements(
         "require_generated_evaluation": True,
         "require_signed_admission": True,
         "require_hash": True,
+        "require_signature": True,
+        "require_signature_verification": True,
+        "require_cryptographic_signature_verification": True,
+        "require_attestation_verification": True,
         "require_model_governance": True,
         "require_deployment_approval": True,
     }

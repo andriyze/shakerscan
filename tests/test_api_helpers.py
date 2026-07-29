@@ -2611,6 +2611,10 @@ def test_model_intake_policy_profile_requirements_add_required_anchor_ids():
     assert updated.run_generated_evaluation is True
     assert updated.require_generated_evaluation is True
     assert updated.require_signed_admission is True
+    assert updated.require_signature is True
+    assert updated.require_signature_verification is True
+    assert updated.require_cryptographic_signature_verification is True
+    assert updated.require_attestation_verification is True
 
 
 def test_model_intake_policy_profile_requirements_ignore_non_strict_or_other_products():
