@@ -1,10 +1,14 @@
 # Model Intake Security Review and Implementation Roadmap
 
-**Status:** Phase -1 trust/correctness repairs, the core static adapter bundle, and full remote static validation of the three immediate model revisions are implemented through `90578da`; disposable microVM execution, runner-generated embedding evaluation, deployment-platform enforcement, optional scanner depth, and per-model corporate qualification remain incomplete
+**Status:** Server-owned admission policy, the core static adapter bundle, semantic serialization analysis,
+built-in safetensors weight loading, security/quality evaluation separation, and useful corporate-use verdicts
+are implemented and remotely validated through `2a88737`. Disposable microVM execution, full model/code
+inference, runner-generated embedding evaluation, deployment-platform enforcement, and organization-specific
+qualification remain incomplete.
 
 **Original audit checkout:** `239f887d9f10e997b9844c916c28073fab71ee79`
 
-**Current implementation checkout:** `90578da` (implementation series beginning at `8f721ce`)
+**Current implementation checkout:** `2a88737` (implementation series beginning at `8f721ce`)
 
 **Review date:** 2026-07-28
 
@@ -72,8 +76,11 @@ Sections 2.1 and 2.4 identify which findings are now resolved, partially resolve
 
 The remaining implementation and validation order is:
 
-1. Build the disposable no-egress VM/microVM loader and independent telemetry contract for CodeRankEmbed.
-2. Connect the evaluator to embeddings and measurements produced by that exact runner.
+1. Build the disposable no-egress VM/microVM loader and independent telemetry contract for custom model
+   code. The built-in safetensors adapter now proves weight readability, shape/range integrity, and sampled
+   numeric finiteness, but deliberately does not import model code or claim inference.
+2. Connect the security evaluator to embeddings and measurements produced by that exact runner, and keep
+   organization-specific retrieval quality as a separate approval gate.
 3. Convert CodeSage Base v2 to `safetensors` in a controlled environment and prove tensor/evaluation
    equivalence; do not admit the upstream pickle-capable artifact directly.
 4. Qualify CodeSage Large v2 only if Base cannot meet retrieval requirements, using a separately approved
@@ -101,7 +108,7 @@ Implemented controls include:
   normalize the provider-authoritative manifest at the pinned revision; caller inventories are comparison-only.
 - Manifest normalization/materialization, custom-code/`auto_map` inventory, recursive ZIP/TAR analysis, and
   traversal, symlink/device where supported, collision, archive-bomb, nested-archive, and unsafe-serialization
-  gates. Section 2.5 records the remaining caller-authority and ZIP-link coverage defects.
+  gates. Section 2.5 records the re-audit findings and their repairs.
 - Generated evidence contracts for pickle semantics, Python AST, secrets, malware rules, CycloneDX SBOM,
   dependencies/SCA adapters, native binaries, and licenses. Caller assertions remain `declared`; they are not
   silently promoted to generated evidence.
@@ -125,12 +132,17 @@ Implemented controls include:
 - A separate non-root, read-only, capability-free, no-egress sandbox service with request/nonce/subject-bound
   evidence, digest revalidation, isolation gating, seccomp verification, per-job child termination, and CPU,
   memory, PID, file, descriptor, and wall-clock limits. Static format inspection cannot produce a dynamic
-  `PASS`. An operator-controlled argv-only runtime adapter must prove exact-digest model load and passing
-  known-answer tests. This container adapter is not the remaining disposable KVM/microVM execution tier.
-- A provider-neutral, content-free embedding/data-plane evaluator for retrieval quality, vector validity,
-  dimensionality, collisions, poisoning, sensitive/ACL leakage, tenant boundaries, runtime stability,
-  latency/RSS, graph authorization, deletion receipts, cache authorization context, and index/model digest
-  compatibility. Raw benchmark vectors are request-transient and are not persisted in scan options.
+  `PASS`. A built-in provider-neutral safetensors adapter re-hashes and memory-maps the exact artifact,
+  validates the tensor inventory and byte ranges, and samples numeric values for non-finite data. It reports
+  load level `weights` and explicitly records that custom code, model graph construction, and embeddings did
+  not run. Other model loaders use the operator-controlled argv-only adapter contract. This container tier is
+  not the remaining disposable KVM/microVM execution tier.
+- A provider-neutral, content-free embedding/data-plane evaluator that separates security controls (digest
+  binding, vector validity/dimensionality/collisions, poisoning, ACL/sensitive leakage, tenant/graph/cache
+  boundaries, deletion, stability, and index/model compatibility) from organization-specific quality and
+  capacity controls (recall, relevance, latency, and RSS). Quality can be required by policy, but an absent
+  optional quality benchmark no longer falsifies security status. Raw benchmark vectors are request-transient
+  and are not persisted in scan options.
 - Canonical signed admission statements bound to artifact, snapshot, scanner, sandbox, attestation,
   evaluation, findings, and policy digests. The library and HTTP verification paths reject every signed
   non-`allow` outcome and require an active registered admission for deployment verification.
@@ -148,8 +160,12 @@ until the core adapter readiness receipt is valid and the operator supplies any 
 scanner engines/rules, an organization-controlled signing key
 and deployment trust roots, a purpose-built runtime image for the chosen model loader, a versioned corporate
 synthetic benchmark, application/vector-store observations, and the required human/legal/privacy approvals.
-Active strict saved profiles now impose non-weakenable minimum acquisition, full Hugging Face snapshot,
-scanner, sandbox, evaluation, signed-admission, hash, governance, and deployment-approval requirements.
+Admission mode now uses a server-owned policy profile (`production` by default); callers cannot select a
+weaker profile, cannot turn required gates off, and cannot inject inline policy exceptions. Only durable,
+approved, unexpired exceptions are eligible. Policy-profile mutations require the Model Intake operator
+credential. Preflight remains available for exploratory evidence but can never issue a signed `allow`.
+Active strict saved profiles impose non-weakenable minimum acquisition, full Hugging Face snapshot, scanner,
+sandbox, evaluation, signed-admission, hash, governance, and deployment-approval requirements.
 Likewise, the CodeRankEmbed and CodeSage model-specific runbooks are not marked complete until real controlled
 runs produce the required evidence. These are operational admission inputs, not missing model-specific code.
 
@@ -231,16 +247,17 @@ but the exported status must remain unambiguous.
 | Built-in semantic, source, secret, malware-rule, SBOM, binary, and license checks | Implemented | Yes | Improve detection depth and rule updates |
 | ModelScan, Semgrep, Fickling, and Trivy core adapters | Packaged and self-testing | **Yes in a newly rebuilt source worker image.** Hash-locked Python environments, checksum-pinned Trivy, offline DB/policy cache, bounded execution, strict parsers, rule/DB digests, and malicious-fixture receipts are exposed by `/model-intake/scanners/readiness` | Define DB-age policy and recurring rebuild/reassessment operations |
 | ClamAV, Gitleaks, Syft, OSV-Scanner, and pip-audit adapters | Fail-closed integration contracts | No; a missing requested/required tool is `UNSUPPORTED` | Package only where organization policy needs the complementary depth; do not duplicate the core bundle by default |
-| Isolated semantic sandbox | Implemented container boundary | Request/subject/evidence binding, isolation/seccomp gating, broker-worker service, and per-job limits are present | Keep it as static/pre-execution evidence; harden queue ownership further where deployments share hosts |
-| Operator runtime adapter | Implemented integration contract | Can prove exact-digest load and known-answer tests in the hardened container when an operator image/argv adapter is installed | Treat as staging evidence, not a substitute for the microVM tier |
+| Isolated semantic sandbox | Implemented container boundary | Request/subject/evidence binding, isolation/seccomp gating, broker-worker service, and per-job limits are present | Treat it as bounded staging evidence, not a substitute for host-independent execution isolation |
+| Built-in safetensors weights adapter | Implemented and enabled by format | Re-hashes and memory-maps the exact artifact; validates tensor inventory/ranges and sampled numeric finiteness; reports `load_level=weights` | Does not import custom code, instantiate the model graph, tokenize, or generate embeddings |
+| Operator runtime adapter | Implemented integration contract | Can prove exact-digest model load and known-answer tests in the hardened container when an operator image/argv adapter is installed | Treat as staging evidence, not a substitute for the microVM tier |
 | Actual tokenizer/model load and inference in disposable microVM | Not implemented | No | Add KVM/Firecracker/Kata runner and loader profiles |
 | Runtime behavior telemetry | Not implemented | No | Integrate Tracee/Falco/auditd/eBPF or equivalent in the execution runner |
-| Provider-neutral evaluation contract | Implemented | Yes when callers provide observations | Add a runner that generates embeddings and observations from the isolated model |
+| Provider-neutral evaluation contract | Implemented | Yes when callers provide observations; security and organization-specific quality statuses are distinct | Add a runner that generates embeddings and observations from the isolated model |
 | Corporate benchmark and thresholds | Integration point implemented | No universal corpus can ship | Organization supplies/version-controls corpus; ShakerScan automates execution and scoring |
 | Typed non-scanner providers | Implemented registry/readiness | Sandbox execution, embedding evaluation, embedded policy, and report export are separate classes; OPA is honestly `NOT_IMPLEMENTED` | Add OPA only with a fail-closed decision/bundle contract; keep the embedded policy fallback |
 | Signed admission statement and lifecycle registry | Implemented product mechanism | Signed denial is rejected; active registry is mandatory; remote lifecycle/verification is operator-authenticated | Add keyless/Cosign and deployment-platform integrations |
-| Saved Model Intake policy profiles | Implemented minimum gate expansion | Strict profiles cannot be weakened by caller booleans/subsets | Add organization-specific required scanner/runtime/benchmark fields |
-| One-page control matrix and detailed evidence | Substantially implemented in UI/JSON | Control execution, explicit non-pass, coverage/error detail, phase timeline, and overall decision are visible | Finish HTML/PDF/SARIF parity and per-control evidence links |
+| Saved Model Intake policy profiles | Implemented server-owned admission expansion | Admission uses the operator-selected server default; caller booleans/subsets/exceptions cannot weaken it; mutations require operator auth | Add organization-specific required scanner/runtime/benchmark fields |
+| One-page control matrix and detailed evidence | Implemented in UI/JSON | Corporate-use verdict, can-use boolean, malicious-vs-capable serialization distinction, control matrix, primary blockers, next actions, limitations, and activity are visible | Finish HTML/PDF/SARIF parity and per-control evidence links |
 | Deployment by exact approved digest | Authorization contract implemented | Core verifier and active registry are safe; no external deployment enforcement ships | Integrate with internal registry, CI/CD, Kubernetes/admission controller, or model serving platform |
 | Legal, privacy, data provenance, and risk acceptance | Recorded as governance evidence | Organization-dependent | Keep human-owned; enforce required owner, approval, scope, and expiry |
 
@@ -254,7 +271,7 @@ A follow-up code re-audit of checkout `a3f10d1`, independently checked against t
 found correctness defects that invalidate several unqualified “implemented” claims above. These are product
 code defects, not operator inputs:
 
-| Priority | Re-audit defect | Implementation status through `b68f23b` | Evidence/remaining boundary |
+| Priority | Re-audit defect | Implementation status through `2a88737` | Evidence/remaining boundary |
 |---|---|---|---|
 | **P0** | Signed `block` verified as `PASS` | **Fixed** in `8f721ce` | Core verifier requires exact `allow`; HTTP verification requires active registry; signed-denial regression exists |
 | **P0** | Caller manifest could define a “complete” HF snapshot | **Fixed** in `6f429d2` | Pinned provider API inventory is authoritative; caller inventory is comparison-only |
@@ -272,6 +289,16 @@ code defects, not operator inputs:
 | **P1** | Attestation pins/transparency policy failed open and crypto-missing path could crash | **Fixed** in `84c5fd0` | Pin allowlist enforced, no-bundle transparency requirement blocks, imports fail cleanly |
 | **P1** | Sandbox peer absent from broker workers | **Fixed** in `de3bbe4` | Broker compose includes the same no-egress service |
 | **P1** | Third-party scanner binaries and databases are not shipped | **Core bundle fixed** in `f406f55` | ModelScan/Semgrep/Fickling/Trivy are pinned, packaged, offline-capable, bounded, and functionally self-tested; optional engines and recurring freshness/rebuild policy remain |
+| **P0** | Caller could choose/omit the admission policy and inject inline exceptions | **Fixed** in `df8df46` | Admission uses a server-owned profile; request exceptions are discarded; only durable approved unexpired exceptions are eligible; preflight cannot issue allow |
+| **P0** | Policy-profile mutations had no Model Intake operator boundary | **Fixed** in `df8df46` | Create/update/delete require operator auth; the UI supports an operator token held only in browser session storage |
+| **P1** | Broad pickle opcode/global rules called ordinary PyTorch state dictionaries malicious | **Fixed** in `0ee4aed` | Semantic classes distinguish proven dangerous callables, expected framework reconstruction, unknown review, and mere executable-format capability |
+| **P1** | Semgrep treated every omitted `torch.load(weights_only=...)` as a high-severity exploit | **Fixed** in `0ee4aed` | Explicit `weights_only=False` is blocking; omission is a version-dependent medium warning requiring PyTorch 2.6+ or a patch to `weights_only=True` |
+| **P1** | Sandbox could not generate any useful load evidence without an operator adapter | **Fixed for safetensors weights** in `fd0e645` | Built-in digest-bound mmap/range/finiteness tests produce `load_level=weights`; custom code/model/inference remain explicitly not run |
+| **P1** | Security evaluation and organization-specific retrieval quality were conflated | **Fixed** in `6d60660` | Independent scopes/statuses; policy can require either; optional absent quality does not falsify security |
+| **P1** | Report did not answer whether the model could be used or distinguish malicious pickle from format capability | **Fixed** in `97cbf26` | UI/JSON corporate-use verdict, controls, evidence-backed blockers, limitations, next actions, and `malicious_primitive_proven` |
+| **P0** | No complete malicious artifact test crossed acquisition, scanners, policy, and admission | **Fixed** in `8167f34` | Deterministic end-to-end malicious pickle proves `posix.system`, rejects admission, and proves caller inline exceptions cannot weaken the gate |
+| **P1** | Missing evaluation specification produced a false report-digest mismatch on worker verification | **Fixed** in `2a88737` | Early-return evaluation evidence is digest-bound; missing spec is the sole intended blocker and `worker_verified=true` |
+| **P1** | Custom executable model code with no dependency manifest could appear to have an empty clean SBOM | **Fixed** in `2a88737` | Production admission emits a high `runtime_dependency_inventory_missing` blocker and a concrete hash-locked runtime/SBOM/SCA action |
 
 The critical signed-denial bypass was reproduced in the source-built remote worker before repair: a newly
 generated, correctly signed admission package with `decision.outcome="block"` returned `verified: true`,
@@ -610,6 +637,18 @@ adapter sets fail closed. Fickling returns `PASS` only for its documented succes
 tool error or ordinary tensor-reconstruction false positives into a malicious-model verdict. A future
 microVM loader is still required for genuinely isolated deserialization.
 
+The built-in pickle analyzer emits semantic classes rather than treating every `GLOBAL`, `REDUCE`, or
+`BINPERSID` as malware:
+
+- `dangerous_callable` — a resolved callable such as `posix.system`, `os.system`, `subprocess.*`, `eval`, or
+  `exec`; this proves a malicious primitive and is a blocking failure.
+- `expected_framework_pickle` — only allowlisted PyTorch/NumPy tensor reconstruction globals plus expected
+  reconstruction opcodes; this is not proof of malware, but the artifact remains executable-capable and can
+  still fail corporate serialization policy.
+- `unknown_callable_review` — unresolved or non-allowlisted globals/reducers; this requires review and cannot
+  silently pass a required gate.
+- `no_executable_serialization` — no executable serialization stream was found.
+
 **Required design:**
 
 - Run [ModelScan](https://github.com/protectai/modelscan) against the complete repository and each supported
@@ -701,12 +740,16 @@ incomplete, stale, bypassed, or governed by a different policy.
 
 ### 7.9 P1 — Execute in a hardened sandbox
 
-**Delivery status: hardened semantic container and operator runtime-adapter contract implemented; disposable
-microVM and independent runtime telemetry are not implemented.** The service re-binds exact subjects and
-requests, gates PASS on isolation, applies per-job kill/resource limits, and refuses to promote header parsing
-to dynamic success. The remaining tier must import custom code, load tokenizer/weights, and run inference in a
-disposable KVM/microVM while independently collecting runtime telemetry. It must not weaken the static sandbox
-by simply enabling `trust_remote_code` in the general worker.
+**Delivery status: hardened semantic container, built-in safetensors weight loader, and operator
+runtime-adapter contract implemented; disposable microVM and independent runtime telemetry are not
+implemented.** The service re-binds exact subjects and requests, gates PASS on isolation, applies per-job
+kill/resource limits, and refuses to promote header parsing to dynamic success. For safetensors, the built-in
+adapter re-hashes and memory-maps the exact file, validates tensor inventory/ranges, samples numeric finiteness,
+and reports `load_level=weights`. It explicitly reports `model_loaded=false` plus the limitations
+`custom_model_code_not_imported`, `model_graph_not_instantiated`, and
+`embedding_known_answers_not_executed`. The remaining tier must import approved custom code, load the
+tokenizer/model, and run inference in a disposable KVM/microVM while independently collecting runtime
+telemetry. It must not weaken the static sandbox by simply enabling `trust_remote_code` in the general worker.
 
 Static checks cannot prove how custom model code behaves when imported or invoked. A deterministic dynamic
 stage is required.
@@ -736,7 +779,7 @@ Dynamic tests must detect:
 - Nondeterministic or environment-sensitive loading.
 - Exceptions, hangs, crashes, and malformed-input behavior.
 
-Current container runtime-adapter contract:
+Stronger operator runtime-adapter contract for model/inference phases:
 
 ```json
 {
@@ -1067,7 +1110,10 @@ Perform automated and manual review of all custom code:
   package installation, and environment-variable access.
 - File access, network clients, telemetry, download helpers, and cache behavior.
 - Transformers registration and remote-code entry points.
-- `torch.load` call sites and whether `weights_only` is enforced where supported.
+- `torch.load` call sites and whether `weights_only` is enforced where supported. The shipped Semgrep policy
+  treats explicit `weights_only=False` as an error. An omitted argument is a medium version-dependent warning:
+  require PyTorch 2.6+ (whose default is weights-only) or patch the call to `weights_only=True`. A call-site
+  warning is not by itself proof that the selected safetensors artifact reaches unsafe pickle loading.
 - Native extension loading and fallback paths.
 - Diff against upstream parent code and prior approved revisions.
 
@@ -1170,11 +1216,13 @@ start rollback/reindex procedures according to incident severity.
 ### 11.1 CodeRankEmbed
 
 **Automation status:** ShakerScan can automate the pinned complete snapshot, full hash, safetensors structure,
-custom-code inventory/AST checks, built-in SBOM/SCA/secret/malware/license evidence, adapter orchestration,
-policy, and admission report. Its operator runtime-adapter contract can load the exact subject and generate
-known-answer embeddings inside the hardened container tier when the corporation supplies a pinned runtime
-image and argv contract. A disposable microVM with independent telemetry remains required for the highest-risk
-custom-code tier. The corporation must provide manual code approval, representative corpus/thresholds,
+custom-code inventory/AST/Semgrep checks, built-in SBOM/secret/malware/license evidence, adapter orchestration,
+policy, and admission report. The built-in no-egress safetensors adapter proves exact-digest weight
+readability, tensor inventory/ranges, and sampled numeric finiteness. It does **not** import CodeRank's custom
+code, instantiate the model graph, or generate an embedding. The operator runtime-adapter contract can do
+those later phases when the corporation supplies a pinned runtime image and argv contract. A disposable
+microVM with independent telemetry remains required for the highest-risk custom-code tier. The corporation
+must provide the exact runtime dependency inventory, manual code approval, representative corpus/thresholds,
 legal/privacy decisions, and deployment enforcement.
 
 Required evidence before a controlled pilot:
@@ -1199,11 +1247,13 @@ must not use network-based `trust_remote_code` loading.
 
 ### 11.2 CodeSage Base v2
 
-**Automation status:** ShakerScan can automate complete snapshot/hash, conservative pickle detection,
-built-in semantics, custom-code review assistance, evidence/policy/reporting, and ModelScan/Fickling
-orchestration when those tools are installed. The current sandbox deliberately blocks `.bin` loading. Phase 3
-must automate isolated deserialization, inference, optional conversion, and equivalence evidence; the
-corporation owns manual approval, benchmark fitness, and production promotion.
+**Automation status:** ShakerScan can automate complete snapshot/hash, semantic pickle classification,
+custom-code AST/Semgrep review assistance, evidence/policy/reporting, and bundled ModelScan/Fickling
+orchestration. Ordinary PyTorch tensor reconstruction is reported as `expected_framework_pickle`, not as a
+proven malicious callable; executable-format capability is a separate corporate policy failure. The current
+sandbox deliberately blocks `.bin` loading. Phase 3 must automate isolated deserialization, inference,
+optional conversion, and equivalence evidence; the corporation owns manual approval, benchmark fitness, and
+production promotion.
 
 Required evidence before a controlled pilot:
 
@@ -1292,7 +1342,7 @@ Production must block when any of the following is true:
 The phases are ordered by risk dependency. Status refers to reusable product mechanisms, not approval of a
 specific model.
 
-### Phase -1 — Restore admission correctness — **completed through `b68f23b`**
+### Phase -1 — Restore admission correctness — **completed through `df8df46`**
 
 Complete before adding more scanners or model-execution features:
 
@@ -1310,6 +1360,9 @@ Complete before adding more scanners or model-execution features:
 - Make every applicable built-in scanner’s requiredness, full discovery count, truncation, parse failure, and
   directory coverage explicit.
 - Require crypto dependencies in security-test jobs and fail if signed-admission/signature/DSSE modules skip.
+- Select the production admission profile on the server, reject request-supplied inline exceptions, and make
+  preflight structurally unable to issue a signed allow.
+- Require Model Intake operator authentication for policy-profile mutations.
 
 Exit evidence: a correctly signed `block` is rejected by the core verifier used by both library and HTTP
 paths; HTTP verification additionally requires an active registry record; a one-file caller manifest cannot
@@ -1356,10 +1409,13 @@ Remaining product work:
 Operator/corporate work: approve scanner versions and licenses, host/update vulnerability and malware
 databases, supply organization rules, and define severity/freshness/exception policy.
 
-### Phase 3 — Disposable model execution and runtime telemetry — **container adapter implemented; microVM tier open**
+### Phase 3 — Disposable model execution and runtime telemetry — **safetensors weights and operator adapter implemented; microVM tier open**
 
-The semantic container now supports an operator runtime adapter and only returns PASS for exact-digest load
-plus known-answer evidence. It remains a staging/integration tier, not the disposable microVM required here.
+The semantic container now includes a built-in exact-digest safetensors weights adapter and supports an
+operator runtime adapter. The built-in adapter only returns PASS after mmap/range/inventory/finiteness checks
+and reports `load_level=weights`; the operator adapter must produce stronger phase-specific known-answer
+evidence before claiming model load or inference. Both remain staging/integration tiers, not the disposable
+microVM required here.
 
 Remaining product work:
 
@@ -1380,11 +1436,13 @@ Exit criteria: CodeRankEmbed and CodeSage Base can be loaded and exercised witho
 or host access; prohibited behavior and resource breaches reliably block. CodeSage Large runs in a separate
 scheduled GPU-capable tier after Base passes.
 
-### Phase 4 — Automated model and application evaluation — **contract implemented; runner incomplete**
+### Phase 4 — Automated model and application evaluation — **security/quality contract implemented; runner incomplete**
 
 Delivered: provider-neutral, content-free evaluation schema and deterministic scoring for vector validity,
 dimensions, retrieval, ACL/sensitive leakage, poisoning, stability, latency/RSS, tenant/graph/cache boundaries,
-deletion, and model/index compatibility.
+deletion, and model/index compatibility. Security and organization-specific retrieval quality are independent
+scopes so the report does not confuse “no quality corpus supplied” with “security failed”; policy may still
+require both for admission.
 
 Remaining product work:
 
@@ -1403,9 +1461,11 @@ Corporate work: supply representative synthetic/internal corpora, relevance judg
 labels, non-production services and principals, quality/capacity thresholds, data approvals, and authorization
 to run the tests.
 
-### Phase 5 — Useful report and release gate — **partially implemented**
+### Phase 5 — Useful report and release gate — **corporate-use UI/JSON implemented; export/deployment parity open**
 
-Delivered: deployment decision/reason, control cards, findings, AIBOM, evidence, activity logs, JSON/PDF
+Delivered: a first-screen corporate-use verdict and can-use boolean, malicious-primitive proof separated from
+format capability, control matrix, primary blockers, limitations, concrete next actions, deployment
+decision/reason, findings, AIBOM, evidence, activity logs, JSON/PDF
 exports, optional signed statements, lifecycle registry, reassessment, expiry, supersession, and revocation.
 The exact-subject verifier authorizes only signed `allow` decisions, and the HTTP path additionally requires
 an active matching registry record. Lifecycle mutation endpoints require an operator bearer token; global
@@ -1476,6 +1536,9 @@ Maintain content-safe fixtures for:
 - Scanner timeout, crash, partial output, false exit code, and stale database.
 - SSRF destinations and redirect/DNS bypasses.
 - Sandbox network, subprocess, host-file, memory, disk, PID, and timeout violations.
+- Complete malicious pickle acquisition whose `posix.system` callable must be found by semantic analysis,
+  rejected by production policy, rendered as `REJECT`, and remain rejected when the caller submits an inline
+  exception.
 
 Do not place live malware, live credentials, or uncontrolled exploit samples in the normal repository.
 Use access-controlled security-fixture storage where stronger samples are necessary.
@@ -1494,16 +1557,18 @@ Use access-controlled security-fixture storage where stronger samples are necess
 The repeatable Make targets remain pipeline E2Es, not complete model qualification. `make e2e-model-intake`
 exercises a real public Hugging Face capped shard and proves that partial acquisition is reported as
 `known_unverified_truncated`; `make e2e-model-intake-fixture` covers deterministic offline plumbing. The
-2026-07-29 remote validation below additionally proves complete acquisition and the installed static bundle
-against the three exact public revisions, but it still does not load the models, run embeddings, exercise a
-corporate data plane, verify organization signatures/approvals, or qualify production use.
+2026-07-29 remote validation below proves complete acquisition and the installed scanner bundle against the
+three exact public revisions. For CodeRank it also proves bounded safetensors weight loading, while clearly
+recording that custom code, model construction, and embeddings did not run. It does not exercise a corporate
+data plane, verify organization signatures/approvals, or qualify production use.
 
 Maintain these tiers:
 
 1. **PR fixture:** local safe/malicious fixtures, policy/report contracts, no external network.
 2. **Public acquisition smoke:** current bounded Hugging Face shard path; never treated as full integrity.
-3. **Scheduled complete static intake:** full pinned CodeRankEmbed and CodeSage Base snapshots, all required
-   scanner images ready, complete hashes, generated evidence, and report assertions.
+3. **Scheduled complete admission-mechanism intake:** full pinned CodeRankEmbed and CodeSage Base snapshots,
+   all fact-applicable scanner images ready, complete hashes, semantic serialization evidence, safetensors
+   weight-load evidence where applicable, and corporate-use report assertions.
 4. **Scheduled isolated execution:** CodeRankEmbed and Base import/load/inference, telemetry, embedding tests,
    and optional Base conversion equivalence in the Phase 3 runner.
 5. **Release/GPU qualification:** CodeSage Large complete snapshot, scanners, load/inference, GPU resource
@@ -1514,41 +1579,39 @@ digests, rule/database versions and freshness, loader/evaluator versions, hardwa
 digests, and which controls were intentionally not applicable. Missing required stamps or controls make the
 run `INCOMPLETE`.
 
-#### 14.5.1 Remote full-static validation — 2026-07-29
+#### 14.5.1 Remote corporate-admission mechanism validation — 2026-07-29
 
-The source branch was rebuilt on `root@2.28.1.228` after each repair. The final deployment ran checkout
-`d20a081`; both workers reported the expected build fingerprint and the image-build malicious-fixture receipt
-reported `PASS` for ModelScan 0.8.8, Semgrep 1.172.0, Fickling 0.1.12, and Trivy 0.72.0. The latest successful
-CodeRankEmbed, Base, and Large scans were produced on `4d66752`, `9a9de72`, and `d20a081`, respectively; each
-later build contains the earlier fixes, and the intervening changes affected only the subsequently exercised
-adapter/archive paths. The tests used full
-artifact acquisition, a 5 GB artifact ceiling, complete pinned Hugging Face snapshots, a 6 GB repository
-ceiling, all fact-applicable generated scanners, the hardened sandbox, and exact expected SHA-256 values.
-Signature, admission, deployment-approval, and generated-evaluation requirements were intentionally disabled
-for this mechanism test; their absence must still block a true corporate production profile.
+The source branch was rebuilt on `root@2.28.1.228` after the final repairs. The deployment ran checkout
+`2a88737`; both workers reported build fingerprint `0398b2a53379d635` as current with zero stale workers. The
+image-build malicious-fixture receipt reported `PASS` for ModelScan 0.8.8, Semgrep 1.172.0, Fickling 0.1.12,
+and Trivy 0.72.0. Unlike the earlier static-mechanism run, these requests used `intake_mode=admission`, so the
+server-owned production profile forced complete acquisition/snapshot/scanners/sandbox/evaluation,
+attestation, signing, governance, and deployment approval. The caller did not receive a way to turn those
+gates off or inject an inline exception. Missing corporate inputs therefore appear as real failed controls
+rather than being hidden to obtain a cleaner result.
 
-| Exact subject | Final scan | Mechanism result | Security decision and useful answer |
+| Exact subject | Final admission scan | What ShakerScan proved | Corporate-use answer |
 |---|---|---|---|
-| `nomic-ai/CodeRankEmbed@3c4b60807d71f79b43f3c4363786d9493691f8b1` | `ad4b3199-6f71-466a-b9f7-39691c91fc3a` | Full 546,938,168-byte artifact hash verified; all 14 pinned repository files acquired; raw pinned `README.md` fetched; safetensors sandbox inspection passed for 112 tensors under no-egress/seccomp isolation; ModelScan/Fickling/Trivy correctly not applicable | **BLOCK, 34/F.** Semgrep found `torch.load` without enforced `weights_only=True` in `modeling_hf_nomic_bert.py:332`; custom remote code needs review. Exact runtime load and embedding evaluation did not run because no operator runtime adapter was configured. |
-| `codesage/codesage-base-v2@92eac4f44c8674638f039f1b0d8280f2539cb4c7` | `a5a2000a-b10c-4b42-be0d-a42654ebc57d` | Full 709,569,721-byte artifact hash verified; all 16 pinned files acquired; ModelScan passed with zero findings; secret scan passed while streaming the large tokenizer; Semgrep produced two writable-cache-path warnings; Fickling correctly not applicable to the PyTorch ZIP | **BLOCK, 0/F.** The upstream artifact is pickle-capable, archive-aware opcode analysis proves executable deserialization semantics, and the sandbox refuses to load it. Convert under isolation to safetensors and prove equivalence before considering admission. |
-| `codesage/codesage-large-v2@6e5d6dc15db3e310c37c6dbac072409f95ffa5c5` | `9c19e0ce-1d06-42dc-bfd5-c61c25890f5e` | Full 2,627,013,817-byte artifact hash verified; all 16 pinned files acquired; 294 archive members and 2,626,958,595 expanded bytes completely inventoried within the operator's 5 GB ceiling; ModelScan and secret scans passed; Semgrep produced the same two warnings; no timeout, OOM, or incomplete coverage | **BLOCK, 0/F.** Same pickle/deserialization and missing runtime/evaluation/admission evidence as Base, with a materially larger resource envelope. There is no security basis to prefer it until Base fails an approved retrieval benchmark. |
+| `nomic-ai/CodeRankEmbed@3c4b60807d71f79b43f3c4363786d9493691f8b1` | `12e54c36-0ff9-4b25-a358-222f6d050ab2` | Complete 546,938,168-byte artifact and 14-file repository snapshot; expected digest verified; safetensors inventory contained 112 tensors; no-egress/seccomp/non-root sandbox passed exact-digest mmap, nonempty inventory, byte-range, and sampled-finiteness tests with `load_level=weights`. Semgrep reported one medium warning at `modeling_hf_nomic_bert.py:332`: omitted `weights_only` is version-dependent and requires PyTorch 2.6+ or a patch to `weights_only=True`; it is not presented as proven exploitation. | **NOT_APPROVED; not proven malicious.** Five controls passed, custom code requires review, and four corporate controls failed. Do not deploy until the custom code has a hash-locked runtime dependency SBOM/SCA result, an exact-runner security evaluation passes, publisher provenance/signing is established, and deployment approval is recorded. Custom code, model construction, and embeddings did not run. |
+| `codesage/codesage-base-v2@92eac4f44c8674638f039f1b0d8280f2539cb4c7` | `da4aebe2-e17e-4150-be47-e67117cf1237` | Complete 709,569,721-byte artifact and 16-file snapshot; expected digest verified; ModelScan 0.8.8 passed with zero findings. Pickletools classified `collections.OrderedDict`, `torch.BFloat16Storage`, and `torch._utils._rebuild_tensor_v2` as `expected_framework_pickle`; `malicious_primitive_proven=false`. Semgrep produced two medium writable-file review warnings in `tokenization_codesage.py`; Fickling was correctly not applicable to the PyTorch ZIP. | **NOT_APPROVED; not proven malicious.** The upstream format is still executable-capable and prohibited by default corporate policy, so the sandbox correctly returned `BLOCKED_BY_POLICY`. Convert in no-egress quarantine to safetensors, prove tensor/numeric and embedding equivalence, then rerun with a locked runtime, SCA, security evaluation, provenance, signing, and approval. |
+| `codesage/codesage-large-v2@6e5d6dc15db3e310c37c6dbac072409f95ffa5c5` | `bdc08d2d-9939-431a-8822-994da2c5f1be` | Complete 2,627,013,817-byte artifact and 16-file snapshot; expected digest verified; all 294 archive members and 2,626,958,595 expanded bytes inspected without truncation. ModelScan passed with zero findings; pickle semantics and the two Semgrep writable-file warnings matched Base; `malicious_primitive_proven=false`; evaluation evidence integrity verified independently. | **NOT_APPROVED; not proven malicious.** Same executable-format, runtime, dependency, evaluation, provenance, signing, and approval failures as Base, plus materially greater storage/memory/GPU exposure. Do not qualify Large unless Base first fails a versioned corporate retrieval benchmark and Large proves a justified benefit within a separately approved resource envelope. |
 
-The validation found and repaired four integration defects: the sandbox lost the selected artifact extension;
-the Hugging Face resolver fetched repository HTML instead of the pinned raw model card; selected snapshot files
-were not traversable by the unprivileged external adapters; and archive inventory used a hard-coded 2 GB
-expanded ceiling unrelated to the bounded artifact policy. It also corrected Fickling exit semantics,
-ModelScan missing-result diagnostics, actionable Semgrep coordinates, and streaming secret inspection for
-large text files. The final reruns contain no acquisition, worker, adapter-execution, model-card, hash,
-repository-completeness, or archive-completeness error.
+The earlier validation found and repaired sandbox extension routing, pinned model-card retrieval, unprivileged
+adapter traversal, archive byte-policy, Fickling exit semantics, ModelScan diagnostics, Semgrep coordinates,
+and streaming large-file inspection. The admission reruns then exposed and repaired two further report defects:
+missing evaluation input incorrectly produced a report-digest mismatch, and custom executable code with no
+runtime dependency manifest looked like an empty clean SBOM. The final reruns contain no acquisition, worker,
+adapter-execution, model-card, hash, repository/archive completeness, or evidence-integrity error.
 
 These are successful tests of ShakerScan and unsuccessful admission reviews of the exact upstream subjects.
 That distinction is intentional: “the scanner worked” does not mean “the model passed.”
 
-Final regression evidence was generated inside the rebuilt remote worker image against source checkout
-`90578da`: **252 passed, 0 failed, 0 skipped** across Model Intake acquisition, archives, scanners, sandbox,
-providers, signatures, admission, DSSE/attestation, and API request/policy tests. The suite is
-installation-independent: a strict-profile test accepts any normalized required non-pass from a deliberately
-invalid artifact instead of assuming an adapter binary is absent from the shipped image.
+Final focused regression evidence was generated inside the exact rebuilt remote worker image against source
+checkout `2a88737`: **177 passed, 0 failed, 0 skipped** across all `test_model_intake*.py` modules, with only a
+read-only pytest-cache warning. A separate exact-image crypto run reported **24 passed, 0 skipped**. The
+deterministic E2E reported 12 executed gates passing plus one intentionally skipped opt-in public-network
+shard; its new complete malicious-artifact gate proved the `posix.system` callable, a `REJECT` verdict, and
+that a caller inline exception cannot weaken admission.
 
 ### 14.6 Application-control tests
 
