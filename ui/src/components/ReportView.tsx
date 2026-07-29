@@ -568,6 +568,44 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   const modelIntakeAibom = model_intake?.aibom || null
   const modelIntakeSupplyChain = model_intake?.supply_chain || null
   const modelIntakeEvaluation = model_intake?.generated_evaluation || null
+  const modelIntakeActivity = Array.isArray(model_intake?.activity) ? model_intake.activity : []
+  const modelIntakeScannerResults = Array.isArray(model_intake?.generated_evidence?.results)
+    ? model_intake.generated_evidence.results
+    : []
+  const modelIntakeExecutionControls = [
+    ...modelIntakeScannerResults.map((item: any) => ({
+      name: item?.scanner?.name || 'scanner',
+      status: item?.execution?.status || 'NOT_RUN',
+      coverage: item?.coverage || {},
+      detail: item?.execution?.error || item?.summary?.error || null,
+    })),
+    {
+      name: 'dynamic sandbox',
+      status: model_intake?.dynamic_sandbox?.status || 'NOT_RUN',
+      coverage: {},
+      detail: model_intake?.dynamic_sandbox?.error || null,
+    },
+    {
+      name: 'provenance attestation',
+      status: model_intake?.attestation?.status || 'NOT_RUN',
+      coverage: {},
+      detail: Array.isArray(model_intake?.attestation?.blockers) ? model_intake.attestation.blockers.join(', ') : model_intake?.attestation?.error || null,
+    },
+    {
+      name: 'embedding evaluation',
+      status: modelIntakeEvaluation?.status || 'NOT_RUN',
+      coverage: modelIntakeEvaluation?.metrics || {},
+      detail: Array.isArray(modelIntakeEvaluation?.blockers) && modelIntakeEvaluation.blockers.length
+        ? modelIntakeEvaluation.blockers.map((item: any) => item?.code).filter(Boolean).slice(0, 3).join(', ')
+        : null,
+    },
+    {
+      name: 'signed admission',
+      status: model_intake?.admission?.status || 'NOT_RUN',
+      coverage: {},
+      detail: model_intake?.admission?.error || null,
+    },
+  ]
   const ai_gate = scanData.ai_gate || null
   const aiGateControlEvidence = ai_gate?.control_evidence || null
   const aiGateDecision = ai_gate?.decision || {}
@@ -1493,6 +1531,60 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
               )
             })}
           </div>
+
+          {(modelIntakeExecutionControls.length > 0 || modelIntakeActivity.length > 0) && (
+            <div className="mt-5 grid gap-4 xl:grid-cols-[minmax(0,1.35fr)_minmax(18rem,0.65fr)]">
+              <div className="min-w-0 overflow-hidden rounded border border-gray-700 bg-gray-900">
+                <div className="border-b border-gray-800 px-3 py-2">
+                  <div className="text-sm font-semibold text-gray-200">Control execution</div>
+                  <div className="mt-0.5 text-xs text-gray-500">PASS means the control actually ran; missing, incomplete, unsupported, and skipped controls remain visible.</div>
+                </div>
+                <div className="divide-y divide-gray-800">
+                  {modelIntakeExecutionControls.map((control: any, index: number) => {
+                    const status = String(control.status || 'NOT_RUN').toUpperCase()
+                    const statusClass = status === 'PASS' || status === 'SIGNED'
+                      ? 'bg-green-950/60 text-green-300'
+                      : status === 'WARNING' || status === 'REVIEW_REQUIRED'
+                        ? 'bg-yellow-950/60 text-yellow-300'
+                        : status === 'NOT_APPLICABLE'
+                          ? 'bg-gray-800 text-gray-300'
+                          : 'bg-red-950/60 text-red-300'
+                    const coverage = Object.entries(control.coverage || {})
+                      .filter(([, value]) => ['string', 'number', 'boolean'].includes(typeof value))
+                      .slice(0, 4)
+                      .map(([key, value]) => `${key.replace(/_/g, ' ')}: ${String(value)}`)
+                      .join(' · ')
+                    return (
+                      <div key={`${control.name}-${index}`} className="grid min-w-0 gap-2 px-3 py-2.5 sm:grid-cols-[minmax(10rem,0.45fr)_auto_minmax(0,1fr)] sm:items-center">
+                        <div className="truncate text-sm text-gray-200" title={String(control.name)}>{String(control.name).replace(/_/g, ' ')}</div>
+                        <span className={`w-fit rounded px-2 py-0.5 text-[11px] font-semibold ${statusClass}`}>{status}</span>
+                        <div className="min-w-0 break-words text-xs text-gray-500">{control.detail || coverage || 'No additional detail reported.'}</div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+
+              <div className="min-w-0 rounded border border-gray-700 bg-gray-900 p-3">
+                <div className="text-sm font-semibold text-gray-200">Intake phase timeline</div>
+                {modelIntakeActivity.length ? (
+                  <ol className="mt-3 space-y-2">
+                    {modelIntakeActivity.map((event: any, index: number) => (
+                      <li key={`${event?.phase || 'phase'}-${index}`} className="rounded border border-gray-800 bg-gray-950/60 p-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-xs font-medium text-gray-200">{String(event?.phase || 'phase').replace(/_/g, ' ')}</span>
+                          <span className="text-[11px] text-gray-500">{event?.progress ?? 0}% · {String(event?.status || 'unknown')}</span>
+                        </div>
+                        {event?.at && <div className="mt-1 text-[10px] text-gray-600">{String(event.at)}</div>}
+                      </li>
+                    ))}
+                  </ol>
+                ) : (
+                  <div className="mt-3 text-xs text-gray-500">No structured phase events were recorded.</div>
+                )}
+              </div>
+            </div>
+          )}
 
           {(modelIntakeAibom || modelIntakeSupplyChain) && (
             <div className="mt-5 grid grid-cols-1 gap-3 lg:grid-cols-3">
