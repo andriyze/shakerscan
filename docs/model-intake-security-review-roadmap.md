@@ -1,12 +1,14 @@
 # Model Intake Security Review and Implementation Roadmap
 
-**Status:** Implemented product roadmap with operational model-approval gates remaining per deployment
+**Status:** Core static intake and admission automation implemented; isolated model execution, packaged third-party scanners, automated benchmark execution, and corporate deployment integrations remain
 
-**Reviewed checkout:** `239f887d9f10e997b9844c916c28073fab71ee79`
+**Original audit checkout:** `239f887d9f10e997b9844c916c28073fab71ee79`
+
+**Current implementation checkout:** `a3f10d142d483395eebb33774279f3cb14e1c7b3`
 
 **Review date:** 2026-07-28
 
-**Implementation completion review:** 2026-07-29
+**Implementation and automation-boundary review:** 2026-07-29
 
 **Scope:** ShakerScan Model Intake, CodeRankEmbed, CodeSage Base v2, CodeSage Large v2, and the knowledge-graph/vector-embedding deployment path
 
@@ -14,8 +16,9 @@
 
 ## 1. Purpose
 
-This document defines the work needed to turn ShakerScan Model Intake from a useful artifact preflight
-check into a defensible corporate model-admission control. It also provides the complete security-review
+This document defines what ShakerScan can realistically automate, what remains to be implemented in
+ShakerScan, and which controls require organization-operated infrastructure or human authority. It also
+provides the complete security-review
 procedure for the following embedding models:
 
 - `nomic-ai/CodeRankEmbed`
@@ -28,53 +31,60 @@ Python and container dependencies, the isolated inference runtime, the embedding
 store, knowledge-graph authorization, ongoing vulnerability monitoring, and the evidence used to make the
 deployment decision.
 
-This is both:
+This is all of the following:
 
-1. A point-in-time audit of the current Model Intake implementation.
+1. A point-in-time audit of the original and current Model Intake implementations.
 2. A target architecture, implementation backlog, operating procedure, and acceptance plan.
+3. An automation-boundary contract that prevents product mechanisms, installed integrations, completed
+   model runs, and corporate approvals from being confused with one another.
 
 It is not an approval of any model, a replacement for legal/privacy review, or a claim that a clean scan
 proves a model is safe.
 
 ## 2. Executive decision
 
-ShakerScan already provides a meaningful Model Intake foundation. It can resolve a Hugging Face model,
-pin a revision, select an artifact, download a bounded prefix, inspect several formats, compare hashes when
-enough bytes are present, verify detached signatures with configured trust material, apply policy profiles,
-record evidence, and produce a deployment decision.
+ShakerScan provides a meaningful provider-neutral Model Intake and admission foundation. It can resolve and
+pin sources, stream bounded prefixes or complete artifacts, capture complete Hugging Face snapshots, inspect
+formats/code/dependencies, orchestrate built-in and external scanners, evaluate supplied model/application
+observations, apply policy, preserve evidence, and issue and lifecycle-manage an admission decision.
 
-The text below preserves the point-in-time audit of checkout `239f887`. The implementation completed after
-that audit is summarized in section 2.1. Statements phrased as “current condition” in sections 6–7 describe
-the reviewed checkout, not the post-roadmap implementation.
+The original audit of checkout `239f887` identified serious gaps. Most acquisition, static-analysis,
+evidence, policy, admission, and lifecycle mechanisms were subsequently implemented. The remaining gap is
+not “scan more file extensions.” It is automated qualification of the exact model/runtime/application
+combination and reliable integration with organization-controlled tools and deployment systems.
 
-The original checkout was not sufficient as the sole corporate approval control for these three models.
+Neither the original checkout nor the current product should be described as the sole corporate approval
+authority. ShakerScan can collect evidence, run deterministic controls, enforce product policy, and issue an
+admission decision. It cannot decide legal acceptability, create a representative corporate benchmark,
+grant business risk acceptance, or prove that an organization actually deploys only the approved digest.
 
-The most important reasons are:
+At the original checkout, the audit found these issues:
 
-1. Remote artifacts and related metadata are fetched before a complete destination-safety decision. An
-   attacker-controlled URL can therefore create server-side request forgery exposure unless outbound
-   network controls compensate for it.
-2. The public download limit is 100 MB, while every target weight artifact is larger than 500 MB. A normal
-   run cannot fully hash or fully inspect any of the three weight files.
-3. The repository inventory excludes arbitrary Python files. All three models require custom Python code
-   through `trust_remote_code=True`, so the most security-sensitive files are outside the present automatic
-   review path.
-4. SBOM, malware, and evaluation fields are primarily caller-supplied evidence. ShakerScan validates their
-   shape and policy presence but does not currently run the underlying SCA, malware, secrets, or model-file
-   scanners.
-5. Unsafe-serialization detection is a useful heuristic, not a semantic pickle/PyTorch analysis.
-6. There is no isolated load-and-inference sandbox, embedding-abuse evaluation, knowledge-graph/vector-store
-   control test, native Sigstore/Rekor verification, or signed final approval report.
+1. Remote artifacts and related metadata were fetched before a complete destination-safety decision.
+2. The public download limit prevented complete hashing and inspection of the three example weight files.
+3. The repository inventory excluded arbitrary Python files despite `trust_remote_code=True` requirements.
+4. SBOM, malware, secrets, and evaluation evidence was primarily caller-supplied.
+5. Unsafe-serialization detection was a bounded heuristic rather than semantic analysis.
+6. Isolated load/inference, embedding/application evaluation, native transparency verification, signed
+   admission, and lifecycle enforcement were absent.
 
-The recommended admission order is:
+Sections 2.1 and 2.4 identify which findings are now resolved, partially resolved, or still open.
 
-1. Build the acquisition, complete-hash, custom-code, SCA, model-scan, and sandbox controls.
-2. Pilot CodeRankEmbed in a no-egress sandbox.
-3. Pilot CodeSage Base v2, preferably after controlled conversion to `safetensors` and equivalence testing.
-4. Admit CodeSage Large v2 only after the Base v2 workflow passes and resource-abuse controls are proven.
+The remaining implementation and validation order is:
 
-Until those conditions are met, the correct corporate decision for all three models is **conditional hold**,
-not unconditional approval.
+1. Package and self-test the external static scanners already supported by adapters.
+2. Build the disposable no-egress VM/microVM loader and telemetry contract.
+3. Connect the evaluator to embeddings and measurements produced by that runner.
+4. Validate the complete workflow on CodeRankEmbed.
+5. Validate CodeSage Base v2, including controlled `safetensors` conversion and equivalence testing where
+   policy requires it.
+6. Validate CodeSage Large v2 only after the Base workflow passes and the GPU/resource tier is proven.
+7. Finish the explicit control-matrix report and corporate registry/deployment enforcement examples.
+
+For a production profile, the correct decision for any exact model revision is **block/incomplete** until
+every required automated control has generated digest-bound evidence and the required corporate approvals
+and deployment bindings exist. No repository is approved merely because it is one of the three examples in
+this document.
 
 ### 2.1 Implementation completion addendum
 
@@ -121,6 +131,66 @@ deployment trust roots, a purpose-built runtime image for the chosen model loade
 synthetic benchmark, application/vector-store observations, and the required human/legal/privacy approvals.
 Likewise, the CodeRankEmbed and CodeSage model-specific runbooks are not marked complete until real controlled
 runs produce the required evidence. These are operational admission inputs, not missing model-specific code.
+
+### 2.2 Automation boundary and product position
+
+ShakerScan should automate repetitive, deterministic, evidence-producing security work. It should orchestrate
+specialist tools rather than attempt to replace every model, malware, SCA, policy, and runtime-monitoring
+engine. The product boundary has three classes:
+
+| Class | Meaning | Examples | ShakerScan responsibility |
+|---|---|---|---|
+| **A — Product-native automation** | Deterministic controls ShakerScan can safely own | Source resolution, safe acquisition, complete hashing, manifests, archive/format checks, evidence normalization, policy evaluation, reporting, admission registry, reassessment | Implement, test, ship, and fail closed |
+| **B — Orchestrated integration** | Automatable controls requiring an external engine, runtime, database, corpus, or organization trust material | ModelScan, Fickling, Syft, Trivy, ClamAV, OSV, microVM execution, eBPF telemetry, OPA, Cosign, vector-store probes | Provide a versioned plug-in contract, isolation, evidence provenance, status handling, and operator configuration; never claim coverage when the integration is absent |
+| **C — Corporate/human authority** | Decisions that cannot be responsibly automated by an open-source scanner | Legal/license approval, training-data acceptability, privacy impact assessment, business owner acceptance, production credentials, representative internal corpus, exception approval, deployment change control | Collect the decision, bind it to exact subjects and policy, enforce its expiry, and expose missing evidence; do not fabricate or make the decision |
+
+The intended product is therefore a **security orchestration and admission layer**, not another monolithic
+scanner and not a universal legal or ML-quality authority.
+
+### 2.3 Plain-language answer the report must provide
+
+Every completed intake must answer, on its first screen and in JSON:
+
+1. **What exact model did we inspect?** Provider, repository, immutable revision, complete snapshot digest,
+   weight digest, code digest, runtime digest, and intended deployment environment.
+2. **What passed?** Only controls that actually ran against those exact subjects and produced eligible
+   evidence.
+3. **What failed?** The failed control, evidence reference, policy consequence, and remediation.
+4. **What did not run?** Missing tool, unsupported format, absent benchmark, timeout, crash, skipped control,
+   or unavailable corporate input. A required non-run is never a pass.
+5. **Can this exact subject be deployed?** `ALLOW`, `REVIEW`, or `BLOCK`, with a short reason and the policy
+   version that made the decision.
+6. **What remains outside ShakerScan?** Required corporate approvals, registry promotion, CI/CD enforcement,
+   runtime monitoring, or data-plane validation.
+
+Normalized control states must be `PASS`, `FAIL`, `WARNING`, `REVIEW_REQUIRED`, `NOT_RUN`, `UNSUPPORTED`,
+`TIMEOUT`, `CRASHED`, `INCOMPLETE`, `SKIPPED_BY_POLICY`, or `NOT_APPLICABLE`. Only `PASS` and an explicitly
+justified `NOT_APPLICABLE` can directly satisfy a required gate. A policy may turn a resolved `WARNING` into
+an approval with recorded rationale; every other non-pass remains visible. The UI may use friendlier labels,
+but the exported status must remain unambiguous.
+
+### 2.4 Current delivery summary
+
+| Capability | Product mechanism | Installed/operational by default | Remaining action |
+|---|---:|---:|---|
+| Provider-neutral source adapters and pinned identities | Implemented | Hugging Face/HTTPS paths usable; other providers need credentials/configuration | Maintain adapters and add provider contract tests |
+| SSRF-resistant acquisition and complete quarantine | Implemented | Available when complete acquisition is enabled and storage is configured | Make production presets require complete snapshots |
+| Repository manifests, archives, custom code, safe-format checks | Implemented | Yes for supported formats | Expand fixtures and format/operator coverage |
+| Built-in semantic, source, secret, malware-rule, SBOM, binary, and license checks | Implemented | Yes | Improve detection depth and rule updates |
+| ModelScan, Fickling, ClamAV, Gitleaks, Syft, Trivy, OSV-Scanner, pip-audit adapters | Implemented | **No; binaries are not in the current source worker image** | Package pinned scanner images or installable plug-in bundles; expose tool/database readiness |
+| Isolated semantic sandbox | Implemented | Dedicated no-egress, read-only container | Keep as pre-execution inspection boundary |
+| Actual tokenizer/model load and inference | Not implemented | No | Add disposable KVM/microVM runner and model-loader profiles |
+| Runtime behavior telemetry | Not implemented | No | Integrate Tracee/Falco/auditd/eBPF or equivalent in the execution runner |
+| Provider-neutral evaluation contract | Implemented | Yes when callers provide observations | Add a runner that generates embeddings and observations from the isolated model |
+| Corporate benchmark and thresholds | Integration point implemented | No universal corpus can ship | Organization supplies/version-controls corpus; ShakerScan automates execution and scoring |
+| Signed admission statement and lifecycle registry | Implemented | Requires signing key/trust roots | Add standard keyless/Cosign/OPA options and deployment verifiers |
+| One-page control matrix and detailed evidence | Partially implemented | Overall decision and control cards exist | Add explicit non-run states, model/runtime test receipts, coverage summary, and HTML/PDF parity |
+| Deployment by exact approved digest | Verification contracts implemented | Organization-dependent | Integrate with internal registry, CI/CD, Kubernetes/admission controller, or model serving platform |
+| Legal, privacy, data provenance, and risk acceptance | Recorded as governance evidence | Organization-dependent | Keep human-owned; enforce required owner, approval, scope, and expiry |
+
+The source-built remote instance checked on 2026-07-29 had none of the eight external scanner binaries
+installed. That deployment must therefore show those controls as `UNSUPPORTED`; the presence of adapter code
+is not operational scanner coverage.
 
 ## 3. Review principles
 
@@ -236,44 +306,74 @@ Authoritative model records:
 - Base and Large share substantial code lineage. A clean source review can be reused only when file digests
   are identical; artifact and runtime results remain model-specific.
 
-## 6. What ShakerScan Model Intake checks today
+## 6. What ShakerScan Model Intake automates today
 
-The reviewed implementation exposes Model Intake through the request model in
-[`api/api.py`](../api/api.py), executes it through [`api/worker.py`](../api/worker.py), and implements the
-artifact checks in [`scanner/scanner_tools/model_intake.py`](../scanner/scanner_tools/model_intake.py).
+Model Intake is exposed through [`api/api.py`](../api/api.py), executed by [`api/worker.py`](../api/worker.py),
+and implemented across the `model_intake*` modules in
+[`scanner/scanner_tools`](../scanner/scanner_tools). The current product can automate the following sequence:
 
-| Control | Current behavior | Security value | Current limitation |
-|---|---|---|---|
-| Hugging Face resolution | Resolves repository information, selects an artifact, and supports a revision | Reduces ambiguity | Does not create a complete immutable repository snapshot |
-| Bounded download | Enforces timeout and byte cap | Limits resource consumption | Prevents complete inspection of all three target artifacts |
-| Checksum comparison | Compares a supplied checksum when the complete artifact is observed | Strong integrity when complete | Truncated downloads become `known_unverified_truncated` |
-| Safetensors inspection | Parses and validates the structural header | Useful format sanity | Not a full tensor/content or runtime safety proof |
-| ZIP/PyTorch hints | Detects ZIP and suspicious serialization markers | Useful preflight | Does not semantically analyze pickle opcodes or all archive members |
-| ONNX/GGUF hints | Recognizes and performs bounded format checks | Useful format coverage | Format recognition is not operator allowlisting or execution testing |
-| Detached signatures | Supports Ed25519, RSA-PSS, and ECDSA with configured keys/fingerprints | Can prove possession of an expected signing key | No native registry transparency/log policy; subject-digest semantics need tightening |
-| License and model card | Checks presence and policy metadata | Supports governance workflow | Presence is not legal approval or content verification |
-| Provenance/governance metadata | Applies profile requirements | Gives policy hooks | Much of the evidence is declared by the caller |
-| AIBOM | Builds an inventory from known metadata | Provides a starting manifest | Not a generated, complete repository or runtime SBOM |
-| Policy profiles | Applies reusable deployment gates | Enables consistent decisions | Does not compensate for missing observations |
-| Exceptions/approvals | Product has lifecycle support | Enables governance | Model Intake evidence must bind every exception to exact digests and policy version |
+1. Resolve a model reference through a provider adapter and freeze an immutable revision where the provider
+   supports it.
+2. Apply every-hop URL/DNS/IP acquisition policy and stream a bounded prefix or complete artifact into
+   content-addressed quarantine.
+3. Build a complete pinned Hugging Face repository snapshot when requested, subject to byte and file ceilings.
+4. Inventory paths, digests, formats, custom code/`auto_map`, archives, native binaries, dependencies,
+   licenses, and governance material.
+5. Run built-in deterministic checks and optional external scanner adapters against the quarantined subject.
+6. Perform safe-format semantic inspection in a separate no-egress, read-only, non-root container. This
+   stage does **not** import repository code or deserialize pickle-backed weights.
+7. Evaluate caller-provided, content-free embedding and application observations against deterministic
+   quality, isolation, poisoning, deletion, latency, and resource controls.
+8. Apply a saved policy profile, preserve evidence provenance, create findings, display durable activity,
+   and produce an `ALLOW`, `REVIEW`, or `BLOCK` decision.
+9. Optionally sign the admission statement, register its lifecycle, expire/supersede/revoke it, and verify
+   an exact subject at deployment time.
 
-Focused tests at the reviewed commit completed with **40 passed and 1 skipped**:
+### 6.1 Complete acquisition versus bounded inspection
 
-```text
-python3 -m pytest tests/test_model_intake.py tests/test_model_intake_signature_crypto.py -q
-```
+The 10 MB default `max_download_bytes` is an in-memory inspection-prefix limit, configurable up to 100 MB.
+It is not a final model-size limit. Complete acquisition streams to quarantine with separate fail-closed
+ceilings:
 
-This result confirms the tested behavior. It does not validate external scanners or controls that are not
-implemented.
+- `max_artifact_bytes`: 10 GB by default, up to 100 GB.
+- `max_repository_bytes`: 50 GB by default, up to 500 GB.
+- `max_repository_files`: 10,000.
 
-## 7. Current gaps and required remediations
+All three example weight files fit within the default complete-artifact ceiling. A production review must
+enable `complete_artifact_download` and `complete_repository_snapshot`, set ceilings from the pinned manifest
+plus controlled headroom, and reject unexpected growth. A prefix-only result remains
+`known_unverified_truncated` and cannot authorize deployment.
+
+### 6.2 What the current sandbox proves
+
+The sandbox proves that its own bounded semantic inspector can examine supported formats under a hardened
+container boundary. It validates safetensors structure, performs bounded ONNX checks, identifies GGUF, and
+blocks executable serialization formats such as `.pkl`, `.pickle`, `.joblib`, `.pt`, `.pth`, `.ckpt`, `.bin`,
+and `.mar` from being loaded.
+
+It does not prove that `transformers`, `trust_remote_code=True`, a tokenizer, custom model class, PyTorch
+deserialization, native kernels, or inference behave safely. Those require the remaining disposable
+VM/microVM runner.
+
+### 6.3 What the current evaluator proves
+
+The evaluator can score supplied documents, query embeddings, retrieval observations, ACL/tenant labels,
+poisoning results, resource measurements, deletion receipts, graph-boundary outcomes, cache context, and
+model/index digests. It does not create those embeddings or measurements. Until an isolated execution harness
+produces and signs the inputs, evaluation coverage is integration-supplied rather than end-to-end generated.
+
+## 7. Delivery gaps and required remediations
+
+Sections 7.1–7.13 retain the original security requirements but now state their current delivery status.
+“Implemented” means the product mechanism exists; it does not mean that a particular deployment installed
+the required external tools or that a particular model passed the control.
 
 ### 7.1 P0 — Block SSRF and unsafe outbound acquisition
 
-**Current condition:** The request accepts artifact, metadata, signature, and public-key URLs. Scheme
-validation occurs before `_fetch_artifact`, but destination scope validation is not consistently enforced
-before every connection and redirect. Runtime scope-guard handling occurs too late to be the primary
-protection for acquisition.
+**Delivery status: implemented product mechanism; deployment egress is still operator-controlled.** The
+current acquisition path applies every-hop URL, DNS, IP, redirect, credential, scheme, host, and port policy,
+including private-network exceptions that require explicit approval. Corporate deployments should still put
+the acquisition worker behind a controlled egress boundary and test the effective network policy.
 
 **Risk:** A user able to submit an intake can make the worker contact loopback, RFC1918, link-local, IPv6
 local, cloud metadata, or other internal services. DNS rebinding and redirect chains can bypass a check that
@@ -302,9 +402,10 @@ loops, cross-scheme redirects, oversized and compressed responses, slow response
 
 ### 7.2 P0 — Acquire and hash complete artifacts
 
-**Current condition:** The request default is 10 MB and the maximum is 100 MB. The smallest target artifact
-is over 500 MB. The current correct result for a supplied full-file checksum is therefore
-`known_unverified_truncated`, not pass or mismatch.
+**Delivery status: implemented but opt-in per intake.** Complete acquisition streams to content-addressed
+quarantine and computes a full digest under a separate artifact ceiling. The 10 MB default remains a bounded
+inspection prefix. Production profiles must require complete artifact and repository acquisition; otherwise
+the correct result is `known_unverified_truncated`, never pass or mismatch.
 
 **Risk:** Malicious content can be placed after the inspected prefix. ZIP central directories and later
 members may not be available. The artifact inspected may not be the artifact deployed.
@@ -328,8 +429,9 @@ hash mismatch.
 
 ### 7.3 P0 — Snapshot and inspect the complete repository
 
-**Current condition:** Hugging Face inventory selection focuses on model, tokenizer, dependency, and metadata
-filenames. Arbitrary `.py` files are not all selected. The target models execute custom Python code.
+**Delivery status: implemented for pinned Hugging Face snapshots.** Complete repository acquisition records
+all manifest files, custom code and `auto_map` surfaces under byte/file limits. Other providers use the same
+normalized contract but require provider-specific proof of complete immutable snapshot semantics.
 
 **Risk:** The most dangerous repository content may never be downloaded or analyzed. A safe weight file can
 be paired with malicious model code, tokenizer code, import hooks, build scripts, or dynamic imports.
@@ -353,8 +455,11 @@ evidence.
 
 ### 7.4 P0 — Generate evidence; do not accept assertions as scan results
 
-**Current condition:** SBOM, malware, and evaluation policy logic validates caller-provided metadata. The
-current AIBOM is derived from known metadata and its check does not prove a scanner ran.
+**Delivery status: provenance distinction implemented; operational evidence remains integration-dependent.**
+ShakerScan separates declared, externally attested, and generated evidence and includes built-in generated
+checks. External adapter evidence is eligible only when the pinned tool actually runs successfully against
+the complete subject. Caller-supplied evaluation observations remain declared/integration evidence until the
+planned isolated harness generates them.
 
 **Risk:** A mistaken or malicious caller can satisfy a gate with unverified claims. Approvers cannot tell
 whether a field was declared, attested by a third party, or generated by ShakerScan.
@@ -373,10 +478,10 @@ policy version. User-supplied metadata must never be silently promoted to genera
 
 ### 7.5 P0 — Tighten signature and attestation semantics
 
-**Current condition:** Detached cryptographic verification exists, but a cryptographically valid signature
-can be represented separately from an attestation subject-digest mismatch. The public schema exposes
-`require_signature_verification`; the internal/documented notion of requiring cryptographic verification is
-not consistently surfaced as an independent public policy control.
+**Delivery status: core cryptographic and subject binding implemented; ecosystem integrations remain.**
+Detached signature trust is atomic, offline DSSE/in-toto subject verification exists, and admission statements
+bind complete subjects. Native online Sigstore/Cosign identity flows and trusted Rekor inclusion verification
+remain integration work when corporate policy requires them.
 
 **Required decision rule:** An artifact signature passes only when all are true:
 
@@ -393,9 +498,10 @@ bind issuer and subject, not merely accept any valid Fulcio certificate.
 
 ### 7.6 P0 — Add semantic unsafe-model analysis
 
-**Current condition:** `_looks_like_pickle` uses bounded prefix and marker heuristics, while ZIP inspection is
-shallow. CodeSage `.bin` files are conservatively flagged, which is appropriate, but the result is not a
-semantic analysis.
+**Delivery status: built-in semantic analysis and fail-closed adapters implemented; external engines are not
+packaged in the current worker image.** CodeSage `.bin` files are conservatively blocked from sandbox loading.
+ModelScan and Fickling can add independent semantic evidence only after their pinned binaries are installed
+or provided through isolated scanner images.
 
 **Required design:**
 
@@ -415,6 +521,12 @@ The current Fickling release and advisories must be reviewed before pinning. A t
 hostile serialization must receive the same dependency, sandbox, and update discipline as the model loader.
 
 ### 7.7 P1 — Generate SBOMs and perform SCA
+
+**Delivery status: built-in generation and normalized adapters implemented; scanner packaging, databases,
+and dependency-runtime construction remain.** Syft, Trivy, OSV-Scanner, and pip-audit have fail-closed
+adapters, but an operator must currently install and pin the binaries and vulnerability databases. Grype,
+ScanCode/ORT, complete locked-environment construction, and recurring database-driven rescans remain target
+work.
 
 Model weights do not have CVEs in the same way as conventional packages. SCA applies to custom model code,
 Python packages, native libraries, base images, GPU runtimes, model servers, and supporting services.
@@ -457,6 +569,10 @@ Required SCA policy:
 
 ### 7.8 P1 — Add malware, secrets, and native-binary scanning
 
+**Delivery status: partially implemented.** Built-in secret, malware-rule, archive, and native-binary checks
+exist, with adapters for ClamAV, Gitleaks, and Trivy. Packaged engines, YARA, optional TruffleHog/enterprise
+anti-malware, Git-history scanning, and versioned organization rule distribution remain.
+
 Run at least:
 
 - YARA with versioned organization and community rule sets.
@@ -474,6 +590,12 @@ external evidence, but corporate intake must still generate its own evidence bec
 incomplete, stale, bypassed, or governed by a different policy.
 
 ### 7.9 P1 — Execute in a hardened sandbox
+
+**Delivery status: semantic container sandbox implemented; actual model execution is not implemented.** The
+current no-egress, read-only, non-root, capability-free service safely inspects supported formats and rejects
+executable serialization. The remaining feature must import custom code, load tokenizer/weights, and run
+inference in a disposable KVM/microVM while collecting runtime telemetry. It must not weaken the current
+static sandbox by simply enabling `trust_remote_code` inside it.
 
 Static checks cannot prove how custom model code behaves when imported or invoked. A deterministic dynamic
 stage is required.
@@ -505,6 +627,11 @@ Dynamic tests must detect:
 
 ### 7.10 P1 — Add embedding-specific security and quality evaluation
 
+**Delivery status: evaluation contract and deterministic scoring implemented; execution harness and benchmark
+content remain.** ShakerScan can score the listed controls when supplied content-free observations. It must
+next generate those observations from the isolated model runner. Each corporation must supply the approved,
+versioned corpus, labels, thresholds, and representative use cases.
+
 A model can be free of malware and still be unsuitable. Build a versioned corporate evaluation corpus with
 public, internal-synthetic, and access-labeled cases. Do not put production secrets in a general benchmark.
 
@@ -528,6 +655,11 @@ Define minimum quality and maximum resource thresholds before results are known.
 not be used to waive unacceptable retrieval quality or capacity risk.
 
 ### 7.11 P1 — Test the knowledge graph and vector store
+
+**Delivery status: control schema and observation evaluation implemented; live data-plane connectors and
+organization test fixtures remain.** ShakerScan should automate bounded probes through provider-neutral
+connectors. The organization must provide a non-production environment, principals/tenants, synthetic data,
+expected ACLs, deletion expectations, and authorization to test it.
 
 The data plane needs its own controls:
 
@@ -554,6 +686,11 @@ The data plane needs its own controls:
 
 ### 7.12 P2 — Produce a signed decision package
 
+**Delivery status: canonical statement, optional signing, admission registry, lifecycle, and deployment
+verification contracts implemented.** Production usefulness still depends on organization-controlled keys,
+trust roots, internal registry promotion, and CI/CD or serving-platform enforcement. HTML/PDF reporting needs
+the same explicit control-state and coverage matrix as JSON.
+
 The final report must be machine-verifiable and human-readable. It should include:
 
 - Requester, business owner, technical owner, security reviewer, and approver.
@@ -575,9 +712,12 @@ pulling or loading the model.
 
 ### 7.13 P2 — Correct documentation and public contract mismatches
 
-Current documentation describes archive coverage more broadly than the runtime provides. The implementation
-performs ZIP-specific inspection; it does not yet provide equivalent complete `tar.gz` analysis. Documentation
-and runtime behavior must use the same supported-format registry.
+**Delivery status: substantially implemented and continuously enforced.** API, policy, UI, reports, and docs
+must continue to distinguish complete from truncated acquisition, declared from generated evidence, signature
+presence from trust, and sandbox inspection from actual model execution.
+
+Recursive ZIP/TAR handling is implemented. Documentation and runtime behavior must continue to use the same
+supported-format registry, and tests must prevent a future format claim from exceeding actual coverage.
 
 The API, policy schema, UI, report, and docs must consistently distinguish:
 
@@ -658,6 +798,8 @@ versioned plug-in contract.
 | `PASS` | Tool completed and found no policy-relevant issue | Yes |
 | `FAIL` | Tool completed and found a blocking issue | No |
 | `WARNING` | Tool completed with reviewable concerns | Only if policy allows and reviewer resolves it |
+| `REVIEW_REQUIRED` | Evidence ran successfully but requires a separate human/policy decision | No, until resolved |
+| `NOT_RUN` | The integration or requested execution did not start | No |
 | `NOT_APPLICABLE` | Check is provably irrelevant to this subject | Yes, with reason |
 | `UNSUPPORTED` | Tool cannot analyze this subject | No |
 | `TIMEOUT` | Execution exceeded a bound | No |
@@ -882,6 +1024,12 @@ start rollback/reindex procedures according to incident severity.
 
 ### 11.1 CodeRankEmbed
 
+**Automation status:** ShakerScan can automate the pinned complete snapshot, full hash, safetensors structure,
+custom-code inventory/AST checks, built-in SBOM/SCA/secret/malware/license evidence, adapter orchestration,
+policy, and admission report. It cannot yet load the custom Transformers code or generate embeddings. Phase 3
+must automate that in a disposable VM; the corporation must provide manual code approval, the representative
+corpus/thresholds, legal/privacy decisions, and deployment enforcement.
+
 Required evidence before a controlled pilot:
 
 1. Complete snapshot of revision `3c4b60807d71f79b43f3c4363786d9493691f8b1`.
@@ -904,6 +1052,12 @@ must not use network-based `trust_remote_code` loading.
 
 ### 11.2 CodeSage Base v2
 
+**Automation status:** ShakerScan can automate complete snapshot/hash, conservative pickle detection,
+built-in semantics, custom-code review assistance, evidence/policy/reporting, and ModelScan/Fickling
+orchestration when those tools are installed. The current sandbox deliberately blocks `.bin` loading. Phase 3
+must automate isolated deserialization, inference, optional conversion, and equivalence evidence; the
+corporation owns manual approval, benchmark fitness, and production promotion.
+
 Required evidence before a controlled pilot:
 
 1. Complete snapshot of revision `92eac4f44c8674638f039f1b0d8280f2539cb4c7`.
@@ -925,6 +1079,11 @@ validating the CodeSage code path. Conversion does not erase the need to review 
 loaded or prove that conversion was isolated.
 
 ### 11.3 CodeSage Large v2
+
+**Automation status:** The same current static controls apply without model-name-specific code. Complete
+acquisition fits the product ceilings, but the ordinary PR path should not spend the storage/GPU budget.
+Phase 3/4 must run this profile in scheduled GPU-capable infrastructure after Base passes. The corporation
+must justify the larger model against its own quality, capacity, cost, and data requirements.
 
 Perform every Base v2 step against revision `6e5d6dc15db3e310c37c6dbac072409f95ffa5c5` and digest
 `78a7ed76ffa5ca4e145100610e5541201ca0f3ecc75f1b73433303ae9348c77c`.
@@ -951,11 +1110,13 @@ security semantics.
 
 ### 12.1 Decision outcomes
 
-- `BLOCKED` — a mandatory control failed or required evidence is incomplete.
-- `REVIEW_REQUIRED` — evidence is complete but a human decision is required.
-- `CONDITIONALLY_APPROVED` — a time-bound exception permits a constrained use.
-- `APPROVED` — all required controls and approvals pass for the exact subject and use.
-- `REVOKED` — a prior approval is no longer valid.
+- `BLOCK` — a mandatory control failed or required evidence is incomplete.
+- `REVIEW` — a human decision, permitted warning, or exception workflow remains.
+- `ALLOW` — all controls and approvals required by the selected profile pass for the exact subject and use.
+
+The admission registry separately records lifecycle state such as active, denied, reassessment-required,
+expired, superseded, or revoked. A time-bound exception can influence `REVIEW`/`ALLOW` only within its exact
+scope and expiry; it is not a fourth way to hide a failed control.
 
 Do not reduce this to a numeric score. A high score must never override an integrity mismatch, untrusted
 signature, unsafe deserialization, prohibited sandbox behavior, or authorization failure.
@@ -981,88 +1142,134 @@ Production must block when any of the following is true:
 
 ## 13. Implementation roadmap
 
-The phases are ordered by risk dependency, not calendar estimate.
+The phases are ordered by risk dependency. Status refers to reusable product mechanisms, not approval of a
+specific model.
 
-### Phase 0 — Contract and immediate containment
+### Phase 0 — Contract and immediate containment — **implemented**
 
-**Work:**
+Delivered: explicit partial/truncated semantics, evidence provenance, normalized scanner failures, subject
+identity, decision outcomes, redaction, durable activity, and corrected signature/archive contracts.
 
-- Document current Model Intake as a preflight, not a complete approval.
-- Add explicit UI/API/report language for partial downloads and caller-declared evidence.
-- Disable or tightly allowlist remote acquisition in corporate profiles until the SSRF boundary is fixed.
-- Define evidence provenance, scanner statuses, subject identities, and decision outcomes.
-- Reconcile archive/signature documentation with actual runtime behavior.
+Keep validating that no UI, API, export, or preset turns declared, truncated, skipped, crashed, unsupported,
+or stale evidence into a pass.
 
-**Exit criteria:** No user can interpret truncated, declared, skipped, crashed, or unsupported evidence as a
-pass. Corporate deployments have an egress control that compensates for the current fetch path.
+### Phase 1 — Safe full acquisition and immutable manifests — **implemented; production preset work remains**
 
-### Phase 1 — Safe full acquisition and immutable manifests
+Delivered: every-hop acquisition policy, streamed full artifacts, content-addressed quarantine, complete
+pinned Hugging Face snapshots, normalized manifests, quotas, retention controls, full digest binding, custom
+code inventory, and archive/path defenses.
 
-**Work:**
+Remaining:
 
-- Implement the restricted acquisition worker.
-- Add pre-connect and per-redirect URL/DNS/IP policy.
-- Stream complete objects to quarantine with full hashes.
-- Create complete Hugging Face repository snapshots and normalized manifests.
-- Add object-store quotas, deduplication, retention, and cleanup.
-- Bind existing signature verification to complete subject digests.
+- Make a production/corporate preset require complete artifact and repository acquisition.
+- Add full-snapshot contract tests for every supported provider adapter.
+- Document object-store sizing, backup, tenant quotas, and cleanup for operators.
+- Run scheduled real-model acquisitions outside ordinary PR jobs.
 
-**Exit criteria:** The three target repositories and artifacts can be acquired completely and reproducibly,
-with SSRF and archive/path negative tests passing.
+### Phase 2 — Generated static evidence — **partially implemented**
 
-### Phase 2 — Generated static evidence
+Delivered: built-in semantic/source/secret/malware/SBOM/SCA/binary/license checks; normalized fail-closed
+contracts for ModelScan, Fickling, ClamAV, Gitleaks, Syft, Trivy, OSV-Scanner, and pip-audit; evidence
+provenance and digest binding.
 
-**Work:**
+Remaining product work:
 
-- Implement the scanner plug-in framework.
-- Integrate ModelScan, Fickling/pickletools, YARA, anti-malware, and secret scanning.
-- Integrate Syft, Grype, Trivy, pip-audit, and OSV-Scanner.
-- Add code analysis and review workflow for custom Python.
-- Add license inventory and human decision recording.
-- Persist raw and normalized evidence with tool/rules/image digests.
+- Package pinned third-party scanners as isolated images or installable plug-in bundles.
+- Publish a readiness endpoint/UI showing binary, version, image digest, rule/database version, freshness,
+  and last self-test.
+- Add YARA and optionally Grype, Semgrep/Bandit/CodeQL, TruffleHog, and ScanCode/ORT through the same contract.
+- Isolate each hostile-file parser with read-only input, no egress where databases permit, resource limits,
+  and bounded output.
+- Provide a scanner expectation matrix so a required missing engine blocks instead of silently reducing
+  coverage.
 
-**Exit criteria:** No production gate depends on an unattested caller assertion. Complete fixture and public
-model snapshots receive deterministic multi-tool results.
+Operator/corporate work: approve scanner versions and licenses, host/update vulnerability and malware
+databases, supply organization rules, and define severity/freshness/exception policy.
 
-### Phase 3 — Runtime construction and dynamic sandbox
+### Phase 3 — Actual model execution and runtime telemetry — **not implemented**
 
-**Work:**
+The existing semantic container sandbox remains valuable but is not this phase.
 
-- Build locked candidate runtime images through the controlled package proxy.
-- Add image SBOM, SCA, signature, and snapshot binding.
-- Implement no-egress microVM loading and inference.
-- Add syscall, file, process, import, network, and resource observations.
-- Add safetensors conversion and equivalence workflow for approved cases.
+Remaining product work:
 
-**Exit criteria:** CodeRankEmbed and CodeSage Base can be loaded and exercised without exposing corp networks,
-credentials, or host state. Prohibited behavior and limit breaches reliably block.
+- Add an execution-controller contract separated from the API and static scanner workers.
+- Start a fresh KVM/QEMU/Firecracker/Kata microVM per exact model/runtime subject.
+- Mount only the read-only quarantined snapshot and signed runtime plus a quota-limited scratch volume.
+- Disable network and credentials, collect file/process/network/syscall/import/resource telemetry, and destroy
+  the VM after bounded evidence export.
+- Implement loader profiles for Transformers/SentenceTransformers first, then ONNX/GGUF as separately
+  versioned profiles. Profiles must be provider-neutral and selected from manifest facts, not model names.
+- Separate import, tokenizer construction, model construction, weight load, warmup, inference, and teardown
+  so the report identifies the failing phase.
+- Add a controlled pickle-to-safetensors conversion workflow and numerical equivalence receipt.
+- Produce a signed runtime-execution receipt bound to snapshot, runtime, loader, configuration, hardware,
+  limits, and telemetry digests.
 
-### Phase 4 — Model and application evaluation
+Exit criteria: CodeRankEmbed and CodeSage Base can be loaded and exercised without corp network, credentials,
+or host access; prohibited behavior and resource breaches reliably block. CodeSage Large runs in a separate
+scheduled GPU-capable tier after Base passes.
 
-**Work:**
+### Phase 4 — Automated model and application evaluation — **contract implemented; runner incomplete**
 
-- Build the versioned corporate embedding benchmark.
-- Add poisoning, adversarial input, sensitive-data, inversion, stability, and resource tests.
-- Build vector-store and knowledge-graph ACL test harnesses.
-- Add deletion, reindex, rollback, and incompatible-index tests.
-- Define quality and capacity thresholds by use case.
+Delivered: provider-neutral, content-free evaluation schema and deterministic scoring for vector validity,
+dimensions, retrieval, ACL/sensitive leakage, poisoning, stability, latency/RSS, tenant/graph/cache boundaries,
+deletion, and model/index compatibility.
 
-**Exit criteria:** Each approval contains empirical evidence for the intended corpus, runtime, authorization
-model, and operational bounds.
+Remaining product work:
 
-### Phase 5 — Signed admission and continuous monitoring
+- Generate embeddings and measurements inside the Phase 3 runner rather than accepting them only from a
+  caller.
+- Define a versioned benchmark plug-in contract: corpus digest, query digest, expected relevance/ACL labels,
+  thresholds, scoring version, and content-retention policy.
+- Ship a small synthetic public smoke corpus, never a claim of corporate fitness.
+- Automate deterministic, batching, malformed/Unicode/long-input, poisoning, resource, and conversion
+  equivalence cases.
+- Add bounded connectors for vector stores and knowledge graphs to test pre-query authorization, tenant
+  isolation, deletion, reindex, rollback, and graph traversal.
+- Ensure raw corporate documents, code, embeddings, and secrets are not persisted in ordinary scan results.
 
-**Work:**
+Corporate work: supply representative synthetic/internal corpora, relevance judgments, classification/ACL
+labels, non-production services and principals, quality/capacity thresholds, data approvals, and authorization
+to run the tests.
 
-- Generate signed, machine-readable decision packages.
-- Add Sigstore/Cosign, Rekor, DSSE, and in-toto/SLSA verification where policy requires them.
-- Enforce signed subject admission in deployment.
-- Add CVE/rules/policy/upstream-drift reassessment.
-- Add revocation, rollback, reindex, and owner notification workflows.
-- Surface fleet/tool/database freshness in UI and reports.
+### Phase 5 — Useful report and release gate — **partially implemented**
 
-**Exit criteria:** Production can load only exactly approved subjects, and a later risk event can automatically
-invalidate approval without losing the historical evidence trail.
+Delivered: deployment decision/reason, control cards, findings, AIBOM, evidence, activity logs, JSON/PDF
+exports, optional signed admission, lifecycle registry, reassessment, expiry, supersession, revocation, and
+exact-subject verification contracts.
+
+Remaining product work:
+
+- Add a first-page control matrix with the normalized states from section 2.3.
+- Separate `product mechanism available`, `tool ready`, `control executed`, and `control passed`.
+- Display complete/prefix acquisition, repository coverage, expected-versus-observed subjects, tool/database
+  freshness, execution phases, runtime telemetry summary, benchmark identity, thresholds, and corporate
+  approvals.
+- Make every failed/non-run required control link to evidence and a concrete remediation.
+- Keep JSON, HTML, PDF, SARIF, admission statement, and UI decisions consistent.
+- Add deterministic report fixtures proving the simple answer: what passed, what failed, what was not tested,
+  whether deployment is allowed, and why.
+
+### Phase 6 — Corporate supply-chain integration — **product seams exist; organization-specific**
+
+Product work:
+
+- Add optional OPA policy-bundle evaluation while retaining an embedded policy fallback.
+- Add Cosign/Sigstore identity and Rekor bundle verification where configured.
+- Publish internal-registry promotion hooks and deploy-time verification examples for common CI/CD,
+  Kubernetes/admission-controller, and model-serving paths.
+- Trigger reassessment on CVE/rule/policy changes and surface stale tool/database/fleet state.
+- Add signed webhooks/events for admission, denial, expiry, revocation, and reassessment.
+
+Corporate work:
+
+- Operate the internal artifact/runtime registry and enforce exact approved digests.
+- Own signing identities, trust roots, OPA/policy bundles, scanner databases, benchmark corpus, approvals,
+  exceptions, incident response, rollback, runtime monitoring, data lifecycle, and audit retention.
+- Verify that production cannot download mutable upstream model code or bypass ShakerScan admission.
+
+Exit criteria: a controlled deployment test proves that an approved exact subject is admitted, a digest
+variant is rejected, expiry/revocation blocks new deployment, and historical evidence remains available.
 
 ## 14. Test and acceptance strategy
 
@@ -1113,13 +1320,26 @@ Use access-controlled security-fixture storage where stronger samples are necess
 
 ### 14.5 Real-model E2E tests
 
-- Preserve `make e2e-model-intake` semantics for the public-model path.
-- Preserve `make e2e-model-intake-fixture` for intentional network isolation.
-- Add explicit full-artifact jobs for CodeRankEmbed and CodeSage Base in a controlled, quota-aware environment.
-- Keep Large v2 out of ordinary PR tests; run it in scheduled/release infrastructure with sufficient storage
-  and resource budgets.
-- Stamp expected worker build, scanner image digests, and rule/database freshness at submission.
-- Never convert a capped partial download into a full-integrity assertion.
+Current coverage is a pipeline E2E, not complete model qualification. `make e2e-model-intake` exercises a
+real public Hugging Face capped shard and proves that partial acquisition is reported as
+`known_unverified_truncated`; `make e2e-model-intake-fixture` covers deterministic offline plumbing. Neither
+loads CodeRankEmbed/CodeSage, proves third-party scanners are installed, or qualifies production use.
+
+Add these tiers:
+
+1. **PR fixture:** local safe/malicious fixtures, policy/report contracts, no external network.
+2. **Public acquisition smoke:** current bounded Hugging Face shard path; never treated as full integrity.
+3. **Scheduled complete static intake:** full pinned CodeRankEmbed and CodeSage Base snapshots, all required
+   scanner images ready, complete hashes, generated evidence, and report assertions.
+4. **Scheduled isolated execution:** CodeRankEmbed and Base import/load/inference, telemetry, embedding tests,
+   and optional Base conversion equivalence in the Phase 3 runner.
+5. **Release/GPU qualification:** CodeSage Large complete snapshot, scanners, load/inference, GPU resource
+   envelope, robustness, evaluation, report, and admission/deployment verification.
+
+Every tier must stamp the expected ShakerScan worker build, model/snapshot/runtime digests, scanner image
+digests, rule/database versions and freshness, loader/evaluator versions, hardware class, policy/benchmark
+digests, and which controls were intentionally not applicable. Missing required stamps or controls make the
+run `INCOMPLETE`.
 
 ### 14.6 Application-control tests
 
@@ -1170,18 +1390,19 @@ every decision relying on the affected scanner image/rules digest as requiring r
 
 | Risk | Present control | Residual risk | Target treatment | Priority |
 |---|---|---|---|---|
-| SSRF through intake URLs | Scheme and runtime scope checks | Internal/metadata destination may be reached before complete validation | Restricted acquisition worker and every-hop egress validation | P0 |
-| Truncated artifact analysis | Byte cap and honest truncated status | Malicious suffix and no full integrity proof | Complete streamed acquisition and digest | P0 |
-| Unscanned custom code | Selected-file inventory | Required remote code escapes review | Complete snapshot, static/manual review, sandbox | P0 |
-| Caller-asserted scan evidence | Shape/policy validation | False assurance | Provenance classes and generated evidence | P0 |
-| Unsafe PyTorch serialization | Extension and prefix heuristics | Semantic payload can evade | Multiple semantic scanners and isolated load | P0 |
-| Signature subject mismatch | Crypto and digest fields exist | Misleading independent success states | Atomic trust decision and complete digest | P0 |
-| Dependency CVEs | Metadata hooks | No generated dependency resolution/SCA | Lock, SBOM, multiple SCA engines, monitoring | P1 |
-| Malware/secrets | Metadata hooks | No local generated scan | YARA, anti-malware, secret and binary scans | P1 |
-| Malicious runtime behavior | None in Model Intake | Static-only assurance | No-egress microVM test | P1 |
-| Retrieval/ACL leakage | Outside current Model Intake | Corporate data disclosure | Data-plane authorization test suite | P1 |
-| Embedding poisoning/inversion | Outside current Model Intake | Integrity/privacy loss | Adversarial model/application evaluation | P1 |
-| Unsigned final decision | Evidence and policy records | Deployment can drift from reviewed subject | Signed admission and deploy-time enforcement | P2 |
+| SSRF through intake URLs | Every-hop URL/DNS/IP/redirect policy and approval-gated exceptions | Effective host egress can be weaker than application policy | Controlled acquisition network plus deployment self-test | P0 |
+| Prefix-only analysis mistaken for approval | Honest truncated status and separate complete acquisition | Production preset may leave complete mode disabled | Require complete artifact and snapshot in production profile | P0 |
+| External scanner adapters mistaken for installed coverage | Fail-closed `UNSUPPORTED` status | Operators may overlook missing binaries/databases | Packaged scanner images, readiness UI, expectation matrix | P0 |
+| Unsafe PyTorch serialization | Built-in semantics, Fickling/ModelScan adapters, sandbox load prohibition | No actual isolated deserialization/load evidence | Multi-engine static analysis plus disposable VM load | P0 |
+| Malicious custom runtime behavior | Complete custom-code inventory, AST checks, no-load semantic sandbox | Static analysis cannot prove import/inference behavior | KVM/microVM runner with runtime telemetry | P0 |
+| Model evaluation evidence supplied by caller | Deterministic evaluation contract and provenance | Vectors/observations may not be generated by reviewed model | Bind runner-generated observations to exact model/runtime | P0 |
+| Dependency CVEs | Generated SBOM/SCA checks and external adapters | Tools/databases not packaged; runtime may not be locked | Scanner bundles, locked runtime builder, recurring rescans | P1 |
+| Malware/secrets | Built-in checks plus ClamAV/Gitleaks/Trivy adapters | Detection depth and rule freshness vary | Packaged engines, YARA/org rules, readiness/freshness gates | P1 |
+| Retrieval/ACL leakage | Evaluation schema for ACL/tenant/graph/cache/deletion controls | No universal live data-plane connector or corporate fixture | Bounded connectors plus organization-provided principals/data | P1 |
+| Embedding poisoning/inversion | Deterministic scoring contract | No runner-generated adversarial corpus results | Automated benchmark plug-ins in isolated runner | P1 |
+| Ambiguous report coverage | Overall decision and control cards | “Not requested” can be misunderstood | Explicit first-page status/coverage/remediation matrix | P1 |
+| Signed decision not enforced by deployment | Signed admission and exact-subject verification contracts | Organization may not integrate registry/CI/CD/serving gate | Promotion hooks and mandatory corporate enforcement test | P1 |
+| Legal/privacy/business decision automated incorrectly | Governance evidence and approvals | Product cannot determine corporate acceptability | Keep human authority; bind owner/scope/expiry to subjects | P1 |
 
 ## 18. Required decisions and open questions
 
@@ -1202,30 +1423,60 @@ Owners must decide and record:
 
 ## 19. Definition of done
 
-Model Intake is ready to act as a production admission control only when all of the following are true:
+“Done” has three separate meanings. They must never be collapsed into one percentage.
 
-The product mechanisms for the items below are implemented. The boxes intentionally remain an
-**admission-run checklist**: they are checked separately for each exact model, runtime, corpus, environment,
-and deployment. Shipping the mechanism is not evidence that a particular model passed it.
+### 19.1 Reusable ShakerScan product automation
 
-- [ ] All URLs are acquired through a tested SSRF-resistant, restricted egress boundary.
-- [ ] The complete immutable repository and artifacts are captured and fully hashed.
-- [ ] All executable and custom model code is inventoried and reviewed.
-- [ ] Unsafe model formats receive complete multi-engine semantic analysis.
-- [ ] SBOM, SCA, malware, secrets, license, and binary evidence is generated by pinned tools.
-- [ ] Scanner status, coverage, freshness, and evidence provenance are explicit and fail closed.
-- [ ] Signatures and attestations bind trusted identity to the exact complete subject digest.
-- [ ] The exact locked runtime is built, scanned, signed, and bound to the model snapshot.
-- [ ] Import, load, and inference pass in a no-egress hardened sandbox.
-- [ ] Embedding quality, poisoning, privacy, stability, and resource thresholds pass.
-- [ ] Knowledge-graph and vector-store authorization, tenant isolation, deletion, and rollback tests pass.
-- [ ] Legal, license, privacy, security, platform, and business approvals are recorded as required.
+- [x] Every-hop acquisition policy and bounded/complete streaming acquisition exist.
+- [x] Complete pinned Hugging Face snapshots, content-addressed quarantine, manifests, hashes, quotas, and
+  retention controls exist.
+- [x] Custom code, unsafe formats, archives, source, secrets, malware rules, SBOM/SCA, native binaries, and
+  licenses have built-in checks and normalized evidence.
+- [x] External scanner adapters fail closed on missing, unsupported, malformed, empty, timed-out, crashed, or
+  incomplete executions.
+- [x] A hardened no-load semantic sandbox exists and clearly prohibits executable serialization.
+- [x] Evaluation, signed admission, lifecycle, reassessment, revocation, and exact-subject verification
+  contracts exist.
+- [x] Durable UI/API activity and deployment decisions exist.
+- [ ] Pinned external scanners are packaged as isolated, self-testing plug-ins with rule/database readiness.
+- [ ] A disposable KVM/microVM model loader executes import/load/inference and produces runtime telemetry.
+- [ ] The evaluator automatically consumes embeddings and measurements generated by that exact runner.
+- [ ] The report has an explicit first-page passed/failed/not-run/coverage/remediation matrix across UI, JSON,
+  HTML/PDF, SARIF, and the admission statement.
+- [ ] Common OPA/Cosign/internal-registry/deployment enforcement integrations and examples are shipped.
+
+### 19.2 Per-model admission-run checklist
+
+These boxes are checked separately for every exact model revision, runtime, benchmark, environment, and
+deployment. Shipping a mechanism does not check a run box.
+
+- [ ] Complete immutable repository and artifacts were captured and fully hashed under the intended profile.
+- [ ] All executable/custom code and unsafe formats received every required built-in, external, and manual
+  review; all tool versions/databases were ready and fresh.
+- [ ] The exact locked runtime was built, scanned, signed, and bound to the model snapshot.
+- [ ] Import, tokenizer construction, load, warmup, inference, and teardown passed in the disposable no-egress
+  execution environment with no prohibited runtime events.
+- [ ] Embedding correctness, retrieval quality, poisoning, privacy, stability, malformed-input, and resource
+  thresholds passed against the identified benchmark.
+- [ ] Knowledge-graph/vector-store authorization, tenant isolation, deletion, cache, reindex, and rollback
+  tests passed in the intended integration environment.
+- [ ] Required signatures, attestations, scanner evidence, model/runtime/benchmark subjects, and policy digest
+  are complete and consistent.
+- [ ] The report contains no required `NOT_RUN`, `UNSUPPORTED`, `TIMEOUT`, `CRASHED`, `INCOMPLETE`, or
+  unapproved `REVIEW_REQUIRED` control.
+- [ ] The decision package is signed and active, and a digest variant is rejected by deployment verification.
+- [ ] CodeRankEmbed completes its profile first; CodeSage Base completes pickle/conversion gates before
+  CodeSage Large is considered for the higher-resource tier.
+
+### 19.3 Corporate operational readiness
+
+- [ ] Legal, license, privacy, security, platform, data-owner, and business approvals are recorded as required.
+- [ ] Scanner versions/licenses, rule databases, trust roots, signing identities, policy bundles, benchmark
+  corpus, thresholds, internal registry, and retention are organization-owned and operational.
+- [ ] Production can load only exact active approved subjects and cannot fetch mutable upstream code/weights.
 - [ ] Exceptions are scoped, owned, approved, expiring, and continuously visible.
-- [ ] The complete decision package is immutable and signed.
-- [ ] Deployment verifies the signed admission and exact subject digests.
-- [ ] Continuous reassessment and revocation are operationally tested.
-- [ ] CodeRankEmbed completes its model-specific gates.
-- [ ] CodeSage Base v2 completes its model-specific gates before CodeSage Large v2 is considered.
+- [ ] Continuous CVE/rule/policy/upstream-drift reassessment and admission revocation are operationally tested.
+- [ ] Rollback, reindex, incident response, notification, and audit-evidence recovery are tested.
 
 ## 20. Primary security references
 
