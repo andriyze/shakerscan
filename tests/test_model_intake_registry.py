@@ -9,8 +9,8 @@ def test_builtin_adapter_catalog_is_model_agnostic_and_capability_explicit():
     assert set(catalog) == {"azure_blob", "gcs", "http", "huggingface", "mlflow", "oci", "s3"}
     assert catalog["huggingface"]["repository_snapshot"] == "implemented"
     assert catalog["http"]["artifact_acquisition"] == "implemented"
-    assert catalog["oci"]["artifact_acquisition"] == "unsupported"
-    assert catalog["mlflow"]["artifact_acquisition"] == "unsupported"
+    assert catalog["oci"]["artifact_acquisition"] == "implemented"
+    assert catalog["mlflow"]["artifact_acquisition"] == "implemented"
     assert all("coderank" not in str(item).lower() and "codesage" not in str(item).lower() for item in catalog.values())
 
 

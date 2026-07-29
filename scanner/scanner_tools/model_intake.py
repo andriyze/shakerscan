@@ -506,9 +506,15 @@ def normalize_model_artifact_reference(
         image_ref = raw.removeprefix("oci://")
         registry, _, repository = image_ref.partition("/")
         repository, tag, digest = _split_tag_digest(repository or image_ref)
-        parsed_ref.update({"registry": registry or None, "repository": repository or None, "path": repository or None, "tag": tag, "digest": digest, "fetchable": False})
+        fetch_url = None
+        try:
+            fetch_url = _registry_gateway_fetch_url(raw, metadata)
+        except ValueError as exc:
+            warnings.append(str(exc))
+        parsed_ref.update({"registry": registry or None, "repository": repository or None, "path": repository or None, "tag": tag, "digest": digest, "fetch_url": fetch_url, "fetchable": bool(fetch_url)})
         parsed_ref["metadata"].update({"oci_registry": registry, "oci_repository": repository, "oci_tag": tag, "digest": digest})
-        warnings.append("Native OCI artifact fetching is not enabled yet; export or sign a fetchable artifact URL for executable intake.")
+        if not fetch_url:
+            warnings.append("OCI intake requires a bound immutable HTTPS export URL for artifact acquisition.")
         if tag and not digest:
             warnings.append("OCI reference is tag-based. Pin to a digest before production approval.")
         if not tag and not digest:
@@ -527,9 +533,15 @@ def normalize_model_artifact_reference(
             parts = [part for part in raw.removeprefix("runs:/").split("/") if part]
             run_id = parts[0] if parts else None
             artifact_path = "/".join(parts[1:]) if len(parts) > 1 else None
-        parsed_ref.update({"registry": "mlflow", "repository": model_name or run_id, "path": artifact_path or model_stage, "model_name": model_name, "stage": model_stage, "run_id": run_id, "fetchable": False})
+        fetch_url = None
+        try:
+            fetch_url = _registry_gateway_fetch_url(raw, metadata)
+        except ValueError as exc:
+            warnings.append(str(exc))
+        parsed_ref.update({"registry": "mlflow", "repository": model_name or run_id, "path": artifact_path or model_stage, "model_name": model_name, "stage": model_stage, "run_id": run_id, "fetch_url": fetch_url, "fetchable": bool(fetch_url)})
         parsed_ref["metadata"].update({"mlflow_model_name": model_name, "mlflow_stage": model_stage, "mlflow_run_id": run_id, "artifact_path": artifact_path})
-        warnings.append("MLflow registry refs need an exported model artifact URL or a gateway fetcher before executable intake.")
+        if not fetch_url:
+            warnings.append("MLflow intake requires a bound immutable HTTPS export URL for artifact acquisition.")
 
     else:
         ext = _artifact_ext(_artifact_name(raw))
@@ -980,6 +992,23 @@ def _runtime_destination(
     return redact_model_intake_value(record)
 
 
+def _registry_gateway_fetch_url(ref: str, metadata: dict[str, Any] | None) -> str | None:
+    """Resolve provider exports without trusting an unbound caller URL."""
+    values = metadata if isinstance(metadata, dict) else {}
+    fetch_url = str(values.get("artifact_fetch_url") or values.get("registry_export_url") or "").strip()
+    if not fetch_url:
+        return None
+    if str(values.get("artifact_fetch_subject") or "").strip() != ref:
+        raise ValueError("Registry gateway export must bind artifact_fetch_subject to the exact model reference")
+    expected = str(values.get("expected_sha256") or values.get("artifact_fetch_sha256") or values.get("sha256") or "").lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise ValueError("Registry gateway export requires an expected SHA-256")
+    parsed = urllib.parse.urlparse(fetch_url)
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise ValueError("Registry gateway export must use an absolute HTTPS URL")
+    return fetch_url
+
+
 async def _fetch_artifact(
     ref: str,
     max_bytes: int,
@@ -1028,6 +1057,21 @@ async def _fetch_artifact(
                     fetch_policy,
                 )
                 return data, {**meta, "source": cloud_ref.get("kind") or "cloud_object", "cloud": cloud_ref}
+            if parsed.scheme in {"oci", "mlflow", "models", "runs"}:
+                fetch_url = _registry_gateway_fetch_url(ref, metadata)
+                if not fetch_url:
+                    raise ValueError("Registry reference requires a bound immutable HTTPS export URL")
+                data, meta = await asyncio.to_thread(
+                    _safe_download_http_to_quarantine,
+                    fetch_url,
+                    max_bytes,
+                    complete_limit,
+                    timeout_seconds,
+                    quarantine_dir,
+                    None,
+                    fetch_policy,
+                )
+                return data, {**meta, "source": parsed.scheme, "registry_reference": ref, "fetch_url": fetch_url}
             if parsed.scheme in {"http", "https"}:
                 return await asyncio.to_thread(
                     _safe_download_http_to_quarantine,
@@ -1065,6 +1109,15 @@ async def _fetch_artifact(
             return await asyncio.to_thread(
                 _download_cloud_object, ref, metadata or {}, max_bytes, timeout_seconds, fetch_policy
             )
+        if parsed.scheme in {"oci", "mlflow", "models", "runs"}:
+            fetch_url = _registry_gateway_fetch_url(ref, metadata)
+            if not fetch_url:
+                raise ValueError("Registry reference requires a bound immutable HTTPS export URL")
+            if fetch_policy is None:
+                data, meta = await asyncio.to_thread(_download_http, fetch_url, max_bytes, timeout_seconds)
+            else:
+                data, meta = await asyncio.to_thread(_download_http, fetch_url, max_bytes, timeout_seconds, None, fetch_policy)
+            return data, {**meta, "source": parsed.scheme, "registry_reference": ref, "fetch_url": fetch_url}
         if parsed.scheme in ("http", "https"):
             if fetch_policy is None:
                 return await asyncio.to_thread(_download_http, ref, max_bytes, timeout_seconds)
@@ -2322,11 +2375,15 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         )
         metadata = {**remote_metadata, **metadata}
 
+    acquisition_metadata = {
+        **metadata,
+        "expected_sha256": options.get("expected_sha256") or metadata.get("expected_sha256") or metadata.get("sha256"),
+    }
     artifact_bytes, artifact_meta = await _fetch_artifact(
         artifact_ref,
         max_bytes=max_download_bytes,
         timeout_seconds=timeout_seconds,
-        metadata=metadata,
+        metadata=acquisition_metadata,
         allow_local_files=allow_local_files,
         fetch_policy=fetch_policy,
         complete_download=complete_artifact_download,

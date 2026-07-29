@@ -908,7 +908,7 @@ def test_generated_scanners_require_complete_quarantined_subject(tmp_path):
     }
 
 
-def test_model_intake_reports_unsupported_artifact_scheme():
+def test_model_intake_registry_ref_without_bound_export_fails_acquisition():
     result = asyncio.run(
         run_model_intake_scan(
             "oci://honey/unsafe-pickle",
@@ -917,7 +917,8 @@ def test_model_intake_reports_unsupported_artifact_scheme():
     )
 
     finding_ids = {finding["id"] for finding in result["findings"]}
-    assert "model_intake:unsupported_artifact_scheme" in finding_ids
+    assert "model_intake:artifact_fetch_failed" in finding_ids
+    assert "bound immutable HTTPS export" in result["model_intake"]["artifact"]["fetch"]["error"]
     assert "model_intake:missing_license_review" in finding_ids
     assert "model_intake:missing_sbom_or_dependencies" in finding_ids
     assert any(finding["severity"] == "high" for finding in result["findings"])
@@ -925,7 +926,7 @@ def test_model_intake_reports_unsupported_artifact_scheme():
     assert result["model_intake"]["summary"]["format_posture"] == "unknown_or_unclassified_format"
 
 
-def test_model_intake_runs_metadata_governance_for_unsupported_registry_refs():
+def test_model_intake_runs_metadata_governance_when_registry_export_is_missing():
     result = asyncio.run(
         run_model_intake_scan(
             "oci://honey.local/models/safe:latest",
@@ -949,9 +950,7 @@ def test_model_intake_runs_metadata_governance_for_unsupported_registry_refs():
     )
 
     finding_ids = {finding["id"] for finding in result["findings"]}
-    # Containment, not exact-set equality: a new advisory check firing on this input
-    # should not false-fail the assertion that the unsupported scheme is rejected.
-    assert "model_intake:unsupported_artifact_scheme" in finding_ids
+    assert "model_intake:artifact_fetch_failed" in finding_ids
     assert result["model_intake"]["checks"]["license_review"] is True
     assert result["model_intake"]["checks"]["sbom_dependencies"] is True
 
@@ -1420,3 +1419,46 @@ def test_model_intake_fetches_public_cloud_object_refs(monkeypatch):
     result = asyncio.run(run_model_intake_scan("azure://acct/models/release/model.gguf", base_options))
     assert "https://acct.blob.core.windows.net/models/release/model.gguf" in observed_urls
     assert result["model_intake"]["artifact"]["fetch"]["source"] == "azure_blob"
+
+
+def test_model_intake_fetches_provider_neutral_registry_exports(monkeypatch):
+    artifact_bytes = _safetensors_bytes()
+    digest = hashlib.sha256(artifact_bytes).hexdigest()
+    observed_urls = []
+
+    def fake_download_http(url, max_bytes, timeout_seconds, headers=None):
+        observed_urls.append(url)
+        return artifact_bytes, {"source": "http", "status": 200, "bytes_observed": len(artifact_bytes), "truncated": False}
+
+    monkeypatch.setattr(model_intake, "_download_http", fake_download_http)
+    for reference in ("oci://registry.example/acme/model@sha256:" + digest, "models:/code-embed/7"):
+        result = asyncio.run(run_model_intake_scan(reference, {
+            "expected_sha256": digest,
+            "require_signature": False,
+            "require_deployment_approval": False,
+            "require_model_governance": False,
+            "metadata_json": {
+                "artifact_fetch_url": "https://exports.example/model.safetensors",
+                "artifact_fetch_subject": reference,
+            },
+        }))
+        assert result["model_intake"]["summary"]["checksum_status"] == "verified"
+        assert "model_intake:artifact_fetch_failed" not in {item["id"] for item in result["findings"]}
+    assert observed_urls == ["https://exports.example/model.safetensors"] * 2
+
+
+def test_registry_export_requires_exact_subject_and_digest_binding(monkeypatch):
+    monkeypatch.setattr(model_intake, "_download_http", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("network must not run")))
+    reference = "models:/code-embed/Production"
+    result = asyncio.run(run_model_intake_scan(reference, {
+        "require_signature": False,
+        "require_deployment_approval": False,
+        "require_model_governance": False,
+        "metadata_json": {
+            "artifact_fetch_url": "https://exports.example/model.safetensors",
+            "artifact_fetch_subject": "models:/different/Production",
+        },
+    }))
+
+    assert "model_intake:artifact_fetch_failed" in {item["id"] for item in result["findings"]}
+    assert "bind artifact_fetch_subject" in result["model_intake"]["artifact"]["fetch"]["error"]
