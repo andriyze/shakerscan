@@ -23,13 +23,19 @@ rules:
       - pattern: importlib.import_module(...)
       - pattern: importlib.util.module_from_spec(...)
 
-  - id: shakerscan.model-intake.unsafe-torch-load
+  - id: shakerscan.model-intake.torch-load-explicit-unsafe
     languages: [python]
-    message: torch.load can execute pickle payloads unless weights_only=True is enforced.
+    message: torch.load explicitly disables weights-only loading and can execute pickle payloads.
     severity: ERROR
+    pattern: torch.load(..., weights_only=False, ...)
+
+  - id: shakerscan.model-intake.torch-load-version-dependent
+    languages: [python]
+    message: torch.load omits weights_only; require PyTorch 2.6+ or patch the call to weights_only=True.
+    severity: WARNING
     patterns:
       - pattern: torch.load(...)
-      - pattern-not: torch.load(..., weights_only=True, ...)
+      - pattern-not: torch.load(..., weights_only=$VALUE, ...)
 
   - id: shakerscan.model-intake.unsafe-deserialization
     languages: [python]

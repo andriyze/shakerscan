@@ -766,10 +766,49 @@ def scanner_adapter_readiness() -> dict[str, Any]:
     }
 
 
-DANGEROUS_PICKLE_OPCODES = {
-    "GLOBAL", "STACK_GLOBAL", "REDUCE", "INST", "OBJ", "NEWOBJ", "NEWOBJ_EX",
-    "EXT1", "EXT2", "EXT4", "PERSID", "BINPERSID",
+DANGEROUS_PICKLE_GLOBALS = {
+    "builtins.__import__", "builtins.compile", "builtins.eval", "builtins.exec", "builtins.open",
+    "importlib.import_module", "nt.system", "os.popen", "os.system", "posix.system",
+    "subprocess.call", "subprocess.check_call", "subprocess.check_output", "subprocess.Popen",
+    "subprocess.run",
 }
+DANGEROUS_PICKLE_MODULE_PREFIXES = (
+    "importlib", "multiprocessing", "nt", "os", "pathlib", "posix", "requests", "shutil",
+    "socket", "subprocess", "urllib",
+)
+EXPECTED_PICKLE_GLOBALS = {
+    "builtins.bytearray", "builtins.complex", "builtins.frozenset", "builtins.set",
+    "builtins.slice", "collections.OrderedDict", "copyreg._reconstructor",
+    "numpy.core.multiarray._reconstruct", "numpy.dtype", "numpy.ndarray",
+    "torch._utils._rebuild_device_tensor_from_numpy", "torch._utils._rebuild_parameter",
+    "torch._utils._rebuild_parameter_with_state", "torch._utils._rebuild_qtensor",
+    "torch._utils._rebuild_sparse_tensor", "torch._utils._rebuild_tensor",
+    "torch._utils._rebuild_tensor_v2", "torch._utils._rebuild_tensor_v3",
+}
+EXPECTED_PICKLE_GLOBAL_PREFIXES = (
+    "torch.BFloat16Storage", "torch.BoolStorage", "torch.ByteStorage", "torch.CharStorage",
+    "torch.ComplexDoubleStorage", "torch.ComplexFloatStorage", "torch.DoubleStorage",
+    "torch.FloatStorage", "torch.HalfStorage", "torch.IntStorage", "torch.LongStorage",
+    "torch.QInt32Storage", "torch.QInt8Storage", "torch.QUInt4x2Storage",
+    "torch.QUInt8Storage", "torch.ShortStorage",
+)
+PICKLE_UNRESOLVED_GLOBAL_OPCODES = {"INST", "OBJ", "NEWOBJ", "NEWOBJ_EX", "EXT1", "EXT2", "EXT4"}
+
+
+def _normalize_pickle_global(argument: Any) -> str:
+    parts = str(argument or "").replace("\n", " ").split()
+    return f"{parts[0]}.{parts[1]}" if len(parts) >= 2 else str(argument or "").strip()
+
+
+def _pickle_global_classification(global_name: str) -> str:
+    if global_name in DANGEROUS_PICKLE_GLOBALS:
+        return "dangerous"
+    module = global_name.rsplit(".", 1)[0] if "." in global_name else global_name
+    if any(module == prefix or module.startswith(f"{prefix}.") for prefix in DANGEROUS_PICKLE_MODULE_PREFIXES):
+        return "dangerous"
+    if global_name in EXPECTED_PICKLE_GLOBALS or global_name in EXPECTED_PICKLE_GLOBAL_PREFIXES:
+        return "expected_framework"
+    return "review"
 
 
 def _pickle_streams(path: Path) -> tuple[list[tuple[str, bytes]], int]:
@@ -830,24 +869,87 @@ def run_builtin_pickle_scan(subject_path: Path, subject: dict[str, Any]) -> dict
     parse_errors: list[dict[str, str]] = []
     for name, raw in streams:
         try:
-            opcodes = []
+            dangerous_globals: list[dict[str, Any]] = []
+            review_globals: list[dict[str, Any]] = []
+            expected_globals: list[str] = []
+            unresolved_globals: list[dict[str, Any]] = []
+            executable_constructs: dict[str, int] = {}
+            recent_strings: list[str] = []
             for opcode, argument, position in pickletools.genops(raw):
-                if opcode.name in DANGEROUS_PICKLE_OPCODES:
-                    opcodes.append({"opcode": opcode.name, "argument": str(argument)[:300], "position": position})
+                if opcode.name in {"SHORT_BINUNICODE", "BINUNICODE", "BINUNICODE8", "UNICODE"}:
+                    recent_strings.append(str(argument))
+                    recent_strings = recent_strings[-2:]
+                global_name = ""
+                if opcode.name == "GLOBAL":
+                    global_name = _normalize_pickle_global(argument)
+                elif opcode.name == "STACK_GLOBAL":
+                    if len(recent_strings) >= 2:
+                        global_name = f"{recent_strings[-2]}.{recent_strings[-1]}"
+                    else:
+                        unresolved_globals.append({"opcode": opcode.name, "position": position})
+                if global_name:
+                    item = {"global": global_name[:300], "opcode": opcode.name, "position": position}
+                    classification = _pickle_global_classification(global_name)
+                    if classification == "dangerous":
+                        dangerous_globals.append(item)
+                    elif classification == "expected_framework":
+                        expected_globals.append(global_name)
+                    else:
+                        review_globals.append(item)
+                if opcode.name in {"REDUCE", "PERSID", "BINPERSID", *PICKLE_UNRESOLVED_GLOBAL_OPCODES}:
+                    executable_constructs[opcode.name] = executable_constructs.get(opcode.name, 0) + 1
+                if opcode.name in PICKLE_UNRESOLVED_GLOBAL_OPCODES:
+                    unresolved_globals.append({"opcode": opcode.name, "position": position})
             analyzed += 1
-            if opcodes:
+            if dangerous_globals:
                 findings.append({
-                    "id": "dangerous_pickle_opcodes",
+                    "id": "dangerous_pickle_global",
                     "severity": "critical",
                     "path": name,
-                    "opcodes": opcodes[:100],
+                    "classification": "proven_dangerous_callable",
+                    "globals": dangerous_globals[:100],
+                })
+            if unresolved_globals:
+                findings.append({
+                    "id": "unresolved_pickle_callable",
+                    "severity": "high",
+                    "path": name,
+                    "classification": "indeterminate_callable",
+                    "opcodes": unresolved_globals[:100],
+                })
+            if review_globals:
+                findings.append({
+                    "id": "unrecognized_pickle_global",
+                    "severity": "medium",
+                    "path": name,
+                    "classification": "manual_review_required",
+                    "globals": review_globals[:100],
+                })
+            if not dangerous_globals and not unresolved_globals and not review_globals:
+                expected_globals = sorted(set(expected_globals))
+            else:
+                expected_globals = sorted(set(expected_globals))[:100]
+            # Per-stream detail stays content-free while making an ordinary
+            # framework pickle distinguishable from a proven exploit primitive.
+            if expected_globals or executable_constructs:
+                findings.append({
+                    "id": "pickle_execution_capability",
+                    "severity": "info",
+                    "path": name,
+                    "classification": "expected_framework_pickle" if expected_globals and not (dangerous_globals or unresolved_globals or review_globals) else "mixed",
+                    "expected_globals": expected_globals[:100],
+                    "executable_constructs": executable_constructs,
                 })
         except Exception as exc:
             parse_errors.append({"path": name, "error": f"{type(exc).__name__}: {exc}"})
+    blocking_findings = [item for item in findings if item.get("severity") in {"critical", "high"}]
+    review_findings = [item for item in findings if item.get("severity") == "medium"]
     if analyzed < discovered or parse_errors or inventory_truncated:
         status = "INCOMPLETE"
-    elif findings:
+    elif blocking_findings:
         status = "FAIL"
+    elif review_findings:
+        status = "WARNING"
     else:
         status = "PASS"
     return _scanner_result(
@@ -866,7 +968,16 @@ def run_builtin_pickle_scan(subject_path: Path, subject: dict[str, Any]) -> dict
             "pickle_streams_analyzed": analyzed,
         },
         execution={"required": True},
-        summary={"parse_errors": parse_errors[:20]},
+        summary={
+            "parse_errors": parse_errors[:20],
+            "semantic_classification": (
+                "dangerous_callable_detected" if any(item.get("severity") == "critical" for item in findings)
+                else "indeterminate_callable" if blocking_findings
+                else "manual_review_required" if review_findings
+                else "expected_framework_pickle"
+            ),
+            "capability_only": not blocking_findings and not review_findings,
+        },
     )
 
 

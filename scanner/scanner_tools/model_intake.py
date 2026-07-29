@@ -3492,21 +3492,57 @@ async def run_model_intake_scan(
     zip_pickle_entries = zip_info.get("pickle_entries") or []
     zip_risky_entries = zip_info.get("risky_entries") or []
     if risky_ext or pickle_like or zip_pickle_entries:
+        pickle_scanner = next(
+            (
+                item for item in generated_evidence.get("results") or []
+                if item.get("scanner", {}).get("name") == "python-pickletools"
+            ),
+            {},
+        )
+        pickle_semantic_classification = str(
+            pickle_scanner.get("summary", {}).get("semantic_classification") or "not_run"
+        )
+        proven_dangerous_pickle = pickle_semantic_classification == "dangerous_callable_detected"
+        expected_framework_pickle = pickle_semantic_classification == "expected_framework_pickle"
         findings.append(_finding(
             finding_id="unsafe_serialization",
-            title="Unsafe model serialization format detected",
-            severity="critical" if pickle_detection_method in {"protocol_magic", "pickletools_semantic"} or zip_pickle_entries else "high",
-            description="The model artifact appears to use pickle-like or framework serialization that can execute code during load.",
+            title=(
+                "Dangerous callable detected in executable model serialization"
+                if proven_dangerous_pickle
+                else "Executable model serialization requires conversion or isolated loading"
+            ),
+            severity=(
+                "critical"
+                if proven_dangerous_pickle
+                else "high"
+                if expected_framework_pickle or zip_pickle_entries or risky_ext
+                else "critical"
+                if pickle_detection_method in {"protocol_magic", "pickletools_semantic"}
+                else "high"
+            ),
+            description=(
+                "Semantic pickle analysis resolved a callable associated with command execution or another dangerous capability."
+                if proven_dangerous_pickle
+                else "No known malicious callable was proven, but this framework/pickle format remains executable-capable and is prohibited by the default corporate admission policy."
+                if expected_framework_pickle
+                else "The model artifact uses executable-capable serialization and semantic classification is incomplete or still requires review."
+            ),
             artifact_ref=artifact_ref,
             evidence={
                 "artifact": name,
                 "extension": ext,
                 "pickle_like_header": pickle_like,
                 "pickle_detection_method": pickle_detection_method,
+                "pickle_semantic_classification": pickle_semantic_classification,
+                "malicious_primitive_proven": proven_dangerous_pickle,
                 "zip_pickle_entries": zip_pickle_entries,
                 "risky_entries": zip_risky_entries,
             },
-            remediation="Prefer non-executable formats such as safetensors, ONNX, TFLite, or GGUF. If legacy formats are unavoidable, load only in a sandboxed conversion pipeline.",
+            remediation=(
+                "Reject the artifact, remove the dangerous callable, and rebuild from a trusted source into a non-executable format."
+                if proven_dangerous_pickle
+                else "Convert in a no-egress sandbox to safetensors or another non-executable format, then verify tensor equivalence and rerun intake. If a temporary exception is approved, bind it to a digest and an isolated weights-only loader."
+            ),
         ))
 
     safetensors_header = format_inspection.get("safetensors_header") if isinstance(format_inspection.get("safetensors_header"), dict) else {}

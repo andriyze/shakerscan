@@ -94,8 +94,44 @@ def test_builtin_pickle_scanner_detects_executable_opcodes(tmp_path):
     assert result["coverage"]["pickle_streams_analyzed"] == 1
     assert result["coverage"]["inventory_truncated"] is False
     assert result["execution"]["required"] is True
-    assert result["findings"][0]["id"] == "dangerous_pickle_opcodes"
-    assert any(item["opcode"] == "GLOBAL" for item in result["findings"][0]["opcodes"])
+    assert result["findings"][0]["id"] == "dangerous_pickle_global"
+    assert result["findings"][0]["globals"][0]["global"] == "posix.system"
+
+
+def test_builtin_pickle_scanner_does_not_call_framework_reconstruction_malicious(tmp_path):
+    artifact = tmp_path / "pytorch_model.bin"
+    artifact.write_bytes(
+        b"\x80\x02ctorch._utils\n_rebuild_tensor_v2\nq\x00c"
+        b"torch\nBFloat16Storage\nq\x01ccollections\nOrderedDict\nq\x02."
+    )
+
+    result = scanners.run_builtin_pickle_scan(artifact, _subject())
+
+    assert result["execution"]["status"] == "PASS"
+    assert result["summary"]["semantic_classification"] == "expected_framework_pickle"
+    assert result["summary"]["capability_only"] is True
+    assert {item["severity"] for item in result["findings"]} == {"info"}
+
+
+def test_builtin_pickle_scanner_detects_stack_global_command_execution(tmp_path):
+    artifact = tmp_path / "model.pkl"
+    artifact.write_bytes(b"\x80\x04\x8c\x05posix\x8c\x06system\x93.")
+
+    result = scanners.run_builtin_pickle_scan(artifact, _subject())
+
+    assert result["execution"]["status"] == "FAIL"
+    assert result["findings"][0]["id"] == "dangerous_pickle_global"
+    assert result["findings"][0]["globals"][0]["global"] == "posix.system"
+
+
+def test_builtin_pickle_scanner_requires_review_for_unknown_global(tmp_path):
+    artifact = tmp_path / "model.pkl"
+    artifact.write_bytes(b"\x80\x02cacme.model\nCustomTensor\nq\x00.")
+
+    result = scanners.run_builtin_pickle_scan(artifact, _subject())
+
+    assert result["execution"]["status"] == "WARNING"
+    assert result["summary"]["semantic_classification"] == "manual_review_required"
 
 
 def test_builtin_pickle_scanner_marks_oversized_stream_incomplete(monkeypatch, tmp_path):
