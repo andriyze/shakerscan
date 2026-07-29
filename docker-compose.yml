@@ -377,6 +377,7 @@ services:
 
   model-intake-sandbox:
     init: true
+    image: ${MODEL_INTAKE_SANDBOX_IMAGE:-shakerscan-model-intake-sandbox:local}
     build:
       context: .
       dockerfile: scanner/Dockerfile
@@ -392,6 +393,8 @@ services:
       - MODEL_INTAKE_SANDBOX_NETWORK_MODE=none
       - MODEL_INTAKE_SANDBOX_READ_ONLY=1
       - MODEL_INTAKE_SANDBOX_NO_NEW_PRIVILEGES=1
+      - MODEL_INTAKE_SANDBOX_RUNTIME_ADAPTERS_JSON=${MODEL_INTAKE_SANDBOX_RUNTIME_ADAPTERS_JSON:-}
+      - MODEL_INTAKE_SANDBOX_RUNTIME_TIMEOUT_SECONDS=${MODEL_INTAKE_SANDBOX_RUNTIME_TIMEOUT_SECONDS:-90}
       - HOME=/tmp
     volumes:
       - ./scanner:/app/_src/scanner:ro

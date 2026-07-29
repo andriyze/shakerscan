@@ -9,6 +9,7 @@ import multiprocessing
 import os
 import resource
 import socket
+import subprocess
 import sys
 import time
 import uuid
@@ -26,6 +27,8 @@ DEFAULT_CHILD_MEMORY_BYTES = 1_500_000_000
 DEFAULT_CHILD_FILE_BYTES = 64_000_000
 DEFAULT_CHILD_OPEN_FILES = 256
 DEFAULT_CHILD_PROCESSES = 32
+MAX_RUNTIME_REPORT_BYTES = 2_000_000
+MAX_RUNTIME_STDERR_BYTES = 32_000
 
 
 def _utc_iso() -> str:
@@ -71,6 +74,149 @@ def _network_probe() -> dict[str, Any]:
         "network_mode": os.getenv("MODEL_INTAKE_SANDBOX_NETWORK_MODE") or "unknown",
         "outbound_probes": observations,
         "blocked": all(item["connect_result"] != 0 for item in observations),
+    }
+
+
+def _seccomp_mode() -> int | None:
+    try:
+        for line in Path("/proc/self/status").read_text("utf-8").splitlines():
+            if line.startswith("Seccomp:"):
+                return int(line.split(":", 1)[1].strip())
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _runtime_adapter(extension: str) -> tuple[dict[str, Any] | None, str | None]:
+    raw = os.getenv("MODEL_INTAKE_SANDBOX_RUNTIME_ADAPTERS_JSON")
+    if not raw:
+        return None, None
+    try:
+        configuration = json.loads(raw)
+    except (TypeError, json.JSONDecodeError) as exc:
+        return None, f"runtime_adapter_configuration_invalid:{type(exc).__name__}"
+    if not isinstance(configuration, dict):
+        return None, "runtime_adapter_configuration_invalid:not_object"
+    adapter = configuration.get(extension) or configuration.get(extension.lstrip("."))
+    if adapter is None:
+        return None, None
+    if not isinstance(adapter, dict) or not isinstance(adapter.get("argv"), list):
+        return None, "runtime_adapter_configuration_invalid:argv_required"
+    argv = adapter["argv"]
+    if not argv or len(argv) > 100 or not all(isinstance(item, str) and item for item in argv):
+        return None, "runtime_adapter_configuration_invalid:argv_invalid"
+    return adapter, None
+
+
+def _runtime_environment() -> dict[str, str]:
+    allowed = {
+        "PATH", "LANG", "LC_ALL", "HOME", "TMPDIR", "LD_LIBRARY_PATH",
+        "PYTHONPATH", "CUDA_VISIBLE_DEVICES", "HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE",
+    }
+    environment = {key: value for key, value in os.environ.items() if key in allowed}
+    environment.update({
+        "NO_PROXY": "*",
+        "no_proxy": "*",
+        "HTTP_PROXY": "",
+        "HTTPS_PROXY": "",
+        "ALL_PROXY": "",
+        "MODEL_INTAKE_RUNTIME_NO_NETWORK": "1",
+    })
+    return environment
+
+
+def _run_runtime_adapter(
+    adapter: dict[str, Any],
+    *,
+    path: Path,
+    filename: str,
+    digest: str,
+) -> dict[str, Any]:
+    replacements = {
+        "{artifact}": str(path),
+        "{filename}": Path(filename).name,
+        "{digest}": digest,
+    }
+    argv = [
+        replacements.get(argument, argument)
+        for argument in adapter["argv"]
+    ]
+    started = time.monotonic()
+    try:
+        completed = subprocess.run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=_runtime_environment(),
+            cwd="/tmp",
+            check=False,
+            timeout=_bounded_env_int("MODEL_INTAKE_SANDBOX_RUNTIME_TIMEOUT_SECONDS", 90, 1, 590),
+        )
+    except subprocess.TimeoutExpired:
+        return {"status": "TIMEOUT", "error": "runtime_adapter_timeout", "adapter": adapter.get("name")}
+    except OSError as exc:
+        return {"status": "CRASHED", "error": f"runtime_adapter_launch_failed:{type(exc).__name__}:{exc}"}
+    stderr = completed.stderr[:MAX_RUNTIME_STDERR_BYTES].decode("utf-8", "replace")
+    if len(completed.stdout) > MAX_RUNTIME_REPORT_BYTES:
+        return {
+            "status": "FAIL",
+            "error": "runtime_adapter_report_too_large",
+            "exit_code": completed.returncode,
+            "stderr": stderr,
+        }
+    try:
+        report = json.loads(completed.stdout.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return {
+            "status": "FAIL",
+            "error": f"runtime_adapter_report_invalid:{type(exc).__name__}",
+            "exit_code": completed.returncode,
+            "stderr": stderr,
+        }
+    if not isinstance(report, dict):
+        return {"status": "FAIL", "error": "runtime_adapter_report_not_object", "exit_code": completed.returncode}
+    known_answers = report.get("known_answer_tests") if isinstance(report.get("known_answer_tests"), list) else []
+    blockers = []
+    if completed.returncode != 0:
+        blockers.append("runtime_adapter_nonzero_exit")
+    if report.get("status") != "PASS":
+        blockers.append("runtime_adapter_report_non_pass")
+    if report.get("artifact_sha256") != digest:
+        blockers.append("runtime_artifact_digest_mismatch")
+    if report.get("model_loaded") is not True:
+        blockers.append("model_load_not_proven")
+    if not known_answers:
+        blockers.append("known_answer_tests_missing")
+    elif any(not isinstance(item, dict) or item.get("status") != "PASS" for item in known_answers):
+        blockers.append("known_answer_test_non_pass")
+    if report.get("network_attempts") not in (None, []):
+        blockers.append("runtime_network_attempt_reported")
+    try:
+        spawned_processes = int(report.get("spawned_processes") or 0)
+    except (TypeError, ValueError):
+        spawned_processes = -1
+    allowed_processes = int(adapter.get("max_spawned_processes") or 0)
+    if spawned_processes < 0 or spawned_processes > allowed_processes:
+        blockers.append("runtime_process_budget_exceeded")
+    return {
+        "status": "FAIL" if blockers else "PASS",
+        "adapter": {
+            "name": str(adapter.get("name") or Path(argv[0]).name),
+            "version": str(adapter.get("version") or "") or None,
+            "argv_sha256": _sha256_json(adapter["argv"]),
+        },
+        "exit_code": completed.returncode,
+        "duration_seconds": round(time.monotonic() - started, 6),
+        "model_loaded": report.get("model_loaded") is True,
+        "artifact_sha256": report.get("artifact_sha256"),
+        "known_answer_tests": known_answers[:100],
+        "imports": report.get("imports", [])[:100] if isinstance(report.get("imports"), list) else [],
+        "spawned_processes": spawned_processes,
+        "network_attempts": report.get("network_attempts", []),
+        "blockers": blockers,
+        "stderr": stderr,
+        "report_sha256": _sha256_json(report),
     }
 
 
@@ -171,6 +317,36 @@ def inspect_quarantine_object(
         inspection = {"status": "PASS" if magic == b"GGUF" else "FAIL", "format": "gguf", "magic_valid": magic == b"GGUF"}
     else:
         inspection = {"status": "UNSUPPORTED", "format": extension.lstrip(".") or "unknown", "error": "dynamic_format_not_supported"}
+    static_inspection = inspection
+    if inspection["status"] not in {"FAIL", "BLOCKED_BY_POLICY"}:
+        adapter, adapter_error = _runtime_adapter(extension)
+        if adapter_error:
+            inspection = {
+                "status": "FAIL",
+                "format": extension.lstrip(".") or "unknown",
+                "error": adapter_error,
+                "static_inspection": static_inspection,
+            }
+        elif adapter:
+            runtime = _run_runtime_adapter(
+                adapter,
+                path=path,
+                filename=filename,
+                digest=digest,
+            )
+            inspection = {
+                "status": runtime["status"],
+                "format": extension.lstrip(".") or "unknown",
+                "static_inspection": static_inspection,
+                "runtime": runtime,
+            }
+        else:
+            inspection = {
+                "status": "UNSUPPORTED",
+                "format": extension.lstrip(".") or "unknown",
+                "error": "runtime_adapter_not_configured",
+                "static_inspection": static_inspection,
+            }
     after = resource.getrusage(resource.RUSAGE_SELF)
     payload = {
         "schema_version": SCHEMA_VERSION,
@@ -184,6 +360,7 @@ def inspect_quarantine_object(
             "gid": os.getegid(),
             "read_only_rootfs_declared": os.getenv("MODEL_INTAKE_SANDBOX_READ_ONLY") == "1",
             "no_new_privileges_declared": os.getenv("MODEL_INTAKE_SANDBOX_NO_NEW_PRIVILEGES") == "1",
+            "seccomp_mode": _seccomp_mode(),
             "credentials_present": any(
                 key.lower().endswith(("token", "password", "secret", "api_key"))
                 for key, value in os.environ.items() if value
@@ -421,6 +598,8 @@ def _validate_sandbox_response(
             errors.append("read_only_rootfs_not_proven")
         if isolation.get("no_new_privileges_declared") is not True:
             errors.append("no_new_privileges_not_proven")
+        if isolation.get("seccomp_mode") != 2:
+            errors.append("seccomp_filter_not_proven")
         if isolation.get("credentials_present") is not False:
             errors.append("credential_free_environment_not_proven")
     return _rejected_sandbox_response(errors, response) if errors else response

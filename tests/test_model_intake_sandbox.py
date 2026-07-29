@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import sys
 import time
 
 from scanner.scanner_tools import model_intake_sandbox as sandbox
@@ -11,7 +12,7 @@ def _safetensors():
     return len(header).to_bytes(8, "little") + header + b"\0\0\0\0"
 
 
-def test_sandbox_inspects_digest_bound_safetensors_without_importing_code(tmp_path, monkeypatch):
+def test_sandbox_static_parse_cannot_masquerade_as_dynamic_pass(tmp_path, monkeypatch):
     artifact = tmp_path / "model.safetensors"
     artifact.write_bytes(_safetensors())
     digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
@@ -19,10 +20,44 @@ def test_sandbox_inspects_digest_bound_safetensors_without_importing_code(tmp_pa
 
     result = sandbox.inspect_quarantine_object(artifact, artifact.name, expected_digest=digest)
 
-    assert result["status"] == "PASS"
+    assert result["status"] == "UNSUPPORTED"
     assert result["subject"]["digest"] == f"sha256:{digest}"
-    assert result["inspection"]["tensor_count"] == 1
+    assert result["inspection"]["error"] == "runtime_adapter_not_configured"
+    assert result["inspection"]["static_inspection"]["status"] == "PASS"
+    assert result["inspection"]["static_inspection"]["tensor_count"] == 1
     assert len(result["evidence_sha256"]) == 64
+
+
+def test_sandbox_runtime_adapter_must_load_exact_artifact_and_pass_known_answers(tmp_path, monkeypatch):
+    artifact = tmp_path / "model.safetensors"
+    artifact.write_bytes(_safetensors())
+    digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    runner = tmp_path / "runtime_runner.py"
+    runner.write_text(
+        "import hashlib, json, sys\n"
+        "artifact, expected = sys.argv[1:3]\n"
+        "actual = hashlib.sha256(open(artifact, 'rb').read()).hexdigest()\n"
+        "print(json.dumps({'status': 'PASS', 'artifact_sha256': actual, 'model_loaded': actual == expected, "
+        "'known_answer_tests': [{'id': 'embedding-shape', 'status': 'PASS'}], "
+        "'spawned_processes': 0, 'network_attempts': []}))\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MODEL_INTAKE_SANDBOX_RUNTIME_ADAPTERS_JSON", json.dumps({
+        "safetensors": {
+            "name": "fixture-runtime",
+            "version": "1",
+            "argv": [sys.executable, str(runner), "{artifact}", "{digest}"],
+        },
+    }))
+    monkeypatch.setattr(sandbox, "_network_probe", lambda: {"network_mode": "none", "blocked": True, "outbound_probes": []})
+
+    result = sandbox.inspect_quarantine_object(artifact, artifact.name, expected_digest=digest)
+
+    assert result["status"] == "PASS"
+    assert result["inspection"]["runtime"]["model_loaded"] is True
+    assert result["inspection"]["runtime"]["known_answer_tests"] == [
+        {"id": "embedding-shape", "status": "PASS"}
+    ]
 
 
 def test_sandbox_blocks_pickle_loading_by_policy(tmp_path, monkeypatch):
@@ -58,7 +93,7 @@ def test_sandbox_file_queue_resolves_only_content_addressed_objects(tmp_path, mo
 
     assert sandbox.process_pending_once(queue, quarantine) == 1
     result = json.loads((queue / "responses" / "request.json").read_text("utf-8"))
-    assert result["status"] == "PASS"
+    assert result["status"] == "UNSUPPORTED"
     assert result["request_binding"] == sandbox._request_binding("request", "n" * 32)
     evidence = dict(result)
     evidence.pop("evidence_sha256")
@@ -78,6 +113,7 @@ def test_sandbox_client_rejects_unbound_or_tampered_pass_response():
             "uid": 1000,
             "read_only_rootfs_declared": True,
             "no_new_privileges_declared": True,
+            "seccomp_mode": 2,
             "credentials_present": False,
         },
     })
@@ -108,6 +144,7 @@ def test_sandbox_client_accepts_only_digest_bound_hardened_evidence():
             "uid": 1000,
             "read_only_rootfs_declared": True,
             "no_new_privileges_declared": True,
+            "seccomp_mode": 2,
             "credentials_present": False,
         },
     })
