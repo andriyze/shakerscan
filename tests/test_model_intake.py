@@ -1002,7 +1002,7 @@ def test_model_intake_strict_governance_rejects_presence_only_evidence(tmp_path)
     assert result["model_intake"]["checks"]["approval_evidence"] is False
 
 
-def test_model_intake_strict_governance_accepts_structured_evidence(tmp_path):
+def test_model_intake_strict_governance_rejects_structured_but_caller_declared_evidence(tmp_path):
     artifact = tmp_path / "model.onnx"
     artifact.write_bytes(b"onnx bytes")
     expected_sha = hashlib.sha256(artifact.read_bytes()).hexdigest()
@@ -1056,18 +1056,44 @@ def test_model_intake_strict_governance_accepts_structured_evidence(tmp_path):
     )
 
     finding_ids = {finding["id"] for finding in result["findings"]}
-    assert "model_intake:invalid_sbom_evidence" not in finding_ids
-    assert "model_intake:invalid_malware_scan_evidence" not in finding_ids
-    assert "model_intake:invalid_security_eval_evidence" not in finding_ids
+    assert "model_intake:invalid_sbom_evidence" in finding_ids
+    assert "model_intake:invalid_malware_scan_evidence" in finding_ids
+    assert "model_intake:invalid_security_eval_evidence" in finding_ids
     assert "model_intake:incomplete_deployment_approval" not in finding_ids
-    assert result["model_intake"]["checks"]["sbom_dependencies"] is True
-    assert result["model_intake"]["checks"]["malware_scan"] is True
-    assert result["model_intake"]["checks"]["security_evals"] is True
+    assert result["model_intake"]["checks"]["sbom_dependencies"] is False
+    assert result["model_intake"]["checks"]["malware_scan"] is False
+    assert result["model_intake"]["checks"]["security_evals"] is False
     assert result["model_intake"]["checks"]["approval_evidence"] is True
     assert result["model_intake"]["checks"]["dataset_lineage"] is True
     assert result["model_intake"]["checks"]["dataset_digest"] is True
     assert result["model_intake"]["checks"]["base_model_lineage"] is True
     assert result["model_intake"]["checks"]["poisoning_evals"] is True
+
+
+def test_strict_evidence_policy_accepts_only_internally_trusted_provenance():
+    sbom = {"bomFormat": "CycloneDX", "components": [{"name": "runtime"}]}
+    malware = {
+        "status": "clean",
+        "scanner": "shakerscan-malware-rules",
+        "engine_version": "1",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "artifact_digest": "sha256:" + "a" * 64,
+    }
+
+    assert model_intake._sbom_policy(sbom, strict=True, trusted_provenance=False)["valid"] is False
+    assert model_intake._sbom_policy(sbom, strict=True, trusted_provenance=True)["valid"] is True
+    assert model_intake._malware_policy(
+        malware,
+        strict=True,
+        expected_sha256="a" * 64,
+        trusted_provenance=False,
+    )["valid"] is False
+    assert model_intake._malware_policy(
+        malware,
+        strict=True,
+        expected_sha256="a" * 64,
+        trusted_provenance=True,
+    )["valid"] is True
 
 
 def test_model_intake_can_require_signature_verification(tmp_path):

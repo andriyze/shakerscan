@@ -1731,7 +1731,7 @@ def _evidence_status(value: Any, *keys: str) -> str:
     return ""
 
 
-def _sbom_policy(value: Any, *, strict: bool) -> dict[str, Any]:
+def _sbom_policy(value: Any, *, strict: bool, trusted_provenance: bool = False) -> dict[str, Any]:
     if value in (None, "", [], {}):
         return {"status": "missing", "valid": False, "component_count": 0, "format": None}
     if isinstance(value, str):
@@ -1742,11 +1742,13 @@ def _sbom_policy(value: Any, *, strict: bool) -> dict[str, Any]:
             "format": "url",
         }
     if isinstance(value, list):
+        valid = (bool(value) and trusted_provenance) if strict else True
         return {
-            "status": "valid" if value else "empty",
-            "valid": bool(value) or not strict,
+            "status": "valid" if valid else "untrusted_provenance" if value else "empty",
+            "valid": valid,
             "component_count": len(value),
             "format": "component_list",
+            "trusted_provenance": trusted_provenance,
         }
     if not isinstance(value, dict):
         return {"status": "invalid_shape", "valid": False, "component_count": 0, "format": type(value).__name__}
@@ -1754,33 +1756,44 @@ def _sbom_policy(value: Any, *, strict: bool) -> dict[str, Any]:
     if str(value.get("bomFormat") or "").lower() == "cyclonedx":
         components = value.get("components")
         count = len(components) if isinstance(components, list) else 0
+        valid = (count > 0 and trusted_provenance) if strict else True
         return {
-            "status": "valid" if count else "empty",
-            "valid": count > 0 or not strict,
+            "status": "valid" if valid else "untrusted_provenance" if count else "empty",
+            "valid": valid,
             "component_count": count,
             "format": "cyclonedx",
+            "trusted_provenance": trusted_provenance,
         }
     if value.get("spdxVersion"):
         packages = value.get("packages")
         count = len(packages) if isinstance(packages, list) else 0
+        valid = (count > 0 and trusted_provenance) if strict else True
         return {
-            "status": "valid" if count else "empty",
-            "valid": count > 0 or not strict,
+            "status": "valid" if valid else "untrusted_provenance" if count else "empty",
+            "valid": valid,
             "component_count": count,
             "format": "spdx",
         }
     if isinstance(value.get("components"), list):
         count = len(value["components"])
+        valid = (count > 0 and trusted_provenance) if strict else True
         return {
-            "status": "valid" if count else "empty",
-            "valid": count > 0 or not strict,
+            "status": "valid" if valid else "untrusted_provenance" if count else "empty",
+            "valid": valid,
             "component_count": count,
             "format": "generic_components",
         }
     return {"status": "invalid_shape" if strict else "present_unvalidated", "valid": not strict, "component_count": 0, "format": "unknown"}
 
 
-def _malware_policy(value: Any, *, strict: bool, expected_sha256: Any, max_age_days: int = 30) -> dict[str, Any]:
+def _malware_policy(
+    value: Any,
+    *,
+    strict: bool,
+    expected_sha256: Any,
+    max_age_days: int = 30,
+    trusted_provenance: bool = False,
+) -> dict[str, Any]:
     if value in (None, "", [], {}):
         return {"status": "missing", "valid": False}
     if isinstance(value, str):
@@ -1801,7 +1814,7 @@ def _malware_policy(value: Any, *, strict: bool, expected_sha256: Any, max_age_d
         stale = age_days > max_age_days
     expected = str(expected_sha256 or "").strip().lower()
     digest_matches = not expected or str(digest or "").replace("sha256:", "").strip().lower() == expected
-    valid = clean and bool(scanner) and bool(version) and bool(scanned_at) and bool(digest) and digest_matches and not stale
+    valid = clean and bool(scanner) and bool(version) and bool(scanned_at) and bool(digest) and digest_matches and not stale and trusted_provenance
     return {
         "status": "valid" if valid else "invalid",
         "valid": valid if strict else clean,
@@ -1813,10 +1826,11 @@ def _malware_policy(value: Any, *, strict: bool, expected_sha256: Any, max_age_d
         "artifact_digest_matches": digest_matches,
         "stale": stale,
         "max_age_days": max_age_days,
+        "trusted_provenance": trusted_provenance,
     }
 
 
-def _eval_policy(value: Any, *, strict: bool, expected_sha256: Any) -> dict[str, Any]:
+def _eval_policy(value: Any, *, strict: bool, expected_sha256: Any, trusted_provenance: bool = False) -> dict[str, Any]:
     if value in (None, "", [], {}):
         return {"status": "missing", "valid": False}
     if isinstance(value, str):
@@ -1832,7 +1846,7 @@ def _eval_policy(value: Any, *, strict: bool, expected_sha256: Any) -> dict[str,
     thresholds = _metadata_value(value, "thresholds", "acceptance_thresholds", "criteria")
     expected = str(expected_sha256 or "").strip().lower()
     digest_matches = not expected or str(digest or "").replace("sha256:", "").strip().lower() == expected
-    valid = passed and bool(suite) and bool(timestamp) and bool(digest) and digest_matches and bool(thresholds)
+    valid = passed and bool(suite) and bool(timestamp) and bool(digest) and digest_matches and bool(thresholds) and trusted_provenance
     return {
         "status": "valid" if valid else "invalid",
         "valid": valid if strict else passed,
@@ -1842,6 +1856,7 @@ def _eval_policy(value: Any, *, strict: bool, expected_sha256: Any) -> dict[str,
         "target_digest_present": bool(digest),
         "target_digest_matches": digest_matches,
         "thresholds_present": bool(thresholds),
+        "trusted_provenance": trusted_provenance,
     }
 
 
@@ -2452,6 +2467,11 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
                         subject,
                     )
                 )
+                scanner_results.append(_model_intake_scanners.run_builtin_secret_scan(subject_path, subject))
+                scanner_results.append(_model_intake_scanners.run_builtin_malware_scan(subject_path, subject))
+                scanner_results.append(_model_intake_scanners.run_builtin_sbom_scan(subject_path, subject))
+                scanner_results.append(_model_intake_scanners.run_builtin_binary_inventory(subject_path, subject))
+                scanner_results.append(_model_intake_scanners.run_builtin_license_inventory(subject_path, subject))
                 requested_scanners = options.get("generated_scanner_names")
                 requested_names = {
                     str(item).strip()
@@ -2500,23 +2520,57 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         require_transparency_log=_boolish(options.get("require_transparency_log")),
     ) if attestation_bundle else {
         "schema_version": "model-intake-attestation/v1",
-        "provenance_class": "externally_attested",
+        "provenance_class": "declared",
         "status": "SKIPPED_BY_POLICY",
         "verified": False,
     }
     license_policy = _license_policy(license_ref)
-    sbom_policy = _sbom_policy(sbom_ref, strict=strict_governance)
+    generated_results = generated_evidence.get("results") if isinstance(generated_evidence.get("results"), list) else []
+    generated_sbom_result = next(
+        (item for item in generated_results if item.get("scanner", {}).get("name") == "shakerscan-sbom"),
+        None,
+    )
+    generated_malware_result = next(
+        (item for item in generated_results if item.get("scanner", {}).get("name") == "shakerscan-malware-rules"),
+        None,
+    )
+    generated_sbom = (
+        generated_sbom_result.get("summary", {}).get("sbom")
+        if generated_sbom_result and generated_sbom_result.get("execution", {}).get("status") in {"PASS", "WARNING"}
+        else None
+    )
+    generated_malware = None
+    if generated_malware_result and generated_malware_result.get("execution", {}).get("status") == "PASS":
+        generated_malware = {
+            "status": "clean",
+            "scanner": generated_malware_result.get("scanner", {}).get("name"),
+            "engine_version": generated_malware_result.get("scanner", {}).get("version"),
+            "timestamp": generated_malware_result.get("execution", {}).get("finished_at"),
+            "artifact_digest": generated_malware_result.get("subject", {}).get("digest"),
+            "provenance_class": "shakerscan_generated",
+        }
+    sbom_policy = _sbom_policy(
+        generated_sbom or sbom_ref,
+        strict=strict_governance,
+        trusted_provenance=bool(generated_sbom),
+    )
     try:
         malware_scan_max_age_days = int(options.get("malware_scan_max_age_days") or metadata.get("malware_scan_max_age_days") or 30)
     except (TypeError, ValueError):
         malware_scan_max_age_days = 30
     malware_policy = _malware_policy(
-        malware_scan_ref,
+        generated_malware or malware_scan_ref,
         strict=strict_governance,
-        expected_sha256=expected_sha256,
+        expected_sha256=sha256 or expected_sha256,
         max_age_days=malware_scan_max_age_days,
+        trusted_provenance=bool(generated_malware),
     )
-    eval_policy = _eval_policy(eval_ref, strict=strict_governance, expected_sha256=expected_sha256)
+    eval_policy = _eval_policy(
+        eval_ref,
+        strict=strict_governance,
+        expected_sha256=sha256 or expected_sha256,
+        trusted_provenance=False,
+    )
     approval_policy = _approval_policy(metadata, deployment_approved=deployment_approved, strict=strict_governance)
     artifact_size, artifact_size_source = _artifact_size_for_inspection(
         artifact_meta,

@@ -113,3 +113,67 @@ def test_generated_evidence_digest_changes_with_status():
 
     assert first["evidence_sha256"] != second["evidence_sha256"]
     assert scanners.generated_evidence_summary([first])["statuses"] == {"test": "PASS"}
+
+
+def test_builtin_secret_scanner_hashes_matches_without_disclosing_values(tmp_path):
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    secret = "AKIAABCDEFGHIJKLMNOP"
+    (snapshot / "config.py").write_text(f"API_KEY='{secret}'\n", encoding="utf-8")
+
+    result = scanners.run_builtin_secret_scan(snapshot, _subject(kind="repository_snapshot"))
+
+    assert result["execution"]["status"] == "FAIL"
+    assert result["execution"]["required"] is True
+    assert any(item["id"] == "aws_access_key" for item in result["findings"])
+    assert secret not in str(result)
+
+
+def test_builtin_malware_scanner_detects_eicar_marker(tmp_path):
+    artifact = tmp_path / "model.bin"
+    artifact.write_bytes(b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*")
+
+    result = scanners.run_builtin_malware_scan(artifact, _subject())
+
+    assert result["execution"]["status"] == "FAIL"
+    assert result["findings"][0]["id"] == "eicar_test_file"
+
+
+def test_builtin_sbom_scanner_generates_digest_bound_cyclonedx(tmp_path):
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    (snapshot / "requirements.txt").write_text("transformers==4.57.0\nnumpy>=2\n", encoding="utf-8")
+
+    result = scanners.run_builtin_sbom_scan(snapshot, _subject(kind="repository_snapshot"))
+    sbom = result["summary"]["sbom"]
+
+    assert result["execution"]["status"] == "WARNING"
+    assert sbom["bomFormat"] == "CycloneDX"
+    assert sbom["provenance_class"] == "shakerscan_generated"
+    assert sbom["subject_digest"] == _subject()["digest"]
+    assert sbom["components"][0]["purl"] == "pkg:pypi/transformers@4.57.0"
+
+
+def test_builtin_binary_inventory_records_native_executables(tmp_path):
+    artifact = tmp_path / "extension.so"
+    artifact.write_bytes(b"\x7fELF" + b"\0" * 32)
+
+    result = scanners.run_builtin_binary_inventory(artifact, _subject())
+
+    assert result["execution"]["status"] == "WARNING"
+    assert result["findings"][0]["format"] == "elf"
+
+
+def test_builtin_license_inventory_identifies_license_and_binds_file_digest(tmp_path):
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    (snapshot / "LICENSE").write_text(
+        "MIT License\nPermission is hereby granted, free of charge, to any person obtaining a copy",
+        encoding="utf-8",
+    )
+
+    result = scanners.run_builtin_license_inventory(snapshot, _subject(kind="repository_snapshot"))
+
+    assert result["execution"]["status"] == "PASS"
+    assert result["summary"]["licenses"][0]["spdx_candidates"] == ["MIT"]
+    assert len(result["summary"]["licenses"][0]["sha256"]) == 64

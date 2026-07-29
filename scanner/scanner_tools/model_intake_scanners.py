@@ -8,6 +8,7 @@ import json
 import os
 import pickletools
 import pwd
+import re
 import resource
 import shutil
 import subprocess
@@ -455,6 +456,282 @@ def run_builtin_source_scan(snapshot_root: Path | None, subject: dict[str, Any])
         finished_at=_utc_iso(),
         findings=findings[:1000],
         coverage={"python_files_discovered": len(paths), "python_files_analyzed": analyzed},
+    )
+
+
+def _subject_files(subject_path: Path, *, limit: int = 10_000) -> list[Path]:
+    if subject_path.is_file():
+        return [subject_path]
+    return [path for path in sorted(subject_path.rglob("*")) if path.is_file()][:limit]
+
+
+def _hash_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+SECRET_RULES = {
+    "private_key": re.compile(rb"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----"),
+    "aws_access_key": re.compile(rb"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"),
+    "github_token": re.compile(rb"\bgh(?:p|o|u|s|r)_[A-Za-z0-9]{30,255}\b"),
+    "generic_secret_assignment": re.compile(
+        rb"(?i)\b(?:api[_-]?key|secret|token|password)\s*[:=]\s*['\"]?[A-Za-z0-9_./+\-=]{16,}"
+    ),
+}
+SECRET_RULESET_SHA256 = _sha256_json(sorted(SECRET_RULES))
+
+
+def run_builtin_secret_scan(subject_path: Path, subject: dict[str, Any]) -> dict[str, Any]:
+    started_at = _utc_iso()
+    files = _subject_files(subject_path)
+    findings: list[dict[str, Any]] = []
+    analyzed = 0
+    skipped_large = 0
+    root = subject_path if subject_path.is_dir() else subject_path.parent
+    for path in files:
+        if path.stat().st_size > MAX_SOURCE_FILE_BYTES:
+            skipped_large += 1
+            continue
+        raw = path.read_bytes()
+        if b"\0" in raw[:4096] and path.suffix.lower() not in {".json", ".txt", ".md", ".yaml", ".yml"}:
+            continue
+        analyzed += 1
+        for rule_id, pattern in SECRET_RULES.items():
+            for match in list(pattern.finditer(raw))[:20]:
+                value = match.group(0)
+                findings.append({
+                    "id": rule_id,
+                    "severity": "critical" if rule_id == "private_key" else "high",
+                    "path": path.relative_to(root).as_posix(),
+                    "offset": match.start(),
+                    "match_sha256": hashlib.sha256(value).hexdigest(),
+                    "match_length": len(value),
+                })
+    status = "INCOMPLETE" if skipped_large else "FAIL" if findings else "PASS"
+    return _scanner_result(
+        name="shakerscan-secret-rules",
+        version="1",
+        status=status,
+        subject=subject,
+        started_at=started_at,
+        finished_at=_utc_iso(),
+        findings=findings[:1000],
+        coverage={"files_discovered": len(files), "files_analyzed": analyzed, "files_skipped_large": skipped_large},
+        execution={"required": True, "rules_sha256": SECRET_RULESET_SHA256},
+    )
+
+
+MALWARE_MARKERS = {
+    "eicar_test_file": b"EICAR-STANDARD-ANTIVIRUS-TEST-FILE",
+    "shell_download_execute": b"curl | sh",
+    "powershell_encoded_command": b"powershell -enc",
+    "python_reverse_shell": b"socket.socket();os.dup2",
+}
+MALWARE_RULESET_SHA256 = _sha256_json({key: value.hex() for key, value in MALWARE_MARKERS.items()})
+
+
+def run_builtin_malware_scan(subject_path: Path, subject: dict[str, Any]) -> dict[str, Any]:
+    started_at = _utc_iso()
+    files = _subject_files(subject_path)
+    findings: list[dict[str, Any]] = []
+    analyzed = 0
+    skipped_large = 0
+    root = subject_path if subject_path.is_dir() else subject_path.parent
+    for path in files:
+        if path.stat().st_size > MAX_PICKLE_MEMBER_BYTES:
+            skipped_large += 1
+            continue
+        raw = path.read_bytes()
+        analyzed += 1
+        lowered = raw.lower()
+        for rule_id, marker in MALWARE_MARKERS.items():
+            if marker.lower() in lowered:
+                findings.append({
+                    "id": rule_id,
+                    "severity": "critical" if rule_id == "eicar_test_file" else "high",
+                    "path": path.relative_to(root).as_posix(),
+                    "file_sha256": hashlib.sha256(raw).hexdigest(),
+                })
+    status = "INCOMPLETE" if skipped_large else "FAIL" if findings else "PASS"
+    return _scanner_result(
+        name="shakerscan-malware-rules",
+        version="1",
+        status=status,
+        subject=subject,
+        started_at=started_at,
+        finished_at=_utc_iso(),
+        findings=findings[:1000],
+        coverage={"files_discovered": len(files), "files_analyzed": analyzed, "files_skipped_large": skipped_large},
+        execution={"required": True, "rules_sha256": MALWARE_RULESET_SHA256},
+    )
+
+
+DEPENDENCY_FILES = {"requirements.txt", "requirements-dev.txt", "pyproject.toml", "package-lock.json"}
+
+
+def _requirement_components(path: Path) -> tuple[list[dict[str, Any]], list[str]]:
+    components: list[dict[str, Any]] = []
+    unpinned: list[str] = []
+    if path.name.startswith("requirements"):
+        for raw_line in path.read_text("utf-8", errors="replace").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith(("#", "-")):
+                continue
+            match = re.match(r"([A-Za-z0-9_.-]+)\s*==\s*([^\s;]+)", line)
+            if match:
+                name, version = match.groups()
+                components.append({"type": "library", "name": name, "version": version, "purl": f"pkg:pypi/{name}@{version}"})
+            else:
+                unpinned.append(line[:300])
+    elif path.name == "package-lock.json":
+        try:
+            payload = json.loads(path.read_text("utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return [], ["package-lock.json:parse_error"]
+        packages = payload.get("packages") if isinstance(payload, dict) else {}
+        for package_path, value in (packages.items() if isinstance(packages, dict) else []):
+            if not package_path or not isinstance(value, dict):
+                continue
+            name = str(value.get("name") or Path(package_path).name)
+            version = str(value.get("version") or "")
+            if name and version:
+                components.append({"type": "library", "name": name, "version": version, "purl": f"pkg:npm/{name}@{version}"})
+    return components, unpinned
+
+
+def run_builtin_sbom_scan(subject_path: Path, subject: dict[str, Any]) -> dict[str, Any]:
+    started_at = _utc_iso()
+    root = subject_path if subject_path.is_dir() else subject_path.parent
+    dependency_paths = [path for path in _subject_files(subject_path) if path.name.lower() in DEPENDENCY_FILES]
+    components: list[dict[str, Any]] = []
+    unpinned: list[dict[str, str]] = []
+    for path in dependency_paths:
+        parsed, path_unpinned = _requirement_components(path)
+        components.extend(parsed)
+        unpinned.extend({"path": path.relative_to(root).as_posix(), "requirement": item} for item in path_unpinned)
+    unique = {
+        (item.get("purl") or f"{item.get('name')}@{item.get('version')}"): item for item in components
+    }
+    normalized_components = [unique[key] for key in sorted(unique)]
+    sbom = {
+        "bomFormat": "CycloneDX",
+        "specVersion": "1.5",
+        "version": 1,
+        "provenance_class": "shakerscan_generated",
+        "subject_digest": subject.get("digest"),
+        "components": normalized_components,
+    }
+    sbom["serialNumber"] = f"urn:uuid:{_sha256_json(sbom)[:32]}"
+    status = "WARNING" if unpinned else "PASS"
+    return _scanner_result(
+        name="shakerscan-sbom",
+        version="1",
+        status=status,
+        subject=subject,
+        started_at=started_at,
+        finished_at=_utc_iso(),
+        findings=[{"id": "unpinned_dependency", "severity": "medium", **item} for item in unpinned[:1000]],
+        coverage={"dependency_files_discovered": len(dependency_paths), "components_generated": len(normalized_components)},
+        execution={"required": True},
+        summary={"sbom": sbom, "sbom_sha256": _sha256_json(sbom)},
+    )
+
+
+BINARY_MAGIC = {
+    b"\x7fELF": "elf",
+    b"MZ": "portable_executable",
+    b"\xcf\xfa\xed\xfe": "mach_o_64",
+    b"\xfe\xed\xfa\xcf": "mach_o_64_be",
+}
+
+
+def run_builtin_binary_inventory(subject_path: Path, subject: dict[str, Any]) -> dict[str, Any]:
+    started_at = _utc_iso()
+    root = subject_path if subject_path.is_dir() else subject_path.parent
+    files = _subject_files(subject_path)
+    binaries: list[dict[str, Any]] = []
+    for path in files:
+        with path.open("rb") as handle:
+            prefix = handle.read(8)
+        binary_format = next((kind for magic, kind in BINARY_MAGIC.items() if prefix.startswith(magic)), None)
+        if binary_format:
+            binaries.append({
+                "id": "native_binary_present",
+                "severity": "high",
+                "path": path.relative_to(root).as_posix(),
+                "format": binary_format,
+                "sha256": _hash_path(path),
+            })
+    return _scanner_result(
+        name="shakerscan-binary-inventory",
+        version="1",
+        status="WARNING" if binaries else "PASS",
+        subject=subject,
+        started_at=started_at,
+        finished_at=_utc_iso(),
+        findings=binaries[:1000],
+        coverage={"files_discovered": len(files), "native_binaries": len(binaries)},
+        execution={"required": True},
+    )
+
+
+LICENSE_MARKERS = {
+    "Apache-2.0": ("apache license", "version 2.0"),
+    "MIT": ("permission is hereby granted, free of charge",),
+    "BSD-3-Clause": ("redistribution and use in source and binary forms", "neither the name"),
+    "BSD-2-Clause": ("redistribution and use in source and binary forms",),
+}
+
+
+def run_builtin_license_inventory(subject_path: Path, subject: dict[str, Any]) -> dict[str, Any]:
+    started_at = _utc_iso()
+    if not subject_path.is_dir():
+        return _scanner_result(
+            name="shakerscan-license-inventory",
+            version="1",
+            status="NOT_APPLICABLE",
+            subject=subject,
+            started_at=started_at,
+            finished_at=_utc_iso(),
+            coverage={"license_files_discovered": 0, "license_files_analyzed": 0},
+        )
+    candidates = [
+        path for path in _subject_files(subject_path)
+        if path.name.lower().startswith(("license", "licence", "copying", "notice"))
+    ]
+    inventory: list[dict[str, Any]] = []
+    for path in candidates:
+        text = path.read_text("utf-8", errors="replace")[:1_000_000].lower()
+        matches = [
+            spdx for spdx, markers in LICENSE_MARKERS.items()
+            if all(marker in text for marker in markers)
+        ]
+        inventory.append({
+            "path": path.relative_to(subject_path).as_posix(),
+            "sha256": _hash_path(path),
+            "spdx_candidates": matches,
+            "requires_legal_review": len(matches) != 1,
+        })
+    findings = [
+        {"id": "license_unidentified", "severity": "medium", "path": item["path"]}
+        for item in inventory if item["requires_legal_review"]
+    ]
+    if not candidates:
+        findings.append({"id": "license_file_missing", "severity": "medium"})
+    return _scanner_result(
+        name="shakerscan-license-inventory",
+        version="1",
+        status="WARNING" if findings else "PASS",
+        subject=subject,
+        started_at=started_at,
+        finished_at=_utc_iso(),
+        findings=findings,
+        coverage={"license_files_discovered": len(candidates), "license_files_analyzed": len(inventory)},
+        execution={"required": True, "rules_sha256": _sha256_json(LICENSE_MARKERS)},
+        summary={"licenses": inventory},
     )
 
 
