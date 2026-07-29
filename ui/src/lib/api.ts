@@ -1376,6 +1376,21 @@ export interface ModelIntakeResolveResponse {
   metadata_json: Record<string, unknown>
   warnings: string[]
   scan_payload: ModelIntakeScanRequest | null
+  capabilities?: ModelIntakeSourceAdapterCapabilities
+}
+
+export interface ModelIntakeSourceAdapterCapabilities {
+  id: string
+  display_name: string
+  aliases: string[]
+  reference_schemes: string[]
+  resolve: 'implemented' | 'unsupported' | 'not_applicable'
+  immutable_resolution: 'implemented' | 'unsupported' | 'not_applicable'
+  artifact_acquisition: 'implemented' | 'unsupported' | 'not_applicable'
+  repository_manifest: 'implemented' | 'unsupported' | 'not_applicable'
+  repository_snapshot: 'implemented' | 'unsupported' | 'not_applicable'
+  authentication: string
+  notes: string[]
 }
 
 export interface AITestReadinessControl {

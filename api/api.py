@@ -53,6 +53,13 @@ except ModuleNotFoundError:
     from scanner.scanner_tools.model_intake_acquisition import download_http as _model_download_http
 
 try:
+    from scanner_tools.model_intake_registry import adapter_capabilities as _model_adapter_capabilities
+    from scanner_tools.model_intake_registry import adapter_catalog as _model_adapter_catalog
+except ModuleNotFoundError:
+    from scanner.scanner_tools.model_intake_registry import adapter_capabilities as _model_adapter_capabilities
+    from scanner.scanner_tools.model_intake_registry import adapter_catalog as _model_adapter_catalog
+
+try:
     from constants import SMART_SCAN_BUDGETS, resolve_scan_budget, resolve_or_consume_budget
 except ModuleNotFoundError as exc:
     if exc.name != "constants":
@@ -10758,10 +10765,11 @@ async def resolve_model_intake(request: ModelIntakeResolveRequest):
         platform = _detect_model_intake_platform(ref, metadata)
     if platform == "huggingface":
         normalized_ref = ref if _is_hf_ref(ref) else f"https://huggingface.co/{ref}"
-        return await asyncio.to_thread(
+        result = await asyncio.to_thread(
             _resolve_huggingface_model_intake,
             request.model_copy(update={"ref": normalized_ref, "platform": "huggingface"}),
         )
+        return {**result, "capabilities": _model_adapter_capabilities("huggingface")}
 
     normalize_model_artifact_reference, _ = _import_model_intake_helpers()
     normalized = normalize_model_artifact_reference(ref, metadata, platform)
@@ -10803,6 +10811,16 @@ async def resolve_model_intake(request: ModelIntakeResolveRequest):
         "metadata_json": metadata_out,
         "warnings": normalized.get("warnings") or [],
         "scan_payload": scan_payload,
+        "capabilities": _model_adapter_capabilities(source_kind),
+    }
+
+
+@app.get("/model-intake/capabilities")
+async def model_intake_capabilities():
+    """List provider-neutral intake adapter capabilities for UI and agents."""
+    return {
+        "schema_version": "model-intake-source-adapters/v1",
+        "adapters": _model_adapter_catalog(),
     }
 
 

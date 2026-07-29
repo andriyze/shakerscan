@@ -49,6 +49,13 @@ except ModuleNotFoundError as exc:
     import model_intake_scanners as _model_intake_scanners
 
 try:
+    from scanner.scanner_tools.model_intake_registry import adapter_capabilities as _adapter_capabilities
+except ModuleNotFoundError as exc:
+    if exc.name not in {"scanner", "scanner.scanner_tools"}:
+        raise
+    from model_intake_registry import adapter_capabilities as _adapter_capabilities
+
+try:
     from scanner.redaction import (
         SENSITIVE_KEYS,
         SENSITIVE_KEY_FRAGMENTS,
@@ -375,6 +382,14 @@ def normalize_model_artifact_reference(
             "huggingface_file": hf_ref.get("filename"),
             "revision": hf_ref.get("revision"),
         })
+        extension = _artifact_ext(parsed_ref.get("path") or _artifact_name(raw))
+        parsed_ref["extension"] = extension
+        parsed_ref["format_posture"] = (
+            "safer_static_format" if extension in SAFER_MODEL_EXTENSIONS
+            else "unsafe_or_review_required" if extension in RISKY_EXTENSIONS
+            else "unknown_or_unclassified_format"
+        )
+        parsed_ref["adapter"] = _adapter_capabilities("huggingface")
         return parsed_ref
 
     if kind == "s3":
@@ -481,6 +496,7 @@ def normalize_model_artifact_reference(
     if extension in RISKY_EXTENSIONS:
         warnings.append("Artifact extension is pickle-like or framework-serialized and should be reviewed before deployment.")
     parsed_ref["format_posture"] = "safer_static_format" if extension in SAFER_MODEL_EXTENSIONS else "unsafe_or_review_required" if extension in RISKY_EXTENSIONS else "unknown_or_unclassified_format"
+    parsed_ref["adapter"] = _adapter_capabilities(str(parsed_ref.get("kind") or kind))
     return parsed_ref
 
 
@@ -2435,6 +2451,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         or metadata.get("require_cryptographic_signature_verification")
     )
     registry_reference = _registry_reference(artifact_ref, metadata)
+    source_adapter = _adapter_capabilities(_source_kind(artifact_ref, metadata))
     crypto_signature_result = await _load_and_verify_signature(
         options, metadata, signature_url, artifact_bytes, sha256,
         timeout_seconds=timeout_seconds,
@@ -3193,6 +3210,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         "artifact_ref": safe_artifact_ref,
         "source_kind": _source_kind(artifact_ref, metadata),
         "registry": safe_registry_reference,
+        "source_adapter": source_adapter,
         "extension": ext,
         "sha256": sha256,
         "sha256_scope": observed_hash_scope,
@@ -3261,6 +3279,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         "target": safe_artifact_ref,
         "model_intake": {
             "summary": summary,
+            "source_adapter": source_adapter,
             "runtime_destinations": runtime_destinations,
             "artifact": {
                 "name": name,

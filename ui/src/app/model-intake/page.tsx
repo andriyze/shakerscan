@@ -1015,6 +1015,8 @@ function ModelIntakeSettingsContent() {
                 <div className="min-w-0 break-words">License: <span className="text-gray-200">{metadataString(resolverResult.metadata_json, 'license') || 'not found'}</span></div>
                 <div className="min-w-0 break-words">Registry SHA: <span className="text-gray-200">{resolverResult.selected_file?.sha256 ? 'available' : 'not found'}</span></div>
                 <div className="min-w-0 break-words">Evidence: <span className="text-gray-200">{Object.keys(resolverResult.metadata_json || {}).length} keys</span></div>
+                <div className="min-w-0 break-words">Artifact acquisition: <span className="text-gray-200">{resolverResult.capabilities?.artifact_acquisition || 'unknown'}</span></div>
+                <div className="min-w-0 break-words">Repository snapshot: <span className="text-gray-200">{resolverResult.capabilities?.repository_snapshot || 'unknown'}</span></div>
               </div>
               {resolverResult.warnings.length > 0 && (
                 <div className="mt-3 space-y-2">
