@@ -615,8 +615,10 @@ Model Intake (`scanner/scanner_tools/model_intake.py`) is a provider-neutral mod
 It resolves and completely acquires immutable subjects, creates content-addressed quarantine objects and
 repository manifests, runs generated static evidence, optionally invokes a separate no-egress semantic
 sandbox and content-free embedding/data-plane evaluation, and emits a signed, revocable decision package.
-It never imports publisher model code in the API or worker process. A purpose-built isolated runtime image
-is still required when a model-specific approval procedure requires actual custom-code load/inference.
+It never imports publisher model code in the API or worker process. An operator-configured, digest-pinned
+runtime adapter can perform exact-subject load/inference and deterministic known-answer cases inside the
+hardened sandbox tier. A disposable microVM with independent telemetry is still required for the highest-risk
+custom-code approval tier.
 
 > **Signature/provenance (R1, shipped 2026-06-24).** Model Intake performs real detached-signature
 > verification (Ed25519 / RSA-PSS / ECDSA via the `cryptography` lib) over the artifact or its digest
@@ -644,7 +646,10 @@ Checks include:
   sensitive-data leakage, stability, capacity, graph boundaries, deletion receipts, cache context, and
   index/model digest compatibility without persisting source text or benchmark vectors.
 - **Admission lifecycle** — signs the complete decision, registers it durably, enforces exact subjects at
-  deployment, and supports expiry, supersession, reassessment triggers, revocation, and audit history.
+  verification, and supports expiry, supersession, reassessment triggers, revocation, and audit history.
+  The core verifier accepts only an exact signed `allow`; HTTP verification also requires an active matching
+  registry record. Mutation endpoints require operator authentication, and global operations require explicit
+  confirmation plus a change receipt. External deployment systems must integrate the verification boundary.
 
 Saved trust anchors can be created, updated/deactivated, selected by policy, and previewed before a
 scan. `POST /model-intake/resolve` normalizes HTTP, Hugging Face, S3, GCS, Azure, OCI, and MLflow
@@ -1206,8 +1211,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Scanner wrapper commands | 26 | `scanner.sh` |
 | Make targets | 11 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
-| Runtime environment keys | 278 | Python sources + Compose manifests |
-| Scanner modules | 92 | `scanner/scanner_tools/` |
+| Runtime environment keys | 282 | Python sources + Compose manifests |
+| Scanner modules | 93 | `scanner/scanner_tools/` |
 | UI pages | 31 | `ui/src/app/` |
 | Skills | 6 | `skills/` |
 | Slash commands | 15 | `.claude/commands/` |
@@ -1934,11 +1939,15 @@ Only key names and declaring sources are documented; secret values are never rea
 | `MODEL_INTAKE_ALLOW_INSECURE_HTTP` | `scanner/scanner_tools/model_intake_acquisition.py` |
 | `MODEL_INTAKE_ALLOW_LOCAL_FILES` | `scanner/scanner_tools/model_intake.py` |
 | `MODEL_INTAKE_ALLOW_PRIVATE_NETWORKS` | `scanner/scanner_tools/model_intake_acquisition.py` |
+| `MODEL_INTAKE_OPERATOR_TOKEN` | `api/api.py` |
 | `MODEL_INTAKE_QUARANTINE_DIR` | `api/api.py`, `scanner/scanner_tools/model_intake.py` |
+| `MODEL_INTAKE_SANDBOX_IMAGE` | `docker-compose.yml` |
 | `MODEL_INTAKE_SANDBOX_NETWORK_MODE` | `scanner/scanner_tools/model_intake_sandbox.py` |
 | `MODEL_INTAKE_SANDBOX_NO_NEW_PRIVILEGES` | `scanner/scanner_tools/model_intake_sandbox.py` |
 | `MODEL_INTAKE_SANDBOX_QUEUE_DIR` | `scanner/scanner_tools/model_intake.py` |
 | `MODEL_INTAKE_SANDBOX_READ_ONLY` | `scanner/scanner_tools/model_intake_sandbox.py` |
+| `MODEL_INTAKE_SANDBOX_RUNTIME_ADAPTERS_JSON` | `docker-compose.broker-worker.yml`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml`, `scanner/scanner_tools/model_intake_sandbox.py` |
+| `MODEL_INTAKE_SANDBOX_RUNTIME_TIMEOUT_SECONDS` | `docker-compose.broker-worker.yml`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_TRUSTED_KEY_SHA256` | `scanner/scanner_tools/model_intake.py` |
 | `MODEL_INTAKE_TRUSTED_SIGNING_KEYS` | `scanner/scanner_tools/model_intake.py` |
 | `NUCLEI_TEMPLATES` | `scanner/scanner_tools/nuclei.py` |
@@ -2143,7 +2152,7 @@ Only key names and declaring sources are documented; secret values are never rea
 
 ### Scanner Module Inventory
 
-`access_control_checks.py`, `active_checks.py`, `active_enrichment_policy.py`, `active_prioritization.py`, `adaptive_throttle.py`, `ai_classifier.py`, `api_auth.py`, `api_security.py`, `approval_checks.py`, `asn_discovery.py`, `attack_chains.py`, `attempt_telemetry.py`, `auth_session.py`, `benchmark_summary.py`, `bola_comparison.py`, `brand_protection.py`, `breach_check.py`, `build_fingerprint.py`, `cancellation.py`, `client_side.py`, `common.py`, `completion_status.py`, `compliance_mapper.py`, `coverage_tracker.py`, `credential_check.py`, `critical_checks.py`, `ct_monitor.py`, `data_exposure.py`, `deduplication_engine.py`, `deserialization_tests.py`, `discovery.py`, `dns_enhanced.py`, `dom_xss_analyzer.py`, `domain_intel.py`, `exposure_markers.py`, `file_upload_tests.py`, `finding_correlator.py`, `finding_validator.py`, `focused_scope.py`, `form_login.py`, `github_recon.py`, `google_dorking.py`, `gopher_payloads.py`, `graphql_schema_recovery.py`, `grpc_discovery.py`, `gungnir.py`, `har_discovery.py`, `hash_routes.py`, `health_check.py`, `http_scanner.py`, `hunter_summary.py`, `infrastructure_checks.py`, `injection_extra_checks.py`, `ip_reputation.py`, `logging_checks.py`, `model_intake.py`, `model_intake_acquisition.py`, `model_intake_admission.py`, `model_intake_archives.py`, `model_intake_attestation.py`, `model_intake_evaluation.py`, `model_intake_registry.py`, `model_intake_retention.py`, `model_intake_sandbox.py`, `model_intake_scanners.py`, `network_services.py`, `nmap.py`, `nuclei.py`, `oauth_auth.py`, `oauth_tests.py`, `phase4_checks.py`, `proof_of_exploit.py`, `race_condition_tests.py`, `remediation_kb.py`, `report_gating.py`, `request_meter.py`, `resource_propagation.py`, `sarif_output.py`, `scan_delta.py`, `signal_types.py`, `smtp_scanner.py`, `ssh_scanner.py`, `subdomain_discovery.py`, `subfinder.py`, `tech_discovery.py`, `tls_scanner.py`, `vendor_risk.py`, `verification_engine.py`, `verification_phase.py`, `wayback_discovery.py`, `webhook_checks.py`, `websocket_security.py`
+`access_control_checks.py`, `active_checks.py`, `active_enrichment_policy.py`, `active_prioritization.py`, `adaptive_throttle.py`, `ai_classifier.py`, `api_auth.py`, `api_security.py`, `approval_checks.py`, `asn_discovery.py`, `attack_chains.py`, `attempt_telemetry.py`, `auth_session.py`, `benchmark_summary.py`, `bola_comparison.py`, `bounded_exec.py`, `brand_protection.py`, `breach_check.py`, `build_fingerprint.py`, `cancellation.py`, `client_side.py`, `common.py`, `completion_status.py`, `compliance_mapper.py`, `coverage_tracker.py`, `credential_check.py`, `critical_checks.py`, `ct_monitor.py`, `data_exposure.py`, `deduplication_engine.py`, `deserialization_tests.py`, `discovery.py`, `dns_enhanced.py`, `dom_xss_analyzer.py`, `domain_intel.py`, `exposure_markers.py`, `file_upload_tests.py`, `finding_correlator.py`, `finding_validator.py`, `focused_scope.py`, `form_login.py`, `github_recon.py`, `google_dorking.py`, `gopher_payloads.py`, `graphql_schema_recovery.py`, `grpc_discovery.py`, `gungnir.py`, `har_discovery.py`, `hash_routes.py`, `health_check.py`, `http_scanner.py`, `hunter_summary.py`, `infrastructure_checks.py`, `injection_extra_checks.py`, `ip_reputation.py`, `logging_checks.py`, `model_intake.py`, `model_intake_acquisition.py`, `model_intake_admission.py`, `model_intake_archives.py`, `model_intake_attestation.py`, `model_intake_evaluation.py`, `model_intake_registry.py`, `model_intake_retention.py`, `model_intake_sandbox.py`, `model_intake_scanners.py`, `network_services.py`, `nmap.py`, `nuclei.py`, `oauth_auth.py`, `oauth_tests.py`, `phase4_checks.py`, `proof_of_exploit.py`, `race_condition_tests.py`, `remediation_kb.py`, `report_gating.py`, `request_meter.py`, `resource_propagation.py`, `sarif_output.py`, `scan_delta.py`, `signal_types.py`, `smtp_scanner.py`, `ssh_scanner.py`, `subdomain_discovery.py`, `subfinder.py`, `tech_discovery.py`, `tls_scanner.py`, `vendor_risk.py`, `verification_engine.py`, `verification_phase.py`, `wayback_discovery.py`, `webhook_checks.py`, `websocket_security.py`
 
 ### Durable Storage Inventory
 

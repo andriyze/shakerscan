@@ -70,7 +70,7 @@ flags, skills, agents, adapters, modules, and durable tables) plus architecture/
 - **Findings (`/findings`)**: filter by DAST, Deep Hunt, Interactive, AI Gate, Model Intake, ASM, or Manual source plus severity/status/last-seen/domain/search; sort by severity/first-seen/last-seen/CVSS; bulk cleanup with dry-run preview.
 - **Finding Detail (`/findings/{id}`)**: status triage buttons (active/resolved/false_positive/accepted_risk), **delete finding** with confirmation, source badge, analyst notes, CVSS, CWE link, evidence summary (URLs, payloads, parameters, status codes, response anomalies), remediation steps, AI analysis (verdict/confidence/rationale/recommendations), raw HTTP request/response, copy buttons for URLs/payloads/IDs, external links to vulnerable URLs, one-shot proof replay, and a bounded **Verify finding** action for target-linked DAST/Deep Hunt/ASM/manual web findings.
 - **AI Gate (`/ai-gate`)**: create and manage AI targets, use Secure RAG + Agent presets, choose auth, target type, probe pack, profile, and environment, then queue AI safety scans for chat APIs, RAG APIs, agent traces, and MCP endpoints. *(Preview surface: deterministic real-stack PR smoke is implemented; planned policy/exception and deterministic-judge seams are not yet release-gated.)*
-- **Model Intake (`/model-intake`)**: use model-intake presets and queue artifact checks with artifact URL, metadata URL/JSON, checksum, detached signature URL/value, public key URL/PEM, trusted key PEM/fingerprints, policy profile, model card, approval flags, timeout, and download cap. *(Preview surface: deterministic real-stack PR smoke is implemented; the planned policy/exception seam is not yet release-gated.)*
+- **Model Intake (`/model-intake`)**: use model-intake presets and queue artifact checks with artifact URL, metadata URL/JSON, checksum, detached signature URL/value, public key URL/PEM, trusted key PEM/fingerprints, saved strict policy profile, model card, approval flags, timeout, and download cap. Reports expose a control execution matrix and structured phase timeline. Strict profiles require complete authoritative acquisition, cryptographic trust/attestation, required scanners, and bound runtime evidence; unavailable controls fail closed. The core worker never imports model code, while an operator-provided digest-pinned sandbox adapter can perform bounded load/inference tests. Corporate promotion hooks and the microVM runtime tier remain integrations.
 - **Policy Profiles (`/settings/policy-profiles`)**: create, edit, activate/deactivate, and delete deployment gate profiles for AI Gate, Model Intake, and DAST decisions. Model Intake can select saved active profiles.
 - **Interactive Testing (`/interactive`)**: browser sessions, managed credential profiles, target principals, authz expectations, endpoint replay, screenshots, and explicit finding creation.
 - **Exceptions (`/exceptions`)**: exception queue, owner/approver/control repair, expiry visibility, and lifecycle sweep.
@@ -735,7 +735,15 @@ After submitting an AI Gate scan, report the scan ID and UI link (`/scans/{scan_
 
 ### Model Intake
 
-Model Intake checks model artifacts before deployment without importing or executing model code. It is available in the UI at `/model-intake` and through REST APIs. Like AI Gate, Model Intake is a **preview** surface for this release. It is for provenance, unsafe serialization, checksum/signature, model card, license review, SBOM/dependency evidence, malware scan evidence, security evals, deployment restrictions, monitoring plan, and deployment approval checks.
+Model Intake checks model artifacts before deployment. The API and worker processes never import publisher
+code. Static semantics run in a no-egress sandbox, and operators can configure a digest-pinned runtime adapter
+that loads the exact quarantined subject and runs bounded known-answer cases. It is available in the UI at
+`/model-intake` and through REST APIs. It covers authoritative provenance, unsafe serialization,
+checksum/signature/attestation, model card, license review, generated SBOM/dependency evidence, malware and
+secret evidence, runtime/evaluation contracts, deployment restrictions, monitoring plan, signed admission,
+and revocable approval lifecycle checks. Strict profiles fail closed when required controls are unavailable.
+The disposable microVM tier and corporate deployment-platform enforcement are explicit external integrations,
+not implied by a ShakerScan `ALLOW` alone.
 
 Model Intake findings use `tool/source=model_intake`, filter with `source_type=model_intake`, and are
 excluded from `source_type=dast`.
