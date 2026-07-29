@@ -56,6 +56,20 @@ def test_archive_member_budget_fails_closed(monkeypatch, tmp_path):
     assert "member_count_limit" in result["limit_reasons"]
 
 
+def test_archive_expanded_budget_uses_bounded_operator_ceiling(tmp_path):
+    artifact = tmp_path / "weights.zip"
+    with zipfile.ZipFile(artifact, "w") as archive:
+        archive.writestr("weights/0", b"12345678")
+
+    too_small = archives.inspect_archive(artifact, max_expanded_bytes=4)
+    sufficient = archives.inspect_archive(artifact, max_expanded_bytes=8)
+
+    assert too_small["complete"] is False
+    assert too_small["limit_reasons"] == ["expanded_byte_limit"]
+    assert sufficient["complete"] is True
+    assert sufficient["expanded_bytes"] == 8
+
+
 def test_complete_archive_path_detects_risky_model_configuration(tmp_path):
     artifact = tmp_path / "model.zip"
     with zipfile.ZipFile(artifact, "w") as archive:

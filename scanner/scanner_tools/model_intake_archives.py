@@ -102,6 +102,7 @@ def _record_member(
     compressed_size: int | None = None,
     link: bool = False,
     device: bool = False,
+    max_expanded_bytes: int = MAX_EXPANDED_BYTES,
 ) -> bool:
     result["members_discovered"] += 1
     result["max_depth_observed"] = max(result["max_depth_observed"], depth)
@@ -111,7 +112,7 @@ def _record_member(
         return False
     result["members_inspected"] += 1
     result["expanded_bytes"] += max(0, size)
-    if result["expanded_bytes"] > MAX_EXPANDED_BYTES:
+    if result["expanded_bytes"] > max_expanded_bytes:
         result["complete"] = False
         _append_unique(result, "limit_reasons", "expanded_byte_limit")
         return False
@@ -136,11 +137,25 @@ def _record_member(
     return True
 
 
-def _inspect_zip(handle: Any, result: dict[str, Any], *, prefix: str, depth: int) -> None:
+def _inspect_zip(
+    handle: Any,
+    result: dict[str, Any],
+    *,
+    prefix: str,
+    depth: int,
+    max_expanded_bytes: int,
+) -> None:
     with zipfile.ZipFile(handle) as archive:
         for info in archive.infolist():
             name = f"{prefix}!/{info.filename}" if prefix else info.filename
-            if not _record_member(result, name, info.file_size, depth=depth, compressed_size=info.compress_size):
+            if not _record_member(
+                result,
+                name,
+                info.file_size,
+                depth=depth,
+                compressed_size=info.compress_size,
+                max_expanded_bytes=max_expanded_bytes,
+            ):
                 return
             if not info.is_dir() and Path(info.filename).name.lower() in RISKY_CONFIG_NAMES:
                 if info.file_size > MAX_CONFIG_BYTES:
@@ -160,13 +175,26 @@ def _inspect_zip(handle: Any, result: dict[str, Any], *, prefix: str, depth: int
                 continue
             try:
                 nested = archive.read(info)
-                _inspect_bytes(nested, result, prefix=name, depth=depth + 1)
+                _inspect_bytes(
+                    nested,
+                    result,
+                    prefix=name,
+                    depth=depth + 1,
+                    max_expanded_bytes=max_expanded_bytes,
+                )
             except Exception as exc:
                 result["complete"] = False
                 _append_unique(result, "errors", {"path": name, "error": f"{type(exc).__name__}: {exc}"}, limit=100)
 
 
-def _inspect_tar(handle: Any, result: dict[str, Any], *, prefix: str, depth: int) -> None:
+def _inspect_tar(
+    handle: Any,
+    result: dict[str, Any],
+    *,
+    prefix: str,
+    depth: int,
+    max_expanded_bytes: int,
+) -> None:
     with tarfile.open(fileobj=handle if hasattr(handle, "read") else None, name=None if hasattr(handle, "read") else str(handle), mode="r:*") as archive:
         for member in archive:
             name = f"{prefix}!/{member.name}" if prefix else member.name
@@ -177,6 +205,7 @@ def _inspect_tar(handle: Any, result: dict[str, Any], *, prefix: str, depth: int
                 depth=depth,
                 link=member.issym() or member.islnk(),
                 device=member.isdev() or member.isfifo(),
+                max_expanded_bytes=max_expanded_bytes,
             ):
                 return
             if member.isfile() and Path(member.name).name.lower() in RISKY_CONFIG_NAMES:
@@ -200,38 +229,79 @@ def _inspect_tar(handle: Any, result: dict[str, Any], *, prefix: str, depth: int
             if nested_handle is None:
                 continue
             try:
-                _inspect_bytes(nested_handle.read(MAX_NESTED_MEMBER_BYTES + 1), result, prefix=name, depth=depth + 1)
+                _inspect_bytes(
+                    nested_handle.read(MAX_NESTED_MEMBER_BYTES + 1),
+                    result,
+                    prefix=name,
+                    depth=depth + 1,
+                    max_expanded_bytes=max_expanded_bytes,
+                )
             except Exception as exc:
                 result["complete"] = False
                 _append_unique(result, "errors", {"path": name, "error": f"{type(exc).__name__}: {exc}"}, limit=100)
 
 
-def _inspect_bytes(data: bytes, result: dict[str, Any], *, prefix: str, depth: int) -> None:
+def _inspect_bytes(
+    data: bytes,
+    result: dict[str, Any],
+    *,
+    prefix: str,
+    depth: int,
+    max_expanded_bytes: int,
+) -> None:
     stream = io.BytesIO(data)
     if zipfile.is_zipfile(stream):
         result["is_archive"] = True
-        _inspect_zip(stream, result, prefix=prefix, depth=depth)
+        _inspect_zip(
+            stream,
+            result,
+            prefix=prefix,
+            depth=depth,
+            max_expanded_bytes=max_expanded_bytes,
+        )
         return
     stream.seek(0)
     try:
         result["is_archive"] = True
-        _inspect_tar(stream, result, prefix=prefix, depth=depth)
+        _inspect_tar(
+            stream,
+            result,
+            prefix=prefix,
+            depth=depth,
+            max_expanded_bytes=max_expanded_bytes,
+        )
     except (tarfile.TarError, OSError):
         # The nested member had an archive-like name but is not a supported
         # tar stream. Keep it inventoried and let the parent remain complete.
         return
 
 
-def inspect_archive(path: str | Path) -> dict[str, Any]:
+def inspect_archive(
+    path: str | Path,
+    *,
+    max_expanded_bytes: int = MAX_EXPANDED_BYTES,
+) -> dict[str, Any]:
     result = _new_result()
     source = Path(path)
     try:
         if zipfile.is_zipfile(source):
             result.update({"is_archive": True, "is_zip": True, "format": "zip"})
-            _inspect_zip(source, result, prefix="", depth=0)
+            _inspect_zip(
+                source,
+                result,
+                prefix="",
+                depth=0,
+                max_expanded_bytes=max_expanded_bytes,
+            )
         elif tarfile.is_tarfile(source):
             result.update({"is_archive": True, "is_tar": True, "format": "tar"})
-            _inspect_tar(source, result, prefix="", depth=0)
+            _inspect_tar(
+                source,
+                result,
+                prefix="",
+                depth=0,
+                max_expanded_bytes=max_expanded_bytes,
+            )
     except Exception as exc:
         result["complete"] = False
         result["errors"].append({"path": source.name, "error": f"{type(exc).__name__}: {exc}"})

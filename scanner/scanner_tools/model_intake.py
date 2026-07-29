@@ -2647,7 +2647,7 @@ async def run_model_intake_scan(
     )
     quarantine_path = str(artifact_meta.get("_quarantine_path") or "").strip()
     zip_info = (
-        _inspect_complete_archive(quarantine_path)
+        _inspect_complete_archive(quarantine_path, max_expanded_bytes=max_artifact_bytes)
         if quarantine_path
         else _inspect_zip(artifact_bytes)
         if artifact_bytes[:4] == b"PK\x03\x04"
