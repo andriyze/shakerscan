@@ -2158,6 +2158,7 @@ def test_huggingface_resolver_prefills_hash_license_and_dependency_inventory(mon
             {"rfilename": "tokenizer.json", "size": 100, "blobId": "blob-tokenizer"},
             {"rfilename": "requirements.txt", "size": 42, "blobId": "blob-reqs"},
             {"rfilename": "modeling_ranker.py", "size": 512, "blobId": "blob-code"},
+            {"rfilename": "README.md", "size": 256, "blobId": "blob-readme"},
         ],
     }
     monkeypatch.setattr(api_module, "_hf_api_model_info", lambda repo_id, revision, timeout_seconds: model_info)
@@ -2177,6 +2178,8 @@ def test_huggingface_resolver_prefills_hash_license_and_dependency_inventory(mon
     assert metadata["license"] == "apache-2.0"
     assert metadata["tokenizer"][0]["path"] == "tokenizer.json"
     assert metadata["package_dependencies"]["files"][0]["path"] == "requirements.txt"
+    assert metadata["model_card_url"] == "https://huggingface.co/acme/ranker/resolve/abc123/README.md"
+    assert resolved["scan_payload"]["model_card_url"] == metadata["model_card_url"]
     manifest = metadata["repository_manifest"]
     assert manifest["complete"] is True
     assert manifest["revision"] == "abc123"
@@ -2187,6 +2190,7 @@ def test_huggingface_resolver_prefills_hash_license_and_dependency_inventory(mon
         "model.safetensors",
         "modeling_ranker.py",
         "requirements.txt",
+        "README.md",
         "tokenizer.json",
         "vision/vit.safetensors",
     }

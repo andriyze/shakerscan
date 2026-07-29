@@ -187,6 +187,20 @@ def _artifact_ext(name: str) -> str:
     return Path(name).suffix.lower()
 
 
+def _sandbox_artifact_filename(
+    artifact_ref: str,
+    metadata: dict[str, Any],
+    artifact_meta: dict[str, Any],
+) -> str:
+    huggingface_fetch = artifact_meta.get("huggingface") if isinstance(artifact_meta.get("huggingface"), dict) else {}
+    return str(
+        huggingface_fetch.get("filename")
+        or metadata.get("huggingface_file")
+        or metadata.get("hf_file")
+        or _artifact_name(artifact_ref, metadata)
+    )
+
+
 def _is_model_artifact_path(path: str) -> bool:
     name = Path(path).name.lower()
     return name in MODEL_ARTIFACT_FILENAMES or Path(name).suffix.lower() in RISKY_EXTENSIONS | SAFER_MODEL_EXTENSIONS
@@ -2930,7 +2944,7 @@ async def run_model_intake_scan(
             dynamic_sandbox = await asyncio.to_thread(
                 _request_sandbox_analysis,
                 quarantine_object,
-                name,
+                _sandbox_artifact_filename(artifact_ref or "", metadata, artifact_meta),
                 queue_root=sandbox_root,
                 timeout_seconds=bounded_int("sandbox_timeout_seconds", 120, 1, 600),
             )

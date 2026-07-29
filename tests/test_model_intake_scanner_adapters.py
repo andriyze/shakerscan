@@ -47,12 +47,27 @@ def test_semgrep_parser_requires_schema_and_preserves_findings():
     assert _parse_external_scanner("semgrep", '{"results":[],"errors":[]}', "", 0)[0] == "PASS"
     status, findings, summary = _parse_external_scanner(
         "semgrep",
-        json.dumps({"results": [{"check_id": "model-intake.exec", "extra": {"severity": "ERROR"}}], "errors": []}),
+        json.dumps({"results": [{
+            "check_id": "model-intake.exec",
+            "path": "/quarantine/snapshot/modeling.py",
+            "start": {"line": 42},
+            "extra": {"severity": "ERROR", "message": "Dynamic execution is unsafe."},
+        }], "errors": []}),
         "",
         1,
     )
     assert status == "FAIL"
     assert len(findings) == 1
+    assert findings[0] == {
+        "id": "semgrep_finding",
+        "severity": "high",
+        "evidence_sha256": findings[0]["evidence_sha256"],
+        "rule_id": "model-intake.exec",
+        "path": "modeling.py",
+        "line": 42,
+        "message": "Dynamic execution is unsafe.",
+        "tool_severity": "ERROR",
+    }
     assert summary["finding_count"] == 1
     assert _parse_external_scanner("semgrep", '{"results":[]}', "", 0)[0] == "PASS"
     assert _parse_external_scanner("semgrep", '{"errors":[]}', "", 0)[0] == "INCOMPLETE"

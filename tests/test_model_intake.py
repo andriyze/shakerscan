@@ -10,6 +10,7 @@ import pytest
 from scanner.scanner_tools import model_intake
 from scanner.scanner_tools.model_intake import (
     _intake_decision,
+    _sandbox_artifact_filename,
     normalize_model_artifact_reference,
     parse_huggingface_ref,
     run_model_intake_scan,
@@ -24,6 +25,14 @@ def _safetensors_bytes(metadata=None, tensors=None, payload=b"\0\0\0\0"):
     header = {"__metadata__": metadata or {}, **(tensors or {"weight": {"dtype": "F32", "shape": [1], "data_offsets": [0, len(payload)]}})}
     raw_header = json.dumps(header, separators=(",", ":")).encode("utf-8")
     return len(raw_header).to_bytes(8, "little") + raw_header + payload
+
+
+def test_sandbox_uses_selected_artifact_filename_instead_of_display_name():
+    assert _sandbox_artifact_filename(
+        "https://huggingface.co/acme/model/resolve/abc/model.safetensors",
+        {"huggingface_file": "model.safetensors", "name": "Hugging Face: acme/model"},
+        {"huggingface": {"filename": "model.safetensors"}},
+    ) == "model.safetensors"
 
 
 def test_model_intake_detects_pickle_and_missing_controls(tmp_path):

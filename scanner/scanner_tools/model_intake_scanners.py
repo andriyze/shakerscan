@@ -386,6 +386,26 @@ def _external_finding(scanner: str, item: Any, severity: str = "high") -> dict[s
     }
 
 
+def _semgrep_finding(item: Any) -> dict[str, Any]:
+    """Keep actionable, content-free Semgrep coordinates in normalized evidence."""
+    if not isinstance(item, dict):
+        return _external_finding("semgrep", item)
+    extra = item.get("extra") if isinstance(item.get("extra"), dict) else {}
+    start = item.get("start") if isinstance(item.get("start"), dict) else {}
+    semgrep_severity = str(extra.get("severity") or "ERROR").upper()
+    severity = {"ERROR": "high", "WARNING": "medium", "INFO": "low"}.get(semgrep_severity, "high")
+    path = str(item.get("path") or "")
+    normalized = _external_finding("semgrep", item, severity)
+    normalized.update({
+        "rule_id": str(item.get("check_id") or "unknown"),
+        "path": Path(path).name if path else None,
+        "line": int(start["line"]) if isinstance(start.get("line"), int) else None,
+        "message": str(extra.get("message") or "Semgrep rule matched")[:500],
+        "tool_severity": semgrep_severity,
+    })
+    return {key: value for key, value in normalized.items() if value is not None}
+
+
 def _parse_external_scanner(
     scanner: str, stdout: str, stderr: str, exit_code: int
 ) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
@@ -415,15 +435,7 @@ def _parse_external_scanner(
                 return "INCOMPLETE", [], {"error": "semgrep_results_missing"}
             errors = parsed.get("errors") if isinstance(parsed.get("errors"), list) else []
             candidates = parsed["results"]
-            findings = [
-                _external_finding(
-                    scanner,
-                    item,
-                    str((item.get("extra") or {}).get("severity") or "high").lower()
-                    if isinstance(item, dict) else "high",
-                )
-                for item in candidates[:1000]
-            ]
+            findings = [_semgrep_finding(item) for item in candidates[:1000]]
             blocking_count = sum(
                 1 for item in candidates
                 if isinstance(item, dict) and str((item.get("extra") or {}).get("severity") or "ERROR").upper() == "ERROR"

@@ -10775,11 +10775,22 @@ def _hf_metadata_from_model_info(model_info: dict[str, Any], repo_id: str, revis
     file_inventory = repository_manifest["files"]
     tokenizer_files = _hf_files_named(model_info, MODEL_INTAKE_TOKENIZER_FILES)
     dependency_files = _hf_files_named(model_info, MODEL_INTAKE_DEPENDENCY_FILES)
+    model_card_file = next(
+        (
+            str(item.get("path"))
+            for item in file_inventory
+            if isinstance(item, dict) and Path(str(item.get("path") or "")).name.lower() == "readme.md"
+        ),
+        None,
+    )
     metadata: dict[str, Any] = {
         "huggingface_repo": repo_id,
         "revision": sha,
         "source_repo": f"https://huggingface.co/{repo_id}",
-        "model_card_url": f"https://huggingface.co/{repo_id}",
+        "model_card_url": (
+            f"https://huggingface.co/{repo_id}/resolve/{sha}/{urllib.parse.quote(model_card_file, safe='/')}"
+            if model_card_file else None
+        ),
         "publisher": repo_id.split("/", 1)[0],
         "pipeline_tag": model_info.get("pipeline_tag") or card_data.get("pipeline_tag"),
         "library_name": model_info.get("library_name") or card_data.get("library_name"),
@@ -10843,7 +10854,10 @@ def _resolve_huggingface_model_intake(request: ModelIntakeResolveRequest) -> dic
             "huggingface_repo": repo_id,
             "revision": hf_ref.get("revision") or metadata.get("revision") or "main",
             "source_repo": f"https://huggingface.co/{repo_id}",
-            "model_card_url": f"https://huggingface.co/{repo_id}",
+            "model_card_url": (
+                f"https://huggingface.co/{repo_id}/resolve/"
+                f"{urllib.parse.quote(str(hf_ref.get('revision') or metadata.get('revision') or 'main'), safe='')}/README.md"
+            ),
         }
         return {
             "platform": "huggingface",
@@ -10889,7 +10903,7 @@ def _resolve_huggingface_model_intake(request: ModelIntakeResolveRequest) -> dic
         **metadata,
     }
     artifact_url = str(hf_ref.get("resolve_url") or request.ref).strip()
-    model_card_url = str(metadata_out.get("model_card_url") or f"https://huggingface.co/{repo_id}")
+    model_card_url = str(metadata_out.get("model_card_url") or "") or None
     scan_payload = {
         "artifact_url": artifact_url,
         "name": f"Hugging Face: {repo_id}",
