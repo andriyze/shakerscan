@@ -17782,23 +17782,58 @@ def test_model_admission_endpoint_passes_exact_deployment_subjects(monkeypatch):
 
     def verify(package, **kwargs):
         captured.update({"package": package, **kwargs})
-        return {"verified": True, "status": "PASS"}
+        return {"verified": True, "status": "PASS", "statement_sha256": "c" * 64}
+
+    class Conn:
+        async def execute(self, *_args):
+            return "UPDATE 0"
+
+        async def fetchrow(self, *_args):
+            return {
+                "id": "00000000-0000-4000-8000-000000000001",
+                "scan_id": "00000000-0000-4000-8000-000000000002",
+                "status": "active",
+                "expires_at": None,
+                "reassessment_due_at": None,
+            }
+
+    class Acquire:
+        async def __aenter__(self):
+            return Conn()
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Pool:
+        def acquire(self):
+            return Acquire()
 
     monkeypatch.setattr(api_module, "_model_admission_trusted_keys", lambda: ["trusted-pem"])
     monkeypatch.setattr(api_module, "_verify_model_admission_package", verify)
+    monkeypatch.setattr(api_module, "db_pool", Pool())
     request = api_module.ModelIntakeAdmissionVerifyRequest(
         admission_package={"statement": {"subject": {}}},
         expected_artifact_sha256="A" * 64,
         expected_repository_snapshot_sha256="B" * 64,
-        require_registered_active_admission=False,
     )
 
     result = asyncio.run(api_module.verify_model_intake_admission(request))
 
-    assert result == {"verified": True, "status": "PASS"}
+    assert result["verified"] is True
+    assert result["status"] == "PASS"
+    assert result["registry"]["status"] == "active"
     assert captured["trusted_public_keys"] == ["trusted-pem"]
     assert captured["expected_artifact_sha256"] == "a" * 64
     assert captured["expected_repository_snapshot_sha256"] == "b" * 64
+
+
+def test_model_admission_endpoint_registry_requirement_cannot_be_disabled():
+    with pytest.raises(Exception):
+        api_module.ModelIntakeAdmissionVerifyRequest(
+            admission_package={"statement": {}},
+            expected_artifact_sha256="a" * 64,
+            require_registered_active_admission=False,
+        )
 
 
 def test_model_reassessment_event_requires_known_trigger_and_explicit_scope():

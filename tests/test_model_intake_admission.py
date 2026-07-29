@@ -61,6 +61,25 @@ def test_signed_admission_verifies_exact_subjects():
     assert result["verified"] is True
 
 
+def test_legitimately_signed_block_decision_is_never_admitted():
+    private_pem, public_pem = _keys()
+    statement = _statement()
+    statement["decision"] = {"outcome": "block", "reason": "critical unsafe serialization"}
+    package = sign_statement(statement, private_pem)
+
+    result = verify_package(
+        package,
+        trusted_public_keys=[public_pem],
+        expected_artifact_sha256="a" * 64,
+        expected_repository_snapshot_sha256="b" * 64,
+    )
+
+    assert package["status"] == "SIGNED"
+    assert result["verified"] is False
+    assert result["status"] == "FAIL"
+    assert "admission_decision_not_allow" in result["blockers"]
+
+
 def test_admission_rejects_tampering_drift_and_expiry():
     private_pem, public_pem = _keys()
     package = sign_statement(_statement(), private_pem)

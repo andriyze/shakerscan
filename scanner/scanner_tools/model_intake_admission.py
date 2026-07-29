@@ -129,6 +129,9 @@ def verify_package(
     statement = package["statement"]
     if statement.get("_type") != SCHEMA_VERSION:
         result["blockers"].append("unsupported_statement_type")
+    decision = statement.get("decision") if isinstance(statement.get("decision"), dict) else {}
+    if decision.get("outcome") != "allow":
+        result["blockers"].append("admission_decision_not_allow")
     message = canonical_bytes(statement)
     if package.get("statement_sha256") != hashlib.sha256(message).hexdigest():
         result["blockers"].append("statement_digest_mismatch")
@@ -172,29 +175,33 @@ def verify_package(
     keys = trusted_public_keys if isinstance(trusted_public_keys, (list, tuple, set)) else [trusted_public_keys]
     if not any(keys):
         result["blockers"].append("no_trusted_admission_keys_configured")
-    for pem in keys:
-        if not pem:
-            continue
-        try:
-            from cryptography.exceptions import InvalidSignature
-            from cryptography.hazmat.primitives import hashes
-            from cryptography.hazmat.primitives.asymmetric import ed25519, padding, rsa
-            from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat, load_pem_public_key
-            key = load_pem_public_key(pem if isinstance(pem, bytes) else str(pem).encode())
-            fingerprint = hashlib.sha256(key.public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)).hexdigest()
-            fingerprints.append(fingerprint)
-            if fingerprint != package.get("key_fingerprint"):
+    try:
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import ed25519, padding, rsa
+        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat, load_pem_public_key
+    except ImportError:
+        result["blockers"].append("cryptography_runtime_unavailable")
+    else:
+        for pem in keys:
+            if not pem:
                 continue
-            if isinstance(key, ed25519.Ed25519PublicKey) and package.get("algorithm") == "ed25519":
-                key.verify(signature, message)
-            elif isinstance(key, rsa.RSAPublicKey) and package.get("algorithm") == "rsa-pss-sha256":
-                key.verify(signature, message, padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH), hashes.SHA256())
-            else:
+            try:
+                key = load_pem_public_key(pem if isinstance(pem, bytes) else str(pem).encode())
+                fingerprint = hashlib.sha256(key.public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)).hexdigest()
+                fingerprints.append(fingerprint)
+                if fingerprint != package.get("key_fingerprint"):
+                    continue
+                if isinstance(key, ed25519.Ed25519PublicKey) and package.get("algorithm") == "ed25519":
+                    key.verify(signature, message)
+                elif isinstance(key, rsa.RSAPublicKey) and package.get("algorithm") == "rsa-pss-sha256":
+                    key.verify(signature, message, padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH), hashes.SHA256())
+                else:
+                    continue
+                signature_valid = True
+                break
+            except (InvalidSignature, ValueError, TypeError):
                 continue
-            signature_valid = True
-            break
-        except (InvalidSignature, ValueError, TypeError, ImportError):
-            continue
     if not signature_valid:
         result["blockers"].append("signature_invalid_or_untrusted")
     result.update({

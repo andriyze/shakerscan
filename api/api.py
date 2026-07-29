@@ -30,7 +30,7 @@ from collections import Counter
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Mapping, Optional, Sequence, Union
+from typing import Any, Literal, Mapping, Optional, Sequence, Union
 from zoneinfo import ZoneInfo
 
 import asyncpg
@@ -3757,7 +3757,7 @@ class ModelIntakeAdmissionVerifyRequest(BaseModel):
     admission_package: dict[str, Any]
     expected_artifact_sha256: str = Field(pattern="^[0-9a-fA-F]{64}$")
     expected_repository_snapshot_sha256: Optional[str] = Field(default=None, pattern="^[0-9a-fA-F]{64}$")
-    require_registered_active_admission: bool = True
+    require_registered_active_admission: Literal[True] = True
 
 
 class ModelIntakeAdmissionRevokeRequest(BaseModel):
@@ -10938,30 +10938,29 @@ async def verify_model_intake_admission(request: ModelIntakeAdmissionVerifyReque
     )
     if not result.get("verified"):
         raise HTTPException(status_code=409, detail=result)
-    if request.require_registered_active_admission:
-        async with db_pool.acquire() as conn:
-            await conn.execute(
-                """UPDATE model_intake_admissions
-                   SET status='expired', updated_at=NOW()
-                   WHERE status='active' AND expires_at <= NOW()"""
-            )
-            admission = await conn.fetchrow(
-                """SELECT id, scan_id, status, expires_at, reassessment_due_at
-                   FROM model_intake_admissions
-                   WHERE statement_sha256=$1""",
-                result.get("statement_sha256"),
-            )
-        if not admission:
-            raise HTTPException(status_code=409, detail={**result, "verified": False, "status": "FAIL", "blockers": ["admission_not_registered"]})
-        if admission["status"] != "active":
-            raise HTTPException(status_code=409, detail={**result, "verified": False, "status": "FAIL", "blockers": [f"admission_{admission['status']}"]})
-        result["registry"] = {
-            "admission_id": str(admission["id"]),
-            "scan_id": str(admission["scan_id"]),
-            "status": admission["status"],
-            "expires_at": _iso_or_none(admission["expires_at"]),
-            "reassessment_due_at": _iso_or_none(admission["reassessment_due_at"]),
-        }
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            """UPDATE model_intake_admissions
+               SET status='expired', updated_at=NOW()
+               WHERE status='active' AND expires_at <= NOW()"""
+        )
+        admission = await conn.fetchrow(
+            """SELECT id, scan_id, status, expires_at, reassessment_due_at
+               FROM model_intake_admissions
+               WHERE statement_sha256=$1""",
+            result.get("statement_sha256"),
+        )
+    if not admission:
+        raise HTTPException(status_code=409, detail={**result, "verified": False, "status": "FAIL", "blockers": ["admission_not_registered"]})
+    if admission["status"] != "active":
+        raise HTTPException(status_code=409, detail={**result, "verified": False, "status": "FAIL", "blockers": [f"admission_{admission['status']}"]})
+    result["registry"] = {
+        "admission_id": str(admission["id"]),
+        "scan_id": str(admission["scan_id"]),
+        "status": admission["status"],
+        "expires_at": _iso_or_none(admission["expires_at"]),
+        "reassessment_due_at": _iso_or_none(admission["reassessment_due_at"]),
+    }
     return result
 
 
