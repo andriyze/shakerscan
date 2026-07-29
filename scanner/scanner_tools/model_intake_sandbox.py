@@ -90,6 +90,18 @@ def _seccomp_mode() -> int | None:
 def _runtime_adapter(extension: str) -> tuple[dict[str, Any] | None, str | None]:
     raw = os.getenv("MODEL_INTAKE_SANDBOX_RUNTIME_ADAPTERS_JSON")
     if not raw:
+        if extension == ".safetensors":
+            return {
+                "name": "shakerscan-safetensors-weights",
+                "version": "1",
+                "required_load_level": "weights",
+                "argv": [
+                    sys.executable,
+                    "/app/scanner_tools/model_intake_runtime.py",
+                    "{artifact}",
+                    "{digest}",
+                ],
+            }, None
         return None, None
     try:
         configuration = json.loads(raw)
@@ -184,7 +196,11 @@ def _run_runtime_adapter(
         blockers.append("runtime_adapter_report_non_pass")
     if report.get("artifact_sha256") != digest:
         blockers.append("runtime_artifact_digest_mismatch")
-    if report.get("model_loaded") is not True:
+    required_load_level = str(adapter.get("required_load_level") or "model")
+    if required_load_level == "weights":
+        if report.get("artifact_loaded") is not True or report.get("load_level") != "weights":
+            blockers.append("weights_load_not_proven")
+    elif report.get("model_loaded") is not True or report.get("load_level") not in {None, "model"}:
         blockers.append("model_load_not_proven")
     if not known_answers:
         blockers.append("known_answer_tests_missing")
@@ -209,11 +225,14 @@ def _run_runtime_adapter(
         "exit_code": completed.returncode,
         "duration_seconds": round(time.monotonic() - started, 6),
         "model_loaded": report.get("model_loaded") is True,
+        "artifact_loaded": report.get("artifact_loaded") is True,
+        "load_level": report.get("load_level"),
         "artifact_sha256": report.get("artifact_sha256"),
         "known_answer_tests": known_answers[:100],
         "imports": report.get("imports", [])[:100] if isinstance(report.get("imports"), list) else [],
         "spawned_processes": spawned_processes,
         "network_attempts": report.get("network_attempts", []),
+        "limitations": report.get("limitations", [])[:100] if isinstance(report.get("limitations"), list) else [],
         "blockers": blockers,
         "stderr": stderr,
         "report_sha256": _sha256_json(report),
