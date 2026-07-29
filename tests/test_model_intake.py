@@ -993,6 +993,33 @@ def test_generated_scanners_require_complete_quarantined_subject(tmp_path):
     }
 
 
+def test_generated_scanner_subset_cannot_remove_required_adapters(tmp_path):
+    artifact = tmp_path / "model.safetensors"
+    artifact.write_bytes(_safetensors_bytes())
+
+    result = asyncio.run(run_model_intake_scan(
+        str(artifact),
+        _local_options({
+            "complete_artifact_download": True,
+            "quarantine_dir": str(tmp_path / "quarantine"),
+            "run_generated_scanners": True,
+            "generated_scanner_names": ["pip-audit"],
+            "require_hash": False,
+            "require_signature": False,
+            "require_model_governance": False,
+            "require_deployment_approval": False,
+        }),
+    ))
+
+    evidence = result["model_intake"]["generated_evidence"]
+    assert evidence["statuses"]["modelscan"] == "SKIPPED_BY_POLICY"
+    assert "modelscan" in evidence["required_non_pass"]
+    assert "model_intake:generated_scanner_modelscan_non_pass" in {
+        finding["id"] for finding in result["findings"]
+    }
+    assert result["result"]["decision"] == "block"
+
+
 def test_model_intake_registry_ref_without_bound_export_fails_acquisition():
     result = asyncio.run(
         run_model_intake_scan(

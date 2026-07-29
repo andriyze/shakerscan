@@ -22,6 +22,22 @@ def test_missing_required_external_scanner_is_unsupported_and_fail_closed(monkey
     assert summary["required_non_pass"] == ["required-tool"]
 
 
+def test_skipped_required_scanner_is_a_required_non_pass():
+    result = scanners._scanner_result(
+        name="required-tool",
+        version=None,
+        status="SKIPPED_BY_POLICY",
+        subject=_subject(),
+        started_at="2026-07-29T00:00:00+00:00",
+        finished_at="2026-07-29T00:00:01+00:00",
+        execution={"required": True, "reason": "scanner_omitted_by_request"},
+    )
+
+    summary = scanners.generated_evidence_summary([result])
+
+    assert summary["required_non_pass"] == ["required-tool"]
+
+
 def test_builtin_pickle_scanner_detects_executable_opcodes(tmp_path):
     artifact = tmp_path / "model.pkl"
     artifact.write_bytes(b"\x80\x04cposix\nsystem\nq\x00.")

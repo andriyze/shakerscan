@@ -10364,10 +10364,27 @@ def _apply_model_intake_policy_profile_requirements(
     metadata["policy_required_trust_anchor_profile"] = str(
         profile.get("name") or profile.get("environment") or request.policy_profile or ""
     )
-    return request.model_copy(update={
+    metadata["policy_requirements_enforced"] = True
+    updates: dict[str, Any] = {
         "trust_anchor_ids": merged_ids,
         "metadata_json": metadata,
-    })
+        "complete_artifact_download": True,
+        "run_generated_scanners": True,
+        # None means the complete registered scanner set. A requester-provided
+        # subset must never weaken a strict server-side profile.
+        "generated_scanner_names": None,
+        "run_dynamic_sandbox": True,
+        "require_dynamic_sandbox": True,
+        "run_generated_evaluation": True,
+        "require_generated_evaluation": True,
+        "require_signed_admission": True,
+        "require_hash": True,
+        "require_model_governance": True,
+        "require_deployment_approval": True,
+    }
+    if _detect_model_intake_platform(request.artifact_url, metadata) == "huggingface":
+        updates["complete_repository_snapshot"] = True
+    return request.model_copy(update=updates)
 
 
 async def _expand_model_intake_policy_profile_requirements(request: ModelIntakeScanRequest) -> ModelIntakeScanRequest:

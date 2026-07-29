@@ -2826,6 +2826,18 @@ async def run_model_intake_scan(
                 } if isinstance(requested_scanners, list) else None
                 for spec in _model_intake_scanners.EXTERNAL_SCANNERS:
                     if requested_names is not None and spec.name not in requested_names:
+                        scanner_results.append(_model_intake_scanners._scanner_result(
+                            name=spec.name,
+                            version=None,
+                            status="SKIPPED_BY_POLICY",
+                            subject=subject,
+                            started_at=datetime.now(timezone.utc).isoformat(),
+                            finished_at=datetime.now(timezone.utc).isoformat(),
+                            execution={
+                                "required": spec.required,
+                                "reason": "scanner_omitted_by_request",
+                            },
+                        ))
                         continue
                     scanner_results.append(
                         _model_intake_scanners.run_external_scanner(spec, subject_path, subject)
@@ -2833,7 +2845,8 @@ async def run_model_intake_scan(
         generated_evidence = {
             **_model_intake_scanners.generated_evidence_summary(scanner_results),
             "status": "PASS" if not any(
-                item.get("execution", {}).get("status") in _model_intake_scanners.NON_PASS_STATUSES
+                item.get("execution", {}).get("status") in _model_intake_scanners.REQUIRED_NON_PASS_STATUSES
+                and bool(item.get("execution", {}).get("required"))
                 for item in scanner_results
             ) else "FAIL",
         }
@@ -3216,7 +3229,7 @@ async def run_model_intake_scan(
             scanner_name = str(scanner_result.get("scanner", {}).get("name") or "unknown")
             scanner_status = str(scanner_result.get("execution", {}).get("status") or "CRASHED")
             required = bool(scanner_result.get("execution", {}).get("required"))
-            if scanner_status in _model_intake_scanners.NON_PASS_STATUSES and required:
+            if scanner_status in _model_intake_scanners.REQUIRED_NON_PASS_STATUSES and required:
                 findings.append(_finding(
                     finding_id=f"generated_scanner_{re.sub(r'[^a-z0-9]+', '_', scanner_name.lower()).strip('_')}_non_pass",
                     title=f"Required generated scanner did not pass: {scanner_name}",

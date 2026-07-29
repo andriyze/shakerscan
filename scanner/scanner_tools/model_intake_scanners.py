@@ -34,6 +34,7 @@ NORMALIZED_STATUSES = {
     "SKIPPED_BY_POLICY",
 }
 NON_PASS_STATUSES = {"FAIL", "UNSUPPORTED", "TIMEOUT", "CRASHED", "INCOMPLETE"}
+REQUIRED_NON_PASS_STATUSES = NON_PASS_STATUSES | {"SKIPPED_BY_POLICY"}
 MAX_SCANNER_OUTPUT_BYTES = 20_000_000
 MAX_SOURCE_FILE_BYTES = 2_000_000
 MAX_PICKLE_MEMBER_BYTES = 100_000_000
@@ -921,7 +922,7 @@ def generated_evidence_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
         "required_non_pass": [
             name
             for name, status in statuses.items()
-            if status in NON_PASS_STATUSES
+            if status in REQUIRED_NON_PASS_STATUSES
             and next(
                 (bool(item.get("execution", {}).get("required")) for item in results if item.get("scanner", {}).get("name") == name),
                 False,

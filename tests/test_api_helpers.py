@@ -2587,6 +2587,14 @@ def test_model_intake_policy_profile_requirements_add_required_anchor_ids():
     assert updated.metadata_json["strict_governance"] is True
     assert updated.metadata_json["policy_required_trust_anchor_ids"] == [required]
     assert updated.metadata_json["policy_required_trust_anchor_profile"] == "Production strict"
+    assert updated.complete_artifact_download is True
+    assert updated.run_generated_scanners is True
+    assert updated.generated_scanner_names is None
+    assert updated.run_dynamic_sandbox is True
+    assert updated.require_dynamic_sandbox is True
+    assert updated.run_generated_evaluation is True
+    assert updated.require_generated_evaluation is True
+    assert updated.require_signed_admission is True
 
 
 def test_model_intake_policy_profile_requirements_ignore_non_strict_or_other_products():
@@ -2634,6 +2642,38 @@ def test_custom_named_strict_model_intake_profile_enables_strict_governance_with
 
     assert updated.metadata_json["strict_governance"] is True
     assert updated.metadata_json["policy_required_trust_anchor_ids"] == []
+    assert updated.complete_artifact_download is True
+    assert updated.complete_repository_snapshot is False
+    assert updated.require_dynamic_sandbox is True
+
+
+def test_strict_huggingface_profile_forces_complete_snapshot_and_ignores_weaker_request():
+    request = api_module.ModelIntakeScanRequest(
+        artifact_url="hf://acme/ranker/model.safetensors",
+        policy_profile="production",
+        complete_artifact_download=False,
+        complete_repository_snapshot=False,
+        run_generated_scanners=False,
+        generated_scanner_names=["pip-audit"],
+        require_dynamic_sandbox=False,
+        require_generated_evaluation=False,
+        require_signed_admission=False,
+    )
+
+    updated = api_module._apply_model_intake_policy_profile_requirements(request, {
+        "name": "Production strict",
+        "product_area": "model_intake",
+        "environment": "production",
+        "strict_model_intake": True,
+    })
+
+    assert updated.complete_artifact_download is True
+    assert updated.complete_repository_snapshot is True
+    assert updated.run_generated_scanners is True
+    assert updated.generated_scanner_names is None
+    assert updated.require_dynamic_sandbox is True
+    assert updated.require_generated_evaluation is True
+    assert updated.require_signed_admission is True
 
 
 def test_model_intake_evidence_export_is_content_free():
