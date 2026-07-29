@@ -2979,8 +2979,9 @@ async def run_model_intake_scan(
         attestation=attestation_verification.get("status"),
         evaluation=generated_evaluation.get("status"),
     )
+    effective_sbom_evidence = generated_sbom or sbom_ref
     sbom_policy = _sbom_policy(
-        generated_sbom or sbom_ref,
+        effective_sbom_evidence,
         strict=strict_governance,
         trusted_provenance=bool(generated_sbom),
     )
@@ -2988,10 +2989,15 @@ async def run_model_intake_scan(
         malware_scan_max_age_days = int(options.get("malware_scan_max_age_days") or metadata.get("malware_scan_max_age_days") or 30)
     except (TypeError, ValueError):
         malware_scan_max_age_days = 30
+    effective_malware_evidence = generated_malware or malware_scan_ref
     malware_policy = _malware_policy(
-        generated_malware or malware_scan_ref,
+        effective_malware_evidence,
         strict=strict_governance,
-        expected_sha256=sha256 or expected_sha256,
+        expected_sha256=(
+            repository_snapshot.get("snapshot_sha256")
+            if generated_malware and repository_snapshot.get("complete")
+            else sha256 or expected_sha256
+        ),
         max_age_days=malware_scan_max_age_days,
         trusted_provenance=bool(generated_malware),
     )
@@ -3244,7 +3250,7 @@ async def run_model_intake_scan(
                     },
                     remediation="Install and pin the scanner, restore its rules/database, and rerun it against the same complete subject until it produces a valid PASS or reviewed finding result.",
                 ))
-            elif scanner_status in {"FAIL", "WARNING"} and scanner_result.get("findings"):
+            if scanner_status in {"FAIL", "WARNING", "INCOMPLETE"} and scanner_result.get("findings"):
                 findings.append(_finding(
                     finding_id=f"generated_scanner_{re.sub(r'[^a-z0-9]+', '_', scanner_name.lower()).strip('_')}_findings",
                     title=f"Generated scanner reported model-intake concerns: {scanner_name}",
@@ -3669,7 +3675,7 @@ async def run_model_intake_scan(
             remediation="Confirm the intended deployment is allowed by the model license and record legal/security approval in intake metadata.",
         ))
 
-    if require_governance and not sbom_ref and not metadata_unavailable:
+    if require_governance and not effective_sbom_evidence and not metadata_unavailable:
         findings.append(_finding(
             finding_id="missing_sbom_or_dependencies",
             title="Model dependency/SBOM evidence missing",
@@ -3680,7 +3686,7 @@ async def run_model_intake_scan(
             remediation="Attach SBOM or dependency inventory for model package code, adapters, tokenizers, and serving dependencies.",
         ))
 
-    if require_governance and sbom_ref and strict_governance and not sbom_policy["valid"] and not metadata_unavailable:
+    if require_governance and effective_sbom_evidence and strict_governance and not sbom_policy["valid"] and not metadata_unavailable:
         findings.append(_finding(
             finding_id="invalid_sbom_evidence",
             title="Model SBOM evidence is incomplete or unvalidated",
@@ -3691,7 +3697,7 @@ async def run_model_intake_scan(
             remediation="Attach a valid CycloneDX or SPDX SBOM with package components, purls, hashes, and license evidence.",
         ))
 
-    if require_governance and not malware_scan_ref and not metadata_unavailable:
+    if require_governance and not effective_malware_evidence and not metadata_unavailable:
         findings.append(_finding(
             finding_id="missing_malware_scan",
             title="Model malware scan evidence missing",
@@ -3702,7 +3708,7 @@ async def run_model_intake_scan(
             remediation="Require static malware/YARA scanning and record scan result, engine, and timestamp before approval.",
         ))
 
-    if require_governance and malware_scan_ref and strict_governance and not malware_policy["valid"] and not metadata_unavailable:
+    if require_governance and effective_malware_evidence and strict_governance and not malware_policy["valid"] and not metadata_unavailable:
         findings.append(_finding(
             finding_id="invalid_malware_scan_evidence",
             title="Model malware scan evidence is incomplete, stale, or not bound to the artifact",
@@ -3910,9 +3916,9 @@ async def run_model_intake_scan(
         "expected_hash_present": bool(expected_sha256),
         "deployment_approved": deployment_approved,
         "license_present": bool(license_ref),
-        "sbom_present": bool(sbom_ref),
-        "malware_scan_present": bool(malware_scan_ref),
-        "eval_evidence_present": bool(eval_ref),
+        "sbom_present": bool(effective_sbom_evidence),
+        "malware_scan_present": bool(effective_malware_evidence),
+        "eval_evidence_present": bool(effective_eval_evidence),
         "deployment_restrictions_present": bool(deployment_restrictions),
         "monitoring_plan_present": bool(monitoring_plan),
         "training_data_lineage_present": bool(training_data_ref),

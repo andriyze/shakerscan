@@ -45,7 +45,10 @@ def test_builtin_pickle_scanner_detects_executable_opcodes(tmp_path):
     result = scanners.run_builtin_pickle_scan(artifact, _subject(hashlib.sha256(artifact.read_bytes()).hexdigest()))
 
     assert result["execution"]["status"] == "FAIL"
-    assert result["coverage"] == {"pickle_streams_discovered": 1, "pickle_streams_analyzed": 1}
+    assert result["coverage"]["pickle_streams_discovered"] == 1
+    assert result["coverage"]["pickle_streams_analyzed"] == 1
+    assert result["coverage"]["inventory_truncated"] is False
+    assert result["execution"]["required"] is True
     assert result["findings"][0]["id"] == "dangerous_pickle_opcodes"
     assert any(item["opcode"] == "GLOBAL" for item in result["findings"][0]["opcodes"])
 
@@ -75,7 +78,79 @@ def test_builtin_source_scanner_records_dangerous_calls_without_execution(tmp_pa
     assert result["execution"]["status"] == "WARNING"
     calls = {finding["call"] for finding in result["findings"]}
     assert calls == {"os.system", "torch.load"}
-    assert result["coverage"] == {"python_files_discovered": 1, "python_files_analyzed": 1}
+    assert result["coverage"]["python_files_discovered"] == 1
+    assert result["coverage"]["python_files_analyzed"] == 1
+    assert result["coverage"]["inventory_truncated"] is False
+    assert result["execution"]["required"] is True
+
+
+def test_builtin_pickle_scanner_covers_directory_subjects(tmp_path):
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    (snapshot / "safe.txt").write_text("safe")
+    (snapshot / "unsafe.pkl").write_bytes(b"\x80\x04cposix\nsystem\nq\x00.")
+
+    result = scanners.run_builtin_pickle_scan(snapshot, _subject(kind="repository_snapshot"))
+
+    assert result["execution"]["status"] == "FAIL"
+    assert result["coverage"]["files_discovered"] == 2
+    assert result["coverage"]["pickle_streams_discovered"] == 1
+    assert result["findings"][0]["path"] == "unsafe.pkl"
+
+
+def test_source_parse_failure_keeps_other_findings_and_fails_closed(tmp_path):
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    (snapshot / "dangerous.py").write_text("import os\nos.system('id')\n")
+    (snapshot / "broken.py").write_text("def broken(:\n")
+
+    result = scanners.run_builtin_source_scan(snapshot, _subject(kind="repository_snapshot"))
+
+    assert result["execution"]["status"] == "INCOMPLETE"
+    assert result["execution"]["required"] is True
+    assert {finding["id"] for finding in result["findings"]} == {
+        "dangerous_python_call",
+        "source_parse_failed",
+    }
+
+
+def test_subject_inventory_truncation_reports_prelimit_counts(monkeypatch, tmp_path):
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    (snapshot / "a.txt").write_text("a")
+    (snapshot / "b.txt").write_text("b")
+    monkeypatch.setattr(scanners, "MAX_SUBJECT_FILES", 1)
+
+    result = scanners.run_builtin_secret_scan(snapshot, _subject(kind="repository_snapshot"))
+
+    assert result["execution"]["status"] == "INCOMPLETE"
+    assert result["coverage"]["files_discovered"] == 2
+    assert result["coverage"]["files_enumerated"] == 1
+    assert result["coverage"]["inventory_truncated"] is True
+
+
+def test_large_opaque_weights_are_explicitly_excluded_from_text_secret_scan(monkeypatch, tmp_path):
+    weights = tmp_path / "model.safetensors"
+    weights.write_bytes(b"\0binary-weights")
+    monkeypatch.setattr(scanners, "MAX_SOURCE_FILE_BYTES", 1)
+
+    result = scanners.run_builtin_secret_scan(weights, _subject())
+
+    assert result["execution"]["status"] == "PASS"
+    assert result["coverage"]["files_excluded_by_type"] == 1
+    assert result["coverage"]["files_skipped_large"] == 0
+
+
+def test_malware_scan_streams_large_files_without_incomplete_status(monkeypatch, tmp_path):
+    weights = tmp_path / "model.safetensors"
+    weights.write_bytes(b"A" * 32 + b"EICAR-STANDARD-ANTIVIRUS-TEST-FILE" + b"B" * 32)
+    monkeypatch.setattr(scanners, "MAX_PICKLE_MEMBER_BYTES", 1)
+
+    result = scanners.run_builtin_malware_scan(weights, _subject())
+
+    assert result["execution"]["status"] == "FAIL"
+    assert result["coverage"]["files_analyzed"] == 1
+    assert result["findings"][0]["id"] == "eicar_test_file"
 
 
 def test_materialize_snapshot_tree_preserves_paths_and_rejects_collision(tmp_path):

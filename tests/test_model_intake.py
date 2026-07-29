@@ -1020,6 +1020,34 @@ def test_generated_scanner_subset_cannot_remove_required_adapters(tmp_path):
     assert result["result"]["decision"] == "block"
 
 
+def test_generated_sbom_and_malware_evidence_satisfy_presence_checks(tmp_path):
+    artifact = tmp_path / "model.safetensors"
+    artifact.write_bytes(_safetensors_bytes())
+
+    result = asyncio.run(run_model_intake_scan(
+        str(artifact),
+        _local_options({
+            "complete_artifact_download": True,
+            "quarantine_dir": str(tmp_path / "quarantine"),
+            "run_generated_scanners": True,
+            "generated_scanner_names": ["shakerscan-malware-rules", "shakerscan-sbom"],
+            "require_hash": False,
+            "require_signature": False,
+            "require_deployment_approval": False,
+            "metadata_json": {
+                "license": "apache-2.0",
+                "security_evals": {"status": "passed"},
+            },
+        }),
+    ))
+
+    finding_ids = {finding["id"] for finding in result["findings"]}
+    assert "model_intake:missing_sbom_or_dependencies" not in finding_ids
+    assert "model_intake:missing_malware_scan" not in finding_ids
+    assert result["model_intake"]["summary"]["sbom_present"] is True
+    assert result["model_intake"]["summary"]["malware_scan_present"] is True
+
+
 def test_model_intake_registry_ref_without_bound_export_fails_acquisition():
     result = asyncio.run(
         run_model_intake_scan(

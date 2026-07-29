@@ -38,6 +38,9 @@ REQUIRED_NON_PASS_STATUSES = NON_PASS_STATUSES | {"SKIPPED_BY_POLICY"}
 MAX_SCANNER_OUTPUT_BYTES = 20_000_000
 MAX_SOURCE_FILE_BYTES = 2_000_000
 MAX_PICKLE_MEMBER_BYTES = 100_000_000
+MAX_PICKLE_ARCHIVE_MEMBERS = 5_000
+MAX_SOURCE_FILES = 10_000
+MAX_SUBJECT_FILES = 10_000
 
 
 @dataclass(frozen=True)
@@ -465,17 +468,17 @@ DANGEROUS_PICKLE_OPCODES = {
 def _pickle_streams(path: Path) -> tuple[list[tuple[str, bytes]], int]:
     if zipfile.is_zipfile(path):
         streams: list[tuple[str, bytes]] = []
-        discovered = 0
         with zipfile.ZipFile(path) as archive:
-            for info in archive.infolist()[:5000]:
+            candidates = [
+                info for info in archive.infolist()
+                if info.filename.lower().endswith((".pkl", ".pickle", "data.pkl"))
+            ]
+            for info in candidates[:MAX_PICKLE_ARCHIVE_MEMBERS]:
                 name = info.filename
-                if not name.lower().endswith((".pkl", ".pickle", "data.pkl")):
-                    continue
-                discovered += 1
                 if info.file_size > MAX_PICKLE_MEMBER_BYTES:
                     continue
                 streams.append((name, archive.read(info)))
-        return streams, discovered
+        return streams, len(candidates)
     if path.suffix.lower() in {".pkl", ".pickle", ".pt", ".pth", ".ckpt", ".bin", ".joblib"}:
         if path.stat().st_size > MAX_PICKLE_MEMBER_BYTES:
             return [], 1
@@ -485,16 +488,35 @@ def _pickle_streams(path: Path) -> tuple[list[tuple[str, bytes]], int]:
 
 def run_builtin_pickle_scan(subject_path: Path, subject: dict[str, Any]) -> dict[str, Any]:
     started_at = _utc_iso()
-    streams, discovered = _pickle_streams(subject_path)
+    inventory_truncated = False
+    if subject_path.is_dir():
+        files, files_discovered, inventory_truncated = _subject_file_inventory(subject_path)
+        streams = []
+        discovered = 0
+        for path in files:
+            path_streams, path_discovered = _pickle_streams(path)
+            relative = path.relative_to(subject_path).as_posix()
+            streams.extend((f"{relative}!/{name}" if name != path.name else relative, raw) for name, raw in path_streams)
+            discovered += path_discovered
+    else:
+        streams, discovered = _pickle_streams(subject_path)
+        files_discovered = 1
     if discovered == 0:
         return _scanner_result(
             name="python-pickletools",
             version=None,
-            status="NOT_APPLICABLE",
+            status="INCOMPLETE" if inventory_truncated else "NOT_APPLICABLE",
             subject=subject,
             started_at=started_at,
             finished_at=_utc_iso(),
-            coverage={"pickle_streams_discovered": 0, "pickle_streams_analyzed": 0},
+            coverage={
+                "files_discovered": files_discovered,
+                "files_enumerated": min(files_discovered, MAX_SUBJECT_FILES),
+                "inventory_truncated": inventory_truncated,
+                "pickle_streams_discovered": 0,
+                "pickle_streams_analyzed": 0,
+            },
+            execution={"required": True},
         )
     findings: list[dict[str, Any]] = []
     analyzed = 0
@@ -515,7 +537,7 @@ def run_builtin_pickle_scan(subject_path: Path, subject: dict[str, Any]) -> dict
                 })
         except Exception as exc:
             parse_errors.append({"path": name, "error": f"{type(exc).__name__}: {exc}"})
-    if analyzed < discovered or parse_errors:
+    if analyzed < discovered or parse_errors or inventory_truncated:
         status = "INCOMPLETE"
     elif findings:
         status = "FAIL"
@@ -529,7 +551,14 @@ def run_builtin_pickle_scan(subject_path: Path, subject: dict[str, Any]) -> dict
         started_at=started_at,
         finished_at=_utc_iso(),
         findings=findings,
-        coverage={"pickle_streams_discovered": discovered, "pickle_streams_analyzed": analyzed},
+        coverage={
+            "files_discovered": files_discovered,
+            "files_enumerated": min(files_discovered, MAX_SUBJECT_FILES),
+            "inventory_truncated": inventory_truncated,
+            "pickle_streams_discovered": discovered,
+            "pickle_streams_analyzed": analyzed,
+        },
+        execution={"required": True},
         summary={"parse_errors": parse_errors[:20]},
     )
 
@@ -562,11 +591,13 @@ def run_builtin_source_scan(snapshot_root: Path | None, subject: dict[str, Any])
             started_at=started_at,
             finished_at=_utc_iso(),
             coverage={"python_files_discovered": 0, "python_files_analyzed": 0},
+            execution={"required": True},
         )
-    paths = sorted(snapshot_root.rglob("*.py"))[:10_000]
+    all_paths = sorted(snapshot_root.rglob("*.py"))
+    paths = all_paths[:MAX_SOURCE_FILES]
     findings: list[dict[str, Any]] = []
     analyzed = 0
-    incomplete = False
+    incomplete = len(all_paths) > len(paths)
     for path in paths:
         relative = path.relative_to(snapshot_root).as_posix()
         if path.stat().st_size > MAX_SOURCE_FILE_BYTES:
@@ -601,14 +632,26 @@ def run_builtin_source_scan(snapshot_root: Path | None, subject: dict[str, Any])
         started_at=started_at,
         finished_at=_utc_iso(),
         findings=findings[:1000],
-        coverage={"python_files_discovered": len(paths), "python_files_analyzed": analyzed},
+        coverage={
+            "python_files_discovered": len(all_paths),
+            "python_files_enumerated": len(paths),
+            "python_files_analyzed": analyzed,
+            "inventory_truncated": len(all_paths) > len(paths),
+        },
+        execution={"required": True},
     )
 
 
-def _subject_files(subject_path: Path, *, limit: int = 10_000) -> list[Path]:
+def _subject_file_inventory(subject_path: Path, *, limit: int | None = None) -> tuple[list[Path], int, bool]:
     if subject_path.is_file():
-        return [subject_path]
-    return [path for path in sorted(subject_path.rglob("*")) if path.is_file()][:limit]
+        return [subject_path], 1, False
+    limit = MAX_SUBJECT_FILES if limit is None else limit
+    all_files = [path for path in sorted(subject_path.rglob("*")) if path.is_file()]
+    return all_files[:limit], len(all_files), len(all_files) > limit
+
+
+def _subject_files(subject_path: Path, *, limit: int | None = None) -> list[Path]:
+    return _subject_file_inventory(subject_path, limit=limit)[0]
 
 
 def _hash_path(path: Path) -> str:
@@ -628,21 +671,38 @@ SECRET_RULES = {
     ),
 }
 SECRET_RULESET_SHA256 = _sha256_json(sorted(SECRET_RULES))
+SECRET_TEXT_EXTENSIONS = {
+    ".cfg", ".conf", ".ini", ".json", ".md", ".py", ".rst", ".sh",
+    ".toml", ".txt", ".yaml", ".yml", ".ps1", ".xml",
+}
+OPAQUE_MODEL_EXTENSIONS = {
+    ".bin", ".ckpt", ".gguf", ".joblib", ".mar", ".onnx", ".pickle",
+    ".pkl", ".pt", ".pth", ".safetensors", ".tflite",
+}
 
 
 def run_builtin_secret_scan(subject_path: Path, subject: dict[str, Any]) -> dict[str, Any]:
     started_at = _utc_iso()
-    files = _subject_files(subject_path)
+    files, files_discovered, inventory_truncated = _subject_file_inventory(subject_path)
     findings: list[dict[str, Any]] = []
     analyzed = 0
     skipped_large = 0
+    excluded_by_type = 0
     root = subject_path if subject_path.is_dir() else subject_path.parent
     for path in files:
+        extension = path.suffix.lower()
+        if extension in OPAQUE_MODEL_EXTENSIONS:
+            excluded_by_type += 1
+            continue
         if path.stat().st_size > MAX_SOURCE_FILE_BYTES:
-            skipped_large += 1
+            if extension in SECRET_TEXT_EXTENSIONS or path.name.lower().startswith(("license", "readme", "requirements")):
+                skipped_large += 1
+            else:
+                excluded_by_type += 1
             continue
         raw = path.read_bytes()
-        if b"\0" in raw[:4096] and path.suffix.lower() not in {".json", ".txt", ".md", ".yaml", ".yml"}:
+        if b"\0" in raw[:4096] and extension not in SECRET_TEXT_EXTENSIONS:
+            excluded_by_type += 1
             continue
         analyzed += 1
         for rule_id, pattern in SECRET_RULES.items():
@@ -656,7 +716,7 @@ def run_builtin_secret_scan(subject_path: Path, subject: dict[str, Any]) -> dict
                     "match_sha256": hashlib.sha256(value).hexdigest(),
                     "match_length": len(value),
                 })
-    status = "INCOMPLETE" if skipped_large else "FAIL" if findings else "PASS"
+    status = "INCOMPLETE" if skipped_large or inventory_truncated else "FAIL" if findings else "PASS"
     return _scanner_result(
         name="shakerscan-secret-rules",
         version="1",
@@ -665,7 +725,14 @@ def run_builtin_secret_scan(subject_path: Path, subject: dict[str, Any]) -> dict
         started_at=started_at,
         finished_at=_utc_iso(),
         findings=findings[:1000],
-        coverage={"files_discovered": len(files), "files_analyzed": analyzed, "files_skipped_large": skipped_large},
+        coverage={
+            "files_discovered": files_discovered,
+            "files_enumerated": len(files),
+            "files_analyzed": analyzed,
+            "files_skipped_large": skipped_large,
+            "files_excluded_by_type": excluded_by_type,
+            "inventory_truncated": inventory_truncated,
+        },
         execution={"required": True, "rules_sha256": SECRET_RULESET_SHA256},
     )
 
@@ -679,29 +746,37 @@ MALWARE_MARKERS = {
 MALWARE_RULESET_SHA256 = _sha256_json({key: value.hex() for key, value in MALWARE_MARKERS.items()})
 
 
+def _stream_marker_matches(path: Path, markers: dict[str, bytes]) -> set[str]:
+    matches: set[str] = set()
+    lowered_markers = {key: value.lower() for key, value in markers.items()}
+    overlap = max((len(value) for value in lowered_markers.values()), default=1) - 1
+    carry = b""
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            window = (carry + chunk).lower()
+            for rule_id, marker in lowered_markers.items():
+                if rule_id not in matches and marker in window:
+                    matches.add(rule_id)
+            carry = window[-overlap:] if overlap > 0 else b""
+    return matches
+
+
 def run_builtin_malware_scan(subject_path: Path, subject: dict[str, Any]) -> dict[str, Any]:
     started_at = _utc_iso()
-    files = _subject_files(subject_path)
+    files, files_discovered, inventory_truncated = _subject_file_inventory(subject_path)
     findings: list[dict[str, Any]] = []
     analyzed = 0
-    skipped_large = 0
     root = subject_path if subject_path.is_dir() else subject_path.parent
     for path in files:
-        if path.stat().st_size > MAX_PICKLE_MEMBER_BYTES:
-            skipped_large += 1
-            continue
-        raw = path.read_bytes()
         analyzed += 1
-        lowered = raw.lower()
-        for rule_id, marker in MALWARE_MARKERS.items():
-            if marker.lower() in lowered:
-                findings.append({
-                    "id": rule_id,
-                    "severity": "critical" if rule_id == "eicar_test_file" else "high",
-                    "path": path.relative_to(root).as_posix(),
-                    "file_sha256": hashlib.sha256(raw).hexdigest(),
-                })
-    status = "INCOMPLETE" if skipped_large else "FAIL" if findings else "PASS"
+        for rule_id in sorted(_stream_marker_matches(path, MALWARE_MARKERS)):
+            findings.append({
+                "id": rule_id,
+                "severity": "critical" if rule_id == "eicar_test_file" else "high",
+                "path": path.relative_to(root).as_posix(),
+                "file_sha256": _hash_path(path),
+            })
+    status = "INCOMPLETE" if inventory_truncated else "FAIL" if findings else "PASS"
     return _scanner_result(
         name="shakerscan-malware-rules",
         version="1",
@@ -710,7 +785,12 @@ def run_builtin_malware_scan(subject_path: Path, subject: dict[str, Any]) -> dic
         started_at=started_at,
         finished_at=_utc_iso(),
         findings=findings[:1000],
-        coverage={"files_discovered": len(files), "files_analyzed": analyzed, "files_skipped_large": skipped_large},
+        coverage={
+            "files_discovered": files_discovered,
+            "files_enumerated": len(files),
+            "files_analyzed": analyzed,
+            "inventory_truncated": inventory_truncated,
+        },
         execution={"required": True, "rules_sha256": MALWARE_RULESET_SHA256},
     )
 
@@ -751,7 +831,8 @@ def _requirement_components(path: Path) -> tuple[list[dict[str, Any]], list[str]
 def run_builtin_sbom_scan(subject_path: Path, subject: dict[str, Any]) -> dict[str, Any]:
     started_at = _utc_iso()
     root = subject_path if subject_path.is_dir() else subject_path.parent
-    dependency_paths = [path for path in _subject_files(subject_path) if path.name.lower() in DEPENDENCY_FILES]
+    files, files_discovered, inventory_truncated = _subject_file_inventory(subject_path)
+    dependency_paths = [path for path in files if path.name.lower() in DEPENDENCY_FILES]
     components: list[dict[str, Any]] = []
     unpinned: list[dict[str, str]] = []
     for path in dependency_paths:
@@ -771,7 +852,7 @@ def run_builtin_sbom_scan(subject_path: Path, subject: dict[str, Any]) -> dict[s
         "components": normalized_components,
     }
     sbom["serialNumber"] = f"urn:uuid:{_sha256_json(sbom)[:32]}"
-    status = "WARNING" if unpinned else "PASS"
+    status = "INCOMPLETE" if inventory_truncated else "WARNING" if unpinned else "PASS"
     return _scanner_result(
         name="shakerscan-sbom",
         version="1",
@@ -780,7 +861,13 @@ def run_builtin_sbom_scan(subject_path: Path, subject: dict[str, Any]) -> dict[s
         started_at=started_at,
         finished_at=_utc_iso(),
         findings=[{"id": "unpinned_dependency", "severity": "medium", **item} for item in unpinned[:1000]],
-        coverage={"dependency_files_discovered": len(dependency_paths), "components_generated": len(normalized_components)},
+        coverage={
+            "files_discovered": files_discovered,
+            "files_enumerated": len(files),
+            "inventory_truncated": inventory_truncated,
+            "dependency_files_discovered": len(dependency_paths),
+            "components_generated": len(normalized_components),
+        },
         execution={"required": True},
         summary={"sbom": sbom, "sbom_sha256": _sha256_json(sbom)},
     )
@@ -797,7 +884,7 @@ BINARY_MAGIC = {
 def run_builtin_binary_inventory(subject_path: Path, subject: dict[str, Any]) -> dict[str, Any]:
     started_at = _utc_iso()
     root = subject_path if subject_path.is_dir() else subject_path.parent
-    files = _subject_files(subject_path)
+    files, files_discovered, inventory_truncated = _subject_file_inventory(subject_path)
     binaries: list[dict[str, Any]] = []
     for path in files:
         with path.open("rb") as handle:
@@ -814,12 +901,17 @@ def run_builtin_binary_inventory(subject_path: Path, subject: dict[str, Any]) ->
     return _scanner_result(
         name="shakerscan-binary-inventory",
         version="1",
-        status="WARNING" if binaries else "PASS",
+        status="INCOMPLETE" if inventory_truncated else "WARNING" if binaries else "PASS",
         subject=subject,
         started_at=started_at,
         finished_at=_utc_iso(),
         findings=binaries[:1000],
-        coverage={"files_discovered": len(files), "native_binaries": len(binaries)},
+        coverage={
+            "files_discovered": files_discovered,
+            "files_enumerated": len(files),
+            "inventory_truncated": inventory_truncated,
+            "native_binaries": len(binaries),
+        },
         execution={"required": True},
     )
 
@@ -843,9 +935,11 @@ def run_builtin_license_inventory(subject_path: Path, subject: dict[str, Any]) -
             started_at=started_at,
             finished_at=_utc_iso(),
             coverage={"license_files_discovered": 0, "license_files_analyzed": 0},
+            execution={"required": True},
         )
+    files, files_discovered, inventory_truncated = _subject_file_inventory(subject_path)
     candidates = [
-        path for path in _subject_files(subject_path)
+        path for path in files
         if path.name.lower().startswith(("license", "licence", "copying", "notice"))
     ]
     inventory: list[dict[str, Any]] = []
@@ -870,12 +964,18 @@ def run_builtin_license_inventory(subject_path: Path, subject: dict[str, Any]) -
     return _scanner_result(
         name="shakerscan-license-inventory",
         version="1",
-        status="WARNING" if findings else "PASS",
+        status="INCOMPLETE" if inventory_truncated else "WARNING" if findings else "PASS",
         subject=subject,
         started_at=started_at,
         finished_at=_utc_iso(),
         findings=findings,
-        coverage={"license_files_discovered": len(candidates), "license_files_analyzed": len(inventory)},
+        coverage={
+            "files_discovered": files_discovered,
+            "files_enumerated": len(files),
+            "inventory_truncated": inventory_truncated,
+            "license_files_discovered": len(candidates),
+            "license_files_analyzed": len(inventory),
+        },
         execution={"required": True, "rules_sha256": _sha256_json(LICENSE_MARKERS)},
         summary={"licenses": inventory},
     )
