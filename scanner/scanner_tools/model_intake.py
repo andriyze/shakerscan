@@ -24,94 +24,35 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 from typing import Any
 
-try:
-    from scanner.scanner_tools.model_intake_acquisition import (
-        acquisition_policy as _acquisition_policy,
-        download_http as _safe_download_http,
-        download_http_to_quarantine as _safe_download_http_to_quarantine,
-        quarantine_local_file as _quarantine_local_file,
-    )
-except ModuleNotFoundError as exc:
-    if exc.name not in {"scanner", "scanner.scanner_tools"}:
-        raise
-    from model_intake_acquisition import (
-        acquisition_policy as _acquisition_policy,
-        download_http as _safe_download_http,
-        download_http_to_quarantine as _safe_download_http_to_quarantine,
-        quarantine_local_file as _quarantine_local_file,
-    )
+from .model_intake_acquisition import (
+    acquisition_policy as _acquisition_policy,
+    download_http as _safe_download_http,
+    download_http_to_quarantine as _safe_download_http_to_quarantine,
+    quarantine_local_file as _quarantine_local_file,
+)
+from . import model_intake_scanners as _model_intake_scanners
+from .model_intake_admission import (
+    build_statement as _build_admission_statement,
+    sign_statement as _sign_admission_statement,
+    signing_available as _admission_signing_available,
+)
+from .model_intake_archives import inspect_archive as _inspect_complete_archive
+from .model_intake_attestation import verify_dsse_in_toto as _verify_dsse_in_toto
+from .model_intake_evaluation import evaluate as _evaluate_model_intake
+from .model_intake_evaluation import verify_report as _verify_model_intake_evaluation
+from .model_intake_registry import adapter_capabilities as _adapter_capabilities
+from .model_intake_sandbox import request_sandbox_analysis as _request_sandbox_analysis
 
-try:
-    from scanner.scanner_tools import model_intake_scanners as _model_intake_scanners
-except ModuleNotFoundError as exc:
-    if exc.name not in {"scanner", "scanner.scanner_tools"}:
-        raise
-    import model_intake_scanners as _model_intake_scanners
-
-try:
-    from scanner.scanner_tools.model_intake_registry import adapter_capabilities as _adapter_capabilities
-except ModuleNotFoundError as exc:
-    if exc.name not in {"scanner", "scanner.scanner_tools"}:
-        raise
-    from model_intake_registry import adapter_capabilities as _adapter_capabilities
-
-try:
-    from scanner.scanner_tools.model_intake_attestation import verify_dsse_in_toto as _verify_dsse_in_toto
-except ModuleNotFoundError as exc:
-    if exc.name not in {"scanner", "scanner.scanner_tools"}:
-        raise
-    from model_intake_attestation import verify_dsse_in_toto as _verify_dsse_in_toto
-
-try:
-    from scanner.scanner_tools.model_intake_archives import inspect_archive as _inspect_complete_archive
-except ModuleNotFoundError as exc:
-    if exc.name not in {"scanner", "scanner.scanner_tools"}:
-        raise
-    from model_intake_archives import inspect_archive as _inspect_complete_archive
-
-try:
-    from scanner.scanner_tools.model_intake_sandbox import request_sandbox_analysis as _request_sandbox_analysis
-except ModuleNotFoundError as exc:
-    if exc.name not in {"scanner", "scanner.scanner_tools"}:
-        raise
-    from model_intake_sandbox import request_sandbox_analysis as _request_sandbox_analysis
-
-try:
-    from scanner.scanner_tools.model_intake_admission import (
-        build_statement as _build_admission_statement,
-        sign_statement as _sign_admission_statement,
-        signing_available as _admission_signing_available,
-    )
-except ModuleNotFoundError as exc:
-    if exc.name not in {"scanner", "scanner.scanner_tools"}:
-        raise
-    from model_intake_admission import (
-        build_statement as _build_admission_statement,
-        sign_statement as _sign_admission_statement,
-        signing_available as _admission_signing_available,
-    )
-
-try:
-    from scanner.scanner_tools.model_intake_evaluation import evaluate as _evaluate_model_intake
-    from scanner.scanner_tools.model_intake_evaluation import verify_report as _verify_model_intake_evaluation
-except ModuleNotFoundError as exc:
-    if exc.name not in {"scanner", "scanner.scanner_tools"}:
-        raise
-    from model_intake_evaluation import evaluate as _evaluate_model_intake
-    from model_intake_evaluation import verify_report as _verify_model_intake_evaluation
-
-try:
-    from scanner.redaction import (
+if __package__ == "scanner_tools":
+    from redaction import (
         SENSITIVE_KEYS,
         SENSITIVE_KEY_FRAGMENTS,
         is_sensitive_key,
         redact_sensitive,
         redact_url_credentials,
     )
-except ModuleNotFoundError as exc:
-    if exc.name not in {"scanner", "scanner.redaction"}:
-        raise
-    from redaction import (
+else:
+    from ..redaction import (
         SENSITIVE_KEYS,
         SENSITIVE_KEY_FRAGMENTS,
         is_sensitive_key,
