@@ -1,10 +1,10 @@
 # Model Intake Security Review and Implementation Roadmap
 
-**Status:** Confirmed Phase -1 trust/correctness defects repaired through `96b7253`; external scanner packaging/databases, disposable microVM execution, deployment-platform enforcement, and per-model corporate qualification remain incomplete
+**Status:** Phase -1 trust/correctness repairs and the core static adapter bundle are implemented through `b68f23b`; disposable microVM execution, runner-generated embedding evaluation, deployment-platform enforcement, optional scanner depth, and per-model corporate qualification remain incomplete
 
 **Original audit checkout:** `239f887d9f10e997b9844c916c28073fab71ee79`
 
-**Current implementation checkout:** `96b7253` (implementation series beginning at `8f721ce`)
+**Current implementation checkout:** `b68f23b` (implementation series beginning at `8f721ce`)
 
 **Review date:** 2026-07-28
 
@@ -72,14 +72,13 @@ Sections 2.1 and 2.4 identify which findings are now resolved, partially resolve
 
 The remaining implementation and validation order is:
 
-1. Package and self-test the external static scanners already supported by adapters.
-2. Build the disposable no-egress VM/microVM loader and telemetry contract.
-3. Connect the evaluator to embeddings and measurements produced by that runner.
-4. Validate the complete workflow on CodeRankEmbed.
-5. Validate CodeSage Base v2, including controlled `safetensors` conversion and equivalence testing where
+1. Validate complete acquisition and the packaged static bundle on CodeRankEmbed.
+2. Validate CodeSage Base v2, including controlled `safetensors` conversion and equivalence testing where
    policy requires it.
-6. Validate CodeSage Large v2 only after the Base workflow passes and the GPU/resource tier is proven.
-7. Finish the explicit control-matrix report and corporate registry/deployment enforcement examples.
+3. Validate CodeSage Large v2 only after the Base workflow passes and resource limits are proven.
+4. Build the disposable no-egress VM/microVM loader and independent telemetry contract.
+5. Connect the evaluator to embeddings and measurements produced by that runner.
+6. Finish corporate registry/deployment enforcement examples and report-format parity.
 
 For a production profile, the correct decision for any exact model revision is **block/incomplete** until
 every required automated control has generated digest-bound evidence and the required corporate approvals
@@ -106,10 +105,16 @@ Implemented controls include:
 - Generated evidence contracts for pickle semantics, Python AST, secrets, malware rules, CycloneDX SBOM,
   dependencies/SCA adapters, native binaries, and licenses. Caller assertions remain `declared`; they are not
   silently promoted to generated evidence.
-- Normalized ModelScan, Fickling, ClamAV, Gitleaks, Syft, Trivy, OSV-Scanner, and pip-audit adapters. Missing
+- Normalized ModelScan, Semgrep, Fickling, Trivy, ClamAV, Gitleaks, Syft, OSV-Scanner, and pip-audit adapters. Missing
   binaries, bad schemas, empty output, timeout, crash, incomplete execution, explicit omission, `NOT_RUN`, and
-  `REVIEW_REQUIRED` are non-pass when required. The adapters are integration contracts; their binaries and
-  vulnerability/rule databases are not bundled into the default source worker image.
+  `REVIEW_REQUIRED` are non-pass when required. ModelScan 0.8.8, Semgrep 1.172.0, Fickling 0.1.12, and Trivy
+  0.72.0 are bundled in isolated hash-locked environments; Trivy's vulnerability and policy data is captured
+  during the image build for offline scans. The other named adapters remain fail-closed contracts, not shipped
+  coverage.
+- The core bundle is selected from immutable repository facts, never a model-name allowlist: ModelScan for
+  supported serialized artifacts, Fickling for pickle-backed artifacts, Semgrep for repository code/config,
+  and Trivy when dependency manifests are present. Every worker image build runs all four on deterministic
+  malicious fixtures and fails if any tool cannot generate and normalize its expected finding.
 - Atomic detached-signature trust decisions and offline DSSE/in-toto subject verification. Explicit key pins
   are enforced as an allowlist and cannot be widened by request-supplied keys. Transparency-log policy fails
   closed when no locally verified inclusion/checkpoint proof exists; native Rekor verification remains an
@@ -136,7 +141,8 @@ Implemented controls include:
   live/durable activity logs on running, completed, and failed Model Intake scans.
 
 The framework deliberately does not fabricate external evidence. The intended production profile must block
-until the operator supplies pinned scanner binaries/rule databases, an organization-controlled signing key
+until the core adapter readiness receipt is valid and the operator supplies any additional policy-required
+scanner engines/rules, an organization-controlled signing key
 and deployment trust roots, a purpose-built runtime image for the chosen model loader, a versioned corporate
 synthetic benchmark, application/vector-store observations, and the required human/legal/privacy approvals.
 Active strict saved profiles now impose non-weakenable minimum acquisition, full Hugging Face snapshot,
@@ -158,6 +164,37 @@ engine. The product boundary has three classes:
 
 The intended product is therefore a **security orchestration and admission layer**, not another monolithic
 scanner and not a universal legal or ML-quality authority.
+
+#### 2.2.1 Implemented plug-in/provider boundary and recommended tool set
+
+The useful default is deliberately smaller than the original ten-tool sketch:
+
+| Capability | Default decision | Reason |
+|---|---|---|
+| ModelScan | **Ship and enable by applicability** | Independent model-format/serialization analysis; complements ShakerScan pickle semantics |
+| Fickling | **Ship and enable for pickle-backed artifacts** | Deep pickle semantics and a second engine for the highest-risk Python serialization family |
+| Semgrep | **Ship and enable for repository code/config** | Mature source-pattern engine with a narrow, versioned model-intake ruleset; complements the built-in AST analyzer |
+| Trivy | **Ship and enable when dependency manifests exist** | One maintained engine provides vulnerability, secret, misconfiguration, and license evidence without shipping four overlapping defaults |
+| Syft/Grype/OSV/pip-audit | Keep optional | Useful for organizations needing independent SBOM/advisory corroboration, but overlapping as a universal default |
+| CodeQL | Keep optional/CI-side | High value for deep source repositories, but costly and license/workflow dependent for small model repos |
+| ClamAV/Gitleaks/YARA | Keep optional by policy | Add when enterprise malware, Git-history, or organization rule depth is required |
+| Sandbox | Separate execution provider | Loading/import/inference is a stronger trust boundary than static evidence scanning |
+| Embedding test | Separate evaluation provider | Needs an approved runner, benchmark corpus, thresholds, and data-plane observations |
+| OPA | Separate optional policy provider | Do not pretend an external PDP is installed; embedded policy remains enforcing until an OPA bundle/decision contract is implemented |
+| Report | Core report provider | A normalized decision and evidence export are product behavior, not a replaceable hostile-file scanner |
+
+The code reflects this split. `GET /model-intake/scanners/readiness` reports evidence adapters, versions,
+rules/database identity, applicability, and the last deterministic functional receipt. `GET
+/model-intake/providers/readiness` reports execution, evaluation, policy, and report providers separately.
+Source-registry adapters remain under `GET /model-intake/capabilities`. This prevents a binary being installed
+from implying that it is runnable, applicable, required, fresh, or capable of satisfying an admission gate.
+
+Every evidence adapter must use an argv-only contract, a read-only exact subject, credential-minimized
+environment, unprivileged execution, CPU/file/descriptor/process/wall limits, bounded output, a strict output
+schema, explicit applicability, and normalized non-pass states. The core packaged tools live in independent
+hash-locked virtual environments so their transitive dependencies cannot replace API/worker dependencies.
+Trivy is checksum-pinned and runs with build-captured data and runtime update/network lookups disabled. An
+image build fails unless every core adapter detects its corresponding deterministic malicious fixture.
 
 ### 2.3 Plain-language answer the report must provide
 
@@ -189,22 +226,24 @@ but the exported status must remain unambiguous.
 | SSRF-resistant acquisition and complete quarantine | Implemented | Available when complete acquisition is enabled and storage is configured; strict saved profiles force it | Maintain provider/redirect contract tests and controlled egress |
 | Repository manifests, archives, custom code, safe-format checks | Implemented mechanism | Provider-authoritative pinned HF inventory, containment, recursive archive/config inspection, and explicit truncation are enforced | Add the same authoritative inventory contract to future providers |
 | Built-in semantic, source, secret, malware-rule, SBOM, binary, and license checks | Implemented | Yes | Improve detection depth and rule updates |
-| ModelScan, Fickling, ClamAV, Gitleaks, Syft, Trivy, OSV-Scanner, pip-audit adapters | Integration contracts implemented | **No; binaries/databases are not in the current source worker image. Required omissions now block explicitly.** | Package digest-pinned, self-testing scanner images and database freshness receipts |
+| ModelScan, Semgrep, Fickling, and Trivy core adapters | Packaged and self-testing | **Yes in a newly rebuilt source worker image.** Hash-locked Python environments, checksum-pinned Trivy, offline DB/policy cache, bounded execution, strict parsers, rule/DB digests, and malicious-fixture receipts are exposed by `/model-intake/scanners/readiness` | Define DB-age policy and recurring rebuild/reassessment operations |
+| ClamAV, Gitleaks, Syft, OSV-Scanner, and pip-audit adapters | Fail-closed integration contracts | No; a missing requested/required tool is `UNSUPPORTED` | Package only where organization policy needs the complementary depth; do not duplicate the core bundle by default |
 | Isolated semantic sandbox | Implemented container boundary | Request/subject/evidence binding, isolation/seccomp gating, broker-worker service, and per-job limits are present | Keep it as static/pre-execution evidence; harden queue ownership further where deployments share hosts |
 | Operator runtime adapter | Implemented integration contract | Can prove exact-digest load and known-answer tests in the hardened container when an operator image/argv adapter is installed | Treat as staging evidence, not a substitute for the microVM tier |
 | Actual tokenizer/model load and inference in disposable microVM | Not implemented | No | Add KVM/Firecracker/Kata runner and loader profiles |
 | Runtime behavior telemetry | Not implemented | No | Integrate Tracee/Falco/auditd/eBPF or equivalent in the execution runner |
 | Provider-neutral evaluation contract | Implemented | Yes when callers provide observations | Add a runner that generates embeddings and observations from the isolated model |
 | Corporate benchmark and thresholds | Integration point implemented | No universal corpus can ship | Organization supplies/version-controls corpus; ShakerScan automates execution and scoring |
-| Signed admission statement and lifecycle registry | Implemented product mechanism | Signed denial is rejected; active registry is mandatory; remote lifecycle/verification is operator-authenticated | Add keyless/Cosign/OPA and deployment-platform integrations |
+| Typed non-scanner providers | Implemented registry/readiness | Sandbox execution, embedding evaluation, embedded policy, and report export are separate classes; OPA is honestly `NOT_IMPLEMENTED` | Add OPA only with a fail-closed decision/bundle contract; keep the embedded policy fallback |
+| Signed admission statement and lifecycle registry | Implemented product mechanism | Signed denial is rejected; active registry is mandatory; remote lifecycle/verification is operator-authenticated | Add keyless/Cosign and deployment-platform integrations |
 | Saved Model Intake policy profiles | Implemented minimum gate expansion | Strict profiles cannot be weakened by caller booleans/subsets | Add organization-specific required scanner/runtime/benchmark fields |
 | One-page control matrix and detailed evidence | Substantially implemented in UI/JSON | Control execution, explicit non-pass, coverage/error detail, phase timeline, and overall decision are visible | Finish HTML/PDF/SARIF parity and per-control evidence links |
 | Deployment by exact approved digest | Authorization contract implemented | Core verifier and active registry are safe; no external deployment enforcement ships | Integrate with internal registry, CI/CD, Kubernetes/admission controller, or model serving platform |
 | Legal, privacy, data provenance, and risk acceptance | Recorded as governance evidence | Organization-dependent | Keep human-owned; enforce required owner, approval, scope, and expiry |
 
-The source-built remote instance checked on 2026-07-29 had none of the eight external scanner binaries
-installed. That deployment must therefore show those controls as `UNSUPPORTED`; the presence of adapter code
-is not operational scanner coverage.
+The source-built remote instance checked before this adapter bundle was implemented had none of the external
+scanner binaries installed. That historical deployment correctly returned `UNSUPPORTED`; it must be rebuilt
+from `f406f55` or later before the new readiness receipt can claim operational coverage.
 
 ### 2.5 Security re-audit correction
 
@@ -212,7 +251,7 @@ A follow-up code re-audit of checkout `a3f10d1`, independently checked against t
 found correctness defects that invalidate several unqualified “implemented” claims above. These are product
 code defects, not operator inputs:
 
-| Priority | Re-audit defect | Implementation status through `96b7253` | Evidence/remaining boundary |
+| Priority | Re-audit defect | Implementation status through `b68f23b` | Evidence/remaining boundary |
 |---|---|---|---|
 | **P0** | Signed `block` verified as `PASS` | **Fixed** in `8f721ce` | Core verifier requires exact `allow`; HTTP verification requires active registry; signed-denial regression exists |
 | **P0** | Caller manifest could define a “complete” HF snapshot | **Fixed** in `6f429d2` | Pinned provider API inventory is authoritative; caller inventory is comparison-only |
@@ -229,7 +268,7 @@ code defects, not operator inputs:
 | **P1** | Generated SBOM/malware evidence did not satisfy its own governance gates or bind snapshot digest | **Fixed** in `102cf94` | Generated evidence is eligible and snapshot malware evidence compares to snapshot subject |
 | **P1** | Attestation pins/transparency policy failed open and crypto-missing path could crash | **Fixed** in `84c5fd0` | Pin allowlist enforced, no-bundle transparency requirement blocks, imports fail cleanly |
 | **P1** | Sandbox peer absent from broker workers | **Fixed** in `de3bbe4` | Broker compose includes the same no-egress service |
-| **P1** | Third-party scanner binaries and databases are not shipped | **Open integration packaging** | Adapter code is not scanner coverage. Production remains blocked until digest-pinned images and fresh DB/rule receipts are installed |
+| **P1** | Third-party scanner binaries and databases are not shipped | **Core bundle fixed** in `f406f55` | ModelScan/Semgrep/Fickling/Trivy are pinned, packaged, offline-capable, bounded, and functionally self-tested; optional engines and recurring freshness/rebuild policy remain |
 
 The critical signed-denial bypass was reproduced in the source-built remote worker before repair: a newly
 generated, correctly signed admission package with `decision.outcome="block"` returned `verified: true`,
@@ -559,11 +598,11 @@ bind issuer and subject, not merely accept any valid Fulcio certificate.
 
 ### 7.6 P0 — Add semantic unsafe-model analysis
 
-**Delivery status: built-in semantic analysis and adapter normalization implemented, but fail-closed coverage
-has bypasses and external engines are not packaged.** CodeSage `.bin` files are conservatively blocked from
-sandbox loading. Directory handling, required flags, parse failures, enumeration limits, and caller-selected
-adapter sets must be repaired. ModelScan and Fickling can add independent semantic evidence only after their
-pinned binaries are installed or provided through isolated scanner images.
+**Delivery status: built-in semantic analysis plus packaged ModelScan and Fickling are implemented.**
+ModelScan 0.8.8 and Fickling 0.1.12 live in separate hash-locked environments and must detect a deterministic
+malicious pickle during the image build. CodeSage `.bin` files remain conservatively blocked from dynamic
+container loading. Applicability, required flags, parser failures, enumeration limits, and caller-selected
+adapter sets fail closed; a future microVM loader is still required for genuinely isolated deserialization.
 
 **Required design:**
 
@@ -579,16 +618,17 @@ pinned binaries are installed or provided through isolated scanner images.
 - Keep multiple engines. No individual pickle scanner is a complete security boundary.
 - Treat scanner timeout, crash, unsupported format, partial analysis, or database failure as non-pass.
 
-The current Fickling release and advisories must be reviewed before pinning. A tool designed to inspect
-hostile serialization must receive the same dependency, sandbox, and update discipline as the model loader.
+The Fickling and ModelScan pins and their transitive hashes must be reviewed on every upgrade. A tool designed
+to inspect hostile serialization receives the same hostile-input, bounded-execution, upgrade, and regression
+discipline as the model loader.
 
 ### 7.7 P1 — Generate SBOMs and perform SCA
 
-**Delivery status: built-in generation and normalized adapters implemented; scanner packaging, databases,
-and dependency-runtime construction remain.** Syft, Trivy, OSV-Scanner, and pip-audit have fail-closed
-adapters, but an operator must currently install and pin the binaries and vulnerability databases. Grype,
-ScanCode/ORT, complete locked-environment construction, and recurring database-driven rescans remain target
-work.
+**Delivery status: built-in generation and packaged Trivy filesystem SCA are implemented; complete runtime
+construction and complementary engines remain.** Trivy 0.72.0 is checksum-pinned, its vulnerability and
+misconfiguration data is captured at image build, and runtime scans disable updates and external dependency
+lookups. Syft, OSV-Scanner, and pip-audit remain fail-closed optional adapters. Grype, ScanCode/ORT, complete
+locked-environment construction, freshness policy, and recurring database-driven rescans remain target work.
 
 Model weights do not have CVEs in the same way as conventional packages. SCA applies to custom model code,
 Python packages, native libraries, base images, GPU runtimes, model servers, and supporting services.
@@ -632,8 +672,9 @@ Required SCA policy:
 ### 7.8 P1 — Add malware, secrets, and native-binary scanning
 
 **Delivery status: partially implemented.** Built-in secret, malware-rule, archive, and native-binary checks
-exist, with adapters for ClamAV, Gitleaks, and Trivy. Packaged engines, YARA, optional TruffleHog/enterprise
-anti-malware, Git-history scanning, and versioned organization rule distribution remain.
+exist, and packaged Trivy adds secret, misconfiguration, and license evidence. ClamAV and Gitleaks remain
+optional fail-closed adapters. YARA, optional TruffleHog/enterprise anti-malware, Git-history scanning, and
+versioned organization rule distribution remain.
 
 Run at least:
 
@@ -1244,7 +1285,7 @@ Production must block when any of the following is true:
 The phases are ordered by risk dependency. Status refers to reusable product mechanisms, not approval of a
 specific model.
 
-### Phase -1 — Restore admission correctness — **completed through `96b7253`**
+### Phase -1 — Restore admission correctness — **completed through `b68f23b`**
 
 Complete before adding more scanners or model-execution features:
 
@@ -1288,18 +1329,18 @@ Remaining:
 - Document object-store sizing, backup, tenant quotas, and cleanup for operators.
 - Run scheduled real-model acquisitions outside ordinary PR jobs.
 
-### Phase 2 — Generated static evidence — **partially implemented**
+### Phase 2 — Generated static evidence — **core bundle implemented; optional depth remains**
 
 Delivered: built-in semantic/source/secret/malware/SBOM/SCA/binary/license checks; normalized fail-closed
-contracts for ModelScan, Fickling, ClamAV, Gitleaks, Syft, Trivy, OSV-Scanner, and pip-audit; evidence
-provenance and digest binding.
+contracts for ModelScan, Semgrep, Fickling, Trivy, ClamAV, Gitleaks, Syft, OSV-Scanner, and pip-audit;
+evidence provenance and digest binding; packaged ModelScan/Semgrep/Fickling/Trivy; hash-locked/checksum-pinned
+installation; offline Trivy data; bounded execution; readiness API/UI; and image-build malicious-fixture tests.
 
 Remaining product work:
 
-- Package pinned third-party scanners as isolated images or installable plug-in bundles.
-- Publish a readiness endpoint/UI showing binary, version, image digest, rule/database version, freshness,
-  and last self-test.
-- Add YARA and optionally Grype, Semgrep/Bandit/CodeQL, TruffleHog, and ScanCode/ORT through the same contract.
+- Define enforceable maximum DB/rule age and trigger rebuild/reassessment when the bundled data becomes stale.
+- Add YARA and optionally Grype, Bandit/CodeQL, TruffleHog, and ScanCode/ORT through the same contract only
+  where their incremental evidence justifies image size, latency, and maintenance.
 - Isolate each hostile-file parser with read-only input, no egress where databases permit, resource limits,
   and bounded output.
 - Provide a scanner expectation matrix so a required missing engine blocks instead of silently reducing
@@ -1535,12 +1576,12 @@ every decision relying on the affected scanner image/rules digest as requiring r
 | Caller-defined “complete” repository | Authoritative pinned Hugging Face manifest; caller manifest compare-only | Other providers need equivalent authoritative adapters | Add provider adapters with immutable-manifest proof | P1 |
 | Signed denial accepted as authorization | Exact signed `allow` and active-registry enforcement with regression tests | External deployment can omit the integration | Add promotion/serving hooks and deployed-system negative tests | P0 |
 | Caller weakens required gates | Server-side strict-profile expansion and expectation matrix | Custom profiles can intentionally be less strict | Govern profile creation/activation and bind production environments to approved profiles | P1 |
-| External scanner adapters mistaken for installed coverage | Fail-closed `UNSUPPORTED` status | Operators may overlook missing binaries/databases | Packaged scanner images, readiness UI, expectation matrix | P0 |
+| External scanner adapters mistaken for installed coverage | Fail-closed status plus packaged core bundle, rules/DB identity, readiness UI, and functional receipt | Optional tools can still be requested without being installed; bundled DB can age | Enforce freshness policy and preserve explicit `UNSUPPORTED` for optional tools | P0 |
 | Unsafe PyTorch serialization | Built-in semantics, Fickling/ModelScan adapters, sandbox load prohibition | No actual isolated deserialization/load evidence | Multi-engine static analysis plus disposable VM load | P0 |
 | Malicious custom runtime behavior | Complete custom-code inventory, AST checks, hardened operator runtime adapter | Container isolation is weaker than a microVM and telemetry is self-reported/bound | KVM/microVM runner with independent runtime telemetry | P0 |
 | Model evaluation evidence supplied by caller | Deterministic evaluation contract and provenance | Vectors/observations may not be generated by reviewed model | Bind runner-generated observations to exact model/runtime | P0 |
-| Dependency CVEs | Generated SBOM/SCA checks and external adapters | Tools/databases not packaged; runtime may not be locked | Scanner bundles, locked runtime builder, recurring rescans | P1 |
-| Malware/secrets | Built-in checks plus ClamAV/Gitleaks/Trivy adapters | Detection depth and rule freshness vary | Packaged engines, YARA/org rules, readiness/freshness gates | P1 |
+| Dependency CVEs | Generated SBOM/SCA plus packaged offline Trivy | Runtime may not be locked; DB ages between image rebuilds | Locked runtime builder, freshness gate, recurring rescans | P1 |
+| Malware/secrets | Built-in checks plus packaged Trivy and optional ClamAV/Gitleaks adapters | Detection depth and rule freshness vary | YARA/org rules and enforceable freshness/reassessment gates | P1 |
 | Retrieval/ACL leakage | Evaluation schema for ACL/tenant/graph/cache/deletion controls | No universal live data-plane connector or corporate fixture | Bounded connectors plus organization-provided principals/data | P1 |
 | Embedding poisoning/inversion | Deterministic scoring contract | No runner-generated adversarial corpus results | Automated benchmark plug-ins in isolated runner | P1 |
 | Ambiguous report coverage | Decision/control cards plus first-page execution matrix and phase timeline | Operators still need organization-specific interpretation | Add freshness/telemetry columns and organization report profiles | P1 |
@@ -1591,7 +1632,10 @@ Owners must decide and record:
   identities; fleet-wide actions require separate authorization.
 - [x] All signature, signed-admission, and DSSE tests execute in mandatory CI without module-level skips.
 - [x] Durable UI/API activity and deployment decisions exist.
-- [ ] Pinned external scanners are packaged as isolated, self-testing plug-ins with rule/database readiness.
+- [x] The core ModelScan/Semgrep/Fickling/Trivy adapters are pinned, isolated, packaged, functionally
+  self-tested, and expose rule/database/readiness identity.
+- [ ] Optional ClamAV/Gitleaks/Syft/OSV/pip-audit/YARA or organization engines are packaged where policy
+  requires them, with recurring freshness and reassessment operations.
 - [ ] A disposable KVM/microVM model loader executes import/load/inference and produces runtime telemetry.
 - [ ] The evaluator automatically consumes embeddings and measurements generated by that exact runner.
 - [ ] The UI/JSON report has explicit passed/failed/not-run/coverage/error detail and a phase timeline; HTML/PDF,

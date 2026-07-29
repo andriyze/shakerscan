@@ -70,7 +70,7 @@ flags, skills, agents, adapters, modules, and durable tables) plus architecture/
 - **Findings (`/findings`)**: filter by DAST, Deep Hunt, Interactive, AI Gate, Model Intake, ASM, or Manual source plus severity/status/last-seen/domain/search; sort by severity/first-seen/last-seen/CVSS; bulk cleanup with dry-run preview.
 - **Finding Detail (`/findings/{id}`)**: status triage buttons (active/resolved/false_positive/accepted_risk), **delete finding** with confirmation, source badge, analyst notes, CVSS, CWE link, evidence summary (URLs, payloads, parameters, status codes, response anomalies), remediation steps, AI analysis (verdict/confidence/rationale/recommendations), raw HTTP request/response, copy buttons for URLs/payloads/IDs, external links to vulnerable URLs, one-shot proof replay, and a bounded **Verify finding** action for target-linked DAST/Deep Hunt/ASM/manual web findings.
 - **AI Gate (`/ai-gate`)**: create and manage AI targets, use Secure RAG + Agent presets, choose auth, target type, probe pack, profile, and environment, then queue AI safety scans for chat APIs, RAG APIs, agent traces, and MCP endpoints. *(Preview surface: deterministic real-stack PR smoke is implemented; planned policy/exception and deterministic-judge seams are not yet release-gated.)*
-- **Model Intake (`/model-intake`)**: use model-intake presets and queue artifact checks with artifact URL, metadata URL/JSON, checksum, detached signature URL/value, public key URL/PEM, trusted key PEM/fingerprints, saved strict policy profile, model card, approval flags, timeout, and download cap. Reports expose a control execution matrix and structured phase timeline. Strict profiles require complete authoritative acquisition, cryptographic trust/attestation, required scanners, and bound runtime evidence; unavailable controls fail closed. The core worker never imports model code, while an operator-provided digest-pinned sandbox adapter can perform bounded load/inference tests. Corporate promotion hooks and the microVM runtime tier remain integrations.
+- **Model Intake (`/model-intake`)**: use model-intake presets and queue artifact checks with artifact URL, metadata URL/JSON, checksum, detached signature URL/value, public key URL/PEM, trusted key PEM/fingerprints, saved strict policy profile, model card, approval flags, timeout, and download cap. Reports expose a control execution matrix and structured phase timeline. Strict profiles require complete authoritative acquisition, cryptographic trust/attestation, required scanners, and bound runtime evidence; unavailable controls fail closed. Rebuilt source workers package and functionally self-test ModelScan, Semgrep, Fickling, and offline Trivy; `/model-intake/scanners/readiness` proves their versions/rules/DB/receipt. Execution, evaluation, policy, and report capabilities are separately reported at `/model-intake/providers/readiness`. The core worker never imports model code, while an operator-provided digest-pinned sandbox adapter can perform bounded load/inference tests. Corporate promotion hooks and the microVM runtime tier remain integrations.
 - **Policy Profiles (`/settings/policy-profiles`)**: create, edit, activate/deactivate, and delete deployment gate profiles for AI Gate, Model Intake, and DAST decisions. Model Intake can select saved active profiles.
 - **Interactive Testing (`/interactive`)**: browser sessions, managed credential profiles, target principals, authz expectations, endpoint replay, screenshots, and explicit finding creation.
 - **Exceptions (`/exceptions`)**: exception queue, owner/approver/control repair, expiry visibility, and lifecycle sweep.
@@ -742,6 +742,9 @@ that loads the exact quarantined subject and runs bounded known-answer cases. It
 checksum/signature/attestation, model card, license review, generated SBOM/dependency evidence, malware and
 secret evidence, runtime/evaluation contracts, deployment restrictions, monitoring plan, signed admission,
 and revocable approval lifecycle checks. Strict profiles fail closed when required controls are unavailable.
+Newly rebuilt source workers include hash-locked ModelScan, Semgrep, and Fickling environments plus a
+checksum-pinned Trivy binary with build-captured vulnerability/policy data. The image build must detect known
+malicious fixtures with all four tools. Applicability is based on file/repository facts, not model names.
 The disposable microVM tier and corporate deployment-platform enforcement are explicit external integrations,
 not implied by a ShakerScan `ALLOW` alone.
 
@@ -751,6 +754,10 @@ excluded from `source_type=dast`.
 The `/ai/test-scenarios` catalog also includes `model-intake-pipeline` presets and the canonical Honey model-intake routes: scenario registry, index, artifact/manifest/signature/card reads, submit, status, scan, approve, and deploy.
 
 ```bash
+# Verify static adapters and the separate execution/evaluation/policy/report providers
+curl http://localhost:8080/model-intake/scanners/readiness
+curl http://localhost:8080/model-intake/providers/readiness
+
 # Queue a model intake scan
 curl -X POST http://localhost:8080/model-intake/scan \
   -H "Content-Type: application/json" \
