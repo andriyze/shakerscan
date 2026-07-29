@@ -47,12 +47,80 @@ def test_sandbox_file_queue_resolves_only_content_addressed_objects(tmp_path, mo
     requests = queue / "requests"
     requests.mkdir(parents=True)
     request = requests / "request.json"
-    request.write_text(json.dumps({"digest": digest, "filename": "model.safetensors"}), encoding="utf-8")
+    request.write_text(json.dumps({
+        "request_id": "request",
+        "request_nonce": "n" * 32,
+        "digest": digest,
+        "filename": "model.safetensors",
+        "timeout_seconds": 5,
+    }), encoding="utf-8")
     monkeypatch.setattr(sandbox, "_network_probe", lambda: {"network_mode": "none", "blocked": True, "outbound_probes": []})
 
     assert sandbox.process_pending_once(queue, quarantine) == 1
     result = json.loads((queue / "responses" / "request.json").read_text("utf-8"))
     assert result["status"] == "PASS"
+    assert result["request_binding"] == sandbox._request_binding("request", "n" * 32)
+    evidence = dict(result)
+    evidence.pop("evidence_sha256")
+    assert result["evidence_sha256"] == sandbox._sha256_json(evidence)
+
+
+def test_sandbox_client_rejects_unbound_or_tampered_pass_response():
+    digest = "a" * 64
+    response = sandbox._attach_evidence_digest({
+        "schema_version": sandbox.SCHEMA_VERSION,
+        "provenance_class": "shakerscan_generated",
+        "status": "PASS",
+        "request_binding": sandbox._request_binding("request", "n" * 32),
+        "subject": {"digest": f"sha256:{digest}", "filename": "model.safetensors"},
+        "isolation": {
+            "network": {"network_mode": "none", "blocked": False},
+            "uid": 1000,
+            "read_only_rootfs_declared": True,
+            "no_new_privileges_declared": True,
+            "credentials_present": False,
+        },
+    })
+
+    result = sandbox._validate_sandbox_response(
+        response,
+        request_id="request",
+        request_nonce="n" * 32,
+        digest=digest,
+        filename="model.safetensors",
+    )
+
+    assert result["status"] == "CRASHED"
+    assert result["error"] == "sandbox_response_validation_failed"
+    assert result["validation_errors"] == ["no_egress_not_proven"]
+
+
+def test_sandbox_client_accepts_only_digest_bound_hardened_evidence():
+    digest = "a" * 64
+    response = sandbox._attach_evidence_digest({
+        "schema_version": sandbox.SCHEMA_VERSION,
+        "provenance_class": "shakerscan_generated",
+        "status": "PASS",
+        "request_binding": sandbox._request_binding("request", "n" * 32),
+        "subject": {"digest": f"sha256:{digest}", "filename": "model.safetensors"},
+        "isolation": {
+            "network": {"network_mode": "none", "blocked": True},
+            "uid": 1000,
+            "read_only_rootfs_declared": True,
+            "no_new_privileges_declared": True,
+            "credentials_present": False,
+        },
+    })
+
+    result = sandbox._validate_sandbox_response(
+        response,
+        request_id="request",
+        request_nonce="n" * 32,
+        digest=digest,
+        filename="model.safetensors",
+    )
+
+    assert result is response
 
 
 def test_sandbox_client_fails_fast_when_service_is_absent(tmp_path):
