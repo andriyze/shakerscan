@@ -613,6 +613,7 @@ def _corporate_use_assessment(
         or scanner_statuses.get("modelscan") == "FAIL"
         or "model_intake:sha256_mismatch" in finding_ids
     )
+    serialization_finding = next((item for item in findings if item.get("id") == "model_intake:unsafe_serialization"), None)
     controls: list[dict[str, Any]] = []
 
     def control(identifier: str, label: str, status: str, detail: str) -> None:
@@ -628,18 +629,20 @@ def _corporate_use_assessment(
         "PASS" if checksum_status == "verified" else "FAIL" if checksum_status == "mismatch" else "INDETERMINATE",
         f"Checksum status: {checksum_status}.",
     )
+    generated_scanners_complete = generated_evidence.get("status") == "PASS"
     control(
         "malicious_primitives", "Known malicious serialization primitives",
-        "FAIL" if proven_malicious else "PASS" if pickle_classification == "expected_framework_pickle" or scanner_statuses.get("modelscan") == "PASS" else "INDETERMINATE",
+        "FAIL" if proven_malicious else "PASS" if generated_scanners_complete and (pickle_classification == "expected_framework_pickle" or not serialization_finding) else "INDETERMINATE",
         (
             "A dangerous callable, known malicious primitive, or digest mismatch was proven."
             if proven_malicious
             else "No known malicious callable was proven; executable-format capability is assessed separately."
             if pickle_classification == "expected_framework_pickle"
+            else "No executable serialization was detected and all applicable generated scanners completed."
+            if generated_scanners_complete and not serialization_finding
             else "Semantic malicious-primitive coverage is incomplete."
         ),
     )
-    serialization_finding = next((item for item in findings if item.get("id") == "model_intake:unsafe_serialization"), None)
     control(
         "serialization_policy", "Corporate serialization policy",
         "FAIL" if serialization_finding else "PASS",
@@ -654,8 +657,12 @@ def _corporate_use_assessment(
     dependency_status = scanner_statuses.get("trivy") or scanner_statuses.get("pip-audit") or scanner_statuses.get("osv-scanner")
     control(
         "dependencies", "Dependency and CVE review",
-        "PASS" if dependency_status == "PASS" else "FAIL" if dependency_status == "FAIL" else "INDETERMINATE",
-        f"Dependency scanner status: {dependency_status or 'NOT_RUN'}.",
+        "PASS" if dependency_status == "PASS" else "FAIL" if dependency_status == "FAIL" or (custom_code_required and dependency_status in {None, "NOT_APPLICABLE"}) else "NOT_APPLICABLE" if dependency_status == "NOT_APPLICABLE" else "INDETERMINATE",
+        (
+            "Custom executable code has no dependency manifest/runtime inventory, so CVE coverage is incomplete."
+            if custom_code_required and dependency_status in {None, "NOT_APPLICABLE"}
+            else f"Dependency scanner status: {dependency_status or 'NOT_RUN'}."
+        ),
     )
     sandbox_status = str(dynamic_sandbox.get("status") or "NOT_RUN")
     runtime = dynamic_sandbox.get("inspection", {}).get("runtime") if isinstance(dynamic_sandbox.get("inspection"), dict) else {}
@@ -3989,14 +3996,19 @@ async def run_model_intake_scan(
         ))
 
     if require_governance and effective_sbom_evidence and strict_governance and not sbom_policy["valid"] and not metadata_unavailable:
+        custom_code_without_dependencies = bool(repository_manifest.get("custom_code_required")) and sbom_policy.get("status") == "empty"
         findings.append(_finding(
-            finding_id="invalid_sbom_evidence",
-            title="Model SBOM evidence is incomplete or unvalidated",
-            severity="medium",
-            description="Strict model-intake policy requires a CycloneDX/SPDX or component-list SBOM with at least one component.",
+            finding_id="runtime_dependency_inventory_missing" if custom_code_without_dependencies else "invalid_sbom_evidence",
+            title="Runtime dependency inventory missing for custom model code" if custom_code_without_dependencies else "Model SBOM evidence is incomplete or unvalidated",
+            severity="high" if custom_code_without_dependencies else "medium",
+            description=(
+                "The repository contains custom executable model code but no dependency manifest or generated runtime component inventory, so library and CVE review is not reproducible."
+                if custom_code_without_dependencies
+                else "Strict model-intake policy requires a CycloneDX/SPDX or component-list SBOM with at least one component."
+            ),
             artifact_ref=artifact_ref,
             evidence={"artifact": name, "sbom_policy": sbom_policy},
-            remediation="Attach a valid CycloneDX or SPDX SBOM with package components, purls, hashes, and license evidence.",
+            remediation="Build a hash-locked runtime for the pinned model revision, generate its CycloneDX/SPDX SBOM, and run offline SCA against the installed components.",
         ))
 
     if require_governance and not effective_malware_evidence and not metadata_unavailable:

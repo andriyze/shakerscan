@@ -71,6 +71,16 @@ def test_evaluation_requires_predeclared_thresholds_and_stability():
     assert "stability_not_measured" in codes
 
 
+def test_missing_evaluation_is_digest_bound_without_false_tamper_blocker():
+    report = evaluate(None, artifact_sha256="a" * 64)
+    verified = verify_report(report, artifact_sha256="a" * 64)
+
+    assert verified["status"] == "FAIL"
+    assert verified["worker_verified"] is True
+    assert verified["verification_blockers"] == []
+    assert {item["code"] for item in verified["blockers"]} == {"evaluation_spec_missing"}
+
+
 def test_quality_is_separate_unless_suite_explicitly_requires_it():
     spec = _spec()
     spec["suite_scope"] = ["security"]

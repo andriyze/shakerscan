@@ -25,6 +25,13 @@ def _digest(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
 
 
+def _finalize_report(report: dict[str, Any]) -> dict[str, Any]:
+    report.setdefault("finished_at", datetime.now(timezone.utc).isoformat())
+    report.setdefault("evaluated_at", report["finished_at"])
+    report["evidence_sha256"] = _digest(report)
+    return report
+
+
 def _case_ref(value: Any) -> str:
     return f"case:{_digest(str(value))[:16]}"
 
@@ -99,7 +106,7 @@ def evaluate(spec: Any, *, artifact_sha256: str | None) -> dict[str, Any]:
             return default
 
     if not isinstance(spec, dict):
-        return {
+        return _finalize_report({
             "schema_version": SCHEMA_VERSION,
             "provenance_class": "shakerscan_generated",
             "status": "INDETERMINATE",
@@ -107,12 +114,12 @@ def evaluate(spec: Any, *, artifact_sha256: str | None) -> dict[str, Any]:
             "blockers": [{"code": "evaluation_spec_missing", "detail": "No evaluation specification was supplied."}],
             "warnings": [],
             "started_at": started_at,
-        }
+        })
     try:
         if len(json.dumps(spec, default=str).encode()) > MAX_SPEC_BYTES:
             raise ValueError("evaluation specification exceeds the 20 MB bound")
     except (TypeError, ValueError) as exc:
-        return {
+        return _finalize_report({
             "schema_version": SCHEMA_VERSION,
             "provenance_class": "shakerscan_generated",
             "status": "FAIL",
@@ -120,7 +127,7 @@ def evaluate(spec: Any, *, artifact_sha256: str | None) -> dict[str, Any]:
             "blockers": [{"code": "evaluation_spec_invalid", "detail": str(exc)}],
             "warnings": [],
             "started_at": started_at,
-        }
+        })
 
     thresholds = spec.get("thresholds") if isinstance(spec.get("thresholds"), dict) else {}
     raw_scope = spec.get("suite_scope")
@@ -351,9 +358,7 @@ def evaluate(spec: Any, *, artifact_sha256: str | None) -> dict[str, Any]:
         "started_at": started_at,
         "finished_at": datetime.now(timezone.utc).isoformat(),
     }
-    report["evaluated_at"] = report["finished_at"]
-    report["evidence_sha256"] = _digest(report)
-    return report
+    return _finalize_report(report)
 
 
 def verify_report(report: Any, *, artifact_sha256: str | None) -> dict[str, Any]:
@@ -369,20 +374,23 @@ def verify_report(report: Any, *, artifact_sha256: str | None) -> dict[str, Any]
         }
     verified = dict(report)
     supplied_digest = verified.pop("evidence_sha256", None)
-    blockers = list(verified.get("blockers") or [])
+    policy_blockers = list(verified.get("blockers") or [])
+    verification_blockers: list[dict[str, str]] = []
     if report.get("schema_version") != SCHEMA_VERSION:
-        blockers.append({"code": "evaluation_schema_invalid", "detail": "Evaluation report schema is unsupported."})
+        verification_blockers.append({"code": "evaluation_schema_invalid", "detail": "Evaluation report schema is unsupported."})
     if supplied_digest != _digest(verified):
-        blockers.append({"code": "evaluation_evidence_digest_mismatch", "detail": "Evaluation report was changed after generation."})
+        verification_blockers.append({"code": "evaluation_evidence_digest_mismatch", "detail": "Evaluation report was changed after generation."})
     observed = str(artifact_sha256 or "").lower()
     bound = str(report.get("artifact_sha256") or "").lower()
     if not observed or bound != observed:
-        blockers.append({"code": "evaluation_artifact_digest_mismatch", "detail": "Evaluation is not bound to the complete observed artifact."})
+        verification_blockers.append({"code": "evaluation_artifact_digest_mismatch", "detail": "Evaluation is not bound to the complete observed artifact."})
+    blockers = policy_blockers + verification_blockers
     return {
         **report,
         "status": "FAIL" if blockers else report.get("status"),
         "blockers": blockers,
-        "worker_verified": not blockers,
+        "worker_verified": not verification_blockers,
+        "verification_blockers": verification_blockers,
     }
 
 
