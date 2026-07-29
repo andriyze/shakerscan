@@ -1326,6 +1326,7 @@ export interface ModelIntakeScanRequest {
   require_generated_evaluation?: boolean
   require_signed_admission?: boolean
   admission_expires_days?: number
+  admission_reassessment_days?: number
   allow_insecure_http?: boolean
   allow_private_networks?: boolean
   allowed_acquisition_hosts?: string[]
@@ -1346,6 +1347,25 @@ export interface ModelIntakeTrustAnchor {
   is_active: boolean
   created_at?: string
   updated_at?: string
+}
+
+export interface ModelIntakeAdmission {
+  id: string
+  scan_id: string
+  target_id?: string | null
+  artifact_sha256: string
+  repository_snapshot_sha256?: string | null
+  statement_sha256: string
+  decision: string
+  status: 'active' | 'denied' | 'reassessment_required' | 'revoked' | 'expired' | 'superseded'
+  policy_profile?: string | null
+  policy_version?: string | null
+  issued_at: string
+  expires_at: string
+  reassessment_due_at: string
+  revoked_at?: string | null
+  revoked_by?: string | null
+  revocation_reason?: string | null
 }
 
 export interface ModelIntakeScanResponse {
@@ -3731,6 +3751,14 @@ export async function deactivateModelIntakeTrustAnchor(id: string): Promise<{ de
   const res = await fetch(`${API_URL}/model-intake/trust-anchors/${id}`, { method: 'DELETE' })
   if (!res.ok) {
     throw new Error(await getApiErrorMessage(res, 'Failed to deactivate Model Intake trust anchor'))
+  }
+  return res.json()
+}
+
+export async function getModelIntakeAdmissions(limit: number = 20): Promise<{ admissions: ModelIntakeAdmission[] }> {
+  const res = await fetch(`${API_URL}/model-intake/admissions?limit=${limit}`)
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Failed to load Model Intake admissions'))
   }
   return res.json()
 }

@@ -76,6 +76,11 @@ except ModuleNotFoundError:
     from scanner.scanner_tools.model_intake_evaluation import evaluate as _evaluate_model_intake_request
 
 try:
+    from model_intake_admissions import REASSESSMENT_TRIGGERS, triggered_status as _model_admission_triggered_status
+except ModuleNotFoundError:
+    from api.model_intake_admissions import REASSESSMENT_TRIGGERS, triggered_status as _model_admission_triggered_status
+
+try:
     from constants import SMART_SCAN_BUDGETS, resolve_scan_budget, resolve_or_consume_budget
 except ModuleNotFoundError as exc:
     if exc.name != "constants":
@@ -3705,6 +3710,7 @@ class ModelIntakeScanRequest(BaseModel):
     require_generated_evaluation: bool = False
     require_signed_admission: bool = False
     admission_expires_days: int = Field(default=30, ge=1, le=365)
+    admission_reassessment_days: int = Field(default=30, ge=1, le=365)
     timeout_seconds: int = Field(default=20, ge=1, le=120)
     allow_insecure_http: bool = Field(
         default=False,
@@ -3744,6 +3750,32 @@ class ModelIntakeAdmissionVerifyRequest(BaseModel):
     admission_package: dict[str, Any]
     expected_artifact_sha256: str = Field(pattern="^[0-9a-fA-F]{64}$")
     expected_repository_snapshot_sha256: Optional[str] = Field(default=None, pattern="^[0-9a-fA-F]{64}$")
+    require_registered_active_admission: bool = True
+
+
+class ModelIntakeAdmissionRevokeRequest(BaseModel):
+    actor: str = Field(min_length=1, max_length=200)
+    reason: str = Field(min_length=3, max_length=2000)
+
+
+class ModelIntakeReassessmentEventRequest(BaseModel):
+    trigger_type: str
+    requested_action: str = Field(default="reassess", pattern="^(reassess|revoke)$")
+    actor: str = Field(min_length=1, max_length=200)
+    reason: str = Field(min_length=3, max_length=2000)
+    artifact_sha256: Optional[str] = Field(default=None, pattern="^[0-9a-fA-F]{64}$")
+    statement_sha256: Optional[str] = Field(default=None, pattern="^[0-9a-fA-F]{64}$")
+    all_active: bool = False
+    evidence_digest: Optional[str] = Field(default=None, pattern="^[0-9a-fA-F]{64}$")
+    metadata_json: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("trigger_type")
+    @classmethod
+    def validate_trigger_type(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in REASSESSMENT_TRIGGERS:
+            raise ValueError("unsupported Model Intake reassessment trigger")
+        return normalized
 
 
 class ModelIntakeTrustAnchorRequest(BaseModel):
@@ -10886,7 +10918,152 @@ async def verify_model_intake_admission(request: ModelIntakeAdmissionVerifyReque
     )
     if not result.get("verified"):
         raise HTTPException(status_code=409, detail=result)
+    if request.require_registered_active_admission:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """UPDATE model_intake_admissions
+                   SET status='expired', updated_at=NOW()
+                   WHERE status='active' AND expires_at <= NOW()"""
+            )
+            admission = await conn.fetchrow(
+                """SELECT id, scan_id, status, expires_at, reassessment_due_at
+                   FROM model_intake_admissions
+                   WHERE statement_sha256=$1""",
+                result.get("statement_sha256"),
+            )
+        if not admission:
+            raise HTTPException(status_code=409, detail={**result, "verified": False, "status": "FAIL", "blockers": ["admission_not_registered"]})
+        if admission["status"] != "active":
+            raise HTTPException(status_code=409, detail={**result, "verified": False, "status": "FAIL", "blockers": [f"admission_{admission['status']}"]})
+        result["registry"] = {
+            "admission_id": str(admission["id"]),
+            "scan_id": str(admission["scan_id"]),
+            "status": admission["status"],
+            "expires_at": _iso_or_none(admission["expires_at"]),
+            "reassessment_due_at": _iso_or_none(admission["reassessment_due_at"]),
+        }
     return result
+
+
+async def _expire_model_intake_admissions(conn: Any) -> None:
+    await conn.execute(
+        """UPDATE model_intake_admissions
+           SET status='expired', updated_at=NOW()
+           WHERE status IN ('active','reassessment_required') AND expires_at <= NOW()"""
+    )
+
+
+@app.get("/model-intake/admissions")
+async def list_model_intake_admissions(
+    status: Optional[str] = Query(default=None, pattern="^(active|denied|reassessment_required|revoked|expired|superseded)$"),
+    artifact_sha256: Optional[str] = Query(default=None, pattern="^[0-9a-fA-F]{64}$"),
+    limit: int = Query(default=100, ge=1, le=500),
+):
+    conditions = []
+    args: list[Any] = []
+    if status:
+        args.append(status)
+        conditions.append(f"status=${len(args)}")
+    if artifact_sha256:
+        args.append(artifact_sha256.lower())
+        conditions.append(f"artifact_sha256=${len(args)}")
+    args.append(limit)
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    async with db_pool.acquire() as conn:
+        await _expire_model_intake_admissions(conn)
+        rows = await conn.fetch(
+            f"""SELECT id, scan_id, target_id, artifact_sha256, repository_snapshot_sha256,
+                       statement_sha256, decision, status, policy_profile, policy_version,
+                       issued_at, expires_at, reassessment_due_at, revoked_at, revoked_by,
+                       revocation_reason, created_at, updated_at
+                FROM model_intake_admissions {where}
+                ORDER BY created_at DESC LIMIT ${len(args)}""",
+            *args,
+        )
+    return {"admissions": [row_to_dict(row) for row in rows]}
+
+
+@app.get("/model-intake/admissions/{admission_id}")
+async def get_model_intake_admission(admission_id: str):
+    try:
+        admission_uuid = uuid.UUID(admission_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid admission id")
+    async with db_pool.acquire() as conn:
+        await _expire_model_intake_admissions(conn)
+        row = await conn.fetchrow("SELECT * FROM model_intake_admissions WHERE id=$1", admission_uuid)
+        events = await conn.fetch(
+            "SELECT * FROM model_intake_admission_events WHERE admission_id=$1 ORDER BY created_at DESC LIMIT 200",
+            admission_uuid,
+        ) if row else []
+    if not row:
+        raise HTTPException(status_code=404, detail="Model admission not found")
+    return {"admission": row_to_dict(row), "events": [row_to_dict(item) for item in events]}
+
+
+@app.post("/model-intake/admissions/{admission_id}/revoke")
+async def revoke_model_intake_admission(admission_id: str, request: ModelIntakeAdmissionRevokeRequest):
+    try:
+        admission_uuid = uuid.UUID(admission_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid admission id")
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """UPDATE model_intake_admissions
+               SET status='revoked', revoked_at=NOW(), revoked_by=$2, revocation_reason=$3, updated_at=NOW()
+               WHERE id=$1 AND status IN ('active','reassessment_required')
+               RETURNING id, status, statement_sha256""",
+            admission_uuid, request.actor, request.reason,
+        )
+        if row:
+            await conn.execute(
+                """INSERT INTO model_intake_admission_events
+                   (admission_id,event_type,actor,reason,previous_status,new_status,evidence_digest)
+                   VALUES ($1,'revoked',$2,$3,'active','revoked',$4)""",
+                admission_uuid, request.actor, request.reason, row["statement_sha256"],
+            )
+    if not row:
+        raise HTTPException(status_code=409, detail="Admission is absent or no longer deployable")
+    return {"admission_id": str(row["id"]), "status": "revoked"}
+
+
+@app.post("/model-intake/reassessment/events")
+async def create_model_intake_reassessment_event(request: ModelIntakeReassessmentEventRequest):
+    if not request.all_active and not request.artifact_sha256 and not request.statement_sha256:
+        raise HTTPException(status_code=400, detail="Select artifact_sha256, statement_sha256, or explicitly set all_active")
+    new_status = _model_admission_triggered_status(request.trigger_type, request.requested_action)
+    conditions = ["status IN ('active','reassessment_required')"]
+    args: list[Any] = []
+    if request.artifact_sha256:
+        args.append(request.artifact_sha256.lower())
+        conditions.append(f"artifact_sha256=${len(args)}")
+    if request.statement_sha256:
+        args.append(request.statement_sha256.lower())
+        conditions.append(f"statement_sha256=${len(args)}")
+    args.extend([new_status, request.actor, request.reason])
+    status_arg, actor_arg, reason_arg = len(args) - 2, len(args) - 1, len(args)
+    async with db_pool.acquire() as conn:
+        await _expire_model_intake_admissions(conn)
+        rows = await conn.fetch(
+            f"""UPDATE model_intake_admissions
+                SET status=${status_arg},
+                    revoked_at=CASE WHEN ${status_arg}='revoked' THEN NOW() ELSE revoked_at END,
+                    revoked_by=CASE WHEN ${status_arg}='revoked' THEN ${actor_arg} ELSE revoked_by END,
+                    revocation_reason=CASE WHEN ${status_arg}='revoked' THEN ${reason_arg} ELSE revocation_reason END,
+                    updated_at=NOW()
+                WHERE {' AND '.join(conditions)}
+                RETURNING id, statement_sha256""",
+            *args,
+        )
+        for row in rows:
+            await conn.execute(
+                """INSERT INTO model_intake_admission_events
+                   (admission_id,event_type,trigger_type,actor,reason,previous_status,new_status,evidence_digest,metadata_json)
+                   VALUES ($1,'reassessment_trigger',$2,$3,$4,'active',$5,$6,$7::jsonb)""",
+                row["id"], request.trigger_type, request.actor, request.reason, new_status,
+                request.evidence_digest or row["statement_sha256"], json.dumps(request.metadata_json),
+            )
+    return {"affected": len(rows), "status": new_status, "trigger_type": request.trigger_type}
 
 
 async def _enrich_model_intake_scan_request(request: ModelIntakeScanRequest) -> ModelIntakeScanRequest:
@@ -11001,6 +11178,7 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
         "require_generated_evaluation": request.require_generated_evaluation,
         "require_signed_admission": request.require_signed_admission,
         "admission_expires_days": request.admission_expires_days,
+        "admission_reassessment_days": request.admission_reassessment_days,
         "timeout_seconds": request.timeout_seconds,
         "allow_insecure_http": request.allow_insecure_http,
         "allow_private_networks": request.allow_private_networks,

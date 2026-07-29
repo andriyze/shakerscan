@@ -17790,6 +17790,7 @@ def test_model_admission_endpoint_passes_exact_deployment_subjects(monkeypatch):
         admission_package={"statement": {"subject": {}}},
         expected_artifact_sha256="A" * 64,
         expected_repository_snapshot_sha256="B" * 64,
+        require_registered_active_admission=False,
     )
 
     result = asyncio.run(api_module.verify_model_intake_admission(request))
@@ -17798,6 +17799,25 @@ def test_model_admission_endpoint_passes_exact_deployment_subjects(monkeypatch):
     assert captured["trusted_public_keys"] == ["trusted-pem"]
     assert captured["expected_artifact_sha256"] == "a" * 64
     assert captured["expected_repository_snapshot_sha256"] == "b" * 64
+
+
+def test_model_reassessment_event_requires_known_trigger_and_explicit_scope():
+    with pytest.raises(Exception):
+        api_module.ModelIntakeReassessmentEventRequest(
+            trigger_type="unknown",
+            actor="security",
+            reason="test trigger",
+            all_active=True,
+        )
+    request = api_module.ModelIntakeReassessmentEventRequest(
+        trigger_type="CVE_UPDATE",
+        actor="security",
+        reason="new runtime vulnerability",
+    )
+    assert request.trigger_type == "cve_update"
+    with pytest.raises(api_module.HTTPException) as exc_info:
+        asyncio.run(api_module.create_model_intake_reassessment_event(request))
+    assert exc_info.value.status_code == 400
 
 
 def test_model_intake_queue_persists_content_free_evaluation_not_vectors(monkeypatch):

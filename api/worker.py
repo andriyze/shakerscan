@@ -47,6 +47,7 @@ from retest_contract import (
 )
 import parallel_scan
 import asm_inventory
+from model_intake_admissions import persist_from_result as persist_model_intake_admission
 from job_queue import (
     DEFAULT_WORKER_TOOL_COMMANDS,
     QueueLease,
@@ -7418,6 +7419,25 @@ async def process_scan_job(job_data: dict):
                     WHERE id = $7
                 """, json.dumps(result), score, grade, len(findings),
                      completed_at, duration, uuid.UUID(scan_id))
+                if (options or {}).get("run_kind") in MODEL_INTAKE_RUN_KINDS:
+                    try:
+                        admission = await persist_model_intake_admission(
+                            conn,
+                            scan_id=scan_id,
+                            target_id=target_id,
+                            result=result,
+                            reassessment_days=int((options or {}).get("admission_reassessment_days") or 30),
+                        )
+                        if admission:
+                            print(
+                                f"[{job_id[:8]}] Model admission {admission.get('id')} registered as {admission.get('status')}",
+                                flush=True,
+                            )
+                    except Exception as admission_error:
+                        # Deployment verification requires a durable active row,
+                        # so registration failure is fail-closed even though the
+                        # historical scan itself remains available.
+                        print(f"[{job_id[:8]}] Model admission registration failed: {admission_error}", flush=True)
                 await asm_inventory.finish_campaign(conn, campaign_id, status='completed')
                 if ai_target_id:
                     await conn.execute("""

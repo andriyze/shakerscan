@@ -3075,6 +3075,61 @@ async def run_schema_migrations(pool) -> None:
                 ON node_credentials(node_id, credential_version)
             """)
 
+            # Signed Model Intake admission lifecycle. Historical packages are
+            # preserved while the status field controls future deployment.
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS model_intake_admissions (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    scan_id UUID NOT NULL UNIQUE REFERENCES scans(id) ON DELETE CASCADE,
+                    target_id UUID REFERENCES targets(id) ON DELETE SET NULL,
+                    artifact_sha256 TEXT NOT NULL,
+                    repository_snapshot_sha256 TEXT,
+                    statement_sha256 TEXT NOT NULL UNIQUE,
+                    admission_package JSONB NOT NULL,
+                    decision TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    policy_profile TEXT,
+                    policy_version TEXT,
+                    issued_at TIMESTAMPTZ NOT NULL,
+                    expires_at TIMESTAMPTZ NOT NULL,
+                    reassessment_due_at TIMESTAMPTZ NOT NULL,
+                    revoked_at TIMESTAMPTZ,
+                    revoked_by TEXT,
+                    revocation_reason TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT model_intake_admission_status_check
+                        CHECK (status IN ('active','denied','reassessment_required','revoked','expired','superseded'))
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_model_intake_admissions_subject
+                ON model_intake_admissions(artifact_sha256, status, expires_at)
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_model_intake_admissions_reassessment
+                ON model_intake_admissions(status, reassessment_due_at)
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS model_intake_admission_events (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    admission_id UUID NOT NULL REFERENCES model_intake_admissions(id) ON DELETE CASCADE,
+                    event_type TEXT NOT NULL,
+                    trigger_type TEXT,
+                    actor TEXT,
+                    reason TEXT,
+                    previous_status TEXT,
+                    new_status TEXT,
+                    evidence_digest TEXT,
+                    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_model_intake_admission_events_admission
+                ON model_intake_admission_events(admission_id, created_at DESC)
+            """)
+
             # Canonical de-dupe prevention must be present before startup completes;
             # current ON CONFLICT insert paths rely on this unique index.
             await _ensure_target_canonical_key_invariant(conn)

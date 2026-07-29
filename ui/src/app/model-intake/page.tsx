@@ -25,6 +25,7 @@ import {
   createModelIntakeTrustAnchor,
   deactivateModelIntakeTrustAnchor,
   getModelIntakeTrustAnchors,
+  getModelIntakeAdmissions,
   getPolicyProfiles,
   resolveModelIntakeReference,
   submitModelIntakeScan,
@@ -35,6 +36,7 @@ import {
   type ModelIntakeResolveResponse,
   type ModelIntakeScanRequest,
   type ModelIntakeTrustAnchor,
+  type ModelIntakeAdmission,
   type PolicyProfile as SavedPolicyProfile,
 } from '@/lib/api'
 import {
@@ -354,6 +356,8 @@ function ModelIntakeSettingsContent() {
   const [policyProfilesLoading, setPolicyProfilesLoading] = useState(true)
   const [policyProfilesError, setPolicyProfilesError] = useState<string | null>(null)
   const [savedTrustAnchors, setSavedTrustAnchors] = useState<ModelIntakeTrustAnchor[]>([])
+  const [admissions, setAdmissions] = useState<ModelIntakeAdmission[]>([])
+  const [admissionsError, setAdmissionsError] = useState<string | null>(null)
   const [selectedTrustAnchorIds, setSelectedTrustAnchorIds] = useState<string[]>([])
   const [trustAnchorsLoading, setTrustAnchorsLoading] = useState(true)
   const [trustAnchorsError, setTrustAnchorsError] = useState<string | null>(null)
@@ -412,11 +416,23 @@ function ModelIntakeSettingsContent() {
     }
   }, [])
 
+  const loadAdmissions = useCallback(async () => {
+    try {
+      const payload = await getModelIntakeAdmissions(20)
+      setAdmissions(payload.admissions || [])
+      setAdmissionsError(null)
+    } catch (err) {
+      setAdmissions([])
+      setAdmissionsError(err instanceof Error ? err.message : 'Failed to load admissions')
+    }
+  }, [])
+
   useEffect(() => {
     loadScenario()
     loadPolicyProfiles()
     loadTrustAnchors()
-  }, [loadScenario, loadPolicyProfiles, loadTrustAnchors])
+    loadAdmissions()
+  }, [loadScenario, loadPolicyProfiles, loadTrustAnchors, loadAdmissions])
 
   const remediationMode = searchParams.get('remediate')
   const trustRemediationMode = remediationMode === 'trust'
@@ -961,6 +977,36 @@ function ModelIntakeSettingsContent() {
           </div>
         </div>
       )}
+
+      <Card className="min-w-0 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 className="text-sm font-semibold text-white">Admission lifecycle</h2>
+            <p className="mt-1 text-xs text-gray-500">Deployment accepts only active, registered, non-expired signed subjects.</p>
+          </div>
+          <button type="button" onClick={loadAdmissions} className="rounded border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800">Refresh</button>
+        </div>
+        {admissionsError ? (
+          <div className="mt-3 text-xs text-red-300">{admissionsError}</div>
+        ) : admissions.length === 0 ? (
+          <div className="mt-3 text-xs text-gray-500">No signed admissions are registered yet.</div>
+        ) : (
+          <div className="mt-3 grid gap-2">
+            {admissions.slice(0, 10).map((admission) => (
+              <div key={admission.id} className="grid min-w-0 gap-2 rounded border border-gray-800 bg-gray-950 p-3 sm:grid-cols-[minmax(0,1fr)_auto]">
+                <div className="min-w-0">
+                  <div className="truncate font-mono text-xs text-gray-300">sha256:{admission.artifact_sha256}</div>
+                  <div className="mt-1 text-xs text-gray-500">Policy {admission.policy_profile || 'unspecified'} · reassess {new Date(admission.reassessment_due_at).toLocaleString()} · expires {new Date(admission.expires_at).toLocaleString()}</div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className={`rounded px-2 py-1 text-xs font-semibold ${admission.status === 'active' ? 'bg-green-950/50 text-green-300' : admission.status === 'reassessment_required' ? 'bg-yellow-950/50 text-yellow-300' : 'bg-red-950/50 text-red-300'}`}>{admission.status.replace(/_/g, ' ')}</span>
+                  <Link href={`/scans/${admission.scan_id}`} className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">Scan</Link>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
 
       <Card className="min-w-0 p-4">
         <div className="flex items-center gap-2 text-white">
