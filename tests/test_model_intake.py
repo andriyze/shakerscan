@@ -289,20 +289,26 @@ def test_download_http_206_without_content_range_is_truncated(monkeypatch):
     # and no Content-Range total, MUST be flagged truncated — otherwise a capped
     # prefix is hashed and compared against the full-artifact digest, producing a
     # false sha256 mismatch (the nex-agi/Nex-N2-mini case).
-    import urllib.request as _urlreq
+    from scanner.scanner_tools import model_intake_acquisition
     from scanner.scanner_tools.model_intake import _download_http
 
     max_bytes = 1000
     payload = b"x" * max_bytes
 
-    class _FakeResp:
-        status = 206
-        headers = {"Content-Type": "application/octet-stream"}  # NO Content-Range
-        def read(self, n): return payload[:n]
-        def __enter__(self): return self
-        def __exit__(self, *a): return False
-
-    monkeypatch.setattr(_urlreq, "urlopen", lambda req, timeout=None: _FakeResp())
+    monkeypatch.setattr(model_intake_acquisition, "_resolve_host", lambda host, port: ["93.184.216.34"])
+    monkeypatch.setattr(
+        model_intake_acquisition,
+        "_request_once",
+        lambda destination, headers, limit, timeout: (
+            payload[:limit],
+            {
+                "status": 206,
+                "reason": "Partial Content",
+                "headers": {"Content-Type": "application/octet-stream"},
+                "remote_ip": destination["addresses"][0],
+            },
+        ),
+    )
     _data, meta = _download_http("https://cdn.example/model.safetensors", max_bytes, 5)
     assert meta["status"] == 206
     assert meta["truncated"] is True
@@ -311,19 +317,25 @@ def test_download_http_206_without_content_range_is_truncated(monkeypatch):
 
 def test_download_http_200_full_small_file_is_not_truncated(monkeypatch):
     # Control: a 200 with the whole (small) file present is NOT truncated.
-    import urllib.request as _urlreq
+    from scanner.scanner_tools import model_intake_acquisition
     from scanner.scanner_tools.model_intake import _download_http
 
     payload = b"y" * 50
 
-    class _FakeResp:
-        status = 200
-        headers = {"Content-Length": "50"}
-        def read(self, n): return payload[:n]
-        def __enter__(self): return self
-        def __exit__(self, *a): return False
-
-    monkeypatch.setattr(_urlreq, "urlopen", lambda req, timeout=None: _FakeResp())
+    monkeypatch.setattr(model_intake_acquisition, "_resolve_host", lambda host, port: ["93.184.216.34"])
+    monkeypatch.setattr(
+        model_intake_acquisition,
+        "_request_once",
+        lambda destination, headers, limit, timeout: (
+            payload[:limit],
+            {
+                "status": 200,
+                "reason": "OK",
+                "headers": {"Content-Length": "50"},
+                "remote_ip": destination["addresses"][0],
+            },
+        ),
+    )
     _data, meta = _download_http("https://cdn.example/small.bin", 1000, 5)
     assert meta["truncated"] is False
 

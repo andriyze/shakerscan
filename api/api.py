@@ -3631,6 +3631,25 @@ class ModelIntakeScanRequest(BaseModel):
     policy_exceptions: Optional[list[dict[str, Any]]] = None
     max_download_bytes: int = Field(default=10_000_000, ge=1024, le=100_000_000)
     timeout_seconds: int = Field(default=20, ge=1, le=120)
+    allow_insecure_http: bool = Field(
+        default=False,
+        description="Development-only exception permitting plain HTTP artifact acquisition.",
+    )
+    allow_private_networks: bool = Field(
+        default=False,
+        description="Development-only exception permitting acquisition from private/non-global addresses.",
+    )
+    allowed_acquisition_hosts: Optional[list[str]] = Field(
+        default=None,
+        max_length=100,
+        description="Optional exact or *.suffix hostname allowlist enforced on every acquisition redirect.",
+    )
+    allowed_acquisition_ports: Optional[list[int]] = Field(
+        default=None,
+        max_length=20,
+        description="Additional acquisition ports; HTTPS/443 is always allowed and HTTP/80 requires allow_insecure_http.",
+    )
+    max_acquisition_redirects: int = Field(default=5, ge=0, le=5)
     approval_receipt_id: Optional[str] = Field(
         default=None,
         description="Optional durable approval receipt to validate and stamp on the queued Model Intake scan.",
@@ -10714,6 +10733,11 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
         "policy_exceptions": request.policy_exceptions or [],
         "max_download_bytes": request.max_download_bytes,
         "timeout_seconds": request.timeout_seconds,
+        "allow_insecure_http": request.allow_insecure_http,
+        "allow_private_networks": request.allow_private_networks,
+        "allowed_acquisition_hosts": request.allowed_acquisition_hosts,
+        "allowed_acquisition_ports": request.allowed_acquisition_ports,
+        "max_acquisition_redirects": request.max_acquisition_redirects,
     }
     if request.policy_profile in POLICY_PROFILES:
         options["environment"] = request.policy_profile

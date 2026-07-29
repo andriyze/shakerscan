@@ -23,6 +23,19 @@ from tempfile import NamedTemporaryFile
 from typing import Any
 
 try:
+    from scanner.scanner_tools.model_intake_acquisition import (
+        acquisition_policy as _acquisition_policy,
+        download_http as _safe_download_http,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name not in {"scanner", "scanner.scanner_tools"}:
+        raise
+    from model_intake_acquisition import (
+        acquisition_policy as _acquisition_policy,
+        download_http as _safe_download_http,
+    )
+
+try:
     from scanner.redaction import (
         SENSITIVE_KEYS,
         SENSITIVE_KEY_FRAGMENTS,
@@ -582,71 +595,29 @@ def _download_http(
     max_bytes: int,
     timeout_seconds: int,
     headers: dict[str, str] | None = None,
+    fetch_policy: dict[str, Any] | None = None,
 ) -> tuple[bytes, dict[str, Any]]:
-    request_headers = {
-        "User-Agent": "ShakerScan-ModelIntake/1.0",
-        "Range": f"bytes=0-{max_bytes - 1}",
-        **(headers or {}),
-    }
-    request = urllib.request.Request(
+    data, meta = _safe_download_http(
         url,
-        headers=request_headers,
+        max_bytes,
+        timeout_seconds,
+        headers=headers,
+        policy=fetch_policy,
     )
-    with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-        data = response.read(max_bytes + 1)
-        headers = dict(response.headers.items())
-        final_url = ""
-        try:
-            final_url = str(response.geturl() or "")
-        except Exception:
-            final_url = ""
-        remote_ip = None
-        try:
-            raw = getattr(getattr(response, "fp", None), "raw", None)
-            sock = getattr(raw, "_sock", None)
-            peer = sock.getpeername() if sock else None
-            if isinstance(peer, (list, tuple)) and peer:
-                remote_ip = str(peer[0])
-        except Exception:
-            remote_ip = None
-        content_range = _parse_content_range(headers.get("Content-Range"))
-        content_length = headers.get("Content-Length")
-        try:
-            declared_length = int(content_length) if content_length is not None else None
-        except ValueError:
-            declared_length = None
-        status = getattr(response, "status", None)
-        if content_range:
-            total = content_range.get("total")
-            truncated = total is None or int(content_range["end"]) + 1 < int(total)
-        elif status == 206:
-            # 206 Partial Content: the server served only part of the resource in
-            # response to our Range request. Without a Content-Range total proving
-            # we fetched the whole file, assume the artifact exceeds the cap
-            # (fail-safe) — otherwise a capped prefix hashed against the
-            # full-artifact digest surfaces as a FALSE checksum mismatch.
-            truncated = True
-        else:
-            truncated = len(data) > max_bytes or (declared_length is not None and declared_length > max_bytes)
-        return data[:max_bytes], {
-            "source": "http",
-            "requested_url": url,
-            "final_url": final_url or url,
-            "redirected": bool(final_url and final_url != url),
-            "redirect_chain": [final_url] if final_url and final_url != url else [],
-            "remote_ip": remote_ip,
-            "status": status,
-            "content_type": headers.get("Content-Type"),
-            "content_length": content_length,
-            "content_range": headers.get("Content-Range"),
-            "range_requested": f"bytes=0-{max_bytes - 1}",
-            "range_satisfied": bool(content_range),
-            "bytes_observed": min(len(data), max_bytes),
-            "truncated": truncated,
-        }
+    content_range = _parse_content_range(str(meta.get("content_range") or ""))
+    if content_range:
+        total = content_range.get("total")
+        meta["truncated"] = total is None or int(content_range["end"]) + 1 < int(total)
+    return data, meta
 
 
-def _download_huggingface(ref: str, metadata: dict[str, Any], max_bytes: int, timeout_seconds: int) -> tuple[bytes, dict[str, Any]]:
+def _download_huggingface(
+    ref: str,
+    metadata: dict[str, Any],
+    max_bytes: int,
+    timeout_seconds: int,
+    fetch_policy: dict[str, Any] | None = None,
+) -> tuple[bytes, dict[str, Any]]:
     hf_ref = parse_huggingface_ref(ref, metadata)
     if not hf_ref.get("repo_id"):
         return b"", {
@@ -670,7 +641,12 @@ def _download_huggingface(ref: str, metadata: dict[str, Any], max_bytes: int, ti
     auth_source = "metadata" if metadata_token else "env" if env_token else None
     if token:
         auth_headers["Authorization"] = f"Bearer {token}"
-    data, fetch_meta = _download_http(str(hf_ref["resolve_url"]), max_bytes, timeout_seconds, auth_headers)
+    if fetch_policy is None:
+        data, fetch_meta = _download_http(str(hf_ref["resolve_url"]), max_bytes, timeout_seconds, auth_headers)
+    else:
+        data, fetch_meta = _download_http(
+            str(hf_ref["resolve_url"]), max_bytes, timeout_seconds, auth_headers, fetch_policy
+        )
     return data, {
         **fetch_meta,
         "source": "huggingface",
@@ -680,7 +656,13 @@ def _download_huggingface(ref: str, metadata: dict[str, Any], max_bytes: int, ti
     }
 
 
-def _download_cloud_object(ref: str, metadata: dict[str, Any], max_bytes: int, timeout_seconds: int) -> tuple[bytes, dict[str, Any]]:
+def _download_cloud_object(
+    ref: str,
+    metadata: dict[str, Any],
+    max_bytes: int,
+    timeout_seconds: int,
+    fetch_policy: dict[str, Any] | None = None,
+) -> tuple[bytes, dict[str, Any]]:
     cloud_ref = normalize_model_artifact_reference(ref, metadata)
     fetch_url = cloud_ref.get("fetch_url")
     if not fetch_url:
@@ -690,7 +672,10 @@ def _download_cloud_object(ref: str, metadata: dict[str, Any], max_bytes: int, t
             "cloud": cloud_ref,
             "error": "Cloud object reference could not be converted to a fetchable HTTPS URL.",
         }
-    data, fetch_meta = _download_http(str(fetch_url), max_bytes, timeout_seconds)
+    if fetch_policy is None:
+        data, fetch_meta = _download_http(str(fetch_url), max_bytes, timeout_seconds)
+    else:
+        data, fetch_meta = _download_http(str(fetch_url), max_bytes, timeout_seconds, None, fetch_policy)
     return data, {
         **fetch_meta,
         "source": cloud_ref.get("kind") or fetch_meta.get("source") or "cloud_object",
@@ -736,15 +721,26 @@ async def _fetch_artifact(
     timeout_seconds: int,
     metadata: dict[str, Any] | None = None,
     allow_local_files: bool = False,
+    fetch_policy: dict[str, Any] | None = None,
 ) -> tuple[bytes, dict[str, Any]]:
     parsed = urllib.parse.urlparse(ref)
+    parsed_host = (parsed.hostname or "").lower().rstrip(".")
     try:
-        if parsed.scheme == "hf" or (parsed.scheme in {"http", "https"} and parsed.netloc.endswith("huggingface.co")):
-            return await asyncio.to_thread(_download_huggingface, ref, metadata or {}, max_bytes, timeout_seconds)
+        if parsed.scheme == "hf" or (
+            parsed.scheme in {"http", "https"}
+            and (parsed_host == "huggingface.co" or parsed_host.endswith(".huggingface.co"))
+        ):
+            return await asyncio.to_thread(
+                _download_huggingface, ref, metadata or {}, max_bytes, timeout_seconds, fetch_policy
+            )
         if parsed.scheme in {"s3", "gs", "gcs", "azure"}:
-            return await asyncio.to_thread(_download_cloud_object, ref, metadata or {}, max_bytes, timeout_seconds)
+            return await asyncio.to_thread(
+                _download_cloud_object, ref, metadata or {}, max_bytes, timeout_seconds, fetch_policy
+            )
         if parsed.scheme in ("http", "https"):
-            return await asyncio.to_thread(_download_http, ref, max_bytes, timeout_seconds)
+            if fetch_policy is None:
+                return await asyncio.to_thread(_download_http, ref, max_bytes, timeout_seconds)
+            return await asyncio.to_thread(_download_http, ref, max_bytes, timeout_seconds, None, fetch_policy)
         if parsed.scheme == "file" or not parsed.scheme:
             if not allow_local_files:
                 return b"", {
@@ -771,12 +767,14 @@ async def _fetch_json(
     timeout_seconds: int,
     max_bytes: int = 262_144,
     allow_local_files: bool = False,
+    fetch_policy: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     data, meta = await _fetch_artifact(
         url,
         max_bytes=max_bytes,
         timeout_seconds=timeout_seconds,
         allow_local_files=allow_local_files,
+        fetch_policy=fetch_policy,
     )
     fetch_meta = {**meta, "url": url}
     if fetch_meta.get("error"):
@@ -1146,6 +1144,7 @@ async def _load_and_verify_signature(
     *,
     timeout_seconds: int,
     allow_local_files: bool,
+    fetch_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Gather signature material (inline or fetched) and run real verification.
 
@@ -1167,7 +1166,7 @@ async def _load_and_verify_signature(
     elif pub_url:
         pk_bytes, _pk_meta = await _fetch_artifact(
             str(pub_url), max_bytes=1_000_000, timeout_seconds=timeout_seconds,
-            metadata=metadata, allow_local_files=allow_local_files,
+            metadata=metadata, allow_local_files=allow_local_files, fetch_policy=fetch_policy,
         )
         if pk_bytes:
             public_key_pem = pk_bytes
@@ -1178,7 +1177,7 @@ async def _load_and_verify_signature(
     if not signature_bytes and signature_url:
         sig_bytes, _sig_meta = await _fetch_artifact(
             str(signature_url), max_bytes=1_000_000, timeout_seconds=timeout_seconds,
-            metadata=metadata, allow_local_files=allow_local_files,
+            metadata=metadata, allow_local_files=allow_local_files, fetch_policy=fetch_policy,
         )
         if sig_bytes:
             signature_bytes = sig_bytes
@@ -1906,12 +1905,30 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
     timeout_seconds = int(options.get("timeout_seconds") or 20)
     max_download_bytes = int(options.get("max_download_bytes") or 10_000_000)
     allow_local_files = _boolish(options.get("allow_local_files")) or _boolish(os.getenv("MODEL_INTAKE_ALLOW_LOCAL_FILES"))
+    acquisition_option_names = {
+        "allow_insecure_http",
+        "allow_private_networks",
+        "allowed_acquisition_hosts",
+        "allowed_acquisition_ports",
+        "max_acquisition_redirects",
+    }
+    has_explicit_acquisition_policy = any(name in options for name in acquisition_option_names) or any(
+        os.getenv(name)
+        for name in (
+            "MODEL_INTAKE_ALLOW_INSECURE_HTTP",
+            "MODEL_INTAKE_ALLOW_PRIVATE_NETWORKS",
+            "MODEL_INTAKE_ALLOWED_HOSTS",
+            "MODEL_INTAKE_ALLOWED_PORTS",
+        )
+    )
+    fetch_policy = _acquisition_policy(options) if has_explicit_acquisition_policy else None
 
     if metadata_url:
         remote_metadata, metadata_fetch_meta = await _fetch_json(
             str(metadata_url),
             timeout_seconds=timeout_seconds,
             allow_local_files=allow_local_files,
+            fetch_policy=fetch_policy,
         )
         metadata = {**remote_metadata, **metadata}
 
@@ -1921,6 +1938,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         timeout_seconds=timeout_seconds,
         metadata=metadata,
         allow_local_files=allow_local_files,
+        fetch_policy=fetch_policy,
     )
 
     unsupported_scheme_error = bool(
@@ -1978,7 +1996,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
     registry_reference = _registry_reference(artifact_ref, metadata)
     crypto_signature_result = await _load_and_verify_signature(
         options, metadata, signature_url, artifact_bytes, sha256,
-        timeout_seconds=timeout_seconds, allow_local_files=allow_local_files,
+        timeout_seconds=timeout_seconds, allow_local_files=allow_local_files, fetch_policy=fetch_policy,
     )
     signature_status = _signature_verification_status(metadata, signature_url, signed_by, crypto_signature_result)
     license_policy = _license_policy(license_ref)
