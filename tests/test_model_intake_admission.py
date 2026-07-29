@@ -1,8 +1,5 @@
 from datetime import datetime, timedelta, timezone
 
-import pytest
-
-crypto = pytest.importorskip("cryptography")
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 

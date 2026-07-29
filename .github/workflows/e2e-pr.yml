@@ -59,6 +59,17 @@ jobs:
           python3 tests/e2e/run_e2e.py --area model_intake
           python3 tests/e2e/run_e2e.py --area ai_gate
 
+      - name: Run Model Intake cryptographic trust contracts
+        if: steps.changes.outputs.backend == 'true'
+        run: |
+          docker compose cp tests api:/tmp/model-intake-tests
+          docker compose exec -T api sh -lc '
+            cd /tmp &&
+            PYTHONPATH=/app/_src/api:/app/_src python -m pytest -q -p no:cacheprovider \
+              model-intake-tests/test_model_intake_admission.py \
+              model-intake-tests/test_model_intake_attestation.py \
+              model-intake-tests/test_model_intake_signature_crypto.py'
+
       - name: Dump stack logs on failure
         if: failure() && steps.changes.outputs.backend == 'true'
         run: docker compose logs --tail=300 api worker || true

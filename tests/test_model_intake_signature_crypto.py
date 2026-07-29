@@ -4,8 +4,8 @@ These prove that ShakerScan now performs ACTUAL detached-signature verification
 (not metadata-trust): a valid signature verifies, a tampered one is rejected and
 blocks, and a metadata-only claim under a crypto-strict policy is flagged.
 
-Requires the `cryptography` library (present in the scanner runtime image; these
-skip where it is absent, e.g. a minimal host interpreter).
+The `cryptography` library is a required scanner-runtime dependency. Collection
+must fail if it is absent because these tests cover the Model Intake trust root.
 """
 
 import asyncio
@@ -13,9 +13,6 @@ import base64
 import hashlib
 import json
 
-import pytest
-
-crypto = pytest.importorskip("cryptography")
 from cryptography.hazmat.primitives import hashes, serialization  # noqa: E402
 from cryptography.hazmat.primitives.asymmetric import ed25519, padding, rsa  # noqa: E402
 
