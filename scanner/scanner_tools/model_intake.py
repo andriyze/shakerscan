@@ -2908,6 +2908,8 @@ async def run_model_intake_scan(
     )
     signature_status = _signature_verification_status(metadata, signature_url, signed_by, crypto_signature_result)
     attestation_bundle = options.get("attestation_bundle_json") or metadata.get("attestation_bundle_json")
+    require_attestation_verification = _boolish(options.get("require_attestation_verification"))
+    require_transparency_log = _boolish(options.get("require_transparency_log"))
     attestation_verification = _verify_dsse_in_toto(
         attestation_bundle,
         subject_sha256=sha256,
@@ -2916,12 +2918,20 @@ async def run_model_intake_scan(
         trusted_key_sha256=options.get("attestation_trusted_key_sha256") or options.get("signature_trusted_key_sha256"),
         allowed_predicate_types=options.get("allowed_attestation_predicate_types"),
         required_builder_ids=options.get("required_attestation_builder_ids"),
-        require_transparency_log=_boolish(options.get("require_transparency_log")),
+        require_transparency_log=require_transparency_log,
     ) if attestation_bundle else {
         "schema_version": "model-intake-attestation/v1",
         "provenance_class": "declared",
-        "status": "SKIPPED_BY_POLICY",
+        "status": "FAIL" if require_attestation_verification or require_transparency_log else "SKIPPED_BY_POLICY",
         "verified": False,
+        "transparency_log_verified": False,
+        "transparency_log_status": "UNSUPPORTED",
+        "blockers": [
+            blocker for required, blocker in (
+                (require_attestation_verification, "attestation_bundle_required"),
+                (require_transparency_log, "transparency_log_proof_required"),
+            ) if required
+        ],
     }
     license_policy = _license_policy(license_ref)
     generated_results = generated_evidence.get("results") if isinstance(generated_evidence.get("results"), list) else []
@@ -3070,7 +3080,7 @@ async def run_model_intake_scan(
             remediation="Publish the model card at an approved reachable HTTPS destination and rerun intake.",
         ))
 
-    if _boolish(options.get("require_attestation_verification")) and not attestation_verification.get("verified"):
+    if (require_attestation_verification or require_transparency_log) and not attestation_verification.get("verified"):
         findings.append(_finding(
             finding_id="attestation_not_verified",
             title="Model provenance attestation did not pass verification",

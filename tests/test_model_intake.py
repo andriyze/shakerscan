@@ -1279,6 +1279,28 @@ def test_strict_evidence_policy_accepts_only_internally_trusted_provenance():
     )["valid"] is True
 
 
+def test_required_transparency_log_without_attestation_fails_closed(tmp_path):
+    artifact = tmp_path / "model.safetensors"
+    artifact.write_bytes(_safetensors_bytes())
+
+    result = asyncio.run(run_model_intake_scan(
+        str(artifact),
+        _local_options({
+            "require_transparency_log": True,
+            "require_hash": False,
+            "require_signature": False,
+            "require_model_governance": False,
+            "require_deployment_approval": False,
+        }),
+    ))
+
+    attestation = result["model_intake"]["attestation"]
+    assert attestation["status"] == "FAIL"
+    assert attestation["blockers"] == ["transparency_log_proof_required"]
+    assert "model_intake:attestation_not_verified" in {item["id"] for item in result["findings"]}
+    assert result["result"]["decision"] == "block"
+
+
 def test_model_intake_can_require_signature_verification(tmp_path):
     artifact = tmp_path / "model.onnx"
     artifact.write_bytes(b"onnx bytes")

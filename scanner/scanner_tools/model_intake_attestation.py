@@ -44,6 +44,9 @@ def _verify_with_key(public_key_pem: Any, signature: bytes, message: bytes) -> t
         from cryptography.hazmat.primitives import hashes
         from cryptography.hazmat.primitives.asymmetric import ec, ed25519, padding, rsa
         from cryptography.hazmat.primitives.serialization import load_pem_public_key
+    except ImportError:
+        return False, None
+    try:
         key = load_pem_public_key(public_key_pem if isinstance(public_key_pem, bytes) else str(public_key_pem).encode())
         if isinstance(key, ed25519.Ed25519PublicKey):
             key.verify(signature, message)
@@ -55,7 +58,7 @@ def _verify_with_key(public_key_pem: Any, signature: bytes, message: bytes) -> t
             key.verify(signature, message, ec.ECDSA(hashes.SHA256()))
             return True, "ecdsa-sha256"
         return False, None
-    except (InvalidSignature, ValueError, TypeError, ImportError):
+    except (InvalidSignature, ValueError, TypeError):
         return False, None
 
 
@@ -112,7 +115,7 @@ def verify_dsse_in_toto(
     required_builders = {str(item) for item in _iter_values(required_builder_ids)}
     builder_allowed = not required_builders or builder_id in required_builders
 
-    trusted_fingerprints = {
+    pinned_fingerprints = {
         str(item).strip().lower().replace(":", "") for item in _iter_values(trusted_key_sha256) if str(item).strip()
     }
     keys: list[tuple[Any, str]] = []
@@ -120,9 +123,12 @@ def verify_dsse_in_toto(
         fingerprint = _public_key_fingerprint(key)
         if fingerprint:
             keys.append((key, fingerprint))
-            trusted_fingerprints.add(fingerprint)
     if not keys:
         return {**result, "error": "operator_trusted_attestation_key_required"}
+    # Supplied keys are trust anchors when no separate pin set is configured.
+    # Once pins are present, they are an additional allowlist and must never be
+    # widened merely because a key was included in the request.
+    trusted_fingerprints = pinned_fingerprints or {fingerprint for _, fingerprint in keys}
 
     message = _dsse_pae(payload_type, payload)
     verified_signature: dict[str, Any] | None = None

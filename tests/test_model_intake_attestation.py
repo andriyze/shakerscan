@@ -9,7 +9,7 @@ crypto = pytest.importorskip("cryptography")
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
-from scanner.scanner_tools.model_intake_attestation import _dsse_pae, verify_dsse_in_toto
+from scanner.scanner_tools.model_intake_attestation import _dsse_pae, _public_key_fingerprint, verify_dsse_in_toto
 from scanner.scanner_tools.model_intake import run_model_intake_scan
 
 
@@ -92,6 +92,24 @@ def test_dsse_attestation_requires_complete_subject_and_operator_key():
         subject_complete=True,
         trusted_public_keys=None,
     )["error"] == "operator_trusted_attestation_key_required"
+
+
+def test_dsse_attestation_pin_allowlist_cannot_be_widened_by_supplied_keys():
+    pinned_key = ed25519.Ed25519PrivateKey.generate()
+    unpinned_key = ed25519.Ed25519PrivateKey.generate()
+    digest = hashlib.sha256(b"model").hexdigest()
+
+    result = verify_dsse_in_toto(
+        _envelope(unpinned_key, digest),
+        subject_sha256=digest,
+        subject_complete=True,
+        trusted_public_keys=[_pem(pinned_key.public_key()), _pem(unpinned_key.public_key())],
+        trusted_key_sha256=[_public_key_fingerprint(_pem(pinned_key.public_key()))],
+    )
+
+    assert result["status"] == "FAIL"
+    assert result["signature"] is None
+    assert "dsse_signature_invalid_or_untrusted" in result["blockers"]
 
 
 def test_model_intake_uses_verified_dsse_attestation_as_generated_gate_evidence(tmp_path):
