@@ -131,6 +131,33 @@ def test_digest_hex_payload_signature_verifies(tmp_path):
     assert summary["signature_cryptographically_verified"] is True
 
 
+def test_raw_signature_cannot_verify_only_an_inspection_prefix(tmp_path):
+    artifact = tmp_path / "model.safetensors"
+    data = _safetensors_bytes(payload=b"x" * 4096)
+    artifact.write_bytes(data)
+
+    priv = ed25519.Ed25519PrivateKey.generate()
+    prefix = data[:128]
+    signature = priv.sign(prefix)
+
+    result = _run(artifact, _base_opts(
+        data,
+        complete_artifact_download=True,
+        max_download_bytes=128,
+        max_artifact_bytes=10_000,
+        quarantine_dir=str(tmp_path / "quarantine"),
+        signature_public_key=_pub_pem(priv.public_key()),
+        signature_value=base64.b64encode(signature).decode(),
+        signature_trusted_keys=[_pub_pem(priv.public_key())],
+        require_cryptographic_signature_verification=True,
+    ))
+
+    summary = result["model_intake"]["summary"]
+    assert summary["signature_cryptographically_verified"] is False
+    assert summary["signature_crypto_attempted"] is False
+    assert "model_intake:signature_not_verified" in _finding_ids(result)
+
+
 def test_tampered_signature_is_invalid_and_blocks(tmp_path):
     artifact = tmp_path / "model.safetensors"
     data = _safetensors_bytes()

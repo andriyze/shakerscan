@@ -336,6 +336,8 @@ function ModelIntakeSettingsContent() {
   const [requireHash, setRequireHash] = useState(true)
   const [requireModelGovernance, setRequireModelGovernance] = useState(true)
   const [maxDownloadBytes, setMaxDownloadBytes] = useState('10000000')
+  const [completeArtifactDownload, setCompleteArtifactDownload] = useState(false)
+  const [maxArtifactBytes, setMaxArtifactBytes] = useState('10000000000')
   const [timeoutSeconds, setTimeoutSeconds] = useState('20')
   const [policyProfile, setPolicyProfile] = useState<string>('production')
   const [savedPolicyProfiles, setSavedPolicyProfiles] = useState<SavedPolicyProfile[]>([])
@@ -417,6 +419,7 @@ function ModelIntakeSettingsContent() {
     setRequireSignatureVerification(true)
     setRequireModelGovernance(true)
     setRequireDeploymentApproval(true)
+    setCompleteArtifactDownload(true)
     setTrustMode('trusted_key_fingerprint')
     setMaxDownloadBytes((current) => {
       const parsed = Number(current)
@@ -490,6 +493,8 @@ function ModelIntakeSettingsContent() {
     setRequireHash(payload.require_hash ?? true)
     setRequireModelGovernance(payload.require_model_governance ?? true)
     setMaxDownloadBytes(String(payload.max_download_bytes || 10000000))
+    setCompleteArtifactDownload(payload.complete_artifact_download ?? false)
+    setMaxArtifactBytes(String(payload.max_artifact_bytes || 10000000000))
     setTimeoutSeconds(String(payload.timeout_seconds || 20))
     if (payload.policy_profile) setPolicyProfile(payload.policy_profile)
     setTrustMode(inferModelIntakeTrustMode({
@@ -560,12 +565,15 @@ function ModelIntakeSettingsContent() {
 
   function buildPayload(): ModelIntakeScanRequest {
     const maxBytes = Number(maxDownloadBytes || 10000000)
+    const maxTotalBytes = Number(maxArtifactBytes || 10000000000)
     const timeout = Number(timeoutSeconds || 20)
     const includeUrlSignature = trustMode === 'signature_url_key_url' || trustMode === 'trusted_key_fingerprint'
     const includeInlineSignature = trustMode === 'inline_signature_key' || trustMode === 'trusted_key_fingerprint'
     const includeTrustAnchor = trustMode === 'trusted_key_fingerprint'
     const includeSignatureOptions = trustMode !== 'checksum_only'
     if (!Number.isFinite(maxBytes) || maxBytes < 1024) throw new Error('Download limit must be at least 1024 bytes')
+    if (!Number.isFinite(maxTotalBytes) || maxTotalBytes < 1024) throw new Error('Complete artifact limit must be at least 1024 bytes')
+    if (completeArtifactDownload && maxTotalBytes < maxBytes) throw new Error('Complete artifact limit must be greater than or equal to the inspection limit')
     if (!Number.isFinite(timeout) || timeout < 1) throw new Error('Timeout must be at least 1 second')
     const payload: ModelIntakeScanRequest = {
       artifact_url: artifactUrl.trim(),
@@ -592,6 +600,8 @@ function ModelIntakeSettingsContent() {
       require_model_governance: requireModelGovernance,
       policy_profile: policyProfile,
       max_download_bytes: maxBytes,
+      complete_artifact_download: completeArtifactDownload,
+      max_artifact_bytes: maxTotalBytes,
       timeout_seconds: timeout,
     }
     if (!payload.artifact_url) {
@@ -1501,7 +1511,7 @@ function ModelIntakeSettingsContent() {
             </div>
             <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
               <label className={fieldClass}>
-                Download limit (bytes)
+                Inspection prefix (bytes)
                 <input value={maxDownloadBytes} onChange={(e) => setMaxDownloadBytes(e.target.value)} className={inputClass} inputMode="numeric" />
               </label>
               <label className={fieldClass}>
@@ -1509,6 +1519,19 @@ function ModelIntakeSettingsContent() {
                 <input value={timeoutSeconds} onChange={(e) => setTimeoutSeconds(e.target.value)} className={inputClass} inputMode="numeric" />
               </label>
             </div>
+            <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+              <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
+                <input type="checkbox" checked={completeArtifactDownload} onChange={(e) => setCompleteArtifactDownload(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+                Acquire and hash the complete artifact
+              </label>
+              <label className={fieldClass}>
+                Complete artifact limit (bytes)
+                <input value={maxArtifactBytes} onChange={(e) => setMaxArtifactBytes(e.target.value)} className={inputClass} inputMode="numeric" disabled={!completeArtifactDownload} />
+              </label>
+            </div>
+            <p className="text-xs text-gray-500">
+              Complete acquisition streams to content-addressed quarantine; only the bounded prefix is retained in worker memory.
+            </p>
             <label className={fieldClass}>
               Metadata JSON
               <textarea

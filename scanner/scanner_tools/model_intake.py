@@ -26,6 +26,8 @@ try:
     from scanner.scanner_tools.model_intake_acquisition import (
         acquisition_policy as _acquisition_policy,
         download_http as _safe_download_http,
+        download_http_to_quarantine as _safe_download_http_to_quarantine,
+        quarantine_local_file as _quarantine_local_file,
     )
 except ModuleNotFoundError as exc:
     if exc.name not in {"scanner", "scanner.scanner_tools"}:
@@ -33,6 +35,8 @@ except ModuleNotFoundError as exc:
     from model_intake_acquisition import (
         acquisition_policy as _acquisition_policy,
         download_http as _safe_download_http,
+        download_http_to_quarantine as _safe_download_http_to_quarantine,
+        quarantine_local_file as _quarantine_local_file,
     )
 
 try:
@@ -656,6 +660,45 @@ def _download_huggingface(
     }
 
 
+def _download_huggingface_complete(
+    ref: str,
+    metadata: dict[str, Any],
+    inspection_bytes: int,
+    max_artifact_bytes: int,
+    timeout_seconds: int,
+    quarantine_dir: Path,
+    fetch_policy: dict[str, Any] | None = None,
+) -> tuple[bytes, dict[str, Any]]:
+    hf_ref = parse_huggingface_ref(ref, metadata)
+    if not hf_ref.get("repo_id") or not hf_ref.get("filename"):
+        return b"", {
+            "source": "huggingface",
+            "bytes_observed": 0,
+            "huggingface": hf_ref,
+            "error": "Hugging Face reference must identify a repository and artifact file.",
+        }
+    metadata_token = str(metadata.get("hf_token") or "").strip()
+    env_token = str(os.getenv("HF_TOKEN") or "").strip()
+    token = metadata_token or env_token
+    auth_headers = {"Authorization": f"Bearer {token}"} if token else None
+    data, fetch_meta = _safe_download_http_to_quarantine(
+        str(hf_ref["resolve_url"]),
+        inspection_bytes,
+        max_artifact_bytes,
+        timeout_seconds,
+        quarantine_dir,
+        headers=auth_headers,
+        policy=fetch_policy,
+    )
+    return data, {
+        **fetch_meta,
+        "source": "huggingface",
+        "huggingface": hf_ref,
+        "authenticated": bool(token),
+        "auth_source": "metadata" if metadata_token else "env" if env_token else None,
+    }
+
+
 def _download_cloud_object(
     ref: str,
     metadata: dict[str, Any],
@@ -722,10 +765,73 @@ async def _fetch_artifact(
     metadata: dict[str, Any] | None = None,
     allow_local_files: bool = False,
     fetch_policy: dict[str, Any] | None = None,
+    complete_download: bool = False,
+    max_artifact_bytes: int | None = None,
+    quarantine_dir: Path | None = None,
 ) -> tuple[bytes, dict[str, Any]]:
     parsed = urllib.parse.urlparse(ref)
     parsed_host = (parsed.hostname or "").lower().rstrip(".")
     try:
+        if complete_download:
+            if not quarantine_dir:
+                raise ValueError("Complete model acquisition requires a quarantine directory")
+            complete_limit = int(max_artifact_bytes or max_bytes)
+            if parsed.scheme == "hf" or (
+                parsed.scheme in {"http", "https"}
+                and (parsed_host == "huggingface.co" or parsed_host.endswith(".huggingface.co"))
+            ):
+                return await asyncio.to_thread(
+                    _download_huggingface_complete,
+                    ref,
+                    metadata or {},
+                    max_bytes,
+                    complete_limit,
+                    timeout_seconds,
+                    quarantine_dir,
+                    fetch_policy,
+                )
+            if parsed.scheme in {"s3", "gs", "gcs", "azure"}:
+                cloud_ref = normalize_model_artifact_reference(ref, metadata or {})
+                fetch_url = cloud_ref.get("fetch_url")
+                if not fetch_url:
+                    raise ValueError("Cloud object reference could not be converted to a fetchable HTTPS URL")
+                data, meta = await asyncio.to_thread(
+                    _safe_download_http_to_quarantine,
+                    str(fetch_url),
+                    max_bytes,
+                    complete_limit,
+                    timeout_seconds,
+                    quarantine_dir,
+                    None,
+                    fetch_policy,
+                )
+                return data, {**meta, "source": cloud_ref.get("kind") or "cloud_object", "cloud": cloud_ref}
+            if parsed.scheme in {"http", "https"}:
+                return await asyncio.to_thread(
+                    _safe_download_http_to_quarantine,
+                    ref,
+                    max_bytes,
+                    complete_limit,
+                    timeout_seconds,
+                    quarantine_dir,
+                    None,
+                    fetch_policy,
+                )
+            if parsed.scheme == "file" or not parsed.scheme:
+                if not allow_local_files:
+                    return b"", {
+                        "source": "local_file",
+                        "bytes_observed": 0,
+                        "error": "Local artifact reads are disabled for model intake. Use http(s), hf, or cloud object references, or enable allow_local_files in local development.",
+                    }
+                local_path = Path(urllib.request.url2pathname(parsed.path) if parsed.scheme == "file" else ref)
+                return await asyncio.to_thread(
+                    _quarantine_local_file,
+                    local_path,
+                    quarantine_dir,
+                    inspection_bytes=max_bytes,
+                    max_artifact_bytes=complete_limit,
+                )
         if parsed.scheme == "hf" or (
             parsed.scheme in {"http", "https"}
             and (parsed_host == "huggingface.co" or parsed_host.endswith(".huggingface.co"))
@@ -808,6 +914,62 @@ def _looks_like_pickle(data: bytes, ext: str = "") -> bool:
     return any(marker in sample for marker in PICKLE_OPCODE_MARKERS)
 
 
+def _inspect_zip_path(path: str | Path) -> dict[str, Any]:
+    if not zipfile.is_zipfile(path):
+        return {"is_zip": False, "entries": []}
+    entries = []
+    risky_entries = []
+    executable_entries = []
+    pickle_entries = []
+    path_traversal_entries = []
+    nested_archive_entries = []
+    zip_bomb_entries = []
+    risky_config_entries = []
+    with zipfile.ZipFile(path) as zf:
+        for info in zf.infolist()[:500]:
+            entry = info.filename
+            entries.append(entry)
+            ext = Path(entry).suffix.lower()
+            lowered = entry.lower()
+            parts = Path(entry.replace("\\", "/")).parts
+            if entry.startswith(("/", "\\")) or ".." in parts or re.match(r"^[a-zA-Z]:", entry):
+                path_traversal_entries.append(entry)
+            if lowered.endswith((".zip", ".tar", ".tar.gz", ".tgz", ".tar.xz", ".tar.bz2", ".7z")):
+                nested_archive_entries.append(entry)
+            if info.compress_size > 0 and info.file_size > 1_000_000 and info.file_size / info.compress_size > 100:
+                zip_bomb_entries.append(entry)
+            if ext in RISKY_EXTENSIONS or lowered.endswith("/data.pkl") or lowered.endswith("pickle"):
+                risky_entries.append(entry)
+            if ext in EXECUTABLE_EXTENSIONS:
+                executable_entries.append(entry)
+            if lowered.endswith((".pkl", ".pickle", "data.pkl")):
+                pickle_entries.append(entry)
+            if (
+                info.file_size <= 262_144
+                and Path(entry).name.lower() in {"config.json", "tokenizer_config.json", "generation_config.json"}
+            ):
+                try:
+                    content = zf.read(info, pwd=None)[:262_144].lower()
+                except (KeyError, RuntimeError, zipfile.BadZipFile):
+                    content = b""
+                if b"trust_remote_code" in content and b"true" in content:
+                    risky_config_entries.append({"entry": entry, "risk": "trust_remote_code"})
+                if b"chat_template" in content and any(marker in content for marker in (b"tool_call", b"system", b"developer")):
+                    risky_config_entries.append({"entry": entry, "risk": "risky_chat_template"})
+    return {
+        "is_zip": True,
+        "entries": entries[:50],
+        "entry_count": len(entries),
+        "risky_entries": risky_entries[:50],
+        "pickle_entries": pickle_entries[:50],
+        "executable_entries": executable_entries[:50],
+        "path_traversal_entries": path_traversal_entries[:50],
+        "nested_archive_entries": nested_archive_entries[:50],
+        "zip_bomb_entries": zip_bomb_entries[:50],
+        "risky_config_entries": risky_config_entries[:50],
+    }
+
+
 def _inspect_zip(data: bytes) -> dict[str, Any]:
     with NamedTemporaryFile(delete=False) as tmp:
         tmp.write(data)
@@ -815,57 +977,7 @@ def _inspect_zip(data: bytes) -> dict[str, Any]:
     try:
         if not zipfile.is_zipfile(tmp_path):
             return {"is_zip": False, "entries": []}
-        entries = []
-        risky_entries = []
-        executable_entries = []
-        pickle_entries = []
-        path_traversal_entries = []
-        nested_archive_entries = []
-        zip_bomb_entries = []
-        risky_config_entries = []
-        with zipfile.ZipFile(tmp_path) as zf:
-            for info in zf.infolist()[:500]:
-                entry = info.filename
-                entries.append(entry)
-                ext = Path(entry).suffix.lower()
-                lowered = entry.lower()
-                parts = Path(entry.replace("\\", "/")).parts
-                if entry.startswith(("/", "\\")) or ".." in parts or re.match(r"^[a-zA-Z]:", entry):
-                    path_traversal_entries.append(entry)
-                if lowered.endswith((".zip", ".tar", ".tar.gz", ".tgz", ".tar.xz", ".tar.bz2", ".7z")):
-                    nested_archive_entries.append(entry)
-                if info.compress_size > 0 and info.file_size > 1_000_000 and info.file_size / info.compress_size > 100:
-                    zip_bomb_entries.append(entry)
-                if ext in RISKY_EXTENSIONS or lowered.endswith("/data.pkl") or lowered.endswith("pickle"):
-                    risky_entries.append(entry)
-                if ext in EXECUTABLE_EXTENSIONS:
-                    executable_entries.append(entry)
-                if lowered.endswith((".pkl", ".pickle", "data.pkl")):
-                    pickle_entries.append(entry)
-                if (
-                    info.file_size <= 262_144
-                    and Path(entry).name.lower() in {"config.json", "tokenizer_config.json", "generation_config.json"}
-                ):
-                    try:
-                        content = zf.read(info, pwd=None)[:262_144].lower()
-                    except (KeyError, RuntimeError, zipfile.BadZipFile):
-                        content = b""
-                    if b"trust_remote_code" in content and b"true" in content:
-                        risky_config_entries.append({"entry": entry, "risk": "trust_remote_code"})
-                    if b"chat_template" in content and any(marker in content for marker in (b"tool_call", b"system", b"developer")):
-                        risky_config_entries.append({"entry": entry, "risk": "risky_chat_template"})
-        return {
-            "is_zip": True,
-            "entries": entries[:50],
-            "entry_count": len(entries),
-            "risky_entries": risky_entries[:50],
-            "pickle_entries": pickle_entries[:50],
-            "executable_entries": executable_entries[:50],
-            "path_traversal_entries": path_traversal_entries[:50],
-            "nested_archive_entries": nested_archive_entries[:50],
-            "zip_bomb_entries": zip_bomb_entries[:50],
-            "risky_config_entries": risky_config_entries[:50],
-        }
+        return _inspect_zip_path(tmp_path)
     finally:
         try:
             os.unlink(tmp_path)
@@ -1145,6 +1257,7 @@ async def _load_and_verify_signature(
     timeout_seconds: int,
     allow_local_files: bool,
     fetch_policy: dict[str, Any] | None = None,
+    artifact_payload_complete: bool = True,
 ) -> dict[str, Any]:
     """Gather signature material (inline or fetched) and run real verification.
 
@@ -1195,6 +1308,15 @@ async def _load_and_verify_signature(
             payload_bytes = sha256.encode()
         digest_based = True
     else:
+        if not artifact_payload_complete:
+            return {
+                "available": True,
+                "attempted": False,
+                "verified": False,
+                "signature_valid": False,
+                "error": "raw_artifact_payload_not_fully_materialized",
+                "payload_kind": "artifact",
+            }
         payload_bytes = artifact_bytes
 
     result = _verify_signature_crypto(
@@ -1249,7 +1371,13 @@ def _signature_verification_status(
     trusted_root = crypto.get("trusted_root")
     crypto_attempted = bool(crypto.get("attempted"))
     crypto_invalid = crypto_attempted and not signature_valid
-    present = bool(signature_url or signed_by or metadata.get("attestation_url") or metadata.get("provenance_url"))
+    present = bool(
+        signature_url
+        or signed_by
+        or metadata.get("attestation_url")
+        or metadata.get("provenance_url")
+        or crypto.get("available") is True
+    )
     if cryptographically_verified:
         status = "verified"
     elif signature_valid and trusted_root is False:
@@ -1904,6 +2032,15 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
     metadata_fetch_meta: dict[str, Any] = {}
     timeout_seconds = int(options.get("timeout_seconds") or 20)
     max_download_bytes = int(options.get("max_download_bytes") or 10_000_000)
+    complete_artifact_download = _boolish(options.get("complete_artifact_download"))
+    max_artifact_bytes = int(options.get("max_artifact_bytes") or 10_000_000_000)
+    quarantine_dir = Path(
+        str(
+            options.get("quarantine_dir")
+            or os.getenv("MODEL_INTAKE_QUARANTINE_DIR")
+            or "/results/model-intake-quarantine"
+        )
+    )
     allow_local_files = _boolish(options.get("allow_local_files")) or _boolish(os.getenv("MODEL_INTAKE_ALLOW_LOCAL_FILES"))
     acquisition_option_names = {
         "allow_insecure_http",
@@ -1939,6 +2076,9 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         metadata=metadata,
         allow_local_files=allow_local_files,
         fetch_policy=fetch_policy,
+        complete_download=complete_artifact_download,
+        max_artifact_bytes=max_artifact_bytes,
+        quarantine_dir=quarantine_dir if complete_artifact_download else None,
     )
 
     unsupported_scheme_error = bool(
@@ -1948,9 +2088,19 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
     artifact_filename = _artifact_name(artifact_ref)
     name = str(options.get("artifact_name") or artifact_filename)
     ext = _artifact_ext(artifact_filename) or _artifact_ext(name)
-    sha256 = hashlib.sha256(artifact_bytes).hexdigest() if artifact_bytes else None
-    zip_info = _inspect_zip(artifact_bytes) if artifact_bytes[:4] == b"PK\x03\x04" else {"is_zip": False, "entries": []}
+    sha256 = str(artifact_meta.get("sha256") or "").strip() or (
+        hashlib.sha256(artifact_bytes).hexdigest() if artifact_bytes else None
+    )
+    quarantine_path = str(artifact_meta.get("_quarantine_path") or "").strip()
+    zip_info = (
+        _inspect_zip_path(quarantine_path)
+        if quarantine_path and artifact_bytes[:4] == b"PK\x03\x04"
+        else _inspect_zip(artifact_bytes)
+        if artifact_bytes[:4] == b"PK\x03\x04"
+        else {"is_zip": False, "entries": []}
+    )
     artifact_truncated = bool(artifact_meta.get("truncated"))
+    inspection_truncated = bool(artifact_meta.get("inspection_truncated") or artifact_truncated)
 
     findings: list[dict[str, Any]] = []
     expected_sha256 = options.get("expected_sha256") or metadata.get("sha256")
@@ -1996,7 +2146,10 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
     registry_reference = _registry_reference(artifact_ref, metadata)
     crypto_signature_result = await _load_and_verify_signature(
         options, metadata, signature_url, artifact_bytes, sha256,
-        timeout_seconds=timeout_seconds, allow_local_files=allow_local_files, fetch_policy=fetch_policy,
+        timeout_seconds=timeout_seconds,
+        allow_local_files=allow_local_files,
+        fetch_policy=fetch_policy,
+        artifact_payload_complete=not inspection_truncated,
     )
     signature_status = _signature_verification_status(metadata, signature_url, signed_by, crypto_signature_result)
     license_policy = _license_policy(license_ref)
@@ -2024,7 +2177,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         ext,
         artifact_bytes,
         zip_info,
-        artifact_truncated=artifact_truncated,
+        artifact_truncated=inspection_truncated,
         artifact_size=artifact_size,
         artifact_size_source=artifact_size_source,
     )
@@ -2614,7 +2767,8 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
     safe_registry_reference = redact_model_intake_value(registry_reference)
     safe_metadata = redact_model_intake_value(metadata)
     safe_metadata_fetch_meta = redact_model_intake_value(metadata_fetch_meta)
-    safe_artifact_meta = redact_model_intake_value(artifact_meta)
+    public_artifact_meta = {key: value for key, value in artifact_meta.items() if not str(key).startswith("_")}
+    safe_artifact_meta = redact_model_intake_value(public_artifact_meta)
     safe_signature_status = redact_model_intake_value(signature_status)
     safe_aibom = redact_model_intake_value(aibom)
     safe_findings = redact_model_intake_value(findings)
@@ -2640,6 +2794,9 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         "extension": ext,
         "sha256": sha256,
         "sha256_scope": observed_hash_scope,
+        "acquisition_complete": bool(artifact_meta.get("complete")) and not artifact_truncated,
+        "inspection_complete": not inspection_truncated,
+        "quarantine_object": artifact_meta.get("quarantine_object"),
         "expected_sha256": expected_sha256,
         "checksum_status": checksum_status,
         "checksum_match": checksum_match,

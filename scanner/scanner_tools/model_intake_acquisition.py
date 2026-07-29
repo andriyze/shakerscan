@@ -9,11 +9,14 @@ forwarded.
 from __future__ import annotations
 
 import http.client
+import hashlib
 import ipaddress
 import os
 import socket
 import ssl
+import tempfile
 import urllib.parse
+from pathlib import Path
 from typing import Any
 
 
@@ -224,6 +227,26 @@ def _request_once(
     max_bytes: int,
     timeout_seconds: int,
 ) -> tuple[bytes, dict[str, Any]]:
+    connection, response = _open_response(destination, headers, timeout_seconds)
+    try:
+        response_headers = {key: value for key, value in response.getheaders()}
+        data = response.read(max_bytes + 1)
+        return data, {
+            "status": response.status,
+            "reason": response.reason,
+            "headers": response_headers,
+            "remote_ip": destination["addresses"][0],
+            "resolved_ips": list(destination["addresses"]),
+        }
+    finally:
+        connection.close()
+
+
+def _open_response(
+    destination: dict[str, Any],
+    headers: dict[str, str],
+    timeout_seconds: int,
+) -> tuple[http.client.HTTPConnection, http.client.HTTPResponse]:
     connect_ip = str(destination["addresses"][0])
     if destination["scheme"] == "https":
         connection: http.client.HTTPConnection = _PinnedHTTPSConnection(
@@ -234,18 +257,10 @@ def _request_once(
     request_headers = {**headers, "Host": str(destination["host_header"]), "Accept-Encoding": "identity"}
     try:
         connection.request("GET", _request_target(str(destination["url"])), headers=request_headers)
-        response = connection.getresponse()
-        response_headers = {key: value for key, value in response.getheaders()}
-        data = response.read(max_bytes + 1)
-        return data, {
-            "status": response.status,
-            "reason": response.reason,
-            "headers": response_headers,
-            "remote_ip": connect_ip,
-            "resolved_ips": list(destination["addresses"]),
-        }
-    finally:
+        return connection, connection.getresponse()
+    except Exception:
         connection.close()
+        raise
 
 
 def _origin(url: str) -> tuple[str, str, int]:
@@ -337,5 +352,201 @@ def download_http(
                 "dns_pinned": True,
             },
         }
+
+    raise AcquisitionPolicyError("Artifact acquisition ended without a response")
+
+
+def _quarantine_final_path(root: Path, digest: str) -> Path:
+    return root / "sha256" / digest[:2] / digest
+
+
+def _hash_file(path: Path) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+            size += len(chunk)
+    return digest.hexdigest(), size
+
+
+def _commit_quarantine_file(temp_path: Path, root: Path, digest: str, size: int) -> Path:
+    final_path = _quarantine_final_path(root, digest)
+    final_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if final_path.exists():
+        existing_digest, existing_size = _hash_file(final_path)
+        if existing_digest != digest or existing_size != size:
+            raise AcquisitionPolicyError("Existing quarantine object failed content-address integrity verification")
+        temp_path.unlink(missing_ok=True)
+        return final_path
+    os.chmod(temp_path, 0o600)
+    os.replace(temp_path, final_path)
+    return final_path
+
+
+def quarantine_local_file(
+    source_path: Path,
+    quarantine_dir: Path,
+    *,
+    inspection_bytes: int,
+    max_artifact_bytes: int,
+) -> tuple[bytes, dict[str, Any]]:
+    """Copy a development-only local artifact into content-addressed quarantine."""
+    quarantine_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    source_size = source_path.stat().st_size
+    if source_size > max_artifact_bytes:
+        raise AcquisitionPolicyError(
+            f"Artifact exceeds the complete acquisition limit of {max_artifact_bytes} bytes"
+        )
+    digest = hashlib.sha256()
+    prefix = bytearray()
+    total = 0
+    temp_handle = tempfile.NamedTemporaryFile(prefix="acquire-", dir=quarantine_dir, delete=False)
+    temp_path = Path(temp_handle.name)
+    try:
+        with temp_handle, source_path.open("rb") as source:
+            while chunk := source.read(1024 * 1024):
+                total += len(chunk)
+                if total > max_artifact_bytes:
+                    raise AcquisitionPolicyError(
+                        f"Artifact exceeds the complete acquisition limit of {max_artifact_bytes} bytes"
+                    )
+                digest.update(chunk)
+                temp_handle.write(chunk)
+                if len(prefix) < inspection_bytes:
+                    prefix.extend(chunk[: inspection_bytes - len(prefix)])
+        digest_hex = digest.hexdigest()
+        final_path = _commit_quarantine_file(temp_path, quarantine_dir, digest_hex, total)
+        return bytes(prefix), {
+            "source": "local_file",
+            "bytes_observed": total,
+            "bytes_total": total,
+            "inspection_bytes_observed": len(prefix),
+            "inspection_truncated": total > len(prefix),
+            "truncated": False,
+            "complete": True,
+            "sha256": digest_hex,
+            "quarantine_object": f"sha256:{digest_hex}",
+            "_quarantine_path": str(final_path),
+        }
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
+
+
+def download_http_to_quarantine(
+    url: str,
+    inspection_bytes: int,
+    max_artifact_bytes: int,
+    timeout_seconds: int,
+    quarantine_dir: Path,
+    headers: dict[str, str] | None = None,
+    policy: dict[str, Any] | None = None,
+) -> tuple[bytes, dict[str, Any]]:
+    """Stream a complete artifact into immutable content-addressed quarantine."""
+    if inspection_bytes < 1 or max_artifact_bytes < inspection_bytes:
+        raise AcquisitionPolicyError("Complete acquisition limits are inconsistent")
+    effective_policy = policy or acquisition_policy()
+    current_url = str(url or "").strip()
+    current_headers = {
+        "User-Agent": "ShakerScan-ModelIntake/2.0",
+        **(headers or {}),
+    }
+    redirect_chain: list[str] = []
+    resolution_chain: list[dict[str, Any]] = []
+    max_redirects = int(effective_policy.get("max_redirects", DEFAULT_REDIRECT_LIMIT))
+
+    for hop in range(max_redirects + 1):
+        destination = validate_url_destination(current_url, effective_policy)
+        resolution_chain.append({
+            "url": current_url,
+            "host": destination["host"],
+            "port": destination["port"],
+            "ips": list(destination["addresses"]),
+        })
+        connection, response = _open_response(destination, current_headers, timeout_seconds)
+        try:
+            response_headers = {key: value for key, value in response.getheaders()}
+            location = response_headers.get("Location") or response_headers.get("location")
+            if response.status in REDIRECT_STATUSES and location:
+                if hop >= max_redirects:
+                    raise AcquisitionPolicyError(f"Artifact redirect limit exceeded ({max_redirects})")
+                next_url = urllib.parse.urljoin(current_url, location)
+                validate_url_destination(next_url, effective_policy)
+                if _origin(next_url) != _origin(current_url):
+                    current_headers = {
+                        key: value
+                        for key, value in current_headers.items()
+                        if key.lower() not in SENSITIVE_REDIRECT_HEADERS
+                    }
+                redirect_chain.append(next_url)
+                current_url = next_url
+                continue
+            if response.status < 200 or response.status >= 300:
+                raise AcquisitionPolicyError(f"Artifact acquisition returned HTTP {response.status}")
+            content_length = response_headers.get("Content-Length") or response_headers.get("content-length")
+            try:
+                declared_length = int(content_length) if content_length is not None else None
+            except ValueError:
+                declared_length = None
+            if declared_length is not None and declared_length > max_artifact_bytes:
+                raise AcquisitionPolicyError(
+                    f"Artifact exceeds the complete acquisition limit of {max_artifact_bytes} bytes"
+                )
+
+            quarantine_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            temp_handle = tempfile.NamedTemporaryFile(prefix="acquire-", dir=quarantine_dir, delete=False)
+            temp_path = Path(temp_handle.name)
+            digest = hashlib.sha256()
+            prefix = bytearray()
+            total = 0
+            try:
+                with temp_handle:
+                    while chunk := response.read(1024 * 1024):
+                        total += len(chunk)
+                        if total > max_artifact_bytes:
+                            raise AcquisitionPolicyError(
+                                f"Artifact exceeds the complete acquisition limit of {max_artifact_bytes} bytes"
+                            )
+                        digest.update(chunk)
+                        temp_handle.write(chunk)
+                        if len(prefix) < inspection_bytes:
+                            prefix.extend(chunk[: inspection_bytes - len(prefix)])
+                digest_hex = digest.hexdigest()
+                final_path = _commit_quarantine_file(temp_path, quarantine_dir, digest_hex, total)
+            except Exception:
+                temp_path.unlink(missing_ok=True)
+                raise
+
+            return bytes(prefix), {
+                "source": "http",
+                "requested_url": url,
+                "final_url": current_url,
+                "redirected": bool(redirect_chain),
+                "redirect_chain": redirect_chain,
+                "resolution_chain": resolution_chain,
+                "remote_ip": destination["addresses"][0],
+                "status": response.status,
+                "content_type": response_headers.get("Content-Type") or response_headers.get("content-type"),
+                "content_length": content_length,
+                "bytes_observed": total,
+                "bytes_total": total,
+                "inspection_bytes_observed": len(prefix),
+                "inspection_truncated": total > len(prefix),
+                "truncated": False,
+                "complete": True,
+                "sha256": digest_hex,
+                "quarantine_object": f"sha256:{digest_hex}",
+                "_quarantine_path": str(final_path),
+                "acquisition_policy": {
+                    "https_required": not bool(effective_policy.get("allow_insecure_http")),
+                    "private_networks_blocked": not bool(effective_policy.get("allow_private_networks")),
+                    "host_allowlist_enforced": bool(effective_policy.get("allowed_hosts")),
+                    "redirect_limit": max_redirects,
+                    "dns_pinned": True,
+                },
+            }
+        finally:
+            connection.close()
 
     raise AcquisitionPolicyError("Artifact acquisition ended without a response")

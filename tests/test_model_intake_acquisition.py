@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import io
 
 import pytest
 
@@ -209,3 +211,109 @@ def test_model_intake_huggingface_routing_does_not_accept_lookalike_host(monkeyp
     assert data == b"model"
     assert meta["source"] == "http"
     assert observed == ["https://huggingface.co.evil.test/model.bin"]
+
+
+def test_complete_http_acquisition_streams_to_content_addressed_quarantine(monkeypatch, tmp_path):
+    _dns(monkeypatch, {"models.example.test": ["93.184.216.34"]})
+    payload = b"0123456789" * 1000
+
+    class FakeResponse:
+        status = 200
+        reason = "OK"
+
+        def __init__(self):
+            self.body = io.BytesIO(payload)
+
+        def getheaders(self):
+            return [("Content-Length", str(len(payload))), ("Content-Type", "application/octet-stream")]
+
+        def read(self, size):
+            return self.body.read(size)
+
+    class FakeConnection:
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        acquisition,
+        "_open_response",
+        lambda destination, headers, timeout: (FakeConnection(), FakeResponse()),
+    )
+
+    prefix, meta = acquisition.download_http_to_quarantine(
+        "https://models.example.test/model.bin",
+        inspection_bytes=128,
+        max_artifact_bytes=20_000,
+        timeout_seconds=5,
+        quarantine_dir=tmp_path,
+    )
+
+    expected_sha = hashlib.sha256(payload).hexdigest()
+    object_path = tmp_path / "sha256" / expected_sha[:2] / expected_sha
+    assert prefix == payload[:128]
+    assert object_path.read_bytes() == payload
+    assert meta["sha256"] == expected_sha
+    assert meta["quarantine_object"] == f"sha256:{expected_sha}"
+    assert meta["bytes_observed"] == len(payload)
+    assert meta["complete"] is True
+    assert meta["truncated"] is False
+    assert meta["inspection_truncated"] is True
+
+
+def test_complete_acquisition_rejects_declared_oversize_without_object(monkeypatch, tmp_path):
+    _dns(monkeypatch, {"models.example.test": ["93.184.216.34"]})
+
+    class FakeResponse:
+        status = 200
+        reason = "OK"
+
+        def getheaders(self):
+            return [("Content-Length", "5000")]
+
+        def read(self, size):
+            raise AssertionError("oversized response body must not be read")
+
+    class FakeConnection:
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        acquisition,
+        "_open_response",
+        lambda destination, headers, timeout: (FakeConnection(), FakeResponse()),
+    )
+
+    with pytest.raises(acquisition.AcquisitionPolicyError, match="complete acquisition limit"):
+        acquisition.download_http_to_quarantine(
+            "https://models.example.test/model.bin",
+            inspection_bytes=128,
+            max_artifact_bytes=1024,
+            timeout_seconds=5,
+            quarantine_dir=tmp_path,
+        )
+    assert list(tmp_path.rglob("*")) == []
+
+
+def test_local_quarantine_deduplicates_and_revalidates_existing_object(tmp_path):
+    source = tmp_path / "source.bin"
+    quarantine = tmp_path / "quarantine"
+    payload = b"safe-model" * 100
+    source.write_bytes(payload)
+
+    first_prefix, first_meta = acquisition.quarantine_local_file(
+        source, quarantine, inspection_bytes=32, max_artifact_bytes=10_000
+    )
+    second_prefix, second_meta = acquisition.quarantine_local_file(
+        source, quarantine, inspection_bytes=32, max_artifact_bytes=10_000
+    )
+
+    assert first_prefix == second_prefix == payload[:32]
+    assert first_meta["quarantine_object"] == second_meta["quarantine_object"]
+    object_files = [path for path in quarantine.rglob("*") if path.is_file()]
+    assert len(object_files) == 1
+
+    object_files[0].write_bytes(b"tampered")
+    with pytest.raises(acquisition.AcquisitionPolicyError, match="integrity verification"):
+        acquisition.quarantine_local_file(
+            source, quarantine, inspection_bytes=32, max_artifact_bytes=10_000
+        )

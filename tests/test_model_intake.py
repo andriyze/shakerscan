@@ -633,6 +633,46 @@ def test_model_intake_blocks_local_file_reads_by_default(tmp_path):
     assert "Local artifact reads are disabled" in result["model_intake"]["artifact"]["fetch"]["error"]
 
 
+def test_model_intake_complete_acquisition_verifies_full_hash_and_full_zip(tmp_path):
+    artifact = tmp_path / "pytorch_model.bin"
+    quarantine = tmp_path / "quarantine"
+    with zipfile.ZipFile(artifact, "w") as zf:
+        zf.writestr("padding.bin", b"x" * 4096)
+        zf.writestr("archive/data.pkl", b"\x80\x04cposix\nsystem\nq\x00.")
+    expected_sha = hashlib.sha256(artifact.read_bytes()).hexdigest()
+
+    result = asyncio.run(
+        run_model_intake_scan(
+            str(artifact),
+            _local_options(
+                {
+                    "complete_artifact_download": True,
+                    "max_download_bytes": 64,
+                    "max_artifact_bytes": 100_000,
+                    "quarantine_dir": str(quarantine),
+                    "expected_sha256": expected_sha,
+                    "require_signature": False,
+                    "require_model_governance": False,
+                    "require_deployment_approval": False,
+                }
+            ),
+        )
+    )
+
+    summary = result["model_intake"]["summary"]
+    fetch = result["model_intake"]["artifact"]["fetch"]
+    assert summary["sha256"] == expected_sha
+    assert summary["sha256_scope"] == "full_artifact"
+    assert summary["checksum_status"] == "verified"
+    assert summary["acquisition_complete"] is True
+    assert summary["inspection_complete"] is False
+    assert fetch["complete"] is True
+    assert fetch["inspection_truncated"] is True
+    assert "_quarantine_path" not in fetch
+    assert result["model_intake"]["artifact"]["archive"]["pickle_entries"] == ["archive/data.pkl"]
+    assert "model_intake:unsafe_serialization" in {finding["id"] for finding in result["findings"]}
+
+
 def test_model_intake_reports_unsupported_artifact_scheme():
     result = asyncio.run(
         run_model_intake_scan(

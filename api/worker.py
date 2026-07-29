@@ -2031,7 +2031,11 @@ async def run_scan(
         except ImportError:
             from scanner.scanner_tools.model_intake import run_model_intake_scan
 
-        result = await run_model_intake_scan(target, options)
+        intake_options = dict(options or {})
+        if scan_id:
+            intake_options.setdefault("scan_id", scan_id)
+            intake_options.setdefault("quarantine_dir", str(RESULTS_DIR / "model-intake-quarantine"))
+        result = await run_model_intake_scan(target, intake_options)
         if scan_id:
             await update_scan_progress(scan_id, "model_intake_finalize", 95, job_id=job_id)
         return result

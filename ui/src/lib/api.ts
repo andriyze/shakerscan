@@ -1303,6 +1303,13 @@ export interface ModelIntakeScanRequest {
   require_model_governance?: boolean
   policy_profile?: string
   max_download_bytes?: number
+  complete_artifact_download?: boolean
+  max_artifact_bytes?: number
+  allow_insecure_http?: boolean
+  allow_private_networks?: boolean
+  allowed_acquisition_hosts?: string[]
+  allowed_acquisition_ports?: number[]
+  max_acquisition_redirects?: number
   timeout_seconds?: number
   approval_receipt_id?: string
 }

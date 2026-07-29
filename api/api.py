@@ -3630,6 +3630,16 @@ class ModelIntakeScanRequest(BaseModel):
     policy_profile: Optional[str] = None
     policy_exceptions: Optional[list[dict[str, Any]]] = None
     max_download_bytes: int = Field(default=10_000_000, ge=1024, le=100_000_000)
+    complete_artifact_download: bool = Field(
+        default=False,
+        description="Stream the complete artifact into content-addressed quarantine while retaining only a bounded inspection prefix in memory.",
+    )
+    max_artifact_bytes: int = Field(
+        default=10_000_000_000,
+        ge=1024,
+        le=100_000_000_000,
+        description="Fail-closed total-byte ceiling used only for complete artifact acquisition.",
+    )
     timeout_seconds: int = Field(default=20, ge=1, le=120)
     allow_insecure_http: bool = Field(
         default=False,
@@ -10732,6 +10742,8 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
         "policy_profile": request.policy_profile,
         "policy_exceptions": request.policy_exceptions or [],
         "max_download_bytes": request.max_download_bytes,
+        "complete_artifact_download": request.complete_artifact_download,
+        "max_artifact_bytes": request.max_artifact_bytes,
         "timeout_seconds": request.timeout_seconds,
         "allow_insecure_http": request.allow_insecure_http,
         "allow_private_networks": request.allow_private_networks,
