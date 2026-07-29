@@ -75,7 +75,8 @@ def test_materialize_snapshot_tree_preserves_paths_and_rejects_collision(tmp_pat
 
     target = root / "nested" / "modeling.py"
     assert target.read_bytes() == payload
-    assert os.stat(target).st_ino == os.stat(object_path).st_ino
+    assert os.stat(target).st_ino != os.stat(object_path).st_ino
+    assert target.stat().st_mode & 0o777 == 0o444
 
     collision = {
         "files": [

@@ -141,6 +141,30 @@ def _safe_environment(scratch: Path) -> dict[str, str]:
     }
 
 
+def _prepare_unprivileged_paths(subject_path: Path, scratch: Path) -> None:
+    """Make the disposable scan view readable and scratch writable after UID drop."""
+    if os.geteuid() != 0:
+        return
+    try:
+        account = pwd.getpwnam("scanner")
+    except KeyError:
+        return
+    os.chown(scratch, account.pw_uid, account.pw_gid)
+    os.chmod(scratch, 0o700)
+    # TemporaryDirectory creates its root as 0700. The scanner only needs
+    # traversal to the copied, read-only subject view beneath it.
+    os.chmod(subject_path.parent, 0o711)
+    if subject_path.is_dir():
+        for root, directories, filenames in os.walk(subject_path):
+            os.chmod(root, 0o555)
+            for directory in directories:
+                os.chmod(Path(root) / directory, 0o555)
+            for filename in filenames:
+                os.chmod(Path(root) / filename, 0o444)
+    else:
+        os.chmod(subject_path, 0o444)
+
+
 def _read_bounded(path: Path, limit: int = MAX_SCANNER_OUTPUT_BYTES) -> tuple[str, bool]:
     size = path.stat().st_size if path.exists() else 0
     with path.open("rb") as handle:
@@ -208,6 +232,7 @@ def run_external_scanner(spec: ScannerSpec, subject_path: Path, subject: dict[st
         )
     with tempfile.TemporaryDirectory(prefix=f"model-intake-{spec.name}-") as scratch_raw:
         scratch = Path(scratch_raw)
+        _prepare_unprivileged_paths(subject_path, scratch)
         env = _safe_environment(scratch)
         version = _tool_version(executable, spec.version_args, env, scratch)
         argv = [
@@ -434,7 +459,7 @@ def run_builtin_source_scan(snapshot_root: Path | None, subject: dict[str, Any])
 
 
 def materialize_snapshot_tree(snapshot: dict[str, Any], quarantine_dir: Path, destination: Path) -> Path:
-    """Create a path-preserving, hard-linked view over content-addressed objects."""
+    """Create a path-preserving disposable view over content-addressed objects."""
     destination.mkdir(parents=True, exist_ok=False)
     seen_casefold: set[str] = set()
     for item in snapshot.get("files") or []:
@@ -454,7 +479,10 @@ def materialize_snapshot_tree(snapshot: dict[str, Any], quarantine_dir: Path, de
             raise FileNotFoundError("snapshot quarantine object is missing")
         target = destination.joinpath(*parts)
         target.parent.mkdir(parents=True, exist_ok=True)
-        os.link(source, target)
+        # Do not hard-link: later read-only permission changes for an
+        # unprivileged scanner must never mutate the quarantine inode.
+        shutil.copyfile(source, target)
+        os.chmod(target, 0o444)
     return destination
 
 

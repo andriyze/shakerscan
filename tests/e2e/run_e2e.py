@@ -16,6 +16,7 @@ import argparse
 import json
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 
 try:
     from . import harness as H
@@ -45,6 +46,31 @@ def run_model_intake() -> H.Scorecard:
     fx_large = f"{FIXTURES_BASE}/models/large.safetensors"
 
     def _mi_scan(opts: dict, label: str, timeout: int = 180) -> dict:
+        artifact_url = str(opts.get("artifact_url") or "")
+        if artifact_url.startswith(FIXTURES_BASE) and not opts.get("approval_receipt_id"):
+            host = artifact_url.split("/", 3)[2].split(":", 1)[0]
+            _, preview = H.post("/arsenal/scope/preview", {
+                "url": artifact_url,
+                "allowed_hosts": [host],
+                "environment": "lab",
+            })
+            scope = preview.get("scope_receipt") or {}
+            _, approval = H.post("/arsenal/approvals", {
+                "scope_receipt_id": scope.get("receipt_id"),
+                "risk_tier": "active",
+                "confirmations": ["confirm_authorized", "confirm_scope_reviewed"],
+                "action_name": "model_intake.scan",
+                "approved_by": "model-intake-e2e",
+                "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat(),
+            })
+            opts = {
+                **opts,
+                "allow_insecure_http": True,
+                "allow_private_networks": True,
+                "allowed_acquisition_hosts": [host],
+                "allowed_acquisition_ports": [FIXTURES_PORT],
+                "approval_receipt_id": (approval.get("approval_receipt") or {}).get("id"),
+            }
         _, r = H.post("/model-intake/scan", opts)
         sid = r.get("scan_id")
         if not sid:

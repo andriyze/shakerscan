@@ -12,7 +12,9 @@ import asyncio
 import hashlib
 import json
 import os
+import pickletools
 import re
+import shutil
 import struct
 import urllib.parse
 import urllib.request
@@ -108,7 +110,13 @@ EXECUTABLE_EXTENSIONS = {
 }
 
 PICKLE_MAGIC_PREFIXES = (b"\x80\x02", b"\x80\x03", b"\x80\x04", b"\x80\x05")
-PICKLE_OPCODE_MARKERS = (b"__reduce__", b"GLOBAL", b"cposix\nsystem", b"cos\nsystem", b"subprocess", b"eval", b"exec")
+PICKLE_OPCODE_MARKERS = (b"__reduce__", b"cposix\nsystem", b"cos\nsystem")
+
+MAX_INSPECTION_BYTES = 100_000_000
+MAX_ARTIFACT_BYTES = 100_000_000_000
+MAX_REPOSITORY_BYTES = 500_000_000_000
+MAX_REPOSITORY_FILES = 10_000
+MAX_TIMEOUT_SECONDS = 120
 
 SUSPICIOUS_LOADER_MARKERS = {
     b"os.system": "python_os_system",
@@ -1061,10 +1069,19 @@ async def _fetch_json(
 def _looks_like_pickle(data: bytes, ext: str = "") -> bool:
     if data.startswith(PICKLE_MAGIC_PREFIXES):
         return True
-    if ext in SAFER_MODEL_EXTENSIONS:
+    if ext in SAFER_MODEL_EXTENSIONS or data.startswith(b"PK\x03\x04"):
         return False
-    sample = data[:65536]
-    return any(marker in sample for marker in PICKLE_OPCODE_MARKERS)
+    # Do not classify arbitrary binary text such as "evaluation" or "execution"
+    # as pickle. pickletools disassembles opcodes without importing or executing
+    # the payload and also recognizes protocols 0 and 1, which have no magic.
+    try:
+        for opcode, _argument, _position in pickletools.genops(data):
+            if opcode.name == "STOP":
+                return True
+        return False
+    except Exception:
+        sample = data[:65536]
+        return any(marker in sample for marker in PICKLE_OPCODE_MARKERS)
 
 
 def _inspect_zip_path(path: str | Path) -> dict[str, Any]:
@@ -1850,10 +1867,6 @@ def _inspect_safetensors(
         header["error"] = "header_length_unreasonable"
         header["conclusive_invalid"] = True
         return header
-    if header_len > 1_048_576:
-        header["error"] = "header_exceeds_intake_limit"
-        header["valid"] = None
-        return header
     if len(data) < 8 + header_len:
         header["error"] = "header_not_fully_observed" if artifact_truncated else "truncated_header"
         header["conclusive_invalid"] = not artifact_truncated
@@ -1992,30 +2005,11 @@ def _inspect_onnx(data: bytes) -> dict[str, Any]:
         if item.startswith(("ai.onnx.contrib", "com.microsoft", "com.", "org."))
         or "customop" in item.lower()
     ][:25]
-    parsed_with = "string_table"
-    graph_name = None
-    try:
-        import onnx  # type: ignore
-
-        model = onnx.load_model_from_string(data)
-        parsed_with = "onnx"
-        graph_name = getattr(getattr(model, "graph", None), "name", None) or None
-        for initializer in getattr(getattr(model, "graph", None), "initializer", []) or []:
-            for entry in getattr(initializer, "external_data", []) or []:
-                key = getattr(entry, "key", "")
-                value = getattr(entry, "value", "")
-                if key == "location" and value:
-                    external_locations.append(str(value))
-        for node in getattr(getattr(model, "graph", None), "node", []) or []:
-            domain = getattr(node, "domain", "")
-            if domain and domain not in {"", "ai.onnx", "ai.onnx.ml"}:
-                custom_domains.append(str(domain))
-    except Exception:
-        pass
-
     return {
-        "parsed_with": parsed_with,
-        "graph_name": graph_name,
+        "parsed_with": "bounded_string_table",
+        "parser_status": "not_executed_in_worker",
+        "parser_reason": "untrusted_protobuf_requires_generated_scanner_or_sandbox",
+        "graph_name": None,
         "external_data_hint": (
             b"external_data" in sample.lower()
             or b"location" in sample.lower()
@@ -2183,13 +2177,20 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
     metadata = dict(inline_metadata)
     metadata_url = options.get("metadata_url")
     metadata_fetch_meta: dict[str, Any] = {}
-    timeout_seconds = int(options.get("timeout_seconds") or 20)
-    max_download_bytes = int(options.get("max_download_bytes") or 10_000_000)
+    def bounded_int(name: str, default: int, minimum: int, maximum: int) -> int:
+        try:
+            value = int(options.get(name) or default)
+        except (TypeError, ValueError):
+            value = default
+        return max(minimum, min(value, maximum))
+
+    timeout_seconds = bounded_int("timeout_seconds", 20, 1, MAX_TIMEOUT_SECONDS)
+    max_download_bytes = bounded_int("max_download_bytes", 10_000_000, 1024, MAX_INSPECTION_BYTES)
     complete_artifact_download = _boolish(options.get("complete_artifact_download"))
-    max_artifact_bytes = int(options.get("max_artifact_bytes") or 10_000_000_000)
+    max_artifact_bytes = bounded_int("max_artifact_bytes", 10_000_000_000, 1024, MAX_ARTIFACT_BYTES)
     complete_repository_snapshot = _boolish(options.get("complete_repository_snapshot"))
-    max_repository_bytes = int(options.get("max_repository_bytes") or 50_000_000_000)
-    max_repository_files = int(options.get("max_repository_files") or 10_000)
+    max_repository_bytes = bounded_int("max_repository_bytes", 50_000_000_000, 1024, MAX_REPOSITORY_BYTES)
+    max_repository_files = bounded_int("max_repository_files", 10_000, 1, MAX_REPOSITORY_FILES)
     quarantine_dir = Path(
         str(
             options.get("quarantine_dir")
@@ -2282,6 +2283,21 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         or _boolish(metadata.get("production_policy"))
         or deployment_environment == "production"
     )
+    model_card_fetch_meta: dict[str, Any] = {}
+    if isinstance(model_card, str) and urllib.parse.urlparse(model_card).scheme in {"http", "https"}:
+        model_card_bytes, model_card_fetch_meta = await _fetch_artifact(
+            model_card,
+            max_bytes=2_000_000,
+            timeout_seconds=timeout_seconds,
+            allow_local_files=False,
+            fetch_policy=fetch_policy,
+        )
+        model_card_fetch_meta = {
+            **model_card_fetch_meta,
+            "url": model_card,
+            "content_sha256": hashlib.sha256(model_card_bytes).hexdigest() if model_card_bytes else None,
+            "content_retained": False,
+        }
     license_ref = _metadata_value(metadata, "license", "model_license", "license_url")
     sbom_ref = _metadata_value(metadata, "sbom_url", "sbom", "dependencies", "package_dependencies")
     malware_scan_ref = _metadata_value(metadata, "malware_scan_url", "malware_scan_result", "yara_scan", "av_scan")
@@ -2361,7 +2377,8 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             elif quarantine_path and Path(quarantine_path).is_file():
                 safe_subject_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", Path(name).name).strip(".-") or "model-artifact.bin"
                 materialized_artifact = Path(subject_tmp) / safe_subject_name
-                os.link(quarantine_path, materialized_artifact)
+                shutil.copyfile(quarantine_path, materialized_artifact)
+                os.chmod(materialized_artifact, 0o444)
                 subject_path = materialized_artifact
             else:
                 scanner_results.append(_model_intake_scanners._scanner_result(
@@ -2456,7 +2473,9 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         artifact_size_source=artifact_size_source,
     )
     suspicious_loader_markers = _scan_suspicious_loader_markers(artifact_bytes, zip_info)
-    aibom_hash = str(expected_sha256 or sha256 or "").strip() or None
+    # An AIBOM hash is generated evidence only when it covers the complete
+    # observed artifact. Keep publisher/caller claims in a distinct field.
+    aibom_hash = str(sha256 or "").strip() if sha256 and not artifact_truncated else None
     aibom = _generate_aibom(
         artifact_ref=artifact_ref,
         name=name,
@@ -2468,6 +2487,14 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         signature_status=signature_status,
         format_inspection=format_inspection,
     )
+    aibom["declared_artifact_hash"] = (
+        {"alg": "SHA-256", "content": str(expected_sha256).strip().lower(), "provenance_class": "declared"}
+        if expected_sha256 else None
+    )
+    aibom["observed_artifact_hash"] = (
+        {"alg": "SHA-256", "content": aibom_hash, "provenance_class": "shakerscan_generated", "scope": "full_artifact"}
+        if aibom_hash else None
+    )
 
     if metadata_fetch_meta.get("error"):
         findings.append(_finding(
@@ -2478,6 +2505,17 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             artifact_ref=artifact_ref,
             evidence={"artifact": name, "metadata_url": str(metadata_url), "metadata_fetch": metadata_fetch_meta},
             remediation="Make the metadata URL reachable and return a JSON object, or provide equivalent metadata_json directly in the intake request.",
+        ))
+
+    if strict_governance and model_card_fetch_meta.get("error"):
+        findings.append(_finding(
+            finding_id="model_card_fetch_failed",
+            title="Model card could not be acquired",
+            severity="medium",
+            description="The declared model-card URL could not be acquired through the hardened intake fetcher, so its contents were not reviewed.",
+            artifact_ref=artifact_ref,
+            evidence={"artifact": name, "model_card_url": model_card, "model_card_fetch": model_card_fetch_meta},
+            remediation="Publish the model card at an approved reachable HTTPS destination and rerun intake.",
         ))
 
     if artifact_meta.get("error"):
@@ -3130,6 +3168,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
     safe_registry_reference = redact_model_intake_value(registry_reference)
     safe_metadata = redact_model_intake_value(metadata)
     safe_metadata_fetch_meta = redact_model_intake_value(metadata_fetch_meta)
+    safe_model_card_fetch_meta = redact_model_intake_value(model_card_fetch_meta)
     public_artifact_meta = {key: value for key, value in artifact_meta.items() if not str(key).startswith("_")}
     safe_artifact_meta = redact_model_intake_value(public_artifact_meta)
     safe_signature_status = redact_model_intake_value(signature_status)
@@ -3145,7 +3184,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
                 options.get("signature_public_key_url") or metadata.get("signature_public_key_url"),
                 None,
             ) if (options.get("signature_public_key_url") or metadata.get("signature_public_key_url")) else None,
-            _runtime_destination("model_card", model_card, None) if isinstance(model_card, str) else None,
+            _runtime_destination("model_card", model_card, model_card_fetch_meta) if isinstance(model_card, str) else None,
         )
         if item
     ]
@@ -3211,6 +3250,8 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         "training_pipeline_provenance_present": bool(fine_tune_provenance),
         "poisoning_eval_present": bool(poisoning_eval_ref),
         "metadata_fetch_failed": bool(metadata_fetch_meta.get("error")),
+        "model_card_fetch_failed": bool(model_card_fetch_meta.get("error")),
+        "model_card_content_sha256": model_card_fetch_meta.get("content_sha256"),
         "findings_count": len(findings),
     }
 
@@ -3229,6 +3270,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             },
             "metadata": safe_metadata,
             "metadata_fetch": safe_metadata_fetch_meta if metadata_url else None,
+            "model_card_fetch": safe_model_card_fetch_meta if model_card_fetch_meta else None,
             "aibom": safe_aibom,
             "repository_snapshot": redact_model_intake_value(repository_snapshot),
             "generated_evidence": redact_model_intake_value(generated_evidence),

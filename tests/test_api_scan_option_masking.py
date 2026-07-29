@@ -2077,47 +2077,28 @@ def test_sanitize_ai_settings_leaves_demo_urls_empty_by_default():
 def test_huggingface_model_info_requests_lfs_blob_metadata(monkeypatch):
     captured = {}
 
-    class FakeResponse:
-        headers = {}
+    def fake_download(url, max_bytes, timeout, headers=None, policy=None):
+        captured.update({"url": url, "timeout": timeout, "max_bytes": max_bytes, "policy": policy})
+        return b'{"siblings":[]}', {"status": 200}
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-        def read(self, limit):
-            return b'{"siblings":[]}'
-
-    def fake_urlopen(request, timeout):
-        captured["url"] = request.full_url
-        captured["timeout"] = timeout
-        return FakeResponse()
-
-    monkeypatch.setattr(api_module.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(api_module, "_model_download_http", fake_download)
 
     result = api_module._hf_api_model_info("acme/ranker", "abc123", 7)
 
     assert result == {"siblings": []}
     assert captured["timeout"] == 7
+    assert captured["max_bytes"] == api_module.HF_MODEL_INFO_MAX_BYTES + 1
+    assert captured["policy"]["allowed_hosts"] == ["huggingface.co"]
     assert captured["url"] == "https://huggingface.co/api/models/acme/ranker/revision/abc123?blobs=true"
 
 
 def test_huggingface_model_info_rejects_oversized_payload(monkeypatch):
-    class FakeResponse:
-        headers = {}
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-        def read(self, limit):
-            return b"x" * limit
-
     monkeypatch.setattr(api_module, "HF_MODEL_INFO_MAX_BYTES", 10)
-    monkeypatch.setattr(api_module.urllib.request, "urlopen", lambda request, timeout: FakeResponse())
+    monkeypatch.setattr(
+        api_module,
+        "_model_download_http",
+        lambda url, max_bytes, timeout, headers=None, policy=None: (b"x" * max_bytes, {"status": 200}),
+    )
 
     try:
         api_module._hf_api_model_info("acme/ranker", "main", 7)

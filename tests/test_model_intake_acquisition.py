@@ -194,6 +194,28 @@ def test_redirect_limit_is_fail_closed(monkeypatch):
         acquisition.download_http("https://models.example.test/model", 1024, 5, policy=policy)
 
 
+@pytest.mark.parametrize("status", [199, 300, 403, 404, 500])
+def test_bounded_download_rejects_non_success_response_bodies(monkeypatch, status):
+    _dns(monkeypatch, {"models.example.test": ["93.184.216.34"]})
+
+    monkeypatch.setattr(
+        acquisition,
+        "_request_once",
+        lambda destination, headers, max_bytes, timeout_seconds: (
+            b'{"error":"not an artifact"}',
+            {
+                "status": status,
+                "reason": "Error",
+                "headers": {"Content-Type": "application/json"},
+                "remote_ip": destination["addresses"][0],
+            },
+        ),
+    )
+
+    with pytest.raises(acquisition.AcquisitionPolicyError, match=f"HTTP {status}"):
+        acquisition.download_http("https://models.example.test/model", 1024, 5)
+
+
 def test_model_intake_huggingface_routing_does_not_accept_lookalike_host(monkeypatch):
     from scanner.scanner_tools import model_intake
 

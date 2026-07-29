@@ -2584,6 +2584,7 @@ def test_model_intake_policy_profile_requirements_add_required_anchor_ids():
 
     assert updated.trust_anchor_ids == [explicit, required]
     assert updated.metadata_json["license"] == "apache-2.0"
+    assert updated.metadata_json["strict_governance"] is True
     assert updated.metadata_json["policy_required_trust_anchor_ids"] == [required]
     assert updated.metadata_json["policy_required_trust_anchor_profile"] == "Production strict"
 
@@ -2612,6 +2613,27 @@ def test_model_intake_policy_profile_requirements_ignore_non_strict_or_other_pro
 
     assert other_product.trust_anchor_ids is None
     assert non_strict.trust_anchor_ids is None
+
+
+def test_custom_named_strict_model_intake_profile_enables_strict_governance_without_anchors():
+    request = api_module.ModelIntakeScanRequest(
+        artifact_url="https://models.example/model.safetensors",
+        policy_profile="mi-prod-v2",
+    )
+
+    updated = api_module._apply_model_intake_policy_profile_requirements(
+        request,
+        {
+            "name": "MI production v2",
+            "product_area": "model_intake",
+            "environment": "corp-prod",
+            "strict_model_intake": True,
+            "required_trust_anchor_ids": [],
+        },
+    )
+
+    assert updated.metadata_json["strict_governance"] is True
+    assert updated.metadata_json["policy_required_trust_anchor_ids"] == []
 
 
 def test_model_intake_evidence_export_is_content_free():

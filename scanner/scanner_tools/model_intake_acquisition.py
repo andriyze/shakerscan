@@ -319,6 +319,9 @@ def download_http(
             current_url = next_url
             continue
 
+        if status < 200 or status >= 300:
+            raise AcquisitionPolicyError(f"Artifact acquisition returned HTTP {status}")
+
         content_range = response_headers.get("Content-Range") or response_headers.get("content-range")
         content_length = response_headers.get("Content-Length") or response_headers.get("content-length")
         try:

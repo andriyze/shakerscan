@@ -1,8 +1,6 @@
 import asyncio
 import hashlib
 import json
-import sys
-import types
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -202,6 +200,13 @@ def test_model_intake_does_not_compare_full_hash_to_truncated_sample(monkeypatch
     assert result["model_intake"]["summary"]["expected_sha256"] == full_artifact_sha
     assert result["model_intake"]["summary"]["checksum_policy_status"] == "fail_unverified"
     assert result["model_intake"]["checks"]["checksum"] is False
+    aibom = result["model_intake"]["aibom"]
+    artifact_component = next(item for item in aibom["components"] if item["type"] == "model_artifact")
+    assert artifact_component["hashes"] == []
+    assert aibom["completeness"]["fields"]["hash"] is False
+    assert aibom["declared_artifact_hash"]["content"] == full_artifact_sha
+    assert aibom["declared_artifact_hash"]["provenance_class"] == "declared"
+    assert aibom["observed_artifact_hash"] is None
 
 
 def test_model_intake_validates_truncated_safetensors_against_declared_artifact_size(monkeypatch):
@@ -493,33 +498,67 @@ def test_model_intake_flags_onnx_external_data_and_custom_operator(tmp_path):
     assert "model_intake:onnx_custom_operator" in finding_ids
 
 
-def test_model_intake_onnx_inspection_uses_parser_when_available(monkeypatch):
-    fake_onnx = types.SimpleNamespace()
-
-    def load_model_from_string(_data):
-        external_entry = types.SimpleNamespace(key="location", value="weights.bin")
-        initializer = types.SimpleNamespace(external_data=[external_entry])
-        node = types.SimpleNamespace(domain="com.example.custom")
-        graph = types.SimpleNamespace(name="parsed-graph", initializer=[initializer], node=[node])
-        return types.SimpleNamespace(graph=graph)
-
-    fake_onnx.load_model_from_string = load_model_from_string
-    monkeypatch.setitem(sys.modules, "onnx", fake_onnx)
-
+def test_model_intake_onnx_inspection_does_not_parse_untrusted_protobuf_in_worker():
     inspection = model_intake._inspect_onnx(b"opaque protobuf bytes")
 
-    assert inspection["parsed_with"] == "onnx"
-    assert inspection["graph_name"] == "parsed-graph"
-    assert inspection["external_data_hint"] is True
-    assert "weights.bin" in inspection["external_data_locations"]
-    assert inspection["custom_operator_hint"] is True
-    assert "com.example.custom" in inspection["custom_operator_domains"]
+    assert inspection["parsed_with"] == "bounded_string_table"
+    assert inspection["parser_status"] == "not_executed_in_worker"
+    assert inspection["parser_reason"] == "untrusted_protobuf_requires_generated_scanner_or_sandbox"
 
 
 def test_scanner_image_installs_onnx_parser_dependency():
     requirements = Path("scanner/requirements.txt").read_text(encoding="utf-8")
 
     assert "onnx>=" in requirements
+
+
+def test_model_intake_pickle_detection_does_not_match_ordinary_words():
+    assert model_intake._looks_like_pickle(b"retrieval execution evaluation", ".bin") is False
+
+
+def test_model_intake_pickle_detection_recognizes_protocol_zero():
+    assert model_intake._looks_like_pickle(b"(dp0\nVsafe\np1\nVvalue\np2\ns.", ".bin") is True
+
+
+def test_model_intake_large_observed_safetensors_header_is_validated():
+    padding = "x" * 1_100_000
+    artifact = _safetensors_bytes(metadata={"description": padding})
+
+    inspection = model_intake._inspect_safetensors(artifact)
+
+    assert inspection["length"] > 1_048_576
+    assert inspection["valid"] is True
+    assert inspection["validation_complete"] is True
+
+
+def test_model_intake_worker_clamps_non_api_resource_limits(monkeypatch):
+    observed = {}
+
+    async def fake_fetch(ref, max_bytes, timeout_seconds, **kwargs):
+        observed.update({"max_bytes": max_bytes, "timeout_seconds": timeout_seconds})
+        return b"model", {"source": "http", "status": 200, "bytes_observed": 5, "truncated": False}
+
+    monkeypatch.setattr(model_intake, "_fetch_artifact", fake_fetch)
+
+    asyncio.run(run_model_intake_scan(
+        "https://models.example/model.bin",
+        {
+            "max_download_bytes": 10**30,
+            "timeout_seconds": 10**30,
+            "max_artifact_bytes": 10**30,
+            "max_repository_bytes": 10**30,
+            "max_repository_files": 10**30,
+            "require_hash": False,
+            "require_signature": False,
+            "require_model_governance": False,
+            "require_deployment_approval": False,
+        },
+    ))
+
+    assert observed == {
+        "max_bytes": model_intake.MAX_INSPECTION_BYTES,
+        "timeout_seconds": model_intake.MAX_TIMEOUT_SECONDS,
+    }
 
 
 def test_model_intake_flags_malformed_safetensors_header(tmp_path):
@@ -1297,14 +1336,17 @@ def test_model_intake_fetches_public_cloud_object_refs(monkeypatch):
     }
 
     result = asyncio.run(run_model_intake_scan("s3://models-prod/releases/model.safetensors", base_options))
-    assert observed_urls[-1] == "https://models-prod.s3.amazonaws.com/releases/model.safetensors"
+    assert "https://models-prod.s3.amazonaws.com/releases/model.safetensors" in observed_urls
+    assert "https://example.test/model-card" in observed_urls
+    assert result["model_intake"]["model_card_fetch"]["content_sha256"] == expected_sha
+    assert result["model_intake"]["model_card_fetch"]["content_retained"] is False
     assert result["model_intake"]["artifact"]["fetch"]["source"] == "s3"
     assert "model_intake:artifact_fetch_failed" not in {finding["id"] for finding in result["findings"]}
 
     result = asyncio.run(run_model_intake_scan("gs://ml-bucket/releases/model.onnx", base_options))
-    assert observed_urls[-1] == "https://storage.googleapis.com/ml-bucket/releases/model.onnx"
+    assert "https://storage.googleapis.com/ml-bucket/releases/model.onnx" in observed_urls
     assert result["model_intake"]["artifact"]["fetch"]["source"] == "gcs"
 
     result = asyncio.run(run_model_intake_scan("azure://acct/models/release/model.gguf", base_options))
-    assert observed_urls[-1] == "https://acct.blob.core.windows.net/models/release/model.gguf"
+    assert "https://acct.blob.core.windows.net/models/release/model.gguf" in observed_urls
     assert result["model_intake"]["artifact"]["fetch"]["source"] == "azure_blob"

@@ -46,6 +46,13 @@ except ModuleNotFoundError:
     from scanner.scanner_tools.build_fingerprint import hash_source_files, runtime_file_map, source_file_map
 
 try:
+    from scanner_tools.model_intake_acquisition import acquisition_policy as _model_acquisition_policy
+    from scanner_tools.model_intake_acquisition import download_http as _model_download_http
+except ModuleNotFoundError:
+    from scanner.scanner_tools.model_intake_acquisition import acquisition_policy as _model_acquisition_policy
+    from scanner.scanner_tools.model_intake_acquisition import download_http as _model_download_http
+
+try:
     from constants import SMART_SCAN_BUDGETS, resolve_scan_budget, resolve_or_consume_budget
 except ModuleNotFoundError as exc:
     if exc.name != "constants":
@@ -10249,11 +10256,10 @@ def _apply_model_intake_policy_profile_requirements(
     if not bool(profile.get("strict_model_intake")):
         return request
     required_ids = _str_list(_decode_json_value(profile.get("required_trust_anchor_ids")))
-    if not required_ids:
-        return request
     selected_ids = _str_list(request.trust_anchor_ids)
     merged_ids = list(dict.fromkeys(selected_ids + required_ids))
     metadata = dict(request.metadata_json or {})
+    metadata["strict_governance"] = True
     metadata["policy_required_trust_anchor_ids"] = required_ids
     metadata["policy_required_trust_anchor_profile"] = str(
         profile.get("name") or profile.get("environment") or request.policy_profile or ""
@@ -10389,18 +10395,16 @@ def _hf_api_model_info(repo_id: str, revision: str | None, timeout_seconds: int)
     # for hosted large model artifacts. Without it, `siblings` only contains names.
     query = urllib.parse.urlencode({"blobs": "true"})
     url = f"https://huggingface.co/api/models/{urllib.parse.quote(repo_id, safe='/')}{suffix}?{query}"
-    request = urllib.request.Request(
+    raw, _fetch = _model_download_http(
         url,
-        headers={
-            "User-Agent": "ShakerScan-ModelIntake/1.0",
-            "Accept": "application/json",
-        },
+        HF_MODEL_INFO_MAX_BYTES + 1,
+        timeout_seconds,
+        headers={"Accept": "application/json"},
+        policy=_model_acquisition_policy({"allowed_acquisition_hosts": ["huggingface.co"]}),
     )
-    with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-        raw = response.read(HF_MODEL_INFO_MAX_BYTES + 1)
-        if len(raw) > HF_MODEL_INFO_MAX_BYTES:
-            raise RuntimeError(f"Hugging Face model metadata exceeded {HF_MODEL_INFO_MAX_BYTES} byte cap")
-        return json.loads(raw.decode("utf-8"))
+    if len(raw) > HF_MODEL_INFO_MAX_BYTES:
+        raise RuntimeError(f"Hugging Face model metadata exceeded {HF_MODEL_INFO_MAX_BYTES} byte cap")
+    return json.loads(raw.decode("utf-8"))
 
 
 def _hf_candidate_score(path: str) -> int:
@@ -10926,6 +10930,8 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
             target_url=artifact_ref,
             target_id=target_id,
             action_name="model_intake.scan",
+            risk_tier="active",
+            always_require_receipt=bool(request.allow_insecure_http or request.allow_private_networks),
         )
         if approval_context:
             options.update(approval_context)
