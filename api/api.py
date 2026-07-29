@@ -3640,6 +3640,17 @@ class ModelIntakeScanRequest(BaseModel):
         le=100_000_000_000,
         description="Fail-closed total-byte ceiling used only for complete artifact acquisition.",
     )
+    complete_repository_snapshot: bool = Field(
+        default=False,
+        description="Acquire every file in a complete pinned Hugging Face repository manifest into quarantine.",
+    )
+    max_repository_bytes: int = Field(
+        default=50_000_000_000,
+        ge=1024,
+        le=500_000_000_000,
+        description="Fail-closed aggregate byte ceiling for complete repository snapshots.",
+    )
+    max_repository_files: int = Field(default=10_000, ge=1, le=10_000)
     timeout_seconds: int = Field(default=20, ge=1, le=120)
     allow_insecure_http: bool = Field(
         default=False,
@@ -10869,6 +10880,9 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
         "max_download_bytes": request.max_download_bytes,
         "complete_artifact_download": request.complete_artifact_download,
         "max_artifact_bytes": request.max_artifact_bytes,
+        "complete_repository_snapshot": request.complete_repository_snapshot,
+        "max_repository_bytes": request.max_repository_bytes,
+        "max_repository_files": request.max_repository_files,
         "timeout_seconds": request.timeout_seconds,
         "allow_insecure_http": request.allow_insecure_http,
         "allow_private_networks": request.allow_private_networks,

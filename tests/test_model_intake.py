@@ -712,6 +712,91 @@ def test_model_intake_blocks_incomplete_manifest_and_unreviewed_custom_code(tmp_
     assert result["result"]["decision"] == "block"
 
 
+def test_huggingface_repository_snapshot_acquires_every_manifest_file(monkeypatch, tmp_path):
+    revision = "a" * 40
+    selected_bytes = b"weights"
+    code_bytes = b"class Model: pass\n"
+    selected_sha = hashlib.sha256(selected_bytes).hexdigest()
+    code_sha = hashlib.sha256(code_bytes).hexdigest()
+    observed_urls = []
+
+    def fake_complete_download(url, inspection_bytes, max_bytes, timeout, quarantine_dir, headers=None, policy=None):
+        observed_urls.append(url)
+        assert url.endswith(f"/{revision}/modeling.py")
+        return code_bytes, {
+            "complete": True,
+            "sha256": code_sha,
+            "bytes_total": len(code_bytes),
+            "quarantine_object": f"sha256:{code_sha}",
+        }
+
+    monkeypatch.setattr(model_intake, "_safe_download_http_to_quarantine", fake_complete_download)
+    metadata = {
+        "huggingface_repo": "acme/ranker",
+        "huggingface_file": "model.safetensors",
+        "revision": revision,
+        "repository_manifest": {
+            "complete": True,
+            "repository": "acme/ranker",
+            "revision": revision,
+            "manifest_sha256": "f" * 64,
+            "files": [
+                {"path": "model.safetensors", "size_bytes": len(selected_bytes), "sha256": selected_sha},
+                {"path": "modeling.py", "size_bytes": len(code_bytes), "blob_id": "git-blob"},
+            ],
+        },
+    }
+
+    snapshot = asyncio.run(
+        model_intake._acquire_huggingface_repository_snapshot(
+            metadata,
+            timeout_seconds=5,
+            quarantine_dir=tmp_path,
+            fetch_policy=None,
+            max_repository_bytes=10_000,
+            max_repository_files=10,
+            selected_artifact_meta={
+                "complete": True,
+                "sha256": selected_sha,
+                "bytes_total": len(selected_bytes),
+                "quarantine_object": f"sha256:{selected_sha}",
+            },
+        )
+    )
+
+    assert snapshot["status"] == "PASS"
+    assert snapshot["complete"] is True
+    assert snapshot["files_expected"] == snapshot["files_acquired"] == 2
+    assert snapshot["bytes_acquired"] == len(selected_bytes) + len(code_bytes)
+    assert len(snapshot["snapshot_sha256"]) == 64
+    assert observed_urls == [f"https://huggingface.co/acme/ranker/resolve/{revision}/modeling.py"]
+
+
+def test_huggingface_repository_snapshot_rejects_mutable_revision(tmp_path):
+    snapshot = asyncio.run(
+        model_intake._acquire_huggingface_repository_snapshot(
+            {
+                "huggingface_repo": "acme/ranker",
+                "revision": "main",
+                "repository_manifest": {
+                    "complete": True,
+                    "repository": "acme/ranker",
+                    "revision": "main",
+                    "files": [{"path": "model.safetensors"}],
+                },
+            },
+            timeout_seconds=5,
+            quarantine_dir=tmp_path,
+            fetch_policy=None,
+            max_repository_bytes=10_000,
+            max_repository_files=10,
+        )
+    )
+
+    assert snapshot["status"] == "INCOMPLETE"
+    assert snapshot["error"] == "repository_revision_not_immutable"
+
+
 def test_model_intake_reports_unsupported_artifact_scheme():
     result = asyncio.run(
         run_model_intake_scan(

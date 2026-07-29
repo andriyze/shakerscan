@@ -699,6 +699,152 @@ def _download_huggingface_complete(
     }
 
 
+async def _acquire_huggingface_repository_snapshot(
+    metadata: dict[str, Any],
+    *,
+    timeout_seconds: int,
+    quarantine_dir: Path,
+    fetch_policy: dict[str, Any] | None,
+    max_repository_bytes: int,
+    max_repository_files: int,
+    selected_artifact_meta: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Acquire every file in a pinned Hugging Face manifest into quarantine."""
+    declared = metadata.get("repository_manifest") if isinstance(metadata.get("repository_manifest"), dict) else {}
+    repo_id = str(declared.get("repository") or metadata.get("huggingface_repo") or "").strip()
+    revision = str(declared.get("revision") or metadata.get("revision") or "").strip()
+    files = declared.get("files") if isinstance(declared.get("files"), list) else []
+    if not declared or not declared.get("complete"):
+        return {"status": "INCOMPLETE", "complete": False, "error": "declared_manifest_incomplete"}
+    if not repo_id or not re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+", repo_id):
+        return {"status": "INCOMPLETE", "complete": False, "error": "invalid_huggingface_repository"}
+    if not re.fullmatch(r"[0-9a-fA-F]{40,64}", revision):
+        return {"status": "INCOMPLETE", "complete": False, "error": "repository_revision_not_immutable"}
+    if len(files) > max_repository_files:
+        return {
+            "status": "INCOMPLETE",
+            "complete": False,
+            "error": "repository_file_limit_exceeded",
+            "files_discovered": len(files),
+            "file_limit": max_repository_files,
+        }
+    declared_bytes = sum(int(item.get("size_bytes") or 0) for item in files if isinstance(item, dict))
+    if declared_bytes > max_repository_bytes:
+        return {
+            "status": "INCOMPLETE",
+            "complete": False,
+            "error": "repository_byte_limit_exceeded",
+            "declared_bytes": declared_bytes,
+            "byte_limit": max_repository_bytes,
+        }
+
+    metadata_token = str(metadata.get("hf_token") or "").strip()
+    env_token = str(os.getenv("HF_TOKEN") or "").strip()
+    token = metadata_token or env_token
+    auth_headers = {"Authorization": f"Bearer {token}"} if token else None
+    selected_path = str(metadata.get("huggingface_file") or "").strip()
+    selected_artifact_meta = selected_artifact_meta or {}
+    acquired: list[dict[str, Any]] = []
+    total_bytes = 0
+    failures: list[dict[str, Any]] = []
+
+    for item in files:
+        if not isinstance(item, dict):
+            failures.append({"path": None, "error": "invalid_manifest_file_record"})
+            break
+        path = str(item.get("path") or "").strip()
+        if not path:
+            failures.append({"path": None, "error": "missing_manifest_path"})
+            break
+        observed: dict[str, Any]
+        can_reuse_selected = (
+            path == selected_path
+            and selected_artifact_meta.get("complete") is True
+            and selected_artifact_meta.get("sha256")
+            and selected_artifact_meta.get("quarantine_object")
+        )
+        if can_reuse_selected:
+            observed = selected_artifact_meta
+        else:
+            remaining = max_repository_bytes - total_bytes
+            if remaining <= 0:
+                failures.append({"path": path, "error": "repository_byte_limit_exceeded"})
+                break
+            resolve_url = (
+                f"https://huggingface.co/{urllib.parse.quote(repo_id, safe='/')}/resolve/"
+                f"{urllib.parse.quote(revision, safe='')}/{urllib.parse.quote(path, safe='/')}"
+            )
+            try:
+                _prefix, observed = await asyncio.to_thread(
+                    _safe_download_http_to_quarantine,
+                    resolve_url,
+                    min(1_048_576, remaining),
+                    remaining,
+                    timeout_seconds,
+                    quarantine_dir,
+                    auth_headers,
+                    fetch_policy,
+                )
+            except Exception as exc:
+                failures.append({"path": path, "error": f"{type(exc).__name__}: {exc}"})
+                break
+        observed_sha = str(observed.get("sha256") or "").lower()
+        expected_sha = str(item.get("sha256") or "").lower()
+        if expected_sha and observed_sha != expected_sha:
+            failures.append({
+                "path": path,
+                "error": "sha256_mismatch",
+                "expected_sha256": expected_sha,
+                "observed_sha256": observed_sha,
+            })
+            break
+        size = int(observed.get("bytes_total") or observed.get("bytes_observed") or 0)
+        total_bytes += size
+        if total_bytes > max_repository_bytes:
+            failures.append({"path": path, "error": "repository_byte_limit_exceeded"})
+            break
+        acquired.append({
+            "path": path,
+            "size_bytes": size,
+            "sha256": observed_sha,
+            "quarantine_object": observed.get("quarantine_object"),
+            "declared_sha256": expected_sha or None,
+            "declared_blob_id": item.get("blob_id"),
+            "categories": item.get("categories") or [],
+        })
+
+    canonical = {
+        "provider": "huggingface",
+        "repository": repo_id,
+        "revision": revision,
+        "files": [
+            {"path": item["path"], "size_bytes": item["size_bytes"], "sha256": item["sha256"]}
+            for item in sorted(acquired, key=lambda value: value["path"])
+        ],
+    }
+    snapshot_sha256 = hashlib.sha256(
+        json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    complete = not failures and len(acquired) == len(files)
+    return {
+        "schema_version": "model-intake-repository-snapshot/v1",
+        "status": "PASS" if complete else "INCOMPLETE",
+        "complete": complete,
+        "repository": repo_id,
+        "revision": revision,
+        "declared_manifest_sha256": declared.get("manifest_sha256"),
+        "snapshot_sha256": snapshot_sha256,
+        "files_expected": len(files),
+        "files_acquired": len(acquired),
+        "bytes_acquired": total_bytes,
+        "byte_limit": max_repository_bytes,
+        "file_limit": max_repository_files,
+        "authenticated": bool(token),
+        "failures": failures[:20],
+        "files": acquired,
+    }
+
+
 def _download_cloud_object(
     ref: str,
     metadata: dict[str, Any],
@@ -2034,6 +2180,9 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
     max_download_bytes = int(options.get("max_download_bytes") or 10_000_000)
     complete_artifact_download = _boolish(options.get("complete_artifact_download"))
     max_artifact_bytes = int(options.get("max_artifact_bytes") or 10_000_000_000)
+    complete_repository_snapshot = _boolish(options.get("complete_repository_snapshot"))
+    max_repository_bytes = int(options.get("max_repository_bytes") or 50_000_000_000)
+    max_repository_files = int(options.get("max_repository_files") or 10_000)
     quarantine_dir = Path(
         str(
             options.get("quarantine_dir")
@@ -2138,6 +2287,30 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
     fine_tune_provenance = _metadata_value(metadata, "fine_tuning_job", "fine_tune_job", "training_run_id", "training_pipeline")
     poisoning_eval_ref = _metadata_value(metadata, "poisoning_evals", "backdoor_evals", "canary_eval_report", "data_poisoning_evals")
     repository_manifest = metadata.get("repository_manifest") if isinstance(metadata.get("repository_manifest"), dict) else {}
+    repository_snapshot: dict[str, Any] = {
+        "status": "SKIPPED_BY_POLICY",
+        "complete": False,
+        "requested": False,
+    }
+    if complete_repository_snapshot:
+        if _source_kind(artifact_ref, metadata) != "huggingface":
+            repository_snapshot = {
+                "status": "UNSUPPORTED",
+                "complete": False,
+                "requested": True,
+                "error": "complete_repository_snapshot_is_currently_supported_for_huggingface_only",
+            }
+        else:
+            repository_snapshot = await _acquire_huggingface_repository_snapshot(
+                metadata,
+                timeout_seconds=timeout_seconds,
+                quarantine_dir=quarantine_dir,
+                fetch_policy=fetch_policy,
+                max_repository_bytes=max_repository_bytes,
+                max_repository_files=max_repository_files,
+                selected_artifact_meta=artifact_meta,
+            )
+            repository_snapshot["requested"] = True
     metadata_unavailable = bool(metadata_url and metadata_fetch_meta.get("error") and not metadata)
     require_signature_verification = _boolish(options.get("require_signature_verification"))
     require_cryptographic_signature_verification = _boolish(
@@ -2262,6 +2435,24 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
                 "executable_files": (repository_manifest.get("executable_files") or [])[:100],
             },
             remediation="Acquire the complete repository, run generated static analysis, perform recorded manual review, and load only in a no-egress sandbox.",
+        ))
+
+    if complete_repository_snapshot and not repository_snapshot.get("complete"):
+        findings.append(_finding(
+            finding_id="repository_snapshot_incomplete",
+            title="Complete model repository snapshot acquisition failed",
+            severity="high",
+            description="The requested immutable repository snapshot was unsupported, exceeded a bound, failed integrity verification, or did not acquire every manifest file.",
+            artifact_ref=artifact_ref,
+            evidence={
+                "status": repository_snapshot.get("status"),
+                "error": repository_snapshot.get("error"),
+                "files_expected": repository_snapshot.get("files_expected"),
+                "files_acquired": repository_snapshot.get("files_acquired"),
+                "bytes_acquired": repository_snapshot.get("bytes_acquired"),
+                "failures": repository_snapshot.get("failures") or [],
+            },
+            remediation="Retry from an immutable supported registry revision with sufficient file/byte quota and resolve every failed file before approval.",
         ))
 
     checksum_status = "missing"
@@ -2837,6 +3028,8 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         "repository_manifest_complete": repository_manifest.get("complete") if repository_manifest else None,
         "repository_files_discovered": repository_manifest.get("files_discovered") if repository_manifest else None,
         "custom_code_required": repository_manifest.get("custom_code_required") if repository_manifest else None,
+        "repository_snapshot_sha256": repository_snapshot.get("snapshot_sha256"),
+        "repository_snapshot_complete": repository_snapshot.get("complete") if complete_repository_snapshot else None,
         "expected_sha256": expected_sha256,
         "checksum_status": checksum_status,
         "checksum_match": checksum_match,
@@ -2899,6 +3092,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             "metadata": safe_metadata,
             "metadata_fetch": safe_metadata_fetch_meta if metadata_url else None,
             "aibom": safe_aibom,
+            "repository_snapshot": redact_model_intake_value(repository_snapshot),
             "supply_chain": {
                 "registry": safe_registry_reference,
                 "signature": safe_signature_status,
@@ -2918,6 +3112,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
                 "checksum": None if metadata_unavailable else checksum_status == "verified",
                 "aibom": True,
                 "repository_manifest": repository_manifest.get("complete") if repository_manifest else None,
+                "repository_snapshot": repository_snapshot.get("complete") if complete_repository_snapshot else None,
                 "custom_code_review": False if repository_manifest.get("custom_code_required") else None,
                 "format_specific_inspection": format_specific_ok,
                 "license_policy": None if metadata_unavailable or not license_ref else license_policy["status"] == "permissive",

@@ -1305,6 +1305,9 @@ export interface ModelIntakeScanRequest {
   max_download_bytes?: number
   complete_artifact_download?: boolean
   max_artifact_bytes?: number
+  complete_repository_snapshot?: boolean
+  max_repository_bytes?: number
+  max_repository_files?: number
   allow_insecure_http?: boolean
   allow_private_networks?: boolean
   allowed_acquisition_hosts?: string[]
