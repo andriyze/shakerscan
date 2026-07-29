@@ -3735,10 +3735,13 @@ export async function createModelIntakeTrustAnchor(data: {
   policy_profile?: string
   owner?: string
   is_active?: boolean
-}): Promise<ModelIntakeTrustAnchor> {
+}, operatorToken?: string): Promise<ModelIntakeTrustAnchor> {
   const res = await fetch(`${API_URL}/model-intake/trust-anchors`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(operatorToken ? { Authorization: `Bearer ${operatorToken}` } : {}),
+    },
     body: JSON.stringify(data),
   })
   if (!res.ok) {
@@ -3747,8 +3750,11 @@ export async function createModelIntakeTrustAnchor(data: {
   return res.json()
 }
 
-export async function deactivateModelIntakeTrustAnchor(id: string): Promise<{ deactivated: boolean; trust_anchor: ModelIntakeTrustAnchor }> {
-  const res = await fetch(`${API_URL}/model-intake/trust-anchors/${id}`, { method: 'DELETE' })
+export async function deactivateModelIntakeTrustAnchor(id: string, operatorToken?: string): Promise<{ deactivated: boolean; trust_anchor: ModelIntakeTrustAnchor }> {
+  const res = await fetch(`${API_URL}/model-intake/trust-anchors/${id}`, {
+    method: 'DELETE',
+    headers: operatorToken ? { Authorization: `Bearer ${operatorToken}` } : {},
+  })
   if (!res.ok) {
     throw new Error(await getApiErrorMessage(res, 'Failed to deactivate Model Intake trust anchor'))
   }

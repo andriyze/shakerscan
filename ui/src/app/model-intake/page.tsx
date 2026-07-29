@@ -51,6 +51,7 @@ const inputClass =
 const textareaClass =
   'min-w-0 w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 font-mono text-xs text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none'
 const fieldClass = 'grid min-w-0 gap-1 text-sm text-gray-300'
+const MODEL_INTAKE_OPERATOR_TOKEN_KEY = 'shakerscan:model-intake-operator-token'
 
 const COMPLETE_METADATA_EXAMPLE = {
   source_repo: 'https://github.com/example/model-release',
@@ -365,6 +366,7 @@ function ModelIntakeSettingsContent() {
   const [newAnchorSha256, setNewAnchorSha256] = useState('')
   const [newAnchorPem, setNewAnchorPem] = useState('')
   const [newAnchorOwner, setNewAnchorOwner] = useState('')
+  const [operatorToken, setOperatorToken] = useState('')
   const [savingAnchor, setSavingAnchor] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -428,11 +430,18 @@ function ModelIntakeSettingsContent() {
   }, [])
 
   useEffect(() => {
+    setOperatorToken(sessionStorage.getItem(MODEL_INTAKE_OPERATOR_TOKEN_KEY) || '')
     loadScenario()
     loadPolicyProfiles()
     loadTrustAnchors()
     loadAdmissions()
   }, [loadScenario, loadPolicyProfiles, loadTrustAnchors, loadAdmissions])
+
+  function updateOperatorToken(value: string) {
+    setOperatorToken(value)
+    if (value) sessionStorage.setItem(MODEL_INTAKE_OPERATOR_TOKEN_KEY, value)
+    else sessionStorage.removeItem(MODEL_INTAKE_OPERATOR_TOKEN_KEY)
+  }
 
   const remediationMode = searchParams.get('remediate')
   const trustRemediationMode = remediationMode === 'trust'
@@ -682,7 +691,7 @@ function ModelIntakeSettingsContent() {
         policy_profile: policyProfile,
         owner: optionalText(newAnchorOwner),
         is_active: true,
-      })
+      }, operatorToken.trim())
       setSavedTrustAnchors((prev) => [...prev, anchor].sort((a, b) => a.name.localeCompare(b.name)))
       setSelectedTrustAnchorIds((prev) => Array.from(new Set([...prev, anchor.id])))
       setNewAnchorName('')
@@ -701,7 +710,7 @@ function ModelIntakeSettingsContent() {
 
   async function deactivateTrustAnchor(anchorId: string) {
     try {
-      await deactivateModelIntakeTrustAnchor(anchorId)
+      await deactivateModelIntakeTrustAnchor(anchorId, operatorToken.trim())
       setSavedTrustAnchors((prev) => prev.filter((anchor) => anchor.id !== anchorId))
       setSelectedTrustAnchorIds((prev) => prev.filter((id) => id !== anchorId))
       toast.success('Trust anchor deactivated')
@@ -1393,6 +1402,18 @@ function ModelIntakeSettingsContent() {
                     Refresh
                   </button>
                 </div>
+                <label className={`${fieldClass} mt-3`}>
+                  Operator token for trust changes
+                  <input
+                    type="password"
+                    autoComplete="off"
+                    value={operatorToken}
+                    onChange={(event) => updateOperatorToken(event.target.value)}
+                    className={inputClass}
+                    placeholder="Required for remote create/deactivate actions"
+                  />
+                  <span className="text-xs text-gray-500">Kept only in this browser tab session and sent as a bearer credential for trust-anchor mutations.</span>
+                </label>
                 {trustAnchorsLoading && <div className="mt-3 text-xs text-gray-500">Loading trust anchors...</div>}
                 {trustAnchorsError && <div role="alert" className="mt-3 text-xs text-red-400">{trustAnchorsError}</div>}
                 {!trustAnchorsLoading && savedTrustAnchors.length === 0 && (
