@@ -1384,6 +1384,9 @@ prepare_runtime_files() {
     export SHAKERSCAN_HOST_PLATFORM="$PLATFORM"
     write_dotenv_value SHAKERSCAN_HOST_PLATFORM "$SHAKERSCAN_HOST_PLATFORM"
     mkdir -p results
+    mkdir -p results/model-intake-quarantine results/model-intake-sandbox
+    chmod 755 results/model-intake-quarantine
+    chmod 777 results/model-intake-sandbox
     mkdir -p .shakerscan-fleet
     chmod 700 .shakerscan-fleet
     ensure_runtime_datastore_credentials

@@ -1318,6 +1318,9 @@ export interface ModelIntakeScanRequest {
   max_repository_files?: number
   run_generated_scanners?: boolean
   generated_scanner_names?: string[]
+  run_dynamic_sandbox?: boolean
+  require_dynamic_sandbox?: boolean
+  sandbox_timeout_seconds?: number
   allow_insecure_http?: boolean
   allow_private_networks?: boolean
   allowed_acquisition_hosts?: string[]

@@ -70,6 +70,13 @@ except ModuleNotFoundError as exc:
     from model_intake_archives import inspect_archive as _inspect_complete_archive
 
 try:
+    from scanner.scanner_tools.model_intake_sandbox import request_sandbox_analysis as _request_sandbox_analysis
+except ModuleNotFoundError as exc:
+    if exc.name not in {"scanner", "scanner.scanner_tools"}:
+        raise
+    from model_intake_sandbox import request_sandbox_analysis as _request_sandbox_analysis
+
+try:
     from scanner.redaction import (
         SENSITIVE_KEYS,
         SENSITIVE_KEY_FRAGMENTS,
@@ -2498,6 +2505,30 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
                 for item in scanner_results
             ) else "FAIL",
         }
+    run_dynamic_sandbox = _boolish(options.get("run_dynamic_sandbox"))
+    require_dynamic_sandbox = _boolish(options.get("require_dynamic_sandbox"))
+    dynamic_sandbox: dict[str, Any] = {
+        "schema_version": "model-intake-sandbox/v1",
+        "provenance_class": "shakerscan_generated",
+        "status": "SKIPPED_BY_POLICY",
+    }
+    if run_dynamic_sandbox or require_dynamic_sandbox:
+        quarantine_object = str(artifact_meta.get("quarantine_object") or "")
+        if not quarantine_object or artifact_truncated or not artifact_meta.get("complete"):
+            dynamic_sandbox = {
+                **dynamic_sandbox,
+                "status": "INCOMPLETE",
+                "error": "complete_quarantined_artifact_required",
+            }
+        else:
+            sandbox_root = Path(str(options.get("sandbox_queue_dir") or os.getenv("MODEL_INTAKE_SANDBOX_QUEUE_DIR") or "/results/model-intake-sandbox"))
+            dynamic_sandbox = await asyncio.to_thread(
+                _request_sandbox_analysis,
+                quarantine_object,
+                name,
+                queue_root=sandbox_root,
+                timeout_seconds=bounded_int("sandbox_timeout_seconds", 120, 1, 600),
+            )
     metadata_unavailable = bool(metadata_url and metadata_fetch_meta.get("error") and not metadata)
     require_signature_verification = _boolish(options.get("require_signature_verification"))
     require_cryptographic_signature_verification = _boolish(
@@ -2649,6 +2680,17 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             artifact_ref=artifact_ref,
             evidence={"artifact": name, "attestation": attestation_verification},
             remediation="Provide a DSSE in-toto/SLSA statement signed by an allowed key, with the exact artifact SHA-256 subject and required builder/transparency evidence.",
+        ))
+
+    if require_dynamic_sandbox and dynamic_sandbox.get("status") != "PASS":
+        findings.append(_finding(
+            finding_id="dynamic_sandbox_non_pass",
+            title="Required no-egress model sandbox did not pass",
+            severity="high",
+            description=f"The isolated dynamic inspection ended with status {dynamic_sandbox.get('status')}; unsupported, blocked, timed-out, crashed, and incomplete runs never count as approval evidence.",
+            artifact_ref=artifact_ref,
+            evidence={"sandbox": dynamic_sandbox},
+            remediation="Run the exact quarantined artifact through the no-network sandbox and resolve all format, runtime, isolation, or resource failures.",
         ))
 
     if artifact_meta.get("error"):
@@ -3409,6 +3451,8 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         "signature_crypto_attempted": signature_status.get("crypto_attempted"),
         "attestation_verification_status": attestation_verification.get("status"),
         "attestation_verified": bool(attestation_verification.get("verified")),
+        "dynamic_sandbox_status": dynamic_sandbox.get("status"),
+        "dynamic_sandbox_evidence_sha256": dynamic_sandbox.get("evidence_sha256"),
         "expected_hash_present": bool(expected_sha256),
         "deployment_approved": deployment_approved,
         "license_present": bool(license_ref),
@@ -3436,6 +3480,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             "summary": summary,
             "source_adapter": source_adapter,
             "attestation": redact_model_intake_value(attestation_verification),
+            "dynamic_sandbox": redact_model_intake_value(dynamic_sandbox),
             "runtime_destinations": runtime_destinations,
             "artifact": {
                 "name": name,
@@ -3470,6 +3515,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
                 "repository_manifest": repository_manifest.get("complete") if repository_manifest else None,
                 "repository_snapshot": repository_snapshot.get("complete") if complete_repository_snapshot else None,
                 "generated_scanners": generated_evidence.get("status") == "PASS" if run_generated_scanners else None,
+                "dynamic_sandbox": dynamic_sandbox.get("status") == "PASS" if (run_dynamic_sandbox or require_dynamic_sandbox) else None,
                 "custom_code_review": False if repository_manifest.get("custom_code_required") else None,
                 "format_specific_inspection": format_specific_ok,
                 "license_policy": None if metadata_unavailable or not license_ref else license_policy["status"] == "permissive",

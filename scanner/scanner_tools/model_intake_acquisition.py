@@ -12,6 +12,7 @@ import http.client
 import hashlib
 import ipaddress
 import os
+import pwd
 import socket
 import ssl
 import tempfile
@@ -381,10 +382,28 @@ def _commit_quarantine_file(temp_path: Path, root: Path, digest: str, size: int)
         if existing_digest != digest or existing_size != size:
             raise AcquisitionPolicyError("Existing quarantine object failed content-address integrity verification")
         temp_path.unlink(missing_ok=True)
+        _grant_sandbox_read(final_path, root)
         return final_path
     os.chmod(temp_path, 0o600)
     os.replace(temp_path, final_path)
+    _grant_sandbox_read(final_path, root)
     return final_path
+
+
+def _grant_sandbox_read(path: Path, root: Path) -> None:
+    """Grant only the image's unprivileged scanner group read/traverse access."""
+    if os.geteuid() != 0:
+        return
+    try:
+        account = pwd.getpwnam("scanner")
+    except KeyError:
+        return
+    for directory in (root, root / "sha256", path.parent):
+        if directory.exists():
+            os.chown(directory, 0, account.pw_gid)
+            os.chmod(directory, 0o750)
+    os.chown(path, 0, account.pw_gid)
+    os.chmod(path, 0o640)
 
 
 def quarantine_local_file(

@@ -3681,6 +3681,9 @@ class ModelIntakeScanRequest(BaseModel):
         description="Run ShakerScan-generated semantic, malware, secret, SBOM, and SCA scanner plug-ins against the complete quarantined subject.",
     )
     generated_scanner_names: Optional[list[str]] = Field(default=None, max_length=50)
+    run_dynamic_sandbox: bool = False
+    require_dynamic_sandbox: bool = False
+    sandbox_timeout_seconds: int = Field(default=120, ge=1, le=600)
     timeout_seconds: int = Field(default=20, ge=1, le=120)
     allow_insecure_http: bool = Field(
         default=False,
@@ -10931,6 +10934,9 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
         "max_repository_files": request.max_repository_files,
         "run_generated_scanners": request.run_generated_scanners,
         "generated_scanner_names": request.generated_scanner_names,
+        "run_dynamic_sandbox": request.run_dynamic_sandbox,
+        "require_dynamic_sandbox": request.require_dynamic_sandbox,
+        "sandbox_timeout_seconds": request.sandbox_timeout_seconds,
         "timeout_seconds": request.timeout_seconds,
         "allow_insecure_http": request.allow_insecure_http,
         "allow_private_networks": request.allow_private_networks,

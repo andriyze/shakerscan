@@ -317,6 +317,36 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  model-intake-sandbox:
+    init: true
+    image: ${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}:${SCANNER_IMAGE_TAG:-latest}
+    user: scanner
+    network_mode: none
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - PYTHONUNBUFFERED=1
+      - MODEL_INTAKE_SANDBOX_NETWORK_MODE=none
+      - MODEL_INTAKE_SANDBOX_READ_ONLY=1
+      - MODEL_INTAKE_SANDBOX_NO_NEW_PRIVILEGES=1
+      - HOME=/tmp
+    volumes:
+      - ./results/model-intake-quarantine:/results/model-intake-quarantine:ro
+      - ./results/model-intake-sandbox:/results/model-intake-sandbox
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=256m
+    command: ["python3", "/app/scanner_tools/model_intake_sandbox.py", "--serve"]
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 2G
+          pids: 64
+    restart: unless-stopped
+
   gungnir-worker:
     image: ${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}:${SCANNER_IMAGE_TAG:-latest}
     environment:
