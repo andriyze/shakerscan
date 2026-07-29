@@ -1,6 +1,6 @@
 # Model Intake Security Review and Implementation Roadmap
 
-**Status:** Core static intake and admission automation implemented; isolated model execution, packaged third-party scanners, automated benchmark execution, and corporate deployment integrations remain
+**Status:** Core intake framework implemented, but release-blocking admission-verification, manifest-authority, required-gate, scanner-coverage, and test-integrity defects remain; isolated model execution and corporate integrations are also incomplete
 
 **Original audit checkout:** `239f887d9f10e997b9844c916c28073fab71ee79`
 
@@ -97,38 +97,44 @@ Implemented controls include:
 
 - Every-hop SSRF policy, DNS/IP validation and pinning, redirect limits, cross-origin credential stripping,
   HTTPS/private-network policy, exact host/port allowlists, and approval-gated network exceptions.
-- Complete streamed acquisition, full SHA-256, content-addressed quarantine, byte/file quotas, safe retention
-  preview/execution, and complete pinned Hugging Face repository snapshots.
-- Complete normalized manifests, custom-code/`auto_map` inventory, recursive ZIP/TAR analysis, and traversal,
-  symlink, device, collision, archive-bomb, nested-archive, and unsafe-serialization gates.
+- Complete streamed artifact acquisition, full SHA-256, content-addressed quarantine, byte/file quotas, safe
+  retention preview/execution, and repository snapshot materialization. The current snapshot file list is not
+  authoritative until the section 2.5 manifest defect is repaired.
+- Manifest normalization/materialization, custom-code/`auto_map` inventory, recursive ZIP/TAR analysis, and
+  traversal, symlink/device where supported, collision, archive-bomb, nested-archive, and unsafe-serialization
+  gates. Section 2.5 records the remaining caller-authority and ZIP-link coverage defects.
 - Generated evidence contracts for pickle semantics, Python AST, secrets, malware rules, CycloneDX SBOM,
   dependencies/SCA adapters, native binaries, and licenses. Caller assertions remain `declared`; they are not
   silently promoted to generated evidence.
-- Fail-closed ModelScan, Fickling, ClamAV, Gitleaks, Syft, Trivy, OSV-Scanner, and pip-audit adapters. Missing
-  binaries, bad schemas, empty output, timeout, crash, and incomplete coverage cannot satisfy a required gate.
+- Normalized ModelScan, Fickling, ClamAV, Gitleaks, Syft, Trivy, OSV-Scanner, and pip-audit adapters. Missing
+  binaries, bad schemas, empty output, timeout, crash, and incomplete executions are non-pass when the result
+  is present and required; section 2.5 records the caller-omission and built-in-requiredness bypasses.
 - Atomic detached-signature trust decisions and offline DSSE/in-toto subject verification, with explicit
   transparency-log non-support where no trusted inclusion bundle verifier is configured.
-- A separate non-root, read-only, capability-free, no-egress sandbox service with CPU, memory, PID, scratch,
-  and wall-time limits. It performs safe-format semantic inspection and prohibits executable serialization;
-  operator-provided runtime images remain required for actual custom-code model loading.
+- A separate non-root, read-only, capability-free, no-egress sandbox service with container CPU, memory, PID,
+  and scratch limits plus a client response timeout. It performs safe-format semantic inspection and
+  prohibits executable serialization; service-side per-job termination and an operator runtime-image/model-
+  loading interface are not implemented.
 - A provider-neutral, content-free embedding/data-plane evaluator for retrieval quality, vector validity,
   dimensionality, collisions, poisoning, sensitive/ACL leakage, tenant boundaries, runtime stability,
   latency/RSS, graph authorization, deletion receipts, cache authorization context, and index/model digest
   compatibility. Raw benchmark vectors are request-transient and are not persisted in scan options.
 - Canonical signed admission statements bound to artifact, snapshot, scanner, sandbox, attestation,
-  evaluation, findings, and policy digests; deployment verification uses operator trust roots and exact
-  expected subjects.
+  evaluation, findings, and policy digests. Signature and subject verification exists, but the current
+  authorization verifier fails to reject a signed non-`allow` outcome and is release-blocked by section 2.5.
 - A durable admission registry with active/denied/reassessment-required/revoked/expired/superseded states,
-  event history, automatic worker registration, expiry, scoped trigger ingestion, immediate high-consequence
-  revocation, and deploy-time active-registry enforcement.
+  event history, automatic worker registration, expiry, scoped trigger ingestion, and revocation. The current
+  verification endpoint can check active registry state, but callers can disable that lookup and no external
+  deployment enforcement point is shipped.
 - UI/API visibility for provider capabilities, complete acquisition, generated scanners, sandbox and
   evaluation gates, signed admission, admission age/reassessment/expiry, evaluation metrics, and redacted
   live/durable activity logs on running, completed, and failed Model Intake scans.
 
-The framework deliberately does not fabricate external evidence. A production profile still blocks until
-the operator supplies the pinned scanner binaries/rule databases, an organization-controlled signing key and
-deployment trust roots, a purpose-built runtime image for the chosen model loader, a versioned corporate
+The framework deliberately does not fabricate external evidence. The intended production profile must block
+until the operator supplies pinned scanner binaries/rule databases, an organization-controlled signing key
+and deployment trust roots, a purpose-built runtime image for the chosen model loader, a versioned corporate
 synthetic benchmark, application/vector-store observations, and the required human/legal/privacy approvals.
+The current saved-profile expansion does not yet enforce all of those requirements and is a section 2.5 P0.
 Likewise, the CodeRankEmbed and CodeSage model-specific runbooks are not marked complete until real controlled
 runs produce the required evidence. These are operational admission inputs, not missing model-specific code.
 
@@ -175,22 +181,52 @@ but the exported status must remain unambiguous.
 |---|---:|---:|---|
 | Provider-neutral source adapters and pinned identities | Implemented | Hugging Face/HTTPS paths usable; other providers need credentials/configuration | Maintain adapters and add provider contract tests |
 | SSRF-resistant acquisition and complete quarantine | Implemented | Available when complete acquisition is enabled and storage is configured | Make production presets require complete snapshots |
-| Repository manifests, archives, custom code, safe-format checks | Implemented | Yes for supported formats | Expand fixtures and format/operator coverage |
+| Repository manifests, archives, custom code, safe-format checks | Partially implemented | Archive/format logic exists; complete snapshot authority is not trustworthy when caller metadata overrides the file list | Move authoritative manifest generation into acquisition and reject caller replacement |
 | Built-in semantic, source, secret, malware-rule, SBOM, binary, and license checks | Implemented | Yes | Improve detection depth and rule updates |
-| ModelScan, Fickling, ClamAV, Gitleaks, Syft, Trivy, OSV-Scanner, pip-audit adapters | Implemented | **No; binaries are not in the current source worker image** | Package pinned scanner images or installable plug-in bundles; expose tool/database readiness |
-| Isolated semantic sandbox | Implemented | Dedicated no-egress, read-only container | Keep as pre-execution inspection boundary |
+| ModelScan, Fickling, ClamAV, Gitleaks, Syft, Trivy, OSV-Scanner, pip-audit adapters | Partially implemented | **No; binaries are not in the current source worker image, and callers can omit required adapters** | Package pinned scanner images, derive required set from policy, emit explicit omitted results, expose readiness |
+| Isolated semantic sandbox | Partially implemented | Dedicated no-egress, read-only container; response binding/isolation gating and per-job kill boundary are incomplete | Repair evidence binding/limits and keep it as a pre-execution inspection boundary |
 | Actual tokenizer/model load and inference | Not implemented | No | Add disposable KVM/microVM runner and model-loader profiles |
 | Runtime behavior telemetry | Not implemented | No | Integrate Tracee/Falco/auditd/eBPF or equivalent in the execution runner |
 | Provider-neutral evaluation contract | Implemented | Yes when callers provide observations | Add a runner that generates embeddings and observations from the isolated model |
 | Corporate benchmark and thresholds | Integration point implemented | No universal corpus can ship | Organization supplies/version-controls corpus; ShakerScan automates execution and scoring |
-| Signed admission statement and lifecycle registry | Implemented | Requires signing key/trust roots | Add standard keyless/Cosign/OPA options and deployment verifiers |
+| Signed admission statement and lifecycle registry | **Unsafe for authorization until P0 repair** | A signed `block` currently verifies as `PASS`; API registry compensation is caller-disableable | Fix core decision verification, require active registry state, then add keyless/Cosign/OPA integrations |
+| Saved Model Intake policy profiles | Partially implemented | Strict governance and trust anchors expand; most required execution gates remain caller booleans | Server-side profile sets non-weakenable acquisition/scanner/sandbox/evaluation/signing requirements |
 | One-page control matrix and detailed evidence | Partially implemented | Overall decision and control cards exist | Add explicit non-run states, model/runtime test receipts, coverage summary, and HTML/PDF parity |
-| Deployment by exact approved digest | Verification contracts implemented | Organization-dependent | Integrate with internal registry, CI/CD, Kubernetes/admission controller, or model serving platform |
+| Deployment by exact approved digest | Contract present but unsafe | Signed denial can pass core verification; no external deployment enforcement ships | Repair authorization first, then integrate with internal registry, CI/CD, Kubernetes/admission controller, or model serving platform |
 | Legal, privacy, data provenance, and risk acceptance | Recorded as governance evidence | Organization-dependent | Keep human-owned; enforce required owner, approval, scope, and expiry |
 
 The source-built remote instance checked on 2026-07-29 had none of the eight external scanner binaries
 installed. That deployment must therefore show those controls as `UNSUPPORTED`; the presence of adapter code
 is not operational scanner coverage.
+
+### 2.5 Security re-audit correction
+
+A follow-up code re-audit of checkout `a3f10d1`, independently checked against the source and remote worker,
+found correctness defects that invalidate several unqualified “implemented” claims above. These are product
+code defects, not operator inputs:
+
+| Priority | Confirmed defect | Security consequence | Required correction |
+|---|---|---|---|
+| **P0** | `verify_package` verifies signature/subjects but never requires `decision.outcome == "allow"` | A correctly signed denial returns `verified: true`, `status: PASS` through the library verifier; the HTTP registry check is only a partial, caller-disableable compensation | Treat every non-`allow` outcome as a blocker in the core verifier; make active-registry enforcement non-disableable in production; add signed-denial tests |
+| **P0** | Complete Hugging Face snapshot acquisition trusts caller-overridable `metadata.repository_manifest.files` | A one-file caller manifest can be labeled complete and omit malicious code/files from every downstream scanner | Fetch the authoritative manifest inside the acquisition boundary at the pinned revision; reject caller replacement; keep caller manifests declared and compare-only |
+| **P0** | `generated_scanner_names` can omit required scanners without emitting a result | A caller can remove required gates rather than pass them | Resolve the required scanner set from policy; emit `SKIPPED_BY_POLICY`/`NOT_RUN` for every omitted expected scanner and block required omissions |
+| **P0** | Saved Model Intake profiles set strict governance/trust-anchor context but do not force complete acquisition, required scanners, sandbox/evaluation, attestation, or signed admission | The gated requester still controls most security booleans, which default off | Expand an active server-side profile into immutable minimum requirements; callers may strengthen but never weaken it |
+| **P0** | Core signed-admission/DSSE/signature tests are module-skipped when `cryptography` is absent | A green run can omit all 22 trust-surface tests | Make crypto a test-environment prerequisite and fail CI collection when required security modules skip |
+| **P1** | Admission revocation and reassessment mutators have no operator authentication; reassessment accepts `all_active` | Any caller that can reach the API can revoke/reclassify every active admission | Apply the existing trusted operator-access pattern, require scoped authorization, and separately approve fleet-wide actions |
+| **P1** | Pickle/source scanners do not consistently declare `execution.required`; directory pickle scans can return `NOT_APPLICABLE`; file enumeration silently truncates | Incomplete or irrelevant results can escape the required-non-pass finding loop | Policy-stamp requiredness centrally, scan every applicable snapshot file, report pre-limit discovery counts, and make truncation `INCOMPLETE` |
+| **P1** | Sandbox response subject/isolation evidence is not independently re-bound or gated | A forged/shared response or failed isolation probe can still contribute a `PASS` receipt | Recompute response digest, bind request ID and expected subject, require isolation assertions, isolate queues per worker/run, and authenticate the response |
+| **P1** | The current sandbox has a client timeout but no per-job service-side kill/limit boundary | One hung parser can stall the single service loop | Execute each job in a killable bounded child/microVM with CPU/address-space/file/process/wall limits |
+| **P1** | External scanner binaries/databases are not shipped and the built-in secret/malware scanners mark large model files incomplete | Real snapshots cannot achieve the apparent full scanner coverage as shipped | Package scanners, define file-type-aware coverage, avoid pretending opaque weights need text-secret scanning, and make every exclusion explicit |
+| **P1** | Caller-controlled `huggingface_file` is joined without containment validation | An absolute or escaping path can redirect built-in/external scanners outside the materialized subject | Resolve and require `selected_path.is_relative_to(subject_root)` before use |
+
+The critical signed-denial bypass was reproduced in the source-built remote worker: a newly generated,
+correctly signed admission package with `decision.outcome="block"` returned `verified: true`, `status: PASS`,
+and no blockers from the library verifier. This must be fixed before signed admission is described or used as
+a deployment authorization boundary.
+
+The re-audit also correctly distinguishes the current semantic sandbox from future model execution. It is a
+hardened static-format service, not a model loader. Its GGUF result currently validates only the magic bytes,
+and its pickle-backed format result is a policy refusal, not dynamic safety evidence.
 
 ## 3. Review principles
 
@@ -316,18 +352,22 @@ and implemented across the `model_intake*` modules in
    supports it.
 2. Apply every-hop URL/DNS/IP acquisition policy and stream a bounded prefix or complete artifact into
    content-addressed quarantine.
-3. Build a complete pinned Hugging Face repository snapshot when requested, subject to byte and file ceilings.
+3. Build a pinned Hugging Face repository snapshot when requested, subject to byte and file ceilings. The
+   current implementation incorrectly lets caller metadata replace the authoritative file manifest, so its
+   `complete` claim is not yet an admission-grade guarantee.
 4. Inventory paths, digests, formats, custom code/`auto_map`, archives, native binaries, dependencies,
    licenses, and governance material.
 5. Run built-in deterministic checks and optional external scanner adapters against the quarantined subject.
+   Required adapter selection is not yet protected from caller weakening.
 6. Perform safe-format semantic inspection in a separate no-egress, read-only, non-root container. This
    stage does **not** import repository code or deserialize pickle-backed weights.
 7. Evaluate caller-provided, content-free embedding and application observations against deterministic
    quality, isolation, poisoning, deletion, latency, and resource controls.
 8. Apply a saved policy profile, preserve evidence provenance, create findings, display durable activity,
    and produce an `ALLOW`, `REVIEW`, or `BLOCK` decision.
-9. Optionally sign the admission statement, register its lifecycle, expire/supersede/revoke it, and verify
-   an exact subject at deployment time.
+9. Optionally sign the admission statement and register its lifecycle. The current core verifier authenticates
+   the package and subjects but fails to reject a signed non-`allow` decision, so it must not authorize
+   deployment until repaired.
 
 ### 6.1 Complete acquisition versus bounded inspection
 
@@ -340,8 +380,8 @@ ceilings:
 - `max_repository_files`: 10,000.
 
 All three example weight files fit within the default complete-artifact ceiling. A production review must
-enable `complete_artifact_download` and `complete_repository_snapshot`, set ceilings from the pinned manifest
-plus controlled headroom, and reject unexpected growth. A prefix-only result remains
+enable `complete_artifact_download` and `complete_repository_snapshot`, use a server-resolved authoritative
+pinned manifest, set ceilings from that manifest plus controlled headroom, and reject unexpected growth. A prefix-only result remains
 `known_unverified_truncated` and cannot authorize deployment.
 
 ### 6.2 What the current sandbox proves
@@ -352,8 +392,9 @@ blocks executable serialization formats such as `.pkl`, `.pickle`, `.joblib`, `.
 and `.mar` from being loaded.
 
 It does not prove that `transformers`, `trust_remote_code=True`, a tokenizer, custom model class, PyTorch
-deserialization, native kernels, or inference behave safely. Those require the remaining disposable
-VM/microVM runner.
+deserialization, native kernels, or inference behave safely. Its present response and isolation observations
+also need stronger request/subject binding and fail-closed gating. Actual execution requires the remaining
+disposable VM/microVM runner.
 
 ### 6.3 What the current evaluator proves
 
@@ -429,9 +470,11 @@ hash mismatch.
 
 ### 7.3 P0 — Snapshot and inspect the complete repository
 
-**Delivery status: implemented for pinned Hugging Face snapshots.** Complete repository acquisition records
-all manifest files, custom code and `auto_map` surfaces under byte/file limits. Other providers use the same
-normalized contract but require provider-specific proof of complete immutable snapshot semantics.
+**Delivery status: partially implemented with a release-blocking authority defect.** Complete repository
+acquisition records files, custom code and `auto_map` surfaces under byte/file limits, but it currently takes
+the file list from caller-overridable metadata. The acquisition worker must independently resolve the full
+manifest at the pinned revision and compare, not trust, requester declarations. Other providers require the
+same provider-specific proof of complete immutable snapshot semantics.
 
 **Risk:** The most dangerous repository content may never be downloaded or analyzed. A safe weight file can
 be paired with malicious model code, tokenizer code, import hooks, build scripts, or dynamic imports.
@@ -455,10 +498,11 @@ evidence.
 
 ### 7.4 P0 — Generate evidence; do not accept assertions as scan results
 
-**Delivery status: provenance distinction implemented; operational evidence remains integration-dependent.**
+**Delivery status: provenance distinction implemented; requiredness and coverage enforcement are incomplete.**
 ShakerScan separates declared, externally attested, and generated evidence and includes built-in generated
 checks. External adapter evidence is eligible only when the pinned tool actually runs successfully against
-the complete subject. Caller-supplied evaluation observations remain declared/integration evidence until the
+the complete subject, but callers can currently remove expected adapters and some built-ins do not mark
+themselves required. Caller-supplied evaluation observations remain declared/integration evidence until the
 planned isolated harness generates them.
 
 **Risk:** A mistaken or malicious caller can satisfy a gate with unverified claims. Approvers cannot tell
@@ -478,10 +522,12 @@ policy version. User-supplied metadata must never be silently promoted to genera
 
 ### 7.5 P0 — Tighten signature and attestation semantics
 
-**Delivery status: core cryptographic and subject binding implemented; ecosystem integrations remain.**
-Detached signature trust is atomic, offline DSSE/in-toto subject verification exists, and admission statements
-bind complete subjects. Native online Sigstore/Cosign identity flows and trusted Rekor inclusion verification
-remain integration work when corporate policy requires them.
+**Delivery status: core cryptographic and subject binding implemented; trusted-key filtering and required-
+transparency semantics need repair.** Detached signature trust is atomic and offline DSSE/in-toto subject
+verification exists, but the current attestation verifier adds every supplied key fingerprint to the trusted
+set, defeating a narrower fingerprint pin, and `require_transparency_log` does not fail when no attestation
+bundle is supplied unless attestation verification is also required. Native online Sigstore/Cosign identity
+flows and trusted Rekor inclusion verification remain integration work when corporate policy requires them.
 
 **Required decision rule:** An artifact signature passes only when all are true:
 
@@ -498,10 +544,11 @@ bind issuer and subject, not merely accept any valid Fulcio certificate.
 
 ### 7.6 P0 — Add semantic unsafe-model analysis
 
-**Delivery status: built-in semantic analysis and fail-closed adapters implemented; external engines are not
-packaged in the current worker image.** CodeSage `.bin` files are conservatively blocked from sandbox loading.
-ModelScan and Fickling can add independent semantic evidence only after their pinned binaries are installed
-or provided through isolated scanner images.
+**Delivery status: built-in semantic analysis and adapter normalization implemented, but fail-closed coverage
+has bypasses and external engines are not packaged.** CodeSage `.bin` files are conservatively blocked from
+sandbox loading. Directory handling, required flags, parse failures, enumeration limits, and caller-selected
+adapter sets must be repaired. ModelScan and Fickling can add independent semantic evidence only after their
+pinned binaries are installed or provided through isolated scanner images.
 
 **Required design:**
 
@@ -591,11 +638,12 @@ incomplete, stale, bypassed, or governed by a different policy.
 
 ### 7.9 P1 — Execute in a hardened sandbox
 
-**Delivery status: semantic container sandbox implemented; actual model execution is not implemented.** The
-current no-egress, read-only, non-root, capability-free service safely inspects supported formats and rejects
-executable serialization. The remaining feature must import custom code, load tokenizer/weights, and run
-inference in a disposable KVM/microVM while collecting runtime telemetry. It must not weaken the current
-static sandbox by simply enabling `trust_remote_code` inside it.
+**Delivery status: semantic container sandbox partially implemented; actual model execution is not
+implemented.** The no-egress, read-only, non-root, capability-free service inspects supported formats and
+rejects executable serialization, but its response subject/isolation evidence is not fully re-bound and its
+single service loop lacks a per-job kill boundary. Repair those controls independently. The remaining feature
+must import custom code, load tokenizer/weights, and run inference in a disposable KVM/microVM while collecting
+runtime telemetry. It must not weaken the static sandbox by simply enabling `trust_remote_code` inside it.
 
 Static checks cannot prove how custom model code behaves when imported or invoked. A deterministic dynamic
 stage is required.
@@ -686,10 +734,12 @@ The data plane needs its own controls:
 
 ### 7.12 P2 — Produce a signed decision package
 
-**Delivery status: canonical statement, optional signing, admission registry, lifecycle, and deployment
-verification contracts implemented.** Production usefulness still depends on organization-controlled keys,
-trust roots, internal registry promotion, and CI/CD or serving-platform enforcement. HTML/PDF reporting needs
-the same explicit control-state and coverage matrix as JSON.
+**Delivery status: statement signing and lifecycle registry implemented, but deployment authorization is
+release-blocked.** The core package verifier does not inspect the signed decision outcome, so a correctly
+signed `block` verifies as `PASS`. The registry lookup in the HTTP endpoint is not a sufficient fix because
+library callers bypass it and API callers can disable it. Repair decision verification and mandatory active
+registry enforcement before relying on organization keys, internal registry promotion, or CI/CD/serving
+integration. HTML/PDF reporting also needs the same explicit control-state and coverage matrix as JSON.
 
 The final report must be machine-verifiable and human-readable. It should include:
 
@@ -1145,6 +1195,28 @@ Production must block when any of the following is true:
 The phases are ordered by risk dependency. Status refers to reusable product mechanisms, not approval of a
 specific model.
 
+### Phase -1 — Restore admission correctness — **release blocker**
+
+Complete before adding more scanners or model-execution features:
+
+- Reject any signed admission whose decision is not exactly `allow` in the core library verifier.
+- Make active admission-registry verification mandatory for production integrations.
+- Generate the complete provider manifest inside the trusted acquisition path and prevent caller override.
+- Resolve the required scanner/control set from server-side policy; a requester cannot remove it.
+- Make production policy profiles expand into non-weakenable acquisition, scanner, sandbox, evaluation,
+  attestation, signing, and approval requirements.
+- Fix attestation trusted-key fingerprint filtering and make transparency requirements fail closed even when
+  no bundle is supplied.
+- Protect admission verify/revoke/reassessment/retention operations with authenticated operator/deployment
+  identities; require additional authorization for `all_active` actions.
+- Contain the selected Hugging Face artifact path to the materialized snapshot.
+- Make every applicable built-in scanner’s requiredness, full discovery count, truncation, parse failure, and
+  directory coverage explicit.
+- Require crypto dependencies in security-test jobs and fail if signed-admission/signature/DSSE modules skip.
+
+Exit criteria: a correctly signed `block` is rejected by both library and HTTP paths; a one-file caller
+manifest cannot become complete; required scanners cannot disappear; and all 22 trust-surface tests execute.
+
 ### Phase 0 — Contract and immediate containment — **implemented**
 
 Delivered: explicit partial/truncated semantics, evidence provenance, normalized scanner failures, subject
@@ -1153,15 +1225,18 @@ identity, decision outcomes, redaction, durable activity, and corrected signatur
 Keep validating that no UI, API, export, or preset turns declared, truncated, skipped, crashed, unsupported,
 or stale evidence into a pass.
 
-### Phase 1 — Safe full acquisition and immutable manifests — **implemented; production preset work remains**
+### Phase 1 — Safe full acquisition and immutable manifests — **partially implemented; manifest authority repair required**
 
-Delivered: every-hop acquisition policy, streamed full artifacts, content-addressed quarantine, complete
-pinned Hugging Face snapshots, normalized manifests, quotas, retention controls, full digest binding, custom
-code inventory, and archive/path defenses.
+Delivered: every-hop acquisition policy, streamed full artifacts, content-addressed quarantine, snapshot
+materialization, normalized manifests, quotas, retention controls, full digest binding, custom-code inventory,
+and archive/path defenses. The current complete-snapshot claim is not trustworthy until the acquisition path
+stops accepting a caller-defined file list.
 
 Remaining:
 
 - Make a production/corporate preset require complete artifact and repository acquisition.
+- Resolve and attest the authoritative provider manifest inside the acquisition worker; requester manifests
+  are compare-only evidence.
 - Add full-snapshot contract tests for every supported provider adapter.
 - Document object-store sizing, backup, tenant quotas, and cleanup for operators.
 - Run scheduled real-model acquisitions outside ordinary PR jobs.
@@ -1182,6 +1257,10 @@ Remaining product work:
   and bounded output.
 - Provide a scanner expectation matrix so a required missing engine blocks instead of silently reducing
   coverage.
+- Remove caller authority to omit policy-required scanners; create an explicit result for every expected
+  scanner.
+- Fix required flags, directory pickle coverage, syntax-error result handling, pre-limit discovery counts,
+  and file-type-aware large-file exclusions.
 
 Operator/corporate work: approve scanner versions and licenses, host/update vulnerability and malware
 databases, supply organization rules, and define severity/freshness/exception policy.
@@ -1235,12 +1314,14 @@ to run the tests.
 ### Phase 5 — Useful report and release gate — **partially implemented**
 
 Delivered: deployment decision/reason, control cards, findings, AIBOM, evidence, activity logs, JSON/PDF
-exports, optional signed admission, lifecycle registry, reassessment, expiry, supersession, revocation, and
-exact-subject verification contracts.
+exports, optional signed statements, lifecycle registry, reassessment, expiry, supersession, and revocation.
+The exact-subject verifier authenticates packages but is not yet a correct authorization verifier because it
+accepts signed non-allow decisions.
 
 Remaining product work:
 
 - Add a first-page control matrix with the normalized states from section 2.3.
+- Repair and regression-test signed-decision authorization before exposing an `ALLOW` deployment receipt.
 - Separate `product mechanism available`, `tool ready`, `control executed`, and `control passed`.
 - Display complete/prefix acquisition, repository coverage, expected-versus-observed subjects, tool/database
   freshness, execution phases, runtime telemetry summary, benchmark identity, thresholds, and corporate
@@ -1352,6 +1433,23 @@ run `INCOMPLETE`.
 - Downstream LLM prompts isolate retrieved content from trusted instructions.
 - Logs, traces, metrics, and failure reports do not expose source content or embeddings unnecessarily.
 
+### 14.7 Trust-surface test integrity
+
+At the 2026-07-29 re-audit, `python3 -m pytest tests/test_model_intake*.py -q` reported
+`116 passed, 3 skipped`. The three skipped modules suppress 22 tests covering detached signatures, signed
+admission, and DSSE/in-toto because `cryptography` is absent in the local test environment. The exact focused
+API helper run also reports two Hugging Face resolver failures caused by an import-order-dependent
+`ModuleNotFoundError: redaction`.
+
+Required CI behavior:
+
+- Install the complete scanner/test dependency set, including `cryptography`.
+- Treat a skipped module under `test_model_intake_admission`, `test_model_intake_attestation`, or
+  `test_model_intake_signature_crypto` as a failed security job.
+- Add a legitimately signed `block` package test; mutating an already signed statement is not equivalent.
+- Run focused test groups in isolation as well as the full suite to detect import-order masking.
+- Publish passed/failed/skipped test counts and dependency versions with the release evidence.
+
 ## 15. Observability and operations
 
 Expose metrics and alerts for:
@@ -1392,6 +1490,9 @@ every decision relying on the affected scanner image/rules digest as requiring r
 |---|---|---|---|---|
 | SSRF through intake URLs | Every-hop URL/DNS/IP/redirect policy and approval-gated exceptions | Effective host egress can be weaker than application policy | Controlled acquisition network plus deployment self-test | P0 |
 | Prefix-only analysis mistaken for approval | Honest truncated status and separate complete acquisition | Production preset may leave complete mode disabled | Require complete artifact and snapshot in production profile | P0 |
+| Caller-defined “complete” repository | Snapshot downloads/hashes every declared file | Requester can omit files from the declaration that defines completeness | Authoritative provider manifest resolved inside acquisition; caller manifest compare-only | P0 |
+| Signed denial accepted as authorization | Signature, subject and time verification | Core verifier ignores signed decision outcome | Require exact `allow`, active registry state, and signed-denial regression tests | P0 |
+| Caller weakens required gates | Saved profile adds governance/trust anchors | Most execution requirements and scanner selection remain requester-controlled | Server-side non-weakenable profile expansion and expectation matrix | P0 |
 | External scanner adapters mistaken for installed coverage | Fail-closed `UNSUPPORTED` status | Operators may overlook missing binaries/databases | Packaged scanner images, readiness UI, expectation matrix | P0 |
 | Unsafe PyTorch serialization | Built-in semantics, Fickling/ModelScan adapters, sandbox load prohibition | No actual isolated deserialization/load evidence | Multi-engine static analysis plus disposable VM load | P0 |
 | Malicious custom runtime behavior | Complete custom-code inventory, AST checks, no-load semantic sandbox | Static analysis cannot prove import/inference behavior | KVM/microVM runner with runtime telemetry | P0 |
@@ -1401,7 +1502,9 @@ every decision relying on the affected scanner image/rules digest as requiring r
 | Retrieval/ACL leakage | Evaluation schema for ACL/tenant/graph/cache/deletion controls | No universal live data-plane connector or corporate fixture | Bounded connectors plus organization-provided principals/data | P1 |
 | Embedding poisoning/inversion | Deterministic scoring contract | No runner-generated adversarial corpus results | Automated benchmark plug-ins in isolated runner | P1 |
 | Ambiguous report coverage | Overall decision and control cards | “Not requested” can be misunderstood | Explicit first-page status/coverage/remediation matrix | P1 |
-| Signed decision not enforced by deployment | Signed admission and exact-subject verification contracts | Organization may not integrate registry/CI/CD/serving gate | Promotion hooks and mandatory corporate enforcement test | P1 |
+| Signed decision not enforced by deployment | Lifecycle registry exists; verifier currently has a critical outcome bug | Library path can authorize denial; deployment may also bypass registry | Repair verifier, mandate active registry, then add promotion hooks and enforcement test | P0 |
+| Security tests silently skipped | Crypto modules use `importorskip` | Green suite omits 22 signature/admission/attestation tests | Mandatory dependency job and fail-on-security-skip policy | P0 |
+| Unauthenticated admission lifecycle mutation | Reachability/network placement only | API caller can revoke or reassess all active admissions | Authenticated operator identities, scoped authorization, fleet-wide confirmation | P1 |
 | Legal/privacy/business decision automated incorrectly | Governance evidence and approvals | Product cannot determine corporate acceptability | Keep human authority; bind owner/scope/expiry to subjects | P1 |
 
 ## 18. Required decisions and open questions
@@ -1428,15 +1531,23 @@ Owners must decide and record:
 ### 19.1 Reusable ShakerScan product automation
 
 - [x] Every-hop acquisition policy and bounded/complete streaming acquisition exist.
-- [x] Complete pinned Hugging Face snapshots, content-addressed quarantine, manifests, hashes, quotas, and
-  retention controls exist.
+- [x] Content-addressed quarantine, full artifact hashes, quotas, retention, and snapshot materialization exist.
+- [ ] Complete pinned provider manifests are generated authoritatively inside acquisition and cannot be
+  replaced or weakened by requester metadata.
 - [x] Custom code, unsafe formats, archives, source, secrets, malware rules, SBOM/SCA, native binaries, and
   licenses have built-in checks and normalized evidence.
-- [x] External scanner adapters fail closed on missing, unsupported, malformed, empty, timed-out, crashed, or
-  incomplete executions.
-- [x] A hardened no-load semantic sandbox exists and clearly prohibits executable serialization.
-- [x] Evaluation, signed admission, lifecycle, reassessment, revocation, and exact-subject verification
-  contracts exist.
+- [ ] Policy-required built-in/external scanners cannot be omitted; requiredness, directory applicability,
+  pre-limit discovery, truncation, parse failure, and large-file exclusions all fail closed.
+- [ ] The hardened no-load semantic sandbox re-binds authenticated responses to request/subject/isolation and
+  terminates each job under service-side limits.
+- [x] Evaluation, admission lifecycle, reassessment, revocation, and subject-verification data contracts exist.
+- [ ] The core signed-admission verifier rejects every non-`allow` decision and production verification
+  requires an active registry entry.
+- [ ] Active server-side policy profiles impose non-weakenable minimum acquisition, scanner, sandbox,
+  evaluation, attestation, signing, and approval gates.
+- [ ] Admission verification and lifecycle mutations require authenticated, scoped deployment/operator
+  identities; fleet-wide actions require separate authorization.
+- [ ] All signature, signed-admission, and DSSE tests execute in mandatory CI without module-level skips.
 - [x] Durable UI/API activity and deployment decisions exist.
 - [ ] Pinned external scanners are packaged as isolated, self-testing plug-ins with rule/database readiness.
 - [ ] A disposable KVM/microVM model loader executes import/load/inference and produces runtime telemetry.
