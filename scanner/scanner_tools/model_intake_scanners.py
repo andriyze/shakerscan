@@ -48,13 +48,14 @@ class ScannerSpec:
     timeout_seconds: int = 300
     required: bool = False
     parser: Callable[[str, str, int], tuple[str, list[dict[str, Any]], dict[str, Any]]] | None = None
+    result_file: str | None = None
 
 
 EXTERNAL_SCANNERS: tuple[ScannerSpec, ...] = (
     ScannerSpec("modelscan", "modelscan", ("-p", "{subject}", "-r", "json"), required=True),
     ScannerSpec("fickling", "fickling", ("--check-safety", "{subject}"), required=True),
     ScannerSpec("clamav", "clamscan", ("--recursive=yes", "--infected", "{subject}"), required=True),
-    ScannerSpec("gitleaks", "gitleaks", ("detect", "--no-git", "--source", "{subject}", "--report-format", "json", "--report-path", "{scratch}/gitleaks.json"), required=True),
+    ScannerSpec("gitleaks", "gitleaks", ("detect", "--no-git", "--source", "{subject}", "--report-format", "json", "--report-path", "{scratch}/gitleaks.json"), required=True, result_file="gitleaks.json"),
     ScannerSpec("syft", "syft", ("dir:{subject}", "-o", "cyclonedx-json"), required=True),
     ScannerSpec("trivy", "trivy", ("fs", "--scanners", "vuln,secret,misconfig,license", "--format", "json", "--skip-db-update", "{subject}"), required=True),
     ScannerSpec("osv-scanner", "osv-scanner", ("scan", "source", "-r", "{subject}", "--format", "json"), required=True),
@@ -173,6 +174,19 @@ def _read_bounded(path: Path, limit: int = MAX_SCANNER_OUTPUT_BYTES) -> tuple[st
     return raw[:limit].decode("utf-8", "replace"), size > limit or len(raw) > limit
 
 
+def _output_digest(paths: list[Path]) -> str:
+    digest = hashlib.sha256()
+    for index, path in enumerate(paths):
+        if index:
+            digest.update(b"\0")
+        if not path.is_file():
+            continue
+        with path.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _tool_version(executable: str, args: tuple[str, ...], env: dict[str, str], cwd: Path) -> str | None:
     try:
         completed = subprocess.run(
@@ -216,6 +230,122 @@ def _default_external_parser(stdout: str, stderr: str, exit_code: int) -> tuple[
         "top_level_type": type(parsed).__name__ if parsed is not None else None,
     }
     return status, findings, summary
+
+
+def _json_output(stdout: str) -> Any:
+    if not stdout.strip():
+        raise ValueError("empty scanner output")
+    return json.loads(stdout)
+
+
+def _external_finding(scanner: str, item: Any, severity: str = "high") -> dict[str, Any]:
+    return {
+        "id": f"{scanner}_finding",
+        "severity": severity,
+        "evidence_sha256": _sha256_json(item),
+    }
+
+
+def _parse_external_scanner(
+    scanner: str, stdout: str, stderr: str, exit_code: int
+) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
+    """Validate each tool's output contract; exit zero alone is never PASS."""
+    if scanner in {"modelscan", "gitleaks", "syft", "trivy", "osv-scanner", "pip-audit"}:
+        try:
+            parsed = _json_output(stdout)
+        except (ValueError, json.JSONDecodeError) as exc:
+            return "INCOMPLETE" if exit_code in {0, 1} else "CRASHED", [], {"error": f"invalid_json_output:{exc}"}
+        findings: list[dict[str, Any]] = []
+        summary: dict[str, Any] = {"output_schema": type(parsed).__name__}
+        if scanner == "modelscan":
+            if not isinstance(parsed, (dict, list)):
+                return "INCOMPLETE", [], {"error": "modelscan_output_shape_invalid"}
+            if isinstance(parsed, dict) and not any(key in parsed for key in ("issues", "findings", "errors")):
+                return "INCOMPLETE", [], {"error": "modelscan_findings_key_missing"}
+            candidates = (
+                parsed if isinstance(parsed, list)
+                else parsed.get("issues") or parsed.get("findings") or parsed.get("errors") or []
+            )
+            if not isinstance(candidates, list):
+                return "INCOMPLETE", [], {"error": "modelscan_findings_shape_invalid"}
+            findings = [_external_finding(scanner, item, "critical") for item in candidates[:1000]]
+            summary["finding_count"] = len(candidates)
+        elif scanner == "gitleaks":
+            if not isinstance(parsed, list):
+                return "INCOMPLETE", [], {"error": "gitleaks_output_shape_invalid"}
+            findings = [_external_finding(scanner, item, "critical") for item in parsed[:1000]]
+            summary["finding_count"] = len(parsed)
+        elif scanner == "syft":
+            if not isinstance(parsed, dict) or not isinstance(parsed.get("components"), list):
+                return "INCOMPLETE", [], {"error": "cyclonedx_components_missing"}
+            summary.update({"bom_format": parsed.get("bomFormat"), "component_count": len(parsed["components"])})
+        elif scanner == "trivy":
+            results = parsed.get("Results") if isinstance(parsed, dict) else None
+            if not isinstance(results, list):
+                return "INCOMPLETE", [], {"error": "trivy_results_missing"}
+            counts = {"vulnerabilities": 0, "secrets": 0, "misconfigurations": 0}
+            warning = False
+            for result in results:
+                if not isinstance(result, dict):
+                    continue
+                for key, label in (("Vulnerabilities", "vulnerabilities"), ("Secrets", "secrets"), ("Misconfigurations", "misconfigurations")):
+                    items = result.get(key) if isinstance(result.get(key), list) else []
+                    counts[label] += len(items)
+                    for item in items[:1000 - len(findings)]:
+                        severity = str(item.get("Severity") or "high").lower() if isinstance(item, dict) else "high"
+                        if key == "Secrets" or severity in {"critical", "high"}:
+                            findings.append(_external_finding(scanner, item, "critical" if severity == "critical" else "high"))
+                        elif severity in {"medium", "low", "unknown"}:
+                            warning = True
+            summary.update(counts)
+            summary["warning_only"] = warning and not findings
+        elif scanner == "osv-scanner":
+            results = parsed.get("results") if isinstance(parsed, dict) else None
+            if not isinstance(results, list):
+                return "INCOMPLETE", [], {"error": "osv_results_missing"}
+            vulnerabilities = []
+            for result in results:
+                packages = result.get("packages") if isinstance(result, dict) else []
+                for package in packages if isinstance(packages, list) else []:
+                    vulnerabilities.extend(package.get("vulnerabilities") or [] if isinstance(package, dict) else [])
+            findings = [_external_finding(scanner, item) for item in vulnerabilities[:1000]]
+            summary["vulnerability_count"] = len(vulnerabilities)
+        elif scanner == "pip-audit":
+            dependencies = parsed.get("dependencies") if isinstance(parsed, dict) else parsed if isinstance(parsed, list) else None
+            if not isinstance(dependencies, list):
+                return "INCOMPLETE", [], {"error": "pip_audit_dependencies_missing"}
+            vulnerabilities = [
+                vulnerability
+                for dependency in dependencies if isinstance(dependency, dict)
+                for vulnerability in (dependency.get("vulns") or [])
+            ]
+            findings = [_external_finding(scanner, item) for item in vulnerabilities[:1000]]
+            summary["vulnerability_count"] = len(vulnerabilities)
+        if exit_code not in {0, 1}:
+            return "CRASHED", findings, {**summary, "error": (stderr or "unexpected exit code")[:1000]}
+        if findings:
+            return "FAIL", findings, summary
+        if summary.get("warning_only"):
+            return "WARNING", [], summary
+        return "PASS", [], summary
+
+    text = f"{stdout}\n{stderr}".strip()
+    if scanner == "clamav":
+        if "SCAN SUMMARY" not in text or "Infected files:" not in text:
+            return "INCOMPLETE" if exit_code in {0, 1} else "CRASHED", [], {"error": "clamav_summary_missing"}
+        match = re.search(r"Infected files:\s*(\d+)", text)
+        infected = int(match.group(1)) if match else 0
+        findings = [_external_finding(scanner, {"infected_files": infected}, "critical")] if infected else []
+        if exit_code not in {0, 1}:
+            return "CRASHED", findings, {"infected_files": infected, "error": "clamav_engine_error"}
+        return ("FAIL" if infected else "PASS"), findings, {"infected_files": infected}
+    if scanner == "fickling":
+        if not text:
+            return "INCOMPLETE", [], {"error": "fickling_output_empty"}
+        unsafe = exit_code != 0 or any(marker in text.lower() for marker in ("unsafe", "malicious", "overtly bad"))
+        findings = [_external_finding(scanner, {"output_sha256": hashlib.sha256(text.encode()).hexdigest()}, "critical")] if unsafe else []
+        return ("FAIL" if unsafe else "PASS"), findings, {"output_sha256": hashlib.sha256(text.encode()).hexdigest()}
+    return _default_external_parser(stdout, stderr, exit_code)
 
 
 def run_external_scanner(spec: ScannerSpec, subject_path: Path, subject: dict[str, Any]) -> dict[str, Any]:
@@ -281,13 +411,28 @@ def run_external_scanner(spec: ScannerSpec, subject_path: Path, subject: dict[st
             )
         stdout, stdout_truncated = _read_bounded(stdout_path)
         stderr, stderr_truncated = _read_bounded(stderr_path)
-        raw_digest = hashlib.sha256(stdout_path.read_bytes() + b"\0" + stderr_path.read_bytes()).hexdigest()
-        if stdout_truncated or stderr_truncated:
+        result_path = scratch / spec.result_file if spec.result_file else None
+        result_output = stdout
+        result_truncated = False
+        if result_path is not None:
+            if result_path.is_file():
+                result_output, result_truncated = _read_bounded(result_path)
+            else:
+                result_output = ""
+                result_truncated = True
+        raw_digest = _output_digest(
+            [stdout_path, stderr_path, *([result_path] if result_path is not None else [])]
+        )
+        if stdout_truncated or stderr_truncated or result_truncated:
             status, findings, summary = "INCOMPLETE", [], {"error": "scanner_output_limit_exceeded"}
         else:
-            parser = spec.parser or _default_external_parser
+            parser = spec.parser
             try:
-                status, findings, summary = parser(stdout, stderr, completed.returncode)
+                status, findings, summary = (
+                    parser(result_output, stderr, completed.returncode)
+                    if parser
+                    else _parse_external_scanner(spec.name, result_output, stderr, completed.returncode)
+                )
             except Exception as exc:
                 status, findings, summary = "CRASHED", [], {"error": f"parser_{type(exc).__name__}: {exc}"}
         return _scanner_result(
