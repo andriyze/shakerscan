@@ -333,6 +333,7 @@ function ModelIntakeSettingsContent() {
   const [requireDeploymentApproval, setRequireDeploymentApproval] = useState(true)
   const [requireSignature, setRequireSignature] = useState(true)
   const [requireSignatureVerification, setRequireSignatureVerification] = useState(false)
+  const [requireCryptographicSignatureVerification, setRequireCryptographicSignatureVerification] = useState(false)
   const [requireHash, setRequireHash] = useState(true)
   const [requireModelGovernance, setRequireModelGovernance] = useState(true)
   const [maxDownloadBytes, setMaxDownloadBytes] = useState('10000000')
@@ -420,6 +421,7 @@ function ModelIntakeSettingsContent() {
     setRequireHash(true)
     setRequireSignature(true)
     setRequireSignatureVerification(true)
+    setRequireCryptographicSignatureVerification(true)
     setRequireModelGovernance(true)
     setRequireDeploymentApproval(true)
     setCompleteArtifactDownload(true)
@@ -495,6 +497,7 @@ function ModelIntakeSettingsContent() {
     setRequireDeploymentApproval(payload.require_deployment_approval ?? true)
     setRequireSignature(payload.require_signature ?? true)
     setRequireSignatureVerification(payload.require_signature_verification ?? false)
+    setRequireCryptographicSignatureVerification(payload.require_cryptographic_signature_verification ?? false)
     setRequireHash(payload.require_hash ?? true)
     setRequireModelGovernance(payload.require_model_governance ?? true)
     setMaxDownloadBytes(String(payload.max_download_bytes || 10000000))
@@ -606,6 +609,7 @@ function ModelIntakeSettingsContent() {
       require_deployment_approval: requireDeploymentApproval,
       require_signature: requireSignature,
       require_signature_verification: requireSignatureVerification,
+      require_cryptographic_signature_verification: requireCryptographicSignatureVerification,
       require_hash: requireHash,
       require_model_governance: requireModelGovernance,
       policy_profile: policyProfile,
@@ -1510,6 +1514,10 @@ function ModelIntakeSettingsContent() {
               <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
                 <input type="checkbox" checked={requireSignatureVerification} onChange={(e) => setRequireSignatureVerification(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
                 Verify signature
+              </label>
+              <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
+                <input type="checkbox" checked={requireCryptographicSignatureVerification} onChange={(e) => setRequireCryptographicSignatureVerification(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+                Require trusted crypto verification
               </label>
               <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
                 <input type="checkbox" checked={requireDeploymentApproval} onChange={(e) => setRequireDeploymentApproval(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />

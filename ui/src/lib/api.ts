@@ -1299,6 +1299,7 @@ export interface ModelIntakeScanRequest {
   require_deployment_approval?: boolean
   require_signature?: boolean
   require_signature_verification?: boolean
+  require_cryptographic_signature_verification?: boolean
   require_hash?: boolean
   require_model_governance?: boolean
   policy_profile?: string

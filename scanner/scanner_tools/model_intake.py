@@ -1317,12 +1317,15 @@ def _verify_signature_crypto(
             key.verify(bytes(signature_bytes), bytes(payload_bytes))
             algorithm = "ed25519"
         elif isinstance(key, rsa.RSAPublicKey):
-            if str(rsa_padding).lower() == "pkcs1":
+            normalized_padding = str(rsa_padding).lower().replace("-", "").replace("_", "")
+            if normalized_padding in {"pkcs1", "pkcs1v15", "pkcs1v1.5"}:
                 pad = asy_padding.PKCS1v15()
+                padding_name = "pkcs1v15"
             else:
                 pad = asy_padding.PSS(mgf=asy_padding.MGF1(hash_alg), salt_length=asy_padding.PSS.MAX_LENGTH)
+                padding_name = "pss"
             key.verify(bytes(signature_bytes), bytes(payload_bytes), pad, hash_alg)
-            algorithm = f"rsa-{str(rsa_padding).lower()}-{str(hash_name).lower()}"
+            algorithm = f"rsa-{padding_name}-{str(hash_name).lower()}"
         elif isinstance(key, ec.EllipticCurvePublicKey):
             key.verify(bytes(signature_bytes), bytes(payload_bytes), ec.ECDSA(hash_alg))
             algorithm = f"ecdsa-{str(hash_name).lower()}"
@@ -1444,6 +1447,7 @@ async def _load_and_verify_signature(
     allow_local_files: bool,
     fetch_policy: dict[str, Any] | None = None,
     artifact_payload_complete: bool = True,
+    artifact_subject_complete: bool = True,
 ) -> dict[str, Any]:
     """Gather signature material (inline or fetched) and run real verification.
 
@@ -1483,6 +1487,17 @@ async def _load_and_verify_signature(
     if not signature_bytes:
         return {"available": True, "attempted": False, "verified": False, "error": "no_signature"}
 
+    if not artifact_subject_complete:
+        return {
+            "available": True,
+            "attempted": False,
+            "verified": False,
+            "signature_valid": False,
+            "attestation_subject_digest_match": None,
+            "error": "complete_artifact_required_for_signature_verification",
+            "payload_kind": payload_kind,
+        }
+
     digest_based = False
     if payload_kind in ("digest_hex", "digesthex", "digest-hex") and sha256:
         payload_bytes: bytes | None = sha256.encode()
@@ -1500,6 +1515,7 @@ async def _load_and_verify_signature(
                 "attempted": False,
                 "verified": False,
                 "signature_valid": False,
+                "attestation_subject_digest_match": None,
                 "error": "raw_artifact_payload_not_fully_materialized",
                 "payload_kind": "artifact",
             }
@@ -1511,9 +1527,10 @@ async def _load_and_verify_signature(
     signature_valid = bool(result.get("verified"))
     result["signature_valid"] = signature_valid
     if signature_valid:
-        result["attestation_subject_digest_match"] = bool(
+        subject_digest_match = bool(
             not expected_sha256 or (sha256 and sha256 == expected_sha256)
         )
+        result["attestation_subject_digest_match"] = subject_digest_match
         result["payload_kind"] = "digest" if digest_based else "artifact"
         # A valid signature only establishes TRUSTED provenance when the signing key
         # chains to an operator-configured trust anchor. Without that, a publisher
@@ -1521,7 +1538,7 @@ async def _load_and_verify_signature(
         # cryptographic-pass-AND-trusted.
         trust = _evaluate_signature_trust_root(public_key_pem, options)
         result.update(trust)
-        result["verified"] = signature_valid and trust.get("trusted_root") is True
+        result["verified"] = signature_valid and subject_digest_match and trust.get("trusted_root") is True
     return result
 
 
@@ -1564,7 +1581,10 @@ def _signature_verification_status(
         or metadata.get("provenance_url")
         or crypto.get("available") is True
     )
-    if cryptographically_verified:
+    subject_digest_match = crypto.get("attestation_subject_digest_match")
+    if signature_valid and subject_digest_match is False:
+        status = "subject_digest_mismatch"
+    elif cryptographically_verified:
         status = "verified"
     elif signature_valid and trusted_root is False:
         # Signature math passed but the signing key is not a configured trust anchor.
@@ -1599,7 +1619,7 @@ def _signature_verification_status(
         "verifier": crypto.get("verifier"),
         "algorithm": crypto.get("algorithm"),
         "transparency_log_verified": bool(crypto.get("transparency_log_verified")),
-        "attestation_subject_digest_match": crypto.get("attestation_subject_digest_match"),
+        "attestation_subject_digest_match": subject_digest_match,
         "crypto_error": crypto.get("error"),
         "verification_evidence": {
             key: metadata.get(key)
@@ -2458,6 +2478,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         allow_local_files=allow_local_files,
         fetch_policy=fetch_policy,
         artifact_payload_complete=not inspection_truncated,
+        artifact_subject_complete=bool(artifact_meta.get("complete")) or not artifact_truncated,
     )
     signature_status = _signature_verification_status(metadata, signature_url, signed_by, crypto_signature_result)
     license_policy = _license_policy(license_ref)
@@ -2727,11 +2748,22 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             remediation="Do not deploy. Re-sign the artifact with the correct key, or correct the public key / payload (artifact vs digest) used for verification.",
         ))
 
+    if signature_status["status"] == "subject_digest_mismatch" and not metadata_unavailable:
+        findings.append(_finding(
+            finding_id="signature_subject_digest_mismatch",
+            title="Signature subject digest does not match the acquired artifact",
+            severity="critical",
+            description="The signature math passed, but the expected signed subject digest is not the SHA-256 digest of the complete acquired artifact.",
+            artifact_ref=artifact_ref,
+            evidence={"artifact": name, "signature": signature_status, "observed_sha256": sha256, "expected_sha256": expected_sha256},
+            remediation="Block deployment and issue a new signature or attestation bound to the exact quarantined artifact digest.",
+        ))
+
     effective_require_verification = require_signature_verification or require_cryptographic_signature_verification
     untrusted_signature = signature_status["status"] in {"untrusted_key", "untrusted_root"}
     if (
         effective_require_verification
-        and signature_status["status"] in {"present_unverified", "claimed_verified", "untrusted_key", "untrusted_root"}
+        and signature_status["status"] in {"present_unverified", "claimed_verified", "untrusted_key", "untrusted_root", "subject_digest_mismatch"}
         and not metadata_unavailable
     ):
         crypto_strict = require_cryptographic_signature_verification

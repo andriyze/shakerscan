@@ -3639,6 +3639,10 @@ class ModelIntakeScanRequest(BaseModel):
     require_deployment_approval: bool = True
     require_signature: bool = True
     require_signature_verification: bool = False
+    require_cryptographic_signature_verification: bool = Field(
+        default=False,
+        description="Require a complete subject, valid cryptographic signature, matching subject digest, and operator-trusted signing key.",
+    )
     require_hash: bool = True
     require_model_governance: bool = True
     policy_profile: Optional[str] = None
@@ -10900,6 +10904,7 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
         "require_deployment_approval": request.require_deployment_approval,
         "require_signature": request.require_signature,
         "require_signature_verification": request.require_signature_verification,
+        "require_cryptographic_signature_verification": request.require_cryptographic_signature_verification,
         "require_hash": request.require_hash,
         "require_model_governance": request.require_model_governance,
         "policy_profile": request.policy_profile,
