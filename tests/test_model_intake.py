@@ -673,6 +673,45 @@ def test_model_intake_complete_acquisition_verifies_full_hash_and_full_zip(tmp_p
     assert "model_intake:unsafe_serialization" in {finding["id"] for finding in result["findings"]}
 
 
+def test_model_intake_blocks_incomplete_manifest_and_unreviewed_custom_code(tmp_path):
+    artifact = tmp_path / "model.safetensors"
+    artifact.write_bytes(_safetensors_bytes())
+    expected_sha = hashlib.sha256(artifact.read_bytes()).hexdigest()
+
+    result = asyncio.run(
+        run_model_intake_scan(
+            str(artifact),
+            _local_options(
+                {
+                    "expected_sha256": expected_sha,
+                    "require_signature": False,
+                    "require_model_governance": False,
+                    "require_deployment_approval": False,
+                    "metadata_json": {
+                        "repository_manifest": {
+                            "manifest_sha256": "a" * 64,
+                            "complete": False,
+                            "files_discovered": 3,
+                            "files_recorded": 2,
+                            "invalid_paths": [{"path": "../escape.py", "reason": "non_normalized_path"}],
+                            "custom_code_required": True,
+                            "python_files": ["modeling.py"],
+                            "executable_files": ["modeling.py"],
+                        }
+                    },
+                }
+            ),
+        )
+    )
+
+    finding_ids = {finding["id"] for finding in result["findings"]}
+    assert "model_intake:repository_manifest_incomplete" in finding_ids
+    assert "model_intake:custom_model_code_requires_review" in finding_ids
+    assert result["model_intake"]["checks"]["repository_manifest"] is False
+    assert result["model_intake"]["checks"]["custom_code_review"] is False
+    assert result["result"]["decision"] == "block"
+
+
 def test_model_intake_reports_unsupported_artifact_scheme():
     result = asyncio.run(
         run_model_intake_scan(

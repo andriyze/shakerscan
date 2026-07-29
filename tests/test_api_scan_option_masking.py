@@ -2149,6 +2149,7 @@ def test_huggingface_resolver_prefills_hash_license_and_dependency_inventory(mon
             },
             {"rfilename": "tokenizer.json", "size": 100, "blobId": "blob-tokenizer"},
             {"rfilename": "requirements.txt", "size": 42, "blobId": "blob-reqs"},
+            {"rfilename": "modeling_ranker.py", "size": 512, "blobId": "blob-code"},
         ],
     }
     monkeypatch.setattr(api_module, "_hf_api_model_info", lambda repo_id, revision, timeout_seconds: model_info)
@@ -2168,6 +2169,20 @@ def test_huggingface_resolver_prefills_hash_license_and_dependency_inventory(mon
     assert metadata["license"] == "apache-2.0"
     assert metadata["tokenizer"][0]["path"] == "tokenizer.json"
     assert metadata["package_dependencies"]["files"][0]["path"] == "requirements.txt"
+    manifest = metadata["repository_manifest"]
+    assert manifest["complete"] is True
+    assert manifest["revision"] == "abc123"
+    assert len(manifest["manifest_sha256"]) == 64
+    assert manifest["custom_code_required"] is True
+    assert manifest["python_files"] == ["modeling_ranker.py"]
+    assert {item["path"] for item in manifest["files"]} == {
+        "model.safetensors",
+        "modeling_ranker.py",
+        "requirements.txt",
+        "tokenizer.json",
+        "vision/vit.safetensors",
+    }
+    assert any("custom executable model code" in warning for warning in resolved["warnings"])
 
     resolved_file_url = api_module._resolve_huggingface_model_intake(
         api_module.ModelIntakeResolveRequest(
@@ -2178,6 +2193,39 @@ def test_huggingface_resolver_prefills_hash_license_and_dependency_inventory(mon
     )
     assert resolved_file_url["selected_file"]["path"] == "vision/vit.safetensors"
     assert resolved_file_url["scan_payload"]["expected_sha256"] == "e" * 64
+
+
+def test_huggingface_repository_manifest_rejects_unsafe_and_colliding_paths():
+    model_info = {
+        "sha": "commit-sha",
+        "siblings": [
+            {"rfilename": "model.py", "size": 1, "blobId": "one"},
+            {"rfilename": "Model.py", "size": 1, "blobId": "two"},
+            {"rfilename": "../escape.py", "size": 1, "blobId": "three"},
+            {"rfilename": "model.py", "size": 1, "blobId": "four"},
+        ],
+    }
+
+    manifest = api_module._hf_repository_manifest(model_info, "acme/model", "commit-sha")
+
+    assert manifest["complete"] is False
+    assert manifest["files_discovered"] == 4
+    assert manifest["files_recorded"] == 2
+    assert manifest["invalid_paths"] == [{"path": "../escape.py", "reason": "non_normalized_path"}]
+    assert manifest["duplicate_paths"] == ["model.py"]
+    assert manifest["case_collisions"] == [["model.py", "Model.py"]]
+
+
+def test_huggingface_repository_manifest_digest_is_order_independent():
+    siblings = [
+        {"rfilename": "z.py", "size": 3, "blobId": "z"},
+        {"rfilename": "a.safetensors", "size": 2, "lfs": {"sha256": "a" * 64, "size": 2}},
+    ]
+
+    first = api_module._hf_repository_manifest({"sha": "abc", "siblings": siblings}, "acme/model", "abc")
+    second = api_module._hf_repository_manifest({"sha": "abc", "siblings": list(reversed(siblings))}, "acme/model", "abc")
+
+    assert first["manifest_sha256"] == second["manifest_sha256"]
 
 
 def test_huggingface_resolver_does_not_emit_scan_payload_without_metadata_or_file(monkeypatch):

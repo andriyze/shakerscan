@@ -10101,6 +10101,11 @@ MODEL_INTAKE_METADATA_FILES = {
     "model.safetensors.index.json",
     "readme.md",
 }
+MODEL_INTAKE_EXECUTABLE_EXTENSIONS = {
+    ".py", ".pyc", ".pyo", ".ipynb", ".sh", ".bash", ".zsh", ".ps1", ".bat", ".cmd",
+    ".so", ".dll", ".dylib", ".exe", ".whl",
+}
+MODEL_INTAKE_REPOSITORY_MANIFEST_MAX_FILES = 10_000
 HF_MODEL_INFO_MAX_BYTES = 10_000_000
 
 
@@ -10422,33 +10427,141 @@ def _hf_file_candidates(model_info: dict[str, Any]) -> list[dict[str, Any]]:
     return sorted(candidates, key=lambda item: (-int(item.get("score") or 0), str(item.get("path") or "")))
 
 
-def _hf_include_inventory_file(path: str) -> bool:
+def _hf_repo_path_status(raw_path: str) -> tuple[str | None, str | None]:
+    path = str(raw_path or "")
+    if not path or "\x00" in path or "\\" in path or path.startswith("/") or re.match(r"^[A-Za-z]:", path):
+        return None, "invalid_or_absolute_path"
+    parts = path.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        return None, "non_normalized_path"
+    normalized = "/".join(parts)
+    if len(normalized.encode("utf-8")) > 4096:
+        return None, "path_too_long"
+    return normalized, None
+
+
+def _hf_repo_file_record(sibling: dict[str, Any], path: str) -> dict[str, Any]:
+    lfs = sibling.get("lfs") if isinstance(sibling.get("lfs"), dict) else {}
     name = Path(path).name.lower()
+    ext = Path(path).suffix.lower()
+    categories: list[str] = []
     if _hf_candidate_score(path) > 0:
-        return True
-    if name in MODEL_INTAKE_TOKENIZER_FILES | MODEL_INTAKE_DEPENDENCY_FILES | MODEL_INTAKE_METADATA_FILES:
-        return True
-    if name.endswith("_config.json"):
-        return True
-    return False
+        categories.append("model_artifact")
+    if name in MODEL_INTAKE_TOKENIZER_FILES:
+        categories.append("tokenizer")
+    if name in MODEL_INTAKE_DEPENDENCY_FILES:
+        categories.append("dependency")
+    if name in MODEL_INTAKE_METADATA_FILES or name.endswith("_config.json"):
+        categories.append("metadata")
+    if ext in MODEL_INTAKE_EXECUTABLE_EXTENSIONS:
+        categories.append("executable")
+    if ext == ".py":
+        categories.append("python_source")
+    if not categories:
+        categories.append("other")
+    item = {
+        "path": path,
+        "size_bytes": sibling.get("size") or lfs.get("size"),
+        "sha256": lfs.get("sha256"),
+        "blob_id": sibling.get("blobId"),
+        "categories": categories,
+        "executable": "executable" in categories,
+        "source": "huggingface_model_info",
+    }
+    return {key: value for key, value in item.items() if value not in (None, "", [], {})}
 
 
-def _hf_repo_file_inventory(model_info: dict[str, Any], limit: int = 100) -> list[dict[str, Any]]:
+def _hf_repository_manifest(
+    model_info: dict[str, Any],
+    repo_id: str | None = None,
+    revision: str | None = None,
+    limit: int = MODEL_INTAKE_REPOSITORY_MANIFEST_MAX_FILES,
+) -> dict[str, Any]:
+    siblings = model_info.get("siblings") if isinstance(model_info.get("siblings"), list) else []
     inventory: list[dict[str, Any]] = []
-    for sibling in model_info.get("siblings") or []:
-        path = str(sibling.get("rfilename") or sibling.get("path") or "")
-        if not path or not _hf_include_inventory_file(path):
+    invalid_paths: list[dict[str, str]] = []
+    duplicate_paths: list[str] = []
+    case_collisions: list[list[str]] = []
+    observed_paths: set[str] = set()
+    case_paths: dict[str, str] = {}
+    for sibling in siblings[:limit]:
+        raw_path = str(sibling.get("rfilename") or sibling.get("path") or "")
+        path, error = _hf_repo_path_status(raw_path)
+        if error or not path:
+            invalid_paths.append({"path": raw_path[:512], "reason": error or "invalid_path"})
             continue
-        lfs = sibling.get("lfs") if isinstance(sibling.get("lfs"), dict) else {}
-        item = {
-            "path": path,
-            "size_bytes": sibling.get("size") or lfs.get("size"),
-            "sha256": lfs.get("sha256"),
-            "blob_id": sibling.get("blobId"),
-            "source": "huggingface_model_info",
-        }
-        inventory.append({key: value for key, value in item.items() if value not in (None, "", [], {})})
-    return inventory[:limit]
+        if path in observed_paths:
+            duplicate_paths.append(path)
+            continue
+        observed_paths.add(path)
+        folded = path.casefold()
+        if folded in case_paths and case_paths[folded] != path:
+            case_collisions.append([case_paths[folded], path])
+        else:
+            case_paths[folded] = path
+        inventory.append(_hf_repo_file_record(sibling, path))
+    inventory.sort(key=lambda item: str(item.get("path") or ""))
+    canonical_subject = {
+        "provider": "huggingface",
+        "repository": repo_id,
+        "revision": revision or model_info.get("sha"),
+        "files": [
+            {
+                key: item.get(key)
+                for key in ("path", "size_bytes", "sha256", "blob_id")
+                if item.get(key) not in (None, "")
+            }
+            for item in inventory
+        ],
+    }
+    manifest_sha256 = hashlib.sha256(
+        json.dumps(canonical_subject, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    executable_files = [item["path"] for item in inventory if item.get("executable")]
+    python_files = [item["path"] for item in inventory if "python_source" in item.get("categories", [])]
+    auto_map = (
+        model_info.get("config", {}).get("auto_map")
+        if isinstance(model_info.get("config"), dict)
+        else None
+    )
+    tags = model_info.get("tags") if isinstance(model_info.get("tags"), list) else []
+    custom_code_required = bool(auto_map or python_files or "custom_code" in tags)
+    total_size = sum(int(item.get("size_bytes") or 0) for item in inventory)
+    complete = (
+        bool(siblings)
+        and len(siblings) <= limit
+        and len(inventory) + len(invalid_paths) + len(duplicate_paths) == len(siblings)
+        and not invalid_paths
+        and not duplicate_paths
+        and not case_collisions
+    )
+    return {
+        "schema_version": "model-intake-repository-manifest/v1",
+        "provider": "huggingface",
+        "repository": repo_id,
+        "revision": revision or model_info.get("sha"),
+        "manifest_sha256": manifest_sha256,
+        "complete": complete,
+        "files_discovered": len(siblings),
+        "files_recorded": len(inventory),
+        "total_declared_bytes": total_size,
+        "truncated_by_limit": len(siblings) > limit,
+        "invalid_paths": invalid_paths[:100],
+        "duplicate_paths": duplicate_paths[:100],
+        "case_collisions": case_collisions[:100],
+        "executable_files": executable_files,
+        "python_files": python_files,
+        "custom_code_required": custom_code_required,
+        "auto_map": auto_map,
+        "files": inventory,
+    }
+
+
+def _hf_repo_file_inventory(
+    model_info: dict[str, Any],
+    limit: int = MODEL_INTAKE_REPOSITORY_MANIFEST_MAX_FILES,
+) -> list[dict[str, Any]]:
+    return list(_hf_repository_manifest(model_info, limit=limit).get("files") or [])
 
 
 def _hf_files_named(model_info: dict[str, Any], names: set[str]) -> list[dict[str, Any]]:
@@ -10468,7 +10581,8 @@ def _hf_metadata_from_model_info(model_info: dict[str, Any], repo_id: str, revis
     license_ref = card_data.get("license") or next((tag.removeprefix("license:") for tag in tags if isinstance(tag, str) and tag.startswith("license:")), None)
     evals = card_data.get("model-index") or card_data.get("eval_results") or card_data.get("eval_results_v2")
     sha = model_info.get("sha") or revision
-    file_inventory = _hf_repo_file_inventory(model_info)
+    repository_manifest = _hf_repository_manifest(model_info, repo_id, str(sha))
+    file_inventory = repository_manifest["files"]
     tokenizer_files = _hf_files_named(model_info, MODEL_INTAKE_TOKENIZER_FILES)
     dependency_files = _hf_files_named(model_info, MODEL_INTAKE_DEPENDENCY_FILES)
     metadata: dict[str, Any] = {
@@ -10483,6 +10597,7 @@ def _hf_metadata_from_model_info(model_info: dict[str, Any], repo_id: str, revis
         "gated": model_info.get("gated"),
         "private": model_info.get("private"),
         "huggingface_file_inventory": file_inventory,
+        "repository_manifest": repository_manifest,
     }
     if license_ref:
         metadata["license"] = license_ref
@@ -10568,6 +10683,16 @@ def _resolve_huggingface_model_intake(request: ModelIntakeResolveRequest) -> dic
         warnings.append("Reference is not pinned to an immutable commit yet.")
     if model_info.get("gated") or model_info.get("private"):
         warnings.append("This model may require authenticated Hub access from the scanner worker.")
+
+    repository_manifest = _hf_repository_manifest(
+        model_info,
+        repo_id,
+        str(model_info.get("sha") or hf_ref.get("revision") or "main"),
+    )
+    if not repository_manifest.get("complete"):
+        warnings.append("Repository inventory is incomplete or contains unsafe/colliding paths; production intake must fail closed.")
+    if repository_manifest.get("custom_code_required"):
+        warnings.append("Repository contains custom executable model code; scan and sandbox every executable file before approval.")
 
     metadata_out = {
         **_hf_metadata_from_model_info(model_info, repo_id, str(hf_ref.get("revision") or "main"), selected),

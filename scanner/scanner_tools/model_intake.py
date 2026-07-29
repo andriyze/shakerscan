@@ -2137,6 +2137,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
     base_model_ref = _metadata_value(metadata, "base_model", "base_models", "foundation_model")
     fine_tune_provenance = _metadata_value(metadata, "fine_tuning_job", "fine_tune_job", "training_run_id", "training_pipeline")
     poisoning_eval_ref = _metadata_value(metadata, "poisoning_evals", "backdoor_evals", "canary_eval_report", "data_poisoning_evals")
+    repository_manifest = metadata.get("repository_manifest") if isinstance(metadata.get("repository_manifest"), dict) else {}
     metadata_unavailable = bool(metadata_url and metadata_fetch_meta.get("error") and not metadata)
     require_signature_verification = _boolish(options.get("require_signature_verification"))
     require_cryptographic_signature_verification = _boolish(
@@ -2227,6 +2228,41 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
                 evidence={"artifact": name, "fetch": artifact_meta},
                 remediation="Make the model artifact reachable to the intake worker or provide an internal registry reference with access credentials.",
             ))
+
+    if repository_manifest and not repository_manifest.get("complete"):
+        findings.append(_finding(
+            finding_id="repository_manifest_incomplete",
+            title="Model repository manifest is incomplete or unsafe",
+            severity="high",
+            description="The pinned repository inventory was truncated or contains invalid, duplicate, or case-colliding paths.",
+            artifact_ref=artifact_ref,
+            evidence={
+                "manifest_sha256": repository_manifest.get("manifest_sha256"),
+                "files_discovered": repository_manifest.get("files_discovered"),
+                "files_recorded": repository_manifest.get("files_recorded"),
+                "truncated_by_limit": repository_manifest.get("truncated_by_limit"),
+                "invalid_paths": repository_manifest.get("invalid_paths") or [],
+                "duplicate_paths": repository_manifest.get("duplicate_paths") or [],
+                "case_collisions": repository_manifest.get("case_collisions") or [],
+            },
+            remediation="Reject the repository until every path is normalized, unique, and represented in a complete immutable manifest.",
+        ))
+
+    if repository_manifest.get("custom_code_required"):
+        findings.append(_finding(
+            finding_id="custom_model_code_requires_review",
+            title="Model repository contains custom executable code",
+            severity="high" if strict_governance else "medium",
+            description="The repository contains executable files that can run during model or tokenizer loading and has no ShakerScan-generated code-review evidence yet.",
+            artifact_ref=artifact_ref,
+            evidence={
+                "manifest_sha256": repository_manifest.get("manifest_sha256"),
+                "auto_map": repository_manifest.get("auto_map"),
+                "python_files": (repository_manifest.get("python_files") or [])[:100],
+                "executable_files": (repository_manifest.get("executable_files") or [])[:100],
+            },
+            remediation="Acquire the complete repository, run generated static analysis, perform recorded manual review, and load only in a no-egress sandbox.",
+        ))
 
     checksum_status = "missing"
     if expected_sha256 and sha256 and not artifact_truncated and str(expected_sha256).lower() == sha256.lower():
@@ -2797,6 +2833,10 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         "acquisition_complete": bool(artifact_meta.get("complete")) and not artifact_truncated,
         "inspection_complete": not inspection_truncated,
         "quarantine_object": artifact_meta.get("quarantine_object"),
+        "repository_manifest_sha256": repository_manifest.get("manifest_sha256"),
+        "repository_manifest_complete": repository_manifest.get("complete") if repository_manifest else None,
+        "repository_files_discovered": repository_manifest.get("files_discovered") if repository_manifest else None,
+        "custom_code_required": repository_manifest.get("custom_code_required") if repository_manifest else None,
         "expected_sha256": expected_sha256,
         "checksum_status": checksum_status,
         "checksum_match": checksum_match,
@@ -2877,6 +2917,8 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
                 "signature_verification": None if not require_signature_verification or metadata_unavailable else signature_status["verified"],
                 "checksum": None if metadata_unavailable else checksum_status == "verified",
                 "aibom": True,
+                "repository_manifest": repository_manifest.get("complete") if repository_manifest else None,
+                "custom_code_review": False if repository_manifest.get("custom_code_required") else None,
                 "format_specific_inspection": format_specific_ok,
                 "license_policy": None if metadata_unavailable or not license_ref else license_policy["status"] == "permissive",
                 "approval": (None if metadata_unavailable else deployment_approved) if require_approval else None,
