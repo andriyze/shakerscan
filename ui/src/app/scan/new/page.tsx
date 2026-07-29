@@ -62,7 +62,16 @@ export default function NewScanPage() {
         if (cancelled) return
         setWorkerStats(w)
         setStaleWorkers(w.stale_workers?.length ?? 0)
-        if (w.execution_capacity) setRunningWorkers(w.execution_capacity.total_available)
+        if (w.execution_capacity) {
+          setRunningWorkers(w.fleet?.enabled
+            ? w.execution_capacity.total_available
+            : w.execution_capacity.local_available)
+        }
+        if (w.fleet?.enabled) {
+          getFleetNodes(sessionStorage.getItem('shakerscan:fleet-operator-token') || '')
+            .then((result) => { if (!cancelled) setFleetNodes(result.nodes || []) })
+            .catch(() => { /* operator token is optional until remote placement is requested */ })
+        }
       })
       .catch(() => { /* freshness is advisory; ignore failures */ })
     getTargets()
@@ -72,9 +81,6 @@ export default function NewScanPage() {
         setExistingTargets(list)
       })
       .catch(() => { /* target suggestions are optional; ignore failures */ })
-    getFleetNodes(sessionStorage.getItem('shakerscan:fleet-operator-token') || '')
-      .then((result) => { if (!cancelled) setFleetNodes(result.nodes || []) })
-      .catch(() => { /* standalone installs have no fleet nodes */ })
     return () => { cancelled = true }
   }, [])
   const [customEndpointsText, setCustomEndpointsText] = useState('')
@@ -453,8 +459,8 @@ export default function NewScanPage() {
           </div>
         </Card>
 
-        {/* Execution Mode */}
-        <Card className="p-4">
+        {/* Fleet execution location is intentionally absent on standalone installs. */}
+        {workerStats?.fleet?.enabled && <Card className="p-4">
           <label className="block text-sm font-medium text-gray-400 mb-3">
             Execution location
           </label>
@@ -507,7 +513,7 @@ export default function NewScanPage() {
           <p className="mt-3 text-xs text-gray-500">
             Automatic preserves failover. Selecting a location keeps the scan on local workers or on any healthy worker replica within the chosen remote node.
           </p>
-        </Card>
+        </Card>}
 
         {/* Execution Mode */}
         <Card className={`p-4 ${showAdvanced ? '' : 'hidden'}`}>

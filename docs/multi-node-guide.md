@@ -36,6 +36,28 @@ Users select an execution **location** (automatic, the local control plane, or a
 an individual worker process. Worker processes can be replaced during scaling or upgrades; keeping
 selection at node level preserves failover between replicas on the selected machine.
 
+## Availability and UI Behavior
+
+Managed multi-node Fleet hosts require Linux. macOS remains fully supported for standalone
+ShakerScan, but it cannot act as a managed Fleet control plane or worker host. A direct visit to
+`/fleet` on macOS explains that boundary and recommends a Linux VPS or Linux VM. The Fleet sidebar
+entry is hidden on macOS and on ordinary standalone installations.
+
+Fleet is opt-in. Until `shakerscan fleet init` successfully initializes a Linux control plane:
+
+- the Dashboard reports and scales local workers only;
+- remote-worker capacity is not shown;
+- New Scan does not show remote placement controls;
+- the Fleet navigation entry is hidden; and
+- a direct `/fleet` visit shows setup guidance instead of empty node counters or authentication
+  errors.
+
+After initialization, the API reports Fleet as enabled, the navigation and remote capacity appear,
+and the Fleet page becomes the operating surface. On the Dashboard the remote count is deliberately
+placed after the local `−` and `+` controls so local scaling remains visually distinct from remote
+capacity. `GET /health` and `GET /workers` expose the same non-secret `fleet` capability object with
+`enabled`, `supported`, `status`, and `host_platform` fields.
+
 ## Choose a Transport
 
 | Transport | Use it when | Worker receives | Network requirement |

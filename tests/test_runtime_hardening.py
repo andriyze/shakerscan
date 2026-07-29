@@ -62,6 +62,22 @@ def test_docs_page_renders_markdown_without_raw_html_injection():
     assert "href: '/docs', label: 'Docs'" in sidebar
 
 
+def test_fleet_ui_is_capability_driven_and_keeps_remote_capacity_last():
+    sidebar = (ROOT / "ui" / "src" / "components" / "Sidebar.tsx").read_text()
+    dashboard = (ROOT / "ui" / "src" / "app" / "page.tsx").read_text()
+    fleet_page = (ROOT / "ui" / "src" / "app" / "fleet" / "page.tsx").read_text()
+    new_scan = (ROOT / "ui" / "src" / "app" / "scan" / "new" / "page.tsx").read_text()
+
+    assert "fleetOnly: true" in sidebar
+    assert "!item.fleetOnly || fleetEnabled" in sidebar
+    assert "workers?.fleet?.enabled === true" in dashboard
+    assert dashboard.index('aria-label="Increase local worker count"') < dashboard.rindex("{remoteAvailable} remote")
+    assert "fleetState.status === 'unsupported'" in fleet_page
+    assert "Multi-node Fleet is not supported on macOS" in fleet_page
+    assert "Fleet is not enabled" in fleet_page
+    assert "workerStats?.fleet?.enabled && <Card" in new_scan
+
+
 def test_hosted_installer_packages_advertised_host_side_adapters():
     expected_downloads = (
         "docker-compose.worker.yml",
@@ -297,6 +313,18 @@ def test_scanner_sh_marks_only_a_live_matching_tailscale_bind_as_trusted():
     assert '[ "${SHAKERSCAN_BIND_HOST:-}" = "$tailscale_ip" ]' in script
     assert "export SHAKERSCAN_TRUSTED_REMOTE_TRANSPORT=tailscale" in script
     assert "unset SHAKERSCAN_TRUSTED_REMOTE_TRANSPORT" in script
+
+
+def test_runtime_records_host_platform_for_fleet_ui_capabilities():
+    script = (ROOT / "scanner.sh").read_text()
+
+    prepare_body = script.split("prepare_runtime_files() {", 1)[1].split("\n}", 1)[0]
+    assert "detect_platform" in prepare_body
+    assert 'export SHAKERSCAN_HOST_PLATFORM="$PLATFORM"' in prepare_body
+    assert 'write_dotenv_value SHAKERSCAN_HOST_PLATFORM "$SHAKERSCAN_HOST_PLATFORM"' in prepare_body
+    for compose_name in ("docker-compose.yml", "docker-compose.release.yml"):
+        compose = (ROOT / compose_name).read_text()
+        assert "SHAKERSCAN_HOST_PLATFORM=${SHAKERSCAN_HOST_PLATFORM:-unknown}" in compose
 
 
 def test_scanner_sh_worker_logs_aggregate_api_scaled_containers():

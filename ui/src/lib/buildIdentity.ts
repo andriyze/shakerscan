@@ -1,5 +1,13 @@
 export type HealthBuildIdentity = {
   scanner_version?: string
+  fleet?: {
+    enabled?: boolean
+    configured?: boolean
+    supported?: boolean
+    status?: 'enabled' | 'disabled' | 'unsupported'
+    host_platform?: string
+    reason?: string | null
+  }
   worker_build?: {
     available?: boolean
     expected_count?: number | null

@@ -9611,6 +9611,7 @@ async def health():
         "scanner_version": expected_version,
         "build_fingerprint": expected_fingerprint,
         "worker_build": worker_build,
+        "fleet": fleet_feature_state(),
     }
 
 
@@ -49302,6 +49303,49 @@ def compute_execution_capacity(
     }
 
 
+def fleet_feature_state() -> dict[str, Any]:
+    """Return the host-aware UI contract for the optional fleet feature.
+
+    The API runs inside a Linux container even on Docker Desktop, so the host
+    platform must be recorded by ``scanner.sh``. Unknown remains eligible for
+    backwards compatibility with direct Compose deployments, while an explicit
+    non-Linux host fails closed for managed fleet operations.
+    """
+    raw_platform = os.environ.get("SHAKERSCAN_HOST_PLATFORM", "").strip().lower()
+    if raw_platform in {"darwin", "mac", "macos", "osx"}:
+        host_platform = "macos"
+    elif raw_platform.startswith("linux"):
+        host_platform = "linux"
+    elif raw_platform in {"windows", "win32", "wsl"}:
+        host_platform = raw_platform
+    else:
+        host_platform = "unknown"
+
+    supported = host_platform in {"linux", "unknown"}
+    configured = bool(
+        len(os.environ.get("FLEET_OPERATOR_TOKEN", "").strip()) >= 32
+        and os.environ.get("FLEET_WORKER_IMAGE_DIGEST", "").strip()
+    )
+    enabled = supported and configured
+    if not supported:
+        status = "unsupported"
+        reason = "Managed multi-node fleets require a Linux host."
+    elif not configured:
+        status = "disabled"
+        reason = "Fleet mode has not been initialized on this control plane."
+    else:
+        status = "enabled"
+        reason = None
+    return {
+        "enabled": enabled,
+        "configured": configured,
+        "supported": supported,
+        "status": status,
+        "host_platform": host_platform,
+        "reason": reason,
+    }
+
+
 async def _execution_capacity_snapshot(local_summary: Mapping[str, Any]) -> dict[str, Any]:
     stale_after = max(60, _int_env("FLEET_HEARTBEAT_TIMEOUT_SECONDS", HEARTBEAT_TIMEOUT_MINUTES * 60))
     try:
@@ -49463,6 +49507,7 @@ async def get_workers():
             "expected_build_fingerprint": expected_fp,
             "expected_scanner_version": expected_version,
             "execution_capacity": execution_capacity,
+            "fleet": fleet_feature_state(),
         }
     except FileNotFoundError:
         return {
@@ -49474,6 +49519,7 @@ async def get_workers():
             "execution_capacity": compute_execution_capacity(
                 {"count": 0, "current_count": 0}, [], remote_inventory_available=False
             ),
+            "fleet": fleet_feature_state(),
         }
     except Exception:
         logger.exception("Failed to query Docker worker fleet")
@@ -49486,6 +49532,7 @@ async def get_workers():
             "execution_capacity": compute_execution_capacity(
                 {"count": 0, "current_count": 0}, [], remote_inventory_available=False
             ),
+            "fleet": fleet_feature_state(),
         }
 
 

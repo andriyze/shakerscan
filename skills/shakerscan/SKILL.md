@@ -1,6 +1,6 @@
 ---
 name: shakerscan
-description: Operate ShakerScan. Route scan requests to Web DAST, Deep Hunt requests to the keyless AI investigator, and manual browser work to Interactive Testing; also manage targets, Continuous ASM, findings, AI Gate, Model Intake, evidence, schedules, and workers.
+description: Operate ShakerScan. Route scan requests to Web DAST, Deep Hunt requests to the keyless AI investigator, and manual browser work to Interactive Testing; also manage targets, Continuous ASM, findings, AI Gate, Model Intake, evidence, schedules, local workers, and opt-in Linux fleets.
 ---
 
 # ShakerScan
@@ -47,6 +47,7 @@ target binding, approvals, budgets, evidence, and finding proof.
 | Content-discovery seeds | Use the `content-discovery` skill |
 | Deep Hunt | Use the `research-agent` skill |
 | Health, queue, and workers | `/health`, `/queue/stats`, `/workers` |
+| Multi-node fleet setup or operations | Check `/workers.fleet`, then use `shakerscan fleet *`, `shakerscan join`, and `/fleet/*` only when supported/enabled |
 | Exhaustive operation or schema lookup | Read `AGENTS.md` and the live `/openapi.json` |
 
 ## Apply Safety Gates
@@ -85,6 +86,34 @@ After any action queues a scan, ASM job, AI Gate run, Model Intake run, or findi
 
 For batch submissions, report `queued_count`, `failed_count`, and per-target errors. Never report the
 requested count as successfully queued when the response is partial.
+
+## Manage Multi-Node Fleet
+
+Fleet is optional and Linux-hosted. Before offering remote placement or calling protected Fleet
+routes, inspect the non-secret capability state:
+
+```bash
+curl -s http://localhost:8080/workers | jq '.fleet, .execution_capacity'
+```
+
+- `fleet.status=unsupported`: do not attempt initialization or join on this host. macOS can run
+  standalone ShakerScan; use Linux VPSs or Linux VMs for Fleet control-plane and worker roles.
+- `fleet.status=disabled`: this is a normal standalone install. Do not describe remote workers as
+  unavailable or zero; Fleet does not exist yet. Use `shakerscan fleet preflight` and
+  `shakerscan fleet init` only when the user asks to enable multi-node operation.
+- `fleet.status=enabled`: the Fleet UI, remote counts, remote placement, and protected lifecycle APIs
+  are available. Keep local `POST /workers` scaling distinct from remote `POST /fleet/scale` or
+  per-node desired-state changes.
+
+For setup, read `docs/multi-node-guide.md` before mutating the host. Run the aggregated read-only
+preflight first. Treat the fleet operator token, join tokens, node credentials, connection bundles,
+and private CA material as secrets. Join tokens are single-use by default; when the operator needs
+one command for several machines, mint a short-lived bounded `--max-uses N` token for the exact host
+count, distribute it through an approved secret channel, and revoke unused capacity immediately.
+
+Use node-level placement, not a worker-container identity. `node_id=local` selects control-plane
+workers; a Fleet UUID selects any healthy replica on that remote node. Keep automatic placement as
+the default because it preserves failover.
 
 ## Read Results
 

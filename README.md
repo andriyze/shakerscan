@@ -340,6 +340,11 @@ Treat results, evidence, configuration, and backups as sensitive.
 
 ### Multi-node fleets
 
+Multi-node Fleet is opt-in and requires Linux for both the control plane and worker hosts. macOS
+continues to support standalone ShakerScan, but does not expose Fleet navigation or remote-worker
+capacity; a direct Fleet-page visit explains the Linux requirement. Standalone Linux installs also
+hide Fleet and remote placement until `fleet init` succeeds.
+
 ShakerScan can add digest-pinned worker VPSs to one control plane. Use the WireGuard transport for
 machines you own and trust with scoped Redis/PostgreSQL access:
 

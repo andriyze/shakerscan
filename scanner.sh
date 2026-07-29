@@ -1380,6 +1380,9 @@ resolve_start_workers() {
 }
 
 prepare_runtime_files() {
+    detect_platform
+    export SHAKERSCAN_HOST_PLATFORM="$PLATFORM"
+    write_dotenv_value SHAKERSCAN_HOST_PLATFORM "$SHAKERSCAN_HOST_PLATFORM"
     mkdir -p results
     mkdir -p .shakerscan-fleet
     chmod 700 .shakerscan-fleet

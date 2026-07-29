@@ -104,6 +104,49 @@ def test_empty_fleet_not_uniform():
     assert s["fleet_uniform"] is False
 
 
+def test_fleet_feature_state_hides_uninitialized_linux_fleet(monkeypatch):
+    monkeypatch.setenv("SHAKERSCAN_HOST_PLATFORM", "linux")
+    monkeypatch.delenv("FLEET_OPERATOR_TOKEN", raising=False)
+    monkeypatch.delenv("FLEET_WORKER_IMAGE_DIGEST", raising=False)
+
+    assert api_module.fleet_feature_state() == {
+        "enabled": False,
+        "configured": False,
+        "supported": True,
+        "status": "disabled",
+        "host_platform": "linux",
+        "reason": "Fleet mode has not been initialized on this control plane.",
+    }
+
+
+def test_fleet_feature_state_marks_macos_unsupported(monkeypatch):
+    monkeypatch.setenv("SHAKERSCAN_HOST_PLATFORM", "macos")
+    monkeypatch.setenv("FLEET_OPERATOR_TOKEN", "x" * 32)
+    monkeypatch.setenv("FLEET_WORKER_IMAGE_DIGEST", "scanner@example")
+
+    state = api_module.fleet_feature_state()
+
+    assert state["enabled"] is False
+    assert state["configured"] is True
+    assert state["supported"] is False
+    assert state["status"] == "unsupported"
+    assert state["host_platform"] == "macos"
+
+
+def test_fleet_feature_state_enables_initialized_linux_control_plane(monkeypatch):
+    monkeypatch.setenv("SHAKERSCAN_HOST_PLATFORM", "linux")
+    monkeypatch.setenv("FLEET_OPERATOR_TOKEN", "x" * 32)
+    monkeypatch.setenv("FLEET_WORKER_IMAGE_DIGEST", "scanner@example")
+
+    state = api_module.fleet_feature_state()
+
+    assert state["enabled"] is True
+    assert state["configured"] is True
+    assert state["supported"] is True
+    assert state["status"] == "enabled"
+    assert state["reason"] is None
+
+
 def test_execution_capacity_separates_local_remote_and_unavailable_nodes():
     local = {"count": 2, "current_count": 1}
     nodes = [

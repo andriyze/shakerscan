@@ -6,7 +6,7 @@ governance, automation, UI, CLI, API, and agent-facing surfaces. The human-reada
 the behavior; the generated inventory in §17 enumerates every current public route, registry command,
 CLI flag, wrapper command, Make target, release gate, runtime configuration key, UI page, skill,
 agent, adapter, scanner module, and durable table.
-**Reconciled:** 2026-07-21
+**Reconciled:** 2026-07-28
 **Audience:** users, operators, AI coding agents, and engineers who need one place that explains the
 product's functionality end to end.
 
@@ -454,7 +454,10 @@ automatic restricted public HTTPS for broker fleets with pinned Caddy, certifica
 secret-bound proxy trust, minimal public health, protected-route/rollback verification, bounded
 enrollment attempts, and worker-only `join` with HTTPS preflight and WireGuard handshake
 diagnostics. The installed worker image is derived automatically; `--worker-image` selects a custom
-build. The Fleet UI also flags WireGuard nodes awaiting their first connection. Leased delivery and
+build. Fleet is host-aware and opt-in: standalone installs hide Fleet navigation, remote capacity,
+and remote placement; direct macOS visits explain the Linux requirement, while uninitialized Linux
+visits show setup guidance. `GET /health` and `GET /workers` expose the same non-secret capability
+state. The enabled Fleet UI also flags WireGuard nodes awaiting their first connection. Leased delivery and
 fencing, central artifact transfer, placement, capacity-weighted scaling, rolling lifecycle,
 outbound-only HTTPS broker transport, and fleet-wide
 admission/request controls are implemented. The remaining release-topology gate is executing the
@@ -843,8 +846,9 @@ uses owner-only local state, reconciles only node-labeled workers on the local D
 reports applied state/capacity/errors. `scanner.sh fleet init`, `fleet join-token`, `fleet reconcile`,
 and `scanner.sh join` provide the Linux host workflow with owner-only state, explicit system/private
 CA trust, CA-verified overlay proof, one-time bundle persistence, and pinned-image startup. Broker
-nodes receive no Redis, PostgreSQL, or object-store credentials and use outbound HTTPS only. The
-Fleet UI manages capacity, drift, drain/resume, image rollout, lifecycle events, and revocation.
+nodes receive no Redis, PostgreSQL, or object-store credentials and use outbound HTTPS only. On an
+initialized Linux control plane, the Fleet UI manages capacity, drift, drain/resume, image rollout,
+lifecycle events, and revocation. It stays hidden on standalone installs.
 `shakerscan fleet accept` is implemented; its physical two-VPS release run remains pending.
 
 **Command Arsenal**: `GET /arsenal/commands` · `GET /arsenal/contracts` ·
@@ -1192,7 +1196,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Scanner wrapper commands | 26 | `scanner.sh` |
 | Make targets | 11 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
-| Runtime environment keys | 264 | Python sources + Compose manifests |
+| Runtime environment keys | 265 | Python sources + Compose manifests |
 | Scanner modules | 83 | `scanner/scanner_tools/` |
 | UI pages | 31 | `ui/src/app/` |
 | Skills | 6 | `skills/` |
@@ -1992,6 +1996,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_ENABLE_ADAPTIVE_THROTTLE` | `scanner/scanner.py` |
 | `SHAKERSCAN_ENFORCE_FLEET_LIMITS` | `api/worker.py` |
 | `SHAKERSCAN_FLEET_OPERATOR_TOKEN` | `scripts/fleet_acceptance.py` |
+| `SHAKERSCAN_HOST_PLATFORM` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_MAX_ACTIVE_SCANS` | `api/api.py`, `api/worker.py` |
 | `SHAKERSCAN_MAX_WORKERS` | `api/api.py`, `docker-compose.yml` |
 | `SHAKERSCAN_MCP_ALLOW_REMOTE_API` | `scripts/shakerscan_mcp.py` |
@@ -2080,7 +2085,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `js-analyze` | Analyze JavaScript bundles, frontend routes, browser-captured APIs, libraries, and secrets for a ShakerScan target or completed scan. Use when asked for JS analysis, route analysis, frontend endpoint discovery, library review, source-map hints, or to build `custom_endpoints` for a ShakerScan scan. | `skills/js-analyze/SKILL.md` |
 | `research-agent` | Run ShakerScan Deep Hunt: the current coding agent performs free-form, AI-driven exploration and bounded active exploitation through /agent/hunt/* while ShakerScan enforces target scope, approvals, budgets, evidence provenance, and deterministic finding verification. Use for “deep hunt”, “autonomous hunt”, or “investigate autonomously”; do not use for ordinary DAST scans. | `skills/research-agent/SKILL.md` |
 | `review-skills` | Review ShakerScan skills, commands, and subagents for broken references, invalid Claude Code configuration, prompt anti-patterns, missing hard gates, missing outputs, and weak operational guidance. Use when asked to audit, review, or quality-check the skill system itself. | `skills/review-skills/SKILL.md` |
-| `shakerscan` | Operate ShakerScan. Route scan requests to Web DAST, Deep Hunt requests to the keyless AI investigator, and manual browser work to Interactive Testing; also manage targets, Continuous ASM, findings, AI Gate, Model Intake, evidence, schedules, and workers. | `skills/shakerscan/SKILL.md` |
+| `shakerscan` | Operate ShakerScan. Route scan requests to Web DAST, Deep Hunt requests to the keyless AI investigator, and manual browser work to Interactive Testing; also manage targets, Continuous ASM, findings, AI Gate, Model Intake, evidence, schedules, local workers, and opt-in Linux fleets. | `skills/shakerscan/SKILL.md` |
 
 | Slash command | Title | Purpose | Source |
 |---|---|---|---|

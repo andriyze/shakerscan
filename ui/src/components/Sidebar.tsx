@@ -18,7 +18,7 @@ const navGroups: {
   badge?: string
   // Advanced groups/items are hidden unless the sidebar "show all" switch is on.
   advanced?: boolean
-  items: { href: string; label: string; icon: ReactNode; advanced?: boolean }[]
+  items: { href: string; label: string; icon: ReactNode; advanced?: boolean; fleetOnly?: boolean }[]
 }[] = [
   {
     heading: null,
@@ -108,7 +108,7 @@ const navGroups: {
   {
     heading: 'Operations',
     items: [
-      { href: '/fleet', label: 'Fleet', icon: <ServerCog className="w-5 h-5" /> },
+      { href: '/fleet', label: 'Fleet', icon: <ServerCog className="w-5 h-5" />, fleetOnly: true },
     ],
   },
   {
@@ -173,17 +173,25 @@ function NavContent({
   showAll,
   onToggleShowAll,
   buildIdentity,
+  fleetEnabled,
 }: {
   pathname: string
   showAll: boolean
   onToggleShowAll: (value: boolean) => void
   buildIdentity: BuildIdentity
+  fleetEnabled: boolean
 }) {
   const buildLabel = formatBuildIdentity(buildIdentity)
   // Default view hides advanced groups/items; the footer switch reveals them.
   const visibleGroups = navGroups
     .filter((group) => showAll || !group.advanced)
-    .map((group) => ({ ...group, items: group.items.filter((item) => showAll || !item.advanced) }))
+    .map((group) => ({
+      ...group,
+      items: group.items.filter((item) => (
+        (showAll || !item.advanced)
+        && (!item.fleetOnly || fleetEnabled)
+      )),
+    }))
     .filter((group) => group.items.length > 0)
   // Only the Settings landing lights the gear. The /settings/* sub-routes
   // (research-agent, arsenal, ai-ops-router) belong to their own nav groups.
@@ -331,6 +339,7 @@ export default function Sidebar() {
   const [showAll, setShowAll] = useState(false)
   const bakedVersion = process.env.NEXT_PUBLIC_APP_VERSION
   const [buildIdentity, setBuildIdentity] = useState<BuildIdentity>({ ui: bakedVersion, skew: false })
+  const [fleetEnabled, setFleetEnabled] = useState(false)
   const openerRef = useRef<HTMLButtonElement>(null)
   const drawerRef = useRef<HTMLElement>(null)
 
@@ -342,6 +351,7 @@ export default function Sidebar() {
       loadHealthBuildIdentity(force).then((health) => {
         if (cancelled) return
         setBuildIdentity(deriveBuildIdentity(bakedVersion, health))
+        setFleetEnabled(health?.fleet?.enabled === true)
       })
     }
     refresh()
@@ -457,14 +467,14 @@ export default function Sidebar() {
                 <X className="h-5 w-5" aria-hidden="true" />
               </button>
             </div>
-            <NavContent pathname={pathname} showAll={showAll} onToggleShowAll={handleToggleShowAll} buildIdentity={buildIdentity} />
+            <NavContent pathname={pathname} showAll={showAll} onToggleShowAll={handleToggleShowAll} buildIdentity={buildIdentity} fleetEnabled={fleetEnabled} />
           </aside>
         </div>
       )}
 
       {/* Desktop: persistent sidebar. */}
       <aside className="sticky top-0 hidden h-screen w-64 shrink-0 flex-col overflow-y-auto overscroll-contain border-r border-gray-800 bg-gray-900 p-4 md:flex">
-        <NavContent pathname={pathname} showAll={showAll} onToggleShowAll={handleToggleShowAll} buildIdentity={buildIdentity} />
+        <NavContent pathname={pathname} showAll={showAll} onToggleShowAll={handleToggleShowAll} buildIdentity={buildIdentity} fleetEnabled={fleetEnabled} />
       </aside>
     </>
   )

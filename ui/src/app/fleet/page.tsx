@@ -143,13 +143,17 @@ export default function FleetPage() {
     if (background) setRefreshing(true)
     else setLoading(true)
     try {
-      const [fleetResult, workersResult] = await Promise.allSettled([
-        getFleetNodes(operatorToken),
-        getWorkers(),
-      ])
-      if (workersResult.status === 'fulfilled') setWorkers(workersResult.value)
-      if (fleetResult.status === 'rejected') throw fleetResult.reason
-      const response = fleetResult.value
+      const workersResult = await getWorkers()
+      setWorkers(workersResult)
+      if (workersResult.fleet && !workersResult.fleet.enabled) {
+        setNodes([])
+        setSummary(EMPTY_SUMMARY)
+        setStaleAfterSeconds(0)
+        setUpdatedAt(new Date())
+        setError(null)
+        return
+      }
+      const response = await getFleetNodes(operatorToken)
       setNodes(response.nodes)
       setSummary(response.summary)
       setStaleAfterSeconds(response.stale_after_seconds)
@@ -265,6 +269,82 @@ export default function FleetPage() {
     }
     setExpandedNodeId(node.id)
     await loadActivity(node.id)
+  }
+
+  const fleetState = workers?.fleet
+  if (loading && !workers) {
+    return (
+      <div className="mx-auto max-w-4xl p-6">
+        <PageHeader
+          title="Fleet"
+          description="Checking whether multi-node Fleet is available on this installation."
+          icon={<ServerCog className="h-7 w-7" />}
+        />
+        <Card className="h-36 animate-pulse bg-gray-900/70" aria-label="Checking Fleet availability" />
+      </div>
+    )
+  }
+  if (!loading && !workers && error) {
+    return (
+      <div className="mx-auto max-w-4xl p-6">
+        <PageHeader
+          title="Fleet"
+          description="Coordinate Linux worker nodes from one ShakerScan control plane."
+          icon={<ServerCog className="h-7 w-7" />}
+        />
+        <ErrorState message={error} onRetry={() => void loadFleet()} />
+      </div>
+    )
+  }
+  if (!loading && fleetState && !fleetState.enabled) {
+    const macosUnsupported = fleetState.status === 'unsupported' && fleetState.host_platform === 'macos'
+    return (
+      <div className="mx-auto max-w-4xl p-6">
+        <PageHeader
+          title="Fleet"
+          description="Coordinate Linux worker nodes from one ShakerScan control plane."
+          icon={<ServerCog className="h-7 w-7" />}
+        />
+        <Card className="p-6">
+          <div className="flex items-start gap-4">
+            <span className={`rounded-xl p-3 ${macosUnsupported ? 'bg-amber-500/10 text-amber-300' : 'bg-blue-500/10 text-blue-300'}`}>
+              {macosUnsupported
+                ? <TriangleAlert className="h-6 w-6" aria-hidden="true" />
+                : <ServerCog className="h-6 w-6" aria-hidden="true" />}
+            </span>
+            <div className="min-w-0">
+              <h2 className="text-lg font-semibold text-white">
+                {macosUnsupported ? 'Multi-node Fleet is not supported on macOS' : 'Fleet is not enabled'}
+              </h2>
+              <p className="mt-2 text-sm leading-6 text-gray-400">
+                {macosUnsupported
+                  ? 'This Mac can run standalone ShakerScan, but managed control-plane and worker-node services require Linux host networking and service management. Use a Linux VPS or Linux VM as the control plane and Linux machines as worker nodes.'
+                  : 'This installation is running in standalone mode. Fleet navigation, remote-worker counts, and remote placement stay hidden until this Linux control plane is explicitly initialized.'}
+              </p>
+              {!macosUnsupported && (
+                <div className="mt-4 rounded-lg border border-gray-800 bg-gray-950 px-4 py-3 font-mono text-sm text-gray-300">
+                  shakerscan fleet preflight --help<br />
+                  shakerscan fleet init --help
+                </div>
+              )}
+              <div className="mt-4 flex flex-wrap gap-4 text-sm">
+                <Link href="/docs" className="font-medium text-blue-400 hover:text-blue-300">
+                  Read the installed guide →
+                </Link>
+                <a
+                  href="https://github.com/andriyze/shakerscan/blob/main/docs/multi-node-guide.md"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-medium text-blue-400 hover:text-blue-300"
+                >
+                  Multi-node setup guide ↗
+                </a>
+              </div>
+            </div>
+          </div>
+        </Card>
+      </div>
+    )
   }
 
   return (

@@ -1849,6 +1849,15 @@ export interface WorkerInfo {
   scanner_version?: string | null
 }
 
+export interface FleetFeatureState {
+  enabled: boolean
+  configured: boolean
+  supported: boolean
+  status: 'enabled' | 'disabled' | 'unsupported'
+  host_platform: 'linux' | 'macos' | 'windows' | 'win32' | 'wsl' | 'unknown'
+  reason?: string | null
+}
+
 export interface WorkerStats {
   count: number
   current_count?: number
@@ -1870,6 +1879,7 @@ export interface WorkerStats {
     remote_nodes_available: number
     remote_inventory_available: boolean
   }
+  fleet?: FleetFeatureState
   error?: string
 }
 
