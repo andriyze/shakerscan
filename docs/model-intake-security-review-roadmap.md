@@ -1,10 +1,10 @@
 # Model Intake Security Review and Implementation Roadmap
 
-**Status:** Phase -1 trust/correctness repairs and the core static adapter bundle are implemented through `b68f23b`; disposable microVM execution, runner-generated embedding evaluation, deployment-platform enforcement, optional scanner depth, and per-model corporate qualification remain incomplete
+**Status:** Phase -1 trust/correctness repairs, the core static adapter bundle, and full remote static validation of the three immediate model revisions are implemented through `90578da`; disposable microVM execution, runner-generated embedding evaluation, deployment-platform enforcement, optional scanner depth, and per-model corporate qualification remain incomplete
 
 **Original audit checkout:** `239f887d9f10e997b9844c916c28073fab71ee79`
 
-**Current implementation checkout:** `b68f23b` (implementation series beginning at `8f721ce`)
+**Current implementation checkout:** `90578da` (implementation series beginning at `8f721ce`)
 
 **Review date:** 2026-07-28
 
@@ -72,13 +72,13 @@ Sections 2.1 and 2.4 identify which findings are now resolved, partially resolve
 
 The remaining implementation and validation order is:
 
-1. Validate complete acquisition and the packaged static bundle on CodeRankEmbed.
-2. Validate CodeSage Base v2, including controlled `safetensors` conversion and equivalence testing where
-   policy requires it.
-3. Validate CodeSage Large v2 only after the Base workflow passes and resource limits are proven.
-4. Build the disposable no-egress VM/microVM loader and independent telemetry contract.
-5. Connect the evaluator to embeddings and measurements produced by that runner.
-6. Finish corporate registry/deployment enforcement examples and report-format parity.
+1. Build the disposable no-egress VM/microVM loader and independent telemetry contract for CodeRankEmbed.
+2. Connect the evaluator to embeddings and measurements produced by that exact runner.
+3. Convert CodeSage Base v2 to `safetensors` in a controlled environment and prove tensor/evaluation
+   equivalence; do not admit the upstream pickle-capable artifact directly.
+4. Qualify CodeSage Large v2 only if Base cannot meet retrieval requirements, using a separately approved
+   high-resource runner after the same conversion/equivalence controls.
+5. Finish corporate registry/deployment enforcement examples and report-format parity.
 
 For a production profile, the correct decision for any exact model revision is **block/incomplete** until
 every required automated control has generated digest-bound evidence and the required corporate approvals
@@ -112,9 +112,12 @@ Implemented controls include:
   during the image build for offline scans. The other named adapters remain fail-closed contracts, not shipped
   coverage.
 - The core bundle is selected from immutable repository facts, never a model-name allowlist: ModelScan for
-  supported serialized artifacts, Fickling for pickle-backed artifacts, Semgrep for repository code/config,
-  and Trivy when dependency manifests are present. Every worker image build runs all four on deterministic
-  malicious fixtures and fails if any tool cannot generate and normalize its expected finding.
+  supported serialized artifacts, Fickling for raw pickle artifacts it can parse reliably, Semgrep for
+  repository code/config, and Trivy when dependency manifests are present. Fickling is explicitly
+  `NOT_APPLICABLE` to PyTorch ZIP checkpoints because extracting their ordinary tensor `data.pkl` stream
+  produces high-volume reconstruction false positives; ModelScan and ShakerScan's archive-aware pickle
+  opcode analysis cover that family. Every worker image build runs all four on deterministic malicious
+  fixtures and fails if any tool cannot generate and normalize its expected finding.
 - Atomic detached-signature trust decisions and offline DSSE/in-toto subject verification. Explicit key pins
   are enforced as an allowlist and cannot be widened by request-supplied keys. Transparency-log policy fails
   closed when no locally verified inclusion/checkpoint proof exists; native Rekor verification remains an
@@ -172,7 +175,7 @@ The useful default is deliberately smaller than the original ten-tool sketch:
 | Capability | Default decision | Reason |
 |---|---|---|
 | ModelScan | **Ship and enable by applicability** | Independent model-format/serialization analysis; complements ShakerScan pickle semantics |
-| Fickling | **Ship and enable for pickle-backed artifacts** | Deep pickle semantics and a second engine for the highest-risk Python serialization family |
+| Fickling | **Ship for raw pickle artifacts; declare PyTorch ZIP not applicable** | Deep raw-pickle semantics and a second engine where its parser is reliable; ordinary PyTorch state-dict reconstruction produces unusable false positives after manual member extraction |
 | Semgrep | **Ship and enable for repository code/config** | Mature source-pattern engine with a narrow, versioned model-intake ruleset; complements the built-in AST analyzer |
 | Trivy | **Ship and enable when dependency manifests exist** | One maintained engine provides vulnerability, secret, misconfiguration, and license evidence without shipping four overlapping defaults |
 | Syft/Grype/OSV/pip-audit | Keep optional | Useful for organizations needing independent SBOM/advisory corroboration, but overlapping as a universal default |
@@ -602,14 +605,18 @@ bind issuer and subject, not merely accept any valid Fulcio certificate.
 ModelScan 0.8.8 and Fickling 0.1.12 live in separate hash-locked environments and must detect a deterministic
 malicious pickle during the image build. CodeSage `.bin` files remain conservatively blocked from dynamic
 container loading. Applicability, required flags, parser failures, enumeration limits, and caller-selected
-adapter sets fail closed; a future microVM loader is still required for genuinely isolated deserialization.
+adapter sets fail closed. Fickling returns `PASS` only for its documented successful exit, returns
+`INCOMPLETE` for parse/tool failures, and is `NOT_APPLICABLE` to PyTorch ZIP checkpoints; it must not turn a
+tool error or ordinary tensor-reconstruction false positives into a malicious-model verdict. A future
+microVM loader is still required for genuinely isolated deserialization.
 
 **Required design:**
 
 - Run [ModelScan](https://github.com/protectai/modelscan) against the complete repository and each supported
   artifact.
-- Run [Fickling](https://github.com/trailofbits/fickling) and Python `pickletools` analysis for pickle-backed
-  objects, including pickle members inside PyTorch ZIP containers.
+- Run [Fickling](https://github.com/trailofbits/fickling) for supported raw pickle objects. Run ShakerScan
+  `pickletools` analysis and ModelScan for pickle members inside PyTorch ZIP containers; preserve Fickling's
+  explicit `NOT_APPLICABLE` result rather than extracting a state dict into a known high-false-positive path.
 - Inspect every archive member recursively within bounded depth, count, expanded size, and ratio.
 - Maintain an explicit format/operator allowlist per policy. Unknown opcodes, globals, reducers, extensions,
   persistent IDs, and dynamic imports must block or require review.
@@ -1484,12 +1491,14 @@ Use access-controlled security-fixture storage where stronger samples are necess
 
 ### 14.5 Real-model E2E tests
 
-Current coverage is a pipeline E2E, not complete model qualification. `make e2e-model-intake` exercises a
-real public Hugging Face capped shard and proves that partial acquisition is reported as
-`known_unverified_truncated`; `make e2e-model-intake-fixture` covers deterministic offline plumbing. Neither
-loads CodeRankEmbed/CodeSage, proves third-party scanners are installed, or qualifies production use.
+The repeatable Make targets remain pipeline E2Es, not complete model qualification. `make e2e-model-intake`
+exercises a real public Hugging Face capped shard and proves that partial acquisition is reported as
+`known_unverified_truncated`; `make e2e-model-intake-fixture` covers deterministic offline plumbing. The
+2026-07-29 remote validation below additionally proves complete acquisition and the installed static bundle
+against the three exact public revisions, but it still does not load the models, run embeddings, exercise a
+corporate data plane, verify organization signatures/approvals, or qualify production use.
 
-Add these tiers:
+Maintain these tiers:
 
 1. **PR fixture:** local safe/malicious fixtures, policy/report contracts, no external network.
 2. **Public acquisition smoke:** current bounded Hugging Face shard path; never treated as full integrity.
@@ -1504,6 +1513,42 @@ Every tier must stamp the expected ShakerScan worker build, model/snapshot/runti
 digests, rule/database versions and freshness, loader/evaluator versions, hardware class, policy/benchmark
 digests, and which controls were intentionally not applicable. Missing required stamps or controls make the
 run `INCOMPLETE`.
+
+#### 14.5.1 Remote full-static validation — 2026-07-29
+
+The source branch was rebuilt on `root@2.28.1.228` after each repair. The final deployment ran checkout
+`d20a081`; both workers reported the expected build fingerprint and the image-build malicious-fixture receipt
+reported `PASS` for ModelScan 0.8.8, Semgrep 1.172.0, Fickling 0.1.12, and Trivy 0.72.0. The latest successful
+CodeRankEmbed, Base, and Large scans were produced on `4d66752`, `9a9de72`, and `d20a081`, respectively; each
+later build contains the earlier fixes, and the intervening changes affected only the subsequently exercised
+adapter/archive paths. The tests used full
+artifact acquisition, a 5 GB artifact ceiling, complete pinned Hugging Face snapshots, a 6 GB repository
+ceiling, all fact-applicable generated scanners, the hardened sandbox, and exact expected SHA-256 values.
+Signature, admission, deployment-approval, and generated-evaluation requirements were intentionally disabled
+for this mechanism test; their absence must still block a true corporate production profile.
+
+| Exact subject | Final scan | Mechanism result | Security decision and useful answer |
+|---|---|---|---|
+| `nomic-ai/CodeRankEmbed@3c4b60807d71f79b43f3c4363786d9493691f8b1` | `ad4b3199-6f71-466a-b9f7-39691c91fc3a` | Full 546,938,168-byte artifact hash verified; all 14 pinned repository files acquired; raw pinned `README.md` fetched; safetensors sandbox inspection passed for 112 tensors under no-egress/seccomp isolation; ModelScan/Fickling/Trivy correctly not applicable | **BLOCK, 34/F.** Semgrep found `torch.load` without enforced `weights_only=True` in `modeling_hf_nomic_bert.py:332`; custom remote code needs review. Exact runtime load and embedding evaluation did not run because no operator runtime adapter was configured. |
+| `codesage/codesage-base-v2@92eac4f44c8674638f039f1b0d8280f2539cb4c7` | `a5a2000a-b10c-4b42-be0d-a42654ebc57d` | Full 709,569,721-byte artifact hash verified; all 16 pinned files acquired; ModelScan passed with zero findings; secret scan passed while streaming the large tokenizer; Semgrep produced two writable-cache-path warnings; Fickling correctly not applicable to the PyTorch ZIP | **BLOCK, 0/F.** The upstream artifact is pickle-capable, archive-aware opcode analysis proves executable deserialization semantics, and the sandbox refuses to load it. Convert under isolation to safetensors and prove equivalence before considering admission. |
+| `codesage/codesage-large-v2@6e5d6dc15db3e310c37c6dbac072409f95ffa5c5` | `9c19e0ce-1d06-42dc-bfd5-c61c25890f5e` | Full 2,627,013,817-byte artifact hash verified; all 16 pinned files acquired; 294 archive members and 2,626,958,595 expanded bytes completely inventoried within the operator's 5 GB ceiling; ModelScan and secret scans passed; Semgrep produced the same two warnings; no timeout, OOM, or incomplete coverage | **BLOCK, 0/F.** Same pickle/deserialization and missing runtime/evaluation/admission evidence as Base, with a materially larger resource envelope. There is no security basis to prefer it until Base fails an approved retrieval benchmark. |
+
+The validation found and repaired four integration defects: the sandbox lost the selected artifact extension;
+the Hugging Face resolver fetched repository HTML instead of the pinned raw model card; selected snapshot files
+were not traversable by the unprivileged external adapters; and archive inventory used a hard-coded 2 GB
+expanded ceiling unrelated to the bounded artifact policy. It also corrected Fickling exit semantics,
+ModelScan missing-result diagnostics, actionable Semgrep coordinates, and streaming secret inspection for
+large text files. The final reruns contain no acquisition, worker, adapter-execution, model-card, hash,
+repository-completeness, or archive-completeness error.
+
+These are successful tests of ShakerScan and unsuccessful admission reviews of the exact upstream subjects.
+That distinction is intentional: “the scanner worked” does not mean “the model passed.”
+
+Final regression evidence was generated inside the rebuilt remote worker image against source checkout
+`90578da`: **252 passed, 0 failed, 0 skipped** across Model Intake acquisition, archives, scanners, sandbox,
+providers, signatures, admission, DSSE/attestation, and API request/policy tests. The suite is
+installation-independent: a strict-profile test accepts any normalized required non-pass from a deliberately
+invalid artifact instead of assuming an adapter binary is absent from the shipped image.
 
 ### 14.6 Application-control tests
 
