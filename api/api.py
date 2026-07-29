@@ -60,6 +60,11 @@ except ModuleNotFoundError:
     from scanner.scanner_tools.model_intake_registry import adapter_catalog as _model_adapter_catalog
 
 try:
+    from scanner_tools.model_intake_scanners import scanner_adapter_readiness as _model_scanner_adapter_readiness
+except ModuleNotFoundError:
+    from scanner.scanner_tools.model_intake_scanners import scanner_adapter_readiness as _model_scanner_adapter_readiness
+
+try:
     from scanner_tools.model_intake_admission import (
         trusted_public_keys_from_env as _model_admission_trusted_keys,
         verify_package as _verify_model_admission_package,
@@ -10975,6 +10980,12 @@ async def model_intake_capabilities():
         "schema_version": "model-intake-source-adapters/v1",
         "adapters": _model_adapter_catalog(),
     }
+
+
+@app.get("/model-intake/scanners/readiness")
+async def model_intake_scanner_readiness():
+    """Report installed evidence adapters, immutable rule/database identity, and readiness."""
+    return await asyncio.to_thread(_model_scanner_adapter_readiness)
 
 
 @app.post("/model-intake/admission/verify")

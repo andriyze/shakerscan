@@ -26,6 +26,7 @@ import {
   deactivateModelIntakeTrustAnchor,
   getModelIntakeTrustAnchors,
   getModelIntakeAdmissions,
+  getModelIntakeScannerReadiness,
   getPolicyProfiles,
   resolveModelIntakeReference,
   submitModelIntakeScan,
@@ -35,6 +36,7 @@ import {
   type ModelIntakePreset,
   type ModelIntakeResolveResponse,
   type ModelIntakeScanRequest,
+  type ModelIntakeScannerReadiness,
   type ModelIntakeTrustAnchor,
   type ModelIntakeAdmission,
   type PolicyProfile as SavedPolicyProfile,
@@ -359,6 +361,8 @@ function ModelIntakeSettingsContent() {
   const [savedTrustAnchors, setSavedTrustAnchors] = useState<ModelIntakeTrustAnchor[]>([])
   const [admissions, setAdmissions] = useState<ModelIntakeAdmission[]>([])
   const [admissionsError, setAdmissionsError] = useState<string | null>(null)
+  const [scannerReadiness, setScannerReadiness] = useState<ModelIntakeScannerReadiness | null>(null)
+  const [scannerReadinessError, setScannerReadinessError] = useState<string | null>(null)
   const [selectedTrustAnchorIds, setSelectedTrustAnchorIds] = useState<string[]>([])
   const [trustAnchorsLoading, setTrustAnchorsLoading] = useState(true)
   const [trustAnchorsError, setTrustAnchorsError] = useState<string | null>(null)
@@ -429,13 +433,24 @@ function ModelIntakeSettingsContent() {
     }
   }, [])
 
+  const loadScannerReadiness = useCallback(async () => {
+    try {
+      setScannerReadiness(await getModelIntakeScannerReadiness())
+      setScannerReadinessError(null)
+    } catch (err) {
+      setScannerReadiness(null)
+      setScannerReadinessError(err instanceof Error ? err.message : 'Failed to load scanner readiness')
+    }
+  }, [])
+
   useEffect(() => {
     setOperatorToken(sessionStorage.getItem(MODEL_INTAKE_OPERATOR_TOKEN_KEY) || '')
     loadScenario()
     loadPolicyProfiles()
     loadTrustAnchors()
     loadAdmissions()
-  }, [loadScenario, loadPolicyProfiles, loadTrustAnchors, loadAdmissions])
+    loadScannerReadiness()
+  }, [loadScenario, loadPolicyProfiles, loadTrustAnchors, loadAdmissions, loadScannerReadiness])
 
   function updateOperatorToken(value: string) {
     setOperatorToken(value)
@@ -986,6 +1001,43 @@ function ModelIntakeSettingsContent() {
           </div>
         </div>
       )}
+
+      <Card className="min-w-0 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 className="text-sm font-semibold text-white">Evidence adapter readiness</h2>
+            <p className="mt-1 text-xs text-gray-500">Strict intake requires applicable adapters; irrelevant formats report not applicable.</p>
+          </div>
+          <div className="flex items-center gap-2">
+            {scannerReadiness && (
+              <span className={`rounded px-2 py-1 text-xs font-semibold ${scannerReadiness.status === 'READY' ? 'bg-green-950/50 text-green-300' : 'bg-yellow-950/50 text-yellow-300'}`}>
+                {scannerReadiness.required_ready}/{scannerReadiness.required_total} ready
+              </span>
+            )}
+            <button type="button" onClick={loadScannerReadiness} className="rounded border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800">Refresh</button>
+          </div>
+        </div>
+        {scannerReadinessError ? (
+          <div className="mt-3 text-xs text-red-300">{scannerReadinessError}</div>
+        ) : scannerReadiness ? (
+          <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            {scannerReadiness.adapters.filter((adapter) => adapter.enabled_by_default).map((adapter) => (
+              <div key={adapter.name} className="rounded border border-gray-800 bg-gray-950 p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-mono text-xs text-gray-200">{adapter.name}</span>
+                  <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${adapter.ready ? 'bg-green-950/60 text-green-300' : 'bg-red-950/60 text-red-300'}`}>
+                    {adapter.status}
+                  </span>
+                </div>
+                <div className="mt-2 text-xs text-gray-500">{adapter.applicability.replace(/_/g, ' ')}</div>
+                <div className="mt-1 truncate font-mono text-[10px] text-gray-600">{adapter.version || 'not installed'}</div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="mt-3 text-xs text-gray-500">Checking adapter readiness…</div>
+        )}
+      </Card>
 
       <Card className="min-w-0 p-4">
         <div className="flex flex-wrap items-center justify-between gap-2">

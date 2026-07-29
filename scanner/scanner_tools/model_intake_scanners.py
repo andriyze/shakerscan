@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import dataclasses
 import hashlib
 import json
 import os
@@ -55,18 +56,141 @@ class ScannerSpec:
     required: bool = False
     parser: Callable[[str, str, int], tuple[str, list[dict[str, Any]], dict[str, Any]]] | None = None
     result_file: str | None = None
+    adapter_kind: str = "evidence_scanner"
+    applicability: str = "always"
+    target_scope: str = "repository"
+    enabled_by_default: bool = False
+    required_profiles: tuple[str, ...] = ()
+    rules_path: str | None = None
+    database_path: str | None = None
 
 
 EXTERNAL_SCANNERS: tuple[ScannerSpec, ...] = (
-    ScannerSpec("modelscan", "modelscan", ("-p", "{subject}", "-r", "json"), required=True),
-    ScannerSpec("fickling", "fickling", ("--check-safety", "{subject}"), required=True),
-    ScannerSpec("clamav", "clamscan", ("--recursive=yes", "--infected", "{subject}"), required=True),
-    ScannerSpec("gitleaks", "gitleaks", ("detect", "--no-git", "--source", "{subject}", "--report-format", "json", "--report-path", "{scratch}/gitleaks.json"), required=True, result_file="gitleaks.json"),
-    ScannerSpec("syft", "syft", ("dir:{subject}", "-o", "cyclonedx-json"), required=True),
-    ScannerSpec("trivy", "trivy", ("fs", "--scanners", "vuln,secret,misconfig,license", "--format", "json", "--skip-db-update", "{subject}"), required=True),
-    ScannerSpec("osv-scanner", "osv-scanner", ("scan", "source", "-r", "{subject}", "--format", "json"), required=True),
-    ScannerSpec("pip-audit", "pip-audit", ("--path", "{subject}", "--format=json"), required=False),
+    ScannerSpec(
+        "modelscan", "modelscan", ("-p", "{subject}", "-r", "json"),
+        applicability="serialized_model", target_scope="artifact", enabled_by_default=True,
+        required_profiles=("strict",),
+    ),
+    ScannerSpec(
+        "semgrep", "semgrep",
+        ("scan", "--config", "/app/scanner_tools/model_intake_semgrep.yml", "--json", "--metrics", "off", "--disable-version-check", "{subject}"),
+        applicability="repository_code", enabled_by_default=True, required_profiles=("strict",),
+        rules_path="/app/scanner_tools/model_intake_semgrep.yml",
+    ),
+    ScannerSpec(
+        "fickling", "fickling", ("--check-safety", "-p", "{subject}"),
+        applicability="pickle_model", target_scope="artifact", enabled_by_default=True,
+        required_profiles=("strict",),
+    ),
+    ScannerSpec(
+        "trivy", "trivy",
+        ("fs", "--scanners", "vuln,secret,misconfig,license", "--format", "json", "--skip-db-update", "--cache-dir", "/opt/trivy-cache", "{subject}"),
+        applicability="dependency_repository", enabled_by_default=True, required_profiles=("strict",),
+        database_path="/opt/trivy-cache/db/metadata.json",
+    ),
+    ScannerSpec("clamav", "clamscan", ("--recursive=yes", "--infected", "{subject}"), applicability="always"),
+    ScannerSpec("gitleaks", "gitleaks", ("detect", "--no-git", "--source", "{subject}", "--report-format", "json", "--report-path", "{scratch}/gitleaks.json"), applicability="repository_code", result_file="gitleaks.json"),
+    ScannerSpec("syft", "syft", ("dir:{subject}", "-o", "cyclonedx-json"), applicability="dependency_repository"),
+    ScannerSpec("osv-scanner", "osv-scanner", ("scan", "source", "-r", "{subject}", "--format", "json"), applicability="dependency_repository"),
+    ScannerSpec("pip-audit", "pip-audit", ("--path", "{subject}", "--format=json"), applicability="python_dependency_repository"),
 )
+BUILTIN_SCANNER_NAMES = {
+    "python-pickletools",
+    "python-ast-security",
+    "shakerscan-secret-rules",
+    "shakerscan-malware-rules",
+    "shakerscan-sbom",
+    "shakerscan-native-binary-inventory",
+    "shakerscan-license-inventory",
+}
+
+SERIALIZED_MODEL_EXTENSIONS = {
+    ".bin", ".ckpt", ".h5", ".hdf5", ".joblib", ".keras", ".mar", ".pb",
+    ".pickle", ".pkl", ".pt", ".pth",
+}
+PICKLE_MODEL_EXTENSIONS = {".bin", ".ckpt", ".joblib", ".mar", ".pickle", ".pkl", ".pt", ".pth"}
+CODE_AND_CONFIG_EXTENSIONS = {
+    ".bash", ".cfg", ".ini", ".js", ".json", ".jsx", ".py", ".sh", ".toml",
+    ".ts", ".tsx", ".yaml", ".yml",
+}
+DEPENDENCY_FILENAMES = {
+    "cargo.lock", "cargo.toml", "composer.lock", "composer.json", "environment.yml",
+    "gemfile", "gemfile.lock", "go.mod", "go.sum", "package-lock.json", "package.json",
+    "pipfile", "pipfile.lock", "poetry.lock", "pyproject.toml", "requirements.txt",
+    "setup.cfg", "setup.py", "uv.lock", "yarn.lock",
+}
+PYTHON_DEPENDENCY_FILENAMES = {
+    "environment.yml", "pipfile", "pipfile.lock", "poetry.lock", "pyproject.toml",
+    "requirements.txt", "setup.cfg", "setup.py", "uv.lock",
+}
+
+
+def _candidate_files(subject_path: Path) -> list[Path]:
+    if subject_path.is_file():
+        return [subject_path]
+    files, _, _ = _subject_file_inventory(subject_path)
+    return files
+
+
+def scanner_applicability(spec: ScannerSpec, subject_path: Path) -> dict[str, Any]:
+    """Resolve applicability from immutable subject facts, never a model/repository name."""
+    files = _candidate_files(subject_path)
+    names = {path.name.lower() for path in files}
+    suffixes = {path.suffix.lower() for path in files}
+    reason = "applicable_to_all_complete_subjects"
+    applicable = True
+    if spec.applicability == "serialized_model":
+        applicable = bool(suffixes & SERIALIZED_MODEL_EXTENSIONS)
+        reason = "serialized_model_artifact_present" if applicable else "no_supported_serialized_model_artifact"
+    elif spec.applicability == "pickle_model":
+        applicable = bool(suffixes & PICKLE_MODEL_EXTENSIONS)
+        reason = "pickle_backed_artifact_present" if applicable else "no_pickle_backed_artifact"
+    elif spec.applicability == "repository_code":
+        applicable = subject_path.is_dir() and any(
+            path.suffix.lower() in CODE_AND_CONFIG_EXTENSIONS or path.name.lower() in {"dockerfile", "containerfile"}
+            for path in files
+        )
+        reason = "repository_code_or_configuration_present" if applicable else "no_repository_code_or_configuration"
+    elif spec.applicability == "dependency_repository":
+        applicable = subject_path.is_dir() and bool(names & DEPENDENCY_FILENAMES)
+        reason = "dependency_manifest_present" if applicable else "no_dependency_manifest"
+    elif spec.applicability == "python_dependency_repository":
+        applicable = subject_path.is_dir() and bool(names & PYTHON_DEPENDENCY_FILENAMES)
+        reason = "python_dependency_manifest_present" if applicable else "no_python_dependency_manifest"
+    return {
+        "applicable": applicable,
+        "reason": reason,
+        "files_considered": len(files),
+        "applicability": spec.applicability,
+    }
+
+
+def resolve_scanner_plan(
+    subject_path: Path,
+    *,
+    requested_names: set[str] | None = None,
+    profile: str = "baseline",
+) -> list[dict[str, Any]]:
+    """Build a non-weakenable, applicability-aware external scanner plan."""
+    strict = profile == "strict"
+    plan: list[dict[str, Any]] = []
+    for spec in EXTERNAL_SCANNERS:
+        applicability = scanner_applicability(spec, subject_path)
+        requested = requested_names is not None and spec.name in requested_names
+        required = requested or (
+            strict and profile in spec.required_profiles and bool(applicability["applicable"])
+        )
+        selected = requested or (requested_names is None and spec.enabled_by_default) or required
+        if not selected and not required:
+            continue
+        plan.append({
+            "spec": dataclasses.replace(spec, required=required),
+            "selected": selected,
+            "requested": requested,
+            "required": required,
+            **applicability,
+        })
+    return plan
 
 
 def _utc_iso() -> str:
@@ -224,7 +348,7 @@ def _parse_external_scanner(
     scanner: str, stdout: str, stderr: str, exit_code: int
 ) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
     """Validate each tool's output contract; exit zero alone is never PASS."""
-    if scanner in {"modelscan", "gitleaks", "syft", "trivy", "osv-scanner", "pip-audit"}:
+    if scanner in {"modelscan", "semgrep", "gitleaks", "syft", "trivy", "osv-scanner", "pip-audit"}:
         try:
             parsed = _json_output(stdout)
         except (ValueError, json.JSONDecodeError) as exc:
@@ -244,6 +368,23 @@ def _parse_external_scanner(
                 return "INCOMPLETE", [], {"error": "modelscan_findings_shape_invalid"}
             findings = [_external_finding(scanner, item, "critical") for item in candidates[:1000]]
             summary["finding_count"] = len(candidates)
+        elif scanner == "semgrep":
+            if not isinstance(parsed, dict) or not isinstance(parsed.get("results"), list):
+                return "INCOMPLETE", [], {"error": "semgrep_results_missing"}
+            errors = parsed.get("errors") if isinstance(parsed.get("errors"), list) else []
+            candidates = parsed["results"]
+            findings = [
+                _external_finding(
+                    scanner,
+                    item,
+                    str((item.get("extra") or {}).get("severity") or "high").lower()
+                    if isinstance(item, dict) else "high",
+                )
+                for item in candidates[:1000]
+            ]
+            summary.update({"finding_count": len(candidates), "error_count": len(errors)})
+            if errors:
+                return "INCOMPLETE", findings, {**summary, "errors_sha256": _sha256_json(errors)}
         elif scanner == "gitleaks":
             if not isinstance(parsed, list):
                 return "INCOMPLETE", [], {"error": "gitleaks_output_shape_invalid"}
@@ -423,9 +564,74 @@ def run_external_scanner(spec: ScannerSpec, subject_path: Path, subject: dict[st
                 "raw_result_digest": raw_digest,
                 "required": spec.required,
                 "argv_contract": [spec.executable, *spec.args],
+                "adapter_kind": spec.adapter_kind,
+                "applicability": spec.applicability,
+                "target_scope": spec.target_scope,
             },
             summary=summary,
         )
+
+
+def scanner_adapter_catalog() -> list[dict[str, Any]]:
+    return [
+        {
+            "name": spec.name,
+            "adapter_kind": spec.adapter_kind,
+            "executable": spec.executable,
+            "applicability": spec.applicability,
+            "target_scope": spec.target_scope,
+            "enabled_by_default": spec.enabled_by_default,
+            "required_profiles": list(spec.required_profiles),
+            "rules_path": spec.rules_path,
+            "database_path": spec.database_path,
+        }
+        for spec in EXTERNAL_SCANNERS
+    ]
+
+
+def scanner_adapter_readiness() -> dict[str, Any]:
+    """Return content-free runtime readiness for operators and policy diagnostics."""
+    adapters: list[dict[str, Any]] = []
+    for spec in EXTERNAL_SCANNERS:
+        executable = shutil.which(spec.executable)
+        rules_digest = None
+        if spec.rules_path and Path(spec.rules_path).is_file():
+            rules_digest = _hash_path(Path(spec.rules_path))
+        database: dict[str, Any] | None = None
+        if spec.database_path:
+            database_path = Path(spec.database_path)
+            database = {"present": database_path.is_file(), "path": spec.database_path}
+            if database_path.is_file():
+                database["sha256"] = _hash_path(database_path)
+                try:
+                    metadata = json.loads(database_path.read_text("utf-8"))
+                    database["updated_at"] = metadata.get("UpdatedAt") or metadata.get("updated_at")
+                    database["next_update"] = metadata.get("NextUpdate") or metadata.get("next_update")
+                except (OSError, ValueError):
+                    database["metadata_status"] = "unparseable"
+        version = None
+        if executable:
+            with tempfile.TemporaryDirectory(prefix=f"model-intake-readiness-{spec.name}-") as scratch_raw:
+                scratch = Path(scratch_raw)
+                version = _tool_version(executable, spec.version_args, _safe_environment(scratch), scratch)
+        ready = bool(executable and (not spec.rules_path or rules_digest) and (not database or database.get("present")))
+        adapters.append({
+            **next(item for item in scanner_adapter_catalog() if item["name"] == spec.name),
+            "ready": ready,
+            "installed": bool(executable),
+            "version": version,
+            "rules_sha256": rules_digest,
+            "database": database,
+            "status": "READY" if ready else "UNAVAILABLE",
+        })
+    required = [item for item in adapters if item["required_profiles"]]
+    return {
+        "schema_version": "model-intake-adapter-readiness/v1",
+        "status": "READY" if all(item["ready"] for item in required) else "DEGRADED",
+        "required_ready": sum(1 for item in required if item["ready"]),
+        "required_total": len(required),
+        "adapters": adapters,
+    }
 
 
 DANGEROUS_PICKLE_OPCODES = {

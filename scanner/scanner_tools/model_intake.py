@@ -2843,26 +2843,54 @@ async def run_model_intake_scan(
                     for item in requested_scanners
                     if str(item).strip()
                 } if isinstance(requested_scanners, list) else None
-                for spec in _model_intake_scanners.EXTERNAL_SCANNERS:
-                    if requested_names is not None and spec.name not in requested_names:
+                scanner_plan = _model_intake_scanners.resolve_scanner_plan(
+                    subject_path,
+                    requested_names=requested_names,
+                    profile="strict" if strict_governance else "baseline",
+                )
+                registered_names = {
+                    spec.name for spec in _model_intake_scanners.EXTERNAL_SCANNERS
+                } | _model_intake_scanners.BUILTIN_SCANNER_NAMES
+                for unknown_name in sorted((requested_names or set()) - registered_names):
+                    scanner_results.append(_model_intake_scanners._scanner_result(
+                        name=unknown_name,
+                        version=None,
+                        status="UNSUPPORTED",
+                        subject=subject,
+                        started_at=datetime.now(timezone.utc).isoformat(),
+                        finished_at=datetime.now(timezone.utc).isoformat(),
+                        execution={
+                            "required": True,
+                            "reason": "unknown_scanner_adapter",
+                            "adapter_kind": "evidence_scanner",
+                        },
+                    ))
+                for planned in scanner_plan:
+                    spec = planned["spec"]
+                    if not planned["applicable"]:
                         scanner_results.append(_model_intake_scanners._scanner_result(
                             name=spec.name,
                             version=None,
-                            status="SKIPPED_BY_POLICY",
+                            status="NOT_APPLICABLE",
                             subject=subject,
                             started_at=datetime.now(timezone.utc).isoformat(),
                             finished_at=datetime.now(timezone.utc).isoformat(),
+                            coverage={"files_considered": planned["files_considered"]},
                             execution={
-                                "required": spec.required,
-                                "reason": "scanner_omitted_by_request",
+                                "required": False,
+                                "reason": planned["reason"],
+                                "adapter_kind": spec.adapter_kind,
+                                "applicability": spec.applicability,
+                                "target_scope": spec.target_scope,
                             },
                         ))
                         continue
+                    scan_target = artifact_scan_path if spec.target_scope == "artifact" else subject_path
                     scanner_results.append(
                         await asyncio.to_thread(
                             _model_intake_scanners.run_external_scanner,
                             spec,
-                            subject_path,
+                            scan_target,
                             subject,
                         )
                     )

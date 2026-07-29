@@ -1336,6 +1336,34 @@ export interface ModelIntakeScanRequest {
   approval_receipt_id?: string
 }
 
+export interface ModelIntakeScannerAdapterReadiness {
+  name: string
+  adapter_kind: string
+  applicability: string
+  target_scope: string
+  enabled_by_default: boolean
+  required_profiles: string[]
+  ready: boolean
+  installed: boolean
+  version?: string | null
+  rules_sha256?: string | null
+  database?: {
+    present?: boolean
+    sha256?: string
+    updated_at?: string | null
+    next_update?: string | null
+  } | null
+  status: 'READY' | 'UNAVAILABLE' | string
+}
+
+export interface ModelIntakeScannerReadiness {
+  schema_version: string
+  status: 'READY' | 'DEGRADED' | string
+  required_ready: number
+  required_total: number
+  adapters: ModelIntakeScannerAdapterReadiness[]
+}
+
 export interface ModelIntakeTrustAnchor {
   id: string
   name: string
@@ -3715,6 +3743,14 @@ export async function submitModelIntakeScan(data: ModelIntakeScanRequest): Promi
   })
   if (!res.ok) {
     throw new Error(await getApiErrorMessage(res, 'Failed to submit model intake scan'))
+  }
+  return res.json()
+}
+
+export async function getModelIntakeScannerReadiness(): Promise<ModelIntakeScannerReadiness> {
+  const res = await fetch(`${API_URL}/model-intake/scanners/readiness`)
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Failed to load Model Intake scanner readiness'))
   }
   return res.json()
 }
