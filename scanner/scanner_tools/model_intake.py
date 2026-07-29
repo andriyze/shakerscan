@@ -77,6 +77,21 @@ except ModuleNotFoundError as exc:
     from model_intake_sandbox import request_sandbox_analysis as _request_sandbox_analysis
 
 try:
+    from scanner.scanner_tools.model_intake_admission import (
+        build_statement as _build_admission_statement,
+        sign_statement as _sign_admission_statement,
+        signing_available as _admission_signing_available,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name not in {"scanner", "scanner.scanner_tools"}:
+        raise
+    from model_intake_admission import (
+        build_statement as _build_admission_statement,
+        sign_statement as _sign_admission_statement,
+        signing_available as _admission_signing_available,
+    )
+
+try:
     from scanner.redaction import (
         SENSITIVE_KEYS,
         SENSITIVE_KEY_FRAGMENTS,
@@ -2693,6 +2708,28 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             remediation="Run the exact quarantined artifact through the no-network sandbox and resolve all format, runtime, isolation, or resource failures.",
         ))
 
+    require_signed_admission = _boolish(options.get("require_signed_admission"))
+    if require_signed_admission and not _admission_signing_available():
+        findings.append(_finding(
+            finding_id="admission_signing_unavailable",
+            title="Required Model Intake admission statement cannot be signed",
+            severity="high",
+            description="Policy requires a signed machine-readable admission package, but the worker has no configured admission signing key.",
+            artifact_ref=artifact_ref,
+            evidence={"signing_key_configured": False},
+            remediation="Configure MODEL_INTAKE_ADMISSION_SIGNING_KEY_PEM in the trusted worker secret store and rerun intake.",
+        ))
+    if require_signed_admission and (not sha256 or artifact_truncated):
+        findings.append(_finding(
+            finding_id="admission_subject_incomplete",
+            title="Required admission statement has no complete artifact subject",
+            severity="high",
+            description="A deployable admission must bind to the SHA-256 of the complete artifact; a missing or prefix-only digest cannot authorize model loading.",
+            artifact_ref=artifact_ref,
+            evidence={"sha256_present": bool(sha256), "artifact_truncated": artifact_truncated},
+            remediation="Enable complete artifact acquisition, retain the content-addressed object, and rerun intake before admission.",
+        ))
+
     if artifact_meta.get("error"):
         if unsupported_scheme_error:
             findings.append(_finding(
@@ -3376,6 +3413,25 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         format_specific_ok = None
 
     score = max(0, 100 - sum(_severity_score(f.get("severity", "info")) for f in findings))
+    decision = _intake_decision(findings)
+    findings_digest = hashlib.sha256(
+        json.dumps(findings, sort_keys=True, separators=(",", ":"), default=str).encode()
+    ).hexdigest()
+    attestation_evidence_sha256 = attestation_verification.get("envelope_sha256")
+    admission_statement = _build_admission_statement(
+        subject_sha256=sha256 if observed_hash_scope == "full_artifact" else None,
+        repository_snapshot_sha256=repository_snapshot.get("snapshot_sha256"),
+        generated_evidence_sha256=generated_evidence.get("evidence_sha256"),
+        sandbox_evidence_sha256=dynamic_sandbox.get("evidence_sha256"),
+        attestation_evidence_sha256=attestation_evidence_sha256,
+        policy_profile=str(options.get("policy_profile") or deployment_environment or "") or None,
+        policy_version=str(metadata.get("policy_version") or metadata.get("approval_policy_version") or "") or None,
+        decision=decision["decision"],
+        decision_reason=decision["decision_reason"],
+        findings_digest=findings_digest,
+        expires_days=bounded_int("admission_expires_days", 30, 1, 365),
+    )
+    admission_package = _sign_admission_statement(admission_statement)
     safe_artifact_ref = redact_model_intake_value(artifact_ref)
     safe_registry_reference = redact_model_intake_value(registry_reference)
     safe_metadata = redact_model_intake_value(metadata)
@@ -3453,6 +3509,8 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         "attestation_verified": bool(attestation_verification.get("verified")),
         "dynamic_sandbox_status": dynamic_sandbox.get("status"),
         "dynamic_sandbox_evidence_sha256": dynamic_sandbox.get("evidence_sha256"),
+        "admission_status": admission_package.get("status"),
+        "admission_statement_sha256": admission_package.get("statement_sha256"),
         "expected_hash_present": bool(expected_sha256),
         "deployment_approved": deployment_approved,
         "license_present": bool(license_ref),
@@ -3481,6 +3539,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             "source_adapter": source_adapter,
             "attestation": redact_model_intake_value(attestation_verification),
             "dynamic_sandbox": redact_model_intake_value(dynamic_sandbox),
+            "admission": redact_model_intake_value(admission_package),
             "runtime_destinations": runtime_destinations,
             "artifact": {
                 "name": name,
@@ -3553,7 +3612,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         "result": {
             "score": score,
             "grade": _grade(score),
-            **_intake_decision(findings),
+            **decision,
         },
     }
 

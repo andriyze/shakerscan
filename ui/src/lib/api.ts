@@ -1321,6 +1321,8 @@ export interface ModelIntakeScanRequest {
   run_dynamic_sandbox?: boolean
   require_dynamic_sandbox?: boolean
   sandbox_timeout_seconds?: number
+  require_signed_admission?: boolean
+  admission_expires_days?: number
   allow_insecure_http?: boolean
   allow_private_networks?: boolean
   allowed_acquisition_hosts?: string[]

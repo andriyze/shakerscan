@@ -60,6 +60,17 @@ except ModuleNotFoundError:
     from scanner.scanner_tools.model_intake_registry import adapter_catalog as _model_adapter_catalog
 
 try:
+    from scanner_tools.model_intake_admission import (
+        trusted_public_keys_from_env as _model_admission_trusted_keys,
+        verify_package as _verify_model_admission_package,
+    )
+except ModuleNotFoundError:
+    from scanner.scanner_tools.model_intake_admission import (
+        trusted_public_keys_from_env as _model_admission_trusted_keys,
+        verify_package as _verify_model_admission_package,
+    )
+
+try:
     from constants import SMART_SCAN_BUDGETS, resolve_scan_budget, resolve_or_consume_budget
 except ModuleNotFoundError as exc:
     if exc.name != "constants":
@@ -3684,6 +3695,8 @@ class ModelIntakeScanRequest(BaseModel):
     run_dynamic_sandbox: bool = False
     require_dynamic_sandbox: bool = False
     sandbox_timeout_seconds: int = Field(default=120, ge=1, le=600)
+    require_signed_admission: bool = False
+    admission_expires_days: int = Field(default=30, ge=1, le=365)
     timeout_seconds: int = Field(default=20, ge=1, le=120)
     allow_insecure_http: bool = Field(
         default=False,
@@ -3717,6 +3730,12 @@ class ModelIntakeResolveRequest(BaseModel):
     filename: Optional[str] = None
     metadata_json: dict[str, Any] = Field(default_factory=dict)
     timeout_seconds: int = Field(default=15, ge=1, le=60)
+
+
+class ModelIntakeAdmissionVerifyRequest(BaseModel):
+    admission_package: dict[str, Any]
+    expected_artifact_sha256: str = Field(pattern="^[0-9a-fA-F]{64}$")
+    expected_repository_snapshot_sha256: Optional[str] = Field(default=None, pattern="^[0-9a-fA-F]{64}$")
 
 
 class ModelIntakeTrustAnchorRequest(BaseModel):
@@ -10838,6 +10857,30 @@ async def model_intake_capabilities():
     }
 
 
+@app.post("/model-intake/admission/verify")
+async def verify_model_intake_admission(request: ModelIntakeAdmissionVerifyRequest):
+    """Fail closed unless a package authorizes these exact deployment subjects."""
+    trusted_keys = _model_admission_trusted_keys()
+    if not trusted_keys:
+        raise HTTPException(
+            status_code=503,
+            detail="MODEL_INTAKE_ADMISSION_TRUSTED_PUBLIC_KEYS is not configured",
+        )
+    result = _verify_model_admission_package(
+        request.admission_package,
+        trusted_public_keys=trusted_keys,
+        expected_artifact_sha256=request.expected_artifact_sha256.lower(),
+        expected_repository_snapshot_sha256=(
+            request.expected_repository_snapshot_sha256.lower()
+            if request.expected_repository_snapshot_sha256
+            else None
+        ),
+    )
+    if not result.get("verified"):
+        raise HTTPException(status_code=409, detail=result)
+    return result
+
+
 async def _enrich_model_intake_scan_request(request: ModelIntakeScanRequest) -> ModelIntakeScanRequest:
     """Best-effort provider metadata lookup for direct API/UI scan submissions."""
     artifact_ref = (request.artifact_url or "").strip()
@@ -10937,6 +10980,8 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
         "run_dynamic_sandbox": request.run_dynamic_sandbox,
         "require_dynamic_sandbox": request.require_dynamic_sandbox,
         "sandbox_timeout_seconds": request.sandbox_timeout_seconds,
+        "require_signed_admission": request.require_signed_admission,
+        "admission_expires_days": request.admission_expires_days,
         "timeout_seconds": request.timeout_seconds,
         "allow_insecure_http": request.allow_insecure_http,
         "allow_private_networks": request.allow_private_networks,

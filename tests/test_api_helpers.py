@@ -17762,3 +17762,39 @@ def test_compose_propagates_browser_origin_configuration_to_api():
         compose = (repo_root / compose_name).read_text()
         for variable in required:
             assert f"- {variable}=${{{variable}" in compose
+
+
+def test_model_admission_endpoint_fails_closed_without_deployment_trust_roots(monkeypatch):
+    monkeypatch.setattr(api_module, "_model_admission_trusted_keys", lambda: [])
+    request = api_module.ModelIntakeAdmissionVerifyRequest(
+        admission_package={"statement": {}},
+        expected_artifact_sha256="a" * 64,
+    )
+
+    with pytest.raises(api_module.HTTPException) as exc_info:
+        asyncio.run(api_module.verify_model_intake_admission(request))
+
+    assert exc_info.value.status_code == 503
+
+
+def test_model_admission_endpoint_passes_exact_deployment_subjects(monkeypatch):
+    captured = {}
+
+    def verify(package, **kwargs):
+        captured.update({"package": package, **kwargs})
+        return {"verified": True, "status": "PASS"}
+
+    monkeypatch.setattr(api_module, "_model_admission_trusted_keys", lambda: ["trusted-pem"])
+    monkeypatch.setattr(api_module, "_verify_model_admission_package", verify)
+    request = api_module.ModelIntakeAdmissionVerifyRequest(
+        admission_package={"statement": {"subject": {}}},
+        expected_artifact_sha256="A" * 64,
+        expected_repository_snapshot_sha256="B" * 64,
+    )
+
+    result = asyncio.run(api_module.verify_model_intake_admission(request))
+
+    assert result == {"verified": True, "status": "PASS"}
+    assert captured["trusted_public_keys"] == ["trusted-pem"]
+    assert captured["expected_artifact_sha256"] == "a" * 64
+    assert captured["expected_repository_snapshot_sha256"] == "b" * 64
