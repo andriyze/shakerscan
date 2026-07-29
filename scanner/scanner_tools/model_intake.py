@@ -19,7 +19,7 @@ import urllib.request
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-from tempfile import NamedTemporaryFile
+from tempfile import NamedTemporaryFile, TemporaryDirectory
 from typing import Any
 
 try:
@@ -38,6 +38,13 @@ except ModuleNotFoundError as exc:
         download_http_to_quarantine as _safe_download_http_to_quarantine,
         quarantine_local_file as _quarantine_local_file,
     )
+
+try:
+    from scanner.scanner_tools import model_intake_scanners as _model_intake_scanners
+except ModuleNotFoundError as exc:
+    if exc.name not in {"scanner", "scanner.scanner_tools"}:
+        raise
+    import model_intake_scanners as _model_intake_scanners
 
 try:
     from scanner.redaction import (
@@ -2311,6 +2318,99 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
                 selected_artifact_meta=artifact_meta,
             )
             repository_snapshot["requested"] = True
+    run_generated_scanners = _boolish(options.get("run_generated_scanners"))
+    generated_evidence: dict[str, Any] = {
+        "schema_version": "model-intake-generated-evidence/v1",
+        "provenance_class": "shakerscan_generated",
+        "status": "SKIPPED_BY_POLICY",
+        "results": [],
+        "statuses": {},
+        "required_non_pass": [],
+    }
+    if run_generated_scanners:
+        subject_path: Path | None = None
+        subject = {
+            "kind": "repository_snapshot" if repository_snapshot.get("complete") else "model_artifact",
+            "filename": name,
+            "digest": (
+                f"sha256:{repository_snapshot.get('snapshot_sha256')}"
+                if repository_snapshot.get("complete")
+                else f"sha256:{sha256}" if sha256 and not artifact_truncated else None
+            ),
+            "complete": bool(repository_snapshot.get("complete") or (artifact_meta.get("complete") and not artifact_truncated)),
+        }
+        scanner_results: list[dict[str, Any]] = []
+        with TemporaryDirectory(prefix="model-intake-subject-") as subject_tmp:
+            if repository_snapshot.get("complete"):
+                try:
+                    subject_path = _model_intake_scanners.materialize_snapshot_tree(
+                        repository_snapshot,
+                        quarantine_dir,
+                        Path(subject_tmp) / "snapshot",
+                    )
+                except Exception as exc:
+                    scanner_results.append(_model_intake_scanners._scanner_result(
+                        name="subject-materialization",
+                        version=None,
+                        status="INCOMPLETE",
+                        subject=subject,
+                        started_at=datetime.now(timezone.utc).isoformat(),
+                        finished_at=datetime.now(timezone.utc).isoformat(),
+                        execution={"error": f"{type(exc).__name__}: {exc}", "required": True},
+                    ))
+            elif quarantine_path and Path(quarantine_path).is_file():
+                safe_subject_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", Path(name).name).strip(".-") or "model-artifact.bin"
+                materialized_artifact = Path(subject_tmp) / safe_subject_name
+                os.link(quarantine_path, materialized_artifact)
+                subject_path = materialized_artifact
+            else:
+                scanner_results.append(_model_intake_scanners._scanner_result(
+                    name="subject-materialization",
+                    version=None,
+                    status="INCOMPLETE",
+                    subject=subject,
+                    started_at=datetime.now(timezone.utc).isoformat(),
+                    finished_at=datetime.now(timezone.utc).isoformat(),
+                    execution={"error": "complete_quarantine_subject_required", "required": True},
+                ))
+
+            if subject_path is not None:
+                selected_snapshot_path = (
+                    subject_path / str(metadata.get("huggingface_file") or "")
+                    if subject_path.is_dir() and metadata.get("huggingface_file")
+                    else None
+                )
+                artifact_scan_path = (
+                    selected_snapshot_path
+                    if selected_snapshot_path is not None and selected_snapshot_path.is_file()
+                    else subject_path
+                )
+                scanner_results.append(_model_intake_scanners.run_builtin_pickle_scan(artifact_scan_path, subject))
+                scanner_results.append(
+                    _model_intake_scanners.run_builtin_source_scan(
+                        subject_path if subject_path.is_dir() else None,
+                        subject,
+                    )
+                )
+                requested_scanners = options.get("generated_scanner_names")
+                requested_names = {
+                    str(item).strip()
+                    for item in requested_scanners
+                    if str(item).strip()
+                } if isinstance(requested_scanners, list) else None
+                for spec in _model_intake_scanners.EXTERNAL_SCANNERS:
+                    if requested_names is not None and spec.name not in requested_names:
+                        continue
+                    scanner_results.append(
+                        _model_intake_scanners.run_external_scanner(spec, subject_path, subject)
+                    )
+        generated_evidence = {
+            **_model_intake_scanners.generated_evidence_summary(scanner_results),
+            "status": "PASS" if not any(
+                item.get("execution", {}).get("status") in _model_intake_scanners.NON_PASS_STATUSES
+                for item in scanner_results
+            ) else "FAIL",
+        }
     metadata_unavailable = bool(metadata_url and metadata_fetch_meta.get("error") and not metadata)
     require_signature_verification = _boolish(options.get("require_signature_verification"))
     require_cryptographic_signature_verification = _boolish(
@@ -2454,6 +2554,42 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             },
             remediation="Retry from an immutable supported registry revision with sufficient file/byte quota and resolve every failed file before approval.",
         ))
+
+    if run_generated_scanners:
+        for scanner_result in generated_evidence.get("results") or []:
+            scanner_name = str(scanner_result.get("scanner", {}).get("name") or "unknown")
+            scanner_status = str(scanner_result.get("execution", {}).get("status") or "CRASHED")
+            required = bool(scanner_result.get("execution", {}).get("required"))
+            if scanner_status in _model_intake_scanners.NON_PASS_STATUSES and required:
+                findings.append(_finding(
+                    finding_id=f"generated_scanner_{re.sub(r'[^a-z0-9]+', '_', scanner_name.lower()).strip('_')}_non_pass",
+                    title=f"Required generated scanner did not pass: {scanner_name}",
+                    severity="high",
+                    description=f"The required scanner ended with normalized status {scanner_status}; missing, crashed, timed-out, unsupported, and incomplete execution never counts as a pass.",
+                    artifact_ref=artifact_ref,
+                    evidence={
+                        "scanner": scanner_result.get("scanner"),
+                        "execution": scanner_result.get("execution"),
+                        "coverage": scanner_result.get("coverage"),
+                        "evidence_sha256": scanner_result.get("evidence_sha256"),
+                    },
+                    remediation="Install and pin the scanner, restore its rules/database, and rerun it against the same complete subject until it produces a valid PASS or reviewed finding result.",
+                ))
+            elif scanner_status in {"FAIL", "WARNING"} and scanner_result.get("findings"):
+                findings.append(_finding(
+                    finding_id=f"generated_scanner_{re.sub(r'[^a-z0-9]+', '_', scanner_name.lower()).strip('_')}_findings",
+                    title=f"Generated scanner reported model-intake concerns: {scanner_name}",
+                    severity="high" if scanner_status == "FAIL" else "medium",
+                    description="A ShakerScan-generated scanner result contains policy-relevant findings that require resolution or review.",
+                    artifact_ref=artifact_ref,
+                    evidence={
+                        "scanner": scanner_result.get("scanner"),
+                        "status": scanner_status,
+                        "findings": (scanner_result.get("findings") or [])[:100],
+                        "evidence_sha256": scanner_result.get("evidence_sha256"),
+                    },
+                    remediation="Review the digest-bound raw scanner evidence, remove or replace the unsafe content, and rerun the complete intake.",
+                ))
 
     checksum_status = "missing"
     if expected_sha256 and sha256 and not artifact_truncated and str(expected_sha256).lower() == sha256.lower():
@@ -3030,6 +3166,8 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         "custom_code_required": repository_manifest.get("custom_code_required") if repository_manifest else None,
         "repository_snapshot_sha256": repository_snapshot.get("snapshot_sha256"),
         "repository_snapshot_complete": repository_snapshot.get("complete") if complete_repository_snapshot else None,
+        "generated_evidence_status": generated_evidence.get("status"),
+        "generated_evidence_sha256": generated_evidence.get("evidence_sha256"),
         "expected_sha256": expected_sha256,
         "checksum_status": checksum_status,
         "checksum_match": checksum_match,
@@ -3093,6 +3231,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             "metadata_fetch": safe_metadata_fetch_meta if metadata_url else None,
             "aibom": safe_aibom,
             "repository_snapshot": redact_model_intake_value(repository_snapshot),
+            "generated_evidence": redact_model_intake_value(generated_evidence),
             "supply_chain": {
                 "registry": safe_registry_reference,
                 "signature": safe_signature_status,
@@ -3113,6 +3252,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
                 "aibom": True,
                 "repository_manifest": repository_manifest.get("complete") if repository_manifest else None,
                 "repository_snapshot": repository_snapshot.get("complete") if complete_repository_snapshot else None,
+                "generated_scanners": generated_evidence.get("status") == "PASS" if run_generated_scanners else None,
                 "custom_code_review": False if repository_manifest.get("custom_code_required") else None,
                 "format_specific_inspection": format_specific_ok,
                 "license_policy": None if metadata_unavailable or not license_ref else license_policy["status"] == "permissive",

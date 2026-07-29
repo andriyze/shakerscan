@@ -3651,6 +3651,11 @@ class ModelIntakeScanRequest(BaseModel):
         description="Fail-closed aggregate byte ceiling for complete repository snapshots.",
     )
     max_repository_files: int = Field(default=10_000, ge=1, le=10_000)
+    run_generated_scanners: bool = Field(
+        default=False,
+        description="Run ShakerScan-generated semantic, malware, secret, SBOM, and SCA scanner plug-ins against the complete quarantined subject.",
+    )
+    generated_scanner_names: Optional[list[str]] = Field(default=None, max_length=50)
     timeout_seconds: int = Field(default=20, ge=1, le=120)
     allow_insecure_http: bool = Field(
         default=False,
@@ -10883,6 +10888,8 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
         "complete_repository_snapshot": request.complete_repository_snapshot,
         "max_repository_bytes": request.max_repository_bytes,
         "max_repository_files": request.max_repository_files,
+        "run_generated_scanners": request.run_generated_scanners,
+        "generated_scanner_names": request.generated_scanner_names,
         "timeout_seconds": request.timeout_seconds,
         "allow_insecure_http": request.allow_insecure_http,
         "allow_private_networks": request.allow_private_networks,

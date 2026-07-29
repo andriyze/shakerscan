@@ -1308,6 +1308,8 @@ export interface ModelIntakeScanRequest {
   complete_repository_snapshot?: boolean
   max_repository_bytes?: number
   max_repository_files?: number
+  run_generated_scanners?: boolean
+  generated_scanner_names?: string[]
   allow_insecure_http?: boolean
   allow_private_networks?: boolean
   allowed_acquisition_hosts?: string[]

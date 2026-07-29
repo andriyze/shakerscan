@@ -797,6 +797,34 @@ def test_huggingface_repository_snapshot_rejects_mutable_revision(tmp_path):
     assert snapshot["error"] == "repository_revision_not_immutable"
 
 
+def test_generated_scanners_require_complete_quarantined_subject(tmp_path):
+    artifact = tmp_path / "model.safetensors"
+    artifact.write_bytes(_safetensors_bytes())
+
+    result = asyncio.run(
+        run_model_intake_scan(
+            str(artifact),
+            _local_options(
+                {
+                    "run_generated_scanners": True,
+                    "generated_scanner_names": [],
+                    "require_hash": False,
+                    "require_signature": False,
+                    "require_model_governance": False,
+                    "require_deployment_approval": False,
+                }
+            ),
+        )
+    )
+
+    evidence = result["model_intake"]["generated_evidence"]
+    assert evidence["status"] == "FAIL"
+    assert evidence["statuses"] == {"subject-materialization": "INCOMPLETE"}
+    assert "model_intake:generated_scanner_subject_materialization_non_pass" in {
+        finding["id"] for finding in result["findings"]
+    }
+
+
 def test_model_intake_reports_unsupported_artifact_scheme():
     result = asyncio.run(
         run_model_intake_scan(

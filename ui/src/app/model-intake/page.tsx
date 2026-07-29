@@ -340,6 +340,7 @@ function ModelIntakeSettingsContent() {
   const [maxArtifactBytes, setMaxArtifactBytes] = useState('10000000000')
   const [completeRepositorySnapshot, setCompleteRepositorySnapshot] = useState(false)
   const [maxRepositoryBytes, setMaxRepositoryBytes] = useState('50000000000')
+  const [runGeneratedScanners, setRunGeneratedScanners] = useState(false)
   const [timeoutSeconds, setTimeoutSeconds] = useState('20')
   const [policyProfile, setPolicyProfile] = useState<string>('production')
   const [savedPolicyProfiles, setSavedPolicyProfiles] = useState<SavedPolicyProfile[]>([])
@@ -423,6 +424,7 @@ function ModelIntakeSettingsContent() {
     setRequireDeploymentApproval(true)
     setCompleteArtifactDownload(true)
     setCompleteRepositorySnapshot(true)
+    setRunGeneratedScanners(true)
     setTrustMode('trusted_key_fingerprint')
     setMaxDownloadBytes((current) => {
       const parsed = Number(current)
@@ -500,6 +502,7 @@ function ModelIntakeSettingsContent() {
     setMaxArtifactBytes(String(payload.max_artifact_bytes || 10000000000))
     setCompleteRepositorySnapshot(payload.complete_repository_snapshot ?? false)
     setMaxRepositoryBytes(String(payload.max_repository_bytes || 50000000000))
+    setRunGeneratedScanners(payload.run_generated_scanners ?? false)
     setTimeoutSeconds(String(payload.timeout_seconds || 20))
     if (payload.policy_profile) setPolicyProfile(payload.policy_profile)
     setTrustMode(inferModelIntakeTrustMode({
@@ -611,6 +614,7 @@ function ModelIntakeSettingsContent() {
       max_artifact_bytes: maxTotalBytes,
       complete_repository_snapshot: completeRepositorySnapshot,
       max_repository_bytes: maxRepoBytes,
+      run_generated_scanners: runGeneratedScanners,
       timeout_seconds: timeout,
     }
     if (!payload.artifact_url) {
@@ -1553,6 +1557,13 @@ function ModelIntakeSettingsContent() {
             </div>
             <p className="text-xs text-gray-500">
               Full repository snapshots currently require a complete Hugging Face manifest pinned to an immutable commit.
+            </p>
+            <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
+              <input type="checkbox" checked={runGeneratedScanners} onChange={(e) => setRunGeneratedScanners(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+              Run generated model, malware, secret, SBOM, and SCA scanners
+            </label>
+            <p className="text-xs text-gray-500">
+              Required tools that are missing, unsupported, timed out, crashed, or incomplete fail closed instead of being reported as clean.
             </p>
             <label className={fieldClass}>
               Metadata JSON
