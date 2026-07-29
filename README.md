@@ -194,9 +194,10 @@ alone is not exploit proof; use the finding detail page and retest history to in
 
 ### Test AI systems
 
-> **Preview:** AI Gate and Model Intake are preview surfaces for this release. Deterministic
-> real-stack smoke cases run in PR and release workflows, but their complete release-level E2E
-> matrices are not yet implemented.
+> **Preview:** AI Gate remains a preview surface for this release. Model Intake now implements the
+> complete acquisition, generated-evidence, no-egress inspection, evaluation, signed-admission, and
+> revocation framework; production approval still requires operator-supplied tools, trust roots,
+> runtime images, benchmarks, and evidence for the exact model and deployment.
 
 AI Gate supports chat APIs, RAG APIs, agent traces, MCP traces, and embeddable widgets. In the UI:
 
@@ -211,10 +212,11 @@ Production AI targets require explicit confirmation. See
 
 ### Check a model artifact
 
-Open **Model Intake** to resolve a model reference, provide optional metadata, checksums, detached
-signatures, and trust anchors, preview the trust policy, and submit a non-executing artifact check.
-Results include provenance, serialization risk, license posture, model-card controls, and a
-deployment decision.
+Open **Model Intake** to resolve a model reference, provide policy and trust evidence, and queue a
+provider-neutral admission review. It supports Hugging Face, HTTPS, S3, GCS, Azure Blob, and bound
+OCI/MLflow HTTPS exports; performs complete acquisition and generated static checks; can require the
+no-egress sandbox and embedding/vector/graph evaluation; and emits a signed, revocable deployment
+admission bound to the exact artifact and evidence digests.
 
 ### Run Continuous ASM
 

@@ -1,10 +1,12 @@
 # Model Intake Security Review and Implementation Roadmap
 
-**Status:** Audit and target-state design; no application-code changes are authorized by this document
+**Status:** Implemented product roadmap with operational model-approval gates remaining per deployment
 
 **Reviewed checkout:** `239f887d9f10e997b9844c916c28073fab71ee79`
 
 **Review date:** 2026-07-28
+
+**Implementation completion review:** 2026-07-29
 
 **Scope:** ShakerScan Model Intake, CodeRankEmbed, CodeSage Base v2, CodeSage Large v2, and the knowledge-graph/vector-embedding deployment path
 
@@ -41,7 +43,11 @@ pin a revision, select an artifact, download a bounded prefix, inspect several f
 enough bytes are present, verify detached signatures with configured trust material, apply policy profiles,
 record evidence, and produce a deployment decision.
 
-It is not yet sufficient as the sole corporate approval control for these three models.
+The text below preserves the point-in-time audit of checkout `239f887`. The implementation completed after
+that audit is summarized in section 2.1. Statements phrased as “current condition” in sections 6–7 describe
+the reviewed checkout, not the post-roadmap implementation.
+
+The original checkout was not sufficient as the sole corporate approval control for these three models.
 
 The most important reasons are:
 
@@ -69,6 +75,51 @@ The recommended admission order is:
 
 Until those conditions are met, the correct corporate decision for all three models is **conditional hold**,
 not unconditional approval.
+
+### 2.1 Implementation completion addendum
+
+ShakerScan now implements the roadmap as a model-agnostic admission framework rather than as logic tied to
+CodeRankEmbed or CodeSage. The named models remain immediate validation targets, but the same contracts accept
+other Hugging Face repositories, HTTPS artifacts, S3, GCS, Azure Blob, OCI registry exports, MLflow exports,
+and future source adapters.
+
+Implemented controls include:
+
+- Every-hop SSRF policy, DNS/IP validation and pinning, redirect limits, cross-origin credential stripping,
+  HTTPS/private-network policy, exact host/port allowlists, and approval-gated network exceptions.
+- Complete streamed acquisition, full SHA-256, content-addressed quarantine, byte/file quotas, safe retention
+  preview/execution, and complete pinned Hugging Face repository snapshots.
+- Complete normalized manifests, custom-code/`auto_map` inventory, recursive ZIP/TAR analysis, and traversal,
+  symlink, device, collision, archive-bomb, nested-archive, and unsafe-serialization gates.
+- Generated evidence contracts for pickle semantics, Python AST, secrets, malware rules, CycloneDX SBOM,
+  dependencies/SCA adapters, native binaries, and licenses. Caller assertions remain `declared`; they are not
+  silently promoted to generated evidence.
+- Fail-closed ModelScan, Fickling, ClamAV, Gitleaks, Syft, Trivy, OSV-Scanner, and pip-audit adapters. Missing
+  binaries, bad schemas, empty output, timeout, crash, and incomplete coverage cannot satisfy a required gate.
+- Atomic detached-signature trust decisions and offline DSSE/in-toto subject verification, with explicit
+  transparency-log non-support where no trusted inclusion bundle verifier is configured.
+- A separate non-root, read-only, capability-free, no-egress sandbox service with CPU, memory, PID, scratch,
+  and wall-time limits. It performs safe-format semantic inspection and prohibits executable serialization;
+  operator-provided runtime images remain required for actual custom-code model loading.
+- A provider-neutral, content-free embedding/data-plane evaluator for retrieval quality, vector validity,
+  dimensionality, collisions, poisoning, sensitive/ACL leakage, tenant boundaries, runtime stability,
+  latency/RSS, graph authorization, deletion receipts, cache authorization context, and index/model digest
+  compatibility. Raw benchmark vectors are request-transient and are not persisted in scan options.
+- Canonical signed admission statements bound to artifact, snapshot, scanner, sandbox, attestation,
+  evaluation, findings, and policy digests; deployment verification uses operator trust roots and exact
+  expected subjects.
+- A durable admission registry with active/denied/reassessment-required/revoked/expired/superseded states,
+  event history, automatic worker registration, expiry, scoped trigger ingestion, immediate high-consequence
+  revocation, and deploy-time active-registry enforcement.
+- UI/API visibility for provider capabilities, complete acquisition, generated scanners, sandbox and
+  evaluation gates, signed admission, admission age/reassessment/expiry, and evaluation metrics.
+
+The framework deliberately does not fabricate external evidence. A production profile still blocks until
+the operator supplies the pinned scanner binaries/rule databases, an organization-controlled signing key and
+deployment trust roots, a purpose-built runtime image for the chosen model loader, a versioned corporate
+synthetic benchmark, application/vector-store observations, and the required human/legal/privacy approvals.
+Likewise, the CodeRankEmbed and CodeSage model-specific runbooks are not marked complete until real controlled
+runs produce the required evidence. These are operational admission inputs, not missing model-specific code.
 
 ## 3. Review principles
 
@@ -1151,6 +1202,10 @@ Owners must decide and record:
 ## 19. Definition of done
 
 Model Intake is ready to act as a production admission control only when all of the following are true:
+
+The product mechanisms for the items below are implemented. The boxes intentionally remain an
+**admission-run checklist**: they are checked separately for each exact model, runtime, corpus, environment,
+and deployment. Shipping the mechanism is not evidence that a particular model passed it.
 
 - [ ] All URLs are acquired through a tested SSRF-resistant, restricted egress boundary.
 - [ ] The complete immutable repository and artifacts are captured and fully hashed.

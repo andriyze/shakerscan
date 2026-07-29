@@ -2115,7 +2115,8 @@ def test_model_intake_capabilities_endpoint_is_provider_neutral():
     assert result["schema_version"] == "model-intake-source-adapters/v1"
     assert adapters["huggingface"]["repository_snapshot"] == "implemented"
     assert adapters["http"]["artifact_acquisition"] == "implemented"
-    assert adapters["oci"]["artifact_acquisition"] == "unsupported"
+    assert adapters["oci"]["artifact_acquisition"] == "implemented"
+    assert adapters["mlflow"]["artifact_acquisition"] == "implemented"
 
 
 def test_huggingface_resolver_prefills_hash_license_and_dependency_inventory(monkeypatch):

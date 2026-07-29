@@ -611,39 +611,46 @@ reports are available via `/scans/{id}/ai-redteam-report` and a CI/CD `deploymen
 
 ### 11.2 Model Intake
 
-Model Intake (`scanner/scanner_tools/model_intake.py`) statically vets model artifacts **without
-importing or executing model code**. The public request accepts the artifact and metadata sources,
-checksum, detached signature value/URL, public key value/URL, RSA padding/hash/payload selection,
-trusted key material or fingerprints, saved trust-anchor IDs, model card, deployment approval,
-policy profile/exceptions, approval receipt, `require_*` gates, timeout, and download cap. The
-authoritative request schema is `ModelIntakeScanRequest` in `api/api.py`.
+Model Intake (`scanner/scanner_tools/model_intake.py`) is a provider-neutral model admission pipeline.
+It resolves and completely acquires immutable subjects, creates content-addressed quarantine objects and
+repository manifests, runs generated static evidence, optionally invokes a separate no-egress semantic
+sandbox and content-free embedding/data-plane evaluation, and emits a signed, revocable decision package.
+It never imports publisher model code in the API or worker process. A purpose-built isolated runtime image
+is still required when a model-specific approval procedure requires actual custom-code load/inference.
 
 > **Signature/provenance (R1, shipped 2026-06-24).** Model Intake performs real detached-signature
 > verification (Ed25519 / RSA-PSS / ECDSA via the `cryptography` lib) over the artifact or its digest
 > when a public key + signature are supplied (`signature_public_key`/`_url`, `signature_value`/
 > `signature_url`); `require_cryptographic_signature_verification` makes a metadata-only claim fail.
 > Metadata booleans such as `sigstore_verified: true` are treated as **claims**, never as cryptographic
-> proof. (A cosign/Sigstore-rekor transparency-log layer is an optional future add-on.)
+> proof. Offline DSSE/in-toto subject verification is supported. A policy requiring transparency evidence
+> fails closed unless an independently trusted transparency verifier/bundle is available.
 
 Checks include:
 - **Unsafe serialization** — flags pickle-like formats (`.pkl`, `.pickle`, `.joblib`, `.pt`, `.pth`,
   `.ckpt`, `.bin`, `.mar`) vs. safer ones (`.safetensors`, `.onnx`, `.tflite`, `.gguf`); scans for
   pickle opcode markers and suspicious loader markers (`os.system`, `subprocess`, `eval`/`exec`,
   `pickle.loads`, network downloaders, base64 decode).
-- **Archive payload analysis** — enumerates `.tar.gz`/`.zip` contents and flags executable extensions
-  without decompressing/running anything.
+- **Archive payload analysis** — recursively inspects ZIP and TAR families without extraction, enforcing
+  entry/depth/expanded-size/ratio bounds and rejecting traversal, links, devices, collisions, nested unsafe
+  serialization, and executables.
 - **Provenance & integrity** — checksum (`sha256`) verification; signature/attestation **presence**;
   **claimed** signature/provenance metadata; **cryptographic** detached-signature verification
   (Ed25519/RSA-PSS/ECDSA via the `cryptography` lib, over the artifact or its digest); Hugging Face
   reference normalization.
-- **Governance evidence** — model card presence, license policy (permissive vs. restrictive),
-  SBOM/AIBOM, malware-scan evidence, security-eval evidence, deployment restrictions, monitoring plan,
-  and deployment approval.
+- **Generated evidence** — normalized fail-closed adapters for model/pickle scanners, Python AST, secrets,
+  malware, CycloneDX SBOM/SCA, native binaries, licenses, plus explicit tool/rules/version/coverage status.
+- **Model/application evaluation** — computes retrieval quality, vector integrity, poisoning, ACL/tenant and
+  sensitive-data leakage, stability, capacity, graph boundaries, deletion receipts, cache context, and
+  index/model digest compatibility without persisting source text or benchmark vectors.
+- **Admission lifecycle** — signs the complete decision, registers it durably, enforces exact subjects at
+  deployment, and supports expiry, supersession, reassessment triggers, revocation, and audit history.
 
 Saved trust anchors can be created, updated/deactivated, selected by policy, and previewed before a
-scan. `POST /model-intake/resolve` normalizes HTTP, Hugging Face, S3, GCS, Azure, OCI, and MLflow-like
-references and returns bounded candidate metadata; native authenticated byte fetching remains
-provider-dependent. Completed intake scans expose a dedicated evidence export.
+scan. `POST /model-intake/resolve` normalizes HTTP, Hugging Face, S3, GCS, Azure, OCI, and MLflow
+references. OCI/MLflow use an operator gateway or signed HTTPS export bound to the exact provider subject
+and expected digest, so provider credentials never enter scanner output. Completed scans expose a
+content-free evidence export and durable admission lifecycle APIs.
 
 Result shape: `model_intake.checks.*`, `aibom`, `supply_chain`, `summary` (with the `decision`), and
 `artifact`. Findings are stored with `tool = model_intake` and filter independently through
@@ -976,7 +983,10 @@ State-changing commands are not exposed. See [`docs/read-only-mcp.md`](read-only
 **Model Intake**: `POST /model-intake/resolve` · `POST /model-intake/scan` ·
 `POST /model-intake/targets/{id}/rescan` · `GET|POST /model-intake/trust-anchors` ·
 `PATCH|DELETE /model-intake/trust-anchors/{id}` ·
-`GET /model-intake/scans/{id}/evidence-export`
+`GET /model-intake/scans/{id}/evidence-export` · `GET /model-intake/capabilities` ·
+`POST /model-intake/admission/verify` · `GET /model-intake/admissions` ·
+`GET /model-intake/admissions/{id}` · `POST /model-intake/admissions/{id}/revoke` ·
+`POST /model-intake/reassessment/events` · `POST /model-intake/retention/cleanup`
 
 **Governance (deployment gate)**: `GET|POST /policy-profiles` · `PATCH|DELETE /policy-profiles/{id}` ·
 `GET|POST /finding-exceptions` · `PATCH|DELETE /finding-exceptions/{id}` ·
@@ -1186,8 +1196,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 257 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 214 | `api/api.py` |
+| Public REST operations | 264 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 221 | `api/api.py` |
 | Check families | 14 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 13 | `api/command_arsenal.py` |
@@ -1196,13 +1206,13 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Scanner wrapper commands | 26 | `scanner.sh` |
 | Make targets | 11 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
-| Runtime environment keys | 265 | Python sources + Compose manifests |
-| Scanner modules | 83 | `scanner/scanner_tools/` |
+| Runtime environment keys | 278 | Python sources + Compose manifests |
+| Scanner modules | 92 | `scanner/scanner_tools/` |
 | UI pages | 31 | `ui/src/app/` |
 | Skills | 6 | `skills/` |
 | Slash commands | 15 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
-| Durable tables | 53 | `db/init.sql` + migrations |
+| Durable tables | 55 | `db/init.sql` + migrations |
 
 ### Public REST Operations
 
@@ -1354,7 +1364,14 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `GET` | `/gungnir/status` | `gungnir_status` |
 | `POST` | `/gungnir/stop` | `gungnir_stop` |
 | `GET` | `/health` | `health` |
+| `POST` | `/model-intake/admission/verify` | `verify_model_intake_admission` |
+| `GET` | `/model-intake/admissions` | `list_model_intake_admissions` |
+| `GET` | `/model-intake/admissions/{admission_id}` | `get_model_intake_admission` |
+| `POST` | `/model-intake/admissions/{admission_id}/revoke` | `revoke_model_intake_admission` |
+| `GET` | `/model-intake/capabilities` | `model_intake_capabilities` |
+| `POST` | `/model-intake/reassessment/events` | `create_model_intake_reassessment_event` |
 | `POST` | `/model-intake/resolve` | `resolve_model_intake` |
+| `POST` | `/model-intake/retention/cleanup` | `cleanup_model_intake_quarantine` |
 | `POST` | `/model-intake/scan` | `scan_model_intake` |
 | `GET` | `/model-intake/scans/{scan_id}/evidence-export` | `get_model_intake_evidence_export` |
 | `POST` | `/model-intake/targets/{target_id}/rescan` | `rescan_model_intake_target` |
@@ -1910,7 +1927,18 @@ Only key names and declaring sources are documented; secret values are never rea
 | `MINIO_PORT` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `MINIO_ROOT_PASSWORD` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `MINIO_ROOT_USER` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `MODEL_INTAKE_ADMISSION_SIGNING_KEY_PEM` | `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml`, `scanner/scanner_tools/model_intake_admission.py` |
+| `MODEL_INTAKE_ADMISSION_TRUSTED_PUBLIC_KEYS` | `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner_tools/model_intake_admission.py` |
+| `MODEL_INTAKE_ALLOWED_HOSTS` | `scanner/scanner_tools/model_intake_acquisition.py` |
+| `MODEL_INTAKE_ALLOWED_PORTS` | `scanner/scanner_tools/model_intake_acquisition.py` |
+| `MODEL_INTAKE_ALLOW_INSECURE_HTTP` | `scanner/scanner_tools/model_intake_acquisition.py` |
 | `MODEL_INTAKE_ALLOW_LOCAL_FILES` | `scanner/scanner_tools/model_intake.py` |
+| `MODEL_INTAKE_ALLOW_PRIVATE_NETWORKS` | `scanner/scanner_tools/model_intake_acquisition.py` |
+| `MODEL_INTAKE_QUARANTINE_DIR` | `api/api.py`, `scanner/scanner_tools/model_intake.py` |
+| `MODEL_INTAKE_SANDBOX_NETWORK_MODE` | `scanner/scanner_tools/model_intake_sandbox.py` |
+| `MODEL_INTAKE_SANDBOX_NO_NEW_PRIVILEGES` | `scanner/scanner_tools/model_intake_sandbox.py` |
+| `MODEL_INTAKE_SANDBOX_QUEUE_DIR` | `scanner/scanner_tools/model_intake.py` |
+| `MODEL_INTAKE_SANDBOX_READ_ONLY` | `scanner/scanner_tools/model_intake_sandbox.py` |
 | `MODEL_INTAKE_TRUSTED_KEY_SHA256` | `scanner/scanner_tools/model_intake.py` |
 | `MODEL_INTAKE_TRUSTED_SIGNING_KEYS` | `scanner/scanner_tools/model_intake.py` |
 | `NUCLEI_TEMPLATES` | `scanner/scanner_tools/nuclei.py` |
@@ -1919,6 +1947,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `PARALLEL_SHARD_REQUEUE_DELAY_SECONDS` | `api/worker.py` |
 | `PARALLEL_SHARD_SLOT_TTL_SECONDS` | `api/worker.py` |
 | `PARENT_STALE_TIMEOUT_MINUTES` | `api/api.py` |
+| `PATH` | `scanner/scanner_tools/model_intake_scanners.py` |
 | `PLAYWRIGHT_BROWSERS_PATH` | `api/ai_gate/targets/widget_playwright.py`, `scanner/scanner_tools/form_login.py`, `scanner/scanner_tools/http_scanner.py` |
 | `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD` | `scanner/scanner_tools/form_login.py`, `scanner/scanner_tools/http_scanner.py` |
 | `POSTGRES_PASSWORD` | `docker-compose.release.yml`, `docker-compose.yml` |
@@ -2026,6 +2055,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_TRUSTED_REMOTE_TRANSPORT` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_UI_PORT` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_WORKER_FAIL_CLOSED` | `api/worker.py` |
+| `SHAKERSCAN_WORKER_IMAGE_DIGEST` | `scanner/scanner_tools/model_intake_scanners.py` |
 | `SHAKERSCAN_WORKER_MEM_LIMIT_GB` | `api/api.py` |
 | `SMART_BOLA_LANE_MAX_SECONDS` | `scanner/scanner.py` |
 | `TESTSSL_BIN` | `scanner/scanner_tools/tls_scanner.py` |
@@ -2113,7 +2143,7 @@ Only key names and declaring sources are documented; secret values are never rea
 
 ### Scanner Module Inventory
 
-`access_control_checks.py`, `active_checks.py`, `active_enrichment_policy.py`, `active_prioritization.py`, `adaptive_throttle.py`, `ai_classifier.py`, `api_auth.py`, `api_security.py`, `approval_checks.py`, `asn_discovery.py`, `attack_chains.py`, `attempt_telemetry.py`, `auth_session.py`, `benchmark_summary.py`, `bola_comparison.py`, `brand_protection.py`, `breach_check.py`, `build_fingerprint.py`, `cancellation.py`, `client_side.py`, `common.py`, `completion_status.py`, `compliance_mapper.py`, `coverage_tracker.py`, `credential_check.py`, `critical_checks.py`, `ct_monitor.py`, `data_exposure.py`, `deduplication_engine.py`, `deserialization_tests.py`, `discovery.py`, `dns_enhanced.py`, `dom_xss_analyzer.py`, `domain_intel.py`, `exposure_markers.py`, `file_upload_tests.py`, `finding_correlator.py`, `finding_validator.py`, `focused_scope.py`, `form_login.py`, `github_recon.py`, `google_dorking.py`, `gopher_payloads.py`, `graphql_schema_recovery.py`, `grpc_discovery.py`, `gungnir.py`, `har_discovery.py`, `hash_routes.py`, `health_check.py`, `http_scanner.py`, `hunter_summary.py`, `infrastructure_checks.py`, `injection_extra_checks.py`, `ip_reputation.py`, `logging_checks.py`, `model_intake.py`, `network_services.py`, `nmap.py`, `nuclei.py`, `oauth_auth.py`, `oauth_tests.py`, `phase4_checks.py`, `proof_of_exploit.py`, `race_condition_tests.py`, `remediation_kb.py`, `report_gating.py`, `request_meter.py`, `resource_propagation.py`, `sarif_output.py`, `scan_delta.py`, `signal_types.py`, `smtp_scanner.py`, `ssh_scanner.py`, `subdomain_discovery.py`, `subfinder.py`, `tech_discovery.py`, `tls_scanner.py`, `vendor_risk.py`, `verification_engine.py`, `verification_phase.py`, `wayback_discovery.py`, `webhook_checks.py`, `websocket_security.py`
+`access_control_checks.py`, `active_checks.py`, `active_enrichment_policy.py`, `active_prioritization.py`, `adaptive_throttle.py`, `ai_classifier.py`, `api_auth.py`, `api_security.py`, `approval_checks.py`, `asn_discovery.py`, `attack_chains.py`, `attempt_telemetry.py`, `auth_session.py`, `benchmark_summary.py`, `bola_comparison.py`, `brand_protection.py`, `breach_check.py`, `build_fingerprint.py`, `cancellation.py`, `client_side.py`, `common.py`, `completion_status.py`, `compliance_mapper.py`, `coverage_tracker.py`, `credential_check.py`, `critical_checks.py`, `ct_monitor.py`, `data_exposure.py`, `deduplication_engine.py`, `deserialization_tests.py`, `discovery.py`, `dns_enhanced.py`, `dom_xss_analyzer.py`, `domain_intel.py`, `exposure_markers.py`, `file_upload_tests.py`, `finding_correlator.py`, `finding_validator.py`, `focused_scope.py`, `form_login.py`, `github_recon.py`, `google_dorking.py`, `gopher_payloads.py`, `graphql_schema_recovery.py`, `grpc_discovery.py`, `gungnir.py`, `har_discovery.py`, `hash_routes.py`, `health_check.py`, `http_scanner.py`, `hunter_summary.py`, `infrastructure_checks.py`, `injection_extra_checks.py`, `ip_reputation.py`, `logging_checks.py`, `model_intake.py`, `model_intake_acquisition.py`, `model_intake_admission.py`, `model_intake_archives.py`, `model_intake_attestation.py`, `model_intake_evaluation.py`, `model_intake_registry.py`, `model_intake_retention.py`, `model_intake_sandbox.py`, `model_intake_scanners.py`, `network_services.py`, `nmap.py`, `nuclei.py`, `oauth_auth.py`, `oauth_tests.py`, `phase4_checks.py`, `proof_of_exploit.py`, `race_condition_tests.py`, `remediation_kb.py`, `report_gating.py`, `request_meter.py`, `resource_propagation.py`, `sarif_output.py`, `scan_delta.py`, `signal_types.py`, `smtp_scanner.py`, `ssh_scanner.py`, `subdomain_discovery.py`, `subfinder.py`, `tech_discovery.py`, `tls_scanner.py`, `vendor_risk.py`, `verification_engine.py`, `verification_phase.py`, `wayback_discovery.py`, `webhook_checks.py`, `websocket_security.py`
 
 ### Durable Storage Inventory
 
@@ -2148,6 +2178,8 @@ Only key names and declaring sources are documented; secret values are never rea
 | `findings` | `db/init.sql` |
 | `fleet_node_events` | `db/init.sql` |
 | `hypotheses` | `api/retest_contract.py` |
+| `model_intake_admission_events` | `db/init.sql` |
+| `model_intake_admissions` | `db/init.sql` |
 | `model_intake_trust_anchors` | `db/init.sql` |
 | `node_credentials` | `db/init.sql` |
 | `node_join_tokens` | `db/init.sql` |
