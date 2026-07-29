@@ -11180,7 +11180,12 @@ async def create_model_intake_reassessment_event(
 
 
 @app.post("/model-intake/retention/cleanup")
-async def cleanup_model_intake_quarantine(request: ModelIntakeRetentionCleanupRequest):
+async def cleanup_model_intake_quarantine(
+    request: ModelIntakeRetentionCleanupRequest,
+    http_request: Request,
+):
+    if not request.dry_run:
+        _require_model_intake_operator(http_request)
     quarantine_root = Path(
         os.getenv("MODEL_INTAKE_QUARANTINE_DIR") or RESULTS_DIR / "model-intake-quarantine"
     )

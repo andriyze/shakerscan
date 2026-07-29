@@ -17983,6 +17983,25 @@ def test_model_admission_revocation_audits_actual_previous_status(monkeypatch):
     assert captured["args"][4] == "a" * 64
 
 
+def test_model_intake_retention_execution_requires_operator_auth(monkeypatch):
+    monkeypatch.delenv("MODEL_INTAKE_OPERATOR_TOKEN", raising=False)
+    monkeypatch.delenv("FLEET_OPERATOR_TOKEN", raising=False)
+    request = api_module.ModelIntakeRetentionCleanupRequest(
+        dry_run=False,
+        confirm_delete=True,
+        actor="security",
+        reason="approved retention cleanup",
+    )
+
+    with pytest.raises(api_module.HTTPException) as exc_info:
+        asyncio.run(api_module.cleanup_model_intake_quarantine(
+            request,
+            _fleet_request(host="203.0.113.2", scheme="https"),
+        ))
+
+    assert exc_info.value.status_code == 403
+
+
 def test_model_intake_queue_persists_content_free_evaluation_not_vectors(monkeypatch):
     captured = {}
 
