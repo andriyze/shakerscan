@@ -1293,6 +1293,13 @@ export interface ModelIntakeScanRequest {
   signature_payload?: string
   signature_trusted_keys?: string | string[]
   signature_trusted_key_sha256?: string | string[]
+  attestation_bundle_json?: Record<string, unknown>
+  attestation_trusted_keys?: string | string[]
+  attestation_trusted_key_sha256?: string | string[]
+  allowed_attestation_predicate_types?: string[]
+  required_attestation_builder_ids?: string[]
+  require_attestation_verification?: boolean
+  require_transparency_log?: boolean
   trust_anchor_ids?: string[]
   model_card_url?: string
   deployment_approved?: boolean

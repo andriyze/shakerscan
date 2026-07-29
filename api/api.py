@@ -3633,6 +3633,13 @@ class ModelIntakeScanRequest(BaseModel):
     # Scalar-or-list, matching the scanner internals (_iter_str_tokens / _iter_pem_blocks).
     signature_trusted_keys: Optional[Union[str, list[str]]] = None
     signature_trusted_key_sha256: Optional[Union[str, list[str]]] = None
+    attestation_bundle_json: Optional[dict[str, Any]] = None
+    attestation_trusted_keys: Optional[Union[str, list[str]]] = None
+    attestation_trusted_key_sha256: Optional[Union[str, list[str]]] = None
+    allowed_attestation_predicate_types: Optional[list[str]] = None
+    required_attestation_builder_ids: Optional[list[str]] = None
+    require_attestation_verification: bool = False
+    require_transparency_log: bool = False
     trust_anchor_ids: Optional[list[str]] = None
     model_card_url: Optional[str] = None
     deployment_approved: bool = False
@@ -10898,6 +10905,13 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
         "signature_payload": request.signature_payload,
         "signature_trusted_keys": request.signature_trusted_keys,
         "signature_trusted_key_sha256": request.signature_trusted_key_sha256,
+        "attestation_bundle_json": request.attestation_bundle_json,
+        "attestation_trusted_keys": request.attestation_trusted_keys,
+        "attestation_trusted_key_sha256": request.attestation_trusted_key_sha256,
+        "allowed_attestation_predicate_types": request.allowed_attestation_predicate_types,
+        "required_attestation_builder_ids": request.required_attestation_builder_ids,
+        "require_attestation_verification": request.require_attestation_verification,
+        "require_transparency_log": request.require_transparency_log,
         "trust_anchor_ids": request.trust_anchor_ids or [],
         "model_card_url": request.model_card_url,
         "deployment_approved": request.deployment_approved,

@@ -56,6 +56,13 @@ except ModuleNotFoundError as exc:
     from model_intake_registry import adapter_capabilities as _adapter_capabilities
 
 try:
+    from scanner.scanner_tools.model_intake_attestation import verify_dsse_in_toto as _verify_dsse_in_toto
+except ModuleNotFoundError as exc:
+    if exc.name not in {"scanner", "scanner.scanner_tools"}:
+        raise
+    from model_intake_attestation import verify_dsse_in_toto as _verify_dsse_in_toto
+
+try:
     from scanner.redaction import (
         SENSITIVE_KEYS,
         SENSITIVE_KEY_FRAGMENTS,
@@ -2481,6 +2488,22 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         artifact_subject_complete=bool(artifact_meta.get("complete")) or not artifact_truncated,
     )
     signature_status = _signature_verification_status(metadata, signature_url, signed_by, crypto_signature_result)
+    attestation_bundle = options.get("attestation_bundle_json") or metadata.get("attestation_bundle_json")
+    attestation_verification = _verify_dsse_in_toto(
+        attestation_bundle,
+        subject_sha256=sha256,
+        subject_complete=bool(artifact_meta.get("complete")) or not artifact_truncated,
+        trusted_public_keys=options.get("attestation_trusted_keys") or options.get("signature_trusted_keys"),
+        trusted_key_sha256=options.get("attestation_trusted_key_sha256") or options.get("signature_trusted_key_sha256"),
+        allowed_predicate_types=options.get("allowed_attestation_predicate_types"),
+        required_builder_ids=options.get("required_attestation_builder_ids"),
+        require_transparency_log=_boolish(options.get("require_transparency_log")),
+    ) if attestation_bundle else {
+        "schema_version": "model-intake-attestation/v1",
+        "provenance_class": "externally_attested",
+        "status": "SKIPPED_BY_POLICY",
+        "verified": False,
+    }
     license_policy = _license_policy(license_ref)
     sbom_policy = _sbom_policy(sbom_ref, strict=strict_governance)
     try:
@@ -2554,6 +2577,17 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             artifact_ref=artifact_ref,
             evidence={"artifact": name, "model_card_url": model_card, "model_card_fetch": model_card_fetch_meta},
             remediation="Publish the model card at an approved reachable HTTPS destination and rerun intake.",
+        ))
+
+    if _boolish(options.get("require_attestation_verification")) and not attestation_verification.get("verified"):
+        findings.append(_finding(
+            finding_id="attestation_not_verified",
+            title="Model provenance attestation did not pass verification",
+            severity="high",
+            description="Policy requires an offline-verifiable DSSE in-toto attestation bound to the exact complete artifact digest and an operator-trusted signing key.",
+            artifact_ref=artifact_ref,
+            evidence={"artifact": name, "attestation": attestation_verification},
+            remediation="Provide a DSSE in-toto/SLSA statement signed by an allowed key, with the exact artifact SHA-256 subject and required builder/transparency evidence.",
         ))
 
     if artifact_meta.get("error"):
@@ -3286,6 +3320,8 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         "signature_transparency_log_verified": signature_status.get("transparency_log_verified"),
         "signature_attestation_subject_digest_match": signature_status.get("attestation_subject_digest_match"),
         "signature_crypto_attempted": signature_status.get("crypto_attempted"),
+        "attestation_verification_status": attestation_verification.get("status"),
+        "attestation_verified": bool(attestation_verification.get("verified")),
         "expected_hash_present": bool(expected_sha256),
         "deployment_approved": deployment_approved,
         "license_present": bool(license_ref),
@@ -3312,6 +3348,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         "model_intake": {
             "summary": summary,
             "source_adapter": source_adapter,
+            "attestation": redact_model_intake_value(attestation_verification),
             "runtime_destinations": runtime_destinations,
             "artifact": {
                 "name": name,
