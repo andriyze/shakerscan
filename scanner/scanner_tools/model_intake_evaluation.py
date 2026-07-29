@@ -72,14 +72,14 @@ def evaluate(spec: Any, *, artifact_sha256: str | None) -> dict[str, Any]:
     blockers: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
 
-    def block(code: str, detail: str, case: Any = None) -> None:
-        item = {"code": code, "detail": detail}
+    def block(code: str, detail: str, case: Any = None, *, domain: str = "security") -> None:
+        item = {"code": code, "detail": detail, "domain": domain}
         if case is not None:
             item["case_ref"] = _case_ref(case)
         blockers.append(item)
 
-    def warn(code: str, detail: str, case: Any = None) -> None:
-        item = {"code": code, "detail": detail}
+    def warn(code: str, detail: str, case: Any = None, *, domain: str = "security") -> None:
+        item = {"code": code, "detail": detail, "domain": domain}
         if case is not None:
             item["case_ref"] = _case_ref(case)
         warnings.append(item)
@@ -123,7 +123,16 @@ def evaluate(spec: Any, *, artifact_sha256: str | None) -> dict[str, Any]:
         }
 
     thresholds = spec.get("thresholds") if isinstance(spec.get("thresholds"), dict) else {}
-    required_thresholds = {"min_recall_at_k", "max_acl_leaks", "max_poisoned_top_k_rate", "min_stability_cosine"}
+    raw_scope = spec.get("suite_scope")
+    scope = {
+        str(item).strip().lower()
+        for item in (raw_scope if isinstance(raw_scope, list) else [raw_scope or "security"])
+        if str(item).strip()
+    }
+    quality_required = bool(spec.get("require_quality")) or "quality" in scope
+    required_thresholds = {"max_acl_leaks", "max_poisoned_top_k_rate", "min_stability_cosine"}
+    if quality_required:
+        required_thresholds.add("min_recall_at_k")
     missing_thresholds = sorted(required_thresholds - set(thresholds))
     if missing_thresholds:
         block("thresholds_missing", f"Predeclared thresholds are missing: {', '.join(missing_thresholds)}")
@@ -216,9 +225,15 @@ def evaluate(spec: Any, *, artifact_sha256: str | None) -> dict[str, Any]:
 
     mean_recall = sum(recalls) / len(recalls) if recalls else None
     if mean_recall is None:
-        block("retrieval_quality_not_measured", "No query supplied non-empty relevant_ids.")
+        if quality_required:
+            block("retrieval_quality_not_measured", "No query supplied non-empty relevant_ids.", domain="quality")
+        else:
+            warn("retrieval_quality_not_measured", "Retrieval quality was not measured by this security suite.", domain="quality")
     elif mean_recall < threshold_number("min_recall_at_k", 1.0):
-        block("retrieval_quality_below_threshold", f"Mean recall@k {mean_recall:.6f} is below the threshold.")
+        if quality_required:
+            block("retrieval_quality_below_threshold", f"Mean recall@k {mean_recall:.6f} is below the threshold.", domain="quality")
+        else:
+            warn("retrieval_quality_below_threshold", f"Mean recall@k {mean_recall:.6f} is below the optional quality threshold.", domain="quality")
     if acl_leaks > int(threshold_number("max_acl_leaks", 0)):
         block("acl_retrieval_leak", f"Observed {acl_leaks} unauthorized retrieval results.")
     if sensitive_leaks:
@@ -257,10 +272,16 @@ def evaluate(spec: Any, *, artifact_sha256: str | None) -> dict[str, Any]:
         block("stability_below_threshold", f"Minimum cross-runtime cosine {minimum_stability:.6f} is below policy.")
     p95_latency = _percentile(latency_values, 0.95)
     if thresholds.get("max_p95_latency_ms") is not None and (p95_latency is None or p95_latency > threshold_number("max_p95_latency_ms", 0)):
-        block("latency_threshold_exceeded", "P95 latency is absent or exceeds policy.")
+        if quality_required:
+            block("latency_threshold_exceeded", "P95 latency is absent or exceeds policy.", domain="quality")
+        else:
+            warn("latency_threshold_exceeded", "P95 latency is absent or exceeds the optional quality threshold.", domain="quality")
     peak_rss = max(peak_rss_values) if peak_rss_values else None
     if thresholds.get("max_peak_rss_mb") is not None and (peak_rss is None or peak_rss > threshold_number("max_peak_rss_mb", 0)):
-        block("memory_threshold_exceeded", "Peak RSS is absent or exceeds policy.")
+        if quality_required:
+            block("memory_threshold_exceeded", "Peak RSS is absent or exceeds policy.", domain="quality")
+        else:
+            warn("memory_threshold_exceeded", "Peak RSS is absent or exceeds the optional quality threshold.", domain="quality")
 
     controls = spec.get("data_plane_controls") if isinstance(spec.get("data_plane_controls"), dict) else {}
     index_digest = str(controls.get("index_model_sha256") or "").lower()
@@ -281,13 +302,31 @@ def evaluate(spec: Any, *, artifact_sha256: str | None) -> dict[str, Any]:
     if not controls.get("retrieved_content_is_untrusted"):
         warn("retrieved_content_boundary_missing", "Downstream handling did not confirm retrieved text is isolated from trusted instructions.")
 
-    status = "FAIL" if blockers else "WARNING" if warnings else "PASS"
+    security_blockers = [item for item in blockers if item.get("domain") != "quality"]
+    quality_blockers = [item for item in blockers if item.get("domain") == "quality"]
+    security_warnings = [item for item in warnings if item.get("domain") != "quality"]
+    quality_warnings = [item for item in warnings if item.get("domain") == "quality"]
+    security_status = "FAIL" if security_blockers else "WARNING" if security_warnings else "PASS"
+    quality_status = (
+        "FAIL" if quality_blockers
+        else "WARNING" if quality_warnings or not quality_required
+        else "PASS"
+    )
+    status = (
+        "FAIL" if blockers
+        else "WARNING" if security_warnings or (quality_required and quality_warnings)
+        else "PASS"
+    )
     report = {
         "schema_version": SCHEMA_VERSION,
         "provenance_class": "shakerscan_generated",
         "status": status,
         "suite_id": str(spec.get("suite_id") or ""),
         "suite_version": str(spec.get("suite_version") or ""),
+        "suite_scope": sorted(scope),
+        "quality_required": quality_required,
+        "security_status": security_status,
+        "quality_status": quality_status,
         "artifact_sha256": artifact_sha256,
         "target_sha256": artifact_sha256,
         "input_spec_sha256": _digest(spec),

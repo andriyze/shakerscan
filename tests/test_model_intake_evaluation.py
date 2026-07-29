@@ -5,6 +5,7 @@ def _spec():
     return {
         "suite_id": "corp-embedding-security",
         "suite_version": "1",
+        "suite_scope": ["security", "quality"],
         "thresholds": {
             "expected_dimension": 2,
             "min_recall_at_k": 1.0,
@@ -65,8 +66,22 @@ def test_evaluation_requires_predeclared_thresholds_and_stability():
 
     assert report["status"] == "FAIL"
     assert "thresholds_missing" in codes
-    assert "retrieval_quality_not_measured" in codes
+    assert "retrieval_quality_not_measured" not in codes
+    assert "retrieval_quality_not_measured" in {item["code"] for item in report["warnings"]}
     assert "stability_not_measured" in codes
+
+
+def test_quality_is_separate_unless_suite_explicitly_requires_it():
+    spec = _spec()
+    spec["suite_scope"] = ["security"]
+    spec["queries"][0]["relevant_ids"] = []
+
+    report = evaluate(spec, artifact_sha256="a" * 64)
+
+    assert report["security_status"] == "PASS"
+    assert report["quality_status"] == "WARNING"
+    assert report["status"] == "PASS"
+    assert not [item for item in report["blockers"] if item["domain"] == "quality"]
 
 
 def test_evaluation_rejects_malformed_thresholds_without_crashing():
