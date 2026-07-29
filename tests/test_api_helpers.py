@@ -188,6 +188,22 @@ def test_fleet_operator_actions_are_loopback_or_explicit_token_only(monkeypatch)
         api_module._require_fleet_operator(_fleet_request(host="203.0.113.2"))
     assert exc.value.status_code == 403
 
+
+def test_model_intake_operator_actions_require_loopback_or_explicit_token(monkeypatch):
+    monkeypatch.delenv("MODEL_INTAKE_OPERATOR_TOKEN", raising=False)
+    monkeypatch.delenv("FLEET_OPERATOR_TOKEN", raising=False)
+    assert api_module._require_model_intake_operator(_fleet_request(host="127.0.0.1", scheme="http")) is None
+
+    with pytest.raises(api_module.HTTPException) as exc:
+        api_module._require_model_intake_operator(_fleet_request(host="203.0.113.2", scheme="https"))
+    assert exc.value.status_code == 403
+
+    token = "m" * 32
+    monkeypatch.setenv("MODEL_INTAKE_OPERATOR_TOKEN", token)
+    assert api_module._require_model_intake_operator(
+        _fleet_request(host="203.0.113.2", scheme="https", authorization=f"Bearer {token}")
+    ) is None
+
     # A loopback host publish does not make Docker-network peers trusted.
     monkeypatch.setenv("SHAKERSCAN_BIND_HOST", "127.0.0.1")
     with pytest.raises(api_module.HTTPException) as exc:
@@ -17812,7 +17828,10 @@ def test_model_admission_endpoint_fails_closed_without_deployment_trust_roots(mo
     )
 
     with pytest.raises(api_module.HTTPException) as exc_info:
-        asyncio.run(api_module.verify_model_intake_admission(request))
+        asyncio.run(api_module.verify_model_intake_admission(
+            request,
+            _fleet_request(host="127.0.0.1", scheme="http"),
+        ))
 
     assert exc_info.value.status_code == 503
 
@@ -17857,7 +17876,10 @@ def test_model_admission_endpoint_passes_exact_deployment_subjects(monkeypatch):
         expected_repository_snapshot_sha256="B" * 64,
     )
 
-    result = asyncio.run(api_module.verify_model_intake_admission(request))
+    result = asyncio.run(api_module.verify_model_intake_admission(
+        request,
+        _fleet_request(host="127.0.0.1", scheme="http"),
+    ))
 
     assert result["verified"] is True
     assert result["status"] == "PASS"
@@ -17891,8 +17913,70 @@ def test_model_reassessment_event_requires_known_trigger_and_explicit_scope():
     )
     assert request.trigger_type == "cve_update"
     with pytest.raises(api_module.HTTPException) as exc_info:
-        asyncio.run(api_module.create_model_intake_reassessment_event(request))
+        asyncio.run(api_module.create_model_intake_reassessment_event(
+            request,
+            _fleet_request(host="127.0.0.1", scheme="http"),
+        ))
     assert exc_info.value.status_code == 400
+
+    global_request = api_module.ModelIntakeReassessmentEventRequest(
+        trigger_type="cve_update",
+        actor="security",
+        reason="new runtime vulnerability",
+        all_active=True,
+    )
+    with pytest.raises(api_module.HTTPException) as exc_info:
+        asyncio.run(api_module.create_model_intake_reassessment_event(
+            global_request,
+            _fleet_request(host="127.0.0.1", scheme="http"),
+        ))
+    assert exc_info.value.status_code == 400
+    assert "confirm_all_active" in str(exc_info.value.detail)
+
+
+def test_model_admission_revocation_audits_actual_previous_status(monkeypatch):
+    captured = {}
+
+    class Conn:
+        async def fetchrow(self, query, *_args):
+            assert "candidate.previous_status" in query
+            return {
+                "id": "00000000-0000-4000-8000-000000000001",
+                "status": "revoked",
+                "statement_sha256": "a" * 64,
+                "previous_status": "reassessment_required",
+            }
+
+        async def execute(self, query, *_args):
+            captured["query"] = query
+            captured["args"] = _args
+
+    class Acquire:
+        async def __aenter__(self):
+            return Conn()
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Pool:
+        def acquire(self):
+            return Acquire()
+
+    monkeypatch.setattr(api_module, "db_pool", Pool())
+    request = api_module.ModelIntakeAdmissionRevokeRequest(
+        actor="security",
+        reason="new critical runtime CVE",
+    )
+
+    result = asyncio.run(api_module.revoke_model_intake_admission(
+        "00000000-0000-4000-8000-000000000001",
+        request,
+        _fleet_request(host="127.0.0.1", scheme="http"),
+    ))
+
+    assert result["status"] == "revoked"
+    assert captured["args"][3] == "reassessment_required"
+    assert captured["args"][4] == "a" * 64
 
 
 def test_model_intake_queue_persists_content_free_evaluation_not_vectors(monkeypatch):

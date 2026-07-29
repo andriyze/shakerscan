@@ -3773,6 +3773,8 @@ class ModelIntakeReassessmentEventRequest(BaseModel):
     artifact_sha256: Optional[str] = Field(default=None, pattern="^[0-9a-fA-F]{64}$")
     statement_sha256: Optional[str] = Field(default=None, pattern="^[0-9a-fA-F]{64}$")
     all_active: bool = False
+    confirm_all_active: bool = False
+    approval_receipt_id: Optional[str] = None
     evidence_digest: Optional[str] = Field(default=None, pattern="^[0-9a-fA-F]{64}$")
     metadata_json: dict[str, Any] = Field(default_factory=dict)
 
@@ -5001,6 +5003,40 @@ def _require_fleet_operator(request: Request) -> None:
     presented = _fleet_bearer_credential(request)
     if not secrets.compare_digest(presented, expected):
         raise HTTPException(status_code=403, detail="fleet operator authentication failed")
+
+
+def _require_model_intake_operator(request: Request) -> None:
+    """Authorize deployment verification and Model Intake trust mutations."""
+    peer = getattr(getattr(request, "client", None), "host", None)
+    try:
+        if peer and ipaddress.ip_address(peer).is_loopback:
+            return
+    except ValueError:
+        pass
+    configured_bind = os.environ.get("SHAKERSCAN_BIND_HOST", "").strip()
+    try:
+        configured_bind_ip = ipaddress.ip_address(configured_bind) if configured_bind else None
+    except ValueError:
+        configured_bind_ip = None
+    trusted_tailscale_http = bool(
+        os.environ.get("SHAKERSCAN_TRUSTED_REMOTE_TRANSPORT", "").strip().lower() == "tailscale"
+        and isinstance(configured_bind_ip, ipaddress.IPv4Address)
+        and configured_bind_ip in ipaddress.ip_network("100.64.0.0/10")
+    )
+    if request.url.scheme != "https" and not trusted_tailscale_http:
+        raise HTTPException(
+            status_code=403,
+            detail="Model Intake operator access requires loopback, verified Tailscale, or authenticated HTTPS",
+        )
+    expected = (
+        os.environ.get("MODEL_INTAKE_OPERATOR_TOKEN", "").strip()
+        or os.environ.get("FLEET_OPERATOR_TOKEN", "").strip()
+    )
+    if len(expected) < 32:
+        raise HTTPException(status_code=403, detail="Model Intake operator access is not enabled remotely")
+    presented = _fleet_bearer_credential(request)
+    if not secrets.compare_digest(presented, expected):
+        raise HTTPException(status_code=403, detail="Model Intake operator authentication failed")
 
 
 def _fleet_connection_bundle() -> dict[str, Any]:
@@ -10439,7 +10475,8 @@ async def list_model_intake_trust_anchors(active_only: bool = True):
 
 
 @app.post("/model-intake/trust-anchors")
-async def create_model_intake_trust_anchor(req: ModelIntakeTrustAnchorRequest):
+async def create_model_intake_trust_anchor(req: ModelIntakeTrustAnchorRequest, http_request: Request):
+    _require_model_intake_operator(http_request)
     _validate_model_intake_trust_anchor_request(req)
     async with db_pool.acquire() as conn:
         try:
@@ -10464,7 +10501,8 @@ async def create_model_intake_trust_anchor(req: ModelIntakeTrustAnchorRequest):
 
 
 @app.patch("/model-intake/trust-anchors/{anchor_id}")
-async def update_model_intake_trust_anchor(anchor_id: str, req: ModelIntakeTrustAnchorRequest):
+async def update_model_intake_trust_anchor(anchor_id: str, req: ModelIntakeTrustAnchorRequest, http_request: Request):
+    _require_model_intake_operator(http_request)
     _validate_model_intake_trust_anchor_request(req)
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -10490,7 +10528,8 @@ async def update_model_intake_trust_anchor(anchor_id: str, req: ModelIntakeTrust
 
 
 @app.delete("/model-intake/trust-anchors/{anchor_id}")
-async def deactivate_model_intake_trust_anchor(anchor_id: str):
+async def deactivate_model_intake_trust_anchor(anchor_id: str, http_request: Request):
+    _require_model_intake_operator(http_request)
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow(
             """
@@ -10935,8 +10974,9 @@ async def model_intake_capabilities():
 
 
 @app.post("/model-intake/admission/verify")
-async def verify_model_intake_admission(request: ModelIntakeAdmissionVerifyRequest):
+async def verify_model_intake_admission(request: ModelIntakeAdmissionVerifyRequest, http_request: Request):
     """Fail closed unless a package authorizes these exact deployment subjects."""
+    _require_model_intake_operator(http_request)
     trusted_keys = _model_admission_trusted_keys()
     if not trusted_keys:
         raise HTTPException(
@@ -11038,25 +11078,37 @@ async def get_model_intake_admission(admission_id: str):
 
 
 @app.post("/model-intake/admissions/{admission_id}/revoke")
-async def revoke_model_intake_admission(admission_id: str, request: ModelIntakeAdmissionRevokeRequest):
+async def revoke_model_intake_admission(
+    admission_id: str,
+    request: ModelIntakeAdmissionRevokeRequest,
+    http_request: Request,
+):
+    _require_model_intake_operator(http_request)
     try:
         admission_uuid = uuid.UUID(admission_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid admission id")
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow(
-            """UPDATE model_intake_admissions
+            """WITH candidate AS (
+                   SELECT id, status AS previous_status
+                   FROM model_intake_admissions
+                   WHERE id=$1 AND status IN ('active','reassessment_required')
+                   FOR UPDATE
+               )
+               UPDATE model_intake_admissions AS admission
                SET status='revoked', revoked_at=NOW(), revoked_by=$2, revocation_reason=$3, updated_at=NOW()
-               WHERE id=$1 AND status IN ('active','reassessment_required')
-               RETURNING id, status, statement_sha256""",
+               FROM candidate
+               WHERE admission.id=candidate.id
+               RETURNING admission.id, admission.status, admission.statement_sha256, candidate.previous_status""",
             admission_uuid, request.actor, request.reason,
         )
         if row:
             await conn.execute(
                 """INSERT INTO model_intake_admission_events
                    (admission_id,event_type,actor,reason,previous_status,new_status,evidence_digest)
-                   VALUES ($1,'revoked',$2,$3,'active','revoked',$4)""",
-                admission_uuid, request.actor, request.reason, row["statement_sha256"],
+                   VALUES ($1,'revoked',$2,$3,$4,'revoked',$5)""",
+                admission_uuid, request.actor, request.reason, row["previous_status"], row["statement_sha256"],
             )
     if not row:
         raise HTTPException(status_code=409, detail="Admission is absent or no longer deployable")
@@ -11064,39 +11116,60 @@ async def revoke_model_intake_admission(admission_id: str, request: ModelIntakeA
 
 
 @app.post("/model-intake/reassessment/events")
-async def create_model_intake_reassessment_event(request: ModelIntakeReassessmentEventRequest):
+async def create_model_intake_reassessment_event(
+    request: ModelIntakeReassessmentEventRequest,
+    http_request: Request,
+):
+    _require_model_intake_operator(http_request)
     if not request.all_active and not request.artifact_sha256 and not request.statement_sha256:
         raise HTTPException(status_code=400, detail="Select artifact_sha256, statement_sha256, or explicitly set all_active")
+    if request.all_active and not request.confirm_all_active:
+        raise HTTPException(status_code=400, detail="all_active requires confirm_all_active=true")
     new_status = _model_admission_triggered_status(request.trigger_type, request.requested_action)
-    conditions = ["status IN ('active','reassessment_required')"]
+    conditions = ["admission.status IN ('active','reassessment_required')"]
     args: list[Any] = []
     if request.artifact_sha256:
         args.append(request.artifact_sha256.lower())
-        conditions.append(f"artifact_sha256=${len(args)}")
+        conditions.append(f"admission.artifact_sha256=${len(args)}")
     if request.statement_sha256:
         args.append(request.statement_sha256.lower())
-        conditions.append(f"statement_sha256=${len(args)}")
+        conditions.append(f"admission.statement_sha256=${len(args)}")
     args.extend([new_status, request.actor, request.reason])
     status_arg, actor_arg, reason_arg = len(args) - 2, len(args) - 1, len(args)
     async with db_pool.acquire() as conn:
         await _expire_model_intake_admissions(conn)
+        if request.all_active:
+            await _validate_approval_receipt_for_action(
+                conn,
+                request.approval_receipt_id,
+                action_name="model_intake.reassessment.all_active",
+                risk_tier="active",
+                always_require_receipt=True,
+            )
         rows = await conn.fetch(
-            f"""UPDATE model_intake_admissions
+            f"""WITH candidate AS (
+                    SELECT admission.id, admission.status AS previous_status
+                    FROM model_intake_admissions AS admission
+                    WHERE {' AND '.join(conditions)}
+                    FOR UPDATE
+                )
+                UPDATE model_intake_admissions AS admission
                 SET status=${status_arg},
                     revoked_at=CASE WHEN ${status_arg}='revoked' THEN NOW() ELSE revoked_at END,
                     revoked_by=CASE WHEN ${status_arg}='revoked' THEN ${actor_arg} ELSE revoked_by END,
                     revocation_reason=CASE WHEN ${status_arg}='revoked' THEN ${reason_arg} ELSE revocation_reason END,
                     updated_at=NOW()
-                WHERE {' AND '.join(conditions)}
-                RETURNING id, statement_sha256""",
+                FROM candidate
+                WHERE admission.id=candidate.id
+                RETURNING admission.id, admission.statement_sha256, candidate.previous_status""",
             *args,
         )
         for row in rows:
             await conn.execute(
                 """INSERT INTO model_intake_admission_events
                    (admission_id,event_type,trigger_type,actor,reason,previous_status,new_status,evidence_digest,metadata_json)
-                   VALUES ($1,'reassessment_trigger',$2,$3,$4,'active',$5,$6,$7::jsonb)""",
-                row["id"], request.trigger_type, request.actor, request.reason, new_status,
+                   VALUES ($1,'reassessment_trigger',$2,$3,$4,$5,$6,$7,$8::jsonb)""",
+                row["id"], request.trigger_type, request.actor, request.reason, row["previous_status"], new_status,
                 request.evidence_digest or row["statement_sha256"], json.dumps(request.metadata_json),
             )
     return {"affected": len(rows), "status": new_status, "trigger_type": request.trigger_type}
