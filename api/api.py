@@ -81,6 +81,13 @@ except ModuleNotFoundError:
     from api.model_intake_admissions import REASSESSMENT_TRIGGERS, triggered_status as _model_admission_triggered_status
 
 try:
+    from scanner_tools.model_intake_retention import execute_cleanup as _execute_model_quarantine_cleanup
+    from scanner_tools.model_intake_retention import plan_cleanup as _plan_model_quarantine_cleanup
+except ModuleNotFoundError:
+    from scanner.scanner_tools.model_intake_retention import execute_cleanup as _execute_model_quarantine_cleanup
+    from scanner.scanner_tools.model_intake_retention import plan_cleanup as _plan_model_quarantine_cleanup
+
+try:
     from constants import SMART_SCAN_BUDGETS, resolve_scan_budget, resolve_or_consume_budget
 except ModuleNotFoundError as exc:
     if exc.name != "constants":
@@ -3776,6 +3783,19 @@ class ModelIntakeReassessmentEventRequest(BaseModel):
         if normalized not in REASSESSMENT_TRIGGERS:
             raise ValueError("unsupported Model Intake reassessment trigger")
         return normalized
+
+
+class ModelIntakeRetentionCleanupRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    dry_run: bool = True
+    retention_days: int = Field(default=30, ge=1, le=3650)
+    max_total_bytes: Optional[int] = Field(default=None, ge=0, le=10_000_000_000_000)
+    plan_sha256: Optional[str] = Field(default=None, pattern="^[0-9a-fA-F]{64}$")
+    confirm_delete: bool = False
+    actor: Optional[str] = Field(default=None, max_length=200)
+    reason: Optional[str] = Field(default=None, max_length=2000)
+    approval_receipt_id: Optional[str] = None
 
 
 class ModelIntakeTrustAnchorRequest(BaseModel):
@@ -11064,6 +11084,73 @@ async def create_model_intake_reassessment_event(request: ModelIntakeReassessmen
                 request.evidence_digest or row["statement_sha256"], json.dumps(request.metadata_json),
             )
     return {"affected": len(rows), "status": new_status, "trigger_type": request.trigger_type}
+
+
+@app.post("/model-intake/retention/cleanup")
+async def cleanup_model_intake_quarantine(request: ModelIntakeRetentionCleanupRequest):
+    quarantine_root = Path(
+        os.getenv("MODEL_INTAKE_QUARANTINE_DIR") or RESULTS_DIR / "model-intake-quarantine"
+    )
+    async with db_pool.acquire() as conn:
+        await _expire_model_intake_admissions(conn)
+        rows = await conn.fetch(
+            """SELECT artifact_sha256, repository_snapshot_sha256
+               FROM model_intake_admissions
+               WHERE status IN ('active','reassessment_required')"""
+        )
+        protected = {
+            str(value).lower()
+            for row in rows
+            for value in (row["artifact_sha256"], row["repository_snapshot_sha256"])
+            if value
+        }
+        plan = await asyncio.to_thread(
+            _plan_model_quarantine_cleanup,
+            quarantine_root,
+            protected_digests=protected,
+            retention_days=request.retention_days,
+            max_total_bytes=request.max_total_bytes,
+        )
+        plan_sha256 = _content_free_hash(plan)
+        plan["plan_sha256"] = plan_sha256
+        if request.dry_run:
+            plan["dry_run"] = True
+            return plan
+        if not request.confirm_delete or not request.actor or not request.reason:
+            raise HTTPException(status_code=400, detail="Execution requires confirm_delete, actor, and reason")
+        if not request.plan_sha256 or not secrets.compare_digest(request.plan_sha256.lower(), plan_sha256):
+            raise HTTPException(status_code=409, detail="Cleanup plan changed; request a new dry-run preview")
+        approval_context = await _validate_approval_receipt_for_action(
+            conn,
+            request.approval_receipt_id,
+            action_name="model_intake.retention_cleanup",
+            risk_tier="active",
+            always_require_receipt=True,
+        )
+        execution = await asyncio.to_thread(_execute_model_quarantine_cleanup, quarantine_root, plan)
+        command_result = await _record_command_result(
+            conn,
+            command="model_intake.retention_cleanup",
+            status="completed" if not execution["skipped"] else "partial",
+            risk_tier="active",
+            approval_receipt_id=(approval_context or {}).get("approval_receipt_id"),
+            scope_receipt_id=(approval_context or {}).get("scope_receipt_id"),
+            operator_message=f"Deleted {execution['deleted_count']} expired Model Intake quarantine object(s)",
+            result_json={
+                "actor": request.actor,
+                "reason": request.reason,
+                "plan_sha256": plan_sha256,
+                "deleted_count": execution["deleted_count"],
+                "deleted_bytes": execution["deleted_bytes"],
+                "skipped_count": len(execution["skipped"]),
+            },
+        )
+    return {
+        **execution,
+        "dry_run": False,
+        "plan_sha256": plan_sha256,
+        "operation_id": str(command_result["id"]) if command_result else None,
+    }
 
 
 async def _enrich_model_intake_scan_request(request: ModelIntakeScanRequest) -> ModelIntakeScanRequest:
