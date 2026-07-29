@@ -65,6 +65,11 @@ except ModuleNotFoundError:
     from scanner.scanner_tools.model_intake_scanners import scanner_adapter_readiness as _model_scanner_adapter_readiness
 
 try:
+    from scanner_tools.model_intake_providers import provider_readiness as _model_provider_readiness
+except ModuleNotFoundError:
+    from scanner.scanner_tools.model_intake_providers import provider_readiness as _model_provider_readiness
+
+try:
     from scanner_tools.model_intake_admission import (
         trusted_public_keys_from_env as _model_admission_trusted_keys,
         verify_package as _verify_model_admission_package,
@@ -10986,6 +10991,12 @@ async def model_intake_capabilities():
 async def model_intake_scanner_readiness():
     """Report installed evidence adapters, immutable rule/database identity, and readiness."""
     return await asyncio.to_thread(_model_scanner_adapter_readiness)
+
+
+@app.get("/model-intake/providers/readiness")
+async def model_intake_provider_readiness():
+    """Separate execution, evaluation, policy, and report providers from evidence scanners."""
+    return await asyncio.to_thread(_model_provider_readiness)
 
 
 @app.post("/model-intake/admission/verify")

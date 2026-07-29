@@ -2119,6 +2119,22 @@ def test_model_intake_capabilities_endpoint_is_provider_neutral():
     assert adapters["mlflow"]["artifact_acquisition"] == "implemented"
 
 
+def test_model_intake_provider_readiness_separates_non_scanner_capabilities(monkeypatch):
+    monkeypatch.setattr(
+        api_module,
+        "_model_provider_readiness",
+        lambda: {
+            "schema_version": "model-intake-provider-readiness/v1",
+            "status": "READY",
+            "providers": [{"id": "embedding-security-evaluator", "kind": "evaluation_provider"}],
+        },
+    )
+
+    result = asyncio.run(api_module.model_intake_provider_readiness())
+
+    assert result["providers"][0]["kind"] == "evaluation_provider"
+
+
 def test_huggingface_resolver_prefills_hash_license_and_dependency_inventory(monkeypatch):
     model_info = {
         "sha": "abc123",
