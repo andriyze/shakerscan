@@ -63,6 +63,13 @@ except ModuleNotFoundError as exc:
     from model_intake_attestation import verify_dsse_in_toto as _verify_dsse_in_toto
 
 try:
+    from scanner.scanner_tools.model_intake_archives import inspect_archive as _inspect_complete_archive
+except ModuleNotFoundError as exc:
+    if exc.name not in {"scanner", "scanner.scanner_tools"}:
+        raise
+    from model_intake_archives import inspect_archive as _inspect_complete_archive
+
+try:
     from scanner.redaction import (
         SENSITIVE_KEYS,
         SENSITIVE_KEY_FRAGMENTS,
@@ -2308,8 +2315,8 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
     )
     quarantine_path = str(artifact_meta.get("_quarantine_path") or "").strip()
     zip_info = (
-        _inspect_zip_path(quarantine_path)
-        if quarantine_path and artifact_bytes[:4] == b"PK\x03\x04"
+        _inspect_complete_archive(quarantine_path)
+        if quarantine_path
         else _inspect_zip(artifact_bytes)
         if artifact_bytes[:4] == b"PK\x03\x04"
         else {"is_zip": False, "entries": []}
@@ -2683,6 +2690,32 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
                 "case_collisions": repository_manifest.get("case_collisions") or [],
             },
             remediation="Reject the repository until every path is normalized, unique, and represented in a complete immutable manifest.",
+        ))
+
+    if zip_info.get("is_archive") and not zip_info.get("complete", True):
+        findings.append(_finding(
+            finding_id="archive_inspection_incomplete",
+            title="Model archive inspection did not complete",
+            severity="high",
+            description="The complete artifact exceeded a recursive archive safety budget or contained an unreadable nested archive.",
+            artifact_ref=artifact_ref,
+            evidence={"archive": zip_info},
+            remediation="Reject the package, reduce archive nesting/expansion, and rerun until every member is inventoried within policy bounds.",
+        ))
+
+    if zip_info.get("path_traversal_entries") or zip_info.get("archive_link_entries") or zip_info.get("archive_device_entries"):
+        findings.append(_finding(
+            finding_id="unsafe_archive_members",
+            title="Model archive contains unsafe extraction members",
+            severity="critical",
+            description="The archive contains traversal paths, links, or device/FIFO entries that must never be extracted into a runtime filesystem.",
+            artifact_ref=artifact_ref,
+            evidence={
+                "path_traversal_entries": zip_info.get("path_traversal_entries") or [],
+                "archive_link_entries": zip_info.get("archive_link_entries") or [],
+                "archive_device_entries": zip_info.get("archive_device_entries") or [],
+            },
+            remediation="Remove unsafe members and republish a flat, immutable package before intake.",
         ))
 
     if repository_manifest.get("custom_code_required"):
