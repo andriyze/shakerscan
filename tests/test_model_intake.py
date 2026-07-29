@@ -660,6 +660,50 @@ def test_model_intake_records_fetch_failures_as_findings(tmp_path):
     assert result["model_intake"]["artifact"]["fetch"]["error"].startswith("FileNotFoundError")
 
 
+def test_model_intake_generates_digest_bound_embedding_and_data_plane_evidence(tmp_path):
+    artifact = tmp_path / "model.safetensors"
+    artifact.write_bytes(_safetensors_bytes())
+    digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    evaluation_spec = {
+        "suite_id": "corp-embedding-security",
+        "suite_version": "1",
+        "thresholds": {
+            "expected_dimension": 2,
+            "min_recall_at_k": 1,
+            "max_acl_leaks": 0,
+            "max_poisoned_top_k_rate": 0,
+            "min_stability_cosine": 0.999,
+        },
+        "documents": [{"id": "doc", "vector": [1, 0], "tenant": "tenant-a", "classification": "internal", "allowed_principals": ["alice"]}],
+        "queries": [{"id": "query", "vector": [1, 0], "tenant": "tenant-a", "principal": "alice", "relevant_ids": ["doc"]}],
+        "runtime_runs": [
+            {"case_id": "query", "runtime": "cpu", "vector": [1, 0]},
+            {"case_id": "query", "runtime": "gpu", "vector": [1, 0]},
+        ],
+        "data_plane_controls": {
+            "index_model_sha256": digest,
+            "authorization_before_search": True,
+            "cache_key_includes_auth_context": True,
+            "retrieved_content_is_untrusted": True,
+        },
+    }
+
+    result = asyncio.run(run_model_intake_scan(str(artifact), _local_options({
+        "require_deployment_approval": False,
+        "require_signature": False,
+        "require_hash": False,
+        "require_model_governance": False,
+        "evaluation_spec_json": evaluation_spec,
+        "require_generated_evaluation": True,
+    })))
+
+    evaluation = result["model_intake"]["generated_evaluation"]
+    assert evaluation["status"] == "PASS"
+    assert evaluation["artifact_sha256"] == digest
+    assert result["model_intake"]["summary"]["generated_evaluation_status"] == "PASS"
+    assert "model_intake:generated_evaluation_non_pass" not in {item["id"] for item in result["findings"]}
+
+
 def test_model_intake_blocks_local_file_reads_by_default(tmp_path):
     artifact = tmp_path / "model.safetensors"
     artifact.write_bytes(b"safe tensor bytes")

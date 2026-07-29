@@ -71,6 +71,11 @@ except ModuleNotFoundError:
     )
 
 try:
+    from scanner_tools.model_intake_evaluation import evaluate as _evaluate_model_intake_request
+except ModuleNotFoundError:
+    from scanner.scanner_tools.model_intake_evaluation import evaluate as _evaluate_model_intake_request
+
+try:
     from constants import SMART_SCAN_BUDGETS, resolve_scan_budget, resolve_or_consume_budget
 except ModuleNotFoundError as exc:
     if exc.name != "constants":
@@ -3695,6 +3700,9 @@ class ModelIntakeScanRequest(BaseModel):
     run_dynamic_sandbox: bool = False
     require_dynamic_sandbox: bool = False
     sandbox_timeout_seconds: int = Field(default=120, ge=1, le=600)
+    evaluation_spec_json: Optional[dict[str, Any]] = None
+    run_generated_evaluation: bool = False
+    require_generated_evaluation: bool = False
     require_signed_admission: bool = False
     admission_expires_days: int = Field(default=30, ge=1, le=365)
     timeout_seconds: int = Field(default=20, ge=1, le=120)
@@ -10936,6 +10944,12 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
     job_id = str(uuid.uuid4())
     scan_id = str(uuid.uuid4())
     target_name = request.name or f"Model artifact: {_short_url_label(artifact_ref)}"
+    generated_evaluation_report = None
+    if request.run_generated_evaluation or request.require_generated_evaluation or request.evaluation_spec_json is not None:
+        generated_evaluation_report = _evaluate_model_intake_request(
+            request.evaluation_spec_json,
+            artifact_sha256=(request.expected_sha256 or "").strip().lower() or None,
+        )
     options = {
         "run_kind": "model_intake",
         "artifact_name": request.name,
@@ -10980,6 +10994,11 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
         "run_dynamic_sandbox": request.run_dynamic_sandbox,
         "require_dynamic_sandbox": request.require_dynamic_sandbox,
         "sandbox_timeout_seconds": request.sandbox_timeout_seconds,
+        # The raw benchmark may contain embeddings. Only the content-free,
+        # digest-bound computed report may enter durable scan options/Redis.
+        "generated_evaluation_report": generated_evaluation_report,
+        "run_generated_evaluation": request.run_generated_evaluation,
+        "require_generated_evaluation": request.require_generated_evaluation,
         "require_signed_admission": request.require_signed_admission,
         "admission_expires_days": request.admission_expires_days,
         "timeout_seconds": request.timeout_seconds,
@@ -11110,6 +11129,7 @@ def _model_intake_evidence_export(scan_payload: dict[str, Any], *, generated_at:
     checks = model_intake.get("checks") if isinstance(model_intake.get("checks"), dict) else {}
     aibom = model_intake.get("aibom") if isinstance(model_intake.get("aibom"), dict) else {}
     supply_chain = model_intake.get("supply_chain") if isinstance(model_intake.get("supply_chain"), dict) else {}
+    generated_evaluation = model_intake.get("generated_evaluation") if isinstance(model_intake.get("generated_evaluation"), dict) else {}
     runtime_destinations = model_intake.get("runtime_destinations") if isinstance(model_intake.get("runtime_destinations"), list) else []
     artifact_ref = str(summary.get("artifact_ref") or scan_payload.get("target_url") or "")
     artifact = {
@@ -11144,6 +11164,7 @@ def _model_intake_evidence_export(scan_payload: dict[str, Any], *, generated_at:
         "sbom_policy_status": summary.get("sbom_policy_status"),
         "malware_policy_status": summary.get("malware_policy_status"),
         "eval_policy_status": summary.get("eval_policy_status"),
+        "generated_evaluation_status": summary.get("generated_evaluation_status"),
         "approval_policy_status": summary.get("approval_policy_status"),
         "aibom_completeness": summary.get("aibom_completeness"),
     }
@@ -11153,6 +11174,7 @@ def _model_intake_evidence_export(scan_payload: dict[str, Any], *, generated_at:
         "aibom_hash": _content_free_hash(aibom),
         "supply_chain_hash": _content_free_hash(supply_chain),
         "runtime_destinations_hash": _content_free_hash(runtime_destinations),
+        "generated_evaluation_hash": _content_free_hash(generated_evaluation),
     }
     runtime_summary = {
         "destination_count": len(runtime_destinations),

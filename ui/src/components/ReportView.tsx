@@ -567,6 +567,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   const modelIntakeChecks = model_intake?.checks || null
   const modelIntakeAibom = model_intake?.aibom || null
   const modelIntakeSupplyChain = model_intake?.supply_chain || null
+  const modelIntakeEvaluation = model_intake?.generated_evaluation || null
   const ai_gate = scanData.ai_gate || null
   const aiGateControlEvidence = ai_gate?.control_evidence || null
   const aiGateDecision = ai_gate?.decision || {}
@@ -1516,6 +1517,34 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                   {modelIntakeSupplyChain?.license_policy?.status || modelIntakeSummary?.license_policy_status || 'unknown'}
                 </div>
               </div>
+            </div>
+          )}
+
+          {modelIntakeEvaluation && modelIntakeEvaluation.status !== 'SKIPPED_BY_POLICY' && (
+            <div className="mt-5 rounded border border-gray-700 bg-gray-900 p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <div className="text-xs text-gray-400">Embedding and data-plane evaluation</div>
+                  <div className="mt-1 text-sm font-semibold text-white">
+                    {modelIntakeEvaluation.suite_id || 'provider-neutral suite'} {modelIntakeEvaluation.suite_version ? `v${modelIntakeEvaluation.suite_version}` : ''}
+                  </div>
+                </div>
+                <span className={`rounded px-2 py-1 text-xs font-semibold ${modelIntakeEvaluation.status === 'PASS' ? 'bg-green-950/50 text-green-300' : modelIntakeEvaluation.status === 'WARNING' ? 'bg-yellow-950/50 text-yellow-300' : 'bg-red-950/50 text-red-300'}`}>
+                  {modelIntakeEvaluation.status}
+                </span>
+              </div>
+              <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+                <div><div className="text-xs text-gray-500">Recall@k</div><div className="text-sm font-semibold text-white">{modelIntakeEvaluation.metrics?.mean_recall_at_k ?? 'not measured'}</div></div>
+                <div><div className="text-xs text-gray-500">ACL leaks</div><div className="text-sm font-semibold text-white">{modelIntakeEvaluation.metrics?.acl_leaks ?? 'not measured'}</div></div>
+                <div><div className="text-xs text-gray-500">Poisoned hit rate</div><div className="text-sm font-semibold text-white">{modelIntakeEvaluation.metrics?.poisoned_top_k_rate ?? 'not measured'}</div></div>
+                <div><div className="text-xs text-gray-500">Min stability</div><div className="text-sm font-semibold text-white">{modelIntakeEvaluation.metrics?.minimum_stability_cosine ?? 'not measured'}</div></div>
+                <div><div className="text-xs text-gray-500">P95 latency</div><div className="text-sm font-semibold text-white">{modelIntakeEvaluation.metrics?.latency_ms?.p95 !== null && modelIntakeEvaluation.metrics?.latency_ms?.p95 !== undefined ? `${modelIntakeEvaluation.metrics.latency_ms.p95} ms` : 'not measured'}</div></div>
+              </div>
+              {Array.isArray(modelIntakeEvaluation.blockers) && modelIntakeEvaluation.blockers.length > 0 && (
+                <ul className="mt-3 space-y-1 text-xs text-red-200">
+                  {modelIntakeEvaluation.blockers.slice(0, 8).map((item: any, index: number) => <li key={`${item.code}-${index}`}>{item.code}: {item.detail}</li>)}
+                </ul>
+              )}
             </div>
           )}
 

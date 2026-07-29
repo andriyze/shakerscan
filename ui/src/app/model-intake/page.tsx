@@ -344,6 +344,9 @@ function ModelIntakeSettingsContent() {
   const [runGeneratedScanners, setRunGeneratedScanners] = useState(false)
   const [runDynamicSandbox, setRunDynamicSandbox] = useState(false)
   const [requireDynamicSandbox, setRequireDynamicSandbox] = useState(false)
+  const [evaluationSpecJson, setEvaluationSpecJson] = useState('')
+  const [runGeneratedEvaluation, setRunGeneratedEvaluation] = useState(false)
+  const [requireGeneratedEvaluation, setRequireGeneratedEvaluation] = useState(false)
   const [requireSignedAdmission, setRequireSignedAdmission] = useState(false)
   const [timeoutSeconds, setTimeoutSeconds] = useState('20')
   const [policyProfile, setPolicyProfile] = useState<string>('production')
@@ -432,6 +435,8 @@ function ModelIntakeSettingsContent() {
     setRunGeneratedScanners(true)
     setRunDynamicSandbox(true)
     setRequireDynamicSandbox(true)
+    setRunGeneratedEvaluation(true)
+    setRequireGeneratedEvaluation(true)
     setRequireSignedAdmission(true)
     setTrustMode('trusted_key_fingerprint')
     setMaxDownloadBytes((current) => {
@@ -514,6 +519,9 @@ function ModelIntakeSettingsContent() {
     setRunGeneratedScanners(payload.run_generated_scanners ?? false)
     setRunDynamicSandbox(payload.run_dynamic_sandbox ?? false)
     setRequireDynamicSandbox(payload.require_dynamic_sandbox ?? false)
+    setEvaluationSpecJson(payload.evaluation_spec_json ? JSON.stringify(payload.evaluation_spec_json, null, 2) : '')
+    setRunGeneratedEvaluation(payload.run_generated_evaluation ?? false)
+    setRequireGeneratedEvaluation(payload.require_generated_evaluation ?? false)
     setRequireSignedAdmission(payload.require_signed_admission ?? false)
     setTimeoutSeconds(String(payload.timeout_seconds || 20))
     if (payload.policy_profile) setPolicyProfile(payload.policy_profile)
@@ -630,6 +638,9 @@ function ModelIntakeSettingsContent() {
       run_generated_scanners: runGeneratedScanners,
       run_dynamic_sandbox: runDynamicSandbox,
       require_dynamic_sandbox: requireDynamicSandbox,
+      evaluation_spec_json: parseOptionalJsonObject(evaluationSpecJson),
+      run_generated_evaluation: runGeneratedEvaluation,
+      require_generated_evaluation: requireGeneratedEvaluation,
       require_signed_admission: requireSignedAdmission,
       timeout_seconds: timeout,
     }
@@ -1591,6 +1602,25 @@ function ModelIntakeSettingsContent() {
             <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
               <input type="checkbox" checked={requireDynamicSandbox} onChange={(e) => { setRequireDynamicSandbox(e.target.checked); if (e.target.checked) setRunDynamicSandbox(true) }} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
               Require sandbox pass for admission
+            </label>
+            <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
+              <input type="checkbox" checked={runGeneratedEvaluation} onChange={(e) => setRunGeneratedEvaluation(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+              Evaluate embeddings and the vector/graph data plane
+            </label>
+            <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
+              <input type="checkbox" checked={requireGeneratedEvaluation} onChange={(e) => { setRequireGeneratedEvaluation(e.target.checked); if (e.target.checked) setRunGeneratedEvaluation(true) }} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+              Require evaluation pass for admission
+            </label>
+            <label className={fieldClass}>
+              Evaluation specification JSON
+              <textarea
+                value={evaluationSpecJson}
+                onChange={(e) => setEvaluationSpecJson(e.target.value)}
+                className={textareaClass}
+                rows={8}
+                placeholder='{"suite_id":"corp-embedding-security","suite_version":"1","thresholds":{"min_recall_at_k":0.8,"max_acl_leaks":0,"max_poisoned_top_k_rate":0,"min_stability_cosine":0.999},"documents":[],"queries":[],"runtime_runs":[],"data_plane_controls":{}}'
+              />
+              <span className="text-xs text-gray-500">Source text is not retained; results contain metrics and hashed case references only.</span>
             </label>
             <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
               <input type="checkbox" checked={requireSignedAdmission} onChange={(e) => setRequireSignedAdmission(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />

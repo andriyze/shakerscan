@@ -92,6 +92,15 @@ except ModuleNotFoundError as exc:
     )
 
 try:
+    from scanner.scanner_tools.model_intake_evaluation import evaluate as _evaluate_model_intake
+    from scanner.scanner_tools.model_intake_evaluation import verify_report as _verify_model_intake_evaluation
+except ModuleNotFoundError as exc:
+    if exc.name not in {"scanner", "scanner.scanner_tools"}:
+        raise
+    from model_intake_evaluation import evaluate as _evaluate_model_intake
+    from model_intake_evaluation import verify_report as _verify_model_intake_evaluation
+
+try:
     from scanner.redaction import (
         SENSITIVE_KEYS,
         SENSITIVE_KEY_FRAGMENTS,
@@ -2602,6 +2611,27 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             "artifact_digest": generated_malware_result.get("subject", {}).get("digest"),
             "provenance_class": "shakerscan_generated",
         }
+    evaluation_spec = options.get("evaluation_spec_json")
+    precomputed_evaluation = options.get("generated_evaluation_report")
+    run_generated_evaluation = _boolish(options.get("run_generated_evaluation")) or isinstance(evaluation_spec, dict)
+    require_generated_evaluation = _boolish(options.get("require_generated_evaluation"))
+    generated_evaluation = (
+        _verify_model_intake_evaluation(
+            precomputed_evaluation,
+            artifact_sha256=sha256 if sha256 and not artifact_truncated else None,
+        )
+        if isinstance(precomputed_evaluation, dict)
+        else _evaluate_model_intake(
+            evaluation_spec,
+            artifact_sha256=sha256 if sha256 and not artifact_truncated else None,
+        )
+        if run_generated_evaluation or require_generated_evaluation
+        else {
+            "schema_version": "model-intake-evaluation/v1",
+            "provenance_class": "shakerscan_generated",
+            "status": "SKIPPED_BY_POLICY",
+        }
+    )
     sbom_policy = _sbom_policy(
         generated_sbom or sbom_ref,
         strict=strict_governance,
@@ -2618,11 +2648,12 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         max_age_days=malware_scan_max_age_days,
         trusted_provenance=bool(generated_malware),
     )
+    effective_eval_evidence = generated_evaluation if generated_evaluation.get("status") != "SKIPPED_BY_POLICY" else eval_ref
     eval_policy = _eval_policy(
-        eval_ref,
+        effective_eval_evidence,
         strict=strict_governance,
         expected_sha256=sha256 or expected_sha256,
-        trusted_provenance=False,
+        trusted_provenance=effective_eval_evidence is generated_evaluation,
     )
     approval_policy = _approval_policy(metadata, deployment_approved=deployment_approved, strict=strict_governance)
     artifact_size, artifact_size_source = _artifact_size_for_inspection(
@@ -2706,6 +2737,21 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             artifact_ref=artifact_ref,
             evidence={"sandbox": dynamic_sandbox},
             remediation="Run the exact quarantined artifact through the no-network sandbox and resolve all format, runtime, isolation, or resource failures.",
+        ))
+
+    if require_generated_evaluation and generated_evaluation.get("status") != "PASS":
+        findings.append(_finding(
+            finding_id="generated_evaluation_non_pass",
+            title="Required model and data-plane evaluation did not pass",
+            severity="high",
+            description=f"The provider-neutral embedding, retrieval, authorization, graph, deletion, stability, poisoning, or capacity evaluation ended with status {generated_evaluation.get('status')}.",
+            artifact_ref=artifact_ref,
+            evidence={
+                "evaluation_status": generated_evaluation.get("status"),
+                "evaluation_evidence_sha256": generated_evaluation.get("evidence_sha256"),
+                "blockers": generated_evaluation.get("blockers", []),
+            },
+            remediation="Run the versioned corporate evaluation suite against the exact artifact and intended data plane, then meet every predeclared threshold.",
         ))
 
     require_signed_admission = _boolish(options.get("require_signed_admission"))
@@ -3210,7 +3256,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             remediation="Record the fine-tuning job, build workflow, runner identity, and attested source revision for reproducibility.",
         ))
 
-    if require_governance and strict_governance and not poisoning_eval_ref and not metadata_unavailable:
+    if require_governance and strict_governance and not poisoning_eval_ref and generated_evaluation.get("status") == "SKIPPED_BY_POLICY" and not metadata_unavailable:
         findings.append(_finding(
             finding_id="missing_poisoning_eval_evidence",
             title="Model poisoning or backdoor eval evidence missing",
@@ -3320,7 +3366,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             remediation="Run malware/YARA scanning against the exact artifact digest and record scanner, engine version, timestamp, and clean status.",
         ))
 
-    if require_governance and not eval_ref and not metadata_unavailable:
+    if require_governance and not effective_eval_evidence and not metadata_unavailable:
         findings.append(_finding(
             finding_id="missing_eval_evidence",
             title="Model security evaluation evidence missing",
@@ -3331,7 +3377,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             remediation="Attach safety/security eval results, red-team coverage, and deployment-specific acceptance criteria.",
         ))
 
-    if require_governance and eval_ref and strict_governance and not eval_policy["valid"] and not metadata_unavailable:
+    if require_governance and effective_eval_evidence and strict_governance and not eval_policy["valid"] and not metadata_unavailable:
         findings.append(_finding(
             finding_id="invalid_security_eval_evidence",
             title="Model security evaluation evidence is incomplete or not bound to the artifact",
@@ -3424,6 +3470,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         generated_evidence_sha256=generated_evidence.get("evidence_sha256"),
         sandbox_evidence_sha256=dynamic_sandbox.get("evidence_sha256"),
         attestation_evidence_sha256=attestation_evidence_sha256,
+        evaluation_evidence_sha256=generated_evaluation.get("evidence_sha256"),
         policy_profile=str(options.get("policy_profile") or deployment_environment or "") or None,
         policy_version=str(metadata.get("policy_version") or metadata.get("approval_policy_version") or "") or None,
         decision=decision["decision"],
@@ -3509,6 +3556,8 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         "attestation_verified": bool(attestation_verification.get("verified")),
         "dynamic_sandbox_status": dynamic_sandbox.get("status"),
         "dynamic_sandbox_evidence_sha256": dynamic_sandbox.get("evidence_sha256"),
+        "generated_evaluation_status": generated_evaluation.get("status"),
+        "generated_evaluation_sha256": generated_evaluation.get("evidence_sha256"),
         "admission_status": admission_package.get("status"),
         "admission_statement_sha256": admission_package.get("statement_sha256"),
         "expected_hash_present": bool(expected_sha256),
@@ -3539,6 +3588,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             "source_adapter": source_adapter,
             "attestation": redact_model_intake_value(attestation_verification),
             "dynamic_sandbox": redact_model_intake_value(dynamic_sandbox),
+            "generated_evaluation": redact_model_intake_value(generated_evaluation),
             "admission": redact_model_intake_value(admission_package),
             "runtime_destinations": runtime_destinations,
             "artifact": {
@@ -3590,7 +3640,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
                     None if metadata_unavailable else (malware_policy["valid"] if strict_governance else bool(malware_scan_ref))
                 ) if require_governance else None,
                 "security_evals": (
-                    None if metadata_unavailable else (eval_policy["valid"] if strict_governance else bool(eval_ref))
+                    None if metadata_unavailable else (eval_policy["valid"] if strict_governance else bool(effective_eval_evidence))
                 ) if require_governance else None,
                 "deployment_restrictions": (None if metadata_unavailable else bool(deployment_restrictions)) if require_governance else None,
                 "monitoring_plan": (None if metadata_unavailable else bool(monitoring_plan)) if require_governance else None,

@@ -35,6 +35,7 @@ def _statement():
         generated_evidence_sha256="c" * 64,
         sandbox_evidence_sha256="d" * 64,
         attestation_evidence_sha256="e" * 64,
+        evaluation_evidence_sha256="1" * 64,
         policy_profile="production",
         policy_version="v1",
         decision="allow",

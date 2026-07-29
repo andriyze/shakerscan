@@ -17798,3 +17798,65 @@ def test_model_admission_endpoint_passes_exact_deployment_subjects(monkeypatch):
     assert captured["trusted_public_keys"] == ["trusted-pem"]
     assert captured["expected_artifact_sha256"] == "a" * 64
     assert captured["expected_repository_snapshot_sha256"] == "b" * 64
+
+
+def test_model_intake_queue_persists_content_free_evaluation_not_vectors(monkeypatch):
+    captured = {}
+
+    class Conn:
+        async def fetchrow(self, _query, *_args):
+            return {"id": "00000000-0000-4000-8000-000000000001"}
+
+        async def execute(self, _query, *_args):
+            captured["stored_options"] = json.loads(_args[4])
+
+    class Acquire:
+        async def __aenter__(self):
+            return Conn()
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Pool:
+        def acquire(self):
+            return Acquire()
+
+    class Redis:
+        def hset(self, *_args, **_kwargs):
+            return None
+
+    async def unchanged(request):
+        return request
+
+    async def no_approval(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(api_module, "db_pool", Pool())
+    monkeypatch.setattr(api_module, "get_redis", lambda: Redis())
+    monkeypatch.setattr(api_module, "enqueue_job", lambda _redis, _queue, job: captured.update({"job": job}))
+    monkeypatch.setattr(api_module, "_enrich_model_intake_scan_request", unchanged)
+    monkeypatch.setattr(api_module, "_expand_model_intake_policy_profile_requirements", unchanged)
+    monkeypatch.setattr(api_module, "_expand_model_intake_saved_trust_anchors", unchanged)
+    monkeypatch.setattr(api_module, "_require_approval_receipt_if_policy_enabled", no_approval)
+    monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", no_approval)
+    monkeypatch.setattr(api_module, "_record_command_result", no_approval)
+    monkeypatch.setattr(api_module, "_evaluate_model_intake_request", lambda _spec, artifact_sha256: {
+        "schema_version": "model-intake-evaluation/v1",
+        "status": "PASS",
+        "artifact_sha256": artifact_sha256,
+        "evidence_sha256": "c" * 64,
+    })
+    request = api_module.ModelIntakeScanRequest(
+        artifact_url="https://models.example/model.safetensors",
+        expected_sha256="a" * 64,
+        run_generated_evaluation=True,
+        evaluation_spec_json={"documents": [{"vector": [0.123456789], "source_text": "synthetic secret"}]},
+    )
+
+    asyncio.run(api_module.scan_model_intake(request))
+
+    serialized = json.dumps(captured)
+    assert "0.123456789" not in serialized
+    assert "synthetic secret" not in serialized
+    assert "evaluation_spec_json" not in captured["stored_options"]
+    assert captured["stored_options"]["generated_evaluation_report"]["status"] == "PASS"
