@@ -1173,7 +1173,8 @@ function ScanDetailContent() {
         if (data?.status === 'completed' || data?.status === 'failed') {
           refreshDeploymentDecision()
         }
-        if (data?.status === 'running' || data?.status === 'pending') {
+        const isModelIntake = data?.run_kind === 'model_intake' || data?.scan_type === 'model_intake'
+        if (data?.status === 'running' || data?.status === 'pending' || isModelIntake) {
           try {
             const logData = await getScanLogs(scanId, 200)
             setLogs(logData?.lines || [])
@@ -1214,6 +1215,35 @@ function ScanDetailContent() {
       logsRef.current.scrollTop = logsRef.current.scrollHeight
     }
   }, [logs])
+
+  const renderScanActivityLogs = (live: boolean) => {
+    const isModelIntake = scan?.run_kind === 'model_intake' || scan?.scan_type === 'model_intake'
+    const title = isModelIntake ? 'Model Intake Activity' : live ? 'Live Logs' : 'Scan Logs'
+    return (
+      <Card className="p-4">
+        <div className="flex items-center justify-between mb-2">
+          <h2 className="text-sm font-semibold text-gray-400">{title}</h2>
+          <span className="text-xs text-gray-500">{logs.length} lines</span>
+        </div>
+        <div ref={logsRef} className="max-h-64 overflow-y-auto bg-black/30 rounded p-3 font-mono text-xs text-gray-300">
+          {logs.length > 0 ? (
+            logs.map((line, idx) => (
+              <div key={idx} className="whitespace-pre-wrap break-words">
+                {line}
+              </div>
+            ))
+          ) : (
+            <div className="text-gray-500">
+              {isModelIntake ? 'No Model Intake activity has been recorded yet.' : 'No logs yet.'}
+            </div>
+          )}
+        </div>
+        {logsError && (
+          <p className="text-red-400 text-xs mt-2">{logsError}</p>
+        )}
+      </Card>
+    )
+  }
 
   if (loading) {
     return (
@@ -1270,26 +1300,7 @@ function ScanDetailContent() {
         <ParallelShardRollup scan={scan} />
         <ParentCoverageRollup scan={scan} />
 
-        <Card className="p-4">
-          <div className="flex items-center justify-between mb-2">
-            <h2 className="text-sm font-semibold text-gray-400">Live Logs</h2>
-            <span className="text-xs text-gray-500">{logs.length} lines</span>
-          </div>
-          <div ref={logsRef} className="max-h-64 overflow-y-auto bg-black/30 rounded p-3 font-mono text-xs text-gray-300">
-            {logs.length > 0 ? (
-              logs.map((line, idx) => (
-                <div key={idx} className="whitespace-pre-wrap break-words">
-                  {line}
-                </div>
-              ))
-            ) : (
-              <div className="text-gray-500">No logs yet.</div>
-            )}
-          </div>
-          {logsError && (
-            <p className="text-red-400 text-xs mt-2">{logsError}</p>
-          )}
-        </Card>
+        {renderScanActivityLogs(true)}
       </div>
     )
   }
@@ -1308,6 +1319,7 @@ function ScanDetailContent() {
         <div>
           <PageHeader title={scan.target_url} backHref={backUrl} backLabel="Back to scans" />
           <FailedScanPanel scan={scan} hasPartialResults={true} />
+          {(scan.run_kind === 'model_intake' || scan.scan_type === 'model_intake') && renderScanActivityLogs(false)}
           <ParallelShardRollup scan={scan} />
           <ParentCoverageRollup scan={scan} />
           <AiGateCampaignReviewCard scan={scan} />
@@ -1330,6 +1342,7 @@ function ScanDetailContent() {
       <div className="space-y-6">
         <PageHeader title={scan.target_url} backHref={backUrl} backLabel="Back to scans" />
         <FailedScanPanel scan={scan} hasPartialResults={false} />
+        {(scan.run_kind === 'model_intake' || scan.scan_type === 'model_intake') && renderScanActivityLogs(false)}
         <ParallelShardRollup scan={scan} />
         <ParentCoverageRollup scan={scan} />
       </div>
@@ -1341,6 +1354,7 @@ function ScanDetailContent() {
     <div>
       <PageHeader title={scan.target_url} backHref={backUrl} backLabel="Back to scans" />
       {scan.status === 'completed' && <ScanVerdictCard scan={scan} buildVersion={buildVersion} buildFingerprint={buildFingerprint} />}
+      {(scan.run_kind === 'model_intake' || scan.scan_type === 'model_intake') && renderScanActivityLogs(false)}
       <ParallelShardRollup scan={scan} />
       <ParentCoverageRollup scan={scan} />
       <AiGateCampaignReviewCard scan={scan} />

@@ -76,7 +76,9 @@ def run_model_intake() -> H.Scorecard:
         if not sid:
             raise RuntimeError(f"submit rejected: {r}")
         H.wait_for_scan(sid, timeout=timeout, label=label)
-        return H.scan_result(sid)
+        result = H.scan_result(sid)
+        result["_e2e_activity_logs"] = H.get(f"/scans/{sid}/logs?limit=200").get("lines") or []
+        return result
 
     # MI-1 (deterministic hard gate): a 206 partial download capped below the full
     # artifact must report known_unverified_truncated, NOT a false sha256_mismatch
@@ -93,6 +95,11 @@ def run_model_intake() -> H.Scorecard:
                  s.get("sha256_scope") == "inspected_bytes", f"sha256_scope={s.get('sha256_scope')}")
         sc.check("MI-1 no false sha256_mismatch finding",
                  "model_intake:sha256_mismatch" not in fids, f"findings={sorted(fids)[:6]}")
+        activity_logs = [str(line) for line in (res.get("_e2e_activity_logs") or [])]
+        sc.check("MI-1 live and durable activity logs are visible",
+                 any("phase=artifact_acquisition" in line for line in activity_logs)
+                 and any("phase=decision" in line for line in activity_logs),
+                 f"lines={activity_logs[:8]}")
     except Exception as e:
         sc.error("MI-1 local 206 truncation", e)
 

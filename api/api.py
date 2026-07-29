@@ -16315,6 +16315,49 @@ async def get_scan_logs(scan_id: str, limit: int = Query(200, ge=1, le=1000)):
         lines = r.lrange(log_key, max(-limit, -1000), -1) if limit else r.lrange(log_key, -200, -1)
     except Exception:
         lines = []
+    # Model Intake activity is content-free and also stored in the durable scan
+    # result. Use it when Redis live logs have expired or when an older worker
+    # failed before it could emit live lines, so the UI does not become blank.
+    if not lines:
+        try:
+            scan_uuid = uuid.UUID(str(scan_id))
+        except ValueError:
+            scan_uuid = None
+        row = None
+        if scan_uuid is not None:
+            try:
+                async with db_pool.acquire() as conn:
+                    row = await conn.fetchrow(
+                        """
+                        SELECT run_kind, status, progress, current_phase, result
+                        FROM scans WHERE id=$1
+                        """,
+                        scan_uuid,
+                    )
+            except Exception:
+                row = None
+        if row and str(row.get("run_kind") or "") == "model_intake":
+            result = parse_json_field(row.get("result")) or {}
+            intake = result.get("model_intake") if isinstance(result.get("model_intake"), dict) else {}
+            activity = intake.get("activity") if isinstance(intake.get("activity"), list) else []
+            durable_lines = [
+                str(item.get("line"))[:1000]
+                for item in activity
+                if isinstance(item, dict) and str(item.get("line") or "").startswith("[model-intake]")
+            ]
+            if durable_lines:
+                lines = durable_lines[-limit:]
+            else:
+                phase = re.sub(r"[^a-z0-9_]+", "_", str(row.get("current_phase") or "unknown").lower())[:64]
+                status = re.sub(r"[^a-z0-9_]+", "_", str(row.get("status") or "unknown").lower())[:32]
+                try:
+                    progress = max(0, min(100, int(row.get("progress") or 0)))
+                except (TypeError, ValueError):
+                    progress = 0
+                lines = [
+                    f"[model-intake] phase={phase or 'unknown'} progress={progress} status={status or 'unknown'}",
+                    "[model-intake] detail=activity_not_retained_by_earlier_worker_build",
+                ][-limit:]
     return {
         "scan_id": scan_id,
         "lines": lines,

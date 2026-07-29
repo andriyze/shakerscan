@@ -1462,3 +1462,40 @@ def test_registry_export_requires_exact_subject_and_digest_binding(monkeypatch):
 
     assert "model_intake:artifact_fetch_failed" in {item["id"] for item in result["findings"]}
     assert "bind artifact_fetch_subject" in result["model_intake"]["artifact"]["fetch"]["error"]
+
+
+def test_model_intake_emits_content_free_durable_activity(tmp_path):
+    artifact = tmp_path / "private-model.safetensors"
+    artifact.write_bytes(_safetensors_bytes())
+    observed_events = []
+
+    async def capture(event):
+        observed_events.append(event)
+
+    result = asyncio.run(run_model_intake_scan(
+        str(artifact),
+        _local_options({
+            "require_hash": False,
+            "require_signature": False,
+            "require_model_governance": False,
+            "require_deployment_approval": False,
+        }),
+        event_callback=capture,
+    ))
+
+    activity = result["model_intake"]["activity"]
+    phases = [item["phase"] for item in activity]
+    assert phases == [
+        "intake_started",
+        "artifact_acquisition",
+        "repository_snapshot",
+        "generated_scanners",
+        "dynamic_sandbox",
+        "trust_and_evaluation",
+        "decision",
+    ]
+    assert observed_events == activity
+    assert all(item["line"].startswith("[model-intake] phase=") for item in activity)
+    assert all(str(artifact) not in item["line"] for item in activity)
+    assert activity[-1]["progress"] == 95
+    assert "decision=" in activity[-1]["line"]

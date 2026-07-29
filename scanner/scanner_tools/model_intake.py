@@ -565,6 +565,87 @@ def _grade(score: int) -> str:
     return "F"
 
 
+_MODEL_INTAKE_ACTIVITY_FIELDS = (
+    "source_kind",
+    "status",
+    "source",
+    "bytes_observed",
+    "bytes_total",
+    "complete",
+    "truncated",
+    "files_expected",
+    "files_acquired",
+    "generated_scanners",
+    "sandbox",
+    "signature",
+    "attestation",
+    "evaluation",
+    "checksum",
+    "admission",
+    "decision",
+    "findings_count",
+)
+
+
+def _model_intake_activity_record(
+    *,
+    phase: str,
+    progress: int,
+    **details: Any,
+) -> dict[str, Any]:
+    """Build a content-free, UI-safe activity record for durable/live logs."""
+    normalized: dict[str, Any] = {
+        "phase": re.sub(r"[^a-z0-9_]+", "_", str(phase).strip().lower())[:64] or "model_intake",
+        "progress": max(0, min(100, int(progress))),
+    }
+    for key in _MODEL_INTAKE_ACTIVITY_FIELDS:
+        value = details.get(key)
+        if value is None or isinstance(value, (dict, list, tuple, set)):
+            continue
+        if isinstance(value, bool):
+            normalized[key] = value
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            normalized[key] = value
+        else:
+            normalized[key] = re.sub(r"[^A-Za-z0-9_.:-]+", "_", str(value).strip())[:120]
+    tokens = [
+        "[model-intake]",
+        f"phase={normalized['phase']}",
+        f"progress={normalized['progress']}",
+    ]
+    for key in _MODEL_INTAKE_ACTIVITY_FIELDS:
+        if key not in normalized:
+            continue
+        value = normalized[key]
+        if isinstance(value, bool):
+            value = str(value).lower()
+        tokens.append(f"{key}={value}")
+    normalized["line"] = " ".join(tokens)
+    return normalized
+
+
+async def _emit_model_intake_activity(
+    activity: list[dict[str, Any]],
+    callback: Any,
+    *,
+    phase: str,
+    progress: int,
+    **details: Any,
+) -> None:
+    record = _model_intake_activity_record(phase=phase, progress=progress, **details)
+    activity.append(record)
+    if callback is None:
+        return
+    try:
+        callback_result = callback(dict(record))
+        if asyncio.iscoroutine(callback_result):
+            await callback_result
+    except Exception:
+        # Operational logging must never change the security decision or make a
+        # completed intake fail. The durable activity record remains in result.
+        return
+
+
 def _read_local(path_ref: str, max_bytes: int) -> tuple[bytes, dict[str, Any]]:
     parsed = urllib.parse.urlparse(path_ref)
     path = urllib.request.url2pathname(parsed.path) if parsed.scheme == "file" else path_ref
@@ -2260,9 +2341,15 @@ def _generate_aibom(
     }
 
 
-async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] | None = None) -> dict[str, Any]:
+async def run_model_intake_scan(
+    artifact_ref: str,
+    raw_options: dict[str, Any] | None = None,
+    *,
+    event_callback: Any = None,
+) -> dict[str, Any]:
     """Run model artifact intake checks without executing model code."""
     options = raw_options or {}
+    activity: list[dict[str, Any]] = []
     inline_metadata = options.get("metadata_json") if isinstance(options.get("metadata_json"), dict) else {}
     metadata = dict(inline_metadata)
     metadata_url = options.get("metadata_url")
@@ -2281,6 +2368,14 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
     complete_repository_snapshot = _boolish(options.get("complete_repository_snapshot"))
     max_repository_bytes = bounded_int("max_repository_bytes", 50_000_000_000, 1024, MAX_REPOSITORY_BYTES)
     max_repository_files = bounded_int("max_repository_files", 10_000, 1, MAX_REPOSITORY_FILES)
+    await _emit_model_intake_activity(
+        activity,
+        event_callback,
+        phase="intake_started",
+        progress=15,
+        status="RUNNING",
+        source_kind=_source_kind(artifact_ref, metadata),
+    )
     quarantine_dir = Path(
         str(
             options.get("quarantine_dir")
@@ -2330,6 +2425,24 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         complete_download=complete_artifact_download,
         max_artifact_bytes=max_artifact_bytes,
         quarantine_dir=quarantine_dir if complete_artifact_download else None,
+    )
+    await _emit_model_intake_activity(
+        activity,
+        event_callback,
+        phase="artifact_acquisition",
+        progress=35,
+        status=(
+            "FAILED"
+            if artifact_meta.get("error")
+            else "PARTIAL"
+            if artifact_meta.get("truncated")
+            else "PASS"
+        ),
+        source=artifact_meta.get("source"),
+        bytes_observed=artifact_meta.get("bytes_observed"),
+        bytes_total=artifact_meta.get("bytes_total"),
+        complete=not bool(artifact_meta.get("error")) and not bool(artifact_meta.get("truncated")),
+        truncated=bool(artifact_meta.get("truncated")),
     )
 
     unsupported_scheme_error = bool(
@@ -2428,6 +2541,16 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
                 selected_artifact_meta=artifact_meta,
             )
             repository_snapshot["requested"] = True
+    await _emit_model_intake_activity(
+        activity,
+        event_callback,
+        phase="repository_snapshot",
+        progress=45,
+        status=repository_snapshot.get("status"),
+        complete=bool(repository_snapshot.get("complete")),
+        files_expected=repository_snapshot.get("files_expected"),
+        files_acquired=repository_snapshot.get("files_acquired"),
+    )
     run_generated_scanners = _boolish(options.get("run_generated_scanners"))
     generated_evidence: dict[str, Any] = {
         "schema_version": "model-intake-generated-evidence/v1",
@@ -2527,6 +2650,14 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
                 for item in scanner_results
             ) else "FAIL",
         }
+    await _emit_model_intake_activity(
+        activity,
+        event_callback,
+        phase="generated_scanners",
+        progress=60,
+        status=generated_evidence.get("status"),
+        generated_scanners=generated_evidence.get("status"),
+    )
     run_dynamic_sandbox = _boolish(options.get("run_dynamic_sandbox"))
     require_dynamic_sandbox = _boolish(options.get("require_dynamic_sandbox"))
     dynamic_sandbox: dict[str, Any] = {
@@ -2551,6 +2682,14 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
                 queue_root=sandbox_root,
                 timeout_seconds=bounded_int("sandbox_timeout_seconds", 120, 1, 600),
             )
+    await _emit_model_intake_activity(
+        activity,
+        event_callback,
+        phase="dynamic_sandbox",
+        progress=70,
+        status=dynamic_sandbox.get("status"),
+        sandbox=dynamic_sandbox.get("status"),
+    )
     metadata_unavailable = bool(metadata_url and metadata_fetch_meta.get("error") and not metadata)
     require_signature_verification = _boolish(options.get("require_signature_verification"))
     require_cryptographic_signature_verification = _boolish(
@@ -2629,6 +2768,16 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             "provenance_class": "shakerscan_generated",
             "status": "SKIPPED_BY_POLICY",
         }
+    )
+    await _emit_model_intake_activity(
+        activity,
+        event_callback,
+        phase="trust_and_evaluation",
+        progress=85,
+        status="COMPLETE" if not artifact_meta.get("error") else "FAILED",
+        signature=signature_status.get("status"),
+        attestation=attestation_verification.get("status"),
+        evaluation=generated_evaluation.get("status"),
     )
     sbom_policy = _sbom_policy(
         generated_sbom or sbom_ref,
@@ -3577,12 +3726,25 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         "findings_count": len(findings),
     }
 
+    await _emit_model_intake_activity(
+        activity,
+        event_callback,
+        phase="decision",
+        progress=95,
+        status="COMPLETE",
+        checksum=checksum_status,
+        admission=admission_package.get("status"),
+        decision=decision.get("decision"),
+        findings_count=len(findings),
+    )
+
     return {
         "schema_version": "2026-05-10.model-intake.v1",
         "scan_mode": "model_intake",
         "target": safe_artifact_ref,
         "model_intake": {
             "summary": summary,
+            "activity": activity,
             "source_adapter": source_adapter,
             "attestation": redact_model_intake_value(attestation_verification),
             "dynamic_sandbox": redact_model_intake_value(dynamic_sandbox),

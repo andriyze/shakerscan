@@ -112,7 +112,8 @@ Implemented controls include:
   event history, automatic worker registration, expiry, scoped trigger ingestion, immediate high-consequence
   revocation, and deploy-time active-registry enforcement.
 - UI/API visibility for provider capabilities, complete acquisition, generated scanners, sandbox and
-  evaluation gates, signed admission, admission age/reassessment/expiry, and evaluation metrics.
+  evaluation gates, signed admission, admission age/reassessment/expiry, evaluation metrics, and redacted
+  live/durable activity logs on running, completed, and failed Model Intake scans.
 
 The framework deliberately does not fabricate external evidence. A production profile still blocks until
 the operator supplies the pinned scanner binaries/rule databases, an organization-controlled signing key and

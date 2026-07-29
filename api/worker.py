@@ -2036,7 +2036,38 @@ async def run_scan(
         if scan_id:
             intake_options.setdefault("scan_id", scan_id)
             intake_options.setdefault("quarantine_dir", str(RESULTS_DIR / "model-intake-quarantine"))
-        result = await run_model_intake_scan(target, intake_options)
+
+        async def _record_model_intake_event(event: dict[str, Any]) -> None:
+            if not scan_id or not isinstance(event, dict):
+                return
+            line = str(event.get("line") or "").strip()
+            if not line.startswith("[model-intake]") or len(line) > 1000:
+                return
+
+            def _write_log_line() -> None:
+                redis_client = get_redis()
+                log_key = f"scan:{scan_id}:logs"
+                redis_client.rpush(log_key, line)
+                redis_client.ltrim(log_key, -SCAN_LOG_TAIL, -1)
+                redis_client.expire(log_key, SCAN_LOG_TTL_SECONDS)
+
+            try:
+                await asyncio.to_thread(_write_log_line)
+            except Exception as exc:
+                print(f"[model-intake] live log write failed: {type(exc).__name__}", flush=True)
+            print(f"[{(job_id or scan_id)[:8]}] {line}", flush=True)
+            try:
+                progress = max(15, min(95, int(event.get("progress") or 15)))
+            except (TypeError, ValueError):
+                progress = 15
+            phase = re.sub(r"[^a-z0-9_]+", "_", str(event.get("phase") or "model_intake").lower())[:64]
+            await update_scan_progress(scan_id, phase or "model_intake", progress, job_id=job_id)
+
+        result = await run_model_intake_scan(
+            target,
+            intake_options,
+            event_callback=_record_model_intake_event,
+        )
         if scan_id:
             await update_scan_progress(scan_id, "model_intake_finalize", 95, job_id=job_id)
         return result
