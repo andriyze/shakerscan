@@ -2323,6 +2323,35 @@ def test_direct_huggingface_scan_cannot_override_resolved_manifest_or_subject(mo
     assert enriched.metadata_json["repository_manifest"] == authoritative_manifest
 
 
+def test_real_huggingface_enrichment_does_not_relabel_caller_manifest_as_provider_resolved(monkeypatch):
+    revision = "a" * 40
+    monkeypatch.setattr(api_module, "_hf_api_model_info", lambda *_args, **_kwargs: {
+        "sha": revision,
+        "siblings": [
+            {"rfilename": "model.safetensors", "size": 8, "lfs": {"sha256": "1" * 64, "size": 8}},
+            {"rfilename": "modeling_evil.py", "size": 12, "blobId": "git-blob"},
+        ],
+    })
+    request = api_module.ModelIntakeScanRequest(
+        artifact_url="acme/ranker",
+        metadata_json={
+            "custom_code_required": False,
+            "python_files": [],
+            "repository_manifest": {
+                "complete": True,
+                "files": [{"path": "model.safetensors"}],
+            },
+        },
+    )
+
+    enriched = asyncio.run(api_module._enrich_model_intake_scan_request(request))
+
+    manifest = enriched.metadata_json["repository_manifest"]
+    assert manifest["custom_code_required"] is True
+    assert manifest["python_files"] == ["modeling_evil.py"]
+    assert {item["path"] for item in manifest["files"]} == {"model.safetensors", "modeling_evil.py"}
+
+
 # --- Focused check_family auto-sharding policy (locked: this path has regressed) ---
 
 def test_focused_family_runs_direct_without_explicit_parallel(monkeypatch):

@@ -958,7 +958,7 @@ def test_huggingface_repository_snapshot_acquires_every_manifest_file(monkeypatc
             "complete": True,
             "repository": "acme/ranker",
             "revision": revision,
-            "manifest_sha256": "f" * 64,
+            "manifest_sha256": "e" * 64,
             "files": [
                 {"path": "model.safetensors", "size_bytes": len(selected_bytes), "sha256": selected_sha},
                 {"path": "modeling.py", "size_bytes": len(code_bytes), "blob_id": "git-blob"},
@@ -990,7 +990,37 @@ def test_huggingface_repository_snapshot_acquires_every_manifest_file(monkeypatc
     assert len(snapshot["snapshot_sha256"]) == 64
     assert observed_urls == [f"https://huggingface.co/acme/ranker/resolve/{revision}/modeling.py"]
     assert snapshot["authoritative_manifest_sha256"] == "e" * 64
-    assert snapshot["declared_manifest_sha256"] == "f" * 64
+    assert snapshot["declared_manifest_sha256"] == "e" * 64
+
+
+def test_huggingface_repository_snapshot_rejects_declared_manifest_digest_mismatch(monkeypatch, tmp_path):
+    revision = "a" * 40
+
+    async def authoritative(*_args, **_kwargs):
+        return {
+            "complete": True,
+            "manifest_sha256": "e" * 64,
+            "files": [{"path": "model.safetensors", "size_bytes": 1, "sha256": "1" * 64}],
+        }
+
+    monkeypatch.setattr(model_intake, "_fetch_authoritative_huggingface_manifest", authoritative)
+    snapshot = asyncio.run(model_intake._acquire_huggingface_repository_snapshot(
+        {
+            "huggingface_repo": "acme/ranker",
+            "huggingface_file": "model.safetensors",
+            "revision": revision,
+            "repository_manifest": {"manifest_sha256": "f" * 64},
+        },
+        artifact_ref=f"hf://acme/ranker@{revision}/model.safetensors",
+        timeout_seconds=5,
+        quarantine_dir=tmp_path,
+        fetch_policy=None,
+        max_repository_bytes=10_000,
+        max_repository_files=10,
+    ))
+
+    assert snapshot["status"] == "INCOMPLETE"
+    assert snapshot["error"] == "declared_manifest_does_not_match_authoritative_manifest"
 
 
 def test_huggingface_repository_snapshot_ignores_caller_truncated_manifest(monkeypatch, tmp_path):
@@ -1028,7 +1058,7 @@ def test_huggingface_repository_snapshot_ignores_caller_truncated_manifest(monke
             "revision": revision,
             "repository_manifest": {
                 "complete": True,
-                "manifest_sha256": "2" * 64,
+                "manifest_sha256": "1" * 64,
                 "files": [{"path": "model.safetensors", "sha256": model_sha}],
             },
         },
@@ -1267,6 +1297,34 @@ def test_model_intake_reports_metadata_fetch_failure_without_fake_missing_govern
     assert result["model_intake"]["summary"]["metadata_fetch_failed"] is True
 
 
+def test_metadata_url_cannot_reintroduce_deployment_approval_authority(tmp_path):
+    artifact = tmp_path / "model.onnx"
+    metadata = tmp_path / "metadata.json"
+    artifact.write_bytes(b"onnx bytes")
+    metadata.write_text(json.dumps({
+        "deployment_approved": True,
+        "approved_by": "attacker-selected-reviewer",
+        "security_approved": True,
+        "license": "apache-2.0",
+    }))
+
+    result = asyncio.run(run_model_intake_scan(
+        str(artifact),
+        _local_options({
+            "metadata_url": str(metadata),
+            "expected_sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+            "require_deployment_approval": True,
+            "deployment_approved": False,
+        }),
+    ))
+
+    assert result["model_intake"]["summary"]["deployment_approved"] is False
+    assert "model_intake:missing_deployment_approval" in {
+        item["id"] for item in result["findings"]
+    }
+    assert "approved_by" not in result["model_intake"]["metadata"]
+
+
 def test_model_intake_flags_missing_governance_metadata(tmp_path):
     artifact = tmp_path / "model.onnx"
     artifact.write_bytes(b"onnx bytes")
@@ -1391,11 +1449,11 @@ def test_model_intake_strict_governance_rejects_structured_but_caller_declared_e
     assert "model_intake:invalid_sbom_evidence" in finding_ids
     assert "model_intake:invalid_malware_scan_evidence" in finding_ids
     assert "model_intake:invalid_security_eval_evidence" in finding_ids
-    assert "model_intake:incomplete_deployment_approval" not in finding_ids
+    assert "model_intake:incomplete_deployment_approval" in finding_ids
     assert result["model_intake"]["checks"]["sbom_dependencies"] is False
     assert result["model_intake"]["checks"]["malware_scan"] is False
     assert result["model_intake"]["checks"]["security_evals"] is False
-    assert result["model_intake"]["checks"]["approval_evidence"] is True
+    assert result["model_intake"]["checks"]["approval_evidence"] is False
     assert result["model_intake"]["checks"]["dataset_lineage"] is True
     assert result["model_intake"]["checks"]["dataset_digest"] is True
     assert result["model_intake"]["checks"]["base_model_lineage"] is True

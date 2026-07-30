@@ -10495,6 +10495,7 @@ MODEL_INTAKE_ADMISSION_FORBIDDEN_FIELDS = {
     "policy_exceptions",
 }
 MODEL_INTAKE_ADMISSION_FORBIDDEN_METADATA_KEYS = {
+    "deployment_approved",
     "approved_by",
     "approver",
     "approved_at",
@@ -10692,6 +10693,10 @@ def _apply_model_intake_policy_profile_requirements(
         "trust_anchor_ids": merged_ids,
         "metadata_json": metadata,
         "complete_artifact_download": True,
+        # Admission evidence is repository-scoped. Unsupported providers must
+        # return UNSUPPORTED/INCOMPLETE instead of treating one URL as a
+        # complete deployable model bundle.
+        "complete_repository_snapshot": True,
         "run_generated_scanners": True,
         # None means the complete registered scanner set. A requester-provided
         # subset must never weaken a strict server-side profile.
@@ -10709,8 +10714,6 @@ def _apply_model_intake_policy_profile_requirements(
         "require_model_governance": True,
         "require_deployment_approval": True,
     }
-    if _detect_model_intake_platform(request.artifact_url, metadata) == "huggingface":
-        updates["complete_repository_snapshot"] = True
     return request.model_copy(update=updates)
 
 
@@ -10938,6 +10941,18 @@ def _model_intake_json_object(value: Any) -> dict[str, Any]:
     return decoded if isinstance(decoded, dict) else {}
 
 
+def _model_intake_required_static_checks(summary: dict[str, Any]) -> dict[str, bool]:
+    """Checks that a persisted scan must prove before becoming admission evidence."""
+    return {
+        "acquisition_complete": summary.get("acquisition_complete") is True,
+        "inspection_complete": summary.get("inspection_complete") is True,
+        "repository_manifest_complete": summary.get("repository_manifest_complete") is True,
+        "repository_snapshot_complete": summary.get("repository_snapshot_complete") is True,
+        "generated_evidence_pass": summary.get("generated_evidence_status") == "PASS",
+        "checksum_verified": summary.get("checksum_status") == "verified",
+    }
+
+
 @app.post("/model-intake/submissions")
 async def create_model_intake_submission(request: ModelSubmissionRequest, http_request: Request):
     """Create work only; this endpoint can never issue an admission."""
@@ -11048,7 +11063,8 @@ async def attach_model_intake_static_run(
             raise HTTPException(status_code=409, detail="Scan artifact does not match submission expectation")
         findings = result.get("findings") if isinstance(result.get("findings"), list) else []
         severity = {str(item.get("severity") or "").lower() for item in findings if isinstance(item, dict)}
-        complete = bool(summary.get("acquisition_complete")) and bool(summary.get("inspection_complete"))
+        required_static_checks = _model_intake_required_static_checks(summary)
+        complete = all(required_static_checks.values())
         static_status = "FAIL" if severity.intersection({"critical", "high"}) else "PASS" if complete else "INCOMPLETE"
         payload_digest = hashlib.sha256(json.dumps({
             "scan_id": str(scan_uuid),
@@ -11069,7 +11085,7 @@ async def attach_model_intake_static_run(
             artifact_sha,
             summary.get("artifact_size"),
             summary.get("revision"),
-            json.dumps({"registered_by": actor}),
+            json.dumps({"registered_by": actor, "required_static_checks": required_static_checks}),
         )
         if re.fullmatch(r"[0-9a-f]{64}", snapshot_sha):
             await conn.execute(
@@ -11113,7 +11129,12 @@ async def attach_model_intake_static_run(
             submission_uuid,
             scan_uuid,
         )
-    return {"submission_id": str(submission_uuid), "evidence": row_to_dict(evidence), "deployable": False}
+    return {
+        "submission_id": str(submission_uuid),
+        "evidence": row_to_dict(evidence),
+        "required_static_checks": required_static_checks,
+        "deployable": False,
+    }
 
 
 @app.post("/model-intake/submissions/{submission_id}/freeze-evidence")
@@ -12208,12 +12229,14 @@ async def _enrich_model_intake_scan_request(request: ModelIntakeScanRequest) -> 
         return request
 
     try:
+        # Caller metadata must not enter the provider's authoritative output;
+        # it is merged later only as untrusted declarations.
         resolve_request = ModelIntakeResolveRequest(
             platform="huggingface",
             ref=artifact_ref if _is_hf_ref(artifact_ref) else f"https://huggingface.co/{artifact_ref}",
             revision=metadata.get("revision") if isinstance(metadata.get("revision"), str) else None,
             filename=metadata.get("huggingface_file") if isinstance(metadata.get("huggingface_file"), str) else None,
-            metadata_json=metadata,
+            metadata_json={},
             timeout_seconds=min(max(int(request.timeout_seconds or 20), 1), 60),
         )
         resolved = await asyncio.to_thread(_resolve_huggingface_model_intake, resolve_request)

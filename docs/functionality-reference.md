@@ -1209,8 +1209,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 266 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 223 | `api/api.py` |
+| Public REST operations | 274 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 231 | `api/api.py` |
 | Check families | 14 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 13 | `api/command_arsenal.py` |
@@ -1219,13 +1219,13 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Scanner wrapper commands | 26 | `scanner.sh` |
 | Make targets | 11 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
-| Runtime environment keys | 285 | Python sources + Compose manifests |
+| Runtime environment keys | 298 | Python sources + Compose manifests |
 | Scanner modules | 96 | `scanner/scanner_tools/` |
 | UI pages | 31 | `ui/src/app/` |
 | Skills | 6 | `skills/` |
 | Slash commands | 15 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
-| Durable tables | 55 | `db/init.sql` + migrations |
+| Durable tables | 62 | `db/init.sql` + migrations |
 
 ### Public REST Operations
 
@@ -1379,6 +1379,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `GET` | `/health` | `health` |
 | `POST` | `/model-intake/admission/verify` | `verify_model_intake_admission` |
 | `GET` | `/model-intake/admissions` | `list_model_intake_admissions` |
+| `POST` | `/model-intake/admissions/v2/verify` | `verify_model_intake_admission_v2` |
 | `GET` | `/model-intake/admissions/{admission_id}` | `get_model_intake_admission` |
 | `POST` | `/model-intake/admissions/{admission_id}/revoke` | `revoke_model_intake_admission` |
 | `GET` | `/model-intake/capabilities` | `model_intake_capabilities` |
@@ -1389,6 +1390,13 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `POST` | `/model-intake/scan` | `scan_model_intake` |
 | `GET` | `/model-intake/scanners/readiness` | `model_intake_scanner_readiness` |
 | `GET` | `/model-intake/scans/{scan_id}/evidence-export` | `get_model_intake_evidence_export` |
+| `POST` | `/model-intake/submissions` | `create_model_intake_submission` |
+| `GET` | `/model-intake/submissions/{submission_id}` | `get_model_intake_submission` |
+| `POST` | `/model-intake/submissions/{submission_id}/approvals` | `create_model_intake_approval` |
+| `POST` | `/model-intake/submissions/{submission_id}/freeze-evidence` | `freeze_model_intake_evidence` |
+| `POST` | `/model-intake/submissions/{submission_id}/policy-decisions` | `create_model_intake_policy_decision` |
+| `POST` | `/model-intake/submissions/{submission_id}/promote` | `promote_model_intake_submission` |
+| `POST` | `/model-intake/submissions/{submission_id}/static-runs` | `attach_model_intake_static_run` |
 | `POST` | `/model-intake/targets/{target_id}/rescan` | `rescan_model_intake_target` |
 | `GET` | `/model-intake/trust-anchors` | `list_model_intake_trust_anchors` |
 | `POST` | `/model-intake/trust-anchors` | `create_model_intake_trust_anchor` |
@@ -1881,7 +1889,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `BROKER_INGEST_QUEUE_NAME` | `api/api.py`, `api/worker.py` |
 | `BUILD_FINGERPRINT` | `api/worker.py` |
 | `COVERAGE_ALLOCATION_DEFAULT` | `api/parallel_scan.py` |
-| `DATABASE_URL` | `api/api.py`, `api/gungnir_worker.py`, `api/worker.py`, `scanner/gungnir_worker.py`, `scripts/upgrade_schema_smoke.py` |
+| `DATABASE_URL` | `api/api.py`, `api/gungnir_worker.py`, `api/model_intake_signer_service.py`, `api/worker.py`, `scanner/gungnir_worker.py`, `scripts/upgrade_schema_smoke.py` |
 | `DEFAULT_ASM_ENABLED` | `api/api.py` |
 | `DEFAULT_RESEARCH_PLANNER_MODE` | `api/api.py` |
 | `DOMAIN_RATE_REQUEUE_DELAY_SECONDS` | `api/worker.py` |
@@ -1942,16 +1950,23 @@ Only key names and declaring sources are documented; secret values are never rea
 | `MINIO_PORT` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `MINIO_ROOT_PASSWORD` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `MINIO_ROOT_USER` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `MODEL_INTAKE_ADMISSION_BUILDER_ID` | `api/model_intake_signer_service.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_ADMISSION_POLICY_PROFILE` | `api/api.py` |
-| `MODEL_INTAKE_ADMISSION_SIGNING_KEY_PEM` | `api/worker.py`, `scanner/scanner_tools/model_intake_admission.py` |
+| `MODEL_INTAKE_ADMISSION_SIGNING_KEY_PEM` | `scanner/scanner_tools/model_intake_admission.py` |
 | `MODEL_INTAKE_ADMISSION_TRUSTED_PUBLIC_KEYS` | `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner_tools/model_intake_admission.py` |
+| `MODEL_INTAKE_ADMISSION_V2_TRUSTED_BUILDERS` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `MODEL_INTAKE_ADMISSION_V2_TRUSTED_PUBLIC_KEYS` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_ALLOWED_HOSTS` | `scanner/scanner_tools/model_intake_acquisition.py` |
 | `MODEL_INTAKE_ALLOWED_PORTS` | `scanner/scanner_tools/model_intake_acquisition.py` |
 | `MODEL_INTAKE_ALLOW_INSECURE_HTTP` | `scanner/scanner_tools/model_intake_acquisition.py` |
+| `MODEL_INTAKE_ALLOW_LEGACY_V1_VERIFICATION` | `api/api.py` |
 | `MODEL_INTAKE_ALLOW_LOCAL_FILES` | `scanner/scanner_tools/model_intake.py` |
 | `MODEL_INTAKE_ALLOW_PRIVATE_NETWORKS` | `scanner/scanner_tools/model_intake_acquisition.py` |
+| `MODEL_INTAKE_CONTROL_PLANE_SIGNING_KEY_PEM` | `api/model_intake_signer_service.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_OPA_URL` | `scanner/scanner_tools/model_intake_providers.py` |
+| `MODEL_INTAKE_OPERATOR_ROLES` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_OPERATOR_TOKEN` | `api/api.py` |
+| `MODEL_INTAKE_POLICY_BUNDLE_SHA256` | `api/api.py` |
 | `MODEL_INTAKE_QUARANTINE_DIR` | `api/api.py`, `scanner/scanner_tools/model_intake.py` |
 | `MODEL_INTAKE_SANDBOX_IMAGE` | `docker-compose.yml` |
 | `MODEL_INTAKE_SANDBOX_NETWORK_MODE` | `scanner/scanner_tools/model_intake_sandbox.py` |
@@ -1960,6 +1975,12 @@ Only key names and declaring sources are documented; secret values are never rea
 | `MODEL_INTAKE_SANDBOX_READ_ONLY` | `scanner/scanner_tools/model_intake_sandbox.py` |
 | `MODEL_INTAKE_SANDBOX_RUNTIME_ADAPTERS_JSON` | `docker-compose.broker-worker.yml`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml`, `scanner/scanner_tools/model_intake_providers.py`, `scanner/scanner_tools/model_intake_sandbox.py` |
 | `MODEL_INTAKE_SANDBOX_RUNTIME_TIMEOUT_SECONDS` | `docker-compose.broker-worker.yml`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
+| `MODEL_INTAKE_SIGNER_ALLOW_LOCAL_PEM` | `api/model_intake_signer_service.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `MODEL_INTAKE_SIGNER_AWS_KMS_KEY_ID` | `api/model_intake_signer_service.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `MODEL_INTAKE_SIGNER_AWS_REGION` | `api/model_intake_signer_service.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `MODEL_INTAKE_SIGNER_BACKEND` | `api/model_intake_signer_service.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `MODEL_INTAKE_SIGNER_INTERNAL_TOKEN` | `api/api.py`, `api/model_intake_signer_service.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `MODEL_INTAKE_SIGNER_URL` | `api/api.py` |
 | `MODEL_INTAKE_TRUSTED_KEY_SHA256` | `scanner/scanner_tools/model_intake.py` |
 | `MODEL_INTAKE_TRUSTED_SIGNING_KEYS` | `scanner/scanner_tools/model_intake.py` |
 | `NUCLEI_TEMPLATES` | `scanner/scanner_tools/nuclei.py` |
@@ -2202,6 +2223,13 @@ Only key names and declaring sources are documented; secret values are never rea
 | `hypotheses` | `api/retest_contract.py` |
 | `model_intake_admission_events` | `db/init.sql` |
 | `model_intake_admissions` | `db/init.sql` |
+| `model_intake_approval_receipts` | `db/init.sql` |
+| `model_intake_deployment_bindings` | `db/init.sql` |
+| `model_intake_evidence_manifests` | `db/init.sql` |
+| `model_intake_evidence_records` | `db/init.sql` |
+| `model_intake_policy_decisions` | `db/init.sql` |
+| `model_intake_subjects` | `db/init.sql` |
+| `model_intake_submissions` | `db/init.sql` |
 | `model_intake_trust_anchors` | `db/init.sql` |
 | `node_credentials` | `db/init.sql` |
 | `node_join_tokens` | `db/init.sql` |

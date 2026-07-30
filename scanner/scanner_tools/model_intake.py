@@ -110,6 +110,38 @@ MAX_INSPECTION_BYTES = 100_000_000
 MAX_ARTIFACT_BYTES = 100_000_000_000
 MAX_REPOSITORY_BYTES = 500_000_000_000
 MAX_REPOSITORY_FILES = 10_000
+
+# Metadata documents and artifact-side metadata are publisher declarations,
+# never corporate approval or policy authority. Server-owned approval travels
+# only through typed options/control-plane records.
+UNTRUSTED_GOVERNANCE_METADATA_KEYS = {
+    "deployment_approved",
+    "approved_by",
+    "approver",
+    "approved_at",
+    "approval_timestamp",
+    "approval_date",
+    "approval_policy_version",
+    "policy_version",
+    "approved_environment",
+    "deployment_environment",
+    "legal_approved",
+    "privacy_approved",
+    "security_approved",
+    "risk_accepted",
+}
+
+
+def _strip_untrusted_governance_metadata(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _strip_untrusted_governance_metadata(child)
+            for key, child in value.items()
+            if str(key).strip().lower() not in UNTRUSTED_GOVERNANCE_METADATA_KEYS
+        }
+    if isinstance(value, list):
+        return [_strip_untrusted_governance_metadata(child) for child in value]
+    return value
 MAX_TIMEOUT_SECONDS = 120
 
 SUSPICIOUS_LOADER_MARKERS = {
@@ -1042,6 +1074,18 @@ async def _acquire_huggingface_repository_snapshot(
             "status": "INCOMPLETE",
             "complete": False,
             "error": "authoritative_manifest_incomplete",
+            "repository_manifest": authoritative,
+        }
+    declared_manifest_sha256 = str(declared.get("manifest_sha256") or "").strip().lower()
+    authoritative_manifest_sha256 = str(authoritative.get("manifest_sha256") or "").strip().lower()
+    if declared_manifest_sha256 and declared_manifest_sha256 != authoritative_manifest_sha256:
+        return {
+            "schema_version": "model-intake-repository-snapshot/v1",
+            "status": "INCOMPLETE",
+            "complete": False,
+            "error": "declared_manifest_does_not_match_authoritative_manifest",
+            "declared_manifest_sha256": declared_manifest_sha256,
+            "authoritative_manifest_sha256": authoritative_manifest_sha256,
             "repository_manifest": authoritative,
         }
     if len(files) > max_repository_files:
@@ -2757,7 +2801,7 @@ async def run_model_intake_scan(
     options = raw_options or {}
     activity: list[dict[str, Any]] = []
     inline_metadata = options.get("metadata_json") if isinstance(options.get("metadata_json"), dict) else {}
-    metadata = dict(inline_metadata)
+    metadata = _strip_untrusted_governance_metadata(dict(inline_metadata))
     metadata_url = options.get("metadata_url")
     metadata_fetch_meta: dict[str, Any] = {}
     def bounded_int(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -2815,7 +2859,10 @@ async def run_model_intake_scan(
             allow_local_files=allow_local_files,
             fetch_policy=fetch_policy,
         )
-        metadata = {**remote_metadata, **metadata}
+        metadata = {
+            **_strip_untrusted_governance_metadata(remote_metadata),
+            **metadata,
+        }
 
     acquisition_metadata = {
         **metadata,
@@ -2887,7 +2934,7 @@ async def run_model_intake_scan(
     signed_by = metadata.get("signed_by") or metadata.get("attestation_signer")
     provenance_ref = _metadata_value(metadata, "source_repo", "source_repository", "commit_sha", "training_data_ref", "provenance_url", "attestation_url")
     model_card = options.get("model_card_url") or _metadata_value(metadata, "model_card_url", "model_card", "card_url")
-    deployment_approved = _boolish(options.get("deployment_approved") or metadata.get("deployment_approved"))
+    deployment_approved = _boolish(options.get("deployment_approved"))
     require_approval = _boolish(options.get("require_deployment_approval"))
     require_signature = _boolish(options.get("require_signature", True))
     require_hash = _boolish(options.get("require_hash", True))

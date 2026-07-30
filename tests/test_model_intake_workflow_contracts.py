@@ -22,6 +22,14 @@ def test_legacy_scan_is_preflight_by_default_and_submission_cannot_carry_authori
             trust_anchor_ids=["requester-selected"],
         )
 
+    request = api.ModelIntakeScanRequest(
+        artifact_url="https://models.example/model.safetensors",
+        intake_mode="admission",
+        metadata_json={"deployment_approved": True},
+    )
+    with pytest.raises(api.HTTPException, match="server-owned"):
+        api._validate_model_intake_admission_request_authority(request)
+
 
 def test_approval_dto_has_no_identity_or_role_claim_fields():
     fields = set(api.ModelApprovalCreateRequest.model_fields)
@@ -100,3 +108,15 @@ def test_promotion_api_sends_only_stored_decision_id_and_idempotency_key():
     assert '"idempotency_key"' in source
     for forbidden in ("deployment_bundle", "evidence_manifest", "approval", "private_key"):
         assert f'"{forbidden}"' not in source
+
+
+def test_partial_or_scanner_omitting_scan_cannot_become_pass_static_evidence():
+    apparently_clean = {
+        "acquisition_complete": True,
+        "inspection_complete": True,
+        "checksum_status": "verified",
+    }
+    checks = api._model_intake_required_static_checks(apparently_clean)
+    assert checks["repository_snapshot_complete"] is False
+    assert checks["generated_evidence_pass"] is False
+    assert not all(checks.values())
