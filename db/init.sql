@@ -866,6 +866,20 @@ CREATE TABLE IF NOT EXISTS model_intake_submissions (
 CREATE INDEX IF NOT EXISTS idx_model_intake_submissions_state
     ON model_intake_submissions(state, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS model_intake_submission_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    submission_id UUID NOT NULL REFERENCES model_intake_submissions(id) ON DELETE CASCADE,
+    event_type TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    previous_state TEXT NOT NULL,
+    new_state TEXT NOT NULL,
+    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_model_intake_submission_events_submission
+    ON model_intake_submission_events(submission_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS model_intake_subjects (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     submission_id UUID NOT NULL REFERENCES model_intake_submissions(id) ON DELETE CASCADE,

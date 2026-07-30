@@ -33,6 +33,19 @@ async def _assert_common(conn) -> None:
         raise RuntimeError("canonical target trigger is missing or duplicated")
     if not await conn.fetchval("SELECT to_regclass('public.app_schema_migrations') IS NOT NULL"):
         raise RuntimeError("app_schema_migrations is missing after migration")
+    if not await conn.fetchval("SELECT to_regclass('public.model_intake_submission_events') IS NOT NULL"):
+        raise RuntimeError("model_intake_submission_events is missing after migration")
+
+    submission_state_constraint = await conn.fetchval(
+        """
+        SELECT pg_get_constraintdef(oid)
+        FROM pg_constraint
+        WHERE conname = 'model_intake_submission_state_check'
+          AND conrelid = 'model_intake_submissions'::regclass
+        """
+    )
+    if not submission_state_constraint or "policy_decided" not in submission_state_constraint:
+        raise RuntimeError("model intake submission state constraint is missing or incomplete")
 
     deployment_binding_fk = await conn.fetchval(
         """

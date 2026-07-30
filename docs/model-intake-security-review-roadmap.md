@@ -110,8 +110,9 @@ Sections 2.1 and 2.4 identify which findings are now resolved, partially resolve
 
 The remaining implementation and validation order is:
 
-1. Remove remaining ambiguity between non-deployable technical scans and the authoritative controlled
-   admission workflow; enforce legal state transitions and evidence invalidation in the database and UI.
+1. **Implemented:** remove ambiguity between non-deployable technical scans and the authoritative controlled
+   admission workflow; enforce legal state transitions, latest-manifest authority, transactional mutation,
+   durable workflow events, idempotent evidence replay, and downstream admission/deployment invalidation.
 2. Deploy one disposable no-egress Firecracker/KVM loader for custom code, model construction, inference,
    known-answer embeddings, telemetry, and signed exact-bundle receipts. No alternate runner is in scope.
 3. Use that same Firecracker path to convert CodeSage Base v2 to safetensors and prove tensor and embedding
@@ -288,7 +289,7 @@ but the exported status must remain unambiguous.
 | Provider-neutral evaluation contract | Deterministic scorer implemented | Public caller observations are `DECLARED` and fail closed for admission; actual result IDs/scores and connector/index/run identity are mandatory | Add the trusted isolated runner that alone may mark observations `GENERATED_DATA_PLANE` |
 | Corporate benchmark and thresholds | Integration point implemented | No universal corpus can ship | Organization supplies/version-controls corpus; ShakerScan automates execution and scoring |
 | Typed non-scanner providers | Implemented registry/readiness | Sandbox execution, embedding evaluation, embedded Python policy, and report export are separate classes | Harden only the embedded policy provider; OPA remains out of scope |
-| Signed admission statement and lifecycle registry | Exact-bundle v2 control plane implemented | Workers emit only unsigned non-deployable candidates; frozen evidence, approvals, policy decisions, narrow signer invocation, registry state, and exact component verification are durable | Harden database state transitions, signer isolation/KMS operation, revocation, idempotency, and negative-path tests |
+| Signed admission statement and lifecycle registry | Exact-bundle v2 control plane implemented | Workers emit only unsigned non-deployable candidates; frozen evidence, approvals, policy decisions, narrow signer invocation, registry state, exact component verification, legal transition events, latest-manifest checks, and automatic evidence-change invalidation are durable | Harden signer isolation/KMS operation, revocation triggers, and remaining negative-path tests |
 | Saved Model Intake policy profiles | Implemented server-owned admission expansion | Admission uses the operator-selected server default; caller booleans/subsets/exceptions cannot weaken it; mutations require operator auth | Add organization-specific required scanner/runtime/benchmark fields |
 | One-page control matrix and detailed evidence | Implemented in UI/JSON | Corporate-use verdict, can-use boolean, malicious-vs-capable serialization distinction, control matrix, primary blockers, next actions, limitations, and activity are visible | Finish HTML/PDF/SARIF parity and per-control evidence links |
 | Deployment by exact approved digest | v2 verifier code and Kubernetes manifest template implemented | The checked-in webhook manifest is not deployable as-is, and promotion currently stops at a local OCI layout; no live cluster/registry enforcement is proven | Complete one digest-preserving registry push and a correctly scoped/certified Kubernetes negative-path deployment test; add no other orchestrator |
@@ -1455,9 +1456,10 @@ specific model.
 
 Each increment must be independently committed and leave required controls fail closed:
 
-1. **Authoritative workflow:** make technical scans structurally preflight-only; enforce controlled-workflow
-   state transitions, immutable frozen inputs, downstream invalidation, idempotency, and unambiguous UI/API
-   terminology.
+1. **Authoritative workflow — implemented:** technical scans are structurally preflight-only; the controlled
+   workflow enforces legal state transitions, immutable/latest frozen inputs, transactional mutations,
+   downstream admission/binding invalidation, replay idempotency, and unambiguous UI/API terminology. A real
+   PostgreSQL smoke rolls back after proving the invalidation chain.
 2. **Existing evidence hardening:** enforce ModelScan/Fickling/Semgrep/Trivy applicability and freshness,
    improve Semgrep rules and safe fixtures, remove optional-tool claims, and make all unexpected worker/tool
    failures durable terminal non-pass states.

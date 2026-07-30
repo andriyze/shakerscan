@@ -1225,7 +1225,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Skills | 6 | `skills/` |
 | Slash commands | 15 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
-| Durable tables | 62 | `db/init.sql` + migrations |
+| Durable tables | 63 | `db/init.sql` + migrations |
 
 ### Public REST Operations
 
@@ -1892,7 +1892,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `BROKER_INGEST_QUEUE_NAME` | `api/api.py`, `api/worker.py` |
 | `BUILD_FINGERPRINT` | `api/worker.py` |
 | `COVERAGE_ALLOCATION_DEFAULT` | `api/parallel_scan.py` |
-| `DATABASE_URL` | `api/api.py`, `api/gungnir_worker.py`, `api/model_intake_signer_service.py`, `api/worker.py`, `scanner/gungnir_worker.py`, `scripts/upgrade_schema_smoke.py` |
+| `DATABASE_URL` | `api/api.py`, `api/gungnir_worker.py`, `api/model_intake_signer_service.py`, `api/worker.py`, `scanner/gungnir_worker.py`, `scripts/model_intake_workflow_smoke.py`, `scripts/upgrade_schema_smoke.py` |
 | `DEFAULT_ASM_ENABLED` | `api/api.py` |
 | `DEFAULT_RESEARCH_PLANNER_MODE` | `api/api.py` |
 | `DOMAIN_RATE_REQUEUE_DELAY_SECONDS` | `api/worker.py` |
@@ -2233,6 +2233,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `model_intake_evidence_records` | `db/init.sql` |
 | `model_intake_policy_decisions` | `db/init.sql` |
 | `model_intake_subjects` | `db/init.sql` |
+| `model_intake_submission_events` | `db/init.sql` |
 | `model_intake_submissions` | `db/init.sql` |
 | `model_intake_trust_anchors` | `db/init.sql` |
 | `node_credentials` | `db/init.sql` |

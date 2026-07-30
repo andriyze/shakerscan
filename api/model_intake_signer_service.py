@@ -137,9 +137,14 @@ async def issue(
                 }
             row = await conn.fetchrow(
                 """
-                SELECT decision.*,submission.scan_id,submission.id AS submission_id,
+                SELECT decision.*,submission.scan_id,submission.id AS submission_id,submission.state AS submission_state,
                        manifest.manifest_json,manifest.deployment_bundle_json,
-                       manifest.manifest_sha256,scan.target_id
+                       manifest.manifest_sha256,scan.target_id,
+                       manifest.id=(
+                           SELECT latest.id FROM model_intake_evidence_manifests AS latest
+                           WHERE latest.submission_id=submission.id
+                           ORDER BY latest.version DESC LIMIT 1
+                       ) AS is_latest_manifest
                 FROM model_intake_policy_decisions AS decision
                 JOIN model_intake_submissions AS submission ON submission.id=decision.submission_id
                 JOIN model_intake_evidence_manifests AS manifest ON manifest.id=decision.evidence_manifest_id
@@ -153,6 +158,8 @@ async def issue(
                 raise HTTPException(status_code=404, detail="Stored policy decision not found")
             if row["decision"] != "allow" or not row["scan_id"]:
                 raise HTTPException(status_code=409, detail="Only an allow decision with bound scan evidence can be signed")
+            if row["submission_state"] != "policy_decided" or not row["is_latest_manifest"]:
+                raise HTTPException(status_code=409, detail="Submission evidence changed after the policy decision")
             approvals = [
                 _json_object(item["receipt_json"])
                 for item in await conn.fetch(
@@ -223,9 +230,30 @@ async def issue(
                 package["statement_sha256"],
                 json.dumps({"signer_provider": package["envelope"]["signatures"][0]["provider"]}),
             )
-            await conn.execute(
-                "UPDATE model_intake_submissions SET state='admitted',updated_at=NOW() WHERE id=$1",
+            transitioned = await conn.fetchrow(
+                """
+                UPDATE model_intake_submissions
+                SET state='admitted',updated_at=NOW()
+                WHERE id=$1 AND state='policy_decided'
+                RETURNING id
+                """,
                 row["submission_id"],
+            )
+            if not transitioned:
+                raise HTTPException(status_code=409, detail="Submission is no longer eligible for admission")
+            await conn.execute(
+                """
+                INSERT INTO model_intake_submission_events
+                    (submission_id,event_type,actor,reason,previous_state,new_state,metadata_json)
+                VALUES ($1,'admission_issued','model-intake-signer',
+                        'Narrow signer issued an exact-bundle admission','policy_decided','admitted',$2::jsonb)
+                """,
+                row["submission_id"],
+                json.dumps({
+                    "admission_id": str(admission_id),
+                    "policy_decision_id": str(decision_uuid),
+                    "statement_sha256": package["statement_sha256"],
+                }),
             )
             await conn.execute(
                 """

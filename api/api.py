@@ -10968,6 +10968,134 @@ def _model_intake_required_static_checks(summary: dict[str, Any]) -> dict[str, b
     }
 
 
+_MODEL_INTAKE_SUBMISSION_TRANSITIONS: dict[str, set[str]] = {
+    "submitted": {"scanning", "evidence_ready", "blocked", "cancelled"},
+    "scanning": {"evidence_ready", "blocked", "cancelled"},
+    "evidence_ready": {"evidence_ready", "awaiting_approval", "blocked", "cancelled"},
+    "evidence_frozen": {"evidence_ready", "awaiting_approval", "blocked", "cancelled"},
+    "awaiting_approval": {"evidence_ready", "awaiting_approval", "policy_decided", "blocked", "cancelled"},
+    "policy_decided": {"evidence_ready", "admitted", "blocked", "cancelled"},
+    "admitted": {"evidence_ready", "promoted", "blocked"},
+    "promoted": {"evidence_ready", "blocked"},
+    "blocked": {"evidence_ready", "cancelled"},
+    "cancelled": set(),
+}
+
+
+def _model_intake_transition_is_allowed(previous_state: str, new_state: str) -> bool:
+    return new_state in _MODEL_INTAKE_SUBMISSION_TRANSITIONS.get(previous_state, set())
+
+
+async def _transition_model_intake_submission(
+    conn: Any,
+    submission_id: uuid.UUID,
+    *,
+    new_state: str,
+    event_type: str,
+    actor: str,
+    reason: str,
+    metadata: dict[str, Any] | None = None,
+) -> str:
+    row = await conn.fetchrow(
+        "SELECT state FROM model_intake_submissions WHERE id=$1 FOR UPDATE",
+        submission_id,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Model submission not found")
+    previous_state = str(row["state"])
+    if not _model_intake_transition_is_allowed(previous_state, new_state):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "model_intake_state_transition_invalid",
+                "previous_state": previous_state,
+                "requested_state": new_state,
+            },
+        )
+    await conn.execute(
+        "UPDATE model_intake_submissions SET state=$2,updated_at=NOW() WHERE id=$1",
+        submission_id,
+        new_state,
+    )
+    await conn.execute(
+        """
+        INSERT INTO model_intake_submission_events
+            (submission_id,event_type,actor,reason,previous_state,new_state,metadata_json)
+        VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)
+        """,
+        submission_id,
+        event_type,
+        actor,
+        reason,
+        previous_state,
+        new_state,
+        json.dumps(metadata or {}, sort_keys=True, separators=(",", ":"), default=str),
+    )
+    return previous_state
+
+
+async def _reset_model_intake_for_new_evidence(
+    conn: Any,
+    submission_id: uuid.UUID,
+    *,
+    actor: str,
+    evidence_type: str,
+    evidence_id: str,
+) -> dict[str, int]:
+    invalidated = await conn.fetch(
+        """
+        UPDATE model_intake_admissions
+        SET status='reassessment_required',updated_at=NOW()
+        WHERE submission_id=$1 AND status='active'
+        RETURNING id,statement_sha256
+        """,
+        submission_id,
+    )
+    for admission in invalidated:
+        await conn.execute(
+            """
+            INSERT INTO model_intake_admission_events
+                (admission_id,event_type,actor,reason,previous_status,new_status,evidence_digest,metadata_json)
+            VALUES ($1,'authoritative_evidence_changed',$2,$3,'active','reassessment_required',$4,$5::jsonb)
+            """,
+            admission["id"],
+            actor,
+            f"New {evidence_type} evidence requires a fresh frozen manifest and decision",
+            admission["statement_sha256"],
+            json.dumps({"evidence_type": evidence_type, "evidence_id": evidence_id}),
+        )
+    binding_result = await conn.execute(
+        """
+        UPDATE model_intake_deployment_bindings
+        SET verifier_status='STALE',observed_bundle_sha256=NULL,observed_at=NULL
+        WHERE submission_id=$1 AND verifier_status <> 'STALE'
+        """,
+        submission_id,
+    )
+    try:
+        stale_bindings = int(str(binding_result).rsplit(" ", 1)[-1])
+    except ValueError:
+        stale_bindings = 0
+    await _transition_model_intake_submission(
+        conn,
+        submission_id,
+        new_state="evidence_ready",
+        event_type="authoritative_evidence_attached",
+        actor=actor,
+        reason=f"Attached {evidence_type} evidence and invalidated downstream deployment authority",
+        metadata={
+            "evidence_type": evidence_type,
+            "evidence_id": evidence_id,
+            "admissions_invalidated": len(invalidated),
+            "deployment_bindings_staled": stale_bindings,
+        },
+    )
+    return {
+        "admissions_invalidated": len(invalidated),
+        "deployment_bindings_staled": stale_bindings,
+    }
+
+
 @app.post("/model-intake/submissions")
 async def create_model_intake_submission(request: ModelSubmissionRequest, http_request: Request):
     """Create work only; this endpoint can never issue an admission."""
@@ -10988,7 +11116,7 @@ async def create_model_intake_submission(request: ModelSubmissionRequest, http_r
         "upstream_attestation": request.upstream_attestation,
         "provenance_class": "DECLARED",
     }
-    async with db_pool.acquire() as conn:
+    async with db_pool.acquire() as conn, conn.transaction():
         row = await conn.fetchrow(
             """
             INSERT INTO model_intake_submissions
@@ -11004,6 +11132,16 @@ async def create_model_intake_submission(request: ModelSubmissionRequest, http_r
             request.expected_artifact_sha256.lower() if request.expected_artifact_sha256 else None,
             json.dumps(request.intended_use),
             json.dumps(declarations),
+        )
+        await conn.execute(
+            """
+            INSERT INTO model_intake_submission_events
+                (submission_id,event_type,actor,reason,previous_state,new_state,metadata_json)
+            VALUES ($1,'submission_created',$2,'Model intake submission created','submitted','submitted',$3::jsonb)
+            """,
+            row["id"],
+            requested_by,
+            json.dumps({"requested_environment": request.intended_environment}),
         )
     return {
         "submission": row_to_dict(row),
@@ -11038,6 +11176,9 @@ async def get_model_intake_submission(submission_id: str):
         admissions = await conn.fetch(
             "SELECT * FROM model_intake_admissions WHERE submission_id=$1 ORDER BY created_at", submission_uuid
         )
+        events = await conn.fetch(
+            "SELECT * FROM model_intake_submission_events WHERE submission_id=$1 ORDER BY created_at", submission_uuid
+        )
     return {
         "submission": row_to_dict(submission),
         "subjects": [row_to_dict(item) for item in subjects],
@@ -11046,6 +11187,7 @@ async def get_model_intake_submission(submission_id: str):
         "approvals": [row_to_dict(item) for item in approvals],
         "policy_decisions": [row_to_dict(item) for item in decisions],
         "admissions": [row_to_dict(item) for item in admissions],
+        "events": [row_to_dict(item) for item in events],
     }
 
 
@@ -11059,8 +11201,11 @@ async def attach_model_intake_static_run(
     actor = _model_intake_authenticated_subject(http_request)
     submission_uuid = _model_intake_uuid(submission_id, "submission id")
     scan_uuid = _model_intake_uuid(request.scan_id, "scan id")
-    async with db_pool.acquire() as conn:
-        submission = await conn.fetchrow("SELECT * FROM model_intake_submissions WHERE id=$1", submission_uuid)
+    async with db_pool.acquire() as conn, conn.transaction():
+        submission = await conn.fetchrow(
+            "SELECT * FROM model_intake_submissions WHERE id=$1 FOR UPDATE",
+            submission_uuid,
+        )
         scan = await conn.fetchrow("SELECT id,status,result FROM scans WHERE id=$1", scan_uuid)
         if not submission:
             raise HTTPException(status_code=404, detail="Model submission not found")
@@ -11124,7 +11269,7 @@ async def attach_model_intake_static_run(
                  object_storage_uri,status,started_at,finished_at,expires_at)
             VALUES ($1,'static_analysis','model-intake-static-evidence/v1','GENERATED_STATIC',
                     'shakerscan-static-worker',$2,$3,$4,$5::jsonb,$6,$7,$8,NOW(),NOW(),NOW()+INTERVAL '30 days')
-            ON CONFLICT (producer_id,invocation_id) DO UPDATE SET payload_sha256=EXCLUDED.payload_sha256
+            ON CONFLICT (producer_id,invocation_id) DO NOTHING
             RETURNING *
             """,
             submission_uuid,
@@ -11139,8 +11284,28 @@ async def attach_model_intake_static_run(
             f"scan://{scan_uuid}/result",
             static_status,
         )
+        duplicate = evidence is None
+        if duplicate:
+            evidence = await conn.fetchrow(
+                "SELECT * FROM model_intake_evidence_records WHERE producer_id=$1 AND invocation_id=$2",
+                "shakerscan-static-worker",
+                str(scan_uuid),
+            )
+            if not evidence or evidence["payload_sha256"] != payload_digest:
+                raise HTTPException(status_code=409, detail="Static scan invocation replay changed payload")
+        invalidation = (
+            {"admissions_invalidated": 0, "deployment_bindings_staled": 0}
+            if duplicate
+            else await _reset_model_intake_for_new_evidence(
+                conn,
+                submission_uuid,
+                actor=actor,
+                evidence_type="static_analysis",
+                evidence_id=str(evidence["id"]),
+            )
+        )
         await conn.execute(
-            "UPDATE model_intake_submissions SET scan_id=$2,state='evidence_ready',updated_at=NOW() WHERE id=$1",
+            "UPDATE model_intake_submissions SET scan_id=$2,updated_at=NOW() WHERE id=$1",
             submission_uuid,
             scan_uuid,
         )
@@ -11148,6 +11313,7 @@ async def attach_model_intake_static_run(
         "submission_id": str(submission_uuid),
         "evidence": row_to_dict(evidence),
         "required_static_checks": required_static_checks,
+        "downstream_invalidation": invalidation,
         "deployable": False,
     }
 
@@ -11176,9 +11342,9 @@ async def attach_model_intake_runner_evidence(
     if not policy:
         raise HTTPException(status_code=422, detail="Unsupported runner evidence type")
     _provenance, purpose = policy
-    async with db_pool.acquire() as conn:
+    async with db_pool.acquire() as conn, conn.transaction():
         submission = await conn.fetchrow(
-            "SELECT id,requested_environment FROM model_intake_submissions WHERE id=$1",
+            "SELECT id,requested_environment FROM model_intake_submissions WHERE id=$1 FOR UPDATE",
             submission_uuid,
         )
         if not submission:
@@ -11236,7 +11402,8 @@ async def attach_model_intake_runner_evidence(
             datetime.fromisoformat(payload["finished_at"].replace("Z", "+00:00")),
             datetime.fromisoformat(payload["expires_at"].replace("Z", "+00:00")),
         )
-        if not inserted:
+        duplicate = inserted is None
+        if duplicate:
             inserted = await conn.fetchrow(
                 "SELECT * FROM model_intake_evidence_records WHERE producer_id=$1 AND invocation_id=$2",
                 payload["builder_id"],
@@ -11244,14 +11411,22 @@ async def attach_model_intake_runner_evidence(
             )
             if not inserted or inserted["payload_sha256"] != verified["payload_sha256"]:
                 raise HTTPException(status_code=409, detail="Runner invocation replay changed payload")
-        await conn.execute(
-            "UPDATE model_intake_submissions SET state='evidence_ready',updated_at=NOW() WHERE id=$1",
-            submission_uuid,
+        invalidation = (
+            {"admissions_invalidated": 0, "deployment_bindings_staled": 0}
+            if duplicate
+            else await _reset_model_intake_for_new_evidence(
+                conn,
+                submission_uuid,
+                actor=actor,
+                evidence_type=evidence_type,
+                evidence_id=str(inserted["id"]),
+            )
         )
     return {
         "evidence": row_to_dict(inserted),
         "verified": True,
         "verified_by": actor,
+        "downstream_invalidation": invalidation,
         "deployable": False,
     }
 
@@ -11268,7 +11443,7 @@ async def freeze_model_intake_evidence(
         bundle = _build_model_deployment_bundle(request.deployment_bundle)
     except _ModelAdmissionContractError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    async with db_pool.acquire() as conn:
+    async with db_pool.acquire() as conn, conn.transaction():
         submission = await conn.fetchrow("SELECT * FROM model_intake_submissions WHERE id=$1 FOR UPDATE", submission_uuid)
         if not submission:
             raise HTTPException(status_code=404, detail="Model submission not found")
@@ -11348,9 +11523,14 @@ async def freeze_model_intake_evidence(
             actor,
             previous,
         )
-        await conn.execute(
-            "UPDATE model_intake_submissions SET state='awaiting_approval',updated_at=NOW() WHERE id=$1",
+        await _transition_model_intake_submission(
+            conn,
             submission_uuid,
+            new_state="awaiting_approval",
+            event_type="evidence_manifest_frozen",
+            actor=actor,
+            reason="Authoritative evidence was frozen for approval",
+            metadata={"manifest_id": str(row["id"]), "manifest_sha256": manifest["manifest_sha256"]},
         )
     return {"manifest": row_to_dict(row), "deployment_bundle": bundle, "deployable": False}
 
@@ -11366,20 +11546,30 @@ async def create_model_intake_approval(
         raise HTTPException(status_code=403, detail="Authenticated operator lacks the requested approval role")
     submission_uuid = _model_intake_uuid(submission_id, "submission id")
     manifest_uuid = _model_intake_uuid(request.evidence_manifest_id, "evidence manifest id")
-    async with db_pool.acquire() as conn:
+    async with db_pool.acquire() as conn, conn.transaction():
         row = await conn.fetchrow(
             """
-            SELECT submission.requested_by, submission.requested_environment,
-                   manifest.id,manifest.manifest_sha256,manifest.subject_bundle_sha256
+            SELECT submission.requested_by, submission.requested_environment,submission.state,
+                   manifest.id,manifest.manifest_sha256,manifest.subject_bundle_sha256,
+                   manifest.id=(
+                       SELECT latest.id FROM model_intake_evidence_manifests AS latest
+                       WHERE latest.submission_id=submission.id
+                       ORDER BY latest.version DESC LIMIT 1
+                   ) AS is_latest_manifest
             FROM model_intake_evidence_manifests AS manifest
             JOIN model_intake_submissions AS submission ON submission.id=manifest.submission_id
             WHERE manifest.id=$1 AND manifest.submission_id=$2
+            FOR UPDATE OF submission
             """,
             manifest_uuid,
             submission_uuid,
         )
         if not row:
             raise HTTPException(status_code=404, detail="Frozen evidence manifest not found")
+        if row["state"] != "awaiting_approval":
+            raise HTTPException(status_code=409, detail="Submission is not awaiting approval")
+        if not row["is_latest_manifest"]:
+            raise HTTPException(status_code=409, detail="Approval must bind the latest frozen evidence manifest")
         if actor == row["requested_by"]:
             raise HTTPException(status_code=409, detail="A submitter cannot approve its own submission")
         try:
@@ -11418,6 +11608,20 @@ async def create_model_intake_approval(
             request.approval_type,
             datetime.fromisoformat(receipt["expires_at"]),
         )
+        await _transition_model_intake_submission(
+            conn,
+            submission_uuid,
+            new_state="blocked" if request.decision == "reject" else "awaiting_approval",
+            event_type="approval_rejected" if request.decision == "reject" else "approval_recorded",
+            actor=actor,
+            reason=request.reason,
+            metadata={
+                "approval_id": str(approval["id"]),
+                "approval_type": request.approval_type,
+                "decision": request.decision,
+                "evidence_manifest_id": str(manifest_uuid),
+            },
+        )
     return {"approval": row_to_dict(approval), "identity_source": "authenticated_server_context"}
 
 
@@ -11427,22 +11631,32 @@ async def create_model_intake_policy_decision(
     request: ModelPolicyDecisionCreateRequest,
     http_request: Request,
 ):
-    _model_intake_authenticated_subject(http_request)
+    actor = _model_intake_authenticated_subject(http_request)
     submission_uuid = _model_intake_uuid(submission_id, "submission id")
     manifest_uuid = _model_intake_uuid(request.evidence_manifest_id, "evidence manifest id")
-    async with db_pool.acquire() as conn:
+    async with db_pool.acquire() as conn, conn.transaction():
         row = await conn.fetchrow(
             """
-            SELECT submission.requested_by,manifest.manifest_json,manifest.deployment_bundle_json
+            SELECT submission.requested_by,submission.state,manifest.manifest_json,manifest.deployment_bundle_json,
+                   manifest.id=(
+                       SELECT latest.id FROM model_intake_evidence_manifests AS latest
+                       WHERE latest.submission_id=submission.id
+                       ORDER BY latest.version DESC LIMIT 1
+                   ) AS is_latest_manifest
             FROM model_intake_evidence_manifests AS manifest
             JOIN model_intake_submissions AS submission ON submission.id=manifest.submission_id
             WHERE manifest.id=$1 AND manifest.submission_id=$2
+            FOR UPDATE OF submission
             """,
             manifest_uuid,
             submission_uuid,
         )
         if not row:
             raise HTTPException(status_code=404, detail="Frozen evidence manifest not found")
+        if row["state"] != "awaiting_approval":
+            raise HTTPException(status_code=409, detail="Submission is not awaiting a policy decision")
+        if not row["is_latest_manifest"]:
+            raise HTTPException(status_code=409, detail="Policy decision must bind the latest frozen evidence manifest")
         approvals = [
             _model_intake_json_object(item["receipt_json"])
             for item in await conn.fetch(
@@ -11469,6 +11683,7 @@ async def create_model_intake_policy_decision(
                 (id,submission_id,evidence_manifest_id,decision_sha256,decision_json,decision,
                  policy_provider,policy_bundle_sha256,input_sha256)
             VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9)
+            ON CONFLICT (decision_sha256) DO NOTHING
             RETURNING *
             """,
             uuid.UUID(decision["decision_id"]),
@@ -11481,11 +11696,31 @@ async def create_model_intake_policy_decision(
             decision["policy_bundle_sha256"],
             decision["input_sha256"],
         )
+        if not stored:
+            stored = await conn.fetchrow(
+                """
+                SELECT * FROM model_intake_policy_decisions
+                WHERE decision_sha256=$1 AND submission_id=$2 AND evidence_manifest_id=$3
+                """,
+                decision["decision_sha256"],
+                submission_uuid,
+                manifest_uuid,
+            )
+            if not stored:
+                raise HTTPException(status_code=409, detail="Policy decision digest is already bound elsewhere")
         state = "policy_decided" if decision["decision"] == "allow" else "blocked" if decision["decision"] == "block" else "awaiting_approval"
-        await conn.execute(
-            "UPDATE model_intake_submissions SET state=$2,updated_at=NOW() WHERE id=$1",
+        await _transition_model_intake_submission(
+            conn,
             submission_uuid,
-            state,
+            new_state=state,
+            event_type="policy_decision_recorded",
+            actor=actor,
+            reason=f"Embedded policy returned {decision['decision']}",
+            metadata={
+                "policy_decision_id": str(stored["id"]),
+                "decision_sha256": decision["decision_sha256"],
+                "evidence_manifest_id": str(manifest_uuid),
+            },
         )
     return {"policy_decision": row_to_dict(stored), "decision": decision}
 
@@ -12062,7 +12297,17 @@ async def promote_model_intake_submission(
     decision_uuid = _model_intake_uuid(request.policy_decision_id, "policy decision id")
     async with db_pool.acquire() as conn:
         decision = await conn.fetchrow(
-            "SELECT id,decision FROM model_intake_policy_decisions WHERE id=$1 AND submission_id=$2",
+            """
+            SELECT decision.id,decision.decision,submission.state,
+                   decision.evidence_manifest_id=(
+                       SELECT latest.id FROM model_intake_evidence_manifests AS latest
+                       WHERE latest.submission_id=submission.id
+                       ORDER BY latest.version DESC LIMIT 1
+                   ) AS binds_latest_manifest
+            FROM model_intake_policy_decisions AS decision
+            JOIN model_intake_submissions AS submission ON submission.id=decision.submission_id
+            WHERE decision.id=$1 AND decision.submission_id=$2
+            """,
             decision_uuid,
             submission_uuid,
         )
@@ -12070,6 +12315,8 @@ async def promote_model_intake_submission(
         raise HTTPException(status_code=404, detail="Stored policy decision not found")
     if decision["decision"] != "allow":
         raise HTTPException(status_code=409, detail="Only a stored allow decision can be promoted")
+    if decision["state"] != "policy_decided" or not decision["binds_latest_manifest"]:
+        raise HTTPException(status_code=409, detail="Promotion requires the latest unchanged policy-decided evidence")
     try:
         result = await asyncio.to_thread(
             _call_model_intake_signer,

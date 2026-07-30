@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import uuid
 
 import pytest
 
@@ -162,6 +163,59 @@ def test_fresh_and_upgrade_schemas_share_deployment_binding_admission_fk():
         assert "FOREIGN KEY (admission_id) REFERENCES model_intake_admissions(id) ON DELETE SET NULL" in source
 
     assert "SET admission_id = NULL" in migrations
+
+
+def test_submission_state_machine_rejects_authority_skips():
+    assert api._model_intake_transition_is_allowed("submitted", "evidence_ready") is True
+    assert api._model_intake_transition_is_allowed("evidence_ready", "awaiting_approval") is True
+    assert api._model_intake_transition_is_allowed("awaiting_approval", "policy_decided") is True
+    assert api._model_intake_transition_is_allowed("policy_decided", "admitted") is True
+    assert api._model_intake_transition_is_allowed("submitted", "admitted") is False
+    assert api._model_intake_transition_is_allowed("evidence_ready", "policy_decided") is False
+    assert api._model_intake_transition_is_allowed("cancelled", "evidence_ready") is False
+
+
+def test_new_authoritative_evidence_invalidates_active_deployment_authority():
+    class Conn:
+        def __init__(self):
+            self.state = "admitted"
+            self.executions = []
+            self.fetches = []
+
+        async def fetch(self, query, *_args):
+            assert "UPDATE model_intake_admissions" in query
+            self.fetches.append(query)
+            return [{"id": uuid.UUID("11111111-1111-4111-8111-111111111111"), "statement_sha256": "a" * 64}]
+
+        async def fetchrow(self, query, *_args):
+            assert "SELECT state FROM model_intake_submissions" in query
+            return {"state": self.state}
+
+        async def execute(self, query, *args):
+            self.executions.append((query, args))
+            if "UPDATE model_intake_deployment_bindings" in query:
+                return "UPDATE 1"
+            if "UPDATE model_intake_submissions SET state" in query:
+                self.state = args[1]
+                return "UPDATE 1"
+            return "INSERT 0 1"
+
+    conn = Conn()
+    result = asyncio.run(api._reset_model_intake_for_new_evidence(
+        conn,
+        uuid.UUID("22222222-2222-4222-8222-222222222222"),
+        actor="operator-token:test",
+        evidence_type="runtime_execution",
+        evidence_id="33333333-3333-4333-8333-333333333333",
+    ))
+
+    assert result == {"admissions_invalidated": 1, "deployment_bindings_staled": 1}
+    assert conn.state == "evidence_ready"
+    sql = "\n".join(conn.fetches + [query for query, _args in conn.executions])
+    assert "status='reassessment_required'" in sql
+    assert "verifier_status='STALE'" in sql
+    assert "authoritative_evidence_changed" in sql
+    assert any("authoritative_evidence_attached" in args for _query, args in conn.executions)
 
 
 def test_promotion_api_sends_only_stored_decision_id_and_idempotency_key():
