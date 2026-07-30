@@ -1476,6 +1476,31 @@ Each increment must be independently committed and leave required controls fail 
 Release acceptance requires a physical Firecracker run and controlled deployment test. Mocked or
 caller-signed receipts prove contract handling only and cannot close those gates.
 
+Release acceptance also requires surface parity. The controlled workflow must be usable through the API,
+the web UI, and the shipped `shakerscan` agent skill without changing its security meaning. Every surface
+must expose the same authoritative submission, evidence, approval, admission, promotion, verification,
+reassessment, and revocation states; show the same non-pass reasons and evidence provenance; require the
+same operator/deployment authorization; and reject the same attempts to weaken policy or substitute caller
+claims. A surface may offer fewer administrative operations, but it may not silently route a user into the
+legacy preflight scan when they requested admission or describe preflight evidence as deployable approval.
+
+The final release candidate must be rebuilt from the exact branch on the designated Linux/KVM VPS and tested
+through all three surfaces. Acceptance includes physical Firecracker execution and complete pinned intake of:
+
+- `nomic-ai/CodeRankEmbed`
+- `codesage/codesage-base-v2`
+- `codesage/codesage-large-v2`
+
+These models are conformance fixtures, not hard-coded product targets. CodeRankEmbed must exercise the
+custom-code/safetensors loader path; CodeSage Base must exercise quarantined executable serialization,
+Firecracker conversion, and equivalence; Large must exercise the same controls plus the approved resource
+envelope and must remain explicitly `INCOMPLETE` rather than bypassing limits if the VPS cannot qualify it.
+For every model, retain the scan/submission IDs, immutable revision and artifact digests, phase logs, runner
+receipt and telemetry digests, policy/admission result, UI evidence, API response evidence, and agent-skill
+transcript. A technically successful scan may correctly end in `BLOCK`, `INCOMPLETE`, or `REVIEW_REQUIRED`;
+acceptance means the result is accurate, complete, consistent across surfaces, and cannot be promoted when
+non-pass gates remain.
+
 ### Phase -1 — Admission correctness — **closed; retained as Release Gate 0**
 
 Maintain these invariants before any further model-execution or hardening feature:
@@ -1936,6 +1961,10 @@ Owners must decide and record:
   SARIF, per-control evidence links, and admission-statement parity remain.
 - [ ] The embedded Python policy, existing signer/KMS path, configured OCI registry promotion, CI verifier,
   and Kubernetes admission webhook pass their complete negative-path and recovery gates.
+- [ ] API, UI, and the shipped `shakerscan` agent skill expose the same controlled Model Intake workflow,
+  authorization requirements, evidence, state transitions, and fail-closed decision semantics.
+- [ ] The exact release branch is rebuilt on the designated Linux/KVM VPS and physical runs for
+  CodeRankEmbed, CodeSage Base v2, and CodeSage Large v2 retain cross-surface evidence and accurate outcomes.
 
 ### 19.2 Per-model admission-run checklist
 
