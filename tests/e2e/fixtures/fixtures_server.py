@@ -47,6 +47,10 @@ SIGNING_PUB_PEM = base64.b64decode(
     "QyBLRVktLS0tLQo="
 ).decode()
 SIGNATURE_B64 = "JnZOSbYzEiBvloZSeMQsRN4UuZOw9vzNvXPcYP2IFkIePnADXJYi5sTTAbWlfZ8d4bOg/ag4KUc+bzyWK4fGAQ=="
+WRONG_SIGNING_PUB_PEM = """-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAO/G9DQkewHUIaigL4wnW349tDGRH9UnlyREUK1iv174=
+-----END PUBLIC KEY-----
+"""
 
 # A secret-laden disclosure the worker will capture so BOTH detection and
 # transcript redaction can be asserted on real output.

@@ -5161,14 +5161,21 @@ def _require_model_intake_operator(request: Request) -> None:
     configured_bind = os.environ.get("SHAKERSCAN_BIND_HOST", "").strip()
     try:
         configured_bind_ip = ipaddress.ip_address(configured_bind) if configured_bind else None
+        host_publish_is_loopback = bool(configured_bind_ip and configured_bind_ip.is_loopback)
     except ValueError:
         configured_bind_ip = None
+        host_publish_is_loopback = False
     trusted_tailscale_http = bool(
         os.environ.get("SHAKERSCAN_TRUSTED_REMOTE_TRANSPORT", "").strip().lower() == "tailscale"
         and isinstance(configured_bind_ip, ipaddress.IPv4Address)
         and configured_bind_ip in ipaddress.ip_network("100.64.0.0/10")
     )
-    if request.url.scheme != "https" and not peer_is_loopback and not trusted_tailscale_http:
+    if (
+        request.url.scheme != "https"
+        and not peer_is_loopback
+        and not host_publish_is_loopback
+        and not trusted_tailscale_http
+    ):
         raise HTTPException(
             status_code=403,
             detail="Model Intake operator access requires loopback, verified Tailscale, or authenticated HTTPS",
@@ -10808,25 +10815,47 @@ async def _expand_model_intake_policy_profile_requirements(request: ModelIntakeS
 
 async def _expand_model_intake_saved_trust_anchors(request: ModelIntakeScanRequest) -> ModelIntakeScanRequest:
     anchor_ids = [uuid.UUID(item) for item in _str_list(request.trust_anchor_ids)]
-    if not anchor_ids:
-        return request
     async with db_pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT * FROM model_intake_trust_anchors
-            WHERE id = ANY($1::uuid[])
-              AND is_active = true
-              AND revoked_at IS NULL
-              AND valid_from <= NOW()
-              AND (valid_until IS NULL OR valid_until > NOW())
-              AND environment = $2
-              AND purpose IN ('publisher_signature','upstream_attestation')
-            """,
-            anchor_ids,
-            str(request.policy_profile or "production").lower(),
-        )
-    if len(rows) != len(set(anchor_ids)):
-        raise HTTPException(status_code=400, detail="One or more selected Model Intake trust anchors were not found or are inactive")
+        environment = str(request.policy_profile or "production").lower()
+        if request.intake_mode == "preflight":
+            # Public preflight cannot select trust roots. The server supplies
+            # every currently active, environment/profile-scoped publisher or
+            # attestation anchor after requester trust material was stripped.
+            rows = await conn.fetch(
+                """
+                SELECT * FROM model_intake_trust_anchors
+                WHERE is_active = true
+                  AND revoked_at IS NULL
+                  AND valid_from <= NOW()
+                  AND (valid_until IS NULL OR valid_until > NOW())
+                  AND environment = $1
+                  AND (policy_profile IS NULL OR lower(policy_profile) = $1)
+                  AND purpose IN ('publisher_signature','upstream_attestation')
+                ORDER BY purpose,name,id
+                """,
+                environment,
+            )
+        else:
+            if not anchor_ids:
+                return request
+            rows = await conn.fetch(
+                """
+                SELECT * FROM model_intake_trust_anchors
+                WHERE id = ANY($1::uuid[])
+                  AND is_active = true
+                  AND revoked_at IS NULL
+                  AND valid_from <= NOW()
+                  AND (valid_until IS NULL OR valid_until > NOW())
+                  AND environment = $2
+                  AND purpose IN ('publisher_signature','upstream_attestation')
+                """,
+                anchor_ids,
+                environment,
+            )
+            if len(rows) != len(set(anchor_ids)):
+                raise HTTPException(status_code=400, detail="One or more selected Model Intake trust anchors were not found or are inactive")
+    if not rows:
+        return request
     return _merge_model_intake_trust_anchor_material(request, [row_to_dict(row) for row in rows])
 
 

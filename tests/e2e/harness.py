@@ -19,15 +19,21 @@ API = os.environ.get("SHAKERSCAN_API", "http://localhost:8080")
 TERMINAL = {"completed", "failed", "cancelled", "error"}
 
 
-def _req(method: str, path: str, body: dict | None = None, timeout: int = 60, retries: int = 5):
+def _req(
+    method: str,
+    path: str,
+    body: dict | None = None,
+    timeout: int = 60,
+    retries: int = 5,
+    headers: dict[str, str] | None = None,
+):
     url = path if path.startswith("http") else f"{API}{path}"
     data = json.dumps(body).encode() if body is not None else None
     last_exc: Exception | None = None
     for attempt in range(retries):
-        req = urllib.request.Request(
-            url, data=data, method=method,
-            headers={"Content-Type": "application/json"} if data else {},
-        )
+        request_headers = {"Content-Type": "application/json"} if data else {}
+        request_headers.update(headers or {})
+        req = urllib.request.Request(url, data=data, method=method, headers=request_headers)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 raw = r.read().decode()
@@ -41,20 +47,52 @@ def _req(method: str, path: str, body: dict | None = None, timeout: int = 60, re
     raise last_exc  # type: ignore[misc]
 
 
-def get(path: str, timeout: int = 60):
-    return _req("GET", path, timeout=timeout)[1]
+def get(path: str, timeout: int = 60, headers: dict[str, str] | None = None):
+    return _req("GET", path, timeout=timeout, headers=headers)[1]
 
 
-def post(path: str, body: dict, timeout: int = 30):
+def post(path: str, body: dict, timeout: int = 30, headers: dict[str, str] | None = None):
     """POST returning (status_code, json). Raises only on transport errors; HTTP
     error bodies are returned so cases can assert on 4xx/409 gates."""
     try:
-        return _req("POST", path, body, timeout=timeout)
+        return _req("POST", path, body, timeout=timeout, headers=headers)
     except urllib.error.HTTPError as e:
         try:
             return e.code, json.loads(e.read().decode())
         except Exception:
             return e.code, {}
+
+
+def delete(path: str, timeout: int = 30, headers: dict[str, str] | None = None):
+    try:
+        return _req("DELETE", path, timeout=timeout, headers=headers)
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read().decode())
+        except Exception:
+            return e.code, {}
+
+
+def model_intake_operator_headers() -> dict[str, str]:
+    """Load the local release-test credential without printing or persisting it."""
+    token = os.environ.get("SHAKERSCAN_E2E_MODEL_INTAKE_OPERATOR_TOKEN", "").strip()
+    if not token:
+        env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), ".env")
+        try:
+            with open(env_path, encoding="utf-8") as handle:
+                for raw_line in handle:
+                    key, separator, value = raw_line.strip().partition("=")
+                    if separator and key == "MODEL_INTAKE_OPERATOR_TOKEN":
+                        token = value.strip().strip('"').strip("'")
+                        break
+        except OSError:
+            pass
+    if len(token) < 32:
+        raise RuntimeError(
+            "Model Intake operator credential is unavailable; start ShakerScan or set "
+            "SHAKERSCAN_E2E_MODEL_INTAKE_OPERATOR_TOKEN"
+        )
+    return {"Authorization": f"Bearer {token}"}
 
 
 def wait_for_scan(scan_id: str, timeout: int = 600, poll: int = 5, label: str = "") -> dict:

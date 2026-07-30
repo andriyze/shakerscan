@@ -195,7 +195,7 @@ def run_model_intake() -> H.Scorecard:
     # MI-5: a VALID self-signed signature with no configured trust anchor must read
     # as untrusted_root, never "verified" (the trust-root bug). Signature material
     # rides in metadata_json (the verifier's metadata fallback); trust anchors are
-    # operator-config only, so MI-6 (anchor -> verified) needs the worker env var.
+    # durable operator-owned state and cannot be supplied by this request.
     try:
         s = (_mi_scan({"artifact_url": fx_good, "expected_sha256": FX.GOOD_SHA,
                        "metadata_json": {"signature_public_key": FX.SIGNING_PUB_PEM,
@@ -223,6 +223,100 @@ def run_model_intake() -> H.Scorecard:
                  f"status={s.get('signature_verification_status')} trusted_root={s.get('signature_trusted_root')}")
     except Exception as e:
         sc.error("MI-6 caller trust-anchor rejection", e)
+
+    # MI-6A/B/C: exercise the positive durable trust path through the real API,
+    # DB, queue, worker, crypto verifier, and result. Expired and wrong anchors
+    # must not verify; an active correct anchor must; deactivation must take
+    # effect on the next scan. Public scan callers never select these anchors.
+    created_anchor_ids: list[str] = []
+    try:
+        operator_headers = H.model_intake_operator_headers()
+
+        def _create_anchor(label: str, public_key: str, *, valid_from: str | None = None,
+                           valid_until: str | None = None) -> str:
+            status, body = H.post("/model-intake/trust-anchors", {
+                "name": f"e2e-{label}-{_RUN_NONCE}",
+                "description": "Disposable real-stack trust verification fixture",
+                "public_key_pem": public_key,
+                "policy_profile": "production",
+                "purpose": "publisher_signature",
+                "environment": "production",
+                "valid_from": valid_from,
+                "valid_until": valid_until,
+                "source": "model-intake-e2e",
+                "owner": "model-intake-e2e",
+            }, headers=operator_headers)
+            anchor_id = str(body.get("id") or "")
+            if status != 200 or not anchor_id:
+                raise RuntimeError(f"could not create {label} trust anchor: status={status} body={body}")
+            created_anchor_ids.append(anchor_id)
+            return anchor_id
+
+        now = datetime.now(timezone.utc)
+        _create_anchor(
+            "expired-correct",
+            FX.SIGNING_PUB_PEM,
+            valid_from=(now - timedelta(days=2)).isoformat(),
+            valid_until=(now - timedelta(days=1)).isoformat(),
+        )
+        _create_anchor("active-wrong", FX.WRONG_SIGNING_PUB_PEM)
+        negative = (_mi_scan({
+            "artifact_url": fx_good,
+            "expected_sha256": FX.GOOD_SHA,
+            "signature_public_key": FX.SIGNING_PUB_PEM,
+            "signature_value": FX.SIGNATURE_B64,
+        }, "MI-6A").get("model_intake") or {}).get("summary") or {}
+        sc.check(
+            "MI-6A expired and wrong durable anchors do not verify",
+            negative.get("signature_verification_status") == "untrusted_key"
+            and negative.get("signature_verified") is False
+            and negative.get("signature_trusted_root") is False,
+            f"status={negative.get('signature_verification_status')} trusted={negative.get('signature_trusted_root')}",
+        )
+
+        correct_anchor_id = _create_anchor("active-correct", FX.SIGNING_PUB_PEM)
+        positive = (_mi_scan({
+            "artifact_url": fx_good,
+            "expected_sha256": FX.GOOD_SHA,
+            "signature_public_key": FX.SIGNING_PUB_PEM,
+            "signature_value": FX.SIGNATURE_B64,
+        }, "MI-6B").get("model_intake") or {}).get("summary") or {}
+        sc.check(
+            "MI-6B operator-created durable anchor verifies exact signature",
+            positive.get("signature_verification_status") == "verified"
+            and positive.get("signature_verified") is True
+            and positive.get("signature_trusted_root") is True,
+            f"status={positive.get('signature_verification_status')} trusted={positive.get('signature_trusted_root')}",
+        )
+
+        status, deactivated = H.delete(
+            f"/model-intake/trust-anchors/{correct_anchor_id}",
+            headers=operator_headers,
+        )
+        if status != 200 or deactivated.get("deactivated") is not True:
+            raise RuntimeError(f"could not deactivate positive trust anchor: status={status} body={deactivated}")
+        after_revoke = (_mi_scan({
+            "artifact_url": fx_good,
+            "expected_sha256": FX.GOOD_SHA,
+            "signature_public_key": FX.SIGNING_PUB_PEM,
+            "signature_value": FX.SIGNATURE_B64,
+        }, "MI-6C").get("model_intake") or {}).get("summary") or {}
+        sc.check(
+            "MI-6C deactivated durable anchor stops verification",
+            after_revoke.get("signature_verification_status") == "untrusted_key"
+            and after_revoke.get("signature_verified") is False
+            and after_revoke.get("signature_trusted_root") is False,
+            f"status={after_revoke.get('signature_verification_status')} trusted={after_revoke.get('signature_trusted_root')}",
+        )
+    except Exception as e:
+        sc.error("MI-6 durable trust-anchor lifecycle", e)
+    finally:
+        try:
+            cleanup_headers = H.model_intake_operator_headers()
+            for anchor_id in reversed(created_anchor_ids):
+                H.delete(f"/model-intake/trust-anchors/{anchor_id}", headers=cleanup_headers)
+        except Exception:
+            pass
 
     # MI-7: the compatibility endpoint must not expose a second authority path.
     # Admission requests are rejected before acquisition, including requests

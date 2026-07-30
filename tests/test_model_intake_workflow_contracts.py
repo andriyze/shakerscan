@@ -100,6 +100,61 @@ def test_scoped_trust_anchor_routes_attestation_and_publisher_keys_separately():
     assert merged.required_attestation_builder_ids == ["https://builder.example/model"]
 
 
+def test_preflight_trust_is_selected_from_durable_server_state(monkeypatch):
+    class Conn:
+        def __init__(self):
+            self.query = ""
+            self.args = ()
+
+        async def fetch(self, query, *args):
+            self.query = query
+            self.args = args
+            return [{
+                "id": uuid.uuid4(),
+                "name": "publisher",
+                "purpose": "publisher_signature",
+                "environment": "production",
+                "policy_profile": "production",
+                "version": "1",
+                "public_key_pem": "server-owned-publisher-pem",
+                "public_key_sha256": None,
+                "builder_id_constraint": None,
+            }]
+
+    class Acquire:
+        def __init__(self, conn):
+            self.conn = conn
+
+        async def __aenter__(self):
+            return self.conn
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Pool:
+        def __init__(self, conn):
+            self.conn = conn
+
+        def acquire(self):
+            return Acquire(self.conn)
+
+    conn = Conn()
+    monkeypatch.setattr(api, "db_pool", Pool(conn))
+    request = api.ModelIntakeScanRequest(
+        artifact_url="https://models.example/model.safetensors",
+        intake_mode="preflight",
+        policy_profile="production",
+    )
+
+    merged = asyncio.run(api._expand_model_intake_saved_trust_anchors(request))
+
+    assert merged.signature_trusted_keys == ["server-owned-publisher-pem"]
+    assert merged.metadata_json["selected_trust_anchors"][0]["name"] == "publisher"
+    assert conn.args == ("production",)
+    assert "id = ANY" not in conn.query
+    assert "valid_until IS NULL OR valid_until > NOW()" in conn.query
+
+
 def test_signer_has_narrow_route_auth_and_no_production_local_key():
     code = """
 import os

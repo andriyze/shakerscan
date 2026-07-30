@@ -1,6 +1,6 @@
 # ShakerScan End-to-End Test Plan
 
-**Status (reconciled 2026-07-21):** this is the E2E coverage contract, not a current pass report.
+**Status (reconciled 2026-07-30):** this is the E2E coverage contract, not a current pass report.
 Historical `10/10`, `12/12`, and `12/12` totals were produced by an older harness/fleet and are not
 release evidence. The change-aware PR smoke workflow runs deterministic MI-1/MI-2–MI-6 and
 AI-1–AI-4 coverage. The manual full release workflow additionally runs D-1–D-4; MI-1-HF remains
@@ -45,7 +45,7 @@ Every recent escaped bug lived at an **integration seam that unit tests mocked o
 | MI-3 | Implemented | same, deliberately wrong `expected_sha256` | critical `sha256_mismatch` + `decision == block` | real tamper detection |
 | MI-4 | Implemented | crafted `.pkl`/`.pt` with dangerous opcode | unsafe-serialization finding | serialization detector |
 | MI-5 | Implemented | self-signed, no trust anchor | `signature_verification_status == untrusted_root` | trust root |
-| MI-6 | Implemented | trusted-anchor-signed | `verified`, `signature_trusted_root == true` | trust root positive |
+| MI-6 | Implemented | caller-supplied trust rejection plus operator-created expired-correct, active-wrong, active-correct, and deactivated durable anchors | caller cannot self-trust; expired/wrong/deactivated keys are `untrusted_key`; exact active key is `verified` with `signature_trusted_root == true` | trust authority, positive crypto path, expiry, wrong-key, revocation |
 | MI-7 | Implemented | forged `intake_mode=admission` request through the compatibility scan endpoint | HTTP 409, controlled-workflow pointer, and no queued scan | accidental second admission-authority path |
 | MI-8 | **Planned** | Model-Intake deployment decision with an active policy/exception | decision honors the active policy (stays `block` when a required control/exception applies) | policy/exception-wiring regression |
 

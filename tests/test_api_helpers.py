@@ -209,6 +209,21 @@ def test_model_intake_operator_actions_require_explicit_token_even_on_loopback(m
     assert api_module._require_model_intake_operator(loopback_request) is None
     assert api_module._model_intake_authenticated_subject(loopback_request).startswith("operator-token:")
 
+    # A host request reaches the container from its bridge gateway. When the
+    # server is published only on host loopback, the mandatory bearer token may
+    # cross that local HTTP hop. Public/wildcard binds still require HTTPS.
+    monkeypatch.setenv("SHAKERSCAN_BIND_HOST", "127.0.0.1")
+    assert api_module._require_model_intake_operator(
+        _fleet_request(host="192.168.65.1", scheme="http", authorization=f"Bearer {token}")
+    ) is None
+    monkeypatch.setenv("SHAKERSCAN_BIND_HOST", "0.0.0.0")
+    with pytest.raises(api_module.HTTPException) as exc:
+        api_module._require_model_intake_operator(
+            _fleet_request(host="192.168.65.1", scheme="http", authorization=f"Bearer {token}")
+        )
+    assert exc.value.status_code == 403
+    monkeypatch.delenv("SHAKERSCAN_BIND_HOST", raising=False)
+
     with pytest.raises(api_module.HTTPException) as exc:
         api_module._require_model_intake_operator(
             _fleet_request(host="203.0.113.2", scheme="http", authorization=f"Bearer {token}")
