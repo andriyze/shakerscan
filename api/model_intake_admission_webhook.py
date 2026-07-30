@@ -54,7 +54,7 @@ def _verify(package: dict[str, Any], bundle: dict[str, Any]) -> dict[str, Any]:
     )
     with urllib.request.urlopen(request, timeout=10) as response:
         result = json.loads(response.read(2_000_000))
-    if result.get("verified") is not True or result.get("deployment_observed") is not True:
+    if result.get("verified") is not True or result.get("side_effects") is not False:
         raise RuntimeError("exact bundle was not admitted")
     return result
 

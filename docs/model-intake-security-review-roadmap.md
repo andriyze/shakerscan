@@ -2,10 +2,10 @@
 
 **Status:** The admission-v2 control plane, authoritative Hugging Face acquisition, existing scanner bundle,
 official safetensors inspection, signed runner-receipt contracts, signer boundary, OCI layout, and deployment
-verifiers are implemented. Model Intake scans remain non-deployable technical evidence; only the controlled
+verifiers, physical-runner service/orchestration, and bounded keyless planner are implemented. Model Intake scans remain non-deployable technical evidence; only the controlled
 submission/freeze/approval/policy/signing/promotion workflow may authorize deployment. The remaining product
-work is deliberately limited to hardening these mechanisms, deploying one real Firecracker runner, and then
-adding one bounded advisory keyless-agent planner over the existing Model Intake actions.
+work is deliberately limited to physical KVM acceptance, cross-surface/report parity, and organization-operated
+KMS/registry/Kubernetes negative-path acceptance of the implemented mechanisms.
 
 **Original audit checkout:** `239f887d9f10e997b9844c916c28073fab71ee79`
 
@@ -306,7 +306,7 @@ but the exported status must remain unambiguous.
 | Signed admission statement and lifecycle registry | Exact-bundle v2 control plane and isolated signer implemented | Workers emit only unsigned non-deployable candidates. The signer has a dedicated minimal hash-locked image, isolated internal network, separate least-privilege database role, shipped AWS KMS client, request idempotency lock, and initiating-operator audit identity. Frozen evidence, approvals, exact component verification, latest-manifest checks, and evidence-change invalidation are durable. | Prove production KMS rotation/failure paths and remaining revocation/recovery negative paths |
 | Saved Model Intake policy profiles | Implemented server-owned admission expansion | Admission uses the operator-selected server default; caller booleans/subsets/exceptions cannot weaken it; mutations require operator auth | Add organization-specific required scanner/runtime/benchmark fields |
 | One-page control matrix and detailed evidence | Implemented in UI/JSON | Corporate-use verdict, can-use boolean, malicious-vs-capable serialization distinction, control matrix, primary blockers, next actions, limitations, and activity are visible | Finish HTML/PDF/SARIF parity and per-control evidence links |
-| Deployment by exact approved digest | v2 verifier code and Kubernetes manifest template implemented | The checked-in webhook manifest is not deployable as-is, and promotion currently stops at a local OCI layout; no live cluster/registry enforcement is proven | Complete one digest-preserving registry push and a correctly scoped/certified Kubernetes negative-path deployment test; add no other orchestrator |
+| Deployment by exact approved digest | Pure v2 verifier, explicit observation endpoint, configured OCI publisher, and namespace/object-scoped Kubernetes webhook installer implemented | `oras` performs one fixed HTTPS registry copy and verifies the remote descriptor; cert-manager injects the webhook CA; immutable image configuration and rollout are validated. No live corporate registry/cluster acceptance has been run. | Run digest-variant, outage, expiry, revocation, and recovery acceptance against the organization-operated registry and cluster; add no other orchestrator |
 | Legal, privacy, data provenance, and risk acceptance | Recorded as governance evidence | Organization-dependent | Keep human-owned; enforce required owner, approval, scope, and expiry |
 
 The source-built remote instance checked before this adapter bundle was implemented had none of the external
@@ -368,8 +368,8 @@ between schemas and working capabilities. These corrections are authoritative fo
 | Earlier `model_intake_runner_controller.py` only checked files and built a dictionary | Replaced by an executable `model_intake_firecracker_runner.py`, fixed read-only guest protocol, hash-locked CPU runtime, ext4 drive builder, jailer/KVM lifecycle, timeout/process-group kill, cgroup-v2 enforcement, output quotas, cleanup, and signed receipt issuer | Physical E2E remains a release blocker and must run on a host with `/dev/kvm`; the designated VPS currently proves the intended fail-closed `NOT_READY` path |
 | Loader profiles contain entrypoint strings, while the shipped images do not contain the corresponding Transformers/ONNX runtimes | A profile marked `READY` means schema resolution, not executable readiness | Make readiness contingent on a digest-pinned runner image that actually executes the selected entrypoint; otherwise return `INCOMPLETE` |
 | Earlier signed runner receipts accepted isolation booleans without a producer | Receipt v2 now requires canonical measured telemetry: raw trace and telemetry digests, operation/phase/destination evidence, guest/host interfaces, nft counter deltas, no-device proof, loss/overflow flags, and cgroup evidence. The issuer itself refuses an incomplete PASS before signing. | Operate the purpose-scoped KMS key on the runner host and complete deliberate-network-attempt physical acceptance |
-| Promotion creates a local OCI image layout but performs no registry push or post-push digest verification | “Promotion” is not a corporate distribution control yet | Push exactly one configured internal-registry subject and verify the remote manifest digest before activating admission |
-| The Kubernetes webhook manifest contains replacement placeholders, lacks installation/certificate wiring, declares `sideEffects: None` while verification mutates deployment bindings, and is cluster-wide | The manifest is a prototype, not deployable enforcement | Remove verification side effects from admission review (or declare them correctly), scope namespaces, provide certificate/image configuration, and prove fail/recovery behavior without self-deadlocking the cluster |
+| Promotion previously created only a local OCI image layout | **Implemented mechanism:** `model_intake_push_oci.py` accepts only one configured non-local repository, copies the exact `admitted` layout through fixed `oras` argv, fetches the remote descriptor, rejects digest drift, and emits a content-bound receipt | A live corporate registry credential/retention/immutability acceptance run remains operator-owned |
+| The Kubernetes webhook previously mutated deployment bindings while declaring `sideEffects: None`, was cluster-wide, and lacked certificate/install wiring | **Implemented mechanism:** verification is now pure; observation is a separate explicit endpoint; the fail-closed webhook is restricted to labeled namespaces and model objects; cert-manager CA injection, immutable image digest validation, secret creation, and rollout verification are scripted | Run outage/revocation/recovery tests in the target cluster and choose namespaces deliberately to avoid control-plane self-deadlock |
 | The local operator guard trusts loopback, target rescan replays stored acquisition authority without revalidating it, and several resolver/readiness endpoints have no explicit operator boundary | Local network placement is being treated as identity and expired authority can be replayed | Require authenticated operator/deployment identity for mutations and authority-bearing replay; revalidate scope/approval receipts and strip stale acquisition grants |
 | Hugging Face enrichment previously returned the original request when provider resolution failed | Provider failure could preserve caller-declared inventory in preflight | **Implemented:** both public resolution and scan enrichment now discard caller identity/inventory/custom-code authority, retain only a digest of discarded claims, and emit a server-generated `INCOMPLETE` manifest; successful resolution reasserts provider-owned fields |
 | `model_intake_deployment_bindings.admission_id` had different constraints in `db/init.sql` and runtime migration code | Fresh and upgraded installations could have different integrity guarantees | **Implemented:** both paths install the same named `ON DELETE SET NULL` foreign key; upgrades null orphan references before adding it, and the idempotent migration smoke verifies the live constraint |
@@ -1757,9 +1757,9 @@ Remaining product work:
 
 - Extend the implemented first-page execution matrix to include tool/rules database freshness and independent
   microVM telemetry when those integrations ship.
-- **Implemented local promotion artifact only:** build a standard content-addressed OCI image layout containing
-  the exact bundle, admission, and optionally digest-verified model/snapshot blobs. No registry push or
-  post-push digest verification exists yet, so this is not completed promotion.
+- **Implemented bounded OCI promotion mechanism:** build the content-addressed layout, copy its exact admitted
+  manifest to one configured non-local registry repository with `oras`, fetch and compare the remote descriptor,
+  and emit a content-bound receipt. Live registry policy/credential/retention acceptance remains corporate work.
 - Make every failed/non-run required control link to evidence and a concrete remediation.
 - Keep JSON, HTML, PDF, SARIF, admission statement, and UI decisions consistent.
 - Add deterministic report fixtures proving the simple answer: what passed, what failed, what was not tested,
@@ -1777,10 +1777,10 @@ Product work:
   idempotency; and events preserve both the server-derived initiating operator and signer-service identity.
   Remaining corporate acceptance is live KMS rotation/outage/recovery testing; do not add another signing
   ecosystem.
-- Complete digest-preserving push and post-push verification using the existing OCI layout and one configured
-  internal registry; do not build registry administration.
-- Harden the implemented fail-closed CI/startup verifier and Kubernetes admission webhook, including outage,
-  expiry, revocation, cache invalidation, and component-substitution negative tests; add no other orchestrator.
+- Operate and acceptance-test the implemented digest-preserving push/post-push verification against one internal
+  registry; do not build registry administration.
+- Acceptance-test the pure fail-closed CI/startup verifier and scoped/certified Kubernetes admission webhook,
+  including outage, expiry, revocation, cache invalidation, and component substitution; add no other orchestrator.
 - Trigger reassessment on changes to existing scanner rules/databases, embedded policy, trust anchors,
   runtime/loader digests, approvals, and upstream subjects.
 
@@ -2053,12 +2053,14 @@ Owners must decide and record:
 - [ ] The evaluator automatically consumes embeddings and measurements generated by that exact runner.
 - [ ] The UI/JSON report has explicit passed/failed/not-run/coverage/error detail and a phase timeline; HTML/PDF,
   SARIF, per-control evidence links, and admission-statement parity remain.
-- [ ] The embedded Python policy, production KMS rotation/outage path, configured OCI registry promotion, CI verifier,
-  and Kubernetes admission webhook pass their complete negative-path and recovery gates.
+- [ ] The embedded Python policy, production KMS rotation/outage path, and live configured registry/Kubernetes
+  deployments pass their complete negative-path and recovery gates. OCI remote-digest verification and pure,
+  scoped/certified webhook mechanisms are implemented and unit-tested.
 - [ ] API, UI, and the shipped `shakerscan` agent skill expose the same controlled Model Intake workflow,
   authorization requirements, evidence, state transitions, and fail-closed decision semantics.
-- [ ] The optional keyless Codex planner exposes only typed bounded advisory actions, has no admission or
-  arbitrary-execution authority, and passes prompt-injection, budget, replay, and cross-surface negative tests.
+- [x] The optional keyless Codex planner exposes only five typed bounded advisory actions, has no admission,
+  promotion, evidence-writing, or arbitrary-execution authority, and durably enforces iteration/action budgets.
+  Physical and UI cross-surface acceptance remains part of the release run below.
 - [ ] The exact release branch is rebuilt on the designated Linux/KVM VPS and physical runs for
   CodeRankEmbed, CodeSage Base v2, and CodeSage Large v2 retain cross-surface evidence and accurate outcomes.
 

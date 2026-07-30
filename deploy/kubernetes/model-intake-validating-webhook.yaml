@@ -34,6 +34,18 @@ spec:
           volumeMounts: [{name: tls, mountPath: /tls, readOnly: true}]
       volumes: [{name: tls, secret: {secretName: shakerscan-model-admission-webhook-tls}}]
 ---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: shakerscan-model-admission-webhook
+  namespace: shakerscan-system
+spec:
+  secretName: shakerscan-model-admission-webhook-tls
+  dnsNames:
+    - shakerscan-model-admission.shakerscan-system.svc
+    - shakerscan-model-admission.shakerscan-system.svc.cluster.local
+  issuerRef: {kind: ClusterIssuer, name: REPLACE_WITH_CLUSTER_ISSUER}
+---
 apiVersion: v1
 kind: Service
 metadata:
@@ -47,6 +59,8 @@ apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingWebhookConfiguration
 metadata:
   name: shakerscan-model-admission
+  annotations:
+    cert-manager.io/inject-ca-from: shakerscan-system/shakerscan-model-admission-webhook
 webhooks:
   - name: model-admission.shakerscan.dev
     admissionReviewVersions: ["v1"]
@@ -54,6 +68,10 @@ webhooks:
     failurePolicy: Fail
     timeoutSeconds: 10
     matchPolicy: Equivalent
+    namespaceSelector:
+      matchLabels: {shakerscan.dev/model-admission: enabled}
+    objectSelector:
+      matchLabels: {shakerscan.dev/model-deployment: "true"}
     rules:
       - apiGroups: ["apps"]
         apiVersions: ["v1"]
@@ -67,4 +85,4 @@ webhooks:
         scope: Namespaced
     clientConfig:
       service: {name: shakerscan-model-admission, namespace: shakerscan-system, path: /validate, port: 443}
-      caBundle: REPLACE_WITH_BASE64_CA_BUNDLE
+      caBundle: ""

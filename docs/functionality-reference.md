@@ -1209,8 +1209,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 283 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 239 | `api/api.py` |
+| Public REST operations | 284 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 240 | `api/api.py` |
 | Check families | 14 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 13 | `api/command_arsenal.py` |
@@ -1219,7 +1219,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Scanner wrapper commands | 26 | `scanner.sh` |
 | Make targets | 11 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
-| Runtime environment keys | 306 | Python sources + Compose manifests |
+| Runtime environment keys | 307 | Python sources + Compose manifests |
 | Scanner modules | 98 | `scanner/scanner_tools/` |
 | UI pages | 31 | `ui/src/app/` |
 | Skills | 6 | `skills/` |
@@ -1379,6 +1379,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `GET` | `/health` | `health` |
 | `POST` | `/model-intake/admission/verify` | `verify_model_intake_admission` |
 | `GET` | `/model-intake/admissions` | `list_model_intake_admissions` |
+| `POST` | `/model-intake/admissions/v2/observe` | `observe_model_intake_deployment_v2` |
 | `POST` | `/model-intake/admissions/v2/verify` | `verify_model_intake_admission_v2` |
 | `GET` | `/model-intake/admissions/{admission_id}` | `get_model_intake_admission` |
 | `POST` | `/model-intake/admissions/{admission_id}/revoke` | `revoke_model_intake_admission` |
@@ -1973,6 +1974,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `MODEL_INTAKE_ALLOW_PRIVATE_NETWORKS` | `scanner/scanner_tools/model_intake_acquisition.py` |
 | `MODEL_INTAKE_CONTROL_PLANE_SIGNING_KEY_PEM` | `api/model_intake_signer_service.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_DEPLOYMENT_VERIFIER_TOKEN` | `api/model_intake_admission_webhook.py` |
+| `MODEL_INTAKE_OCI_REGISTRY_REPOSITORY` | `scripts/model_intake_push_oci.py` |
 | `MODEL_INTAKE_OPA_URL` | `scanner/scanner_tools/model_intake_providers.py` |
 | `MODEL_INTAKE_OPERATOR_ROLES` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_OPERATOR_TOKEN` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |

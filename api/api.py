@@ -13076,12 +13076,10 @@ async def promote_model_intake_submission(
     return result
 
 
-@app.post("/model-intake/admissions/v2/verify")
-async def verify_model_intake_admission_v2(
+async def _verify_model_intake_admission_v2_request(
     request: ModelAdmissionV2VerifyRequest,
     http_request: Request,
-):
-    """Deployment enforcement path: exact bundle, components, environment, and active state."""
+) -> tuple[dict[str, Any], Any]:
     _model_intake_authenticated_subject(http_request)
     async with db_pool.acquire() as conn:
         anchors = await conn.fetch(
@@ -13134,21 +13132,55 @@ async def verify_model_intake_admission_v2(
             )
         if admission["deployment_bundle_sha256"] != request.expected_bundle_sha256.lower():
             raise HTTPException(status_code=409, detail="Registered deployment bundle differs")
-        await conn.execute(
-            """
-            UPDATE model_intake_deployment_bindings
-            SET observed_bundle_sha256=$2,verifier_status='PASS',observed_at=NOW()
-            WHERE admission_id=$1
-            """,
-            admission["id"],
-            request.expected_bundle_sha256.lower(),
-        )
     result["registry"] = {
         "admission_id": str(admission["id"]),
         "status": admission["status"],
         "schema_version": admission["schema_version"],
     }
+    return result, admission
+
+
+@app.post("/model-intake/admissions/v2/verify")
+async def verify_model_intake_admission_v2(
+    request: ModelAdmissionV2VerifyRequest,
+    http_request: Request,
+):
+    """Pure deployment gate: verify exact components and active registry state."""
+    result, admission = await _verify_model_intake_admission_v2_request(request, http_request)
+    async with db_pool.acquire() as conn:
+        observed = await conn.fetchval(
+            """SELECT EXISTS(
+                   SELECT 1 FROM model_intake_deployment_bindings
+                   WHERE admission_id=$1 AND verifier_status='PASS'
+                     AND observed_bundle_sha256=$2
+               )""",
+            admission["id"],
+            request.expected_bundle_sha256.lower(),
+        )
+    result["deployment_observed"] = bool(observed)
+    result["side_effects"] = False
+    return result
+
+
+@app.post("/model-intake/admissions/v2/observe")
+async def observe_model_intake_deployment_v2(
+    request: ModelAdmissionV2VerifyRequest,
+    http_request: Request,
+):
+    """Explicitly record a deployment observation after the pure gate allows it."""
+    result, admission = await _verify_model_intake_admission_v2_request(request, http_request)
+    async with db_pool.acquire() as conn:
+        command = await conn.execute(
+            """UPDATE model_intake_deployment_bindings
+               SET observed_bundle_sha256=$2,verifier_status='PASS',observed_at=NOW()
+               WHERE admission_id=$1""",
+            admission["id"],
+            request.expected_bundle_sha256.lower(),
+        )
+    if command == "UPDATE 0":
+        raise HTTPException(status_code=409, detail="No registered deployment binding accepts this admission")
     result["deployment_observed"] = True
+    result["side_effects"] = True
     return result
 
 
