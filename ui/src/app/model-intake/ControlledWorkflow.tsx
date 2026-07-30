@@ -6,20 +6,24 @@ import { Activity, Bot, CheckCircle2, Clipboard, LockKeyhole, RefreshCw, Server,
 import { Card, useToast } from '@/components/ui'
 import {
   attachModelIntakeStaticRun,
+  cancelModelIntakeAgentSession,
   createModelIntakeAgentSession,
   createModelIntakeApproval,
   createModelIntakePolicyDecision,
   createModelIntakeRunnerJob,
   createModelIntakeSubmission,
   freezeModelIntakeEvidence,
+  getModelIntakeAgentSession,
   getModelIntakeRunnerReadiness,
   getModelIntakeSubmission,
   listModelIntakeRunnerJobs,
+  listModelIntakeAgentSessions,
   listModelIntakeSubmissions,
   promoteModelIntakeSubmission,
   refreshModelIntakeRunnerJob,
   replyModelIntakeAgentSession,
   type ModelIntakeDeploymentBundleRequest,
+  type ModelIntakeAgentSession,
   type ModelIntakePlatform,
   type ModelIntakeRunnerJob,
   type ModelIntakeRunnerReadiness,
@@ -106,6 +110,7 @@ export function ControlledModelIntakeWorkflow({
   const [selectedId, setSelectedId] = useState('')
   const [detail, setDetail] = useState<ModelIntakeWorkflowDetail | null>(null)
   const [jobs, setJobs] = useState<ModelIntakeRunnerJob[]>([])
+  const [agentSessions, setAgentSessions] = useState<ModelIntakeAgentSession[]>([])
   const [busy, setBusy] = useState('')
   const [error, setError] = useState<string | null>(null)
 
@@ -166,12 +171,14 @@ export function ControlledModelIntakeWorkflow({
   const loadSelected = useCallback(async (id = selectedId) => {
     if (!id || !operatorToken.trim()) return
     try {
-      const [nextDetail, nextJobs] = await Promise.all([
+      const [nextDetail, nextJobs, nextSessions] = await Promise.all([
         getModelIntakeSubmission(id, operatorToken),
         listModelIntakeRunnerJobs(id, operatorToken),
+        listModelIntakeAgentSessions(id, operatorToken),
       ])
       setDetail(nextDetail)
       setJobs(nextJobs.jobs)
+      setAgentSessions(nextSessions.sessions)
       setSelectedId(id)
       const latestManifest = nextDetail.manifests.at(-1)
       const latestDecision = nextDetail.policy_decisions.at(-1)
@@ -305,6 +312,7 @@ export function ControlledModelIntakeWorkflow({
       const session = objectValue(response.session)
       setPlannerSessionId(typeof session.id === 'string' ? session.id : '')
       setPlannerObservation(typeof response.observation === 'string' ? response.observation : JSON.stringify(response.observation, null, 2))
+      await loadSelected(id)
       toast.success('Advisory planner session started')
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Failed to start planner')
@@ -324,8 +332,44 @@ export function ControlledModelIntakeWorkflow({
       setPlannerObservation(JSON.stringify(observation, null, 2))
       if (session.status === 'completed') toast.success('Advisory planner session completed')
       setPlannerReply('')
+      if (selectedId) await loadSelected(selectedId)
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Failed to submit planner turn')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  async function resumePlanner(sessionId: string) {
+    setBusy(`planner-resume:${sessionId}`)
+    setError(null)
+    try {
+      const response = await getModelIntakeAgentSession(sessionId, operatorToken)
+      const transcript = Array.isArray(response.session.transcript_json) ? response.session.transcript_json : []
+      const latestController = transcript.slice().reverse().find((item) => item.role === 'controller')
+      setPlannerSessionId(response.session.status === 'awaiting_planner' ? response.session.id : '')
+      setPlannerObjective(response.session.objective)
+      setPlannerObservation(JSON.stringify(latestController?.content ?? response.session.final_assessment_json ?? {
+        status: response.session.status,
+        actions: response.actions,
+      }, null, 2))
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Failed to resume planner session')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  async function cancelPlanner(sessionId: string) {
+    setBusy(`planner-cancel:${sessionId}`)
+    setError(null)
+    try {
+      await cancelModelIntakeAgentSession(sessionId, operatorToken)
+      if (plannerSessionId === sessionId) setPlannerSessionId('')
+      if (selectedId) await loadSelected(selectedId)
+      toast.success('Advisory planner session cancelled')
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Failed to cancel planner session')
     } finally {
       setBusy('')
     }
@@ -549,6 +593,7 @@ export function ControlledModelIntakeWorkflow({
         <div className="grid gap-4 border-t border-gray-800 p-4 xl:grid-cols-2">
           <div className="grid gap-3">
             <div className="rounded border border-cyan-800/60 bg-cyan-950/20 p-3 text-xs text-cyan-200">The coding agent may inspect evidence, check readiness, validate a runner plan, draft an embedding test plan, or recommend a follow-up. It cannot execute arbitrary commands, approve, change policy, freeze evidence, promote, or turn incomplete evidence into PASS.</div>
+            {agentSessions.length > 0 && <div className="rounded border border-gray-800 p-3"><div className="mb-2 text-xs text-gray-400">Durable advisory sessions</div><div className="max-h-44 space-y-2 overflow-auto">{agentSessions.map((session) => <div key={session.id} className="flex flex-wrap items-center justify-between gap-2 rounded border border-gray-800 bg-gray-900 p-2"><div className="min-w-0"><div className="truncate text-xs text-gray-300">{session.objective}</div><div className="mt-1 text-[10px] text-gray-600">turn {session.iteration}/{session.max_iterations} · actions {session.actions_used}/{session.action_budget}</div></div><div className="flex items-center gap-2"><span className={`rounded px-1.5 py-0.5 text-[10px] ${statusClass(session.status)}`}>{session.status}</span><button type="button" className={buttonClass} disabled={busy === `planner-resume:${session.id}`} onClick={() => void resumePlanner(session.id)}>{session.status === 'awaiting_planner' ? 'Resume' : 'Inspect'}</button>{session.status === 'awaiting_planner' && <button type="button" className={buttonClass} disabled={busy === `planner-cancel:${session.id}`} onClick={() => void cancelPlanner(session.id)}>Cancel</button>}</div></div>)}</div></div>}
             <label className="grid gap-1 text-xs text-gray-300">Objective<textarea className={textareaClass} rows={4} value={plannerObjective} onChange={(event) => setPlannerObjective(event.target.value)} /></label>
             <button type="button" className={buttonClass} disabled={!selectedId || busy === 'planner'} onClick={startPlanner}><Bot className="h-3.5 w-3.5" /> Start keyless planner session</button>
             <label className="grid gap-1 text-xs text-gray-300">Planner reply (fenced controller JSON)<textarea className={textareaClass} rows={8} value={plannerReply} onChange={(event) => setPlannerReply(event.target.value)} placeholder={'```json\n{"tool_calls":[{"name":"inspect_submission","arguments":{}}]}\n```'} /></label>

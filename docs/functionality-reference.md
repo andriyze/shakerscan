@@ -1209,8 +1209,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 285 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 240 | `api/api.py` |
+| Public REST operations | 288 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 243 | `api/api.py` |
 | Check families | 14 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 13 | `api/command_arsenal.py` |
@@ -1383,6 +1383,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `POST` | `/model-intake/admissions/v2/verify` | `verify_model_intake_admission_v2` |
 | `GET` | `/model-intake/admissions/{admission_id}` | `get_model_intake_admission` |
 | `POST` | `/model-intake/admissions/{admission_id}/revoke` | `revoke_model_intake_admission` |
+| `GET` | `/model-intake/agent/session/{session_id}` | `get_model_intake_agent_session` |
+| `POST` | `/model-intake/agent/session/{session_id}/cancel` | `cancel_model_intake_agent_session` |
 | `POST` | `/model-intake/agent/session/{session_id}/reply` | `reply_model_intake_agent_session` |
 | `GET` | `/model-intake/capabilities` | `model_intake_capabilities` |
 | `POST` | `/model-intake/conversion-profiles/resolve` | `resolve_model_intake_conversion_profile` |
@@ -1399,6 +1401,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `POST` | `/model-intake/submissions` | `create_model_intake_submission` |
 | `GET` | `/model-intake/submissions/{submission_id}` | `get_model_intake_submission` |
 | `POST` | `/model-intake/submissions/{submission_id}/agent/session` | `create_model_intake_agent_session` |
+| `GET` | `/model-intake/submissions/{submission_id}/agent/sessions` | `list_model_intake_agent_sessions` |
 | `POST` | `/model-intake/submissions/{submission_id}/approvals` | `create_model_intake_approval` |
 | `POST` | `/model-intake/submissions/{submission_id}/evidence-receipts` | `attach_model_intake_runner_evidence` |
 | `POST` | `/model-intake/submissions/{submission_id}/freeze-evidence` | `freeze_model_intake_evidence` |

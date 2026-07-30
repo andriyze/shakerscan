@@ -1421,6 +1421,21 @@ export interface ModelIntakeRunnerJob extends ModelIntakeWorkflowRecord {
   updated_at: string
 }
 
+export interface ModelIntakeAgentSession extends ModelIntakeWorkflowRecord {
+  submission_id: string
+  objective: string
+  status: 'awaiting_planner' | 'completed' | 'cancelled'
+  max_iterations: number
+  iteration: number
+  action_budget: number
+  actions_used: number
+  transcript_json?: Array<Record<string, unknown>>
+  final_assessment_json?: Record<string, unknown> | null
+  created_by: string
+  created_at: string
+  updated_at: string
+}
+
 export interface ModelIntakeDeploymentBundleRequest {
   model_artifact_sha256: string
   repository_snapshot_sha256: string
@@ -3945,6 +3960,31 @@ export async function createModelIntakeAgentSession(id: string, data: {
     body: JSON.stringify(data),
   })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to start advisory Model Intake planner'))
+  return res.json()
+}
+
+export async function listModelIntakeAgentSessions(id: string, operatorToken: string): Promise<{ sessions: ModelIntakeAgentSession[]; authority: 'advisory_only' }> {
+  const res = await fetch(`${API_URL}/model-intake/submissions/${id}/agent/sessions`, {
+    headers: modelIntakeWorkflowHeaders(operatorToken),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load advisory Model Intake sessions'))
+  return res.json()
+}
+
+export async function getModelIntakeAgentSession(id: string, operatorToken: string): Promise<{ session: ModelIntakeAgentSession; actions: ModelIntakeWorkflowRecord[]; authority: 'advisory_only' }> {
+  const res = await fetch(`${API_URL}/model-intake/agent/session/${id}`, {
+    headers: modelIntakeWorkflowHeaders(operatorToken),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to resume advisory Model Intake session'))
+  return res.json()
+}
+
+export async function cancelModelIntakeAgentSession(id: string, operatorToken: string): Promise<{ session: ModelIntakeAgentSession; cancelled: true; idempotent: boolean; authority: 'advisory_only' }> {
+  const res = await fetch(`${API_URL}/model-intake/agent/session/${id}/cancel`, {
+    method: 'POST',
+    headers: modelIntakeWorkflowHeaders(operatorToken),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to cancel advisory Model Intake session'))
   return res.json()
 }
 

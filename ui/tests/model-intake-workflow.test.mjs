@@ -15,6 +15,8 @@ test('controlled Model Intake UI exposes every authoritative workflow stage', ()
     '/static-runs',
     '/runner-jobs',
     '/agent/session',
+    '/agent/sessions',
+    '/cancel',
     '/freeze-evidence',
     '/approvals',
     '/policy-decisions',
@@ -40,4 +42,6 @@ test('Codex workflow is prominently advisory and promotion remains a separate op
   assert.match(workflow, /Invoke isolated signer and promote/)
   assert.match(workflow, /Production requires distinct server-configured identities/)
   assert.match(workflow, /Operator credential for controlled workflow/)
+  assert.match(workflow, /Durable advisory sessions/)
+  assert.match(workflow, /cancelModelIntakeAgentSession/)
 })

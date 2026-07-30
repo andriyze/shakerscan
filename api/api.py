@@ -12167,6 +12167,92 @@ async def create_model_intake_agent_session(
     return {"session": row_to_dict(row), "observation": prompt, "authority": "advisory_only"}
 
 
+@app.get("/model-intake/submissions/{submission_id}/agent/sessions")
+async def list_model_intake_agent_sessions(submission_id: str, http_request: Request):
+    _model_intake_authenticated_subject(http_request)
+    submission_uuid = _model_intake_uuid(submission_id, "submission id")
+    async with db_pool.acquire() as conn:
+        exists = await conn.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM model_intake_submissions WHERE id=$1)",
+            submission_uuid,
+        )
+        if not exists:
+            raise HTTPException(status_code=404, detail="Model submission not found")
+        rows = await conn.fetch(
+            """
+            SELECT id,submission_id,objective,status,max_iterations,iteration,action_budget,
+                   actions_used,final_assessment_json,created_by,created_at,updated_at
+            FROM model_intake_agent_sessions WHERE submission_id=$1 ORDER BY created_at DESC
+            LIMIT 100
+            """,
+            submission_uuid,
+        )
+    return {"sessions": [row_to_dict(row) for row in rows], "authority": "advisory_only"}
+
+
+@app.get("/model-intake/agent/session/{session_id}")
+async def get_model_intake_agent_session(session_id: str, http_request: Request):
+    _model_intake_authenticated_subject(http_request)
+    session_uuid = _model_intake_uuid(session_id, "agent session id")
+    async with db_pool.acquire() as conn:
+        session = await conn.fetchrow(
+            "SELECT * FROM model_intake_agent_sessions WHERE id=$1",
+            session_uuid,
+        )
+        if not session:
+            raise HTTPException(status_code=404, detail="Model Intake agent session not found")
+        actions = await conn.fetch(
+            """
+            SELECT id,iteration,action_index,action_name,arguments_sha256,status,result_json,
+                   created_at FROM model_intake_agent_actions
+            WHERE session_id=$1 ORDER BY iteration,action_index
+            """,
+            session_uuid,
+        )
+    return {
+        "session": row_to_dict(session),
+        "actions": [row_to_dict(row) for row in actions],
+        "authority": "advisory_only",
+    }
+
+
+@app.post("/model-intake/agent/session/{session_id}/cancel")
+async def cancel_model_intake_agent_session(session_id: str, http_request: Request):
+    actor = _model_intake_authenticated_subject(http_request)
+    session_uuid = _model_intake_uuid(session_id, "agent session id")
+    async with db_pool.acquire() as conn, conn.transaction():
+        session = await conn.fetchrow(
+            "SELECT * FROM model_intake_agent_sessions WHERE id=$1 FOR UPDATE",
+            session_uuid,
+        )
+        if not session:
+            raise HTTPException(status_code=404, detail="Model Intake agent session not found")
+        if session["status"] == "completed":
+            raise HTTPException(status_code=409, detail="Completed Model Intake agent sessions cannot be cancelled")
+        if session["status"] == "cancelled":
+            return {"session": row_to_dict(session), "cancelled": True, "idempotent": True, "authority": "advisory_only"}
+        transcript = _decode_json_value(session["transcript_json"])
+        transcript = transcript if isinstance(transcript, list) else []
+        transcript.append({
+            "role": "controller",
+            "content": {
+                "status": "cancelled",
+                "reason": "cancelled_by_authenticated_operator",
+                "actor": actor,
+                "authority": "advisory_only",
+            },
+        })
+        updated = await conn.fetchrow(
+            """
+            UPDATE model_intake_agent_sessions SET status='cancelled',transcript_json=$2::jsonb,
+                   updated_at=NOW() WHERE id=$1 RETURNING *
+            """,
+            session_uuid,
+            json.dumps(transcript),
+        )
+    return {"session": row_to_dict(updated), "cancelled": True, "idempotent": False, "authority": "advisory_only"}
+
+
 @app.post("/model-intake/agent/session/{session_id}/reply")
 async def reply_model_intake_agent_session(
     session_id: str,

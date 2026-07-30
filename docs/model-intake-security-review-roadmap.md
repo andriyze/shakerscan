@@ -1738,12 +1738,13 @@ turn, proposal, validation rejection, dispatched action, resulting evidence ID/d
 abstention is durably recorded. Replays are idempotent and bind the session to one submission and frozen
 manifest generation; new evidence or reassessment invalidates stale planner conclusions.
 
-The API currently exposes start/reply and typed action/result schemas, and the UI exposes the controller prompt,
-bounded replies, resulting observations, limitations, and a prominent “advisory only” label alongside—but
-separate from—the operator's runner and admission actions. Durable session read/resume/cancel and shipped-skill
-parity are the next surface-hardening increment. Cross-surface tests must prove that direct API calls, UI
-actions, and skill-driven sessions receive the same permissions and cannot reach legacy preflight or privileged
-admission mutations indirectly.
+The API exposes authenticated list/start/read/reply/cancel operations and typed action/result schemas. Cancellation
+is durable and idempotent for an open session; a completed session cannot be rewritten as cancelled. The UI exposes
+durable session resume/inspect/cancel, controller prompts, bounded replies, resulting observations, limitations,
+budgets, and a prominent “advisory only” label alongside—but separate from—the operator's runner and admission
+actions. Shipped-skill parity is the next surface-hardening increment. Cross-surface tests must prove that direct
+API calls, UI actions, and skill-driven sessions receive the same permissions and cannot reach legacy preflight
+or privileged admission mutations indirectly.
 
 ### Phase 5 — Useful report and release gate — **corporate-use report implemented; deployment enforcement is not operationally complete**
 

@@ -101,6 +101,63 @@ def test_submission_listing_and_detail_require_operator_authentication():
     assert detailed.value.status_code == 401
 
 
+def test_agent_session_cancel_is_durable_and_idempotent(monkeypatch):
+    session_id = uuid.uuid4()
+    state = {
+        "id": session_id,
+        "submission_id": uuid.uuid4(),
+        "objective": "review evidence",
+        "status": "awaiting_planner",
+        "max_iterations": 10,
+        "iteration": 1,
+        "action_budget": 20,
+        "actions_used": 1,
+        "transcript_json": [{"role": "system", "content": "bounded"}],
+        "final_assessment_json": None,
+        "created_by": "operator:corp:alice",
+    }
+
+    class _Transaction:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class _Connection:
+        def transaction(self):
+            return _Transaction()
+
+        async def fetchrow(self, query, *args):
+            if query.lstrip().startswith("SELECT"):
+                return dict(state)
+            state["status"] = "cancelled"
+            state["transcript_json"] = json.loads(args[1])
+            return dict(state)
+
+    class _Acquire:
+        async def __aenter__(self):
+            return _Connection()
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class _Pool:
+        def acquire(self):
+            return _Acquire()
+
+    monkeypatch.setattr(api, "db_pool", _Pool())
+    monkeypatch.setattr(api, "_model_intake_authenticated_subject", lambda _request: "operator:corp:alice")
+
+    first = asyncio.run(api.cancel_model_intake_agent_session(str(session_id), object()))
+    second = asyncio.run(api.cancel_model_intake_agent_session(str(session_id), object()))
+
+    assert first["cancelled"] is True
+    assert first["idempotent"] is False
+    assert second["idempotent"] is True
+    assert state["transcript_json"][-1]["content"]["authority"] == "advisory_only"
+
+
 def test_legacy_scan_is_preflight_by_default_and_submission_cannot_carry_authority():
     assert api.ModelIntakeScanRequest(artifact_url="https://models.example/model.safetensors").intake_mode == "preflight"
 
