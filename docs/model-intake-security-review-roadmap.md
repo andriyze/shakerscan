@@ -250,7 +250,7 @@ but the exported status must remain unambiguous.
 | ModelScan, Semgrep, Fickling, and Trivy core adapters | Packaged and self-testing | **Yes in a newly rebuilt source worker image.** Hash-locked Python environments, checksum-pinned Trivy, offline DB/policy cache, bounded execution, strict parsers, rule/DB digests, and malicious-fixture receipts are exposed by `/model-intake/scanners/readiness` | Define DB-age policy and recurring rebuild/reassessment operations |
 | ClamAV, Gitleaks, Syft, OSV-Scanner, and pip-audit adapters | Fail-closed integration contracts | No; a missing requested/required tool is `UNSUPPORTED` | Package only where organization policy needs the complementary depth; do not duplicate the core bundle by default |
 | Isolated semantic sandbox | Implemented container boundary | Request/subject/evidence binding, isolation/seccomp gating, broker-worker service, and per-job limits are present | Treat it as bounded staging evidence, not a substitute for host-independent execution isolation |
-| Built-in safetensors weights adapter | Fail-closed bounded parser implemented and enabled by format | Re-hashes and memory-maps the exact artifact; rejects duplicate keys, unsupported dtypes, invalid shapes/spans, overlap, gaps/trailing payload, and unmeasured floating tensors; samples F16/F32/F64/BF16 finiteness; reports `load_level=weights` | Replace the handwritten parser with a bounded official-library/Rust inspector; it still does not instantiate the model graph, tokenize, or generate embeddings |
+| Built-in safetensors weights adapter | Official parser plus fail-closed defense-in-depth inspector implemented and enabled by format | A hash-locked safetensors 0.8.0 Rust binding is authoritative for format acceptance; ShakerScan independently checks shape/range/coverage, re-hashes the exact artifact, and vector-scans every F16/F32/F64/BF16 value through bounded NumPy memmap chunks. The release image runs non-skippable valid, hostile-metadata, non-finite, and truncated self-tests. Parser identity and full-value counts survive into evidence. | It still does not instantiate the model graph, tokenize, or generate embeddings; those belong to a loader profile in the disposable runner tier. |
 | Operator runtime adapter | Implemented integration contract | Can prove exact-digest model load and known-answer tests in the hardened container when an operator image/argv adapter is installed | Treat as staging evidence, not a substitute for the microVM tier |
 | Actual tokenizer/model load and inference in disposable microVM | Not implemented | No | Add KVM/Firecracker/Kata runner and loader profiles |
 | Runtime behavior telemetry | Not implemented | No | Integrate Tracee/Falco/auditd/eBPF or equivalent in the execution runner |
@@ -1472,7 +1472,7 @@ Remaining product work:
 Operator/corporate work: approve scanner versions and licenses, host/update vulnerability and malware
 databases, supply organization rules, and define severity/freshness/exception policy.
 
-### Phase 3 — Disposable model execution and runtime telemetry — **safetensors weights and operator adapter implemented; microVM tier open**
+### Phase 3 — Disposable model execution and runtime telemetry — **official safetensors weight parsing and operator adapter implemented; microVM tier open**
 
 The semantic container now includes a built-in exact-digest safetensors weights adapter and supports an
 operator runtime adapter. The built-in adapter only returns PASS after mmap/range/inventory/finiteness checks

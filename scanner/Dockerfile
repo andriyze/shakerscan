@@ -147,7 +147,7 @@ RUN pip install --no-cache-dir --break-system-packages --ignore-installed --requ
 # environments. Their dependency graphs cannot alter the API/worker runtime.
 COPY scanner/model_intake_tools /opt/model-intake-locks
 RUN set -eu; \
-    for tool in modelscan fickling semgrep; do \
+    for tool in modelscan fickling semgrep safetensors; do \
       python3 -m venv "/opt/model-intake-tools/${tool}"; \
       "/opt/model-intake-tools/${tool}/bin/pip" install \
         --no-cache-dir --require-hashes -r "/opt/model-intake-locks/${tool}.lock"; \
@@ -210,6 +210,12 @@ COPY api/ai_gate /app/ai_gate
 
 # Ensure scanner files are readable
 RUN chmod -R 755 /app/scanner_tools /app/wordlists
+
+# The official Rust parser boundary is a release-image gate, not an optional
+# test dependency or a monkeypatched unit-test seam.
+RUN PYTHONPATH=/app/scanner_tools \
+    /opt/model-intake-tools/safetensors/bin/python \
+    /app/scanner_tools/model_intake_safetensors_selftest.py
 
 # The adapter harness always drops tool subprocesses to this account, including
 # during the image's functional self-test.

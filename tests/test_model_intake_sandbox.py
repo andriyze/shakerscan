@@ -13,6 +13,24 @@ def _safetensors():
     return len(header).to_bytes(8, "little") + header + b"\0\0\0\0"
 
 
+def test_builtin_safetensors_adapter_uses_hash_locked_official_parser(monkeypatch):
+    monkeypatch.delenv("MODEL_INTAKE_SANDBOX_RUNTIME_ADAPTERS_JSON", raising=False)
+
+    adapter, error = sandbox._runtime_adapter(".safetensors")
+
+    assert error is None
+    assert adapter["name"] == "official-safetensors-weights"
+    assert adapter["version"] == "3"
+    assert adapter["argv"] == [
+        "/opt/model-intake-tools/safetensors/bin/python",
+        "/app/scanner_tools/model_intake_safetensors_runtime.py",
+        "{artifact}",
+        "{digest}",
+        "--numeric-mode",
+        "full",
+    ]
+
+
 def test_sandbox_builtin_safetensors_weights_runtime_is_explicitly_narrow(tmp_path, monkeypatch):
     artifact = tmp_path / "model.safetensors"
     artifact.write_bytes(_safetensors())

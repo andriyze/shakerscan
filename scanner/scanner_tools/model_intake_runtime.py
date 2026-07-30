@@ -199,7 +199,14 @@ def inspect_safetensors_layout(path: Path) -> dict[str, Any]:
     }
 
 
-def inspect_safetensors(path: Path, expected_digest: str) -> dict[str, Any]:
+def inspect_safetensors(
+    path: Path,
+    expected_digest: str,
+    *,
+    numeric_mode: str = "sampled",
+) -> dict[str, Any]:
+    if numeric_mode not in {"sampled", "full"}:
+        raise ValueError("numeric_mode must be sampled or full")
     actual_digest = _sha256(path)
     blockers: list[str] = []
     known_answers: list[dict[str, Any]] = []
@@ -236,9 +243,13 @@ def inspect_safetensors(path: Path, expected_digest: str) -> dict[str, Any]:
                         continue
                     item_size = DTYPE_SIZES[dtype]
                     available = tensor["elements"]
-                    sample_count = min(SAMPLE_VALUES_PER_TENSOR, available)
-                    for sample_index in range(sample_count):
-                        element_index = (sample_index * max(1, available - 1)) // max(1, sample_count - 1)
+                    scan_count = available if numeric_mode == "full" else min(SAMPLE_VALUES_PER_TENSOR, available)
+                    for sample_index in range(scan_count):
+                        element_index = (
+                            sample_index
+                            if numeric_mode == "full"
+                            else (sample_index * max(1, available - 1)) // max(1, scan_count - 1)
+                        )
                         start = layout["payload_offset"] + tensor["start"] + element_index * item_size
                         if dtype == "BF16":
                             bits = struct.unpack_from("<H", mapped, start)[0]
@@ -272,12 +283,13 @@ def inspect_safetensors(path: Path, expected_digest: str) -> dict[str, Any]:
             "status": (
                 "UNSUPPORTED" if unsupported_numeric_dtypes
                 else "NOT_MEASURED" if floating_tensor_count and sampled_values == 0
+                else "NOT_APPLICABLE" if not floating_tensor_count
                 else "PASS" if not non_finite_values else "FAIL"
             ),
             "applicable": bool(floating_tensor_count),
         },
     ])
-    if any(item["status"] != "PASS" for item in known_answers):
+    if any(item.get("applicable", True) and item["status"] != "PASS" for item in known_answers):
         blockers.append("known_answer_non_pass")
     return {
         "status": "UNSUPPORTED" if unsupported_numeric_dtypes else "FAIL" if blockers else "PASS",
@@ -290,6 +302,7 @@ def inspect_safetensors(path: Path, expected_digest: str) -> dict[str, Any]:
         "dtype_counts": dtype_counts,
         "floating_tensor_count": floating_tensor_count,
         "sampled_values": sampled_values,
+        "numeric_scan_mode": numeric_mode,
         "non_finite_values": non_finite_values,
         "invalid_tensor_count": len(invalid_tensors),
         "payload_coverage_complete": not coverage_errors,
@@ -310,8 +323,9 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("artifact")
     parser.add_argument("expected_digest")
+    parser.add_argument("--numeric-mode", choices=("sampled", "full"), default="sampled")
     args = parser.parse_args()
-    result = inspect_safetensors(Path(args.artifact), args.expected_digest)
+    result = inspect_safetensors(Path(args.artifact), args.expected_digest, numeric_mode=args.numeric_mode)
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0 if result["status"] == "PASS" else 1
 

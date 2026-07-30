@@ -97,14 +97,16 @@ def _runtime_adapter(extension: str) -> tuple[dict[str, Any] | None, str | None]
     if not raw:
         if extension == ".safetensors":
             return {
-                "name": "shakerscan-safetensors-weights",
-                "version": "2",
+                "name": "official-safetensors-weights",
+                "version": "3",
                 "required_load_level": "weights",
                 "argv": [
-                    sys.executable,
-                    "/app/scanner_tools/model_intake_runtime.py",
+                    "/opt/model-intake-tools/safetensors/bin/python",
+                    "/app/scanner_tools/model_intake_safetensors_runtime.py",
                     "{artifact}",
                     "{digest}",
+                    "--numeric-mode",
+                    "full",
                 ],
             }, None
         return None, None
@@ -209,7 +211,11 @@ def _run_runtime_adapter(
         blockers.append("model_load_not_proven")
     if not known_answers:
         blockers.append("known_answer_tests_missing")
-    elif any(not isinstance(item, dict) or item.get("status") != "PASS" for item in known_answers):
+    elif any(
+        not isinstance(item, dict)
+        or (item.get("applicable", True) is not False and item.get("status") != "PASS")
+        for item in known_answers
+    ):
         blockers.append("known_answer_test_non_pass")
     if report.get("network_attempts") not in (None, []):
         blockers.append("runtime_network_attempt_reported")
@@ -220,6 +226,23 @@ def _run_runtime_adapter(
     allowed_processes = int(adapter.get("max_spawned_processes") or 0)
     if spawned_processes < 0 or spawned_processes > allowed_processes:
         blockers.append("runtime_process_budget_exceeded")
+    try:
+        numeric_values_checked = int(report.get("numeric_values_checked") or 0)
+        non_finite_values = int(report.get("non_finite_values") or 0)
+    except (TypeError, ValueError):
+        numeric_values_checked = -1
+        non_finite_values = -1
+    if numeric_values_checked < 0 or non_finite_values < 0:
+        blockers.append("runtime_numeric_evidence_invalid")
+    official_parser = report.get("official_parser") if isinstance(report.get("official_parser"), dict) else {}
+    safe_official_parser = {
+        key: official_parser.get(key)
+        for key in (
+            "name", "version", "authoritative", "status", "tensor_count",
+            "rank_counts", "metadata_present", "error",
+        )
+        if official_parser.get(key) is not None
+    }
     return {
         "status": "FAIL" if blockers else "PASS",
         "adapter": {
@@ -234,6 +257,11 @@ def _run_runtime_adapter(
         "load_level": report.get("load_level"),
         "artifact_sha256": report.get("artifact_sha256"),
         "known_answer_tests": known_answers[:100],
+        "parser_authority": str(report.get("parser_authority") or "") or None,
+        "official_parser": safe_official_parser or None,
+        "numeric_scan_mode": str(report.get("numeric_scan_mode") or "") or None,
+        "numeric_values_checked": max(0, numeric_values_checked),
+        "non_finite_values": max(0, non_finite_values),
         "imports": report.get("imports", [])[:100] if isinstance(report.get("imports"), list) else [],
         "spawned_processes": spawned_processes,
         "network_attempts": report.get("network_attempts", []),
