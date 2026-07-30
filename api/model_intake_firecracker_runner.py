@@ -659,6 +659,7 @@ class FirecrackerRunner:
                 else str(request["model_artifact_sha256"]).lower()
             ),
             "repository_snapshot_sha256": str(request["repository_snapshot_sha256"]).lower(),
+            "custom_code_sha256": request.get("reviewed_custom_code_sha256"),
             "tokenizer_sha256": str(request["tokenizer_sha256"]).lower(),
             "configuration_sha256": str(request["configuration_sha256"]).lower(),
             "runtime_image_digest": str(request["runtime_image_digest"]).lower(),

@@ -11879,9 +11879,11 @@ async def _persist_model_intake_runner_evidence(
         key: payload[key]
         for key in (
             "deployment_bundle_sha256", "model_artifact_sha256",
-            "repository_snapshot_sha256", "tokenizer_sha256", "configuration_sha256", "runtime_image_digest",
+            "repository_snapshot_sha256", "custom_code_sha256", "tokenizer_sha256", "configuration_sha256", "runtime_image_digest",
+            "retrieval_application_digest", "index_schema_digest",
             "loader_profile_sha256",
         )
+        if key in payload
     }
     inserted = await conn.fetchrow(
         """

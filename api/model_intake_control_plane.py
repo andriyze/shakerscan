@@ -51,6 +51,24 @@ PRODUCTION_REQUIRED_APPROVALS = {
     "ml_platform_reviewer",
     "release_manager",
 }
+EVIDENCE_BINDING_KEYS = {
+    "static_analysis": (
+        "model_artifact_sha256", "repository_snapshot_sha256", "custom_code_sha256",
+        "tokenizer_sha256", "configuration_sha256",
+    ),
+    "runtime_execution": (
+        "model_artifact_sha256", "repository_snapshot_sha256", "custom_code_sha256",
+        "tokenizer_sha256", "configuration_sha256", "runtime_image_digest", "loader_profile_sha256",
+    ),
+    "embedding_evaluation": (
+        "model_artifact_sha256", "repository_snapshot_sha256", "custom_code_sha256",
+        "tokenizer_sha256", "configuration_sha256", "runtime_image_digest", "loader_profile_sha256",
+    ),
+    "data_plane_evaluation": (
+        "model_artifact_sha256", "repository_snapshot_sha256",
+        "retrieval_application_digest", "index_schema_digest",
+    ),
+}
 
 
 class AdmissionContractError(ValueError):
@@ -320,6 +338,13 @@ def evaluate_policy(
             blockers.append(f"evidence_non_pass:{evidence_type}:{str(item.get('status')).lower()}")
         elif item.get("expires_at") and _timestamp(item["expires_at"], "evidence expires_at") <= now:
             blockers.append(f"evidence_expired:{evidence_type}")
+        else:
+            bindings = item.get("subject_bindings") if isinstance(item.get("subject_bindings"), dict) else {}
+            mismatches = [
+                key for key in EVIDENCE_BINDING_KEYS[evidence_type]
+                if bindings.get(key) != deployment_bundle.get(key)
+            ]
+            blockers.extend(f"evidence_subject_mismatch:{evidence_type}:{key}" for key in mismatches)
     required_approvals = PRODUCTION_REQUIRED_APPROVALS if environment == "production" else set()
     approved_roles: set[str] = set()
     required_role_subjects: dict[str, str] = {}

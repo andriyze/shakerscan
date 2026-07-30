@@ -85,6 +85,7 @@ def _validate_pass_claim(payload: dict[str, Any]) -> list[str]:
         required = {
             "artifact_loaded": observations.get("artifact_loaded") is True,
             "model_loaded": observations.get("model_loaded") is True,
+            "custom_code_binding": observations.get("reviewed_custom_code_sha256") == payload.get("custom_code_sha256"),
             "known_answers": observations.get("embedding_known_answers_status") == "PASS",
             "no_egress": observations.get("network_egress_blocked") is True,
             "no_network_device": network.get("no_network_device") is True,
@@ -188,6 +189,11 @@ def verify_runner_envelope(
         _sha(payload.get("tokenizer_sha256"), "tokenizer_sha256")
         _sha(payload.get("configuration_sha256"), "configuration_sha256")
         _sha(payload.get("loader_profile_sha256"), "loader_profile_sha256")
+        if payload.get("custom_code_sha256") is not None:
+            _sha(payload.get("custom_code_sha256"), "custom_code_sha256")
+        if evidence_type == "data_plane_evaluation":
+            _sha(payload.get("retrieval_application_digest"), "retrieval_application_digest")
+            _sha(payload.get("index_schema_digest"), "index_schema_digest")
         image = str(payload.get("runtime_image_digest") or "")
         if not image.startswith("sha256:"):
             blockers.append("runtime_image_not_digest_pinned")

@@ -17,6 +17,7 @@ from model_intake_control_plane import (  # noqa: E402
     LocalPemSigner,
     build_approval_receipt,
     build_deployment_bundle,
+    digest_json,
     evaluate_policy,
     freeze_evidence_manifest,
     issue_admission_v2,
@@ -102,6 +103,24 @@ def _evidence(bundle):
     }
     records = []
     for index, (evidence_type, provenance) in enumerate(provenances.items(), start=1):
+        binding_keys = {
+            "static_analysis": (
+                "model_artifact_sha256", "repository_snapshot_sha256", "custom_code_sha256",
+                "tokenizer_sha256", "configuration_sha256",
+            ),
+            "runtime_execution": (
+                "model_artifact_sha256", "repository_snapshot_sha256", "custom_code_sha256",
+                "tokenizer_sha256", "configuration_sha256", "runtime_image_digest", "loader_profile_sha256",
+            ),
+            "embedding_evaluation": (
+                "model_artifact_sha256", "repository_snapshot_sha256", "custom_code_sha256",
+                "tokenizer_sha256", "configuration_sha256", "runtime_image_digest", "loader_profile_sha256",
+            ),
+            "data_plane_evaluation": (
+                "model_artifact_sha256", "repository_snapshot_sha256",
+                "retrieval_application_digest", "index_schema_digest",
+            ),
+        }[evidence_type]
         records.append({
             "id": f"00000000-0000-4000-8000-{index:012d}",
             "evidence_type": evidence_type,
@@ -111,7 +130,10 @@ def _evidence(bundle):
             "producer_version": "1",
             "builder_id": f"builder-{index}",
             "invocation_id": f"invocation-{index}",
-            "subject_bindings": {"deployment_bundle_sha256": bundle["bundle_sha256"]},
+            "subject_bindings": {
+                "deployment_bundle_sha256": bundle["bundle_sha256"],
+                **{key: bundle.get(key) for key in binding_keys},
+            },
             "payload_sha256": str(index) * 64,
             "status": "PASS",
             "expires_at": (utc_now() + timedelta(days=7)).isoformat(),
@@ -123,6 +145,24 @@ def _evidence(bundle):
         evidence_records=records,
         frozen_by="control-plane:test",
     )
+
+
+def test_policy_rejects_valid_evidence_bound_to_a_different_runtime_or_index():
+    bundle = _bundle()
+    evidence = _evidence(bundle)
+    evidence["evidence"][1]["subject_bindings"]["runtime_image_digest"] = "sha256:" + "0" * 64
+    evidence["evidence"][3]["subject_bindings"]["index_schema_digest"] = "9" * 64
+    evidence["manifest_sha256"] = digest_json({key: value for key, value in evidence.items() if key != "manifest_sha256"})
+    decision = evaluate_policy(
+        deployment_bundle=bundle,
+        evidence_manifest=evidence,
+        approvals=[],
+        submitter_subject="operator:submitter",
+        policy_bundle_sha256="6" * 64,
+    )
+
+    assert "evidence_subject_mismatch:runtime_execution:runtime_image_digest" in decision["reasons"]
+    assert "evidence_subject_mismatch:data_plane_evaluation:index_schema_digest" in decision["reasons"]
 
 
 def _approvals(bundle, evidence, policy_digest="6" * 64):

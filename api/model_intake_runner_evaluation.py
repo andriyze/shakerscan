@@ -56,6 +56,7 @@ def derive_embedding_evaluation(runtime_payload: dict[str, Any], source_payload_
         "deployment_bundle_sha256": runtime_payload.get("deployment_bundle_sha256"),
         "model_artifact_sha256": runtime_payload.get("model_artifact_sha256"),
         "repository_snapshot_sha256": runtime_payload.get("repository_snapshot_sha256"),
+        "custom_code_sha256": runtime_payload.get("custom_code_sha256"),
         "tokenizer_sha256": runtime_payload.get("tokenizer_sha256"),
         "configuration_sha256": runtime_payload.get("configuration_sha256"),
         "runtime_image_digest": runtime_payload.get("runtime_image_digest"),

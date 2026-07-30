@@ -1652,6 +1652,12 @@ them into the UI bundle, rejects mismatches before queueing, and makes the Firec
 the verified manifest. Signed runner receipt v3 and derived evaluation evidence carry both digests, closing the
 earlier gap where required bundle labels were not independently matched to repository members.
 
+The policy engine now also compares every required evidence record's own subject bindings against the exact
+deployment bundle. Static, runtime, and embedding evidence must match artifact/snapshot/custom-code/tokenizer/
+configuration and applicable runtime/loader identities; data-plane evidence must additionally match the
+retrieval application and index schema. A correctly signed receipt from a different runtime, model, application,
+or index is therefore a blocker rather than reusable evidence.
+
 The guest captures root-owned syscall traces while model code runs as an unprivileged identity. The host
 independently parses and digests the bounded stream, records interface/firewall/cgroup observations, refuses
 incomplete or internally inconsistent PASS claims before signing, kills the whole process group on timeout,
