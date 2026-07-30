@@ -1499,9 +1499,9 @@ Each increment must be independently committed and leave required controls fail 
 5. **Control-plane and deployment hardening:** strengthen embedded policy tests, role separation, signer/KMS
    isolation, OCI push verification, CI/Kubernetes denial paths, revocation/cache behavior, storage quotas,
    restart/replay recovery, and first-screen reporting.
-6. **Bounded agent guidance:** reuse the keyless coding-agent turn contract only after physical runner
-   evidence is available; expose a fixed Model Intake action catalog, immutable transcripts, strict budgets,
-   and identical API/UI/skill semantics while keeping all AI output advisory.
+6. **Bounded agent guidance — implemented:** the keyless coding-agent turn contract exposes a fixed Model
+   Intake action catalog, durable transcripts, strict iteration/action budgets, authenticated resume/cancel,
+   and matching API/UI/shipped-skill semantics while keeping all AI output advisory.
 
 Release acceptance requires a physical Firecracker run and controlled deployment test. Mocked or
 caller-signed receipts prove contract handling only and cannot close those gates.
@@ -1742,9 +1742,10 @@ The API exposes authenticated list/start/read/reply/cancel operations and typed 
 is durable and idempotent for an open session; a completed session cannot be rewritten as cancelled. The UI exposes
 durable session resume/inspect/cancel, controller prompts, bounded replies, resulting observations, limitations,
 budgets, and a prominent “advisory only” label alongside—but separate from—the operator's runner and admission
-actions. Shipped-skill parity is the next surface-hardening increment. Cross-surface tests must prove that direct
-API calls, UI actions, and skill-driven sessions receive the same permissions and cannot reach legacy preflight
-or privileged admission mutations indirectly.
+actions. The shipped `shakerscan` skill routes corporate admission away from legacy preflight, documents the
+same fixed action catalog and lifecycle endpoints, preserves Firecracker no-fallback and reviewer-separation
+rules, and uses the same `ALLOW`/`BLOCK`/`INCOMPLETE`/`REVIEW` vocabulary. Cross-surface tests prove the API,
+UI, and skill carry the same permissions and cannot reach privileged admission mutations indirectly.
 
 ### Phase 5 — Useful report and release gate — **corporate-use report implemented; deployment enforcement is not operationally complete**
 
@@ -2068,7 +2069,7 @@ Owners must decide and record:
 - [ ] The embedded Python policy, production KMS rotation/outage path, and live configured registry/Kubernetes
   deployments pass their complete negative-path and recovery gates. OCI remote-digest verification and pure,
   scoped/certified webhook mechanisms are implemented and unit-tested.
-- [ ] API, UI, and the shipped `shakerscan` agent skill expose the same controlled Model Intake workflow,
+- [x] API, UI, and the shipped `shakerscan` agent skill expose the same controlled Model Intake workflow,
   authorization requirements, evidence, state transitions, and fail-closed decision semantics.
 - [x] The optional keyless Codex planner exposes only five typed bounded advisory actions, has no admission,
   promotion, evidence-writing, or arbitrary-execution authority, and durably enforces iteration/action budgets.

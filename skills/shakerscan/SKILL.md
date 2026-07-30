@@ -67,6 +67,13 @@ target binding, approvals, budgets, evidence, and finding proof.
 - Do not bypass a rejected scope, approval, risk, or budget decision.
 - Do not call a finding verified from a title, status code, reflection, or model judgment alone.
   Use ShakerScan proof and retest records.
+- Keep Model Intake preflight and admission structurally distinct. `POST /model-intake/scan` is always
+  non-deployable technical preflight. When the user asks whether a model may enter a corporate supply
+  chain, use the controlled `/model-intake/submissions/*` workflow and read
+  `skills/shakerscan/references/model-intake.md` before acting.
+- Never replace unavailable Firecracker/KVM execution with the semantic container sandbox, QEMU, Docker,
+  or an agent claim. Report `NOT_READY`/`INCOMPLETE`. The optional Model Intake coding-agent loop is
+  advisory only and cannot approve, freeze evidence, change policy, sign, promote, or suppress a non-pass.
 
 ## Execute
 
@@ -86,6 +93,22 @@ After any action queues a scan, ASM job, AI Gate run, Model Intake run, or findi
 
 For batch submissions, report `queued_count`, `failed_count`, and per-target errors. Never report the
 requested count as successfully queued when the response is partial.
+
+### Model Intake routing
+
+- “Inspect/scan this model” means provider-neutral technical preflight unless the user explicitly asks for
+  corporate admission or deployment approval.
+- “Can we use/admit/approve/deploy this model?” means the authenticated controlled workflow: submission,
+  completed static scan binding, exact-subject Firecracker evidence, frozen evidence, separated human
+  approvals, deterministic policy, and isolated signer promotion.
+- Inspect `/model-intake/scanners/readiness` and `/model-intake/runners/readiness` before promising coverage.
+  Missing required tools or physical KVM is a non-pass, not a reason to omit the control.
+- Model names such as CodeRankEmbed and CodeSage are conformance examples, never allowlist branches. Resolve
+  any supported Hugging Face/HTTP/cloud/OCI/MLflow source through the same format- and fact-selected controls.
+- After queueing a preflight scan or runner job, report its ID and stop unless the user explicitly asked to
+  monitor or complete an end-to-end admission run.
+- Read `skills/shakerscan/references/model-intake.md` for exact endpoints, authority boundaries, bounded
+  planner actions, telemetry fields, stop conditions, and the passed/failed/not-run report contract.
 
 ## Manage Multi-Node Fleet
 
@@ -156,6 +179,8 @@ remains authoritative for scope, credentials, active-tool access, evidence, and 
 
 - Read `AGENTS.md` for exact request bodies, filters, authentication options, and operational rules.
 - Read `skills/ai-security-session/references/api.md` for interactive session schemas.
+- Read `skills/shakerscan/references/model-intake.md` before corporate Model Intake admission, Firecracker,
+  conversion, or Codex-guided Model Intake operations.
 - Use `http://localhost:8080/openapi.json` when an API contract may have changed.
 - Use the public
   `https://github.com/andriyze/shakerscan/blob/main/docs/functionality-reference.md` for the
