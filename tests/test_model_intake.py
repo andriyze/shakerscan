@@ -112,6 +112,41 @@ def test_policy_blocked_sandbox_recommends_conversion_once(monkeypatch, tmp_path
     ) == 1
 
 
+def test_review_only_corporate_report_keeps_actionable_remediation():
+    remediation = "Review and approve the exact custom-code digest before runtime use."
+    assessment = _corporate_use_assessment(
+        findings=[{
+            "id": "model_intake:custom_model_code_requires_review",
+            "title": "Custom code requires review",
+            "severity": "medium",
+            "remediation": remediation,
+        }],
+        decision={"decision": "review"},
+        intake_mode="preflight",
+        acquisition_complete=True,
+        checksum_status="verified",
+        generated_evidence={"status": "REVIEW_REQUIRED", "results": [{
+            "scanner": {"name": "python-pickletools"},
+            "execution": {"status": "NOT_APPLICABLE"},
+        }, {
+            "scanner": {"name": "modelscan"},
+            "execution": {"status": "NOT_APPLICABLE"},
+        }, {
+            "scanner": {"name": "semgrep"},
+            "execution": {"status": "WARNING"},
+        }]},
+        dynamic_sandbox={"status": "PASS", "inspection": {"runtime": {"load_level": "weights"}}},
+        generated_evaluation={"status": "SKIPPED_BY_POLICY"},
+        signature_status={"status": "missing", "verified": False},
+        attestation_verification={"status": "SKIPPED_BY_POLICY", "verified": False},
+        deployment_approved=False,
+        custom_code_required=True,
+    )
+
+    assert assessment["primary_blockers"] == []
+    assert assessment["next_actions"] == [remediation]
+
+
 def _local_options(options=None):
     return {"allow_local_files": True, **(options or {})}
 

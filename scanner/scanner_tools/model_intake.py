@@ -750,9 +750,16 @@ def _corporate_use_assessment(
         }
         for item in findings if str(item.get("severity") or "").lower() in {"critical", "high"}
     ]
+    action_findings = blocking_findings or [
+        {
+            "remediation": item.get("remediation") or item.get("evidence", {}).get("remediation"),
+        }
+        for item in findings
+        if str(item.get("severity") or "").lower() in {"medium", "low"}
+    ]
     next_actions = list(dict.fromkeys(
         str(item.get("remediation") or "").strip()
-        for item in blocking_findings
+        for item in action_findings
         if str(item.get("remediation") or "").strip()
     ))
     return {
