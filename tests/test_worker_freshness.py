@@ -29,6 +29,18 @@ def test_worker_preflight_rejects_admission_private_key_even_when_other_prefligh
         worker.run_worker_preflight()
 
 
+@pytest.mark.parametrize("variable", [
+    "MODEL_INTAKE_CONTROL_PLANE_SIGNING_KEY_PEM",
+    "MODEL_INTAKE_SIGNER_AWS_KMS_KEY_ID",
+])
+def test_worker_preflight_rejects_v2_signer_authority(monkeypatch, variable):
+    monkeypatch.setenv(variable, "forbidden-signer-authority")
+    monkeypatch.setenv("WORKER_PREFLIGHT_ENABLED", "false")
+
+    with pytest.raises(RuntimeError, match="admission signing material"):
+        worker.run_worker_preflight()
+
+
 def test_db_timestamps_are_normalized_to_naive_utc_for_duration_math():
     aware = datetime(2026, 7, 26, 7, 30, tzinfo=timezone(timedelta(hours=2)))
 

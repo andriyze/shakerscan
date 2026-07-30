@@ -380,7 +380,7 @@ function ModelIntakeSettingsContent() {
   const [requireGeneratedEvaluation, setRequireGeneratedEvaluation] = useState(false)
   const [requireSignedAdmission, setRequireSignedAdmission] = useState(false)
   const [timeoutSeconds, setTimeoutSeconds] = useState('20')
-  const [intakeMode, setIntakeMode] = useState<'admission' | 'preflight'>('admission')
+  const [intakeMode, setIntakeMode] = useState<'admission' | 'preflight'>('preflight')
   const [policyProfile, setPolicyProfile] = useState<string>('production')
   const [savedPolicyProfiles, setSavedPolicyProfiles] = useState<SavedPolicyProfile[]>([])
   const [policyProfilesLoading, setPolicyProfilesLoading] = useState(true)
@@ -557,7 +557,7 @@ function ModelIntakeSettingsContent() {
   function applyScanPayload(payload: ModelIntakeScanRequest) {
     setFieldErrors({})
     setArtifactUrl(payload.artifact_url || '')
-    setIntakeMode(payload.intake_mode || 'admission')
+    setIntakeMode(payload.intake_mode || 'preflight')
     setName(payload.name || '')
     setMetadataUrl(payload.metadata_url || '')
     setMetadataJson(payload.metadata_json ? JSON.stringify(payload.metadata_json, null, 2) : '')

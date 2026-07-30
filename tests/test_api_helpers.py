@@ -2574,6 +2574,9 @@ def test_model_intake_trust_anchor_merge_adds_saved_material_and_audit_metadata(
         "id": "anchor-1",
         "name": "prod-release-key",
         "policy_profile": "production",
+        "purpose": "publisher_signature",
+        "environment": "",
+        "version": "",
     }]
 
 
@@ -2637,6 +2640,7 @@ def test_model_intake_admission_uses_server_policy_and_discards_caller_weakening
     monkeypatch.delenv("MODEL_INTAKE_ADMISSION_POLICY_PROFILE", raising=False)
     request = api_module.ModelIntakeScanRequest(
         artifact_url="hf://acme/ranker/model.safetensors",
+        intake_mode="admission",
         policy_profile="development",
         policy_exceptions=[{"finding_id": "unsafe", "status": "approved"}],
         complete_artifact_download=False,
@@ -2674,6 +2678,7 @@ def test_model_intake_admission_uses_server_policy_and_discards_caller_weakening
 def test_model_intake_admission_rejects_requester_authority(field, value):
     request = api_module.ModelIntakeScanRequest(
         artifact_url="https://models.example/model.safetensors",
+        intake_mode="admission",
         **{field: value},
     )
 
@@ -2688,6 +2693,7 @@ def test_model_intake_admission_rejects_requester_authority(field, value):
 def test_model_intake_admission_rejects_nested_approval_metadata():
     request = api_module.ModelIntakeScanRequest(
         artifact_url="https://models.example/model.safetensors",
+        intake_mode="admission",
         metadata_json={"governance": {"approved_by": "requester"}},
     )
 

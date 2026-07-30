@@ -129,6 +129,11 @@ services:
       - ARTIFACT_STORAGE_BACKEND=${ARTIFACT_STORAGE_BACKEND:-}
       - ARTIFACT_STORAGE_REQUIRED=${ARTIFACT_STORAGE_REQUIRED:-false}
       - MODEL_INTAKE_ADMISSION_TRUSTED_PUBLIC_KEYS=${MODEL_INTAKE_ADMISSION_TRUSTED_PUBLIC_KEYS:-}
+      - MODEL_INTAKE_ADMISSION_V2_TRUSTED_PUBLIC_KEYS=${MODEL_INTAKE_ADMISSION_V2_TRUSTED_PUBLIC_KEYS:-}
+      - MODEL_INTAKE_ADMISSION_V2_TRUSTED_BUILDERS=${MODEL_INTAKE_ADMISSION_V2_TRUSTED_BUILDERS:-}
+      - MODEL_INTAKE_SIGNER_URL=http://model-intake-signer:8091/internal/model-intake/admissions/issue
+      - MODEL_INTAKE_SIGNER_INTERNAL_TOKEN=${MODEL_INTAKE_SIGNER_INTERNAL_TOKEN:-}
+      - MODEL_INTAKE_OPERATOR_ROLES=${MODEL_INTAKE_OPERATOR_ROLES:-}
       - ARTIFACT_S3_PREFIX=${ARTIFACT_S3_PREFIX:-scan-artifacts}
       - ARTIFACT_RETENTION_DAYS=${ARTIFACT_RETENTION_DAYS:-}
       - ARTIFACT_RETENTION_RESULT_DAYS=${ARTIFACT_RETENTION_RESULT_DAYS:-365}
@@ -216,6 +221,34 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    restart: unless-stopped
+
+  model-intake-signer:
+    build:
+      context: .
+      dockerfile: scanner/Dockerfile
+    environment:
+      - DATABASE_URL=postgresql://scanner:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/scanner
+      - MODEL_INTAKE_SIGNER_INTERNAL_TOKEN=${MODEL_INTAKE_SIGNER_INTERNAL_TOKEN:-}
+      - MODEL_INTAKE_SIGNER_BACKEND=${MODEL_INTAKE_SIGNER_BACKEND:-}
+      - MODEL_INTAKE_SIGNER_AWS_KMS_KEY_ID=${MODEL_INTAKE_SIGNER_AWS_KMS_KEY_ID:-}
+      - MODEL_INTAKE_SIGNER_AWS_REGION=${MODEL_INTAKE_SIGNER_AWS_REGION:-}
+      - MODEL_INTAKE_SIGNER_ALLOW_LOCAL_PEM=${MODEL_INTAKE_SIGNER_ALLOW_LOCAL_PEM:-false}
+      - MODEL_INTAKE_CONTROL_PLANE_SIGNING_KEY_PEM=${MODEL_INTAKE_CONTROL_PLANE_SIGNING_KEY_PEM:-}
+      - MODEL_INTAKE_ADMISSION_BUILDER_ID=${MODEL_INTAKE_ADMISSION_BUILDER_ID:-https://shakerscan.dev/builders/model-admission/v2}
+    volumes:
+      - ./api:/app/_src/api:ro
+    command: ["uvicorn", "model_intake_signer_service:app", "--host", "0.0.0.0", "--port", "8091"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,noexec,nosuid,nodev
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
 
   # Fleet-only CA-verified HTTPS listener on the WireGuard data address.

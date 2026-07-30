@@ -91,6 +91,29 @@ except ModuleNotFoundError:
     from api.model_intake_admissions import REASSESSMENT_TRIGGERS, triggered_status as _model_admission_triggered_status
 
 try:
+    from model_intake_control_plane import (
+        AdmissionContractError as _ModelAdmissionContractError,
+        LocalPemSigner as _ModelLocalPemSigner,
+        build_approval_receipt as _build_model_approval_receipt,
+        build_deployment_bundle as _build_model_deployment_bundle,
+        evaluate_policy as _evaluate_model_admission_policy,
+        freeze_evidence_manifest as _freeze_model_evidence_manifest,
+        issue_admission_v2 as _issue_model_admission_v2,
+        verify_admission_v2 as _verify_model_admission_v2,
+    )
+except ModuleNotFoundError:
+    from api.model_intake_control_plane import (
+        AdmissionContractError as _ModelAdmissionContractError,
+        LocalPemSigner as _ModelLocalPemSigner,
+        build_approval_receipt as _build_model_approval_receipt,
+        build_deployment_bundle as _build_model_deployment_bundle,
+        evaluate_policy as _evaluate_model_admission_policy,
+        freeze_evidence_manifest as _freeze_model_evidence_manifest,
+        issue_admission_v2 as _issue_model_admission_v2,
+        verify_admission_v2 as _verify_model_admission_v2,
+    )
+
+try:
     from scanner_tools.model_intake_retention import execute_cleanup as _execute_model_quarantine_cleanup
     from scanner_tools.model_intake_retention import plan_cleanup as _plan_model_quarantine_cleanup
 except ModuleNotFoundError:
@@ -3654,10 +3677,11 @@ class ModelIntakeScanRequest(BaseModel):
     artifact_url: str
     name: Optional[str] = None
     intake_mode: Literal["admission", "preflight"] = Field(
-        default="admission",
+        default="preflight",
         description=(
-            "Admission applies the server-owned minimum policy and can produce deployable evidence. "
-            "Preflight is an explicitly non-admissible exploratory review."
+            "Admission applies the server-owned minimum technical policy but still emits only a "
+            "non-deployable candidate. Preflight is the compatibility default. Production authorization "
+            "uses the separate submission/freeze/approval/policy/promotion workflow."
         ),
     )
     metadata_url: Optional[str] = None
@@ -3824,13 +3848,80 @@ class ModelIntakeRetentionCleanupRequest(BaseModel):
 
 
 class ModelIntakeTrustAnchorRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: str
     description: Optional[str] = None
     public_key_pem: Optional[str] = None
     public_key_sha256: Optional[str] = None
     policy_profile: Optional[str] = "production"
+    purpose: str = Field(
+        default="publisher_signature",
+        pattern="^(publisher_signature|upstream_attestation|runtime_runner|evaluation_runner|data_plane_runner|approval_signer|admission_signer)$",
+    )
+    environment: str = Field(default="production", pattern="^(development|test|staging|production)$")
+    valid_from: Optional[datetime] = None
+    valid_until: Optional[datetime] = None
+    issuer_constraint: Optional[str] = None
+    subject_constraint: Optional[str] = None
+    builder_id_constraint: Optional[str] = None
+    source: str = Field(default="operator", min_length=1, max_length=120)
+    version: str = Field(default="1", min_length=1, max_length=80)
     owner: Optional[str] = None
     is_active: bool = True
+
+
+class ModelSubmissionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source: str = Field(min_length=1, max_length=4000)
+    source_kind: str = Field(default="auto", pattern="^(auto|huggingface|http|s3|gcs|azure|oci|mlflow)$")
+    intended_environment: str = Field(pattern="^(development|test|staging|production)$")
+    intended_use: dict[str, Any] = Field(default_factory=dict)
+    expected_artifact_sha256: Optional[str] = Field(default=None, pattern="^[0-9a-fA-F]{64}$")
+    publisher_signature: Optional[dict[str, Any]] = None
+    upstream_attestation: Optional[dict[str, Any]] = None
+    declared_metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ModelSubmissionStaticRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    scan_id: str
+
+
+class ModelEvidenceFreezeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    deployment_bundle: dict[str, Any]
+
+
+class ModelApprovalCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    evidence_manifest_id: str
+    approval_type: str = Field(pattern="^(model_security_reviewer|ml_platform_reviewer|release_manager|legal_reviewer|privacy_reviewer|data_owner|risk_acceptance)$")
+    decision: str = Field(pattern="^(approve|reject)$")
+    reason: str = Field(min_length=3, max_length=2000)
+    expires_days: int = Field(default=30, ge=1, le=365)
+    restrictions: list[str] = Field(default_factory=list, max_length=50)
+
+
+class ModelPolicyDecisionCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    evidence_manifest_id: str
+
+
+class ModelPromotionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    policy_decision_id: str
+    idempotency_key: str = Field(min_length=16, max_length=200)
+
+
+class ModelAdmissionV2VerifyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    admission_package: dict[str, Any]
+    expected_bundle_sha256: str = Field(pattern="^[0-9a-fA-F]{64}$")
+    expected_environment: str = Field(pattern="^(development|test|staging|production)$")
+    expected_components: dict[str, str] = Field(default_factory=dict)
+    require_registered_active_admission: Literal[True] = True
 
 
 AI_TARGET_TYPES = {"api_chat", "widget", "rag", "agent_trace", "mcp_trace"}
@@ -5060,6 +5151,49 @@ def _require_model_intake_operator(request: Request) -> None:
     presented = _fleet_bearer_credential(request)
     if not secrets.compare_digest(presented, expected):
         raise HTTPException(status_code=403, detail="Model Intake operator authentication failed")
+
+
+def _model_intake_authenticated_subject(request: Request) -> str:
+    """Return a server-derived identity; never accept approver identity in JSON."""
+    _require_model_intake_operator(request)
+    peer = getattr(getattr(request, "client", None), "host", None)
+    try:
+        if peer and ipaddress.ip_address(peer).is_loopback:
+            return "local-operator"
+    except ValueError:
+        pass
+    credential = _fleet_bearer_credential(request)
+    if not credential:
+        raise HTTPException(status_code=403, detail="Model Intake authenticated identity is unavailable")
+    return f"operator-token:{hashlib.sha256(credential.encode()).hexdigest()[:24]}"
+
+
+def _model_intake_operator_roles(request: Request) -> set[str]:
+    subject = _model_intake_authenticated_subject(request)
+    configured = {
+        item.strip()
+        for item in os.getenv("MODEL_INTAKE_OPERATOR_ROLES", "").split(",")
+        if item.strip()
+    }
+    if subject == "local-operator" and not configured:
+        return {
+            "model_security_reviewer",
+            "ml_platform_reviewer",
+            "release_manager",
+            "legal_reviewer",
+            "privacy_reviewer",
+            "data_owner",
+            "risk_acceptance",
+        }
+    return configured
+
+
+def _model_intake_submission_subject(request: Request) -> str:
+    credential = _fleet_bearer_credential(request)
+    if credential:
+        return f"submitter-token:{hashlib.sha256(credential.encode()).hexdigest()[:24]}"
+    peer = str(getattr(getattr(request, "client", None), "host", None) or "unknown")
+    return f"submitter-peer:{hashlib.sha256(peer.encode()).hexdigest()[:24]}"
 
 
 def _fleet_connection_bundle() -> dict[str, Any]:
@@ -10482,6 +10616,8 @@ def _validate_model_intake_trust_anchor_request(req: ModelIntakeTrustAnchorReque
     sha = str(req.public_key_sha256 or "").strip()
     if sha and not re.fullmatch(r"[a-fA-F0-9]{64}", sha):
         raise HTTPException(status_code=422, detail="public_key_sha256 must be a 64-character SHA-256 hex digest")
+    if req.valid_until and req.valid_from and req.valid_until <= req.valid_from:
+        raise HTTPException(status_code=422, detail="valid_until must be later than valid_from")
 
 
 def _merge_model_intake_trust_anchor_material(
@@ -10490,27 +10626,44 @@ def _merge_model_intake_trust_anchor_material(
 ) -> ModelIntakeScanRequest:
     # The caller is never a trust-root source. Only the server-selected durable
     # anchors passed to this function may populate trusted material.
-    trusted_keys: list[str] = []
-    trusted_fingerprints: list[str] = []
+    signature_keys: list[str] = []
+    signature_fingerprints: list[str] = []
+    attestation_keys: list[str] = []
+    attestation_fingerprints: list[str] = []
+    required_builder_ids: list[str] = []
     selected: list[dict[str, str]] = []
     for anchor in anchors:
         pem = str(anchor.get("public_key_pem") or "").strip()
         fingerprint = str(anchor.get("public_key_sha256") or "").strip()
-        if pem and pem not in trusted_keys:
-            trusted_keys.append(pem)
-        if fingerprint and fingerprint not in trusted_fingerprints:
-            trusted_fingerprints.append(fingerprint)
+        purpose = str(anchor.get("purpose") or "publisher_signature")
+        target_keys = attestation_keys if purpose == "upstream_attestation" else signature_keys
+        target_fingerprints = (
+            attestation_fingerprints if purpose == "upstream_attestation" else signature_fingerprints
+        )
+        if pem and pem not in target_keys:
+            target_keys.append(pem)
+        if fingerprint and fingerprint not in target_fingerprints:
+            target_fingerprints.append(fingerprint)
+        builder_id = str(anchor.get("builder_id_constraint") or "").strip()
+        if purpose == "upstream_attestation" and builder_id and builder_id not in required_builder_ids:
+            required_builder_ids.append(builder_id)
         selected.append({
             "id": str(anchor.get("id") or ""),
             "name": str(anchor.get("name") or ""),
             "policy_profile": str(anchor.get("policy_profile") or ""),
+            "purpose": purpose,
+            "environment": str(anchor.get("environment") or ""),
+            "version": str(anchor.get("version") or ""),
         })
     metadata = dict(request.metadata_json or {})
     if selected:
         metadata["selected_trust_anchors"] = selected
     return request.model_copy(update={
-        "signature_trusted_keys": trusted_keys or None,
-        "signature_trusted_key_sha256": trusted_fingerprints or None,
+        "signature_trusted_keys": signature_keys or None,
+        "signature_trusted_key_sha256": signature_fingerprints or None,
+        "attestation_trusted_keys": attestation_keys or None,
+        "attestation_trusted_key_sha256": attestation_fingerprints or None,
+        "required_attestation_builder_ids": required_builder_ids or None,
         "metadata_json": metadata,
     })
 
@@ -10643,9 +10796,16 @@ async def _expand_model_intake_saved_trust_anchors(request: ModelIntakeScanReque
         rows = await conn.fetch(
             """
             SELECT * FROM model_intake_trust_anchors
-            WHERE id = ANY($1::uuid[]) AND is_active = true
+            WHERE id = ANY($1::uuid[])
+              AND is_active = true
+              AND revoked_at IS NULL
+              AND valid_from <= NOW()
+              AND (valid_until IS NULL OR valid_until > NOW())
+              AND environment = $2
+              AND purpose IN ('publisher_signature','upstream_attestation')
             """,
             anchor_ids,
+            str(request.policy_profile or "production").lower(),
         )
     if len(rows) != len(set(anchor_ids)):
         raise HTTPException(status_code=400, detail="One or more selected Model Intake trust anchors were not found or are inactive")
@@ -10671,8 +10831,10 @@ async def create_model_intake_trust_anchor(req: ModelIntakeTrustAnchorRequest, h
             row = await conn.fetchrow(
                 """
                 INSERT INTO model_intake_trust_anchors
-                    (name, description, public_key_pem, public_key_sha256, policy_profile, owner, is_active)
-                VALUES ($1,$2,$3,$4,$5,$6,$7)
+                    (name, description, public_key_pem, public_key_sha256, policy_profile,
+                     purpose, environment, valid_from, valid_until, issuer_constraint,
+                     subject_constraint, builder_id_constraint, source, version, owner, is_active)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,COALESCE($8,NOW()),$9,$10,$11,$12,$13,$14,$15,$16)
                 RETURNING *
                 """,
                 req.name.strip(),
@@ -10680,6 +10842,15 @@ async def create_model_intake_trust_anchor(req: ModelIntakeTrustAnchorRequest, h
                 str(req.public_key_pem or "").strip() or None,
                 str(req.public_key_sha256 or "").strip().lower() or None,
                 str(req.policy_profile or "").strip().lower() or None,
+                req.purpose,
+                req.environment,
+                req.valid_from,
+                req.valid_until,
+                req.issuer_constraint,
+                req.subject_constraint,
+                req.builder_id_constraint,
+                req.source,
+                req.version,
                 req.owner,
                 req.is_active,
             )
@@ -10697,7 +10868,10 @@ async def update_model_intake_trust_anchor(anchor_id: str, req: ModelIntakeTrust
             """
             UPDATE model_intake_trust_anchors SET
                 name=$2, description=$3, public_key_pem=$4, public_key_sha256=$5,
-                policy_profile=$6, owner=$7, is_active=$8, updated_at=NOW()
+                policy_profile=$6, purpose=$7, environment=$8, valid_from=COALESCE($9,valid_from),
+                valid_until=$10, issuer_constraint=$11, subject_constraint=$12,
+                builder_id_constraint=$13, source=$14, version=$15, owner=$16,
+                is_active=$17, updated_at=NOW()
             WHERE id=$1
             RETURNING *
             """,
@@ -10707,6 +10881,15 @@ async def update_model_intake_trust_anchor(anchor_id: str, req: ModelIntakeTrust
             str(req.public_key_pem or "").strip() or None,
             str(req.public_key_sha256 or "").strip().lower() or None,
             str(req.policy_profile or "").strip().lower() or None,
+            req.purpose,
+            req.environment,
+            req.valid_from,
+            req.valid_until,
+            req.issuer_constraint,
+            req.subject_constraint,
+            req.builder_id_constraint,
+            req.source,
+            req.version,
             req.owner,
             req.is_active,
         )
@@ -10722,7 +10905,8 @@ async def deactivate_model_intake_trust_anchor(anchor_id: str, http_request: Req
         row = await conn.fetchrow(
             """
             UPDATE model_intake_trust_anchors
-            SET is_active=false, updated_at=NOW()
+            SET is_active=false, revoked_at=NOW(),
+                revocation_reason='operator deactivated trust anchor', updated_at=NOW()
             WHERE id=$1
             RETURNING *
             """,
@@ -10731,6 +10915,413 @@ async def deactivate_model_intake_trust_anchor(anchor_id: str, http_request: Req
         if not row:
             raise HTTPException(status_code=404, detail="Model Intake trust anchor not found")
     return {"deactivated": True, "trust_anchor": row_to_dict(row)}
+
+
+def _model_intake_policy_bundle_sha256() -> str:
+    configured = os.getenv("MODEL_INTAKE_POLICY_BUNDLE_SHA256", "").strip().lower()
+    if configured:
+        if not re.fullmatch(r"[0-9a-f]{64}", configured):
+            raise HTTPException(status_code=503, detail="MODEL_INTAKE_POLICY_BUNDLE_SHA256 is invalid")
+        return configured
+    return hashlib.sha256(b"shakerscan-embedded-model-admission-policy/v2").hexdigest()
+
+
+def _model_intake_uuid(value: str, label: str) -> uuid.UUID:
+    try:
+        return uuid.UUID(str(value))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid {label}") from exc
+
+
+def _model_intake_json_object(value: Any) -> dict[str, Any]:
+    decoded = _decode_json_value(value)
+    return decoded if isinstance(decoded, dict) else {}
+
+
+@app.post("/model-intake/submissions")
+async def create_model_intake_submission(request: ModelSubmissionRequest, http_request: Request):
+    """Create work only; this endpoint can never issue an admission."""
+    forbidden = _model_intake_forbidden_metadata_paths(request.declared_metadata, "declared_metadata")
+    if forbidden:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "model_submission_governance_authority_forbidden",
+                "fields": forbidden,
+            },
+        )
+    requested_by = _model_intake_submission_subject(http_request)
+    source_hash = hashlib.sha256(request.source.strip().encode()).hexdigest()
+    declarations = {
+        **request.declared_metadata,
+        "publisher_signature": request.publisher_signature,
+        "upstream_attestation": request.upstream_attestation,
+        "provenance_class": "DECLARED",
+    }
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO model_intake_submissions
+                (requested_by,requested_environment,source_kind,source_reference_hash,
+                 expected_artifact_sha256,intended_use,declared_metadata,state)
+            VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,'submitted')
+            RETURNING *
+            """,
+            requested_by,
+            request.intended_environment,
+            request.source_kind,
+            source_hash,
+            request.expected_artifact_sha256.lower() if request.expected_artifact_sha256 else None,
+            json.dumps(request.intended_use),
+            json.dumps(declarations),
+        )
+    return {
+        "submission": row_to_dict(row),
+        "source_reference_hash": source_hash,
+        "next_actions": ["queue_static_run", "attach_generated_evidence", "freeze_evidence"],
+        "deployable": False,
+    }
+
+
+@app.get("/model-intake/submissions/{submission_id}")
+async def get_model_intake_submission(submission_id: str):
+    submission_uuid = _model_intake_uuid(submission_id, "submission id")
+    async with db_pool.acquire() as conn:
+        submission = await conn.fetchrow("SELECT * FROM model_intake_submissions WHERE id=$1", submission_uuid)
+        if not submission:
+            raise HTTPException(status_code=404, detail="Model submission not found")
+        subjects = await conn.fetch(
+            "SELECT * FROM model_intake_subjects WHERE submission_id=$1 ORDER BY created_at", submission_uuid
+        )
+        evidence = await conn.fetch(
+            "SELECT * FROM model_intake_evidence_records WHERE submission_id=$1 ORDER BY created_at", submission_uuid
+        )
+        manifests = await conn.fetch(
+            "SELECT * FROM model_intake_evidence_manifests WHERE submission_id=$1 ORDER BY version", submission_uuid
+        )
+        approvals = await conn.fetch(
+            "SELECT * FROM model_intake_approval_receipts WHERE submission_id=$1 ORDER BY created_at", submission_uuid
+        )
+        decisions = await conn.fetch(
+            "SELECT * FROM model_intake_policy_decisions WHERE submission_id=$1 ORDER BY created_at", submission_uuid
+        )
+        admissions = await conn.fetch(
+            "SELECT * FROM model_intake_admissions WHERE submission_id=$1 ORDER BY created_at", submission_uuid
+        )
+    return {
+        "submission": row_to_dict(submission),
+        "subjects": [row_to_dict(item) for item in subjects],
+        "evidence": [row_to_dict(item) for item in evidence],
+        "manifests": [row_to_dict(item) for item in manifests],
+        "approvals": [row_to_dict(item) for item in approvals],
+        "policy_decisions": [row_to_dict(item) for item in decisions],
+        "admissions": [row_to_dict(item) for item in admissions],
+    }
+
+
+@app.post("/model-intake/submissions/{submission_id}/static-runs")
+async def attach_model_intake_static_run(
+    submission_id: str,
+    request: ModelSubmissionStaticRunRequest,
+    http_request: Request,
+):
+    """Attach only a server-persisted completed scan; never accept caller evidence JSON."""
+    actor = _model_intake_authenticated_subject(http_request)
+    submission_uuid = _model_intake_uuid(submission_id, "submission id")
+    scan_uuid = _model_intake_uuid(request.scan_id, "scan id")
+    async with db_pool.acquire() as conn:
+        submission = await conn.fetchrow("SELECT * FROM model_intake_submissions WHERE id=$1", submission_uuid)
+        scan = await conn.fetchrow("SELECT id,status,result FROM scans WHERE id=$1", scan_uuid)
+        if not submission:
+            raise HTTPException(status_code=404, detail="Model submission not found")
+        if not scan or scan["status"] != "completed":
+            raise HTTPException(status_code=409, detail="A completed Model Intake scan is required")
+        result = _model_intake_json_object(scan["result"])
+        model_intake = result.get("model_intake") if isinstance(result.get("model_intake"), dict) else {}
+        summary = model_intake.get("summary") if isinstance(model_intake.get("summary"), dict) else {}
+        artifact_sha = str(summary.get("sha256") or "").lower()
+        snapshot_sha = str(summary.get("repository_snapshot_sha256") or "").lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", artifact_sha):
+            raise HTTPException(status_code=409, detail="Scan lacks a complete artifact SHA-256 subject")
+        expected = str(submission["expected_artifact_sha256"] or "").lower()
+        if expected and expected != artifact_sha:
+            raise HTTPException(status_code=409, detail="Scan artifact does not match submission expectation")
+        findings = result.get("findings") if isinstance(result.get("findings"), list) else []
+        severity = {str(item.get("severity") or "").lower() for item in findings if isinstance(item, dict)}
+        complete = bool(summary.get("acquisition_complete")) and bool(summary.get("inspection_complete"))
+        static_status = "FAIL" if severity.intersection({"critical", "high"}) else "PASS" if complete else "INCOMPLETE"
+        payload_digest = hashlib.sha256(json.dumps({
+            "scan_id": str(scan_uuid),
+            "summary": summary,
+            "checks": model_intake.get("checks"),
+            "generated_scanners": model_intake.get("generated_scanners"),
+            "finding_fingerprints": sorted(str(item.get("fingerprint") or item.get("id") or "") for item in findings if isinstance(item, dict)),
+        }, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
+        await conn.execute(
+            """
+            INSERT INTO model_intake_subjects
+                (submission_id,subject_kind,immutable_uri,sha256,size_bytes,source_revision,metadata_json)
+            VALUES ($1,'artifact',$2,$3,$4,$5,$6::jsonb)
+            ON CONFLICT (submission_id,subject_kind,sha256) DO NOTHING
+            """,
+            submission_uuid,
+            f"scan://{scan_uuid}/artifact",
+            artifact_sha,
+            summary.get("artifact_size"),
+            summary.get("revision"),
+            json.dumps({"registered_by": actor}),
+        )
+        if re.fullmatch(r"[0-9a-f]{64}", snapshot_sha):
+            await conn.execute(
+                """
+                INSERT INTO model_intake_subjects
+                    (submission_id,subject_kind,immutable_uri,sha256,manifest_sha256,metadata_json)
+                VALUES ($1,'repository_snapshot',$2,$3,$4,$5::jsonb)
+                ON CONFLICT (submission_id,subject_kind,sha256) DO NOTHING
+                """,
+                submission_uuid,
+                f"scan://{scan_uuid}/repository-snapshot",
+                snapshot_sha,
+                summary.get("repository_manifest_sha256"),
+                json.dumps({"registered_by": actor}),
+            )
+        evidence = await conn.fetchrow(
+            """
+            INSERT INTO model_intake_evidence_records
+                (submission_id,evidence_type,schema_version,provenance_class,producer_id,
+                 producer_version,builder_id,invocation_id,subject_bindings,payload_sha256,
+                 object_storage_uri,status,started_at,finished_at,expires_at)
+            VALUES ($1,'static_analysis','model-intake-static-evidence/v1','GENERATED_STATIC',
+                    'shakerscan-static-worker',$2,$3,$4,$5::jsonb,$6,$7,$8,NOW(),NOW(),NOW()+INTERVAL '30 days')
+            ON CONFLICT (producer_id,invocation_id) DO UPDATE SET payload_sha256=EXCLUDED.payload_sha256
+            RETURNING *
+            """,
+            submission_uuid,
+            str(result.get("scanner_version") or "unknown"),
+            str(result.get("worker_build_fingerprint") or "shakerscan-worker"),
+            str(scan_uuid),
+            json.dumps({
+                "model_artifact_sha256": artifact_sha,
+                "repository_snapshot_sha256": snapshot_sha or None,
+            }),
+            payload_digest,
+            f"scan://{scan_uuid}/result",
+            static_status,
+        )
+        await conn.execute(
+            "UPDATE model_intake_submissions SET scan_id=$2,state='evidence_ready',updated_at=NOW() WHERE id=$1",
+            submission_uuid,
+            scan_uuid,
+        )
+    return {"submission_id": str(submission_uuid), "evidence": row_to_dict(evidence), "deployable": False}
+
+
+@app.post("/model-intake/submissions/{submission_id}/freeze-evidence")
+async def freeze_model_intake_evidence(
+    submission_id: str,
+    request: ModelEvidenceFreezeRequest,
+    http_request: Request,
+):
+    actor = _model_intake_authenticated_subject(http_request)
+    submission_uuid = _model_intake_uuid(submission_id, "submission id")
+    try:
+        bundle = _build_model_deployment_bundle(request.deployment_bundle)
+    except _ModelAdmissionContractError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    async with db_pool.acquire() as conn:
+        submission = await conn.fetchrow("SELECT * FROM model_intake_submissions WHERE id=$1 FOR UPDATE", submission_uuid)
+        if not submission:
+            raise HTTPException(status_code=404, detail="Model submission not found")
+        if bundle["target_environment"] != submission["requested_environment"]:
+            raise HTTPException(status_code=409, detail="Deployment bundle environment differs from submission")
+        subjects = await conn.fetch(
+            "SELECT subject_kind,sha256 FROM model_intake_subjects WHERE submission_id=$1", submission_uuid
+        )
+        subject_map = {item["subject_kind"]: item["sha256"] for item in subjects}
+        if subject_map.get("artifact") != bundle["model_artifact_sha256"]:
+            raise HTTPException(status_code=409, detail="Deployment bundle artifact was not generated for this submission")
+        if subject_map.get("repository_snapshot") != bundle["repository_snapshot_sha256"]:
+            raise HTTPException(status_code=409, detail="Deployment bundle snapshot was not generated for this submission")
+        records = [row_to_dict(item) for item in await conn.fetch(
+            "SELECT * FROM model_intake_evidence_records WHERE submission_id=$1 ORDER BY created_at", submission_uuid
+        )]
+        version = int(await conn.fetchval(
+            "SELECT COALESCE(MAX(version),0)+1 FROM model_intake_evidence_manifests WHERE submission_id=$1",
+            submission_uuid,
+        ))
+        try:
+            manifest = _freeze_model_evidence_manifest(
+                submission_id=str(submission_uuid),
+                subject_bundle_sha256=bundle["bundle_sha256"],
+                version=version,
+                evidence_records=records,
+                frozen_by=actor,
+            )
+        except _ModelAdmissionContractError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        previous = await conn.fetchval(
+            "SELECT id FROM model_intake_evidence_manifests WHERE submission_id=$1 ORDER BY version DESC LIMIT 1",
+            submission_uuid,
+        )
+        row = await conn.fetchrow(
+            """
+            INSERT INTO model_intake_evidence_manifests
+                (submission_id,version,manifest_sha256,evidence_ids,manifest_json,deployment_bundle_json,
+                 subject_bundle_sha256,frozen_at,frozen_by,supersedes_id)
+            VALUES ($1,$2,$3,$4::jsonb,$5::jsonb,$6::jsonb,$7,$8,$9,$10)
+            RETURNING *
+            """,
+            submission_uuid,
+            version,
+            manifest["manifest_sha256"],
+            json.dumps([item["id"] for item in manifest["evidence"]]),
+            json.dumps(manifest),
+            json.dumps(bundle),
+            bundle["bundle_sha256"],
+            datetime.fromisoformat(manifest["frozen_at"]),
+            actor,
+            previous,
+        )
+        await conn.execute(
+            "UPDATE model_intake_submissions SET state='awaiting_approval',updated_at=NOW() WHERE id=$1",
+            submission_uuid,
+        )
+    return {"manifest": row_to_dict(row), "deployment_bundle": bundle, "deployable": False}
+
+
+@app.post("/model-intake/submissions/{submission_id}/approvals")
+async def create_model_intake_approval(
+    submission_id: str,
+    request: ModelApprovalCreateRequest,
+    http_request: Request,
+):
+    actor = _model_intake_authenticated_subject(http_request)
+    if request.approval_type not in _model_intake_operator_roles(http_request):
+        raise HTTPException(status_code=403, detail="Authenticated operator lacks the requested approval role")
+    submission_uuid = _model_intake_uuid(submission_id, "submission id")
+    manifest_uuid = _model_intake_uuid(request.evidence_manifest_id, "evidence manifest id")
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT submission.requested_by, submission.requested_environment,
+                   manifest.id,manifest.manifest_sha256,manifest.subject_bundle_sha256
+            FROM model_intake_evidence_manifests AS manifest
+            JOIN model_intake_submissions AS submission ON submission.id=manifest.submission_id
+            WHERE manifest.id=$1 AND manifest.submission_id=$2
+            """,
+            manifest_uuid,
+            submission_uuid,
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="Frozen evidence manifest not found")
+        if actor == row["requested_by"]:
+            raise HTTPException(status_code=409, detail="A submitter cannot approve its own submission")
+        try:
+            receipt = _build_model_approval_receipt(
+                submission_id=str(submission_uuid),
+                subject_bundle_sha256=row["subject_bundle_sha256"],
+                evidence_manifest_sha256=row["manifest_sha256"],
+                policy_bundle_sha256=_model_intake_policy_bundle_sha256(),
+                environment=row["requested_environment"],
+                approval_type=request.approval_type,
+                decision=request.decision,
+                approved_by_subject=actor,
+                approved_by_role=request.approval_type,
+                reason=request.reason,
+                expires_at=utc_now() + timedelta(days=request.expires_days),
+                restrictions=request.restrictions,
+            )
+        except _ModelAdmissionContractError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        approval = await conn.fetchrow(
+            """
+            INSERT INTO model_intake_approval_receipts
+                (id,submission_id,evidence_manifest_id,receipt_sha256,receipt_json,approval_type,
+                 decision,approved_by_subject,approved_by_role,expires_at)
+            VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10)
+            RETURNING *
+            """,
+            uuid.UUID(receipt["approval_id"]),
+            submission_uuid,
+            manifest_uuid,
+            receipt["receipt_sha256"],
+            json.dumps(receipt),
+            request.approval_type,
+            request.decision,
+            actor,
+            request.approval_type,
+            datetime.fromisoformat(receipt["expires_at"]),
+        )
+    return {"approval": row_to_dict(approval), "identity_source": "authenticated_server_context"}
+
+
+@app.post("/model-intake/submissions/{submission_id}/policy-decisions")
+async def create_model_intake_policy_decision(
+    submission_id: str,
+    request: ModelPolicyDecisionCreateRequest,
+    http_request: Request,
+):
+    _model_intake_authenticated_subject(http_request)
+    submission_uuid = _model_intake_uuid(submission_id, "submission id")
+    manifest_uuid = _model_intake_uuid(request.evidence_manifest_id, "evidence manifest id")
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT submission.requested_by,manifest.manifest_json,manifest.deployment_bundle_json
+            FROM model_intake_evidence_manifests AS manifest
+            JOIN model_intake_submissions AS submission ON submission.id=manifest.submission_id
+            WHERE manifest.id=$1 AND manifest.submission_id=$2
+            """,
+            manifest_uuid,
+            submission_uuid,
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="Frozen evidence manifest not found")
+        approvals = [
+            _model_intake_json_object(item["receipt_json"])
+            for item in await conn.fetch(
+                """
+                SELECT receipt_json FROM model_intake_approval_receipts
+                WHERE evidence_manifest_id=$1 AND revoked_at IS NULL AND expires_at>NOW()
+                """,
+                manifest_uuid,
+            )
+        ]
+        try:
+            decision = _evaluate_model_admission_policy(
+                deployment_bundle=_model_intake_json_object(row["deployment_bundle_json"]),
+                evidence_manifest=_model_intake_json_object(row["manifest_json"]),
+                approvals=approvals,
+                submitter_subject=row["requested_by"],
+                policy_bundle_sha256=_model_intake_policy_bundle_sha256(),
+            )
+        except _ModelAdmissionContractError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        stored = await conn.fetchrow(
+            """
+            INSERT INTO model_intake_policy_decisions
+                (id,submission_id,evidence_manifest_id,decision_sha256,decision_json,decision,
+                 policy_provider,policy_bundle_sha256,input_sha256)
+            VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9)
+            RETURNING *
+            """,
+            uuid.UUID(decision["decision_id"]),
+            submission_uuid,
+            manifest_uuid,
+            decision["decision_sha256"],
+            json.dumps(decision),
+            decision["decision"],
+            decision["policy_provider"],
+            decision["policy_bundle_sha256"],
+            decision["input_sha256"],
+        )
+        state = "policy_decided" if decision["decision"] == "allow" else "blocked" if decision["decision"] == "block" else "awaiting_approval"
+        await conn.execute(
+            "UPDATE model_intake_submissions SET state=$2,updated_at=NOW() WHERE id=$1",
+            submission_uuid,
+            state,
+        )
+    return {"policy_decision": row_to_dict(stored), "decision": decision}
 
 
 def _hf_api_model_info(repo_id: str, revision: str | None, timeout_seconds: int) -> dict[str, Any]:
@@ -11235,6 +11826,151 @@ async def verify_model_intake_admission(request: ModelIntakeAdmissionVerifyReque
         "expires_at": _iso_or_none(admission["expires_at"]),
         "reassessment_due_at": _iso_or_none(admission["reassessment_due_at"]),
     }
+    return result
+
+
+def _call_model_intake_signer(policy_decision_id: str, idempotency_key: str) -> dict[str, Any]:
+    url = os.getenv(
+        "MODEL_INTAKE_SIGNER_URL",
+        "http://model-intake-signer:8091/internal/model-intake/admissions/issue",
+    ).strip()
+    token = os.getenv("MODEL_INTAKE_SIGNER_INTERNAL_TOKEN", "")
+    if not url or len(token) < 32:
+        raise RuntimeError("model_intake_signer_not_configured")
+    payload = json.dumps({
+        "policy_decision_id": policy_decision_id,
+        "idempotency_key": idempotency_key,
+    }).encode()
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "X-Shakerscan-Signer-Token": token,
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as response:
+            raw = response.read(2_000_001)
+    except urllib.error.HTTPError as exc:
+        detail = exc.read(32_000).decode("utf-8", "replace")
+        raise RuntimeError(f"signer_rejected:{exc.code}:{detail}") from exc
+    if len(raw) > 2_000_000:
+        raise RuntimeError("signer_response_too_large")
+    decoded = json.loads(raw)
+    if not isinstance(decoded, dict) or decoded.get("status") != "active":
+        raise RuntimeError("signer_response_invalid")
+    return decoded
+
+
+@app.post("/model-intake/submissions/{submission_id}/promote")
+async def promote_model_intake_submission(
+    submission_id: str,
+    request: ModelPromotionRequest,
+    http_request: Request,
+):
+    """Invoke the separate narrow signer by stored IDs; no evidence JSON crosses this API."""
+    _model_intake_authenticated_subject(http_request)
+    submission_uuid = _model_intake_uuid(submission_id, "submission id")
+    decision_uuid = _model_intake_uuid(request.policy_decision_id, "policy decision id")
+    async with db_pool.acquire() as conn:
+        decision = await conn.fetchrow(
+            "SELECT id,decision FROM model_intake_policy_decisions WHERE id=$1 AND submission_id=$2",
+            decision_uuid,
+            submission_uuid,
+        )
+    if not decision:
+        raise HTTPException(status_code=404, detail="Stored policy decision not found")
+    if decision["decision"] != "allow":
+        raise HTTPException(status_code=409, detail="Only a stored allow decision can be promoted")
+    try:
+        result = await asyncio.to_thread(
+            _call_model_intake_signer,
+            str(decision_uuid),
+            request.idempotency_key,
+        )
+    except (RuntimeError, OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "model_intake_signer_unavailable_or_rejected", "message": str(exc)},
+        ) from exc
+    return result
+
+
+@app.post("/model-intake/admissions/v2/verify")
+async def verify_model_intake_admission_v2(
+    request: ModelAdmissionV2VerifyRequest,
+    http_request: Request,
+):
+    """Deployment enforcement path: exact bundle, components, environment, and active state."""
+    _model_intake_authenticated_subject(http_request)
+    async with db_pool.acquire() as conn:
+        anchors = await conn.fetch(
+            """
+            SELECT public_key_pem,builder_id_constraint FROM model_intake_trust_anchors
+            WHERE is_active=true AND revoked_at IS NULL AND purpose='admission_signer'
+              AND environment=$1 AND valid_from<=NOW()
+              AND (valid_until IS NULL OR valid_until>NOW())
+            """,
+            request.expected_environment,
+        )
+    trusted_keys = [str(item["public_key_pem"] or "") for item in anchors if item["public_key_pem"]]
+    trusted_builders = {
+        str(item["builder_id_constraint"] or "")
+        for item in anchors
+        if item["builder_id_constraint"]
+    }
+    env_keys = os.getenv("MODEL_INTAKE_ADMISSION_V2_TRUSTED_PUBLIC_KEYS", "").strip()
+    if env_keys:
+        trusted_keys.extend(_model_admission_trusted_keys(env_keys))
+    env_builders = {
+        item.strip()
+        for item in os.getenv("MODEL_INTAKE_ADMISSION_V2_TRUSTED_BUILDERS", "").split(",")
+        if item.strip()
+    }
+    trusted_builders.update(env_builders)
+    result = _verify_model_admission_v2(
+        request.admission_package,
+        trusted_public_keys=trusted_keys,
+        trusted_builder_ids=trusted_builders,
+        expected_bundle_sha256=request.expected_bundle_sha256.lower(),
+        expected_environment=request.expected_environment,
+        expected_components=request.expected_components,
+    )
+    if not result.get("verified"):
+        raise HTTPException(status_code=409, detail=result)
+    async with db_pool.acquire() as conn:
+        admission = await conn.fetchrow(
+            """
+            SELECT * FROM model_intake_admissions
+            WHERE statement_sha256=$1 AND schema_version='model-intake-admission/v2'
+            """,
+            result["statement_sha256"],
+        )
+        if not admission or admission["status"] != "active":
+            blocker = "admission_not_registered" if not admission else f"admission_{admission['status']}"
+            raise HTTPException(
+                status_code=409,
+                detail={**result, "verified": False, "status": "FAIL", "blockers": [blocker]},
+            )
+        if admission["deployment_bundle_sha256"] != request.expected_bundle_sha256.lower():
+            raise HTTPException(status_code=409, detail="Registered deployment bundle differs")
+        await conn.execute(
+            """
+            UPDATE model_intake_deployment_bindings
+            SET observed_bundle_sha256=$2,verifier_status='PASS',observed_at=NOW()
+            WHERE admission_id=$1
+            """,
+            admission["id"],
+            request.expected_bundle_sha256.lower(),
+        )
+    result["registry"] = {
+        "admission_id": str(admission["id"]),
+        "status": admission["status"],
+        "schema_version": admission["schema_version"],
+    }
+    result["deployment_observed"] = True
     return result
 
 

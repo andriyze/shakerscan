@@ -813,6 +813,17 @@ CREATE TABLE IF NOT EXISTS model_intake_trust_anchors (
     public_key_pem TEXT,
     public_key_sha256 TEXT,
     policy_profile TEXT,
+    purpose TEXT NOT NULL DEFAULT 'publisher_signature',
+    environment TEXT NOT NULL DEFAULT 'production',
+    valid_from TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    valid_until TIMESTAMPTZ,
+    revoked_at TIMESTAMPTZ,
+    revocation_reason TEXT,
+    issuer_constraint TEXT,
+    subject_constraint TEXT,
+    builder_id_constraint TEXT,
+    source TEXT NOT NULL DEFAULT 'operator',
+    version TEXT NOT NULL DEFAULT '1',
     owner TEXT,
     is_active BOOLEAN NOT NULL DEFAULT true,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -821,15 +832,148 @@ CREATE TABLE IF NOT EXISTS model_intake_trust_anchors (
         CHECK (
             (public_key_pem IS NOT NULL AND btrim(public_key_pem) <> '')
             OR (public_key_sha256 IS NOT NULL AND btrim(public_key_sha256) <> '')
-        )
+        ),
+    CONSTRAINT model_intake_trust_anchor_purpose_check CHECK (purpose IN (
+        'publisher_signature','upstream_attestation','runtime_runner','evaluation_runner',
+        'data_plane_runner','approval_signer','admission_signer'
+    )),
+    CONSTRAINT model_intake_trust_anchor_environment_check
+        CHECK (environment IN ('development','test','staging','production'))
 );
 CREATE INDEX IF NOT EXISTS idx_model_intake_trust_anchors_active
-    ON model_intake_trust_anchors(is_active, policy_profile);
+    ON model_intake_trust_anchors(is_active, purpose, environment, policy_profile);
+
+CREATE TABLE IF NOT EXISTS model_intake_submissions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    scan_id UUID REFERENCES scans(id) ON DELETE SET NULL,
+    requested_by TEXT NOT NULL,
+    requested_environment TEXT NOT NULL,
+    source_kind TEXT NOT NULL,
+    source_reference_hash TEXT NOT NULL,
+    expected_artifact_sha256 TEXT,
+    intended_use JSONB NOT NULL DEFAULT '{}'::jsonb,
+    declared_metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    state TEXT NOT NULL DEFAULT 'submitted',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT model_intake_submission_environment_check
+        CHECK (requested_environment IN ('development','test','staging','production')),
+    CONSTRAINT model_intake_submission_state_check CHECK (state IN (
+        'submitted','scanning','evidence_ready','evidence_frozen','awaiting_approval',
+        'policy_decided','admitted','promoted','blocked','cancelled'
+    ))
+);
+CREATE INDEX IF NOT EXISTS idx_model_intake_submissions_state
+    ON model_intake_submissions(state, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS model_intake_subjects (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    submission_id UUID NOT NULL REFERENCES model_intake_submissions(id) ON DELETE CASCADE,
+    subject_kind TEXT NOT NULL,
+    immutable_uri TEXT,
+    sha256 TEXT NOT NULL,
+    size_bytes BIGINT,
+    manifest_sha256 TEXT,
+    source_revision TEXT,
+    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT model_intake_subject_unique UNIQUE (submission_id, subject_kind, sha256)
+);
+
+CREATE TABLE IF NOT EXISTS model_intake_evidence_records (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    submission_id UUID NOT NULL REFERENCES model_intake_submissions(id) ON DELETE CASCADE,
+    evidence_type TEXT NOT NULL,
+    schema_version TEXT NOT NULL,
+    provenance_class TEXT NOT NULL,
+    producer_id TEXT NOT NULL,
+    producer_version TEXT NOT NULL,
+    builder_id TEXT NOT NULL,
+    invocation_id TEXT NOT NULL,
+    subject_bindings JSONB NOT NULL,
+    input_manifest_sha256 TEXT,
+    payload_sha256 TEXT NOT NULL,
+    object_storage_uri TEXT,
+    signature_envelope JSONB,
+    status TEXT NOT NULL,
+    started_at TIMESTAMPTZ,
+    finished_at TIMESTAMPTZ,
+    expires_at TIMESTAMPTZ,
+    supersedes_id UUID REFERENCES model_intake_evidence_records(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT model_intake_evidence_invocation_unique UNIQUE (producer_id, invocation_id),
+    CONSTRAINT model_intake_evidence_provenance_check CHECK (provenance_class IN (
+        'DECLARED','PROVIDER_RESOLVED','GENERATED_STATIC','GENERATED_RUNTIME',
+        'GENERATED_EVALUATION','GENERATED_DATA_PLANE','HUMAN_APPROVAL',
+        'POLICY_DECISION','DEPLOYMENT_OBSERVED'
+    ))
+);
+CREATE INDEX IF NOT EXISTS idx_model_intake_evidence_submission
+    ON model_intake_evidence_records(submission_id, evidence_type, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS model_intake_evidence_manifests (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    submission_id UUID NOT NULL REFERENCES model_intake_submissions(id) ON DELETE CASCADE,
+    version INTEGER NOT NULL,
+    manifest_sha256 TEXT NOT NULL UNIQUE,
+    evidence_ids JSONB NOT NULL,
+    manifest_json JSONB NOT NULL,
+    deployment_bundle_json JSONB NOT NULL,
+    subject_bundle_sha256 TEXT NOT NULL,
+    frozen_at TIMESTAMPTZ NOT NULL,
+    frozen_by TEXT NOT NULL,
+    supersedes_id UUID REFERENCES model_intake_evidence_manifests(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT model_intake_evidence_manifest_version_unique UNIQUE (submission_id, version)
+);
+
+CREATE TABLE IF NOT EXISTS model_intake_approval_receipts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    submission_id UUID NOT NULL REFERENCES model_intake_submissions(id) ON DELETE CASCADE,
+    evidence_manifest_id UUID NOT NULL REFERENCES model_intake_evidence_manifests(id) ON DELETE CASCADE,
+    receipt_sha256 TEXT NOT NULL UNIQUE,
+    receipt_json JSONB NOT NULL,
+    approval_type TEXT NOT NULL,
+    decision TEXT NOT NULL,
+    approved_by_subject TEXT NOT NULL,
+    approved_by_role TEXT NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    revoked_at TIMESTAMPTZ,
+    revocation_reason TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS model_intake_policy_decisions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    submission_id UUID NOT NULL REFERENCES model_intake_submissions(id) ON DELETE CASCADE,
+    evidence_manifest_id UUID NOT NULL REFERENCES model_intake_evidence_manifests(id) ON DELETE CASCADE,
+    decision_sha256 TEXT NOT NULL UNIQUE,
+    decision_json JSONB NOT NULL,
+    decision TEXT NOT NULL,
+    policy_provider TEXT NOT NULL,
+    policy_bundle_sha256 TEXT NOT NULL,
+    input_sha256 TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS model_intake_deployment_bindings (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    submission_id UUID NOT NULL REFERENCES model_intake_submissions(id) ON DELETE CASCADE,
+    admission_id UUID,
+    deployment_bundle_sha256 TEXT NOT NULL,
+    environment TEXT NOT NULL,
+    observed_bundle_sha256 TEXT,
+    verifier_status TEXT NOT NULL DEFAULT 'not_observed',
+    deployment_reference TEXT,
+    observed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 
 CREATE TABLE IF NOT EXISTS model_intake_admissions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     scan_id UUID NOT NULL UNIQUE REFERENCES scans(id) ON DELETE CASCADE,
     target_id UUID REFERENCES targets(id) ON DELETE SET NULL,
+    submission_id UUID REFERENCES model_intake_submissions(id) ON DELETE SET NULL,
     artifact_sha256 TEXT NOT NULL,
     repository_snapshot_sha256 TEXT,
     statement_sha256 TEXT NOT NULL UNIQUE,
@@ -837,6 +981,11 @@ CREATE TABLE IF NOT EXISTS model_intake_admissions (
     decision TEXT NOT NULL,
     status TEXT NOT NULL,
     schema_version TEXT NOT NULL DEFAULT 'model-intake-admission/v1',
+    deployment_bundle_sha256 TEXT,
+    evidence_manifest_sha256 TEXT,
+    policy_decision_sha256 TEXT,
+    target_environment TEXT,
+    idempotency_key_sha256 TEXT UNIQUE,
     policy_profile TEXT,
     policy_version TEXT,
     issued_at TIMESTAMPTZ NOT NULL,

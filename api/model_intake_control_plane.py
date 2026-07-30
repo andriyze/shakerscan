@@ -295,6 +295,7 @@ def evaluate_policy(
             blockers.append(f"evidence_expired:{evidence_type}")
     required_approvals = PRODUCTION_REQUIRED_APPROVALS if environment == "production" else set()
     approved_roles: set[str] = set()
+    required_role_subjects: dict[str, str] = {}
     approval_digests: list[str] = []
     for approval in approvals:
         approval_digests.append(_sha256(approval.get("receipt_sha256"), "approval receipt_sha256") or "")
@@ -315,8 +316,13 @@ def evaluate_policy(
         if approval.get("approved_by_subject") == submitter_subject:
             blockers.append("submitter_self_approval")
         approved_roles.add(str(approval.get("approved_by_role") or ""))
+        role = str(approval.get("approved_by_role") or "")
+        if role in required_approvals:
+            required_role_subjects[role] = str(approval.get("approved_by_subject") or "")
     for role in sorted(required_approvals - approved_roles):
         missing_controls.append(f"approval:{role}")
+    if len(set(required_role_subjects.values())) < len(required_role_subjects):
+        blockers.append("approval_separation_of_duties_violation")
     decision = "block" if blockers else "review" if missing_controls else "allow"
     facts = {
         "schema_version": POLICY_FACTS_SCHEMA,
@@ -397,6 +403,46 @@ class LocalPemSigner:
         return {
             "signature": base64.b64encode(signature).decode(),
             "algorithm": algorithm,
+            "key_id": hashlib.sha256(public_der).hexdigest(),
+            "provider": self.provider_id,
+        }
+
+
+class AwsKmsSigner:
+    """Narrow AWS KMS provider; the service still decides the exact payload."""
+
+    def __init__(self, key_id: str, *, region: str | None = None, client: Any = None):
+        if not str(key_id or "").strip():
+            raise AdmissionContractError("AWS KMS key id is required")
+        if client is None:
+            try:
+                import boto3  # type: ignore
+            except ImportError as exc:
+                raise AdmissionContractError("AWS KMS signer requires the optional boto3 runtime") from exc
+            client = boto3.client("kms", region_name=region)
+        self._client = client
+        self._key_id = key_id
+        self.provider_id = f"aws-kms:{key_id}"
+
+    def sign(self, message: bytes) -> dict[str, str]:
+        public = self._client.get_public_key(KeyId=self._key_id)
+        algorithms = set(public.get("SigningAlgorithms") or [])
+        algorithm = "RSASSA_PSS_SHA_256"
+        if algorithm not in algorithms:
+            raise AdmissionContractError("AWS KMS key does not support RSASSA_PSS_SHA_256")
+        response = self._client.sign(
+            KeyId=self._key_id,
+            Message=hashlib.sha256(message).digest(),
+            MessageType="DIGEST",
+            SigningAlgorithm=algorithm,
+        )
+        public_der = bytes(public.get("PublicKey") or b"")
+        signature = bytes(response.get("Signature") or b"")
+        if not public_der or not signature:
+            raise AdmissionContractError("AWS KMS returned incomplete signing material")
+        return {
+            "signature": base64.b64encode(signature).decode(),
+            "algorithm": "rsa-pss-sha256",
             "key_id": hashlib.sha256(public_der).hexdigest(),
             "provider": self.provider_id,
         }
@@ -608,6 +654,7 @@ def verify_admission_v2(
 __all__ = [
     "ADMISSION_SCHEMA",
     "AdmissionContractError",
+    "AwsKmsSigner",
     "LocalPemSigner",
     "build_approval_receipt",
     "build_deployment_bundle",

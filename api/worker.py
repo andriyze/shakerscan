@@ -1247,7 +1247,12 @@ def _scan_time_verification_fields(finding: dict[str, Any]) -> tuple[str | None,
 
 def run_worker_preflight() -> None:
     """Fail fast when the container has an inconsistent scanner import graph."""
-    if os.environ.get("MODEL_INTAKE_ADMISSION_SIGNING_KEY_PEM"):
+    forbidden_signer_variables = (
+        "MODEL_INTAKE_ADMISSION_SIGNING_KEY_PEM",
+        "MODEL_INTAKE_CONTROL_PLANE_SIGNING_KEY_PEM",
+        "MODEL_INTAKE_SIGNER_AWS_KMS_KEY_ID",
+    )
+    if any(os.environ.get(name) for name in forbidden_signer_variables):
         raise RuntimeError(
             "worker preflight failed: admission signing material must not be present in an evidence-producing worker"
         )
