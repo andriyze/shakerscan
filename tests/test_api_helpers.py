@@ -2568,7 +2568,7 @@ def test_model_intake_trust_anchor_merge_adds_saved_material_and_audit_metadata(
     )
 
     assert merged.signature_trusted_keys == ["-----BEGIN PUBLIC KEY-----\nkey\n-----END PUBLIC KEY-----"]
-    assert merged.signature_trusted_key_sha256 == ["a" * 64, "b" * 64]
+    assert merged.signature_trusted_key_sha256 == ["b" * 64]
     assert merged.metadata_json["license"] == "apache-2.0"
     assert merged.metadata_json["selected_trust_anchors"] == [{
         "id": "anchor-1",
@@ -2577,7 +2577,7 @@ def test_model_intake_trust_anchor_merge_adds_saved_material_and_audit_metadata(
     }]
 
 
-def test_model_intake_policy_profile_requirements_add_required_anchor_ids():
+def test_model_intake_policy_profile_requirements_uses_only_server_required_anchor_ids():
     explicit = "11111111-1111-4111-8111-111111111111"
     required = "22222222-2222-4222-8222-222222222222"
     request = api_module.ModelIntakeScanRequest(
@@ -2598,7 +2598,7 @@ def test_model_intake_policy_profile_requirements_add_required_anchor_ids():
         },
     )
 
-    assert updated.trust_anchor_ids == [explicit, required]
+    assert updated.trust_anchor_ids == [required]
     assert updated.metadata_json["license"] == "apache-2.0"
     assert updated.metadata_json["strict_governance"] is True
     assert updated.metadata_json["policy_required_trust_anchor_ids"] == [required]
@@ -2654,6 +2654,74 @@ def test_model_intake_admission_uses_server_policy_and_discards_caller_weakening
     assert updated.require_signed_admission is True
     assert updated.metadata_json["requested_policy_profile"] == "development"
     assert updated.metadata_json["server_policy_profile"] == "production"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("signature_trusted_keys", ["requester-key"]),
+        ("signature_trusted_key_sha256", ["a" * 64]),
+        ("attestation_trusted_keys", ["requester-key"]),
+        ("attestation_trusted_key_sha256", ["b" * 64]),
+        ("allowed_attestation_predicate_types", ["https://example.invalid/predicate"]),
+        ("required_attestation_builder_ids", ["requester-builder"]),
+        ("trust_anchor_ids", ["11111111-1111-4111-8111-111111111111"]),
+        ("deployment_approved", True),
+        ("policy_exceptions", [{"finding_id": "unsafe", "status": "approved"}]),
+        ("require_deployment_approval", False),
+    ],
+)
+def test_model_intake_admission_rejects_requester_authority(field, value):
+    request = api_module.ModelIntakeScanRequest(
+        artifact_url="https://models.example/model.safetensors",
+        **{field: value},
+    )
+
+    with pytest.raises(api_module.HTTPException) as exc:
+        api_module._validate_model_intake_admission_request_authority(request)
+
+    assert exc.value.status_code == 422
+    assert field in exc.value.detail["fields"]
+    assert exc.value.detail["code"] == "model_intake_admission_requester_authority_forbidden"
+
+
+def test_model_intake_admission_rejects_nested_approval_metadata():
+    request = api_module.ModelIntakeScanRequest(
+        artifact_url="https://models.example/model.safetensors",
+        metadata_json={"governance": {"approved_by": "requester"}},
+    )
+
+    with pytest.raises(api_module.HTTPException) as exc:
+        api_module._validate_model_intake_admission_request_authority(request)
+
+    assert exc.value.status_code == 422
+    assert "metadata_json.governance.approved_by" in exc.value.detail["fields"]
+
+
+def test_model_intake_preflight_marks_and_strips_declared_authority():
+    request = api_module.ModelIntakeScanRequest(
+        artifact_url="https://models.example/model.safetensors",
+        intake_mode="preflight",
+        signature_trusted_keys=["requester-key"],
+        trust_anchor_ids=["11111111-1111-4111-8111-111111111111"],
+        deployment_approved=True,
+        policy_exceptions=[{"finding_id": "unsafe", "status": "approved"}],
+        metadata_json={"governance": {"approved_by": "requester"}, "license": "MIT"},
+    )
+
+    updated = api_module._sanitize_model_intake_preflight_authority(request)
+
+    assert updated.signature_trusted_keys is None
+    assert updated.trust_anchor_ids is None
+    assert updated.deployment_approved is False
+    assert updated.policy_exceptions is None
+    assert updated.metadata_json["license"] == "MIT"
+    assert "approved_by" not in updated.metadata_json["governance"]
+    declared = updated.metadata_json["declared_trust_material"]
+    assert declared["provenance_class"] == "DECLARED_UNTRUSTED"
+    assert declared["signature_trusted_key_count"] == 1
+    assert declared["trust_anchor_id_count"] == 1
+    assert declared["deployment_approval_declared"] is True
 
 
 def test_model_intake_preflight_is_explicitly_non_admissible():

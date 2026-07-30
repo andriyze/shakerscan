@@ -10349,6 +10349,131 @@ def _str_list(value: Any) -> list[str]:
     return [str(value).strip()] if str(value).strip() else []
 
 
+MODEL_INTAKE_ADMISSION_FORBIDDEN_FIELDS = {
+    "signature_trusted_keys",
+    "signature_trusted_key_sha256",
+    "attestation_trusted_keys",
+    "attestation_trusted_key_sha256",
+    "allowed_attestation_predicate_types",
+    "required_attestation_builder_ids",
+    "trust_anchor_ids",
+    "deployment_approved",
+    "policy_exceptions",
+}
+MODEL_INTAKE_ADMISSION_FORBIDDEN_METADATA_KEYS = {
+    "approved_by",
+    "approver",
+    "approved_at",
+    "approval_timestamp",
+    "approval_date",
+    "approval_policy_version",
+    "policy_version",
+    "approved_environment",
+    "deployment_environment",
+    "legal_approved",
+    "privacy_approved",
+    "security_approved",
+    "risk_accepted",
+}
+
+
+def _model_intake_value_is_nonempty(value: Any) -> bool:
+    if value is None or value is False:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple, set, dict)):
+        return bool(value)
+    return True
+
+
+def _model_intake_forbidden_metadata_paths(value: Any, path: str = "metadata_json") -> list[str]:
+    paths: list[str] = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            child_path = f"{path}.{key}"
+            if str(key).strip().lower() in MODEL_INTAKE_ADMISSION_FORBIDDEN_METADATA_KEYS:
+                paths.append(child_path)
+            paths.extend(_model_intake_forbidden_metadata_paths(child, child_path))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            paths.extend(_model_intake_forbidden_metadata_paths(child, f"{path}[{index}]"))
+    return paths
+
+
+def _strip_model_intake_governance_metadata(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _strip_model_intake_governance_metadata(child)
+            for key, child in value.items()
+            if str(key).strip().lower() not in MODEL_INTAKE_ADMISSION_FORBIDDEN_METADATA_KEYS
+        }
+    if isinstance(value, list):
+        return [_strip_model_intake_governance_metadata(child) for child in value]
+    return value
+
+
+def _validate_model_intake_admission_request_authority(request: ModelIntakeScanRequest) -> None:
+    if request.intake_mode != "admission":
+        return
+    forbidden = [
+        field
+        for field in sorted(MODEL_INTAKE_ADMISSION_FORBIDDEN_FIELDS)
+        if _model_intake_value_is_nonempty(getattr(request, field, None))
+    ]
+    if request.require_deployment_approval is False:
+        forbidden.append("require_deployment_approval")
+    forbidden.extend(_model_intake_forbidden_metadata_paths(request.metadata_json))
+    if forbidden:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "model_intake_admission_requester_authority_forbidden",
+                "message": (
+                    "Admission trust, policy exceptions, and approval state are server-owned. "
+                    "Submit publisher leaf evidence only, or use preflight for untrusted declarations."
+                ),
+                "fields": sorted(set(forbidden)),
+            },
+        )
+
+
+def _sanitize_model_intake_preflight_authority(request: ModelIntakeScanRequest) -> ModelIntakeScanRequest:
+    metadata = dict(request.metadata_json or {})
+    governance_paths = _model_intake_forbidden_metadata_paths(metadata)
+    declared = {
+        "provenance_class": "DECLARED_UNTRUSTED",
+        "signature_trusted_key_count": len(_str_list(request.signature_trusted_keys)),
+        "signature_trusted_fingerprint_count": len(_str_list(request.signature_trusted_key_sha256)),
+        "attestation_trusted_key_count": len(_str_list(request.attestation_trusted_keys)),
+        "attestation_trusted_fingerprint_count": len(_str_list(request.attestation_trusted_key_sha256)),
+        "trust_anchor_id_count": len(_str_list(request.trust_anchor_ids)),
+        "deployment_approval_declared": bool(request.deployment_approved),
+        "policy_exception_count": len(request.policy_exceptions or []),
+        "governance_fields": governance_paths,
+    }
+    if any(
+        value
+        for key, value in declared.items()
+        if key != "provenance_class"
+    ):
+        metadata["declared_trust_material"] = declared
+    metadata = _strip_model_intake_governance_metadata(metadata)
+    return request.model_copy(update={
+        "metadata_json": metadata,
+        "signature_trusted_keys": None,
+        "signature_trusted_key_sha256": None,
+        "attestation_trusted_keys": None,
+        "attestation_trusted_key_sha256": None,
+        "allowed_attestation_predicate_types": None,
+        "required_attestation_builder_ids": None,
+        "trust_anchor_ids": None,
+        "deployment_approved": False,
+        "require_deployment_approval": False,
+        "policy_exceptions": None,
+    })
+
+
 def _validate_model_intake_trust_anchor_request(req: ModelIntakeTrustAnchorRequest) -> None:
     if not req.name.strip():
         raise HTTPException(status_code=422, detail="name is required")
@@ -10363,8 +10488,10 @@ def _merge_model_intake_trust_anchor_material(
     request: ModelIntakeScanRequest,
     anchors: list[dict[str, Any]],
 ) -> ModelIntakeScanRequest:
-    trusted_keys = _str_list(request.signature_trusted_keys)
-    trusted_fingerprints = _str_list(request.signature_trusted_key_sha256)
+    # The caller is never a trust-root source. Only the server-selected durable
+    # anchors passed to this function may populate trusted material.
+    trusted_keys: list[str] = []
+    trusted_fingerprints: list[str] = []
     selected: list[dict[str, str]] = []
     for anchor in anchors:
         pem = str(anchor.get("public_key_pem") or "").strip()
@@ -10399,8 +10526,8 @@ def _apply_model_intake_policy_profile_requirements(
     if not bool(profile.get("strict_model_intake")):
         return request
     required_ids = _str_list(_decode_json_value(profile.get("required_trust_anchor_ids")))
-    selected_ids = _str_list(request.trust_anchor_ids)
-    merged_ids = list(dict.fromkeys(selected_ids + required_ids))
+    # Strict admission accepts only anchors selected by the server-owned policy.
+    merged_ids = list(dict.fromkeys(required_ids))
     metadata = dict(request.metadata_json or {})
     metadata["strict_governance"] = True
     metadata["policy_required_trust_anchor_ids"] = required_ids
@@ -10442,6 +10569,8 @@ async def _expand_model_intake_policy_profile_requirements(request: ModelIntakeS
         metadata["requested_policy_profile"] = requested_profile
 
     if request.intake_mode == "preflight":
+        request = _sanitize_model_intake_preflight_authority(request)
+        metadata = dict(request.metadata_json or {})
         metadata["admission_eligible"] = False
         metadata["policy_requirements_enforced"] = False
         return request.model_copy(update={
@@ -10483,11 +10612,24 @@ async def _expand_model_intake_policy_profile_requirements(request: ModelIntakeS
                 "configure an active strict_model_intake profile"
             ),
         )
+    provider_governance_paths = _model_intake_forbidden_metadata_paths(metadata)
+    metadata = _strip_model_intake_governance_metadata(metadata)
+    if provider_governance_paths:
+        metadata["ignored_provider_governance_fields"] = provider_governance_paths
     metadata["admission_eligible"] = True
     metadata["server_policy_profile"] = profile_key
     governed = request.model_copy(update={
         "policy_profile": profile_key,
         "policy_exceptions": None,
+        "signature_trusted_keys": None,
+        "signature_trusted_key_sha256": None,
+        "attestation_trusted_keys": None,
+        "attestation_trusted_key_sha256": None,
+        "allowed_attestation_predicate_types": None,
+        "required_attestation_builder_ids": None,
+        "trust_anchor_ids": None,
+        "deployment_approved": False,
+        "require_deployment_approval": True,
         "metadata_json": metadata,
     })
     return _apply_model_intake_policy_profile_requirements(governed, profile)
@@ -11374,6 +11516,9 @@ async def _enrich_model_intake_scan_request(request: ModelIntakeScanRequest) -> 
 @app.post("/model-intake/scan")
 async def scan_model_intake(request: ModelIntakeScanRequest):
     """Queue a model artifact intake scan."""
+    # Validate the raw public DTO before registry enrichment or policy
+    # expansion can blur which authority came from the requester.
+    _validate_model_intake_admission_request_authority(request)
     request = await _enrich_model_intake_scan_request(request)
     request = await _expand_model_intake_policy_profile_requirements(request)
     request = await _expand_model_intake_saved_trust_anchors(request)

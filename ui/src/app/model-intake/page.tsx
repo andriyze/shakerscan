@@ -54,6 +54,33 @@ const textareaClass =
   'min-w-0 w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 font-mono text-xs text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none'
 const fieldClass = 'grid min-w-0 gap-1 text-sm text-gray-300'
 const MODEL_INTAKE_OPERATOR_TOKEN_KEY = 'shakerscan:model-intake-operator-token'
+const ADMISSION_GOVERNANCE_KEYS = new Set([
+  'approved_by',
+  'approver',
+  'approved_at',
+  'approval_timestamp',
+  'approval_date',
+  'approval_policy_version',
+  'policy_version',
+  'approved_environment',
+  'deployment_environment',
+  'legal_approved',
+  'privacy_approved',
+  'security_approved',
+  'risk_accepted',
+])
+
+function stripAdmissionGovernance(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripAdmissionGovernance)
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .filter(([key]) => !ADMISSION_GOVERNANCE_KEYS.has(key.toLowerCase()))
+        .map(([key, child]) => [key, stripAdmissionGovernance(child)]),
+    )
+  }
+  return value
+}
 
 const COMPLETE_METADATA_EXAMPLE = {
   source_repo: 'https://github.com/example/model-release',
@@ -68,7 +95,6 @@ const COMPLETE_METADATA_EXAMPLE = {
   security_evals: { status: 'passed', eval_set: 'ai-security-regression-v1' },
   deployment_restrictions: ['staging', 'production'],
   monitoring_plan: 'model-monitoring-v1',
-  deployment_approved: true,
 }
 
 const MINIMAL_METADATA_EXAMPLE = {
@@ -640,8 +666,12 @@ function ModelIntakeSettingsContent() {
     const timeout = Number(timeoutSeconds || 20)
     const includeUrlSignature = trustMode === 'signature_url_key_url' || trustMode === 'trusted_key_fingerprint'
     const includeInlineSignature = trustMode === 'inline_signature_key' || trustMode === 'trusted_key_fingerprint'
-    const includeTrustAnchor = trustMode === 'trusted_key_fingerprint'
+    const includeTrustAnchor = intakeMode === 'preflight' && trustMode === 'trusted_key_fingerprint'
     const includeSignatureOptions = trustMode !== 'checksum_only'
+    const parsedSubmissionMetadata = parseOptionalJsonObject(metadataJson)
+    const submissionMetadata = intakeMode === 'admission'
+      ? stripAdmissionGovernance(parsedSubmissionMetadata) as Record<string, unknown>
+      : parsedSubmissionMetadata
     if (!Number.isFinite(maxBytes) || maxBytes < 1024) throw new Error('Download limit must be at least 1024 bytes')
     if (!Number.isFinite(maxTotalBytes) || maxTotalBytes < 1024) throw new Error('Complete artifact limit must be at least 1024 bytes')
     if (completeArtifactDownload && maxTotalBytes < maxBytes) throw new Error('Complete artifact limit must be greater than or equal to the inspection limit')
@@ -652,7 +682,7 @@ function ModelIntakeSettingsContent() {
       intake_mode: intakeMode,
       name: optionalText(name),
       metadata_url: optionalText(metadataUrl),
-      metadata_json: parseOptionalJsonObject(metadataJson),
+      metadata_json: submissionMetadata,
       expected_sha256: optionalText(expectedSha256),
       signature_url: includeUrlSignature ? optionalText(signatureUrl) : undefined,
       signature_public_key: includeInlineSignature ? optionalText(signaturePublicKey) : undefined,
@@ -665,8 +695,8 @@ function ModelIntakeSettingsContent() {
       signature_trusted_key_sha256: includeTrustAnchor ? optionalList(signatureTrustedKeySha256) : undefined,
       trust_anchor_ids: includeTrustAnchor && selectedTrustAnchorIds.length ? selectedTrustAnchorIds : undefined,
       model_card_url: optionalText(modelCardUrl),
-      deployment_approved: deploymentApproved,
-      require_deployment_approval: requireDeploymentApproval,
+      deployment_approved: intakeMode === 'preflight' ? deploymentApproved : undefined,
+      require_deployment_approval: intakeMode === 'preflight' ? requireDeploymentApproval : undefined,
       require_signature: requireSignature,
       require_signature_verification: requireSignatureVerification,
       require_cryptographic_signature_verification: requireCryptographicSignatureVerification,
@@ -885,7 +915,7 @@ function ModelIntakeSettingsContent() {
       setError('Fix the highlighted fields before queueing.')
       return
     }
-    if (trustPreview.blockingFailures.length > 0) {
+    if (intakeMode === 'preflight' && trustPreview.blockingFailures.length > 0) {
       setError('Fix the failed trust preview checks before queueing.')
       return
     }
@@ -912,9 +942,11 @@ function ModelIntakeSettingsContent() {
     expected_sha256: expectedSha256.trim() || (metadataUrl.trim() ? 'manifest' : ''),
     signature_url: signatureUrl.trim() || signatureValue.trim() || (parsedMetadata?.signature_url as string | undefined),
     signature_public_key: signaturePublicKey.trim() || signaturePublicKeyUrl.trim() || (parsedMetadata?.signature_public_key as string | undefined),
-    signature_trusted_keys: signatureTrustedKeys.trim() || signatureTrustedKeySha256.trim() || selectedAnchorPems || selectedAnchorFingerprints || (parsedMetadata?.signature_trusted_keys as string | undefined),
+    signature_trusted_keys: intakeMode === 'preflight'
+      ? signatureTrustedKeys.trim() || signatureTrustedKeySha256.trim() || selectedAnchorPems || selectedAnchorFingerprints || (parsedMetadata?.signature_trusted_keys as string | undefined)
+      : undefined,
     model_card_url: modelCardUrl.trim() || (parsedMetadata?.model_card_url as string | undefined),
-    deployment_approved: deploymentApproved || parsedMetadata?.deployment_approved,
+    deployment_approved: intakeMode === 'preflight' ? deploymentApproved || parsedMetadata?.deployment_approved : undefined,
   }
   const readinessControls: AITestReadinessControl[] = scenario?.readiness_controls || []
   const missingControls = readinessControls.filter((control) => !hasMetadataKey(readinessMetadata, control.keys))
@@ -1690,18 +1722,25 @@ function ModelIntakeSettingsContent() {
                 Require trusted crypto verification
               </label>
               <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
-                <input type="checkbox" checked={requireDeploymentApproval} onChange={(e) => setRequireDeploymentApproval(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+                <input type="checkbox" checked={requireDeploymentApproval} onChange={(e) => setRequireDeploymentApproval(e.target.checked)} disabled={intakeMode === 'admission'} className="h-4 w-4 rounded border-gray-700 bg-gray-800 disabled:opacity-50" />
                 Require approval
               </label>
               <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
                 <input type="checkbox" checked={requireModelGovernance} onChange={(e) => setRequireModelGovernance(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
                 Require governance
               </label>
-              <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
-                <input type="checkbox" checked={deploymentApproved} onChange={(e) => setDeploymentApproved(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
-                Mark approved
-              </label>
+              {intakeMode === 'preflight' && (
+                <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
+                  <input type="checkbox" checked={deploymentApproved} onChange={(e) => setDeploymentApproved(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+                  Declare approval for preflight context
+                </label>
+              )}
             </div>
+            {intakeMode === 'admission' && (
+              <div className="rounded border border-cyan-700/40 bg-cyan-950/20 p-2 text-xs text-cyan-200">
+                Production trust anchors, approval requirements, and approval receipts are resolved by the server. This form submits publisher leaf evidence only.
+              </div>
+            )}
             <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
               <label className={fieldClass}>
                 Inspection prefix (bytes)
