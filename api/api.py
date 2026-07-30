@@ -100,6 +100,7 @@ try:
         evaluate_policy as _evaluate_model_admission_policy,
         freeze_evidence_manifest as _freeze_model_evidence_manifest,
         issue_admission_v2 as _issue_model_admission_v2,
+        policy_bundle_identity as _model_policy_bundle_identity,
         verify_admission_v2 as _verify_model_admission_v2,
     )
 
@@ -112,6 +113,7 @@ except ModuleNotFoundError:
         evaluate_policy as _evaluate_model_admission_policy,
         freeze_evidence_manifest as _freeze_model_evidence_manifest,
         issue_admission_v2 as _issue_model_admission_v2,
+        policy_bundle_identity as _model_policy_bundle_identity,
         verify_admission_v2 as _verify_model_admission_v2,
     )
 
@@ -11091,12 +11093,14 @@ async def deactivate_model_intake_trust_anchor(anchor_id: str, http_request: Req
 
 
 def _model_intake_policy_bundle_sha256() -> str:
-    configured = os.getenv("MODEL_INTAKE_POLICY_BUNDLE_SHA256", "").strip().lower()
-    if configured:
-        if not re.fullmatch(r"[0-9a-f]{64}", configured):
-            raise HTTPException(status_code=503, detail="MODEL_INTAKE_POLICY_BUNDLE_SHA256 is invalid")
-        return configured
-    return hashlib.sha256(b"shakerscan-embedded-model-admission-policy/v2").hexdigest()
+    try:
+        return str(
+            _model_policy_bundle_identity(
+                os.getenv("MODEL_INTAKE_POLICY_BUNDLE_SHA256", "")
+            )["bundle_sha256"]
+        )
+    except _ModelAdmissionContractError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 def _model_intake_uuid(value: str, label: str) -> uuid.UUID:

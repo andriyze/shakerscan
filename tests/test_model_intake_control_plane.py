@@ -20,10 +20,28 @@ from model_intake_control_plane import (  # noqa: E402
     evaluate_policy,
     freeze_evidence_manifest,
     issue_admission_v2,
+    policy_bundle_identity,
     utc_now,
     verify_admission_v2,
 )
 from model_intake_signer_service import IssueRequest  # noqa: E402
+
+
+def test_embedded_policy_identity_is_source_bound_stable_and_pin_checked():
+    first = policy_bundle_identity()
+    second = policy_bundle_identity(first["bundle_sha256"])
+
+    assert first == second
+    assert first["schema_version"] == "model-intake-policy-bundle/v1"
+    assert first["version"] == "shakerscan-embedded-model-admission-policy/v3"
+    assert len(first["source_sha256"]) == 64
+    assert len(first["bundle_sha256"]) == 64
+    assert first["production_required_evidence"]["runtime_execution"] == "GENERATED_RUNTIME"
+
+    with pytest.raises(AdmissionContractError, match="does not match shipped policy"):
+        policy_bundle_identity("0" * 64)
+    with pytest.raises(AdmissionContractError, match="digest is invalid"):
+        policy_bundle_identity("not-a-digest")
 
 
 def test_narrow_signer_accepts_only_server_derived_legacy_or_configured_operator_subjects():

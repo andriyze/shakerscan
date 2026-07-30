@@ -1799,7 +1799,11 @@ signatures, statement mismatch, stable digesting, escaped HTML, and SARIF.
 
 Product work:
 
-- Version, hash, regression-test, and fail closed the existing embedded Python policy implementation.
+- **Implemented embedded-policy identity:** the admission policy exposes a versioned canonical manifest bound
+  to the exact shipped policy source hash, facts/decision schemas, production evidence classes, and reviewer
+  roles. Decisions bind its computed bundle digest; an operator-configured digest is a pin and causes a
+  fail-closed service error when invalid or different, rather than replacing the measured identity. Regression
+  tests prove stability and pin rejection.
 - **Implemented signer boundary:** a dedicated minimal hash-locked image contains no worker/scanner code;
   only the API and PostgreSQL share its internal network; workers cannot resolve it; a separate
   `model_intake_signer` role is non-superuser and receives only required SELECT/INSERT plus two-column

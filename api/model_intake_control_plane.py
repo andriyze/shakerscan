@@ -12,6 +12,7 @@ import json
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Protocol
 
 
@@ -22,6 +23,7 @@ POLICY_FACTS_SCHEMA = "model-admission-facts/v1"
 POLICY_DECISION_SCHEMA = "model-intake-policy-decision/v1"
 ADMISSION_SCHEMA = "model-intake-admission/v2"
 ADMISSION_PREDICATE_TYPE = "https://shakerscan.dev/attestation/model-admission/v2"
+POLICY_BUNDLE_VERSION = "shakerscan-embedded-model-admission-policy/v3"
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 OCI_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -65,6 +67,31 @@ def canonical_bytes(value: Any) -> bytes:
 
 def digest_json(value: Any) -> str:
     return hashlib.sha256(canonical_bytes(value)).hexdigest()
+
+
+def policy_bundle_identity(expected_sha256: str | None = None) -> dict[str, Any]:
+    """Identify the exact shipped policy source and reject a mismatched operator pin."""
+    try:
+        source = Path(__file__).resolve().read_bytes()
+    except OSError as exc:
+        raise AdmissionContractError("embedded policy source is unavailable") from exc
+    manifest = {
+        "schema_version": "model-intake-policy-bundle/v1",
+        "version": POLICY_BUNDLE_VERSION,
+        "source_sha256": hashlib.sha256(source).hexdigest(),
+        "policy_facts_schema": POLICY_FACTS_SCHEMA,
+        "policy_decision_schema": POLICY_DECISION_SCHEMA,
+        "production_required_evidence": dict(sorted(PRODUCTION_REQUIRED_EVIDENCE.items())),
+        "production_required_approvals": sorted(PRODUCTION_REQUIRED_APPROVALS),
+    }
+    bundle_sha256 = digest_json(manifest)
+    configured = str(expected_sha256 or "").strip().lower()
+    if configured:
+        if not SHA256_RE.fullmatch(configured):
+            raise AdmissionContractError("configured policy bundle digest is invalid")
+        if configured != bundle_sha256:
+            raise AdmissionContractError("configured policy bundle digest does not match shipped policy")
+    return {**manifest, "bundle_sha256": bundle_sha256}
 
 
 def _self_digest_valid(value: dict[str, Any], field: str) -> bool:
