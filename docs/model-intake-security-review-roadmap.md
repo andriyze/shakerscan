@@ -1642,6 +1642,12 @@ Use access-controlled security-fixture storage where stronger samples are necess
 The repeatable Make targets remain pipeline E2Es, not complete model qualification. `make e2e-model-intake`
 exercises a real public Hugging Face capped shard and proves that partial acquisition is reported as
 `known_unverified_truncated`; `make e2e-model-intake-fixture` covers deterministic offline plumbing. The
+real-stack suite also contains a non-preflight admission case: a plain HTTP(S) artifact with a caller-forged
+one-file repository manifest must remain repository-incomplete and corporately unusable. Its signature
+control proves that an inline caller key cannot become a trust anchor; positive trust is exercised only
+through durable, operator-owned anchors selected by server policy. This closes the earlier test-architecture
+gap in which every E2E forced `preflight` and the hardened admission expansion had no real-stack coverage.
+The
 2026-07-29 remote validation below proves complete acquisition and the installed scanner bundle against the
 three exact public revisions. For CodeRank it also proves bounded safetensors weight loading, while clearly
 recording that custom code, model construction, and embeddings did not run. It does not exercise a corporate
