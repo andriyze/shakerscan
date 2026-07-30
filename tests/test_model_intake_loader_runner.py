@@ -7,6 +7,7 @@ from model_intake_loader_profiles import resolve_conversion_profile, resolve_loa
 from model_intake_control_plane import canonical_bytes  # noqa: E402
 from model_intake_runner_controller import build_firecracker_config, firecracker_readiness  # noqa: E402
 from model_intake_firecracker_runner import FirecrackerRunner, parse_network_telemetry  # noqa: E402
+from model_intake_components import component_identities  # noqa: E402
 
 
 def test_loader_selection_is_capability_based_and_supports_unseen_models():
@@ -174,10 +175,14 @@ def test_runner_rebinds_manifest_runtime_profile_and_reviewed_custom_code(tmp_pa
     subject.mkdir(parents=True)
     model = subject / "model.safetensors"
     code = subject / "modeling_custom.py"
+    config = subject / "config.json"
+    tokenizer = subject / "tokenizer.json"
     model.write_bytes(b"model")
     code.write_text("class SafeModel: pass\n")
+    config.write_text('{"model_type":"bert"}')
+    tokenizer.write_text('{"version":"1"}')
     files = []
-    for path in (code, model):
+    for path in (code, config, model, tokenizer):
         files.append({
             "path": path.relative_to(subject).as_posix(),
             "size": path.stat().st_size,
@@ -190,12 +195,15 @@ def test_runner_rebinds_manifest_runtime_profile_and_reviewed_custom_code(tmp_pa
     rootfs.write_bytes(b"rootfs")
     profile = {"trust_remote_code": True, "allow_pickle": False, "entrypoint": "transformers"}
     custom_entries = [{"path": "modeling_custom.py", "sha256": hashlib.sha256(code.read_bytes()).hexdigest()}]
+    components = component_identities(files)
     request = {
         "mode": "runtime",
         "environment": "test",
         "repository_manifest_path": str(manifest_path),
         "repository_snapshot_sha256": hashlib.sha256(canonical_bytes(manifest)).hexdigest(),
         "model_artifact_sha256": hashlib.sha256(model.read_bytes()).hexdigest(),
+        "tokenizer_sha256": components["tokenizer_sha256"],
+        "configuration_sha256": components["configuration_sha256"],
         "runtime_image_digest": "sha256:" + hashlib.sha256(rootfs.read_bytes()).hexdigest(),
         "loader_profile": profile,
         "loader_profile_sha256": hashlib.sha256(canonical_bytes(profile)).hexdigest(),
@@ -219,6 +227,11 @@ def test_runner_rebinds_manifest_runtime_profile_and_reviewed_custom_code(tmp_pa
     tampered["reviewed_custom_code_sha256"] = "0" * 64
     with pytest.raises(Exception, match="custom-code digest mismatch"):
         runner._validate_job(subject, tampered)
+
+    wrong_tokenizer = dict(request)
+    wrong_tokenizer["tokenizer_sha256"] = "0" * 64
+    with pytest.raises(Exception, match="tokenizer component digest mismatch"):
+        runner._validate_job(subject, wrong_tokenizer)
 
 
 def test_conversion_export_creates_new_content_addressed_identity_and_complete_manifest(tmp_path):

@@ -36,6 +36,8 @@ class RunnerJobRequest(BaseModel):
     repository_manifest_path: str = Field(min_length=1, max_length=4096)
     repository_snapshot_sha256: str = Field(pattern="^[0-9a-f]{64}$")
     model_artifact_sha256: str = Field(pattern="^[0-9a-f]{64}$")
+    tokenizer_sha256: str = Field(pattern="^[0-9a-f]{64}$")
+    configuration_sha256: str = Field(pattern="^[0-9a-f]{64}$")
     deployment_bundle_sha256: str = Field(pattern="^[0-9a-f]{64}$")
     runtime_image_digest: str = Field(pattern="^sha256:[0-9a-f]{64}$")
     loader_profile: dict[str, Any]

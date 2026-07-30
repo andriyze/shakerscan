@@ -31,6 +31,7 @@ try:
     from model_intake_runner_receipts import SCHEMA, issue_runner_envelope
     from model_intake_loader_profiles import CONVERSION_PROFILE_ID
     from model_intake_runner_inputs import suite_identity
+    from model_intake_components import component_identities
 except ModuleNotFoundError:  # pragma: no cover
     from api.model_intake_control_plane import canonical_bytes
     from api.model_intake_control_plane import AwsKmsSigner, LocalPemSigner
@@ -38,6 +39,7 @@ except ModuleNotFoundError:  # pragma: no cover
     from api.model_intake_runner_receipts import SCHEMA, issue_runner_envelope
     from api.model_intake_loader_profiles import CONVERSION_PROFILE_ID
     from api.model_intake_runner_inputs import suite_identity
+    from api.model_intake_components import component_identities
 
 
 class FirecrackerExecutionError(RuntimeError):
@@ -274,7 +276,15 @@ class FirecrackerRunner:
             raise FirecrackerExecutionError("unsupported fixed runner mode")
         if request.get("environment") not in {"development", "test", "staging", "production"}:
             raise FirecrackerExecutionError("invalid target environment")
-        self._validate_subject_manifest(subject, request)
+        manifest = self._validate_subject_manifest(subject, request)
+        try:
+            components = component_identities(manifest["files"])
+        except ValueError as exc:
+            raise FirecrackerExecutionError(str(exc)) from exc
+        if _digest(request.get("tokenizer_sha256"), "tokenizer_sha256") != components["tokenizer_sha256"]:
+            raise FirecrackerExecutionError("tokenizer component digest mismatch")
+        if _digest(request.get("configuration_sha256"), "configuration_sha256") != components["configuration_sha256"]:
+            raise FirecrackerExecutionError("configuration component digest mismatch")
         rootfs_digest = _sha256(Path(self.env["MODEL_INTAKE_ROOTFS_IMAGE"]))
         if _digest(request.get("runtime_image_digest"), "runtime_image_digest", prefixed=True) != rootfs_digest:
             raise FirecrackerExecutionError("runtime image digest does not match the verified guest rootfs")
@@ -649,6 +659,8 @@ class FirecrackerRunner:
                 else str(request["model_artifact_sha256"]).lower()
             ),
             "repository_snapshot_sha256": str(request["repository_snapshot_sha256"]).lower(),
+            "tokenizer_sha256": str(request["tokenizer_sha256"]).lower(),
+            "configuration_sha256": str(request["configuration_sha256"]).lower(),
             "runtime_image_digest": str(request["runtime_image_digest"]).lower(),
             "loader_profile_sha256": str(request["loader_profile_sha256"]).lower(),
             "builder_id": self.env.get("MODEL_INTAKE_RUNNER_BUILDER_ID", ""),

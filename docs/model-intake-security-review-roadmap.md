@@ -1646,6 +1646,12 @@ submission subject and static-evidence binding, seeds the UI deployment bundle, 
 and then makes the Firecracker host independently recompute the same digest before enabling
 `trust_remote_code`. A missing, extra, duplicated, unsafe, or changed Python file fails before boot.
 
+Tokenizer and configuration identities use the same exact-subject rule. ShakerScan derives canonical,
+order-independent component-set digests from the complete snapshot, persists and exposes both subjects, seeds
+them into the UI bundle, rejects mismatches before queueing, and makes the Firecracker host recompute them from
+the verified manifest. Signed runner receipt v3 and derived evaluation evidence carry both digests, closing the
+earlier gap where required bundle labels were not independently matched to repository members.
+
 The guest captures root-owned syscall traces while model code runs as an unprivileged identity. The host
 independently parses and digests the bounded stream, records interface/firewall/cgroup observations, refuses
 incomplete or internally inconsistent PASS claims before signing, kills the whole process group on timeout,

@@ -268,6 +268,8 @@ export function ControlledModelIntakeWorkflow({
     seeded.model_artifact_sha256 = subjectDigest(detail, 'artifact')
     seeded.repository_snapshot_sha256 = subjectDigest(detail, 'repository_snapshot')
     seeded.custom_code_sha256 = subjectDigest(detail, 'custom_code') || null
+    seeded.tokenizer_sha256 = subjectDigest(detail, 'tokenizer')
+    seeded.configuration_sha256 = subjectDigest(detail, 'configuration')
     seeded.runtime_image_digest = typeof request.runtime_image_digest === 'string' ? request.runtime_image_digest : ''
     seeded.loader_profile_sha256 = typeof request.loader_profile_sha256 === 'string' ? request.loader_profile_sha256 : ''
     setBundleJson(JSON.stringify(seeded, null, 2))

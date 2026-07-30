@@ -25,6 +25,8 @@ def _envelope(evidence_type, observations):
         "deployment_bundle_sha256": "1" * 64,
         "model_artifact_sha256": "2" * 64,
         "repository_snapshot_sha256": "3" * 64,
+        "tokenizer_sha256": "6" * 64,
+        "configuration_sha256": "7" * 64,
         "runtime_image_digest": "sha256:" + "4" * 64,
         "loader_profile_sha256": "5" * 64,
         "builder_id": "runner://prod-1",
@@ -94,6 +96,36 @@ def _runtime_observations(**overrides):
 def test_runtime_pass_requires_real_generated_isolation_and_load_observations():
     payload, envelope, key = _envelope("runtime_execution", _runtime_observations())
     assert _verify(payload, envelope, key)["verified"] is True
+
+
+def test_runner_receipt_requires_tokenizer_and_configuration_subject_bindings():
+    payload, _envelope_value, key = _envelope("runtime_execution", _runtime_observations())
+    del payload["tokenizer_sha256"]
+    body = canonical_bytes(payload)
+    private = ed25519.Ed25519PrivateKey.generate()
+    public_pem = private.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode()
+    message = b"DSSEv1 %d %s %d %s" % (len(PAYLOAD_TYPE.encode()), PAYLOAD_TYPE.encode(), len(body), body)
+    signature = private.sign(message)
+    envelope = {
+        "payloadType": PAYLOAD_TYPE,
+        "payload": base64.b64encode(body).decode(),
+        "signatures": [{
+            "keyid": __import__("hashlib").sha256(private.public_key().public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)).hexdigest(),
+            "sig": base64.b64encode(signature).decode(),
+            "algorithm": "ed25519",
+        }],
+    }
+
+    result = verify_runner_envelope(
+        envelope,
+        expected_submission_id=payload["submission_id"],
+        expected_environment="production",
+        trusted_public_keys=[public_pem],
+        trusted_builder_ids={"runner://prod-1"},
+    )
+
+    assert result["verified"] is False
+    assert "invalid_subject_binding" in result["blockers"]
 
 
 def test_runner_issuer_refuses_to_sign_incomplete_pass_claim():

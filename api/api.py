@@ -161,6 +161,11 @@ except ModuleNotFoundError:
     from api.model_intake_runner_inputs import suite_identity as _model_intake_runner_input_suite
 
 try:
+    from model_intake_components import component_identities as _model_intake_component_identities
+except ModuleNotFoundError:
+    from api.model_intake_components import component_identities as _model_intake_component_identities
+
+try:
     from model_intake_reporting import (
         build_model_intake_report as _build_model_intake_report,
         model_intake_report_to_sarif as _model_intake_report_to_sarif,
@@ -11671,6 +11676,11 @@ async def attach_model_intake_static_run(
         model_intake = result.get("model_intake") if isinstance(result.get("model_intake"), dict) else {}
         summary = model_intake.get("summary") if isinstance(model_intake.get("summary"), dict) else {}
         custom_code_sha = _model_intake_snapshot_custom_code_sha256(model_intake)
+        snapshot = model_intake.get("repository_snapshot") if isinstance(model_intake.get("repository_snapshot"), dict) else {}
+        try:
+            components = _model_intake_component_identities(snapshot.get("files") or [])
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         artifact_sha = str(summary.get("sha256") or "").lower()
         snapshot_sha = str(summary.get("repository_snapshot_sha256") or "").lower()
         if not re.fullmatch(r"[0-9a-f]{64}", artifact_sha):
@@ -11732,6 +11742,31 @@ async def attach_model_intake_static_run(
                 snapshot_sha or None,
                 json.dumps({"registered_by": actor, "source": "authoritative_snapshot"}),
             )
+        for subject_kind, digest_key, count_key in (
+            ("tokenizer", "tokenizer_sha256", "tokenizer_file_count"),
+            ("configuration", "configuration_sha256", "configuration_file_count"),
+        ):
+            component_sha = components[digest_key]
+            if not component_sha:
+                continue
+            await conn.execute(
+                """
+                INSERT INTO model_intake_subjects
+                    (submission_id,subject_kind,immutable_uri,sha256,manifest_sha256,metadata_json)
+                VALUES ($1,$2,$3,$4,$5,$6::jsonb)
+                ON CONFLICT (submission_id,subject_kind,sha256) DO NOTHING
+                """,
+                submission_uuid,
+                subject_kind,
+                f"scan://{scan_uuid}/repository-snapshot/{subject_kind}",
+                component_sha,
+                snapshot_sha or None,
+                json.dumps({
+                    "registered_by": actor,
+                    "source": "authoritative_snapshot",
+                    "file_count": components[count_key],
+                }),
+            )
         evidence = await conn.fetchrow(
             """
             INSERT INTO model_intake_evidence_records
@@ -11751,6 +11786,8 @@ async def attach_model_intake_static_run(
                 "model_artifact_sha256": artifact_sha,
                 "repository_snapshot_sha256": snapshot_sha or None,
                 "custom_code_sha256": custom_code_sha,
+                "tokenizer_sha256": components["tokenizer_sha256"],
+                "configuration_sha256": components["configuration_sha256"],
             }),
             payload_digest,
             f"scan://{scan_uuid}/result",
@@ -11842,7 +11879,7 @@ async def _persist_model_intake_runner_evidence(
         key: payload[key]
         for key in (
             "deployment_bundle_sha256", "model_artifact_sha256",
-            "repository_snapshot_sha256", "runtime_image_digest",
+            "repository_snapshot_sha256", "tokenizer_sha256", "configuration_sha256", "runtime_image_digest",
             "loader_profile_sha256",
         )
     }
@@ -12083,6 +12120,10 @@ def _model_intake_snapshot_materialization(
         ).hexdigest()
         if custom_code_entries else None
     )
+    try:
+        components = _model_intake_component_identities(canonical_files)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     profile_manifest = {
         **canonical,
         "library_name": str(semantic.get("library_name") or "transformers"),
@@ -12095,6 +12136,8 @@ def _model_intake_snapshot_materialization(
         "repository_manifest_path": str(Path(host_root) / relative_manifest),
         "artifact_path": selected_path,
         "custom_code_sha256": custom_code_sha256,
+        "tokenizer_sha256": components["tokenizer_sha256"],
+        "configuration_sha256": components["configuration_sha256"],
         "profile_manifest": profile_manifest,
     }
 
@@ -12145,6 +12188,16 @@ async def create_model_intake_runner_job(
             status_code=409,
             detail="Deployment bundle custom-code digest differs from the authoritative snapshot",
         )
+    if bundle["tokenizer_sha256"] != materialized["tokenizer_sha256"]:
+        raise HTTPException(
+            status_code=409,
+            detail="Deployment bundle tokenizer digest differs from the authoritative snapshot",
+        )
+    if bundle["configuration_sha256"] != materialized["configuration_sha256"]:
+        raise HTTPException(
+            status_code=409,
+            detail="Deployment bundle configuration digest differs from the authoritative snapshot",
+        )
     resolver = _resolve_model_conversion_profile if request.operation == "conversion" else _resolve_model_loader_profile
     resolution = resolver(
         materialized["profile_manifest"],
@@ -12162,6 +12215,8 @@ async def create_model_intake_runner_job(
         "subject_path": materialized["subject_path"],
         "repository_manifest_path": materialized["repository_manifest_path"],
         "repository_snapshot_sha256": bundle["repository_snapshot_sha256"],
+        "tokenizer_sha256": bundle["tokenizer_sha256"],
+        "configuration_sha256": bundle["configuration_sha256"],
         "model_artifact_sha256": bundle["model_artifact_sha256"],
         "deployment_bundle_sha256": bundle["bundle_sha256"],
         "runtime_image_digest": bundle["runtime_image_digest"],
@@ -12182,6 +12237,8 @@ async def create_model_intake_runner_job(
         "deployment_bundle_sha256": bundle["bundle_sha256"],
         "model_artifact_sha256": bundle["model_artifact_sha256"],
         "repository_snapshot_sha256": bundle["repository_snapshot_sha256"],
+        "tokenizer_sha256": bundle["tokenizer_sha256"],
+        "configuration_sha256": bundle["configuration_sha256"],
         "runtime_image_digest": bundle["runtime_image_digest"],
         "loader_profile_id": profile["profile_id"],
         "loader_profile_sha256": profile["profile_sha256"],

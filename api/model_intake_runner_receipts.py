@@ -16,7 +16,7 @@ except ModuleNotFoundError:  # pragma: no cover - package import in tests
 
 
 PAYLOAD_TYPE = "https://shakerscan.dev/attestation/model-evidence/v1"
-SCHEMA = "model-intake-runner-receipt/v2"
+SCHEMA = "model-intake-runner-receipt/v3"
 EVIDENCE_POLICY = {
     "runtime_execution": ("GENERATED_RUNTIME", "runtime_runner"),
     "embedding_evaluation": ("GENERATED_EVALUATION", "evaluation_runner"),
@@ -185,6 +185,8 @@ def verify_runner_envelope(
         _sha(payload.get("deployment_bundle_sha256"), "deployment_bundle_sha256")
         _sha(payload.get("model_artifact_sha256"), "model_artifact_sha256")
         _sha(payload.get("repository_snapshot_sha256"), "repository_snapshot_sha256")
+        _sha(payload.get("tokenizer_sha256"), "tokenizer_sha256")
+        _sha(payload.get("configuration_sha256"), "configuration_sha256")
         _sha(payload.get("loader_profile_sha256"), "loader_profile_sha256")
         image = str(payload.get("runtime_image_digest") or "")
         if not image.startswith("sha256:"):

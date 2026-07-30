@@ -20,6 +20,8 @@ def _request() -> dict:
         "repository_manifest_path": "/var/lib/shakerscan/model-intake-quarantine/manifest.json",
         "repository_snapshot_sha256": digest,
         "model_artifact_sha256": digest,
+        "tokenizer_sha256": digest,
+        "configuration_sha256": digest,
         "deployment_bundle_sha256": digest,
         "runtime_image_digest": f"sha256:{digest}",
         "loader_profile": {"profile_id": "safetensors-transformers-v1", "allow_pickle": False},
