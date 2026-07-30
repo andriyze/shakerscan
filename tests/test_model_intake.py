@@ -111,6 +111,9 @@ def test_model_intake_detects_pickle_and_missing_controls(tmp_path):
     assert "model_intake:missing_checksum" in finding_ids
     assert "model_intake:missing_deployment_approval" in finding_ids
     assert result["model_intake"]["summary"]["format_posture"] == "unsafe_executable_serialization"
+    assert result["model_intake"]["admission"]["status"] == "TECHNICAL_CANDIDATE"
+    assert result["model_intake"]["admission"]["deployable"] is False
+    assert "signature" not in result["model_intake"]["admission"]
     assert result["result"]["grade"] == "F"
 
 

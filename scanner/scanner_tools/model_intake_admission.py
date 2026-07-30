@@ -11,6 +11,7 @@ from typing import Any
 
 
 SCHEMA_VERSION = "model-intake-admission/v1"
+TECHNICAL_CANDIDATE_SCHEMA_VERSION = "model-intake-technical-decision-candidate/v1"
 _PEM_PUBLIC_KEY_RE = __import__("re").compile(
     r"-----BEGIN PUBLIC KEY-----.*?-----END PUBLIC KEY-----", __import__("re").DOTALL
 )
@@ -82,6 +83,28 @@ def build_statement(
         "decision": {"outcome": decision, "reason": decision_reason},
         "issued_at": issued.isoformat(),
         "expires_at": (issued + timedelta(days=max(1, min(int(expires_days), 365)))).isoformat(),
+    }
+
+
+def build_technical_candidate(statement: dict[str, Any]) -> dict[str, Any]:
+    """Return non-deployable technical evidence for a future admission service.
+
+    Evidence-producing workers may construct this candidate, but they must not
+    possess admission signing material or create an active registry record.
+    """
+    candidate_statement = json.loads(json.dumps(statement))
+    candidate_statement["_type"] = TECHNICAL_CANDIDATE_SCHEMA_VERSION
+    message = canonical_bytes(candidate_statement)
+    return {
+        "status": "TECHNICAL_CANDIDATE",
+        "deployable": False,
+        "statement": candidate_statement,
+        "statement_sha256": hashlib.sha256(message).hexdigest(),
+        "limitations": [
+            "not_verified_by_admission_control_plane",
+            "not_signed_by_admission_signer",
+            "not_registered_for_deployment",
+        ],
     }
 
 
@@ -215,7 +238,9 @@ def verify_package(
 
 __all__ = [
     "SCHEMA_VERSION",
+    "TECHNICAL_CANDIDATE_SCHEMA_VERSION",
     "build_statement",
+    "build_technical_candidate",
     "canonical_bytes",
     "sign_statement",
     "signing_available",

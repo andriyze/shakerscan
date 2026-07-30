@@ -4,7 +4,9 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from scanner.scanner_tools.model_intake_admission import (
+    TECHNICAL_CANDIDATE_SCHEMA_VERSION,
     build_statement,
+    build_technical_candidate,
     sign_statement,
     trusted_public_keys_from_env,
     verify_package,
@@ -56,6 +58,20 @@ def test_signed_admission_verifies_exact_subjects():
     assert package["status"] == "SIGNED"
     assert result["status"] == "PASS"
     assert result["verified"] is True
+
+
+def test_worker_technical_candidate_is_explicitly_non_deployable():
+    candidate = build_technical_candidate(_statement())
+
+    assert candidate["status"] == "TECHNICAL_CANDIDATE"
+    assert candidate["deployable"] is False
+    assert candidate["statement"]["_type"] == TECHNICAL_CANDIDATE_SCHEMA_VERSION
+    assert "signature" not in candidate
+    assert "not_signed_by_admission_signer" in candidate["limitations"]
+
+    result = verify_package(candidate, trusted_public_keys=[])
+    assert result["verified"] is False
+    assert "unsupported_statement_type" in result["blockers"]
 
 
 def test_legitimately_signed_block_decision_is_never_admitted():

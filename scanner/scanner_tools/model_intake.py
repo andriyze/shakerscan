@@ -33,8 +33,7 @@ from .model_intake_acquisition import (
 from . import model_intake_scanners as _model_intake_scanners
 from .model_intake_admission import (
     build_statement as _build_admission_statement,
-    sign_statement as _sign_admission_statement,
-    signing_available as _admission_signing_available,
+    build_technical_candidate as _build_admission_candidate,
 )
 from .model_intake_archives import inspect_archive as _inspect_complete_archive
 from .model_intake_attestation import verify_dsse_in_toto as _verify_dsse_in_toto
@@ -3361,15 +3360,19 @@ async def run_model_intake_scan(
         ))
 
     require_signed_admission = _boolish(options.get("require_signed_admission"))
-    if require_signed_admission and not _admission_signing_available():
+    if require_signed_admission:
         findings.append(_finding(
-            finding_id="admission_signing_unavailable",
-            title="Required Model Intake admission statement cannot be signed",
+            finding_id="admission_control_plane_required",
+            title="Dedicated Model Intake admission control plane is required",
             severity="high",
-            description="Policy requires a signed machine-readable admission package, but the worker has no configured admission signing key.",
+            description=(
+                "The evidence-producing worker generated a technical decision candidate but is intentionally "
+                "unable to sign or register a deployable admission. A separate control-plane service must "
+                "verify frozen evidence, policy, and approvals before invoking a narrow signer."
+            ),
             artifact_ref=artifact_ref,
-            evidence={"signing_key_configured": False},
-            remediation="Configure MODEL_INTAKE_ADMISSION_SIGNING_KEY_PEM in the trusted worker secret store and rerun intake.",
+            evidence={"worker_signing_authority": False, "dedicated_admission_service": "NOT_IMPLEMENTED"},
+            remediation="Submit the frozen evidence manifest to the dedicated admission service when that release gate is available; never install an admission private key in a scanner worker.",
         ))
     if require_signed_admission and (not sha256 or artifact_truncated):
         findings.append(_finding(
@@ -4146,7 +4149,7 @@ async def run_model_intake_scan(
         findings_digest=findings_digest,
         expires_days=bounded_int("admission_expires_days", 30, 1, 365),
     )
-    admission_package = _sign_admission_statement(admission_statement)
+    admission_package = _build_admission_candidate(admission_statement)
     safe_artifact_ref = redact_model_intake_value(artifact_ref)
     safe_registry_reference = redact_model_intake_value(registry_reference)
     safe_metadata = redact_model_intake_value(metadata)

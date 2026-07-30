@@ -1247,6 +1247,10 @@ def _scan_time_verification_fields(finding: dict[str, Any]) -> tuple[str | None,
 
 def run_worker_preflight() -> None:
     """Fail fast when the container has an inconsistent scanner import graph."""
+    if os.environ.get("MODEL_INTAKE_ADMISSION_SIGNING_KEY_PEM"):
+        raise RuntimeError(
+            "worker preflight failed: admission signing material must not be present in an evidence-producing worker"
+        )
     if os.environ.get("WORKER_PREFLIGHT_ENABLED", "true").lower() not in {"1", "true", "yes", "on"}:
         print("[preflight] worker preflight disabled", flush=True)
         return

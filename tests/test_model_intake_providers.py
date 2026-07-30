@@ -24,6 +24,8 @@ def test_provider_registry_keeps_scanners_out_of_execution_and_policy_classes(tm
     assert by_id["embedded-admission-policy"]["kind"] == "policy_provider"
     assert by_id["opa-policy"]["status"] == "NOT_IMPLEMENTED"
     assert by_id["core-report-exporter"]["kind"] == "report_provider"
+    assert "technical_decision_candidate" in by_id["core-report-exporter"]["formats"]
+    assert "signed_admission_package" not in by_id["core-report-exporter"]["formats"]
 
 
 def test_sandbox_provider_is_explicit_when_runtime_adapter_is_absent(tmp_path, monkeypatch):

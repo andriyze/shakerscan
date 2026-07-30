@@ -137,7 +137,8 @@ class CoreReportProvider(ModelIntakeProvider):
         return self.result(
             ready=True,
             status="READY",
-            formats=["normalized_json", "evidence_export", "signed_admission_package"],
+            formats=["normalized_json", "evidence_export", "technical_decision_candidate"],
+            limitation="dedicated admission service and signer are not implemented; report output cannot authorize deployment",
         )
 
 

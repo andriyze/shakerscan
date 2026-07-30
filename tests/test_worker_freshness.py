@@ -21,6 +21,14 @@ import worker  # noqa: E402
 CURRENT_FP = "deadbeefcafef00d"
 
 
+def test_worker_preflight_rejects_admission_private_key_even_when_other_preflight_is_disabled(monkeypatch):
+    monkeypatch.setenv("MODEL_INTAKE_ADMISSION_SIGNING_KEY_PEM", "forbidden-private-key")
+    monkeypatch.setenv("WORKER_PREFLIGHT_ENABLED", "false")
+
+    with pytest.raises(RuntimeError, match="admission signing material"):
+        worker.run_worker_preflight()
+
+
 def test_db_timestamps_are_normalized_to_naive_utc_for_duration_math():
     aware = datetime(2026, 7, 26, 7, 30, tzinfo=timezone(timedelta(hours=2)))
 
