@@ -11163,6 +11163,35 @@ def _model_intake_required_static_checks(summary: dict[str, Any]) -> dict[str, b
     }
 
 
+def _model_intake_snapshot_custom_code_sha256(model_intake: dict[str, Any]) -> str | None:
+    """Derive the reviewed-code identity only from a complete authoritative snapshot."""
+    snapshot = model_intake.get("repository_snapshot") if isinstance(model_intake.get("repository_snapshot"), dict) else {}
+    if snapshot.get("complete") is not True:
+        return None
+    files = snapshot.get("files") if isinstance(snapshot.get("files"), list) else []
+    entries: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in files:
+        if not isinstance(item, dict):
+            raise HTTPException(status_code=409, detail="Repository snapshot entry is invalid")
+        path = Path(str(item.get("path") or ""))
+        digest = str(item.get("sha256") or "").lower()
+        normalized = path.as_posix()
+        if path.is_absolute() or not path.parts or ".." in path.parts or normalized in seen:
+            raise HTTPException(status_code=409, detail="Repository snapshot custom-code path is unsafe")
+        seen.add(normalized)
+        if path.suffix.lower() != ".py":
+            continue
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise HTTPException(status_code=409, detail="Repository snapshot custom-code digest is invalid")
+        entries.append({"path": normalized, "sha256": digest})
+    if not entries:
+        return None
+    return hashlib.sha256(
+        json.dumps(sorted(entries, key=lambda entry: entry["path"]), sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
 _MODEL_INTAKE_SUBMISSION_TRANSITIONS: dict[str, set[str]] = {
     "submitted": {"scanning", "evidence_ready", "blocked", "cancelled"},
     "scanning": {"evidence_ready", "blocked", "cancelled"},
@@ -11636,6 +11665,7 @@ async def attach_model_intake_static_run(
         result = _model_intake_json_object(scan["result"])
         model_intake = result.get("model_intake") if isinstance(result.get("model_intake"), dict) else {}
         summary = model_intake.get("summary") if isinstance(model_intake.get("summary"), dict) else {}
+        custom_code_sha = _model_intake_snapshot_custom_code_sha256(model_intake)
         artifact_sha = str(summary.get("sha256") or "").lower()
         snapshot_sha = str(summary.get("repository_snapshot_sha256") or "").lower()
         if not re.fullmatch(r"[0-9a-f]{64}", artifact_sha):
@@ -11683,6 +11713,20 @@ async def attach_model_intake_static_run(
                 summary.get("repository_manifest_sha256"),
                 json.dumps({"registered_by": actor}),
             )
+        if custom_code_sha:
+            await conn.execute(
+                """
+                INSERT INTO model_intake_subjects
+                    (submission_id,subject_kind,immutable_uri,sha256,manifest_sha256,metadata_json)
+                VALUES ($1,'custom_code',$2,$3,$4,$5::jsonb)
+                ON CONFLICT (submission_id,subject_kind,sha256) DO NOTHING
+                """,
+                submission_uuid,
+                f"scan://{scan_uuid}/repository-snapshot/python",
+                custom_code_sha,
+                snapshot_sha or None,
+                json.dumps({"registered_by": actor, "source": "authoritative_snapshot"}),
+            )
         evidence = await conn.fetchrow(
             """
             INSERT INTO model_intake_evidence_records
@@ -11701,6 +11745,7 @@ async def attach_model_intake_static_run(
             json.dumps({
                 "model_artifact_sha256": artifact_sha,
                 "repository_snapshot_sha256": snapshot_sha or None,
+                "custom_code_sha256": custom_code_sha,
             }),
             payload_digest,
             f"scan://{scan_uuid}/result",
@@ -11961,7 +12006,8 @@ def _model_intake_snapshot_materialization(
             raise HTTPException(status_code=409, detail="Repository snapshot entry is invalid")
         relative = Path(str(entry.get("path") or ""))
         digest = str(entry.get("sha256") or "").lower()
-        size = int(entry.get("size_bytes") or -1)
+        size_value = entry.get("size_bytes")
+        size = int(size_value if size_value is not None else -1)
         if relative.is_absolute() or not relative.parts or ".." in relative.parts or not re.fullmatch(r"[0-9a-f]{64}", digest) or size < 0:
             raise HTTPException(status_code=409, detail="Repository snapshot entry is unsafe")
         canonical_files.append({"path": relative.as_posix(), "size_bytes": size, "sha256": digest})
@@ -12021,6 +12067,17 @@ def _model_intake_snapshot_materialization(
     relative_manifest = manifest_path.relative_to(RESULTS_DIR.resolve())
     semantic = model.get("metadata") if isinstance(model.get("metadata"), dict) else {}
     python_files = [item[0].as_posix() for item in normalized if item[0].suffix.lower() == ".py"]
+    custom_code_entries = sorted([
+        {"path": relative.as_posix(), "sha256": digest}
+        for relative, digest, _size in normalized
+        if relative.suffix.lower() == ".py"
+    ], key=lambda entry: entry["path"])
+    custom_code_sha256 = (
+        hashlib.sha256(
+            json.dumps(custom_code_entries, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        if custom_code_entries else None
+    )
     profile_manifest = {
         **canonical,
         "library_name": str(semantic.get("library_name") or "transformers"),
@@ -12032,6 +12089,7 @@ def _model_intake_snapshot_materialization(
         "subject_path": str(Path(host_root) / relative_subject),
         "repository_manifest_path": str(Path(host_root) / relative_manifest),
         "artifact_path": selected_path,
+        "custom_code_sha256": custom_code_sha256,
         "profile_manifest": profile_manifest,
     }
 
@@ -12073,12 +12131,17 @@ async def create_model_intake_runner_job(
         artifact_sha256=bundle["model_artifact_sha256"],
         repository_snapshot_sha256=bundle["repository_snapshot_sha256"],
     )
+    if bundle.get("custom_code_sha256") != materialized["custom_code_sha256"]:
+        raise HTTPException(
+            status_code=409,
+            detail="Deployment bundle custom-code digest differs from the authoritative snapshot",
+        )
     resolver = _resolve_model_conversion_profile if request.operation == "conversion" else _resolve_model_loader_profile
     resolution = resolver(
         materialized["profile_manifest"],
         artifact_path=materialized["artifact_path"],
         runtime_image_digest=bundle["runtime_image_digest"],
-        reviewed_custom_code_sha256=None,
+        reviewed_custom_code_sha256=materialized["custom_code_sha256"],
     )
     if resolution.get("status") != "READY" or not isinstance(resolution.get("profile"), dict):
         raise HTTPException(status_code=409, detail={"code": "runner_loader_profile_not_ready", **resolution})
@@ -12095,7 +12158,7 @@ async def create_model_intake_runner_job(
         "runtime_image_digest": bundle["runtime_image_digest"],
         "loader_profile": profile,
         "loader_profile_sha256": profile["profile_sha256"],
-        "reviewed_custom_code_sha256": None,
+        "reviewed_custom_code_sha256": materialized["custom_code_sha256"],
         "known_answer_inputs": request.known_answer_inputs,
         "known_answer_embedding_sha256": request.known_answer_embedding_sha256.lower() if request.known_answer_embedding_sha256 else None,
         "vcpu_count": request.vcpu_count,

@@ -295,8 +295,72 @@ def test_runner_materialization_reconstructs_exact_content_addressed_snapshot(tm
 
     assert materialized["subject_path"] == f"/srv/shakerscan/results/model-intake-runner-subjects/{snapshot_sha}"
     assert materialized["artifact_path"] == "model.safetensors"
+    assert materialized["custom_code_sha256"] is None
     assert materialized["profile_manifest"]["custom_code_required"] is False
     assert (results / "model-intake-runner-subjects" / snapshot_sha / "model.safetensors").read_bytes() == content
+
+
+def test_runner_materialization_derives_exact_custom_code_identity(tmp_path, monkeypatch):
+    results = tmp_path / "results"
+    files = {
+        "model.safetensors": b"weights",
+        "modeling_custom.py": b"class ReviewedModel:\n    pass\n",
+        "nested/helper.py": b"VALUE = 1\n",
+    }
+    entries = []
+    for name, content in files.items():
+        digest = hashlib.sha256(content).hexdigest()
+        object_path = results / "model-intake-quarantine" / "sha256" / digest[:2] / digest
+        object_path.parent.mkdir(parents=True, exist_ok=True)
+        object_path.write_bytes(content)
+        entries.append({"path": name, "size_bytes": len(content), "sha256": digest})
+    canonical = {
+        "provider": "huggingface",
+        "repository": "acme/custom-model",
+        "revision": "2" * 40,
+        "files": sorted(entries, key=lambda item: item["path"]),
+    }
+    snapshot_sha = hashlib.sha256(json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    artifact_sha = next(item["sha256"] for item in entries if item["path"] == "model.safetensors")
+    scan_result = {"model_intake": {
+        "metadata": {"library_name": "transformers"},
+        "repository_snapshot": {
+            "complete": True,
+            "snapshot_sha256": snapshot_sha,
+            "repository": canonical["repository"],
+            "revision": canonical["revision"],
+            "repository_manifest": {"provider": "huggingface"},
+            "files": entries,
+        },
+    }}
+    expected_entries = [
+        {"path": item["path"], "sha256": item["sha256"]}
+        for item in sorted(entries, key=lambda item: item["path"])
+        if item["path"].endswith(".py")
+    ]
+    expected = hashlib.sha256(json.dumps(expected_entries, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    monkeypatch.setattr(api, "RESULTS_DIR", results)
+    monkeypatch.setenv("MODEL_INTAKE_RUNNER_HOST_RESULTS_ROOT", "/srv/shakerscan/results")
+
+    materialized = api._model_intake_snapshot_materialization(
+        scan_result,
+        artifact_sha256=artifact_sha,
+        repository_snapshot_sha256=snapshot_sha,
+    )
+
+    assert materialized["custom_code_sha256"] == expected
+    assert materialized["profile_manifest"]["custom_code_required"] is True
+    assert api._model_intake_snapshot_custom_code_sha256(scan_result["model_intake"]) == expected
+
+
+def test_custom_code_identity_rejects_duplicate_or_unsafe_snapshot_paths():
+    for paths in (["modeling.py", "modeling.py"], ["../modeling.py"]):
+        model_intake = {"repository_snapshot": {
+            "complete": True,
+            "files": [{"path": path, "sha256": "a" * 64} for path in paths],
+        }}
+        with pytest.raises(api.HTTPException, match="custom-code path is unsafe"):
+            api._model_intake_snapshot_custom_code_sha256(model_intake)
 
 def test_legacy_scan_rejects_admission_before_enrichment_or_queueing():
     request = api.ModelIntakeScanRequest(

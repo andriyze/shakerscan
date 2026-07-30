@@ -1640,6 +1640,12 @@ catalog. Before execution it independently validates the complete authoritative 
 member digest/size, selected artifact digest, runtime rootfs digest, loader-profile digest, and reviewed
 custom-code digest. Pickle-capable loading is prohibited in this runtime path.
 
+Reviewed custom code is now usable without caller authority over its identity: the controlled workflow derives
+one canonical Python-file digest from the complete provider-authoritative snapshot, persists it as an immutable
+submission subject and static-evidence binding, seeds the UI deployment bundle, requires exact bundle equality,
+and then makes the Firecracker host independently recompute the same digest before enabling
+`trust_remote_code`. A missing, extra, duplicated, unsafe, or changed Python file fails before boot.
+
 The guest captures root-owned syscall traces while model code runs as an unprivileged identity. The host
 independently parses and digests the bounded stream, records interface/firewall/cgroup observations, refuses
 incomplete or internally inconsistent PASS claims before signing, kills the whole process group on timeout,
