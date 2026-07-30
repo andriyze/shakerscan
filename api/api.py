@@ -5227,20 +5227,80 @@ def _require_model_intake_operator(request: Request) -> None:
             status_code=403,
             detail="Model Intake operator access requires loopback, verified Tailscale, or authenticated HTTPS",
         )
-    expected = (
+    configured = _model_intake_configured_operator_credentials()
+    legacy = (
         os.environ.get("MODEL_INTAKE_OPERATOR_TOKEN", "").strip()
         or os.environ.get("FLEET_OPERATOR_TOKEN", "").strip()
     )
-    if len(expected) < 32:
+    if not configured and len(legacy) < 32:
         raise HTTPException(status_code=403, detail="Model Intake operator credential is not configured")
     presented = _fleet_bearer_credential(request)
-    if not secrets.compare_digest(presented, expected):
+    presented_sha256 = hashlib.sha256(presented.encode()).hexdigest()
+    configured_match = any(
+        secrets.compare_digest(presented_sha256, item["token_sha256"])
+        for item in configured
+    )
+    legacy_match = len(legacy) >= 32 and secrets.compare_digest(presented, legacy)
+    if not configured_match and not legacy_match:
         raise HTTPException(status_code=403, detail="Model Intake operator authentication failed")
+
+
+_MODEL_INTAKE_APPROVAL_ROLES = {
+    "model_security_reviewer", "ml_platform_reviewer", "release_manager",
+    "legal_reviewer", "privacy_reviewer", "data_owner", "risk_acceptance",
+}
+
+
+def _model_intake_configured_operator_credentials() -> list[dict[str, Any]]:
+    """Load environment-owned hashed credentials with stable identities and roles."""
+    raw = os.getenv("MODEL_INTAKE_OPERATOR_CREDENTIALS_JSON", "").strip()
+    if not raw:
+        return []
+    try:
+        decoded = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=503, detail="Model Intake operator credential map is invalid") from exc
+    if not isinstance(decoded, list) or not decoded:
+        raise HTTPException(status_code=503, detail="Model Intake operator credential map must be a non-empty list")
+    records: list[dict[str, Any]] = []
+    seen_tokens: set[str] = set()
+    for value in decoded:
+        if not isinstance(value, dict):
+            raise HTTPException(status_code=503, detail="Model Intake operator credential record is invalid")
+        token_sha256 = str(value.get("token_sha256") or "").lower()
+        subject = str(value.get("subject") or "").strip()
+        roles = value.get("roles")
+        if (
+            not re.fullmatch(r"[0-9a-f]{64}", token_sha256)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:@/-]{1,199}", subject)
+            or not isinstance(roles, list)
+            or any(str(role) not in _MODEL_INTAKE_APPROVAL_ROLES for role in roles)
+            or token_sha256 in seen_tokens
+        ):
+            raise HTTPException(status_code=503, detail="Model Intake operator credential record is invalid")
+        seen_tokens.add(token_sha256)
+        records.append({
+            "token_sha256": token_sha256,
+            "subject": subject,
+            "roles": sorted({str(role) for role in roles}),
+        })
+    return records
+
+
+def _model_intake_operator_credential(request: Request) -> dict[str, Any] | None:
+    presented_sha256 = hashlib.sha256(_fleet_bearer_credential(request).encode()).hexdigest()
+    for item in _model_intake_configured_operator_credentials():
+        if secrets.compare_digest(presented_sha256, item["token_sha256"]):
+            return item
+    return None
 
 
 def _model_intake_authenticated_subject(request: Request) -> str:
     """Return a server-derived identity; never accept approver identity in JSON."""
     _require_model_intake_operator(request)
+    configured = _model_intake_operator_credential(request)
+    if configured:
+        return f"operator:{configured['subject']}"
     credential = _fleet_bearer_credential(request)
     if not credential:
         raise HTTPException(status_code=403, detail="Model Intake authenticated identity is unavailable")
@@ -5249,6 +5309,9 @@ def _model_intake_authenticated_subject(request: Request) -> str:
 
 def _model_intake_operator_roles(request: Request) -> set[str]:
     _model_intake_authenticated_subject(request)
+    configured = _model_intake_operator_credential(request)
+    if configured:
+        return set(configured["roles"])
     configured = {
         item.strip()
         for item in os.getenv("MODEL_INTAKE_OPERATOR_ROLES", "").split(",")
@@ -11230,8 +11293,48 @@ async def create_model_intake_submission(request: ModelSubmissionRequest, http_r
     }
 
 
+@app.get("/model-intake/submissions")
+async def list_model_intake_submissions(
+    http_request: Request,
+    state: Optional[str] = Query(
+        None,
+        pattern="^(submitted|static_running|evidence_ready|awaiting_approval|policy_decided|admitted|blocked|revoked)$",
+    ),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    """List controlled-workflow records without returning source references or evidence payloads."""
+    _model_intake_authenticated_subject(http_request)
+    where = "WHERE state=$1" if state else ""
+    args: list[Any] = [state] if state else []
+    args.extend([limit, offset])
+    limit_index = len(args) - 1
+    offset_index = len(args)
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"""
+            SELECT id,requested_by,requested_environment,source_kind,source_reference_hash,
+                   expected_artifact_sha256,scan_id,state,created_at,updated_at
+            FROM model_intake_submissions {where}
+            ORDER BY created_at DESC LIMIT ${limit_index} OFFSET ${offset_index}
+            """,
+            *args,
+        )
+        total = await conn.fetchval(
+            f"SELECT COUNT(*) FROM model_intake_submissions {where}",
+            *([state] if state else []),
+        )
+    return {
+        "submissions": [row_to_dict(row) for row in rows],
+        "total": int(total or 0),
+        "limit": limit,
+        "offset": offset,
+    }
+
+
 @app.get("/model-intake/submissions/{submission_id}")
-async def get_model_intake_submission(submission_id: str):
+async def get_model_intake_submission(submission_id: str, http_request: Request):
+    _model_intake_authenticated_subject(http_request)
     submission_uuid = _model_intake_uuid(submission_id, "submission id")
     async with db_pool.acquire() as conn:
         submission = await conn.fetchrow("SELECT * FROM model_intake_submissions WHERE id=$1", submission_uuid)
@@ -11956,7 +12059,7 @@ async def _execute_model_intake_agent_action(
             submission_uuid,
         )
         subject_map = {str(row["subject_kind"]): str(row["sha256"]) for row in subjects}
-        if subject_map.get("model_artifact") != bundle["model_artifact_sha256"]:
+        if subject_map.get("artifact") != bundle["model_artifact_sha256"]:
             blockers.append("model_artifact_subject_mismatch")
         if subject_map.get("repository_snapshot") != bundle["repository_snapshot_sha256"]:
             blockers.append("repository_snapshot_subject_mismatch")

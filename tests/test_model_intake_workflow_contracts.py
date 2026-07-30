@@ -41,6 +41,66 @@ def test_submission_and_approval_use_one_authenticated_subject(monkeypatch):
     assert submitter.startswith("operator-token:")
 
 
+def test_configured_model_intake_operators_have_distinct_server_owned_identities_and_roles(monkeypatch):
+    security_token = "security-reviewer-credential-that-is-long-enough"
+    platform_token = "platform-reviewer-credential-that-is-long-enough"
+    monkeypatch.delenv("MODEL_INTAKE_OPERATOR_TOKEN", raising=False)
+    monkeypatch.delenv("FLEET_OPERATOR_TOKEN", raising=False)
+    monkeypatch.setenv("MODEL_INTAKE_OPERATOR_CREDENTIALS_JSON", json.dumps([
+        {
+            "token_sha256": hashlib.sha256(security_token.encode()).hexdigest(),
+            "subject": "corp:alice",
+            "roles": ["model_security_reviewer"],
+        },
+        {
+            "token_sha256": hashlib.sha256(platform_token.encode()).hexdigest(),
+            "subject": "corp:bob",
+            "roles": ["ml_platform_reviewer"],
+        },
+    ]))
+
+    security = _operator_request(security_token)
+    platform = _operator_request(platform_token)
+
+    assert api._model_intake_authenticated_subject(security) == "operator:corp:alice"
+    assert api._model_intake_authenticated_subject(platform) == "operator:corp:bob"
+    assert api._model_intake_operator_roles(security) == {"model_security_reviewer"}
+    assert api._model_intake_operator_roles(platform) == {"ml_platform_reviewer"}
+    assert api._model_intake_submission_subject(security) != api._model_intake_authenticated_subject(platform)
+
+
+def test_invalid_model_intake_operator_credential_map_fails_closed(monkeypatch):
+    token = "model-intake-operator-token-that-is-long-enough"
+    monkeypatch.setenv("MODEL_INTAKE_OPERATOR_TOKEN", token)
+    monkeypatch.setenv("MODEL_INTAKE_OPERATOR_CREDENTIALS_JSON", '{"subject":"caller"}')
+
+    with pytest.raises(api.HTTPException) as caught:
+        api._model_intake_authenticated_subject(_operator_request(token))
+
+    assert caught.value.status_code == 503
+
+
+def test_submission_listing_and_detail_require_operator_authentication():
+    unauthenticated = api.Request({
+        "type": "http",
+        "method": "GET",
+        "path": "/model-intake/submissions",
+        "headers": [],
+        "client": ("127.0.0.1", 40123),
+        "server": ("127.0.0.1", 8080),
+        "scheme": "http",
+        "query_string": b"",
+    })
+
+    with pytest.raises(api.HTTPException) as listed:
+        asyncio.run(api.list_model_intake_submissions(unauthenticated))
+    with pytest.raises(api.HTTPException) as detailed:
+        asyncio.run(api.get_model_intake_submission(str(uuid.uuid4()), unauthenticated))
+
+    assert listed.value.status_code == 401
+    assert detailed.value.status_code == 401
+
+
 def test_legacy_scan_is_preflight_by_default_and_submission_cannot_carry_authority():
     assert api.ModelIntakeScanRequest(artifact_url="https://models.example/model.safetensors").intake_mode == "preflight"
 
@@ -81,6 +141,12 @@ def test_keyless_model_intake_agent_dtos_have_no_authority_or_provider_fields():
     source = inspect.getsource(api._execute_model_intake_agent_action)
     for forbidden in ("subprocess", "shell=True", "model_intake_admissions", "model_intake_approval_receipts"):
         assert forbidden not in source
+
+
+def test_keyless_runner_plan_uses_authoritative_static_artifact_subject_name():
+    source = inspect.getsource(api._execute_model_intake_agent_action)
+    assert 'subject_map.get("artifact")' in source
+    assert 'subject_map.get("model_artifact")' not in source
 
 
 def test_runner_materialization_reconstructs_exact_content_addressed_snapshot(tmp_path, monkeypatch):

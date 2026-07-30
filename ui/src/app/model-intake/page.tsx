@@ -47,6 +47,7 @@ import {
   type ModelIntakeTrustMode,
   type ModelIntakeTrustPreviewStatus,
 } from '@/lib/modelIntakeTrust'
+import { ControlledModelIntakeWorkflow } from './ControlledWorkflow'
 
 const inputClass =
   'min-w-0 w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none'
@@ -1036,6 +1037,13 @@ function ModelIntakeSettingsContent() {
           <div className="mt-3 text-xs text-gray-500">Checking adapter readiness…</div>
         )}
       </Card>
+
+      <ControlledModelIntakeWorkflow
+        operatorToken={operatorToken}
+        onOperatorTokenChange={updateOperatorToken}
+        defaultSource={sourceRef}
+        defaultSourceKind={platform}
+      />
 
       <Card className="min-w-0 p-4">
         <div className="flex flex-wrap items-center justify-between gap-2">

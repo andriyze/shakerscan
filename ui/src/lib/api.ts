@@ -1365,6 +1365,76 @@ export interface ModelIntakeScannerReadiness {
   adapters: ModelIntakeScannerAdapterReadiness[]
 }
 
+export interface ModelIntakeRunnerReadiness {
+  status: 'READY' | 'NOT_READY' | string
+  ready: boolean
+  executor?: string
+  checks?: Record<string, unknown>
+  verified_component_sha256?: Record<string, string>
+  error?: string
+  fallback_execution?: boolean
+}
+
+export interface ModelIntakeWorkflowSubmission {
+  id: string
+  requested_by?: string
+  requested_environment: 'development' | 'test' | 'staging' | 'production'
+  source_kind: ModelIntakePlatform
+  source_reference_hash: string
+  expected_artifact_sha256?: string | null
+  scan_id?: string | null
+  state: string
+  intended_use?: Record<string, unknown>
+  declared_metadata?: Record<string, unknown>
+  created_at: string
+  updated_at: string
+}
+
+export interface ModelIntakeWorkflowRecord {
+  id: string
+  [key: string]: unknown
+}
+
+export interface ModelIntakeWorkflowDetail {
+  submission: ModelIntakeWorkflowSubmission
+  subjects: ModelIntakeWorkflowRecord[]
+  evidence: ModelIntakeWorkflowRecord[]
+  manifests: ModelIntakeWorkflowRecord[]
+  approvals: ModelIntakeWorkflowRecord[]
+  policy_decisions: ModelIntakeWorkflowRecord[]
+  admissions: ModelIntakeWorkflowRecord[]
+  events: ModelIntakeWorkflowRecord[]
+}
+
+export interface ModelIntakeRunnerJob extends ModelIntakeWorkflowRecord {
+  submission_id: string
+  operation: 'calibration' | 'runtime' | 'conversion'
+  state: 'pending' | 'running' | 'completed' | 'failed'
+  request_sha256: string
+  request_json: Record<string, unknown>
+  result_json?: Record<string, unknown> | null
+  error_json?: Record<string, unknown> | null
+  evidence_record_id?: string | null
+  created_at: string
+  started_at?: string | null
+  finished_at?: string | null
+  updated_at: string
+}
+
+export interface ModelIntakeDeploymentBundleRequest {
+  model_artifact_sha256: string
+  repository_snapshot_sha256: string
+  custom_code_sha256?: string | null
+  tokenizer_sha256: string
+  configuration_sha256: string
+  runtime_image_digest: string
+  loader_profile_sha256: string
+  embedding_configuration: Record<string, unknown>
+  retrieval_application_digest: string
+  index_schema_digest: string
+  target_environment: 'development' | 'test' | 'staging' | 'production'
+}
+
 export interface ModelIntakeTrustAnchor {
   id: string
   name: string
@@ -3760,6 +3830,178 @@ export async function getModelIntakeScannerReadiness(): Promise<ModelIntakeScann
   if (!res.ok) {
     throw new Error(await getApiErrorMessage(res, 'Failed to load Model Intake scanner readiness'))
   }
+  return res.json()
+}
+
+function modelIntakeWorkflowHeaders(operatorToken: string, json = false): HeadersInit {
+  return {
+    ...(json ? { 'Content-Type': 'application/json' } : {}),
+    ...(operatorToken.trim() ? { Authorization: `Bearer ${operatorToken.trim()}` } : {}),
+  }
+}
+
+export async function getModelIntakeRunnerReadiness(): Promise<ModelIntakeRunnerReadiness> {
+  const res = await fetch(`${API_URL}/model-intake/runners/readiness`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load Firecracker runner readiness'))
+  return res.json()
+}
+
+export async function listModelIntakeSubmissions(
+  operatorToken: string,
+  params?: { state?: string; limit?: number; offset?: number },
+): Promise<{ submissions: ModelIntakeWorkflowSubmission[]; total: number; limit: number; offset: number }> {
+  const query = new URLSearchParams()
+  if (params?.state) query.set('state', params.state)
+  if (params?.limit) query.set('limit', String(params.limit))
+  if (params?.offset) query.set('offset', String(params.offset))
+  const suffix = query.toString()
+  const res = await fetch(`${API_URL}/model-intake/submissions${suffix ? `?${suffix}` : ''}`, {
+    headers: modelIntakeWorkflowHeaders(operatorToken),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load controlled Model Intake submissions'))
+  return res.json()
+}
+
+export async function createModelIntakeSubmission(data: {
+  source: string
+  source_kind: ModelIntakePlatform
+  intended_environment: 'development' | 'test' | 'staging' | 'production'
+  intended_use?: Record<string, unknown>
+  expected_artifact_sha256?: string
+  publisher_signature?: Record<string, unknown>
+  upstream_attestation?: Record<string, unknown>
+  declared_metadata?: Record<string, unknown>
+}, operatorToken: string): Promise<{ submission: ModelIntakeWorkflowSubmission; source_reference_hash: string; next_actions: string[]; deployable: false }> {
+  const res = await fetch(`${API_URL}/model-intake/submissions`, {
+    method: 'POST',
+    headers: modelIntakeWorkflowHeaders(operatorToken, true),
+    body: JSON.stringify(data),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to create controlled Model Intake submission'))
+  return res.json()
+}
+
+export async function getModelIntakeSubmission(id: string, operatorToken: string): Promise<ModelIntakeWorkflowDetail> {
+  const res = await fetch(`${API_URL}/model-intake/submissions/${id}`, {
+    headers: modelIntakeWorkflowHeaders(operatorToken),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load Model Intake submission'))
+  return res.json()
+}
+
+export async function attachModelIntakeStaticRun(id: string, scanId: string, operatorToken: string): Promise<Record<string, unknown>> {
+  const res = await fetch(`${API_URL}/model-intake/submissions/${id}/static-runs`, {
+    method: 'POST',
+    headers: modelIntakeWorkflowHeaders(operatorToken, true),
+    body: JSON.stringify({ scan_id: scanId }),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to attach completed static run'))
+  return res.json()
+}
+
+export async function listModelIntakeRunnerJobs(id: string, operatorToken: string): Promise<{ jobs: ModelIntakeRunnerJob[] }> {
+  const res = await fetch(`${API_URL}/model-intake/submissions/${id}/runner-jobs`, {
+    headers: modelIntakeWorkflowHeaders(operatorToken),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load Model Intake runner jobs'))
+  return res.json()
+}
+
+export async function createModelIntakeRunnerJob(id: string, data: {
+  operation: 'calibration' | 'runtime' | 'conversion'
+  deployment_bundle: ModelIntakeDeploymentBundleRequest
+  known_answer_inputs?: string[]
+  known_answer_embedding_sha256?: string
+  vcpu_count?: number
+  memory_mib?: number
+  timeout_seconds?: number
+}, operatorToken: string): Promise<{ job: ModelIntakeRunnerJob; loader_profile: Record<string, unknown>; deployable: false }> {
+  const res = await fetch(`${API_URL}/model-intake/submissions/${id}/runner-jobs`, {
+    method: 'POST',
+    headers: modelIntakeWorkflowHeaders(operatorToken, true),
+    body: JSON.stringify(data),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to queue Firecracker runner job'))
+  return res.json()
+}
+
+export async function refreshModelIntakeRunnerJob(submissionId: string, jobId: string, operatorToken: string): Promise<{ job: ModelIntakeRunnerJob; evidence?: ModelIntakeWorkflowRecord | null; deployable: false }> {
+  const res = await fetch(`${API_URL}/model-intake/submissions/${submissionId}/runner-jobs/${jobId}/refresh`, {
+    method: 'POST',
+    headers: modelIntakeWorkflowHeaders(operatorToken),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to refresh Firecracker runner job'))
+  return res.json()
+}
+
+export async function createModelIntakeAgentSession(id: string, data: {
+  objective: string
+  max_iterations?: number
+  action_budget?: number
+}, operatorToken: string): Promise<Record<string, unknown>> {
+  const res = await fetch(`${API_URL}/model-intake/submissions/${id}/agent/session`, {
+    method: 'POST',
+    headers: modelIntakeWorkflowHeaders(operatorToken, true),
+    body: JSON.stringify(data),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to start advisory Model Intake planner'))
+  return res.json()
+}
+
+export async function replyModelIntakeAgentSession(sessionId: string, reply: string, operatorToken: string): Promise<Record<string, unknown>> {
+  const res = await fetch(`${API_URL}/model-intake/agent/session/${sessionId}/reply`, {
+    method: 'POST',
+    headers: modelIntakeWorkflowHeaders(operatorToken, true),
+    body: JSON.stringify({ reply }),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to submit advisory planner turn'))
+  return res.json()
+}
+
+export async function freezeModelIntakeEvidence(id: string, deploymentBundle: ModelIntakeDeploymentBundleRequest, operatorToken: string): Promise<Record<string, unknown>> {
+  const res = await fetch(`${API_URL}/model-intake/submissions/${id}/freeze-evidence`, {
+    method: 'POST',
+    headers: modelIntakeWorkflowHeaders(operatorToken, true),
+    body: JSON.stringify({ deployment_bundle: deploymentBundle }),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to freeze Model Intake evidence'))
+  return res.json()
+}
+
+export async function createModelIntakeApproval(id: string, data: {
+  evidence_manifest_id: string
+  approval_type: string
+  decision: 'approve' | 'reject'
+  reason: string
+  expires_days?: number
+  restrictions?: string[]
+}, operatorToken: string): Promise<Record<string, unknown>> {
+  const res = await fetch(`${API_URL}/model-intake/submissions/${id}/approvals`, {
+    method: 'POST',
+    headers: modelIntakeWorkflowHeaders(operatorToken, true),
+    body: JSON.stringify(data),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to record Model Intake approval'))
+  return res.json()
+}
+
+export async function createModelIntakePolicyDecision(id: string, evidenceManifestId: string, operatorToken: string): Promise<Record<string, unknown>> {
+  const res = await fetch(`${API_URL}/model-intake/submissions/${id}/policy-decisions`, {
+    method: 'POST',
+    headers: modelIntakeWorkflowHeaders(operatorToken, true),
+    body: JSON.stringify({ evidence_manifest_id: evidenceManifestId }),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to evaluate Model Intake policy'))
+  return res.json()
+}
+
+export async function promoteModelIntakeSubmission(id: string, policyDecisionId: string, idempotencyKey: string, operatorToken: string): Promise<Record<string, unknown>> {
+  const res = await fetch(`${API_URL}/model-intake/submissions/${id}/promote`, {
+    method: 'POST',
+    headers: modelIntakeWorkflowHeaders(operatorToken, true),
+    body: JSON.stringify({ policy_decision_id: policyDecisionId, idempotency_key: idempotencyKey }),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to promote Model Intake admission'))
   return res.json()
 }
 

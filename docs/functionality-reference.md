@@ -1209,7 +1209,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 284 | `api/api.py` FastAPI decorators |
+| Public REST operations | 285 | `api/api.py` FastAPI decorators |
 | Unique REST paths | 240 | `api/api.py` |
 | Check families | 14 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
@@ -1219,7 +1219,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Scanner wrapper commands | 26 | `scanner.sh` |
 | Make targets | 11 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
-| Runtime environment keys | 307 | Python sources + Compose manifests |
+| Runtime environment keys | 308 | Python sources + Compose manifests |
 | Scanner modules | 98 | `scanner/scanner_tools/` |
 | UI pages | 31 | `ui/src/app/` |
 | Skills | 6 | `skills/` |
@@ -1395,6 +1395,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `POST` | `/model-intake/scan` | `scan_model_intake` |
 | `GET` | `/model-intake/scanners/readiness` | `model_intake_scanner_readiness` |
 | `GET` | `/model-intake/scans/{scan_id}/evidence-export` | `get_model_intake_evidence_export` |
+| `GET` | `/model-intake/submissions` | `list_model_intake_submissions` |
 | `POST` | `/model-intake/submissions` | `create_model_intake_submission` |
 | `GET` | `/model-intake/submissions/{submission_id}` | `get_model_intake_submission` |
 | `POST` | `/model-intake/submissions/{submission_id}/agent/session` | `create_model_intake_agent_session` |
@@ -1976,6 +1977,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `MODEL_INTAKE_DEPLOYMENT_VERIFIER_TOKEN` | `api/model_intake_admission_webhook.py` |
 | `MODEL_INTAKE_OCI_REGISTRY_REPOSITORY` | `scripts/model_intake_push_oci.py` |
 | `MODEL_INTAKE_OPA_URL` | `scanner/scanner_tools/model_intake_providers.py` |
+| `MODEL_INTAKE_OPERATOR_CREDENTIALS_JSON` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_OPERATOR_ROLES` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_OPERATOR_TOKEN` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_POLICY_BUNDLE_SHA256` | `api/api.py` |

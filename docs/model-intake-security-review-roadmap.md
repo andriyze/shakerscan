@@ -1448,6 +1448,14 @@ signature, unsafe deserialization, prohibited sandbox behavior, or authorization
 
 ### 12.2 Minimum production blockers
 
+Production separation of duties uses server-owned identities. For multi-reviewer deployments, configure
+`MODEL_INTAKE_OPERATOR_CREDENTIALS_JSON` as a non-empty JSON list whose records contain a SHA-256 digest
+of a bearer token, a stable subject, and that subject's allowed approval roles. Raw bearer secrets are not
+stored in the map. The API derives both submission and approval identity from the matched record, rejects
+unknown roles, rejects duplicate token digests, and fails closed on malformed configuration. The legacy
+single operator token remains a development/migration path, but it cannot satisfy production's distinct
+security, platform, and release-manager subject requirement by itself.
+
 Production must block when any of the following is true:
 
 - Revision or any required artifact is mutable or incomplete.
@@ -1701,21 +1709,21 @@ Corporate work: supply representative synthetic/internal corpora, relevance judg
 labels, non-production services and principals, quality/capacity thresholds, data approvals, and authorization
 to run the tests.
 
-### Phase 4.1 — Bounded keyless Codex guidance — **approved scope; not implemented**
+### Phase 4.1 — Bounded keyless Codex guidance — **core controller and UI implemented**
 
 Model Intake may use the current coding-agent session as an optional planner, following the same suspend/reply
 shape as Deep Hunt but with a separate, smaller action catalog. The deterministic intake runs normally when
 no agent is present. Agent refusal, timeout, malformed output, or absence cannot weaken a gate or prevent the
 baseline review from reaching its evidence-based result.
 
-Allowed planner actions are typed operations such as: inspect the authoritative submission and control
-matrix; read redacted evidence; request an applicable existing ModelScan/Fickling/Semgrep/Trivy or built-in
-check; request a named Firecracker phase or approved loader profile; request a schema-validated known-answer,
-embedding, or equivalence case within a pre-approved corpus/threshold contract; compare results; record an
-analyst note; propose remediation/follow-up; and finish or abstain. The controller resolves action IDs to
-fixed implementations and enforces workflow state, applicability, exact subject, authorization, concurrency,
-cost, time, byte, model-token, and action-count budgets. There is no shell, arbitrary argv, arbitrary Python,
-arbitrary guest entrypoint, direct database mutation, or caller/agent-selected evidence signer.
+The implemented action catalog is deliberately smaller: inspect the authoritative submission and redacted
+evidence; inspect scanner/provider/runner readiness; validate (but never execute) an exact deployment-bundle
+runner plan; draft a bounded embedding test plan; recommend one catalogued operator follow-up; and finish or
+abstain. Runner and scanner execution remain explicit operator/API actions so the planner cannot create new
+evidence merely by requesting it. The controller resolves action IDs to fixed implementations and enforces
+submission binding, iteration and action-count budgets, strict schemas, and durable transcript/action rows.
+There is no shell, arbitrary argv, arbitrary Python, arbitrary guest entrypoint, direct admission/evidence
+mutation, or caller/agent-selected evidence signer.
 
 Agent outputs are untrusted advisory records. They cannot declare approval; override policy or required
 gates; suppress findings; trust keys/builders; modify authoritative manifests or evidence; approve exceptions;
@@ -1730,11 +1738,12 @@ turn, proposal, validation rejection, dispatched action, resulting evidence ID/d
 abstention is durably recorded. Replays are idempotent and bind the session to one submission and frozen
 manifest generation; new evidence or reassessment invalidates stale planner conclusions.
 
-Surface parity is mandatory: the API exposes session start/read/reply/cancel and typed action/result schemas;
-the UI shows objective, current turn, budgets, proposed/accepted/rejected actions, evidence links, limitations,
-and a prominent “advisory only” label; the shipped `shakerscan` skill teaches Codex the same contract and stop
-conditions. Cross-surface tests must prove that direct API calls, UI actions, and skill-driven sessions receive
-the same permissions and cannot reach legacy preflight or privileged admission mutations indirectly.
+The API currently exposes start/reply and typed action/result schemas, and the UI exposes the controller prompt,
+bounded replies, resulting observations, limitations, and a prominent “advisory only” label alongside—but
+separate from—the operator's runner and admission actions. Durable session read/resume/cancel and shipped-skill
+parity are the next surface-hardening increment. Cross-surface tests must prove that direct API calls, UI
+actions, and skill-driven sessions receive the same permissions and cannot reach legacy preflight or privileged
+admission mutations indirectly.
 
 ### Phase 5 — Useful report and release gate — **corporate-use report implemented; deployment enforcement is not operationally complete**
 
