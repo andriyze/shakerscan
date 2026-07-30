@@ -12,7 +12,7 @@ chooses the already implemented webhook; Kubernetes is not required by ShakerSca
 
 **Scoped-roadmap baseline checkout:** `c1900af` (implementation series beginning at `8f721ce`)
 
-**Review date:** 2026-07-28
+**Review date:** 2026-07-30
 
 **Implementation and automation-boundary review:** 2026-07-29
 
@@ -268,9 +268,9 @@ hash-locked virtual environments so their transitive dependencies cannot replace
 Trivy is checksum-pinned and runs with build-captured data and runtime update/network lookups disabled. An
 image build fails unless every core adapter detects its corresponding deterministic malicious fixture.
 
-### 2.3 Plain-language answer the report must provide
+### 2.3 Plain-language answer every report must provide
 
-Every completed intake must answer, on its first screen and in JSON:
+Every controlled intake report must answer, on its first screen, in JSON, and in printable HTML/PDF:
 
 1. **What exact model did we inspect?** Provider, repository, immutable revision, complete snapshot digest,
    weight digest, code digest, runtime digest, and intended deployment environment.
@@ -279,16 +279,118 @@ Every completed intake must answer, on its first screen and in JSON:
 3. **What failed?** The failed control, evidence reference, policy consequence, and remediation.
 4. **What did not run?** Missing tool, unsupported format, absent benchmark, timeout, crash, skipped control,
    or unavailable corporate input. A required non-run is never a pass.
-5. **Can this exact subject be deployed?** `ALLOW`, `REVIEW`, or `BLOCK`, with a short reason and the policy
-   version that made the decision.
-6. **What remains outside ShakerScan?** Required corporate approvals, registry promotion, CI/CD enforcement,
-   runtime monitoring, or data-plane validation.
+5. **What is the ShakerScan decision?** `ALLOW`, `REVIEW`, `INCOMPLETE`, or `BLOCK`, with a short reason and
+   the exact policy/evidence/admission identities that produced it.
+6. **Is this full corporate approval?** Always answer separately. ShakerScan reports
+   `NOT_DETERMINED_BY_SHAKERSCAN` because legal, privacy, business, regulatory, platform, and residual-risk
+   authority remain organizational decisions even when ShakerScan returns `ALLOW`.
+7. **What remains outside ShakerScan?** Name the required owner and expected evidence for each corporate
+   approval or operational proof, rather than hiding these items in a generic limitations paragraph.
 
 Normalized control states must be `PASS`, `FAIL`, `WARNING`, `REVIEW_REQUIRED`, `NOT_RUN`, `UNSUPPORTED`,
 `TIMEOUT`, `CRASHED`, `INCOMPLETE`, `SKIPPED_BY_POLICY`, or `NOT_APPLICABLE`. Only `PASS` and an explicitly
 justified `NOT_APPLICABLE` can directly satisfy a required gate. A policy may turn a resolved `WARNING` into
 an approval with recorded rationale; every other non-pass remains visible. The UI may use friendlier labels,
 but the exported status must remain unambiguous.
+
+The normalized controlled report uses `model-intake-corporate-report/v2` and has two deliberately different
+layers:
+
+- **Executive summary:** ShakerScan decision, full-corporate-approval disclaimer, exact authorization scope,
+  coverage counts, key deficiencies, and prioritized next actions. It is short enough for a risk owner to
+  make a disposition without reading scanner payloads.
+- **Detailed technical review:** the control question, status, answer, method, coverage, evidence references,
+  remediation, static per-scanner summary, Firecracker phase/network/resource timeline, authority bindings,
+  complete ShakerScan capability catalog, and corporate requirements outside ShakerScan.
+
+This format follows NIST's assessment-report guidance: an executive summary should state what and when was
+assessed, deficiencies, and recommendations, while the detailed report preserves assessed controls, results,
+observed deficiencies, and mitigation recommendations. NIST AI RMF also requires risks that cannot be measured
+to be documented and emphasizes clear language usable by executives and practitioners. See the
+[NIST RMF Assess FAQ](https://csrc.nist.gov/csrc/media/projects/risk-management/documents/05-assess%20step/nist%20rmf%20assess%20step-faqs.pdf),
+[NIST AI RMF Core](https://airc.nist.gov/airmf-resources/airmf/5-sec-core/), and
+[AI RMF communication attributes](https://airc.nist.gov/airmf-resources/airmf/appendices/app-d-attributes-of-the-ai-rmf/).
+
+#### 2.3.1 Exact list of checks ShakerScan performs
+
+“Performs” means ShakerScan implements and orchestrates the check. It does **not** mean every check ran for
+every model. Applicability and execution are resolved per exact subject. A required unavailable, incomplete,
+timed-out, crashed, unsupported, or stale check remains visible and cannot silently become a pass.
+
+| ID | Check ShakerScan performs | How it is checked | When it applies / what PASS means |
+|---|---|---|---|
+| `MI-01` | Safe source resolution and complete acquisition | Native URL/provider policy validates every redirect/DNS/IP destination, strips cross-origin credentials, streams under quotas, and records a content-free acquisition trail | All sources; approval evidence requires the complete object, not only a bounded prefix |
+| `MI-02` | Artifact integrity and immutable identity | Full SHA-256, byte count, expected/provider digest comparison, content-addressed quarantine, and immutable subject registration | All artifacts; PASS binds the exact bytes evaluated and later admitted |
+| `MI-03` | Complete repository and custom-code inventory | Authoritative pinned provider manifest, complete snapshot materialization, normalized paths, `auto_map`, tokenizer/configuration, and custom-code digests | Providers with authoritative snapshot semantics; non-Hugging Face sources remain artifact-only unless equivalent proof exists |
+| `MI-04` | Archive and model-format safety | Recursive ZIP/TAR inventory; traversal, symlink/device, collision, nesting, ratio/size/count, truncation, polyglot indicators; official safetensors parsing plus bounded defense-in-depth inspection; ONNX and GGUF structural checks | When archives/formats are present; parser error or incomplete coverage is non-pass |
+| `MI-05` | Unsafe serialization | ShakerScan `pickletools` semantic callable/opcode analysis, ModelScan for supported serialized models, and Fickling for applicable raw pickle | Pickle/serialized artifacts; expected framework reconstruction is distinguished from a proven dangerous callable but can still violate format policy |
+| `MI-06` | Repository source/configuration security | Built-in Python AST analysis plus the versioned Model Intake Semgrep ruleset | Code/config present; parse failure, large-file omission, rules staleness, timeout, or unresolved findings remain visible |
+| `MI-07` | Secrets, malware indicators, and native binaries | Built-in secret/malware rules, file-type facts, and native-binary inventory; Trivy adds applicable secret/misconfiguration evidence | Complete subject material exists; this is bounded detection, not a guarantee that no novel malware exists |
+| `MI-08` | SBOM, dependencies, CVEs, and misconfiguration | Native CycloneDX SBOM/dependency facts plus offline Trivy vulnerability, secret, misconfiguration, and license scan with database identity/freshness | Dependency manifests/runtime components present; missing lock/runtime identity or stale data can make the result incomplete |
+| `MI-09` | License inventory | Native license-file/dependency inventory and Trivy license results; declared license metadata is kept separate | License evidence present; PASS is inventory/policy evidence, never a legal opinion |
+| `MI-10` | Provenance, signature, attestation, lineage, and AIBOM | Exact digest verification, configured signer/trust pins, offline DSSE/in-toto subject checks, model/base/dataset declarations, and CycloneDX AI/ML metadata | Required by policy or supplied by source; presence is not trust, and publisher declarations remain declared evidence |
+| `MI-11` | Exact model runtime in Firecracker | Fixed no-shell guest executes import, tokenizer, model construction/load, warmup, inference, and teardown for the exact deployment bundle | Controlled admission requiring runtime qualification; KVM or loader unavailability is `INCOMPLETE`, with no fallback |
+| `MI-12` | Network prevention and attempted-network observation | No virtual NIC plus guest network syscalls, phase/destination digests, interface inventories, host nft counter deltas, loss/overflow, and telemetry digest | Every runtime job; PASS requires zero attempts/drops and complete non-lossy guest/host telemetry |
+| `MI-13` | Runtime resource envelope | Host cgroup limits and peaks for CPU, memory, PIDs, files, descriptors, disk, and wall time, bound into the signed receipt | Every runtime job; incomplete measurement or policy breach is non-pass |
+| `MI-14` | Unsafe-format conversion and equivalence | Fixed Firecracker conversion, tensor inventory, numeric/tensor/embedding equivalence, target identity registration, complete target rescan, and separate safe-loader qualification | When policy prohibits the source serialization format; never converts in the API/static worker |
+| `MI-15` | Embedding known-answer, robustness, and quality evaluation | Deterministic, content-free evaluation over trusted exact-subject observations; output shape, finiteness, collisions, stability, malformed/adversarial inputs, recall/relevance/latency/resource thresholds | An approved versioned benchmark is configured; ShakerScan runs/scores it but the corporation defines representative content and thresholds |
+| `MI-16` | Vector-store and knowledge-graph security | Trusted data-plane observations cover ACL leakage, tenant/graph/cache boundaries, poisoning, deletion, and model/index compatibility | Intended integration is available; model microVM success does not imply data-plane success |
+| `MI-17` | Evidence, policy, approval, and deployment admission | Freeze exact evidence; verify freshness/subject binding; identity-separated approvals; deterministic server policy; isolated signing; active-registry and exact-component parity; reassessment/revocation | Controlled workflow only; a preflight scan cannot authorize deployment |
+
+The external scanner set remains frozen to **ModelScan, Fickling, Semgrep, and Trivy**. ShakerScan does not
+claim that installing a binary proves applicability, freshness, execution, or coverage. The check catalog is
+included in JSON/UI/HTML only as a capability reference; the per-submission control and scanner evidence is
+the authority for what actually ran. This is consistent with [Hugging Face's pickle guidance](https://huggingface.co/docs/hub/security-pickle),
+which warns that scanning is not foolproof, and with [OWASP's AI supply-chain guidance](https://genai.owasp.org/llmrisk/llm032025-supply-chain/),
+which calls for verifiable sources, integrity checks, inventories, vulnerability management, and use-case
+evaluation rather than one scanner result.
+
+#### 2.3.2 Checks and decisions ShakerScan does not make
+
+These items are usually needed for full corporate approval. They are not scanner failures and must not be
+shown as if ShakerScan attempted and failed them. Reports label them `EXTERNAL_REQUIRED`, identify the typical
+owner and expected evidence, and state that full corporate approval is not determined by ShakerScan.
+
+| ID | Not determined by ShakerScan | Why it remains external | Typical owner / evidence |
+|---|---|---|---|
+| `CORP-01` | Intended/prohibited use, business value, affected users, impact tier, and risk tolerance | These are organizational facts and decisions | Business owner / approved use-case and risk classification |
+| `CORP-02` | Legal acceptability of model, code, dataset, and dependency licenses; IP, patent, copyright, redistribution, indemnity, and terms | Automated inventory is not legal interpretation | Legal/procurement / legal opinion or license approval |
+| `CORP-03` | Training/fine-tuning data rights, consent, collection quality, poisoning assurance, and contractual restrictions | Publisher declarations do not prove dataset rights or integrity | Data governance/legal/model owner / dataset lineage and rights assessment |
+| `CORP-04` | Privacy impact, sensitive-data use, memorization/inference, residency, retention, and cross-border transfer | Depends on corporate data, jurisdiction, and deployment | Privacy/DPO / DPIA or PIA and approved handling controls |
+| `CORP-05` | Context-specific safety, harmful bias, accessibility, explainability, human oversight, and failure impact | Requires representative people, harms, tasks, and thresholds | Responsible AI/product risk / use-case TEVV and residual-risk disposition |
+| `CORP-06` | Representative quality, latency, throughput, capacity, availability, cost, and benefit thresholds | ShakerScan cannot invent a representative corporate benchmark | ML platform/application owner / versioned benchmark and capacity plan |
+| `CORP-07` | Threat model and red-team coverage of the complete application, ingestion, retrieval, vector, graph, API, identity, and downstream-LLM system | The model file is only one component | Security architecture/AppSec / threat model and scoped test report |
+| `CORP-08` | Production IAM, segmentation, KMS/secrets, image/host hardening, tenancy, logging access, backup, and registry architecture | These controls live in corporate infrastructure | Platform/cloud security / deployment and inherited-control assessment |
+| `CORP-09` | Continuous production monitoring for drift, abuse, availability, CVEs, upstream changes, and rule/policy freshness | Intake is point-in-time evidence | MLOps/SRE/SOC / monitoring, alerts, ownership, reassessment plan |
+| `CORP-10` | Tested incident response, revocation, rollback, reindex, deletion, retention, recovery, and decommissioning | Requires organization-specific dependent systems and processes | IR/MLOps/data owner / tested runbooks and recovery/deletion receipts |
+| `CORP-11` | Publisher/vendor due diligence, support, disclosure, ownership changes, and contract risk | Repository metadata is not supplier assurance | Third-party risk/procurement / vendor assessment and monitoring plan |
+| `CORP-12` | Applicable sector, AI, export, records, accessibility, data, and assurance regulations | Applicability depends on entity, place, use, user, and data | Compliance/legal / applicability and control mapping |
+| `CORP-13` | Proof that the real production release path cannot bypass exact-digest active-admission verification | ShakerScan ships enforcement mechanisms but cannot force an organization to use them | Release/platform owner / outage, bypass, expiry, revocation, and recovery acceptance receipt |
+| `CORP-14` | Final residual-risk acceptance/rejection and exception authority | A scanner must not approve its own residual risk | Authorizing official/risk owner / signed decision with owner, scope, controls, and expiry |
+
+The external list reflects the wider AI lifecycle rather than only model-file security. The
+[NIST AI RMF](https://www.nist.gov/itl/ai-risk-management-framework) calls for governance, context mapping,
+measurement, and ongoing management across validity, safety, security, transparency, privacy, and fairness.
+The joint [NCSC/CISA secure AI development guidance](https://www.ncsc.gov.uk/collection/guidelines-secure-ai-system-development/guidelines)
+covers secure design, development, deployment, and operation/maintenance. CycloneDX similarly describes an
+[AI/ML-BOM](https://cyclonedx.org/capabilities/mlbom/) as transparency for models, datasets, configurations,
+provenance, security, privacy, safety, and ethical considerations; an inventory supports those reviews but
+does not replace them. SLSA defines [provenance](https://slsa.dev/spec/v1.2/provenance) as verifiable origin
+and production information, not as a statement that an artifact is legally or operationally acceptable.
+
+#### 2.3.3 Report status and interpretation rules
+
+| Report term | Exact meaning |
+|---|---|
+| `ALLOW` | The exact registered deployment subject satisfies the configured ShakerScan admission policy and has a current verified signed admission. It is **not** a universal or standalone corporate approval. |
+| `BLOCK` | A mandatory control failed, policy blocked, or signed/current authority records contradict one another. |
+| `INCOMPLETE` | Required evidence did not run, errored, expired, was partial, or could not be produced in the available environment. Incomplete is not a soft pass. |
+| `REVIEW` | Determinate evidence exists, but a human disposition, policy decision, or promotion step remains. |
+| `PASS` control | That exact control ran or its eligible evidence was verified against the exact subject and met its acceptance rule. |
+| `FAIL` control | The control ran and produced a policy-relevant negative result. |
+| `NOT_RUN` / `ERROR` / `INCOMPLETE` control | ShakerScan supports the control but lacks sufficient evidence for this submission. |
+| `NOT_APPLICABLE` control | Applicability was explicitly resolved from subject facts; it does not mean the tool was forgotten. |
+| `EXTERNAL_REQUIRED` | A normal corporate approval input outside ShakerScan's decision authority. |
 
 ### 2.4 Current delivery summary
 
@@ -310,7 +412,7 @@ but the exported status must remain unambiguous.
 | Typed non-scanner providers | Implemented and boundary-frozen | Sandbox execution, runner-derived embedding evaluation, source-bound embedded policy, and normalized report/signed-admission export are separate classes | OPA and additional provider frameworks are out of scope and are not advertised as product capabilities |
 | Signed admission statement and lifecycle registry | Exact-bundle v2 control plane and isolated signer implemented | Workers emit only unsigned non-deployable candidates. The signer has a dedicated minimal hash-locked image, isolated internal network, separate least-privilege database role, shipped AWS KMS client, request idempotency lock, and initiating-operator audit identity. Frozen evidence, approvals, exact component verification, latest-manifest checks, and evidence-change invalidation are durable. | Prove production KMS rotation/failure paths and remaining revocation/recovery negative paths |
 | Saved Model Intake policy profiles | Implemented server-owned admission expansion | Admission uses the operator-selected server default; caller booleans/subsets/exceptions cannot weaken it; mutations require operator auth | Add organization-specific required scanner/runtime/benchmark fields |
-| One-page control matrix and detailed evidence | Implemented across UI/JSON/HTML/SARIF | Corporate-use verdict, can-use boolean, malicious-vs-capable serialization distinction, control matrix, primary blockers, next actions, limitations, activity, and shared report digest are visible | Add organization-specific remediation content only when useful; it is not an admission dependency |
+| Executive and detailed corporate report | Implemented across UI/JSON/HTML/SARIF as `model-intake-corporate-report/v2` | The executive section separates ShakerScan `ALLOW/BLOCK/INCOMPLETE/REVIEW` from `NOT_DETERMINED_BY_SHAKERSCAN` full corporate approval, exact scope, coverage, key deficiencies, and next actions. The detailed section includes enriched controls, scanner-level content-free static summaries for new evidence, Firecracker timelines, the 17-check capability catalog, and 14 external corporate requirements with owners/evidence. | Add organization-specific policy/remediation text only when useful; it is not an admission dependency and may not hide or relabel a non-pass |
 | Deployment by exact approved digest | Pure v2 verifier, explicit observation endpoint, configured OCI publisher, and namespace/object-scoped Kubernetes webhook installer implemented | `oras` performs one fixed HTTPS registry copy and verifies the remote descriptor; cert-manager injects the webhook CA; immutable image configuration and rollout are validated. No live corporate registry/cluster acceptance has been run. | Run digest-variant, outage, expiry, revocation, and recovery acceptance against the organization-operated registry and cluster; add no other orchestrator |
 | Legal, privacy, data provenance, and risk acceptance | Recorded as governance evidence | Organization-dependent | Keep human-owned; enforce required owner, approval, scope, and expiry |
 
@@ -856,21 +958,27 @@ incomplete, stale, bypassed, or governed by a different policy.
 
 ### 7.9 P1 — Execute in a hardened sandbox
 
-**Delivery status: hardened semantic container, built-in safetensors weight loader, and operator
-runtime-adapter contract implemented; disposable microVM and independent runtime telemetry are not
-implemented.** The service re-binds exact subjects and requests, gates PASS on isolation, applies per-job
-kill/resource limits, and refuses to promote header parsing to dynamic success. For safetensors, the built-in
-adapter re-hashes and memory-maps the exact file, validates tensor inventory/ranges, samples numeric finiteness,
-and reports `load_level=weights`. It explicitly reports `model_loaded=false` plus the limitations
-`custom_model_code_not_imported`, `model_graph_not_instantiated`, and
-`embedding_known_answers_not_executed`. The remaining tier must import approved custom code, load the
-tokenizer/model, and run inference in a disposable KVM/microVM while independently collecting runtime
-telemetry. It must not weaken the static sandbox by simply enabling `trust_remote_code` in the general worker.
+**Delivery status: container staging tier and disposable Firecracker/KVM production tier implemented;
+physical KVM/model acceptance pending.** The container service re-binds exact subjects and requests, gates
+PASS on isolation, applies per-job kill/resource limits, and refuses to promote header parsing to dynamic
+success. For safetensors, the built-in adapter re-hashes and memory-maps the exact file, validates tensor
+inventory/ranges, scans numeric finiteness, and reports `load_level=weights`. It explicitly reports
+`model_loaded=false` plus `custom_model_code_not_imported`, `model_graph_not_instantiated`, and
+`embedding_known_answers_not_executed`.
+
+The separate production tier is now a fixed no-shell Firecracker/jailer host controller and fixed guest. It
+binds the artifact, repository, custom code, tokenizer, configuration, runtime image, loader profile, and
+benchmark digests; executes fixed import/tokenizer/load/warmup/inference/teardown or conversion phases; has no
+virtual NIC and no production fallback; applies cgroup-v2 and wall-time enforcement; measures guest syscalls,
+host firewall counters/interfaces, and resource peaks; and emits a signed exact-subject receipt. The current
+VPS correctly reports `NOT_READY` because it has no `/dev/kvm`. A physical nested-virtualization or bare-metal
+KVM host must still prove benign and deliberate-network/process/file/resource negative fixtures and the three
+real model paths.
 
 Static checks cannot prove how custom model code behaves when imported or invoked. A deterministic dynamic
 stage is required.
 
-The sandbox must have:
+The Firecracker acceptance contract requires:
 
 - A disposable microVM or equivalently isolated runtime. Prefer a microVM for untrusted custom code.
 - No network route and no proxy credentials.
@@ -908,7 +1016,7 @@ Stronger operator runtime-adapter contract for model/inference phases:
 }
 ```
 
-The operator supplies this JSON through `MODEL_INTAKE_SANDBOX_RUNTIME_ADAPTERS_JSON` in the sandbox service,
+The operator supplies this JSON through `MODEL_INTAKE_SANDBOX_RUNTIME_ADAPTERS_JSON` in the container staging service,
 not in the scan request. The command is argv-only; no shell is used. Supported exact placeholders are
 `{artifact}`, `{filename}`, and `{digest}`. The runner receives a credential-stripped, proxy-disabled
 environment in the no-egress container and must emit a bounded JSON object on stdout containing:
@@ -922,18 +1030,19 @@ environment in the no-egress container and must emit a bounded JSON object on st
 
 Non-zero exit, malformed/oversized output, timeout, digest drift, missing load proof, absent/failing known
 answers, process excess, or network attempts fail. The normalized evidence records adapter identity/version,
-argv-contract digest, report digest, timing, imports reported by the adapter, process count, and stderr. Since
-the adapter report is not independent syscall telemetry, it cannot satisfy the remaining microVM telemetry
-control by itself.
+argv-contract digest, report digest, timing, imports reported by the adapter, process count, and stderr. The
+container adapter report is not independent syscall telemetry and cannot satisfy the separately implemented
+Firecracker runtime/network/resource controls by itself.
 
 ### 7.10 P1 — Add embedding-specific security and quality evaluation
 
-**Delivery status: evaluation contract and deterministic scoring implemented; trusted execution harness and
-benchmark content remain.** ShakerScan can score content-free observations, but requester-supplied observations
+**Delivery status: evaluation contract, deterministic scoring, and trusted Firecracker runtime producer
+implemented; corporate benchmark and data-plane producer remain external.** ShakerScan can score content-free observations, but requester-supplied observations
 are explicitly `DECLARED` and cannot satisfy an admission gate. The scorer no longer synthesizes an ideal
 ranking when actual retrieval results are absent. Every scored query requires actual returned IDs and scores
-plus connector, index, principal, tenant, run, and timestamp identity. The remaining runner must generate and
-bind those observations to the exact artifact/runtime/index. Each corporation must supply the approved,
+plus connector, index, principal, tenant, run, and timestamp identity. The Firecracker runner generates and
+binds model-runtime observations; a separate corporate connector must generate the intended vector/graph
+observations. Each corporation must supply the approved,
 versioned corpus, labels, thresholds, and representative use cases.
 
 A model can be free of malware and still be unsuitable. Build a versioned corporate evaluation corpus with
@@ -990,8 +1099,9 @@ The data plane needs its own controls:
 
 ### 7.12 P2 — Produce a signed decision package
 
-**Delivery status: legacy v1 quarantined; exact-bundle admission-v2 library implemented; control-plane
-persistence and external enforcement remain.** Workers
+**Delivery status: legacy v1 quarantined; exact-bundle admission-v2 library, durable control plane, isolated
+signer, OCI publisher, CI verifier, and optional Kubernetes verifier implemented; corporate trust/registry/
+deployment acceptance remains.** Workers
 now emit only unsigned, non-deployable technical candidates and have no admission private key. Both library
 and HTTP legacy verification reject a signed non-`allow` decision, and v1 itself is rejected by default even
 when its signature and subject are valid. Schema migration marks active v1 registry rows
@@ -1001,9 +1111,9 @@ snapshot, custom code, tokenizer, configuration, immutable runtime image, loader
 retrieval application, index schema, and environment. It freezes content-addressed evidence manifests,
 requires exact-bound separated approvals, builds deterministic policy facts, refuses to sign a non-`allow`,
 wraps the statement in a DSSE-style envelope, and verifies every component plus builder identity. Revocation,
-reassessment, and quarantine deletion retain the authenticated operator boundary. Next, a distinct
-control-plane service must persist/freeze those records and invoke a narrow KMS/HSM signer. Only then
-should registry/CI/CD/Kubernetes/serving enforcement clients be enabled.
+reassessment, and quarantine deletion retain the authenticated operator boundary. The durable control plane
+persists and freezes those records and invokes a narrow isolated signer with an organization-controlled KMS
+path. The shipped enforcement clients still require live acceptance in the organization's actual release path.
 
 The final report must be machine-verifiable and human-readable. It should include:
 
@@ -1814,9 +1924,12 @@ UI, and skill carry the same permissions and cannot reach privileged admission m
 
 ### Phase 5 — Useful report and release gate — **product mechanisms complete; corporate deployment acceptance pending**
 
-Delivered: a first-screen corporate-use verdict and can-use boolean, malicious-primitive proof separated from
-format capability, control matrix, primary blockers, limitations, concrete next actions, deployment
-decision/reason, findings, AIBOM, evidence, activity logs, JSON/PDF
+Delivered: a first-screen executive summary that separates the configured ShakerScan decision from full
+corporate approval, exact authorization scope, coverage counts, key deficiencies, and concrete next actions;
+plus a detailed technical section with enriched control questions/methods/evidence/remediation, per-scanner
+content-free static summaries, Firecracker timelines, the complete check catalog, and explicitly external
+corporate requirements. Malicious-primitive proof remains separate from format capability. Findings, AIBOM,
+evidence, activity logs, JSON/PDF
 exports, optional signed statements, lifecycle registry, reassessment, expiry, supersession, and revocation.
 The exact-subject verifier authorizes only signed `allow` decisions, and the HTTP path additionally requires
 an active matching registry record. Lifecycle mutation endpoints require an operator bearer token; global
@@ -1838,7 +1951,8 @@ Remaining organization-specific enrichment and acceptance:
 - Add organization-specific remediation catalogs beyond the shipped per-control evidence references and
   plain-language failure reason. This is enrichment, not an admission dependency.
 
-Implemented normalized export parity: authenticated JSON, printable HTML/browser-PDF, SARIF, and the UI are
+Implemented normalized export parity: authenticated `model-intake-corporate-report/v2` JSON, printable
+HTML/browser-PDF, SARIF, and the UI are
 built from the same authoritative controlled-workflow records and stable report digest. They share
 `PASS`/`FAIL`/`REVIEW`/`INCOMPLETE`/`ERROR`/`NOT_RUN`/`NOT_APPLICABLE`, Firecracker phase/network/resource
 timelines, evidence references, expiry handling, and signed-admission/current-manifest parity. An active
@@ -2145,9 +2259,12 @@ Owners must decide and record:
 - [x] A verified exact-subject runtime receipt automatically produces separate durable embedding-evaluation
   evidence from its signed known-answer digest, output shape, resource limits, and network telemetry. Raw
   vectors are not retained, and this does not impersonate the separately required corporate data-plane run.
-- [x] The UI/JSON report has explicit normalized status, coverage, evidence references, and a phase timeline;
-  printable HTML/browser-PDF, SARIF, stable digest parity, expiry handling, and active-admission/current-record
-  parity use the same authoritative report builder.
+- [x] The UI/JSON report has an executive decision/scope/coverage/action section and a separate detailed
+  control/scanner/evidence section; it explicitly says full corporate approval is not determined by
+  ShakerScan, lists 17 implemented check capabilities and 14 external requirements, and preserves normalized
+  status, coverage, evidence references, remediation, and phase timelines. Printable HTML/browser-PDF, SARIF,
+  stable digest parity, expiry handling, and active-admission/current-record parity use the same authoritative
+  `model-intake-corporate-report/v2` builder.
 - [ ] The embedded Python policy, production KMS rotation/outage path, and live configured registry/Kubernetes
   deployments pass their complete negative-path and recovery gates. OCI remote-digest verification and pure,
   scoped/certified webhook mechanisms are implemented and unit-tested.
