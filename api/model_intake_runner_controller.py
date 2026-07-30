@@ -10,6 +10,7 @@ import hashlib
 import os
 from pathlib import Path
 import platform
+import shutil
 from typing import Any
 
 
@@ -23,6 +24,13 @@ def _sha256(path: Path) -> str:
 
 def firecracker_readiness(environment: dict[str, str] | None = None) -> dict[str, Any]:
     env = environment or os.environ
+    signer_backend = env.get("MODEL_INTAKE_RUNNER_SIGNER_BACKEND", "").lower()
+    signer_ready = bool(
+        signer_backend == "aws-kms" and env.get("MODEL_INTAKE_RUNNER_SIGNER_KEY_ID")
+        or signer_backend == "local-pem"
+        and env.get("MODEL_INTAKE_RUNNER_ALLOW_LOCAL_PEM") == "true"
+        and env.get("MODEL_INTAKE_RUNNER_SIGNING_KEY_PEM")
+    )
     checks: dict[str, Any] = {
         "linux": platform.system() == "Linux",
         "kvm": Path("/dev/kvm").exists(),
@@ -30,8 +38,14 @@ def firecracker_readiness(environment: dict[str, str] | None = None) -> dict[str
         "jailer": False,
         "kernel": False,
         "rootfs": False,
-        "signer": bool(env.get("MODEL_INTAKE_RUNNER_SIGNER_KEY_ID")),
+        "signer": signer_ready,
+        "builder_identity": bool(env.get("MODEL_INTAKE_RUNNER_BUILDER_ID")),
         "egress_policy": env.get("MODEL_INTAKE_RUNNER_EGRESS_POLICY") == "deny-all",
+        "cgroup_v2": Path("/sys/fs/cgroup/cgroup.controllers").is_file(),
+        "cgroup_parent": Path("/sys/fs/cgroup/shakerscan-model-intake/cgroup.subtree_control").is_file(),
+        "network_namespace_tool": shutil.which("ip") is not None,
+        "firewall_tool": shutil.which("nft") is not None,
+        "filesystem_tool": shutil.which("mkfs.ext4") is not None and shutil.which("debugfs") is not None,
     }
     identities: dict[str, str] = {}
     for name, variable, digest_variable in (
@@ -70,7 +84,7 @@ def build_firecracker_config(request: dict[str, Any]) -> dict[str, Any]:
     return {
         "boot-source": {
             "kernel_image_path": request["kernel_image"],
-            "boot_args": "console=ttyS0 reboot=k panic=1 pci=off random.trust_cpu=on module.sig_enforce=1",
+            "boot_args": "console=ttyS0 root=/dev/vda ro rootfstype=ext4 reboot=k panic=1 pci=off random.trust_cpu=on module.sig_enforce=1",
         },
         "drives": [
             {"drive_id": "rootfs", "path_on_host": request["rootfs_image"], "is_root_device": True, "is_read_only": True},

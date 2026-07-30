@@ -1,0 +1,25 @@
+#!/bin/sh
+set -eu
+
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+mount -o ro /dev/vdb /input
+mount /dev/vdc /output
+mkdir -p /output/traces /output/work
+chmod 0700 /output/traces /output/work
+chown 65532:65532 /output/work
+
+/opt/venv/bin/python /opt/shakerscan/guest_worker.py --inventory > /output/interfaces.json
+status=0
+for phase in import tokenizer model_load warmup inference teardown; do
+  /usr/bin/strace -ff -tt -T -s 256 -yy \
+    -e trace=%network,execve,openat,clone,fork,vfork \
+    -o "/output/traces/trace.${phase}" \
+    /usr/bin/setpriv --reuid=65532 --regid=65532 --clear-groups \
+    /opt/venv/bin/python /opt/shakerscan/guest_worker.py --phase "$phase" || status=$?
+  [ "$status" -eq 0 ] || break
+done
+/opt/venv/bin/python /opt/shakerscan/guest_worker.py --finalize "$status"
+sync
+/bin/busybox poweroff -f

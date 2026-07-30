@@ -30,7 +30,9 @@ Implement and harden:
 1. One authoritative admission workflow; the legacy scan path remains preflight/technical review only.
 2. The existing ModelScan, Fickling, Semgrep, and Trivy adapters plus ShakerScan's current built-in archive,
    pickle, Python AST, secret/malware-rule, SBOM, dependency, native-binary, safetensors, ONNX, and GGUF checks.
-3. One production execution backend: Firecracker with KVM and jailer. There is no production fallback.
+3. One production execution backend: Firecracker with KVM and jailer. There is no production fallback. The
+   executable host controller, fixed guest, provisioning/build scripts, and signed measured-telemetry path
+   are implemented; release acceptance still requires a host that actually exposes `/dev/kvm`.
 4. Controlled CodeSage `.bin` to safetensors conversion inside Firecracker, followed by tensor and embedding
    equivalence evidence and a complete rescan of the new artifact identity.
 5. The existing Python policy engine, approval model, signer service, OCI promotion path, CI verifier,
@@ -296,8 +298,8 @@ but the exported status must remain unambiguous.
 | Isolated semantic sandbox | Implemented container boundary | Request/subject/evidence binding, isolation/seccomp gating, broker-worker service, and per-job limits are present | Treat it as bounded staging evidence, not a substitute for host-independent execution isolation |
 | Built-in safetensors weights adapter | Official parser plus fail-closed defense-in-depth inspector implemented and enabled by format | A hash-locked safetensors 0.8.0 Rust binding is authoritative for format acceptance; ShakerScan independently checks shape/range/coverage, re-hashes the exact artifact, and vector-scans every F16/F32/F64/BF16 value through bounded NumPy memmap chunks. The release image runs non-skippable valid, hostile-metadata, non-finite, and truncated self-tests. Parser identity and full-value counts survive into evidence. | It still does not instantiate the model graph, tokenize, or generate embeddings; those belong to a loader profile in the disposable runner tier. |
 | Operator runtime adapter | Implemented integration contract | Can prove exact-digest model load and known-answer tests in the hardened container when an operator image/argv adapter is installed | Treat as staging evidence, not a substitute for the microVM tier |
-| Actual tokenizer/model load and inference in disposable microVM | Firecracker configuration/readiness schema only | No; there is no Firecracker process invocation or runner receipt producer in the repository | Implement one KVM/Firecracker+jailer runner and executable, digest-pinned loader profiles; fail closed without it |
-| Runtime behavior telemetry | Receipt verifier schema only | No producer currently collects or binds independent telemetry; signer assertions alone are not telemetry | Collect and digest bounded process/import/file/network/resource observations inside the Firecracker path without adding another execution backend |
+| Actual tokenizer/model load and inference in disposable microVM | Executable Firecracker/jailer host controller and fixed guest implemented | The controller verifies pinned binaries/kernel/rootfs, authoritative manifest members, loader profile, reviewed custom code, and runtime digest; creates immutable input and bounded output ext4 drives; starts one jailed no-NIC microVM with cgroup-v2 limits; executes fixed import/load/inference phases; hard-kills on timeout; and signs an exact-subject receipt. It has no container fallback or arbitrary guest command. Physical release proof remains pending because the designated VPS does not expose `/dev/kvm`. | Run physical acceptance on a nested-virtualization or bare-metal KVM host; `NOT_READY` remains the only valid result on the current VPS |
+| Runtime behavior telemetry | Measured guest/host producer and strict receipt verifier implemented | Root-owned `strace` streams capture network/process/file syscalls by fixed phase; destination addresses are privacy-safe digests with ports/DNS flags; guest and host interface inventories, deny-all nft counter deltas, raw-trace digest, canonical telemetry digest, overflow/loss/completeness, cgroup limits/peaks, and no-NIC configuration digest are bound into the receipt. Any attempt, loss, overflow, contradiction, missing trace, extra interface, or digest mutation makes PASS impossible. | Prove the measurements against benign and deliberate-connect physical fixtures on a KVM host |
 | Provider-neutral evaluation contract | Deterministic scorer implemented | Public caller observations are `DECLARED` and fail closed for admission; actual result IDs/scores and connector/index/run identity are mandatory | Add the trusted isolated runner that alone may mark observations `GENERATED_DATA_PLANE` |
 | Corporate benchmark and thresholds | Integration point implemented | No universal corpus can ship | Organization supplies/version-controls corpus; ShakerScan automates execution and scoring |
 | Typed non-scanner providers | Implemented registry/readiness | Sandbox execution, embedding evaluation, embedded Python policy, and report export are separate classes | Harden only the embedded policy provider; OPA remains out of scope |
@@ -363,9 +365,9 @@ between schemas and working capabilities. These corrections are authoritative fo
 
 | Verified condition at current HEAD | Consequence | Required scoped repair |
 |---|---|---|
-| `model_intake_runner_controller.py` checks files and builds a Firecracker configuration dictionary, but no production call site invokes Firecracker or jailer | Firecracker execution is **not implemented**; readiness/config tests are contract tests only | Build one real Linux/KVM+jailer execution service with start, timeout/kill, teardown, output quotas, and physical E2E evidence |
+| Earlier `model_intake_runner_controller.py` only checked files and built a dictionary | Replaced by an executable `model_intake_firecracker_runner.py`, fixed read-only guest protocol, hash-locked CPU runtime, ext4 drive builder, jailer/KVM lifecycle, timeout/process-group kill, cgroup-v2 enforcement, output quotas, cleanup, and signed receipt issuer | Physical E2E remains a release blocker and must run on a host with `/dev/kvm`; the designated VPS currently proves the intended fail-closed `NOT_READY` path |
 | Loader profiles contain entrypoint strings, while the shipped images do not contain the corresponding Transformers/ONNX runtimes | A profile marked `READY` means schema resolution, not executable readiness | Make readiness contingent on a digest-pinned runner image that actually executes the selected entrypoint; otherwise return `INCOMPLETE` |
-| Signed runner-receipt verification accepts isolation booleans asserted by the signer, but there is no trusted runner producer or telemetry digest | The signature proves who signed a claim, not that isolation or telemetry occurred | The Firecracker runner must generate the receipt from measured execution, bind telemetry/output digests, and use a purpose-scoped key unavailable to callers and static workers |
+| Earlier signed runner receipts accepted isolation booleans without a producer | Receipt v2 now requires canonical measured telemetry: raw trace and telemetry digests, operation/phase/destination evidence, guest/host interfaces, nft counter deltas, no-device proof, loss/overflow flags, and cgroup evidence. The issuer itself refuses an incomplete PASS before signing. | Operate the purpose-scoped KMS key on the runner host and complete deliberate-network-attempt physical acceptance |
 | Promotion creates a local OCI image layout but performs no registry push or post-push digest verification | “Promotion” is not a corporate distribution control yet | Push exactly one configured internal-registry subject and verify the remote manifest digest before activating admission |
 | The Kubernetes webhook manifest contains replacement placeholders, lacks installation/certificate wiring, declares `sideEffects: None` while verification mutates deployment bindings, and is cluster-wide | The manifest is a prototype, not deployable enforcement | Remove verification side effects from admission review (or declare them correctly), scope namespaces, provide certificate/image configuration, and prove fail/recovery behavior without self-deadlocking the cluster |
 | The local operator guard trusts loopback, target rescan replays stored acquisition authority without revalidating it, and several resolver/readiness endpoints have no explicit operator boundary | Local network placement is being treated as identity and expired authority can be replayed | Require authenticated operator/deployment identity for mutations and authority-bearing replay; revalidate scope/approval receipts and strip stale acquisition grants |
@@ -1599,7 +1601,7 @@ Remaining product work:
 Operator/corporate work: approve the four scanner versions and licenses, update the existing vulnerability
 and rule data, supply organization Semgrep rules where needed, and define severity/freshness/exception policy.
 
-### Phase 3 — Disposable model execution and runtime telemetry — **official parser implemented; loader, Firecracker, and receipt work are contracts only**
+### Phase 3 — Disposable model execution and runtime telemetry — **executable implementation complete; physical KVM acceptance pending**
 
 The semantic container now includes a built-in exact-digest safetensors weights adapter and supports an
 operator runtime adapter. The built-in adapter only returns PASS after official Rust parser acceptance,
@@ -1608,40 +1610,38 @@ floating value, and reports `load_level=weights`; the operator adapter must prod
 known-answer evidence before claiming model load or inference. Both remain staging/integration tiers, not the
 disposable microVM required here.
 
-Contract work only: a Firecracker/jailer configuration builder describes no-network, read-only input/rootfs,
-quota-output, seccomp/cgroup/timeout/receipt-required settings. Readiness hashes configured binaries/images
-and refuses a local-container fallback. It does **not** invoke Firecracker, jailer, cgroups, or a guest, and
-no runner produces the signed receipt. Loader profiles select declaratively from format, runtime library,
-custom-code facts, and image identity, but their entrypoint strings are not executable capabilities until a
-digest-pinned runner image contains and invokes the required runtime. Executable serialization remains
-blocked pending the Firecracker conversion path.
+The executable runner now invokes a digest-pinned Firecracker/jailer pair, creates a fresh network namespace
+with deny-all nft policy, attaches no virtual NIC, enforces cgroup-v2 and rlimits, builds fresh ext4 input and
+output drives, boots a fixed read-only hash-locked guest, and runs only the import/load/inference action
+catalog. Before execution it independently validates the complete authoritative repository manifest, every
+member digest/size, selected artifact digest, runtime rootfs digest, loader-profile digest, and reviewed
+custom-code digest. Pickle-capable loading is prohibited in this runtime path.
 
-Remaining product/infrastructure work:
+The guest captures root-owned syscall traces while model code runs as an unprivileged identity. The host
+independently parses and digests the bounded stream, records interface/firewall/cgroup observations, refuses
+incomplete or internally inconsistent PASS claims before signing, kills the whole process group on timeout,
+and tears down the network namespace, cgroup, and jail. No local-container fallback or arbitrary guest
+command exists.
 
-- Deploy dedicated Linux/KVM runner hosts and start a fresh Firecracker microVM per exact model/runtime subject.
-- Mount only the read-only quarantined snapshot and signed runtime plus a quota-limited scratch volume.
-- Do not attach a Firecracker network interface; place the jailed process in a deny-all host namespace as a
-  second boundary, expose no credentials, and destroy the VM after bounded evidence export.
-- Wrap every guest phase and all descendants with a measured syscall collector. Record `socket`, `connect`,
-  `bind`, `listen`, DNS-related calls, send/receive calls, address family, result, phase, and a job-salted
-  destination digest/port without retaining payloads. Record the guest interface inventory and the host
-  namespace/interface/firewall counters plus whether a TAP/network descriptor ever existed.
-- Bind a canonical network-telemetry digest, event count, per-phase counts, collector identity/version,
-  collection-complete flag, dropped/overflow count, guest-interface digest, host-counter digest, and
-  no-network-device proof into the signed runner receipt. Missing, malformed, truncated, overflowed, or
-  unsigned telemetry is `INCOMPLETE`, never evidence of silence.
-- Fail strict admission on any AF_INET/AF_INET6 or DNS attempt, even when egress was successfully blocked.
-  Record local/Unix-socket activity too; only a server-owned loader policy may classify an exact non-egress
-  local pattern as expected, and requesters or agents cannot add such allowances.
+Physical validation is not complete. The designated rebuild VPS is x86_64 with cgroup v2 but does not expose
+`/dev/kvm` or nested-virtualization flags. ShakerScan therefore reports `NOT_READY` there, as required. A
+bare-metal or nested-virtualization KVM runner is required to check the physical-run boxes; QEMU emulation or
+a Docker fallback will not be added to hide that infrastructure limitation.
+
+Remaining physical acceptance and infrastructure work:
+
+- Deploy at least one Linux host that exposes `/dev/kvm` and run the physical benign, deliberate-connect,
+  timeout, crash, manifest-mismatch, telemetry-truncation, and signature-negative acceptance fixtures.
+- Verify that physical interface/firewall/cgroup observations agree with the implemented guest trace and
+  no-device evidence for both quiet and deliberate-network-attempt fixtures.
 - Add only loader profiles needed by formats already supported by the current product and executable in the
   single Firecracker boundary; unsupported runtimes remain `INCOMPLETE`.
-- Separate import, tokenizer construction, model construction, weight load, warmup, inference, and teardown
-  so the report identifies the failing phase.
+- Verify phase-specific failure reporting for import, tokenizer construction, model construction/weight load,
+  warmup, inference, and teardown against physical fixtures.
 - **Implemented evidence contract:** a signed conversion receipt must bind source/target digests, converter
   image, tensor inventory, numeric equivalence, and embedding equivalence. Deploy the conversion job inside
   the runner fleet; unsafe source serialization never executes in the API/static worker.
-- Produce a signed runtime-execution receipt bound to snapshot, runtime, loader, configuration, hardware,
-  limits, and telemetry digests.
+- Prove the purpose-scoped KMS signer and trust-anchor rotation path on the physical runner host.
 
 Exit criteria: CodeRankEmbed and CodeSage Base can be loaded and exercised without corp network, credentials,
 or host access; prohibited behavior and resource breaches reliably block. CodeSage Large runs only if the

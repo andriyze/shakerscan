@@ -4,7 +4,9 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
 
 from model_intake_loader_profiles import resolve_loader_profile  # noqa: E402
+from model_intake_control_plane import canonical_bytes  # noqa: E402
 from model_intake_runner_controller import build_firecracker_config, firecracker_readiness  # noqa: E402
+from model_intake_firecracker_runner import FirecrackerRunner, parse_network_telemetry  # noqa: E402
 
 
 def test_loader_selection_is_capability_based_and_supports_unseen_models():
@@ -58,3 +60,129 @@ def test_firecracker_readiness_has_no_local_container_fallback(tmp_path, monkeyp
     readiness = firecracker_readiness({})
     assert readiness["status"] == "NOT_READY"
     assert readiness["fallback_execution"] is False
+
+
+def test_network_trace_parser_records_attempt_phase_destination_and_overflow_state(tmp_path):
+    traces = tmp_path / "traces"
+    traces.mkdir()
+    (traces / "trace.load.42").write_text(
+        '12:00:00 connect(3<TCP:[1]>, {sa_family=AF_INET, sin_port=htons(443), '
+        'sin_addr=inet_addr("203.0.113.5")}, 16) = -1 ENETUNREACH\n'
+        '12:00:01 socket(AF_INET, SOCK_STREAM, IPPROTO_TCP) = 3\n'
+    )
+    telemetry = parse_network_telemetry(
+        traces,
+        ["lo"],
+        {
+            "complete": True, "interfaces": ["lo"], "drop_count": 0,
+            "no_network_device": True, "network_interface_config_count": 0, "tap_device_count": 0,
+        },
+    )
+    assert telemetry["attempt_count"] == 2
+    assert telemetry["attempts_by_phase"] == {"load": 2}
+    assert telemetry["attempted_operations"][0]["destination_port"] == 443
+    assert telemetry["attempted_operations"][0]["address_family"] == "AF_INET"
+    assert telemetry["attempted_operations"][0]["result"] == "-1 ENETUNREACH"
+    assert telemetry["attempted_operations"][0]["destination_digest"] != "203.0.113.5"
+    assert len(telemetry["destination_salt_sha256"]) == 64
+    assert telemetry["complete"] is True
+    assert telemetry["overflowed"] is False
+    assert len(telemetry["telemetry_sha256"]) == 64
+
+
+def test_real_input_drive_builder_copies_bounded_subject_and_fixed_job(tmp_path):
+    quarantine = tmp_path / "quarantine"
+    subject = quarantine / "snapshot"
+    subject.mkdir(parents=True)
+    (subject / "config.json").write_text('{"model_type":"bert"}')
+    (subject / "model.safetensors").write_bytes(b"safe-model-bytes")
+    work = tmp_path / "work"
+    work.mkdir()
+    runner = FirecrackerRunner({
+        "MODEL_INTAKE_RUNNER_QUARANTINE_ROOT": str(quarantine),
+        "MODEL_INTAKE_RUNNER_WORK_ROOT": str(tmp_path / "runs"),
+    })
+    input_drive, output_drive = runner._prepare_drives(work, subject, {
+        "trust_remote_code": False,
+        "allow_pickle": False,
+        "known_answer_inputs": ["bounded input"],
+        "output_bytes": 64 * 1024**2,
+    })
+    assert input_drive.is_file() and input_drive.stat().st_size >= 256 * 1024**2
+    assert output_drive.is_file() and output_drive.stat().st_size == 64 * 1024**2
+    import subprocess
+    listing = subprocess.run(
+        ["debugfs", "-R", "ls -l /model", str(input_drive)],
+        capture_output=True, text=True, check=False,
+    )
+    assert listing.returncode == 0
+    assert "config.json" in listing.stdout
+    assert "model.safetensors" in listing.stdout
+
+
+def test_runner_rejects_subject_outside_quarantine(tmp_path):
+    quarantine = tmp_path / "quarantine"
+    quarantine.mkdir()
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"x")
+    runner = FirecrackerRunner({"MODEL_INTAKE_RUNNER_QUARANTINE_ROOT": str(quarantine)})
+    import pytest
+    with pytest.raises(Exception, match="escapes"):
+        runner._validated_subject(str(outside))
+
+
+def test_runner_rebinds_manifest_runtime_profile_and_reviewed_custom_code(tmp_path):
+    import hashlib
+    import json
+    import pytest
+
+    quarantine = tmp_path / "quarantine"
+    subject = quarantine / "snapshot"
+    subject.mkdir(parents=True)
+    model = subject / "model.safetensors"
+    code = subject / "modeling_custom.py"
+    model.write_bytes(b"model")
+    code.write_text("class SafeModel: pass\n")
+    files = []
+    for path in (code, model):
+        files.append({
+            "path": path.relative_to(subject).as_posix(),
+            "size": path.stat().st_size,
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        })
+    manifest = {"files": files, "complete": True}
+    manifest_path = quarantine / "manifest.json"
+    manifest_path.write_bytes(canonical_bytes(manifest))
+    rootfs = tmp_path / "rootfs.ext4"
+    rootfs.write_bytes(b"rootfs")
+    profile = {"trust_remote_code": True, "allow_pickle": False, "entrypoint": "transformers"}
+    custom_entries = [{"path": "modeling_custom.py", "sha256": hashlib.sha256(code.read_bytes()).hexdigest()}]
+    request = {
+        "mode": "runtime",
+        "environment": "test",
+        "repository_manifest_path": str(manifest_path),
+        "repository_snapshot_sha256": hashlib.sha256(canonical_bytes(manifest)).hexdigest(),
+        "model_artifact_sha256": hashlib.sha256(model.read_bytes()).hexdigest(),
+        "runtime_image_digest": "sha256:" + hashlib.sha256(rootfs.read_bytes()).hexdigest(),
+        "loader_profile": profile,
+        "loader_profile_sha256": hashlib.sha256(canonical_bytes(profile)).hexdigest(),
+        "reviewed_custom_code_sha256": hashlib.sha256(canonical_bytes(custom_entries)).hexdigest(),
+    }
+    runner = FirecrackerRunner({
+        "MODEL_INTAKE_RUNNER_QUARANTINE_ROOT": str(quarantine),
+        "MODEL_INTAKE_ROOTFS_IMAGE": str(rootfs),
+    })
+    normalized = runner._validate_job(subject, request)
+    assert normalized["trust_remote_code"] is True
+    assert normalized["allow_pickle"] is False
+
+    weakened = dict(request)
+    weakened["loader_profile"] = {**profile, "allow_pickle": True}
+    weakened["loader_profile_sha256"] = hashlib.sha256(canonical_bytes(weakened["loader_profile"])).hexdigest()
+    with pytest.raises(Exception, match="never permits pickle"):
+        runner._validate_job(subject, weakened)
+
+    tampered = dict(request)
+    tampered["reviewed_custom_code_sha256"] = "0" * 64
+    with pytest.raises(Exception, match="custom-code digest mismatch"):
+        runner._validate_job(subject, tampered)

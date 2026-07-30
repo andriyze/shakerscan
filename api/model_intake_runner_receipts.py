@@ -16,7 +16,7 @@ except ModuleNotFoundError:  # pragma: no cover - package import in tests
 
 
 PAYLOAD_TYPE = "https://shakerscan.dev/attestation/model-evidence/v1"
-SCHEMA = "model-intake-runner-receipt/v1"
+SCHEMA = "model-intake-runner-receipt/v2"
 EVIDENCE_POLICY = {
     "runtime_execution": ("GENERATED_RUNTIME", "runtime_runner"),
     "embedding_evaluation": ("GENERATED_EVALUATION", "evaluation_runner"),
@@ -27,6 +27,34 @@ EVIDENCE_POLICY = {
 
 class RunnerReceiptError(ValueError):
     pass
+
+
+def issue_runner_envelope(payload: dict[str, Any], signer: Any) -> dict[str, Any]:
+    """Sign one canonical, fully bound runner payload with a narrow signer."""
+    if payload.get("schema_version") != SCHEMA:
+        raise RunnerReceiptError("unsupported runner receipt schema")
+    if payload.get("evidence_type") not in EVIDENCE_POLICY:
+        raise RunnerReceiptError("unsupported runner evidence type")
+    if payload.get("status") == "PASS":
+        missing = _validate_pass_claim(payload)
+        if missing:
+            raise RunnerReceiptError(f"invalid PASS claim: {','.join(sorted(missing))}")
+    body = canonical_bytes(payload)
+    message = b"DSSEv1 %d %s %d %s" % (
+        len(PAYLOAD_TYPE.encode()), PAYLOAD_TYPE.encode(), len(body), body
+    )
+    signed = signer.sign(message)
+    return {
+        "payloadType": PAYLOAD_TYPE,
+        "payload": base64.b64encode(body).decode(),
+        "signatures": [{
+            "keyid": signed["key_id"],
+            "sig": signed["signature"],
+            "algorithm": signed["algorithm"],
+            "provider": signed.get("provider"),
+        }],
+        "payload_sha256": hashlib.sha256(body).hexdigest(),
+    }
 
 
 def _parse_time(value: Any, field: str) -> datetime:
@@ -51,11 +79,26 @@ def _validate_pass_claim(payload: dict[str, Any]) -> list[str]:
     kind = payload["evidence_type"]
     missing: list[str] = []
     if kind == "runtime_execution":
+        network = observations.get("network_telemetry") if isinstance(observations.get("network_telemetry"), dict) else {}
+        network_digest_input = {key: value for key, value in network.items() if key != "telemetry_sha256"}
+        expected_network_digest = hashlib.sha256(canonical_bytes(network_digest_input)).hexdigest()
         required = {
             "artifact_loaded": observations.get("artifact_loaded") is True,
             "model_loaded": observations.get("model_loaded") is True,
             "known_answers": observations.get("embedding_known_answers_status") == "PASS",
             "no_egress": observations.get("network_egress_blocked") is True,
+            "no_network_device": network.get("no_network_device") is True,
+            "no_network_interface_config": network.get("network_interface_config_count") == 0,
+            "no_tap_device": network.get("tap_device_count") == 0,
+            "guest_interface_inventory": network.get("guest_interfaces") == ["lo"],
+            "host_interface_inventory": network.get("host_interfaces") == ["lo"],
+            "no_network_attempts": network.get("attempt_count") == 0 and network.get("attempted_operations") == [],
+            "host_firewall_quiet": network.get("host_firewall_drop_count") == 0,
+            "network_telemetry_complete": network.get("complete") is True,
+            "network_telemetry_not_overflowed": network.get("overflowed") is False,
+            "network_telemetry_no_loss": network.get("lost_events") == 0,
+            "network_telemetry_digest": network.get("telemetry_sha256") == expected_network_digest,
+            "network_raw_trace_digest": bool(network.get("raw_trace_sha256")),
             "syscall_telemetry": observations.get("syscall_telemetry_complete") is True,
             "resource_limits": observations.get("resource_limits_enforced") is True,
         }
@@ -200,4 +243,4 @@ def verify_runner_envelope(
     }
 
 
-__all__ = ["EVIDENCE_POLICY", "PAYLOAD_TYPE", "SCHEMA", "verify_runner_envelope"]
+__all__ = ["EVIDENCE_POLICY", "PAYLOAD_TYPE", "SCHEMA", "issue_runner_envelope", "verify_runner_envelope"]

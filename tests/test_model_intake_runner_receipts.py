@@ -11,7 +11,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption,
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
 
 from model_intake_control_plane import LocalPemSigner, canonical_bytes  # noqa: E402
-from model_intake_runner_receipts import PAYLOAD_TYPE, SCHEMA, verify_runner_envelope  # noqa: E402
+from model_intake_runner_receipts import PAYLOAD_TYPE, SCHEMA, issue_runner_envelope, verify_runner_envelope  # noqa: E402
 
 
 def _envelope(evidence_type, observations):
@@ -60,16 +60,58 @@ def _verify(payload, envelope, public_pem):
     )
 
 
-def test_runtime_pass_requires_real_generated_isolation_and_load_observations():
-    payload, envelope, key = _envelope("runtime_execution", {
+def _runtime_observations(**overrides):
+    network = {
+        "schema_version": "model-intake-network-telemetry/v1",
+        "no_network_device": True,
+        "network_interface_config_count": 0,
+        "tap_device_count": 0,
+        "guest_interfaces": ["lo"],
+        "host_interfaces": ["lo"],
+        "attempted_operations": [],
+        "attempt_count": 0,
+        "attempts_by_phase": {},
+        "host_firewall_drop_count": 0,
+        "raw_trace_sha256": "a" * 64,
+        "complete": True,
+        "overflowed": False,
+        "lost_events": 0,
+    }
+    network["telemetry_sha256"] = __import__("hashlib").sha256(canonical_bytes(network)).hexdigest()
+    observations = {
         "artifact_loaded": True,
         "model_loaded": True,
         "embedding_known_answers_status": "PASS",
         "network_egress_blocked": True,
+        "network_telemetry": network,
         "syscall_telemetry_complete": True,
         "resource_limits_enforced": True,
-    })
+    }
+    observations.update(overrides)
+    return observations
+
+
+def test_runtime_pass_requires_real_generated_isolation_and_load_observations():
+    payload, envelope, key = _envelope("runtime_execution", _runtime_observations())
     assert _verify(payload, envelope, key)["verified"] is True
+
+
+def test_runner_issuer_refuses_to_sign_incomplete_pass_claim():
+    now = datetime.now(timezone.utc)
+    payload = {
+        "schema_version": SCHEMA,
+        "evidence_type": "runtime_execution",
+        "status": "PASS",
+        "observations": {"artifact_loaded": True},
+        "started_at": now.isoformat(),
+        "finished_at": now.isoformat(),
+        "expires_at": (now + timedelta(days=1)).isoformat(),
+    }
+    private = ed25519.Ed25519PrivateKey.generate()
+    signer = LocalPemSigner(private.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()).decode())
+    import pytest
+    with pytest.raises(Exception, match="invalid PASS claim"):
+        issue_runner_envelope(payload, signer)
 
 
 def test_evaluation_and_data_plane_pass_claims_are_semantically_checked():
@@ -102,6 +144,20 @@ def test_signed_pass_with_missing_runtime_observation_is_rejected():
     result = _verify(payload, envelope, key)
     assert result["verified"] is False
     assert "pass_claim_missing:syscall_telemetry" in result["blockers"]
+
+
+def test_signed_pass_with_network_attempt_or_tampered_telemetry_is_rejected():
+    observations = _runtime_observations()
+    observations["network_telemetry"]["attempt_count"] = 1
+    observations["network_telemetry"]["attempted_operations"] = [{
+        "operation": "connect", "phase": "load", "destination_digest": "b" * 64,
+        "destination_port": 443, "dns_related": False,
+    }]
+    payload, envelope, key = _envelope("runtime_execution", observations)
+    result = _verify(payload, envelope, key)
+    assert result["verified"] is False
+    assert "pass_claim_missing:no_network_attempts" in result["blockers"]
+    assert "pass_claim_missing:network_telemetry_digest" in result["blockers"]
 
 
 def test_conversion_receipt_requires_tensor_numeric_and_embedding_equivalence():
