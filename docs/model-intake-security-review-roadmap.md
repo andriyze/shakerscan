@@ -257,7 +257,7 @@ but the exported status must remain unambiguous.
 | Provider-neutral evaluation contract | Deterministic scorer implemented | Public caller observations are `DECLARED` and fail closed for admission; actual result IDs/scores and connector/index/run identity are mandatory | Add the trusted isolated runner that alone may mark observations `GENERATED_DATA_PLANE` |
 | Corporate benchmark and thresholds | Integration point implemented | No universal corpus can ship | Organization supplies/version-controls corpus; ShakerScan automates execution and scoring |
 | Typed non-scanner providers | Implemented registry/readiness | Sandbox execution, embedding evaluation, embedded policy, and report export are separate classes; OPA is honestly `NOT_IMPLEMENTED` | Add OPA only with a fail-closed decision/bundle contract; keep the embedded policy fallback |
-| Signed admission statement and lifecycle registry | Legacy mechanism quarantined; v2 pending | Workers emit only unsigned non-deployable candidates; v1 verification rejects by default and active v1 rows migrate to `reassessment_required` | Build exact-bundle admission v2 in a separate authenticated control-plane service with narrow KMS/HSM signing, then add deployment-platform enforcement |
+| Signed admission statement and lifecycle registry | Exact-bundle v2 cryptographic contract implemented; service persistence pending | Workers emit only unsigned non-deployable candidates; v1 verification rejects by default; v2 canonical bundle/manifest/approval/policy binding, DSSE-style signing, narrow non-allow refusal, and component-substitution verification are implemented | Wire the contract to frozen server records in the separate authenticated control-plane service and KMS/HSM signer, then add deployment enforcement |
 | Saved Model Intake policy profiles | Implemented server-owned admission expansion | Admission uses the operator-selected server default; caller booleans/subsets/exceptions cannot weaken it; mutations require operator auth | Add organization-specific required scanner/runtime/benchmark fields |
 | One-page control matrix and detailed evidence | Implemented in UI/JSON | Corporate-use verdict, can-use boolean, malicious-vs-capable serialization distinction, control matrix, primary blockers, next actions, limitations, and activity are visible | Finish HTML/PDF/SARIF parity and per-control evidence links |
 | Deployment by exact approved digest | Fail-closed legacy verifier exists; v2 authorization contract pending | No v1 admission can newly authorize deployment by default; no deployable v2 package or external enforcement ships | Implement v2, then integrate with internal registry, CI/CD, Kubernetes/admission controller, or model serving platform |
@@ -915,14 +915,19 @@ The data plane needs its own controls:
 
 ### 7.12 P2 — Produce a signed decision package
 
-**Delivery status: legacy v1 quarantined; exact-bundle admission v2 and external enforcement remain.** Workers
+**Delivery status: legacy v1 quarantined; exact-bundle admission-v2 library implemented; control-plane
+persistence and external enforcement remain.** Workers
 now emit only unsigned, non-deployable technical candidates and have no admission private key. Both library
 and HTTP legacy verification reject a signed non-`allow` decision, and v1 itself is rejected by default even
 when its signature and subject are valid. Schema migration marks active v1 registry rows
 `reassessment_required`. An explicit compatibility flag exists only for audit/recovery and still cannot make
-a migrated registry row active. Revocation, reassessment, and quarantine deletion retain the authenticated
-operator boundary. Next, a distinct control-plane service must freeze exact evidence/policy/approval receipts,
-issue admission v2 through a narrow KMS/HSM signer, and expose a deployment verification contract. Only then
+a migrated registry row active. The v2 library now canonicalizes a deployment bundle binding the artifact,
+snapshot, custom code, tokenizer, configuration, immutable runtime image, loader, embedding configuration,
+retrieval application, index schema, and environment. It freezes content-addressed evidence manifests,
+requires exact-bound separated approvals, builds deterministic policy facts, refuses to sign a non-`allow`,
+wraps the statement in a DSSE-style envelope, and verifies every component plus builder identity. Revocation,
+reassessment, and quarantine deletion retain the authenticated operator boundary. Next, a distinct
+control-plane service must persist/freeze those records and invoke a narrow KMS/HSM signer. Only then
 should registry/CI/CD/Kubernetes/serving enforcement clients be enabled.
 
 The final report must be machine-verifiable and human-readable. It should include:
