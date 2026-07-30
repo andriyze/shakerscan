@@ -687,7 +687,7 @@ def _corporate_use_assessment(
         "NOT_APPLICABLE" if not custom_code_required else "FAIL" if semgrep_status == "FAIL" else "REVIEW" if semgrep_status == "WARNING" else "PASS" if semgrep_status == "PASS" else "INDETERMINATE",
         f"Semgrep status: {semgrep_status}; custom code still requires a recorded human ownership/review decision." if custom_code_required else "The repository manifest did not require custom executable code.",
     )
-    dependency_status = scanner_statuses.get("trivy") or scanner_statuses.get("pip-audit") or scanner_statuses.get("osv-scanner")
+    dependency_status = scanner_statuses.get("trivy")
     control(
         "dependencies", "Dependency and CVE review",
         "PASS" if dependency_status == "PASS" else "FAIL" if dependency_status == "FAIL" or (custom_code_required and dependency_status in {None, "NOT_APPLICABLE"}) else "NOT_APPLICABLE" if dependency_status == "NOT_APPLICABLE" else "INDETERMINATE",

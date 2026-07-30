@@ -99,11 +99,6 @@ EXTERNAL_SCANNERS: tuple[ScannerSpec, ...] = (
         applicability="dependency_repository", enabled_by_default=True, required_profiles=("strict",),
         database_path="/opt/trivy-cache/db/metadata.json",
     ),
-    ScannerSpec("clamav", "clamscan", ("--recursive=yes", "--infected", "{subject}"), applicability="always"),
-    ScannerSpec("gitleaks", "gitleaks", ("detect", "--no-git", "--source", "{subject}", "--report-format", "json", "--report-path", "{scratch}/gitleaks.json"), applicability="repository_code", result_file="gitleaks.json"),
-    ScannerSpec("syft", "syft", ("dir:{subject}", "-o", "cyclonedx-json"), applicability="dependency_repository"),
-    ScannerSpec("osv-scanner", "osv-scanner", ("scan", "source", "-r", "{subject}", "--format", "json"), applicability="dependency_repository"),
-    ScannerSpec("pip-audit", "pip-audit", ("--path", "{subject}", "--format=json"), applicability="python_dependency_repository"),
 )
 BUILTIN_SCANNER_NAMES = {
     "python-pickletools",
@@ -428,7 +423,7 @@ def _parse_external_scanner(
     scanner: str, stdout: str, stderr: str, exit_code: int
 ) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
     """Validate each tool's output contract; exit zero alone is never PASS."""
-    if scanner in {"modelscan", "semgrep", "gitleaks", "syft", "trivy", "osv-scanner", "pip-audit"}:
+    if scanner in {"modelscan", "semgrep", "trivy"}:
         try:
             parsed = _modelscan_json_output(stdout) if scanner == "modelscan" else _json_output(stdout)
         except (ValueError, json.JSONDecodeError) as exc:
@@ -466,15 +461,6 @@ def _parse_external_scanner(
             })
             if errors:
                 return "INCOMPLETE", findings, {**summary, "errors_sha256": _sha256_json(errors)}
-        elif scanner == "gitleaks":
-            if not isinstance(parsed, list):
-                return "INCOMPLETE", [], {"error": "gitleaks_output_shape_invalid"}
-            findings = [_external_finding(scanner, item, "critical") for item in parsed[:1000]]
-            summary["finding_count"] = len(parsed)
-        elif scanner == "syft":
-            if not isinstance(parsed, dict) or not isinstance(parsed.get("components"), list):
-                return "INCOMPLETE", [], {"error": "cyclonedx_components_missing"}
-            summary.update({"bom_format": parsed.get("bomFormat"), "component_count": len(parsed["components"])})
         elif scanner == "trivy":
             results = parsed.get("Results") if isinstance(parsed, dict) else None
             if not isinstance(results, list):
@@ -495,28 +481,6 @@ def _parse_external_scanner(
                             warning = True
             summary.update(counts)
             summary["warning_only"] = warning and not findings
-        elif scanner == "osv-scanner":
-            results = parsed.get("results") if isinstance(parsed, dict) else None
-            if not isinstance(results, list):
-                return "INCOMPLETE", [], {"error": "osv_results_missing"}
-            vulnerabilities = []
-            for result in results:
-                packages = result.get("packages") if isinstance(result, dict) else []
-                for package in packages if isinstance(packages, list) else []:
-                    vulnerabilities.extend(package.get("vulnerabilities") or [] if isinstance(package, dict) else [])
-            findings = [_external_finding(scanner, item) for item in vulnerabilities[:1000]]
-            summary["vulnerability_count"] = len(vulnerabilities)
-        elif scanner == "pip-audit":
-            dependencies = parsed.get("dependencies") if isinstance(parsed, dict) else parsed if isinstance(parsed, list) else None
-            if not isinstance(dependencies, list):
-                return "INCOMPLETE", [], {"error": "pip_audit_dependencies_missing"}
-            vulnerabilities = [
-                vulnerability
-                for dependency in dependencies if isinstance(dependency, dict)
-                for vulnerability in (dependency.get("vulns") or [])
-            ]
-            findings = [_external_finding(scanner, item) for item in vulnerabilities[:1000]]
-            summary["vulnerability_count"] = len(vulnerabilities)
         if exit_code not in {0, 1}:
             return "CRASHED", findings, {**summary, "error": (stderr or "unexpected exit code")[:1000]}
         if summary.get("warning_only"):
@@ -526,15 +490,6 @@ def _parse_external_scanner(
         return "PASS", [], summary
 
     text = f"{stdout}\n{stderr}".strip()
-    if scanner == "clamav":
-        if "SCAN SUMMARY" not in text or "Infected files:" not in text:
-            return "INCOMPLETE" if exit_code in {0, 1} else "CRASHED", [], {"error": "clamav_summary_missing"}
-        match = re.search(r"Infected files:\s*(\d+)", text)
-        infected = int(match.group(1)) if match else 0
-        findings = [_external_finding(scanner, {"infected_files": infected}, "critical")] if infected else []
-        if exit_code not in {0, 1}:
-            return "CRASHED", findings, {"infected_files": infected, "error": "clamav_engine_error"}
-        return ("FAIL" if infected else "PASS"), findings, {"infected_files": infected}
     if scanner == "fickling":
         output_sha256 = hashlib.sha256(text.encode()).hexdigest()
         if exit_code == 0:

@@ -7,22 +7,17 @@ from scanner.scanner_tools.model_intake_scanners import _parse_external_scanner
 
 
 def test_json_scanners_never_pass_empty_or_malformed_output():
-    for scanner in ("modelscan", "semgrep", "gitleaks", "syft", "trivy", "osv-scanner", "pip-audit"):
+    for scanner in ("modelscan", "semgrep", "trivy"):
         assert _parse_external_scanner(scanner, "", "", 0)[0] == "INCOMPLETE"
         assert _parse_external_scanner(scanner, "not-json", "", 0)[0] == "INCOMPLETE"
 
 
-def test_sbom_and_sca_adapters_validate_schema_and_findings():
-    assert _parse_external_scanner("syft", json.dumps({"bomFormat": "CycloneDX", "components": []}), "", 0)[0] == "PASS"
+def test_trivy_sca_adapter_validates_schema_and_findings():
     trivy = {"Results": [{"Vulnerabilities": [{"VulnerabilityID": "CVE-TEST", "Severity": "HIGH"}]}]}
     assert _parse_external_scanner("trivy", json.dumps(trivy), "", 0)[0] == "FAIL"
-    osv = {"results": [{"packages": [{"vulnerabilities": [{"id": "OSV-TEST"}]}]}]}
-    assert _parse_external_scanner("osv-scanner", json.dumps(osv), "", 0)[0] == "FAIL"
 
 
-def test_secret_model_and_malware_adapters_are_fail_closed():
-    assert _parse_external_scanner("gitleaks", "[]", "", 0)[0] == "PASS"
-    assert _parse_external_scanner("gitleaks", '[{"RuleID":"dummy"}]', "", 1)[0] == "FAIL"
+def test_modelscan_adapter_is_fail_closed():
     assert _parse_external_scanner("modelscan", '{"issues":[]}', "", 0)[0] == "PASS"
     modelscan_preamble = (
         "No settings file detected at /app/modelscan-settings.toml. Using defaults.\n\n"
@@ -33,9 +28,6 @@ def test_secret_model_and_malware_adapters_are_fail_closed():
     assert _parse_external_scanner("modelscan", "untrusted preamble\n{\"issues\":[]}", "", 0)[0] == "INCOMPLETE"
     assert _parse_external_scanner("modelscan", '{}', "", 0)[0] == "INCOMPLETE"
     assert _parse_external_scanner("modelscan", '{"issues":[{"operator":"GLOBAL"}]}', "", 1)[0] == "FAIL"
-    assert _parse_external_scanner("clamav", "----------- SCAN SUMMARY -----------\nInfected files: 0", "", 0)[0] == "PASS"
-    assert _parse_external_scanner("clamav", "", "", 0)[0] == "INCOMPLETE"
-    assert _parse_external_scanner("clamav", "----------- SCAN SUMMARY -----------\nInfected files: 0", "", 2)[0] == "CRASHED"
 
 
 def test_fickling_requires_semantic_output():
@@ -124,11 +116,11 @@ def test_requested_adapter_is_required_and_unknown_names_are_not_in_plan(tmp_pat
 
 def test_adapter_catalog_separates_provider_kind_and_policy():
     catalog = {item["name"]: item for item in scanners.scanner_adapter_catalog()}
+    assert set(catalog) == {"modelscan", "semgrep", "fickling", "trivy"}
     assert catalog["modelscan"]["adapter_kind"] == "evidence_scanner"
     assert catalog["semgrep"]["applicability"] == "repository_code"
     assert catalog["fickling"]["target_scope"] == "artifact"
     assert catalog["trivy"]["required_profiles"] == ["strict"]
-    assert catalog["syft"]["enabled_by_default"] is False
 
 
 def test_readiness_requires_functional_self_test_for_default_adapters(tmp_path, monkeypatch):

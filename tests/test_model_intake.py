@@ -1174,6 +1174,8 @@ def test_strict_generated_scanner_plan_requires_applicable_adapters(tmp_path):
     ))
 
     evidence = result["model_intake"]["generated_evidence"]
+    assert evidence["statuses"]["pip-audit"] == "UNSUPPORTED"
+    assert "pip-audit" in evidence["required_non_pass"]
     assert evidence["statuses"]["modelscan"] in {
         "FAIL", "UNSUPPORTED", "TIMEOUT", "CRASHED", "INCOMPLETE", "REVIEW_REQUIRED", "NOT_RUN",
     }

@@ -1606,8 +1606,9 @@ Remaining product work:
   and bounded output.
 - Provide a scanner expectation matrix so a required missing engine blocks instead of silently reducing
   coverage.
-- Remove unshipped optional scanner names from presets/readiness claims so compatibility code cannot be
-  mistaken for supported coverage.
+- **Implemented scanner-boundary freeze:** catalog, readiness, planning, and parsers expose only ModelScan,
+  Semgrep, Fickling, and Trivy. Legacy optional names are unknown required adapters and fail as `UNSUPPORTED`;
+  they cannot look installed or silently reduce coverage.
 
 Operator/corporate work: approve the four scanner versions and licenses, update the existing vulnerability
 and rule data, supply organization Semgrep rules where needed, and define severity/freshness/exception policy.
