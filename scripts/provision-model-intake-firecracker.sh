@@ -50,9 +50,11 @@ install -m 0644 "$TEMP_DIR/vmlinux" "$INSTALL_ROOT/kernel/vmlinux"
 install -m 0644 "$ROOTFS_SOURCE" "$INSTALL_ROOT/rootfs/rootfs.ext4"
 install -m 0644 \
     "$ROOT_DIR/api/model_intake_control_plane.py" \
+    "$ROOT_DIR/api/model_intake_loader_profiles.py" \
     "$ROOT_DIR/api/model_intake_runner_controller.py" \
     "$ROOT_DIR/api/model_intake_runner_receipts.py" \
     "$ROOT_DIR/api/model_intake_firecracker_runner.py" \
+    "$ROOT_DIR/api/model_intake_runner_service.py" \
     "$INSTALL_ROOT/app/"
 python3 -m venv "$INSTALL_ROOT/venv"
 "$INSTALL_ROOT/venv/bin/pip" install --no-cache-dir --require-hashes -r "$ROOT_DIR/runner/host/requirements.lock"
@@ -67,6 +69,61 @@ done
 echo '+cpu +memory +pids' > /sys/fs/cgroup/cgroup.subtree_control || true
 echo '+cpu +memory +pids' > /sys/fs/cgroup/shakerscan-model-intake/cgroup.subtree_control || true
 
+install -d -m 0700 /etc/shakerscan
+if [[ ! -f /etc/shakerscan/model-intake-runner.env ]]; then
+    runner_token="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
+    cat > /etc/shakerscan/model-intake-runner.env <<EOF
+MODEL_INTAKE_RUNNER_INTERNAL_TOKEN=$runner_token
+MODEL_INTAKE_RUNNER_JOB_ROOT=/var/lib/shakerscan/model-intake-runner/jobs
+MODEL_INTAKE_RUNNER_QUARANTINE_ROOT=/var/lib/shakerscan/model-intake-quarantine
+MODEL_INTAKE_RUNNER_WORK_ROOT=/var/lib/shakerscan/model-intake-runner/work
+MODEL_INTAKE_RUNNER_CONVERSION_ROOT=/var/lib/shakerscan/model-intake-quarantine/conversions
+MODEL_INTAKE_JAILER_ROOT=/srv/jailer
+MODEL_INTAKE_FIRECRACKER_BIN=$INSTALL_ROOT/bin/firecracker
+MODEL_INTAKE_FIRECRACKER_SHA256=$(sha256sum "$INSTALL_ROOT/bin/firecracker" | awk '{print $1}')
+MODEL_INTAKE_JAILER_BIN=$INSTALL_ROOT/bin/jailer
+MODEL_INTAKE_JAILER_SHA256=$(sha256sum "$INSTALL_ROOT/bin/jailer" | awk '{print $1}')
+MODEL_INTAKE_KERNEL_IMAGE=$INSTALL_ROOT/kernel/vmlinux
+MODEL_INTAKE_KERNEL_SHA256=$(sha256sum "$INSTALL_ROOT/kernel/vmlinux" | awk '{print $1}')
+MODEL_INTAKE_ROOTFS_IMAGE=$INSTALL_ROOT/rootfs/rootfs.ext4
+MODEL_INTAKE_ROOTFS_SHA256=$(sha256sum "$INSTALL_ROOT/rootfs/rootfs.ext4" | awk '{print $1}')
+MODEL_INTAKE_RUNNER_EGRESS_POLICY=deny-all
+EOF
+    chmod 0600 /etc/shakerscan/model-intake-runner.env
+fi
+install -d -m 0700 \
+    /var/lib/shakerscan/model-intake-runner/jobs \
+    /var/lib/shakerscan/model-intake-runner/work \
+    /var/lib/shakerscan/model-intake-quarantine/conversions
+cat > /etc/systemd/system/shakerscan-model-intake-runner.service <<EOF
+[Unit]
+Description=ShakerScan physical Model Intake Firecracker runner
+After=network.target
+ConditionPathExists=/dev/kvm
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=$INSTALL_ROOT/app
+EnvironmentFile=/etc/shakerscan/model-intake-runner.env
+ExecStart=$INSTALL_ROOT/venv/bin/uvicorn model_intake_runner_service:app --host 127.0.0.1 --port 8092 --no-access-log
+Restart=on-failure
+RestartSec=3
+UMask=0077
+PrivateTmp=true
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=false
+RestrictAddressFamilies=AF_UNIX AF_INET
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+
 cat <<EOF
 MODEL_INTAKE_FIRECRACKER_BIN=$INSTALL_ROOT/bin/firecracker
 MODEL_INTAKE_FIRECRACKER_SHA256=$(sha256sum "$INSTALL_ROOT/bin/firecracker" | awk '{print $1}')
@@ -78,3 +135,7 @@ MODEL_INTAKE_ROOTFS_IMAGE=$INSTALL_ROOT/rootfs/rootfs.ext4
 MODEL_INTAKE_ROOTFS_SHA256=$(sha256sum "$INSTALL_ROOT/rootfs/rootfs.ext4" | awk '{print $1}')
 MODEL_INTAKE_RUNNER_EGRESS_POLICY=deny-all
 EOF
+
+echo "Runner service installed but not enabled. Configure a production receipt signer and builder identity"
+echo "in /etc/shakerscan/model-intake-runner.env, copy its internal token to the API secret store, then run:"
+echo "  systemctl enable --now shakerscan-model-intake-runner"
