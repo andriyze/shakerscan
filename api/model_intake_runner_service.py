@@ -14,7 +14,12 @@ import uuid
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, HTTPException
+try:
+    from fastapi import Header
+except ImportError:  # pragma: no cover - minimal API-module test shims
+    def Header(default=None):
+        return default
 from pydantic import BaseModel, ConfigDict, Field
 
 try:

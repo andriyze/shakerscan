@@ -19,6 +19,11 @@ def _clear_storage_env(monkeypatch):
         "ARTIFACT_STORAGE_BACKEND",
         "ARTIFACT_STORAGE_REQUIRED",
         "ARTIFACT_S3_PREFIX",
+        "ARTIFACT_RETENTION_ATTACHMENT_DAYS",
+        "ARTIFACT_RETENTION_CHECKPOINT_DAYS",
+        "ARTIFACT_RETENTION_DIAGNOSTIC_DAYS",
+        "ARTIFACT_RETENTION_RESULT_DAYS",
+        "ARTIFACT_RETENTION_SCREENSHOT_DAYS",
         "EVIDENCE_STORAGE_BACKEND",
         "SHAKERSCAN_NODE_ID",
     ):
@@ -85,6 +90,7 @@ def test_artifact_uri_rejects_traversal(tmp_path, monkeypatch):
 
 
 def test_retention_policy_is_per_type_and_zero_means_keep(monkeypatch):
+    _clear_storage_env(monkeypatch)
     monkeypatch.delenv("ARTIFACT_RETENTION_DAYS", raising=False)
     monkeypatch.delenv("ARTIFACT_RETENTION_RESULT_DAYS", raising=False)
     assert artifact_storage.retention_days("checkpoint") == 14

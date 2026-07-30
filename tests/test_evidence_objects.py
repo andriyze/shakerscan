@@ -155,6 +155,7 @@ def test_s3_remote_delete_uses_signed_delete(monkeypatch):
     monkeypatch.setenv("EVIDENCE_S3_ENDPOINT_URL", "http://minio.local:9000")
     monkeypatch.setenv("EVIDENCE_S3_ACCESS_KEY_ID", "ak")
     monkeypatch.setenv("EVIDENCE_S3_SECRET_ACCESS_KEY", "sk")
+    monkeypatch.setenv("EVIDENCE_S3_FORCE_PATH_STYLE", "true")
 
     seen = {}
 

@@ -126,8 +126,21 @@ if "fastapi" not in sys.modules:
         return default
 
     class _FakeRequest:
-        def __init__(self, query_params=None):
-            self.query_params = query_params or {}
+        def __init__(self, scope=None):
+            scope = scope or {}
+            self.query_params = scope if not isinstance(scope, dict) or "type" not in scope else {}
+            if isinstance(scope, dict) and "type" in scope:
+                self.headers = {
+                    key.decode().lower(): value.decode()
+                    for key, value in scope.get("headers", [])
+                }
+                client = scope.get("client") or (None, None)
+                self.client = types.SimpleNamespace(host=client[0])
+                self.url = types.SimpleNamespace(scheme=scope.get("scheme", "http"))
+            else:
+                self.headers = {}
+                self.client = None
+                self.url = types.SimpleNamespace(scheme="http")
 
     fastapi_mod.FastAPI = _FakeFastAPI
     fastapi_mod.HTTPException = _FakeHTTPException
@@ -18038,6 +18051,8 @@ def test_compose_propagates_browser_origin_configuration_to_api():
 
 
 def test_model_admission_endpoint_fails_closed_without_deployment_trust_roots(monkeypatch):
+    token = "model-intake-test-operator-token-that-is-long-enough"
+    monkeypatch.setenv("MODEL_INTAKE_OPERATOR_TOKEN", token)
     monkeypatch.setattr(api_module, "_model_admission_trusted_keys", lambda: [])
     request = api_module.ModelIntakeAdmissionVerifyRequest(
         admission_package={"statement": {}},
@@ -18047,7 +18062,7 @@ def test_model_admission_endpoint_fails_closed_without_deployment_trust_roots(mo
     with pytest.raises(api_module.HTTPException) as exc_info:
         asyncio.run(api_module.verify_model_intake_admission(
             request,
-            _fleet_request(host="127.0.0.1", scheme="http"),
+            _fleet_request(host="127.0.0.1", scheme="http", authorization=f"Bearer {token}"),
         ))
 
     assert exc_info.value.status_code == 503
@@ -18055,6 +18070,8 @@ def test_model_admission_endpoint_fails_closed_without_deployment_trust_roots(mo
 
 def test_model_admission_endpoint_passes_exact_deployment_subjects(monkeypatch):
     captured = {}
+    token = "model-intake-test-operator-token-that-is-long-enough"
+    monkeypatch.setenv("MODEL_INTAKE_OPERATOR_TOKEN", token)
     monkeypatch.delenv("MODEL_INTAKE_ALLOW_LEGACY_V1_VERIFICATION", raising=False)
 
     def verify(package, **kwargs):
@@ -18097,7 +18114,7 @@ def test_model_admission_endpoint_passes_exact_deployment_subjects(monkeypatch):
 
     result = asyncio.run(api_module.verify_model_intake_admission(
         request,
-        _fleet_request(host="127.0.0.1", scheme="http"),
+        _fleet_request(host="127.0.0.1", scheme="http", authorization=f"Bearer {token}"),
     ))
 
     assert result["verified"] is True
@@ -18118,7 +18135,9 @@ def test_model_admission_endpoint_registry_requirement_cannot_be_disabled():
         )
 
 
-def test_model_reassessment_event_requires_known_trigger_and_explicit_scope():
+def test_model_reassessment_event_requires_known_trigger_and_explicit_scope(monkeypatch):
+    token = "model-intake-test-operator-token-that-is-long-enough"
+    monkeypatch.setenv("MODEL_INTAKE_OPERATOR_TOKEN", token)
     with pytest.raises(Exception):
         api_module.ModelIntakeReassessmentEventRequest(
             trigger_type="unknown",
@@ -18135,7 +18154,7 @@ def test_model_reassessment_event_requires_known_trigger_and_explicit_scope():
     with pytest.raises(api_module.HTTPException) as exc_info:
         asyncio.run(api_module.create_model_intake_reassessment_event(
             request,
-            _fleet_request(host="127.0.0.1", scheme="http"),
+            _fleet_request(host="127.0.0.1", scheme="http", authorization=f"Bearer {token}"),
         ))
     assert exc_info.value.status_code == 400
 
@@ -18148,7 +18167,7 @@ def test_model_reassessment_event_requires_known_trigger_and_explicit_scope():
     with pytest.raises(api_module.HTTPException) as exc_info:
         asyncio.run(api_module.create_model_intake_reassessment_event(
             global_request,
-            _fleet_request(host="127.0.0.1", scheme="http"),
+            _fleet_request(host="127.0.0.1", scheme="http", authorization=f"Bearer {token}"),
         ))
     assert exc_info.value.status_code == 400
     assert "confirm_all_active" in str(exc_info.value.detail)
@@ -18156,6 +18175,8 @@ def test_model_reassessment_event_requires_known_trigger_and_explicit_scope():
 
 def test_model_admission_revocation_audits_actual_previous_status(monkeypatch):
     captured = {}
+    token = "model-intake-test-operator-token-that-is-long-enough"
+    monkeypatch.setenv("MODEL_INTAKE_OPERATOR_TOKEN", token)
 
     class Conn:
         async def fetchrow(self, query, *_args):
@@ -18191,7 +18212,7 @@ def test_model_admission_revocation_audits_actual_previous_status(monkeypatch):
     result = asyncio.run(api_module.revoke_model_intake_admission(
         "00000000-0000-4000-8000-000000000001",
         request,
-        _fleet_request(host="127.0.0.1", scheme="http"),
+        _fleet_request(host="127.0.0.1", scheme="http", authorization=f"Bearer {token}"),
     ))
 
     assert result["status"] == "revoked"
