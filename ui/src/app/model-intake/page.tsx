@@ -26,10 +26,13 @@ import {
   deactivateModelIntakeTrustAnchor,
   getModelIntakeTrustAnchors,
   getModelIntakeAdmissions,
+  getModelIntakeOperatorCredential,
   getModelIntakeScannerReadiness,
   getPolicyProfiles,
   resolveModelIntakeReference,
   submitModelIntakeScan,
+  MODEL_INTAKE_OPERATOR_TOKEN_KEY,
+  type ModelIntakeOperatorCredential,
   type AITestReadinessControl,
   type AITestScenario,
   type ModelIntakePlatform,
@@ -54,7 +57,6 @@ const inputClass =
 const textareaClass =
   'min-w-0 w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 font-mono text-xs text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none'
 const fieldClass = 'grid min-w-0 gap-1 text-sm text-gray-300'
-const MODEL_INTAKE_OPERATOR_TOKEN_KEY = 'shakerscan:model-intake-operator-token'
 const COMPLETE_METADATA_EXAMPLE = {
   source_repo: 'https://github.com/example/model-release',
   commit_sha: '0123456789abcdef',
@@ -143,6 +145,24 @@ const PLATFORM_OPTIONS: Array<{
   },
 ]
 
+// The deployment target is chosen exactly once, in step 1, and then flows into
+// the preflight policy profile, the controlled submission's intended
+// environment, and the deployment bundle's target_environment. Nothing
+// downstream asks for it again.
+export type ModelIntakeEnvironment = 'development' | 'test' | 'staging' | 'production'
+
+const ENVIRONMENT_OPTIONS: Array<{
+  value: ModelIntakeEnvironment
+  label: string
+  helper: string
+  policyProfile: BuiltinPolicyProfile
+}> = [
+  { value: 'development', label: 'Development', helper: 'Format and provenance review only', policyProfile: 'research' },
+  { value: 'test', label: 'Test', helper: 'Checksum and signature evidence', policyProfile: 'staging' },
+  { value: 'staging', label: 'Staging', helper: 'Checksum, signature, governance basics', policyProfile: 'staging' },
+  { value: 'production', label: 'Production', helper: 'Approval, evidence, deployment controls', policyProfile: 'production' },
+]
+
 type BuiltinPolicyProfile = 'research' | 'staging' | 'production' | 'strict'
 
 const POLICY_PROFILES: Array<{ value: BuiltinPolicyProfile; label: string; helper: string }> = [
@@ -163,6 +183,30 @@ const TRUST_MODE_OPTIONS: Array<{
   { value: 'trusted_key_fingerprint', label: 'Trusted key fingerprint', helper: 'Require signature plus operator trust anchor.' },
   { value: 'metadata_evidence', label: 'Metadata evidence', helper: 'Publisher claims only; not a trust root.' },
 ]
+
+// Anything above the in-memory inspection prefix is streamed into
+// content-addressed quarantine by the worker, so a multi-gigabyte cap is a
+// disk-bounded operation rather than a memory-bounded one. These presets exist
+// because production models are routinely far larger than the old 100MB wall.
+const ARTIFACT_LIMIT_PRESETS: Array<{ label: string; bytes: number; helper: string }> = [
+  { label: '100 MB', bytes: 100_000_000, helper: 'Header and format inspection only' },
+  { label: '1 GB', bytes: 1_000_000_000, helper: 'Typical single-file model' },
+  { label: '5 GB', bytes: 5_000_000_000, helper: '7B-class weights' },
+  { label: '20 GB', bytes: 20_000_000_000, helper: 'Large or multi-shard weights' },
+  { label: '100 GB', bytes: 100_000_000_000, helper: 'Maximum supported artifact' },
+]
+
+// Strict signing verification is meaningless against a truncated prefix, so
+// strict profiles pull the acquisition limit up to at least a whole small model.
+const STRICT_ARTIFACT_LIMIT_FLOOR = 1_000_000_000
+
+// Fetch the whole artifact plus headroom so the full-artifact SHA-256 is
+// observed instead of a truncated prefix.
+function artifactLimitForSize(sizeBytes: number): number {
+  const withHeadroom = Math.ceil(sizeBytes * 1.05)
+  const preset = ARTIFACT_LIMIT_PRESETS.find((item) => item.bytes >= withHeadroom)
+  return preset ? preset.bytes : 100_000_000_000
+}
 
 const TRUST_PREVIEW_BADGE: Record<ModelIntakeTrustPreviewStatus, string> = {
   pass: 'bg-green-900/50 text-green-200',
@@ -312,6 +356,7 @@ function ModelIntakeSettingsContent() {
   const trustSectionRef = useRef<HTMLDivElement | null>(null)
   const [trustRemediationApplied, setTrustRemediationApplied] = useState(false)
   const [platform, setPlatform] = useState<ModelIntakePlatform>('auto')
+  const [environment, setEnvironment] = useState<ModelIntakeEnvironment>('production')
   const [sourceRef, setSourceRef] = useState('')
   const [revision, setRevision] = useState('')
   const [filename, setFilename] = useState('')
@@ -369,6 +414,7 @@ function ModelIntakeSettingsContent() {
   const [newAnchorPem, setNewAnchorPem] = useState('')
   const [newAnchorOwner, setNewAnchorOwner] = useState('')
   const [operatorToken, setOperatorToken] = useState('')
+  const [operatorCredential, setOperatorCredential] = useState<ModelIntakeOperatorCredential | null>(null)
   const [savingAnchor, setSavingAnchor] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -441,14 +487,32 @@ function ModelIntakeSettingsContent() {
     }
   }, [])
 
+  // A local install already owns its operator credential; asking the human to
+  // find it in .env was pure friction. Fall back to the manual field only when
+  // the UI server declines (remote bind, autofill disabled, or unconfigured).
+  const loadOperatorCredential = useCallback(async () => {
+    const stored = sessionStorage.getItem(MODEL_INTAKE_OPERATOR_TOKEN_KEY) || ''
+    if (stored) {
+      setOperatorToken(stored)
+      setOperatorCredential({ available: true, reason: 'local_deployment' })
+      return
+    }
+    const credential = await getModelIntakeOperatorCredential()
+    setOperatorCredential(credential)
+    if (credential.available && credential.token) {
+      setOperatorToken(credential.token)
+      sessionStorage.setItem(MODEL_INTAKE_OPERATOR_TOKEN_KEY, credential.token)
+    }
+  }, [])
+
   useEffect(() => {
-    setOperatorToken(sessionStorage.getItem(MODEL_INTAKE_OPERATOR_TOKEN_KEY) || '')
+    loadOperatorCredential()
     loadScenario()
     loadPolicyProfiles()
     loadTrustAnchors()
     loadAdmissions()
     loadScannerReadiness()
-  }, [loadScenario, loadPolicyProfiles, loadTrustAnchors, loadAdmissions, loadScannerReadiness])
+  }, [loadOperatorCredential, loadScenario, loadPolicyProfiles, loadTrustAnchors, loadAdmissions, loadScannerReadiness])
 
   function updateOperatorToken(value: string) {
     setOperatorToken(value)
@@ -476,10 +540,7 @@ function ModelIntakeSettingsContent() {
     setRunGeneratedEvaluation(true)
     setRequireGeneratedEvaluation(true)
     setTrustMode('trusted_key_fingerprint')
-    setMaxDownloadBytes((current) => {
-      const parsed = Number(current)
-      return Number.isFinite(parsed) && parsed >= 50_000_000 ? current : '50000000'
-    })
+    raiseArtifactLimitFloor(STRICT_ARTIFACT_LIMIT_FLOOR)
     setTrustRemediationApplied(true)
     window.requestAnimationFrame(() => {
       trustSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -764,6 +825,23 @@ function ModelIntakeSettingsContent() {
     })
   }
 
+  // Raise the acquisition limit toward a floor without ever shrinking a limit
+  // the operator (or the resolver) deliberately set higher.
+  function raiseArtifactLimitFloor(floorBytes: number) {
+    setMaxDownloadBytes((current) => {
+      const parsed = Number(current)
+      return Number.isFinite(parsed) && parsed >= floorBytes ? current : String(floorBytes)
+    })
+  }
+
+  function applyEnvironment(next: ModelIntakeEnvironment) {
+    setEnvironment(next)
+    const option = ENVIRONMENT_OPTIONS.find((item) => item.value === next)
+    // Strict is a deliberate hardening choice on top of production, so keep it
+    // when the operator already selected it.
+    if (option && policyProfile !== 'strict') applyPolicyProfile(option.policyProfile)
+  }
+
   function applyMetadataExample(example: 'complete' | 'minimal') {
     setMetadataJson(JSON.stringify(example === 'complete' ? COMPLETE_METADATA_EXAMPLE : MINIMAL_METADATA_EXAMPLE, null, 2))
   }
@@ -777,7 +855,7 @@ function ModelIntakeSettingsContent() {
       setRequireModelGovernance(true)
       setRequireDeploymentApproval(saved.product_area === 'model_intake' || saved.minimum_block_severity !== 'info')
       setRequireSignatureVerification(Boolean(saved.strict_model_intake))
-      setMaxDownloadBytes(saved.strict_model_intake ? '50000000' : '10000000')
+      if (saved.strict_model_intake) raiseArtifactLimitFloor(STRICT_ARTIFACT_LIMIT_FLOOR)
       if (saved.strict_model_intake) {
         setTrustMode('trusted_key_fingerprint')
         if ((saved.required_trust_anchor_ids || []).length) {
@@ -792,7 +870,6 @@ function ModelIntakeSettingsContent() {
       setRequireSignatureVerification(false)
       setRequireHash(false)
       setRequireModelGovernance(false)
-      setMaxDownloadBytes('10000000')
       if (trustMode === 'trusted_key_fingerprint') setTrustMode('signature_url_key_url')
       return
     }
@@ -801,7 +878,7 @@ function ModelIntakeSettingsContent() {
     setRequireModelGovernance(true)
     setRequireDeploymentApproval(profile === 'production' || profile === 'strict')
     setRequireSignatureVerification(profile === 'strict')
-    setMaxDownloadBytes(profile === 'strict' ? '50000000' : '10000000')
+    if (profile === 'strict') raiseArtifactLimitFloor(STRICT_ARTIFACT_LIMIT_FLOOR)
     if (profile === 'strict' && trustMode !== 'trusted_key_fingerprint') {
       setTrustMode('trusted_key_fingerprint')
     }
@@ -854,6 +931,16 @@ function ModelIntakeSettingsContent() {
       if (result.revision) setRevision(String(result.revision))
       if (result.selected_file?.path) setFilename(result.selected_file.path)
       else if (!result.scan_payload) setFilename('')
+      // A 1GB+ model must not silently fall back to a truncated prefix just
+      // because the resolver's preset carried a small cap.
+      const resolvedSize = Number(result.selected_file?.size_bytes || 0)
+      if (Number.isFinite(resolvedSize) && resolvedSize > 0) {
+        setMaxDownloadBytes((current) => {
+          const parsed = Number(current)
+          const needed = artifactLimitForSize(resolvedSize)
+          return Number.isFinite(parsed) && parsed >= resolvedSize ? current : String(needed)
+        })
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to resolve model reference'
       setError(msg)
@@ -937,6 +1024,12 @@ function ModelIntakeSettingsContent() {
       : 'bg-green-900/50 text-green-200'
   const evidenceBadgeText = !hasIntakeInput ? 'Not started' : `${presentControls}/${readinessControls.length}`
   const scanBlockedByResolver = Boolean(resolverResult && !resolverResult.scan_payload && !artifactUrl.trim())
+  // One model reference for the whole page. The resolver pins it, the preflight
+  // scan queues it, and the controlled workflow submits it — no stage asks for
+  // the URL a second time.
+  const intakeSource = artifactUrl.trim() || resolverResult?.normalized_ref?.trim() || sourceRef.trim()
+  const resolvedArtifactSize = Number(resolverResult?.selected_file?.size_bytes || 0)
+  const artifactLimitCoversArtifact = (Number(maxDownloadBytes) || 0) >= resolvedArtifactSize
   const hasFieldErrors = Object.values(fieldErrors).some(Boolean)
   const previewIncludesUrlSignature = trustMode === 'signature_url_key_url' || trustMode === 'trusted_key_fingerprint'
   const previewIncludesInlineSignature = trustMode === 'inline_signature_key' || trustMode === 'trusted_key_fingerprint'
@@ -1001,90 +1094,15 @@ function ModelIntakeSettingsContent() {
         </div>
       )}
 
-      <Card className="min-w-0 p-4">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div>
-            <h2 className="text-sm font-semibold text-white">Evidence adapter readiness</h2>
-            <p className="mt-1 text-xs text-gray-500">Strict intake requires applicable adapters; irrelevant formats report not applicable.</p>
-          </div>
-          <div className="flex items-center gap-2">
-            {scannerReadiness && (
-              <span className={`rounded px-2 py-1 text-xs font-semibold ${scannerReadiness.status === 'READY' ? 'bg-green-950/50 text-green-300' : 'bg-yellow-950/50 text-yellow-300'}`}>
-                {scannerReadiness.required_ready}/{scannerReadiness.required_total} ready
-              </span>
-            )}
-            <button type="button" onClick={loadScannerReadiness} className="rounded border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800">Refresh</button>
-          </div>
-        </div>
-        {scannerReadinessError ? (
-          <div className="mt-3 text-xs text-red-300">{scannerReadinessError}</div>
-        ) : scannerReadiness ? (
-          <div className="mt-3">
-            {scannerReadiness.reassessment_required && <div className="mb-3 rounded border border-red-800/60 bg-red-950/20 p-3 text-xs text-red-300">Required scanner rules or vulnerability data are stale. Strict scans fail incomplete; rebuild scanner material and trigger <code>{scannerReadiness.reassessment_trigger || 'scanner_data_stale'}</code> reassessment for affected active admissions.</div>}
-          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-            {scannerReadiness.adapters.filter((adapter) => adapter.enabled_by_default).map((adapter) => (
-              <div key={adapter.name} className="rounded border border-gray-800 bg-gray-950 p-3">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="font-mono text-xs text-gray-200">{adapter.name}</span>
-                  <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${adapter.ready ? 'bg-green-950/60 text-green-300' : 'bg-red-950/60 text-red-300'}`}>
-                    {adapter.status}
-                  </span>
-                </div>
-                <div className="mt-2 text-xs text-gray-500">{adapter.applicability.replace(/_/g, ' ')}</div>
-                <div className="mt-1 truncate font-mono text-[10px] text-gray-600">{adapter.version || 'not installed'}</div>
-                {adapter.rules && <div className={`mt-2 text-[10px] ${adapter.rules.fresh ? 'text-green-400' : 'text-red-400'}`}>rules {adapter.rules.status?.toLowerCase()} · {adapter.rules.age_days ?? '?'}d / {adapter.rules.max_age_days ?? '?'}d</div>}
-                {adapter.database && <div className={`mt-1 text-[10px] ${adapter.database.fresh ? 'text-green-400' : 'text-red-400'}`}>database {adapter.database.status?.toLowerCase()} · {adapter.database.age_days ?? '?'}d / {adapter.database.max_age_days ?? '?'}d</div>}
-              </div>
-            ))}
-          </div>
-          </div>
-        ) : (
-          <div className="mt-3 text-xs text-gray-500">Checking adapter readiness…</div>
-        )}
-      </Card>
-
-      <ControlledModelIntakeWorkflow
-        operatorToken={operatorToken}
-        onOperatorTokenChange={updateOperatorToken}
-        defaultSource={sourceRef}
-        defaultSourceKind={platform}
-      />
-
-      <Card className="min-w-0 p-4">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div>
-            <h2 className="text-sm font-semibold text-white">Admission lifecycle</h2>
-            <p className="mt-1 text-xs text-gray-500">Deployment accepts only active, registered, non-expired signed subjects.</p>
-          </div>
-          <button type="button" onClick={loadAdmissions} className="rounded border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800">Refresh</button>
-        </div>
-        {admissionsError ? (
-          <div className="mt-3 text-xs text-red-300">{admissionsError}</div>
-        ) : admissions.length === 0 ? (
-          <div className="mt-3 text-xs text-gray-500">No signed admissions are registered yet.</div>
-        ) : (
-          <div className="mt-3 grid gap-2">
-            {admissions.slice(0, 10).map((admission) => (
-              <div key={admission.id} className="grid min-w-0 gap-2 rounded border border-gray-800 bg-gray-950 p-3 sm:grid-cols-[minmax(0,1fr)_auto]">
-                <div className="min-w-0">
-                  <div className="truncate font-mono text-xs text-gray-300">sha256:{admission.artifact_sha256}</div>
-                  <div className="mt-1 text-xs text-gray-500">Policy {admission.policy_profile || 'unspecified'} · reassess {new Date(admission.reassessment_due_at).toLocaleString()} · expires {new Date(admission.expires_at).toLocaleString()}</div>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className={`rounded px-2 py-1 text-xs font-semibold ${admission.status === 'active' ? 'bg-green-950/50 text-green-300' : admission.status === 'reassessment_required' ? 'bg-yellow-950/50 text-yellow-300' : 'bg-red-950/50 text-red-300'}`}>{admission.status.replace(/_/g, ' ')}</span>
-                  <Link href={`/scans/${admission.scan_id}`} className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">Scan</Link>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </Card>
-
-      <Card className="min-w-0 p-4">
+      <Card className="min-w-0 p-4" id="model-intake-source">
         <div className="flex items-center gap-2 text-white">
           <Wand2 className="h-4 w-4 text-cyan-300" />
-          <h2 className="text-sm font-semibold">1. Model Reference</h2>
+          <h2 className="text-sm font-semibold">1. Model &amp; Target</h2>
         </div>
+        <p className="mt-1 text-xs text-gray-500">
+          Pick the model and where it is headed once. Every stage below — the preflight scan and the
+          controlled admission workflow — reads this reference and this environment.
+        </p>
 
         <div className="mt-4 grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(9rem,0.35fr)_minmax(10rem,0.45fr)_auto]">
           <label className={fieldClass}>
@@ -1143,6 +1161,30 @@ function ModelIntakeSettingsContent() {
               </button>
             )
           })}
+        </div>
+
+        <div className="mt-5 rounded-lg border border-gray-800 bg-gray-950 p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="text-sm font-medium text-gray-200">Deployment target</div>
+            <span className="text-xs text-gray-500">
+              Sets the preflight policy profile and the controlled submission environment
+            </span>
+          </div>
+          <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            {ENVIRONMENT_OPTIONS.map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                onClick={() => applyEnvironment(option.value)}
+                className={`min-w-0 rounded-lg border p-3 text-left ${
+                  environment === option.value ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-900 hover:border-gray-700'
+                }`}
+              >
+                <div className="break-words text-sm font-medium text-white">{option.label}</div>
+                <div className="mt-1 break-words text-xs text-gray-500">{option.helper}</div>
+              </button>
+            ))}
+          </div>
         </div>
 
         {resolverResult && (
@@ -1278,8 +1320,12 @@ function ModelIntakeSettingsContent() {
       <form onSubmit={handleSubmit} className="min-w-0 space-y-5 rounded-lg border border-gray-800 bg-gray-900 p-4">
         <div className="flex items-center gap-2 text-white">
           <Play className="h-4 w-4 text-cyan-300" />
-          <h2 className="text-sm font-semibold">3. Review Scan Payload</h2>
+          <h2 className="text-sm font-semibold">3. Preflight Evidence Scan</h2>
         </div>
+        <p className="-mt-2 text-xs text-gray-500">
+          Technical evidence for the model selected in step 1. This never grants deployment
+          authority — step 4 does that.
+        </p>
 
         <div className="grid gap-3 md:grid-cols-[minmax(0,1.3fr)_minmax(0,0.7fr)]">
           <label className={fieldClass}>
@@ -1326,6 +1372,48 @@ function ModelIntakeSettingsContent() {
               placeholder="optional digest pin"
             />
             {fieldErrors.expectedSha256 && <span role="alert" className="text-sm text-red-400">{fieldErrors.expectedSha256}</span>}
+          </label>
+        </div>
+
+        <div className="min-w-0 space-y-3 rounded-lg border border-gray-800 bg-gray-950 p-3">
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div>
+              <div className="text-sm font-medium text-gray-200">Artifact acquisition limit</div>
+              <div className="mt-1 text-xs text-gray-500">
+                How many artifact bytes intake may fetch. A full-artifact checksum and signature can
+                only be verified when this covers the whole file — anything above the in-memory
+                inspection prefix streams into content-addressed quarantine instead.
+              </div>
+            </div>
+            <span className="rounded bg-gray-800 px-2 py-1 font-mono text-xs text-gray-200">
+              {formatBytes(Number(maxDownloadBytes) || 0)}
+            </span>
+          </div>
+          <div className="grid gap-2 sm:grid-cols-3 xl:grid-cols-5">
+            {ARTIFACT_LIMIT_PRESETS.map((preset) => (
+              <button
+                key={preset.bytes}
+                type="button"
+                onClick={() => setMaxDownloadBytes(String(preset.bytes))}
+                className={`min-w-0 rounded-lg border p-2 text-left ${
+                  Number(maxDownloadBytes) === preset.bytes ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-900 hover:border-gray-700'
+                }`}
+              >
+                <div className="text-sm font-medium text-white">{preset.label}</div>
+                <div className="mt-0.5 break-words text-[11px] text-gray-500">{preset.helper}</div>
+              </button>
+            ))}
+          </div>
+          {resolvedArtifactSize > 0 && (
+            <div className={`text-xs ${artifactLimitCoversArtifact ? 'text-gray-500' : 'text-yellow-200'}`}>
+              {artifactLimitCoversArtifact
+                ? `Resolved artifact is ${formatBytes(resolvedArtifactSize)}; the full file will be acquired and hashed.`
+                : `Resolved artifact is ${formatBytes(resolvedArtifactSize)}, larger than this limit. Intake will report a truncated, unverified checksum.`}
+            </div>
+          )}
+          <label className={fieldClass}>
+            Exact limit (bytes)
+            <input value={maxDownloadBytes} onChange={(e) => setMaxDownloadBytes(e.target.value)} className={inputClass} inputMode="numeric" />
           </label>
         </div>
 
@@ -1471,18 +1559,19 @@ function ModelIntakeSettingsContent() {
                     Refresh
                   </button>
                 </div>
-                <label className={`${fieldClass} mt-3`}>
-                  Operator token for trust changes
-                  <input
-                    type="password"
-                    autoComplete="off"
-                    value={operatorToken}
-                    onChange={(event) => updateOperatorToken(event.target.value)}
-                    className={inputClass}
-                    placeholder="Required for remote create/deactivate actions"
-                  />
-                  <span className="text-xs text-gray-500">Kept only in this browser tab session and sent as a bearer credential for trust-anchor mutations.</span>
-                </label>
+                <div className="mt-3 rounded border border-gray-800 bg-gray-950 p-2 text-xs">
+                  {operatorToken ? (
+                    <span className="text-gray-500">
+                      Trust-anchor changes are authorized with the operator credential resolved in
+                      step 4. No separate token is needed here.
+                    </span>
+                  ) : (
+                    <span className="text-yellow-200">
+                      No operator credential is active. Set one in step 4 before creating or
+                      deactivating a trust anchor.
+                    </span>
+                  )}
+                </div>
                 {trustAnchorsLoading && <div className="mt-3 text-xs text-gray-500">Loading trust anchors...</div>}
                 {trustAnchorsError && <div role="alert" className="mt-3 text-xs text-red-400">{trustAnchorsError}</div>}
                 {!trustAnchorsLoading && savedTrustAnchors.length === 0 && (
@@ -1693,26 +1782,21 @@ function ModelIntakeSettingsContent() {
             </div>
             <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
               <label className={fieldClass}>
-                Inspection prefix (bytes)
-                <input value={maxDownloadBytes} onChange={(e) => setMaxDownloadBytes(e.target.value)} className={inputClass} inputMode="numeric" />
-              </label>
-              <label className={fieldClass}>
                 Timeout (seconds)
                 <input value={timeoutSeconds} onChange={(e) => setTimeoutSeconds(e.target.value)} className={inputClass} inputMode="numeric" />
-              </label>
-            </div>
-            <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-              <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
-                <input type="checkbox" checked={completeArtifactDownload} onChange={(e) => setCompleteArtifactDownload(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
-                Acquire and hash the complete artifact
               </label>
               <label className={fieldClass}>
                 Complete artifact limit (bytes)
                 <input value={maxArtifactBytes} onChange={(e) => setMaxArtifactBytes(e.target.value)} className={inputClass} inputMode="numeric" disabled={!completeArtifactDownload} />
               </label>
             </div>
+            <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
+              <input type="checkbox" checked={completeArtifactDownload} onChange={(e) => setCompleteArtifactDownload(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+              Always acquire the complete artifact, whatever the limit above
+            </label>
             <p className="text-xs text-gray-500">
-              Complete acquisition streams to content-addressed quarantine; only the bounded prefix is retained in worker memory.
+              The acquisition limit in step 3 already escalates to complete streaming acquisition on
+              its own. Use this only to force complete acquisition under a separate ceiling.
             </p>
             <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
               <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
@@ -1794,6 +1878,89 @@ function ModelIntakeSettingsContent() {
           <p role="alert" className="text-sm text-red-400">Fix the failed trust preview checks before queueing this scan.</p>
         )}
       </form>
+
+      <ControlledModelIntakeWorkflow
+        operatorToken={operatorToken}
+        onOperatorTokenChange={updateOperatorToken}
+        operatorCredential={operatorCredential}
+        source={intakeSource}
+        sourceKind={platform}
+        environment={environment}
+        expectedArtifactSha256={expectedSha256.trim()}
+      />
+
+      <Card className="min-w-0 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 className="text-sm font-semibold text-white">Admission lifecycle</h2>
+            <p className="mt-1 text-xs text-gray-500">Deployment accepts only active, registered, non-expired signed subjects.</p>
+          </div>
+          <button type="button" onClick={loadAdmissions} className="rounded border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800">Refresh</button>
+        </div>
+        {admissionsError ? (
+          <div className="mt-3 text-xs text-red-300">{admissionsError}</div>
+        ) : admissions.length === 0 ? (
+          <div className="mt-3 text-xs text-gray-500">No signed admissions are registered yet.</div>
+        ) : (
+          <div className="mt-3 grid gap-2">
+            {admissions.slice(0, 10).map((admission) => (
+              <div key={admission.id} className="grid min-w-0 gap-2 rounded border border-gray-800 bg-gray-950 p-3 sm:grid-cols-[minmax(0,1fr)_auto]">
+                <div className="min-w-0">
+                  <div className="truncate font-mono text-xs text-gray-300">sha256:{admission.artifact_sha256}</div>
+                  <div className="mt-1 text-xs text-gray-500">Policy {admission.policy_profile || 'unspecified'} · reassess {new Date(admission.reassessment_due_at).toLocaleString()} · expires {new Date(admission.expires_at).toLocaleString()}</div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className={`rounded px-2 py-1 text-xs font-semibold ${admission.status === 'active' ? 'bg-green-950/50 text-green-300' : admission.status === 'reassessment_required' ? 'bg-yellow-950/50 text-yellow-300' : 'bg-red-950/50 text-red-300'}`}>{admission.status.replace(/_/g, ' ')}</span>
+                  <Link href={`/scans/${admission.scan_id}`} className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">Scan</Link>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+
+      <Card className="min-w-0 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 className="text-sm font-semibold text-white">Evidence adapter readiness</h2>
+            <p className="mt-1 text-xs text-gray-500">Strict intake requires applicable adapters; irrelevant formats report not applicable.</p>
+          </div>
+          <div className="flex items-center gap-2">
+            {scannerReadiness && (
+              <span className={`rounded px-2 py-1 text-xs font-semibold ${scannerReadiness.status === 'READY' ? 'bg-green-950/50 text-green-300' : 'bg-yellow-950/50 text-yellow-300'}`}>
+                {scannerReadiness.required_ready}/{scannerReadiness.required_total} ready
+              </span>
+            )}
+            <button type="button" onClick={loadScannerReadiness} className="rounded border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800">Refresh</button>
+          </div>
+        </div>
+        {scannerReadinessError ? (
+          <div className="mt-3 text-xs text-red-300">{scannerReadinessError}</div>
+        ) : scannerReadiness ? (
+          <div className="mt-3">
+            {scannerReadiness.reassessment_required && <div className="mb-3 rounded border border-red-800/60 bg-red-950/20 p-3 text-xs text-red-300">Required scanner rules or vulnerability data are stale. Strict scans fail incomplete; rebuild scanner material and trigger <code>{scannerReadiness.reassessment_trigger || 'scanner_data_stale'}</code> reassessment for affected active admissions.</div>}
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            {scannerReadiness.adapters.filter((adapter) => adapter.enabled_by_default).map((adapter) => (
+              <div key={adapter.name} className="rounded border border-gray-800 bg-gray-950 p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-mono text-xs text-gray-200">{adapter.name}</span>
+                  <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${adapter.ready ? 'bg-green-950/60 text-green-300' : 'bg-red-950/60 text-red-300'}`}>
+                    {adapter.status}
+                  </span>
+                </div>
+                <div className="mt-2 text-xs text-gray-500">{adapter.applicability.replace(/_/g, ' ')}</div>
+                <div className="mt-1 truncate font-mono text-[10px] text-gray-600">{adapter.version || 'not installed'}</div>
+                {adapter.rules && <div className={`mt-2 text-[10px] ${adapter.rules.fresh ? 'text-green-400' : 'text-red-400'}`}>rules {adapter.rules.status?.toLowerCase()} · {adapter.rules.age_days ?? '?'}d / {adapter.rules.max_age_days ?? '?'}d</div>}
+                {adapter.database && <div className={`mt-1 text-[10px] ${adapter.database.fresh ? 'text-green-400' : 'text-red-400'}`}>database {adapter.database.status?.toLowerCase()} · {adapter.database.age_days ?? '?'}d / {adapter.database.max_age_days ?? '?'}d</div>}
+              </div>
+            ))}
+          </div>
+          </div>
+        ) : (
+          <div className="mt-3 text-xs text-gray-500">Checking adapter readiness…</div>
+        )}
+      </Card>
+
 
       {scenarioLoading && <CardSkeleton count={2} />}
       {!scenarioLoading && scenarioError && <ErrorState message={scenarioError} onRetry={loadScenario} />}

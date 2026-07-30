@@ -27,6 +27,7 @@ import {
   type ModelIntakeDeploymentBundleRequest,
   type ModelIntakeAgentSession,
   type ModelIntakeCorporateReport,
+  type ModelIntakeOperatorCredential,
   type ModelIntakePlatform,
   type ModelIntakeRunnerJob,
   type ModelIntakeRunnerReadiness,
@@ -99,13 +100,21 @@ function blankBundle(environment: ModelIntakeWorkflowSubmission['requested_envir
 export function ControlledModelIntakeWorkflow({
   operatorToken,
   onOperatorTokenChange,
-  defaultSource,
-  defaultSourceKind,
+  operatorCredential,
+  source,
+  sourceKind,
+  environment,
+  expectedArtifactSha256,
 }: {
   operatorToken: string
   onOperatorTokenChange: (value: string) => void
-  defaultSource: string
-  defaultSourceKind: ModelIntakePlatform
+  operatorCredential: ModelIntakeOperatorCredential | null
+  // Model reference, provider, deployment target, and digest pin are all chosen
+  // once in step 1. This stage consumes them; it never asks for them again.
+  source: string
+  sourceKind: ModelIntakePlatform
+  environment: ModelIntakeWorkflowSubmission['requested_environment']
+  expectedArtifactSha256: string
 }) {
   const toast = useToast()
   const [runnerReadiness, setRunnerReadiness] = useState<ModelIntakeRunnerReadiness | null>(null)
@@ -118,13 +127,9 @@ export function ControlledModelIntakeWorkflow({
   const [busy, setBusy] = useState('')
   const [error, setError] = useState<string | null>(null)
 
-  const [source, setSource] = useState(defaultSource)
-  const [sourceKind, setSourceKind] = useState<ModelIntakePlatform>(defaultSourceKind)
-  const [environment, setEnvironment] = useState<ModelIntakeWorkflowSubmission['requested_environment']>('production')
-  const [expectedSha, setExpectedSha] = useState('')
   const [intendedUse, setIntendedUse] = useState('{"purpose":"knowledge-graph vector embeddings","data_classification":"internal"}')
   const [staticScanId, setStaticScanId] = useState('')
-  const [bundleJson, setBundleJson] = useState(JSON.stringify(blankBundle(), null, 2))
+  const [bundleJson, setBundleJson] = useState(JSON.stringify(blankBundle(environment), null, 2))
   const [runnerOperation, setRunnerOperation] = useState<'calibration' | 'runtime' | 'conversion'>('runtime')
   const [knownAnswerInputs, setKnownAnswerInputs] = useState('["corporate security review","knowledge graph entity retrieval"]')
   const [knownAnswerDigest, setKnownAnswerDigest] = useState('')
@@ -144,11 +149,19 @@ export function ControlledModelIntakeWorkflow({
   const [policyDecisionId, setPolicyDecisionId] = useState('')
   const [idempotencyKey, setIdempotencyKey] = useState('')
 
+  // The deployment target is chosen once in step 1, so the bundle's
+  // target_environment tracks it instead of being a third place to get it wrong.
   useEffect(() => {
-    if (defaultSource) setSource(defaultSource)
-  }, [defaultSource])
-
-  useEffect(() => setSourceKind(defaultSourceKind), [defaultSourceKind])
+    setBundleJson((current) => {
+      try {
+        const parsed = parseObject(current, 'Deployment bundle')
+        if (parsed.target_environment === environment) return current
+        return JSON.stringify({ ...parsed, target_environment: environment }, null, 2)
+      } catch {
+        return current
+      }
+    })
+  }, [environment])
 
   const loadReadiness = useCallback(async () => {
     try {
@@ -227,12 +240,13 @@ export function ControlledModelIntakeWorkflow({
     setError(null)
     try {
       if (!operatorToken.trim()) throw new Error('An operator credential is required')
+      if (!source.trim()) throw new Error('Select a model reference in step 1 first')
       const response = await createModelIntakeSubmission({
         source: source.trim(),
         source_kind: sourceKind,
         intended_environment: environment,
         intended_use: parseObject(intendedUse, 'Intended use'),
-        expected_artifact_sha256: expectedSha.trim() || undefined,
+        expected_artifact_sha256: expectedArtifactSha256.trim() || undefined,
       }, operatorToken)
       setSelectedId(response.submission.id)
       setBundleJson(JSON.stringify(blankBundle(environment), null, 2))
@@ -491,6 +505,9 @@ export function ControlledModelIntakeWorkflow({
     }
   }
 
+  // A loopback deployment resolves its own credential, so the manual field
+  // only appears when the UI server declined to provide one.
+  const operatorCredentialAutofilled = Boolean(operatorToken.trim()) && operatorCredential?.available === true
   const performedControlIds = new Set(report?.assessment_scope?.checks_performed || [])
   const incompleteControlIds = new Set(report?.assessment_scope?.checks_not_completed || [])
   const performedControls = report?.controls.filter((control) => performedControlIds.has(control.id)) || []
@@ -502,7 +519,7 @@ export function ControlledModelIntakeWorkflow({
         <div>
           <div className="flex items-center gap-2 text-white">
             <LockKeyhole className="h-4 w-4 text-cyan-300" />
-            <h2 className="text-sm font-semibold">Controlled corporate admission workflow</h2>
+            <h2 className="text-sm font-semibold">4. Controlled Corporate Admission Workflow</h2>
           </div>
           <p className="mt-1 max-w-4xl text-xs text-gray-400">
             Generated static evidence, exact-subject Firecracker execution, frozen evidence, identity-separated approvals, deterministic policy, and isolated signing. Technical preflight above never grants deployment authority.
@@ -518,53 +535,75 @@ export function ControlledModelIntakeWorkflow({
         </div>
       </div>
 
-      {!operatorToken.trim() && (
-        <div className="mt-4 flex gap-2 rounded border border-yellow-700/50 bg-yellow-950/20 p-3 text-xs text-yellow-200">
-          <ShieldAlert className="h-4 w-4 shrink-0" /> Enter an operator credential below. It stays in session storage and is never rendered in workflow evidence.
+      {operatorCredentialAutofilled ? (
+        <div className="mt-4 flex gap-2 rounded border border-gray-800 bg-gray-950 p-3 text-xs text-gray-400">
+          <LockKeyhole className="h-4 w-4 shrink-0 text-cyan-300" />
+          <span>
+            Using this deployment&apos;s own operator credential. Reviewer identities and roles are
+            still resolved server-side from hashed credential records, and the submitter can never
+            approve its own submission.
+          </span>
+        </div>
+      ) : (
+        <div className="mt-4 grid gap-2 rounded border border-yellow-700/50 bg-yellow-950/20 p-3 text-xs text-yellow-200">
+          <div className="flex gap-2">
+            <ShieldAlert className="h-4 w-4 shrink-0" />
+            <span>
+              {operatorCredential?.detail
+                || 'An operator credential is required for submissions, evidence, runner jobs, approvals, and promotion.'}
+            </span>
+          </div>
+          <label className="mt-1 grid max-w-2xl gap-1 text-gray-300">
+            Operator credential
+            <input
+              className={inputClass}
+              type="password"
+              autoComplete="off"
+              value={operatorToken}
+              onChange={(event) => onOperatorTokenChange(event.target.value)}
+              placeholder="MODEL_INTAKE_OPERATOR_TOKEN, or a configured reviewer credential"
+            />
+            <span className="text-[11px] text-gray-500">Stored only in this browser session and never rendered in workflow evidence.</span>
+          </label>
         </div>
       )}
-      <label className="mt-4 grid max-w-2xl gap-1 text-xs text-gray-300">
-        Operator credential for controlled workflow
-        <input
-          className={inputClass}
-          type="password"
-          autoComplete="off"
-          value={operatorToken}
-          onChange={(event) => onOperatorTokenChange(event.target.value)}
-          placeholder="Required for submissions, evidence, runner jobs, approvals, and promotion"
-        />
-        <span className="text-[11px] text-gray-500">Stored only in this browser session. Production reviewer identities and roles are resolved server-side from hashed credential records.</span>
-      </label>
       {error && <div role="alert" className="mt-4 break-words rounded border border-red-700/50 bg-red-950/20 p-3 text-xs text-red-300">{error}</div>}
 
       <details className="mt-4 rounded-lg border border-gray-800 bg-gray-950" open>
-        <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-white">1. Create or select a submission</summary>
+        <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-white">4.1 Create or select a submission</summary>
         <div className="grid gap-4 border-t border-gray-800 p-4 xl:grid-cols-2">
           <div className="grid gap-3">
-            <label className="grid gap-1 text-xs text-gray-300">Immutable source reference
-              <input className={inputClass} value={source} onChange={(event) => setSource(event.target.value)} placeholder="hf://org/model@commit/model.safetensors" />
-            </label>
-            <div className="grid gap-3 sm:grid-cols-2">
-              <label className="grid gap-1 text-xs text-gray-300">Source kind
-                <select className={inputClass} value={sourceKind} onChange={(event) => setSourceKind(event.target.value as ModelIntakePlatform)}>
-                  {['auto', 'huggingface', 'http', 's3', 'gcs', 'azure', 'oci', 'mlflow'].map((value) => <option key={value} value={value}>{value}</option>)}
-                </select>
-              </label>
-              <label className="grid gap-1 text-xs text-gray-300">Intended environment
-                <select className={inputClass} value={environment} onChange={(event) => setEnvironment(event.target.value as ModelIntakeWorkflowSubmission['requested_environment'])}>
-                  {['development', 'test', 'staging', 'production'].map((value) => <option key={value} value={value}>{value}</option>)}
-                </select>
-              </label>
+            <div className="rounded border border-gray-800 bg-gray-900 p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-xs font-medium text-gray-300">Intake context from step 1</span>
+                <a href="#model-intake-source" className={buttonClass}>Change</a>
+              </div>
+              <dl className="mt-3 grid gap-2 text-[11px] sm:grid-cols-2">
+                <div className="min-w-0">
+                  <dt className="text-gray-500">Immutable source reference</dt>
+                  <dd className="mt-0.5 break-all font-mono text-gray-200">{source || 'not selected yet'}</dd>
+                </div>
+                <div className="min-w-0">
+                  <dt className="text-gray-500">Source kind</dt>
+                  <dd className="mt-0.5 font-mono text-gray-200">{sourceKind}</dd>
+                </div>
+                <div className="min-w-0">
+                  <dt className="text-gray-500">Intended environment</dt>
+                  <dd className="mt-0.5 font-mono text-gray-200">{environment}</dd>
+                </div>
+                <div className="min-w-0">
+                  <dt className="text-gray-500">Expected artifact SHA-256</dt>
+                  <dd className="mt-0.5 break-all font-mono text-gray-200">{expectedArtifactSha256 || 'not pinned'}</dd>
+                </div>
+              </dl>
             </div>
-            <label className="grid gap-1 text-xs text-gray-300">Expected artifact SHA-256 (optional until resolved)
-              <input className={inputClass} value={expectedSha} onChange={(event) => setExpectedSha(event.target.value)} />
-            </label>
             <label className="grid gap-1 text-xs text-gray-300">Intended-use declaration
               <textarea className={textareaClass} rows={4} value={intendedUse} onChange={(event) => setIntendedUse(event.target.value)} />
             </label>
             <button type="button" className={buttonClass} disabled={busy === 'create' || !source.trim()} onClick={createSubmission}>
               {busy === 'create' ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <LockKeyhole className="h-3.5 w-3.5" />} Create controlled submission
             </button>
+            {!source.trim() && <div className="text-[11px] text-yellow-200">Select or resolve a model in step 1 to enable submission.</div>}
           </div>
           <div className="min-w-0">
             <div className="mb-2 flex items-center justify-between text-xs text-gray-400"><span>Recent controlled submissions</span><span>{submissions.length}</span></div>
@@ -581,7 +620,7 @@ export function ControlledModelIntakeWorkflow({
       </details>
 
       <details className="mt-3 rounded-lg border border-gray-800 bg-gray-950" open={Boolean(selectedId)}>
-        <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-white">2. Bind completed static evidence</summary>
+        <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-white">4.2 Bind completed static evidence</summary>
         <div className="border-t border-gray-800 p-4">
           <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
             <label className="grid gap-1 text-xs text-gray-300">Completed Model Intake scan ID
@@ -601,7 +640,7 @@ export function ControlledModelIntakeWorkflow({
       </details>
 
       <details className="mt-3 rounded-lg border border-gray-800 bg-gray-950" open={Boolean(selectedId)}>
-        <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-white">3. Firecracker calibration, runtime, conversion, and telemetry</summary>
+        <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-white">4.3 Firecracker calibration, runtime, conversion, and telemetry</summary>
         <div className="grid gap-4 border-t border-gray-800 p-4 xl:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)]">
           <div className="grid gap-3">
             <div className="flex flex-wrap items-center justify-between gap-2"><span className="text-xs text-gray-400">Exact deployment bundle</span><button type="button" className={buttonClass} onClick={seedBundleFromEvidence}>Seed authoritative digests</button></div>
@@ -648,7 +687,7 @@ export function ControlledModelIntakeWorkflow({
       </details>
 
       <details className="mt-3 rounded-lg border border-gray-800 bg-gray-950">
-        <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-white">4. Codex-guided investigation (advisory only)</summary>
+        <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-white">4.4 Codex-guided investigation (advisory only)</summary>
         <div className="grid gap-4 border-t border-gray-800 p-4 xl:grid-cols-2">
           <div className="grid gap-3">
             <div className="rounded border border-cyan-800/60 bg-cyan-950/20 p-3 text-xs text-cyan-200">The coding agent may inspect evidence, check readiness, validate a runner plan, draft an embedding test plan, or recommend a follow-up. It cannot execute arbitrary commands, approve, change policy, freeze evidence, promote, or turn incomplete evidence into PASS.</div>
@@ -666,7 +705,7 @@ export function ControlledModelIntakeWorkflow({
       </details>
 
       <details className="mt-3 rounded-lg border border-gray-800 bg-gray-950">
-        <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-white">5. Freeze, approve, evaluate policy, and promote</summary>
+        <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-white">4.5 Freeze, approve, evaluate policy, and promote</summary>
         <div className="grid gap-4 border-t border-gray-800 p-4 xl:grid-cols-2">
           <div className="grid gap-3">
             <button type="button" className={buttonClass} disabled={!selectedId || busy === 'freeze'} onClick={freezeEvidence}><LockKeyhole className="h-3.5 w-3.5" /> Freeze exact current evidence</button>
@@ -688,7 +727,7 @@ export function ControlledModelIntakeWorkflow({
       </details>
 
       <details className="mt-3 rounded-lg border border-gray-800 bg-gray-950" open={Boolean(report)}>
-        <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-white">6. Normalized corporate review report</summary>
+        <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-white">4.6 Normalized corporate review report</summary>
         <div className="border-t border-gray-800 p-4">
           {!report ? <div className="text-xs text-gray-500">Select a controlled submission to generate its authoritative report.</div> : (
             <div className="grid gap-4">

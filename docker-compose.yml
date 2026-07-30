@@ -524,6 +524,12 @@ services:
       - NEXT_PUBLIC_API_URL=${SHAKERSCAN_PUBLIC_API_URL:-}
       - NEXT_PUBLIC_APP_VERSION=${SCANNER_VERSION:-dev}
       - SHAKERSCAN_README_PATH=/docs/README.md
+      # Lets the Model Intake page use the deployment's own operator credential
+      # instead of asking a human to copy it out of .env. The route that reads
+      # this serves it only on a loopback-bound deployment.
+      - SHAKERSCAN_BIND_HOST=${SHAKERSCAN_BIND_HOST:-}
+      - SHAKERSCAN_UI_OPERATOR_AUTOFILL=${SHAKERSCAN_UI_OPERATOR_AUTOFILL:-1}
+      - MODEL_INTAKE_OPERATOR_TOKEN=${MODEL_INTAKE_OPERATOR_TOKEN:-}
     volumes:
       - ./README.md:/docs/README.md:ro
     depends_on:

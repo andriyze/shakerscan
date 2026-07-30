@@ -3800,7 +3800,16 @@ class ModelIntakeScanRequest(BaseModel):
         ),
     )
     policy_exceptions: Optional[list[dict[str, Any]]] = None
-    max_download_bytes: int = Field(default=10_000_000, ge=1024, le=100_000_000)
+    max_download_bytes: int = Field(
+        default=10_000_000,
+        ge=1024,
+        le=100_000_000_000,
+        description=(
+            "Artifact byte ceiling for this intake. Production models are routinely 1GB+, so anything "
+            "above the in-memory inspection prefix is streamed into content-addressed quarantine "
+            "automatically, which is what makes a full-artifact checksum and signature verifiable."
+        ),
+    )
     complete_artifact_download: bool = Field(
         default=False,
         description="Stream the complete artifact into content-addressed quarantine while retaining only a bounded inspection prefix in memory.",

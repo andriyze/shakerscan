@@ -2829,9 +2829,25 @@ async def run_model_intake_scan(
         return max(minimum, min(value, maximum))
 
     timeout_seconds = bounded_int("timeout_seconds", 20, 1, MAX_TIMEOUT_SECONDS)
-    max_download_bytes = bounded_int("max_download_bytes", 10_000_000, 1024, MAX_INSPECTION_BYTES)
+    # How many artifact bytes intake may acquire. Real models are routinely
+    # 1GB+, so this is bounded by the artifact ceiling rather than the
+    # in-memory inspection ceiling.
+    max_download_bytes = bounded_int("max_download_bytes", 10_000_000, 1024, MAX_ARTIFACT_BYTES)
     complete_artifact_download = _boolish(options.get("complete_artifact_download"))
     max_artifact_bytes = bounded_int("max_artifact_bytes", 10_000_000_000, 1024, MAX_ARTIFACT_BYTES)
+    # Only a bounded prefix is ever held in worker memory. Anything larger is
+    # streamed into content-addressed quarantine instead, which is what makes a
+    # full-artifact SHA-256 (and therefore checksum/signature verification)
+    # reachable for a multi-gigabyte model.
+    inspection_bytes = min(max_download_bytes, MAX_INSPECTION_BYTES)
+    stream_to_quarantine = complete_artifact_download or max_download_bytes > inspection_bytes
+    # An explicit complete-download request is capped by max_artifact_bytes; an
+    # implicit escalation is capped by exactly what the caller asked to fetch.
+    effective_artifact_bytes = (
+        max(max_artifact_bytes, max_download_bytes)
+        if complete_artifact_download
+        else max_download_bytes
+    )
     complete_repository_snapshot = _boolish(options.get("complete_repository_snapshot"))
     max_repository_bytes = bounded_int("max_repository_bytes", 50_000_000_000, 1024, MAX_REPOSITORY_BYTES)
     max_repository_files = bounded_int("max_repository_files", 10_000, 1, MAX_REPOSITORY_FILES)
@@ -2887,14 +2903,14 @@ async def run_model_intake_scan(
     }
     artifact_bytes, artifact_meta = await _fetch_artifact(
         artifact_ref,
-        max_bytes=max_download_bytes,
+        max_bytes=inspection_bytes,
         timeout_seconds=timeout_seconds,
         metadata=acquisition_metadata,
         allow_local_files=allow_local_files,
         fetch_policy=fetch_policy,
-        complete_download=complete_artifact_download,
-        max_artifact_bytes=max_artifact_bytes,
-        quarantine_dir=quarantine_dir if complete_artifact_download else None,
+        complete_download=stream_to_quarantine,
+        max_artifact_bytes=effective_artifact_bytes,
+        quarantine_dir=quarantine_dir if stream_to_quarantine else None,
     )
     await _emit_model_intake_activity(
         activity,
@@ -2927,7 +2943,7 @@ async def run_model_intake_scan(
     )
     quarantine_path = str(artifact_meta.get("_quarantine_path") or "").strip()
     zip_info = (
-        _inspect_complete_archive(quarantine_path, max_expanded_bytes=max_artifact_bytes)
+        _inspect_complete_archive(quarantine_path, max_expanded_bytes=effective_artifact_bytes)
         if quarantine_path
         else _inspect_zip(artifact_bytes)
         if artifact_bytes[:4] == b"PK\x03\x04"

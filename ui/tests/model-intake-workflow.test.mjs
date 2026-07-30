@@ -52,7 +52,7 @@ test('Codex workflow is prominently advisory and promotion remains a separate op
   assert.match(workflow, /cannot execute arbitrary commands, approve, change policy, freeze evidence, promote/)
   assert.match(workflow, /Invoke isolated signer and promote/)
   assert.match(workflow, /Production requires distinct server-configured identities/)
-  assert.match(workflow, /Operator credential for controlled workflow/)
+  assert.match(workflow, /Operator credential/)
   assert.match(workflow, /Durable advisory sessions/)
   assert.match(workflow, /cancelModelIntakeAgentSession/)
 })
@@ -69,4 +69,71 @@ test('normalized corporate report has UI and export parity', () => {
   assert.match(workflow, /Printable HTML \/ PDF/)
   assert.match(api, /format: 'json' \| 'html' \| 'sarif'/)
   assert.match(api, /ModelIntakeCorporateReport/)
+})
+
+test('the model reference and deployment target are chosen once and reused downstream', () => {
+  // The controlled workflow used to carry its own source, source-kind,
+  // environment, and expected-digest inputs, so the same facts were entered two
+  // or three times and could disagree. They are props now.
+  assert.match(workflow, /source: string/)
+  assert.match(workflow, /sourceKind: ModelIntakePlatform/)
+  assert.match(workflow, /environment: ModelIntakeWorkflowSubmission\['requested_environment'\]/)
+  assert.match(workflow, /expectedArtifactSha256: string/)
+  assert.match(workflow, /Intake context from step 1/)
+  assert.doesNotMatch(workflow, /setSource\(/)
+  assert.doesNotMatch(workflow, /setSourceKind\(/)
+  assert.doesNotMatch(workflow, /setEnvironment\(/)
+  assert.doesNotMatch(workflow, /setExpectedSha\(/)
+
+  // The single environment selector lives in step 1 and drives the bundle.
+  assert.match(page, /const ENVIRONMENT_OPTIONS/)
+  assert.match(page, /Deployment target/)
+  assert.match(page, /environment=\{environment\}/)
+  assert.match(workflow, /target_environment: environment/)
+})
+
+test('page stages are numbered in the order they are rendered', () => {
+  const order = ['1. Model &amp; Target', '2. Policy Profile', '3. Preflight Evidence Scan', '<ControlledModelIntakeWorkflow']
+  let cursor = -1
+  for (const marker of order) {
+    const index = page.indexOf(marker)
+    assert.notStrictEqual(index, -1, `${marker} is missing from the Model Intake page`)
+    assert.ok(index > cursor, `${marker} is rendered out of numbered order`)
+    cursor = index
+  }
+  assert.match(workflow, /4\. Controlled Corporate Admission Workflow/)
+  for (const stage of ['4.1', '4.2', '4.3', '4.4', '4.5', '4.6']) {
+    assert.ok(workflow.includes(`>${stage} `), `controlled stage ${stage} is missing`)
+  }
+})
+
+test('a local deployment resolves its own operator credential instead of asking for it', () => {
+  assert.match(api, /getModelIntakeOperatorCredential/)
+  assert.match(api, /\/api\/model-intake\/operator-credential/)
+  assert.match(page, /loadOperatorCredential/)
+  assert.match(page, /getModelIntakeOperatorCredential\(\)/)
+  // The manual field remains for deployments the UI server will not autofill.
+  assert.match(workflow, /operatorCredentialAutofilled/)
+  assert.match(workflow, /onOperatorTokenChange\(event\.target\.value\)/)
+
+  const route = readFileSync(path.join(root, 'src/app/api/model-intake/operator-credential/route.ts'), 'utf8')
+  assert.match(route, /deploymentIsLoopbackBound/)
+  assert.match(route, /requestIsLoopback/)
+  assert.match(route, /SHAKERSCAN_UI_OPERATOR_AUTOFILL/)
+  assert.match(route, /remote_deployment/)
+})
+
+test('artifact acquisition is presented in model-sized units, not a 100MB prefix', () => {
+  assert.match(page, /ARTIFACT_LIMIT_PRESETS/)
+  assert.match(page, /Artifact acquisition limit/)
+  for (const label of ['100 MB', '1 GB', '5 GB', '20 GB', '100 GB']) {
+    assert.ok(page.includes(`'${label}'`), `${label} preset is missing`)
+  }
+  // Resolving a large model must raise the limit to cover it.
+  assert.match(page, /artifactLimitForSize/)
+  assert.match(page, /artifactLimitCoversArtifact/)
+  // A policy profile must never shrink a deliberately larger limit.
+  assert.match(page, /raiseArtifactLimitFloor/)
+  assert.doesNotMatch(page, /setMaxDownloadBytes\('10000000'\)/)
+  assert.doesNotMatch(page, /setMaxDownloadBytes\('50000000'\)/)
 })

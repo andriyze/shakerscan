@@ -136,8 +136,16 @@ generate_datastore_secret() {
     od -An -N32 -tx1 /dev/urandom | tr -d ' \n'
 }
 
+postgres_data_volume_exists() {
+    local project="${COMPOSE_PROJECT_NAME:-shakerscan}"
+
+    command_exists docker || return 1
+    docker volume inspect "${project}_postgres-data" > /dev/null 2>&1
+}
+
 ensure_runtime_datastore_credentials() {
     local current_postgres current_redis next_postgres next_redis ready_attempt
+    local persist_postgres=1
 
     touch "$SCRIPT_DIR/.env"
     chmod 600 "$SCRIPT_DIR/.env"
@@ -161,40 +169,57 @@ ensure_runtime_datastore_credentials() {
         return 1
     fi
 
-    # Compose files fail closed without these values. Build-only commands use
-    # ephemeral generated values; start/restart persist them after PostgreSQL's
-    # durable role has been rotated. This keeps upgrades from the historical
-    # weak default working even when the old container was removed but its
-    # volume remains.
+    # Compose files fail closed without these values.
     export POSTGRES_PASSWORD="$next_postgres"
     export REDIS_PASSWORD="$next_redis"
-    if [ "$next_postgres" != "$current_postgres" ]; then
-        case "${COMMAND:-}" in
-            start|restart)
-                compose up -d postgres > /dev/null
-                ready_attempt=0
-                until compose exec -T postgres pg_isready -U scanner > /dev/null 2>&1; do
-                    ready_attempt=$((ready_attempt + 1))
-                    if [ "$ready_attempt" -ge 30 ]; then
-                        echo -e "${RED}Error: PostgreSQL did not become ready for credential rotation.${NC}" >&2
-                        return 1
-                    fi
-                    sleep 1
-                done
-                if ! printf "ALTER ROLE scanner PASSWORD '%s';\n" "$next_postgres" | \
-                    compose exec -T postgres psql -U scanner -d scanner -v ON_ERROR_STOP=1 > /dev/null; then
-                    echo -e "${RED}Error: could not rotate the existing PostgreSQL credential.${NC}" >&2
-                    return 1
-                fi
-                ;;
-            *)
-                return 0
-                ;;
-        esac
+
+    # Redis keeps no durable copy of its credential: the server reads
+    # --requirepass from this value every time it starts, so a freshly
+    # generated password is always safe to persist. Persist it independently
+    # of the PostgreSQL rotation below, otherwise a build/rebuild on a new
+    # install exports a password it never records and leaves .env without
+    # REDIS_PASSWORD, which makes a plain `docker compose up` fail closed.
+    if [ "$next_redis" != "$current_redis" ]; then
+        write_dotenv_value REDIS_PASSWORD "$next_redis"
     fi
 
-    write_dotenv_value POSTGRES_PASSWORD "$next_postgres"
-    write_dotenv_value REDIS_PASSWORD "$next_redis"
+    # PostgreSQL does keep a durable role password, so a changed value is only
+    # true once the role has been rotated (start/restart) or once the cluster
+    # is initialized from it. A brand-new install has no data volume yet, so
+    # the value we generated here is exactly what initdb will use and must be
+    # recorded now. An existing volume from an older weak-default install
+    # keeps the previous fail-closed behavior: export for this command, and
+    # persist only after the ALTER ROLE below succeeds.
+    if [ "$next_postgres" != "$current_postgres" ]; then
+        if postgres_data_volume_exists; then
+            case "${COMMAND:-}" in
+                start|restart)
+                    compose up -d postgres > /dev/null
+                    ready_attempt=0
+                    until compose exec -T postgres pg_isready -U scanner > /dev/null 2>&1; do
+                        ready_attempt=$((ready_attempt + 1))
+                        if [ "$ready_attempt" -ge 30 ]; then
+                            echo -e "${RED}Error: PostgreSQL did not become ready for credential rotation.${NC}" >&2
+                            return 1
+                        fi
+                        sleep 1
+                    done
+                    if ! printf "ALTER ROLE scanner PASSWORD '%s';\n" "$next_postgres" | \
+                        compose exec -T postgres psql -U scanner -d scanner -v ON_ERROR_STOP=1 > /dev/null; then
+                        echo -e "${RED}Error: could not rotate the existing PostgreSQL credential.${NC}" >&2
+                        return 1
+                    fi
+                    ;;
+                *)
+                    persist_postgres=0
+                    ;;
+            esac
+        fi
+    fi
+
+    if [ "$persist_postgres" -eq 1 ]; then
+        write_dotenv_value POSTGRES_PASSWORD "$next_postgres"
+    fi
     chmod 600 "$SCRIPT_DIR/.env"
 }
 

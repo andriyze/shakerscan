@@ -24,6 +24,11 @@ UI_BASE=http://localhost:3000   # replace with ./scanner.sh status output on a r
 OPERATOR_TOKEN=...              # obtain through the approved secret channel
 ```
 
+`scanner.sh start` generates `MODEL_INTAKE_OPERATOR_TOKEN` into the runtime `.env` on every install, so a
+local operator already has a working credential and the web UI resolves it from the deployment instead of
+asking a human to paste it. A remote or reverse-proxied deployment still requires explicit entry, and
+`MODEL_INTAKE_OPERATOR_CREDENTIALS_JSON` remains the way to configure per-reviewer identities and roles.
+
 ## 1. Inspect capability state
 
 ```bash
@@ -56,6 +61,12 @@ Queue the returned `scan_payload` through `POST /model-intake/scan`. Complete ad
 uses full artifact and repository acquisition with explicit byte/file/time budgets and the existing fixed
 ModelScan, Fickling, Semgrep, and Trivy adapters. A capped partial download is
 `known_unverified_truncated`/`INCOMPLETE`, never a false hash mismatch and never clean coverage.
+
+`max_download_bytes` is the artifact acquisition ceiling, not a memory budget, and accepts up to 100 GB.
+Production models are routinely 1 GB or larger, so set it to cover the whole file: anything above the bounded
+in-memory inspection prefix is streamed into content-addressed quarantine automatically, which is what makes a
+full-artifact SHA-256 — and therefore checksum and signature verification — reachable. Leaving it at the
+10 MB default for a multi-gigabyte model yields `known_unverified_truncated`, not a verified subject.
 
 After queueing, report the scan ID and `${UI_BASE}/scans/{scan_id}`, then stop unless the user asked to monitor
 an end-to-end run. Only a completed Model Intake scan with a complete artifact SHA-256 subject can be attached

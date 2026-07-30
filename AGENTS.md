@@ -70,7 +70,7 @@ flags, skills, agents, adapters, modules, and durable tables) plus architecture/
 - **Findings (`/findings`)**: filter by DAST, Deep Hunt, Interactive, AI Gate, Model Intake, ASM, or Manual source plus severity/status/last-seen/domain/search; sort by severity/first-seen/last-seen/CVSS; bulk cleanup with dry-run preview.
 - **Finding Detail (`/findings/{id}`)**: status triage buttons (active/resolved/false_positive/accepted_risk), **delete finding** with confirmation, source badge, analyst notes, CVSS, CWE link, evidence summary (URLs, payloads, parameters, status codes, response anomalies), remediation steps, AI analysis (verdict/confidence/rationale/recommendations), raw HTTP request/response, copy buttons for URLs/payloads/IDs, external links to vulnerable URLs, one-shot proof replay, and a bounded **Verify finding** action for target-linked DAST/Deep Hunt/ASM/manual web findings.
 - **AI Gate (`/ai-gate`)**: create and manage AI targets, use Secure RAG + Agent presets, choose auth, target type, probe pack, profile, and environment, then queue AI safety scans for chat APIs, RAG APIs, agent traces, and MCP endpoints. *(Preview surface: deterministic real-stack PR smoke is implemented; planned policy/exception and deterministic-judge seams are not yet release-gated.)*
-- **Model Intake (`/model-intake`)**: use model-intake presets and queue artifact checks with artifact URL, metadata URL/JSON, checksum, detached signature URL/value, public key URL/PEM, trusted key PEM/fingerprints, saved strict policy profile, model card, approval flags, timeout, and download cap. Reports expose a control execution matrix and structured phase timeline. Strict profiles require complete authoritative acquisition, cryptographic trust/attestation, required scanners, and bound runtime evidence; unavailable controls fail closed. Rebuilt source workers package and functionally self-test ModelScan, Semgrep, Fickling, and offline Trivy; `/model-intake/scanners/readiness` proves their versions/rules/DB/receipt. Execution, evaluation, policy, and report capabilities are separately reported at `/model-intake/providers/readiness`. The core worker never imports model code, while an operator-provided digest-pinned sandbox adapter can perform bounded load/inference tests. Corporate promotion hooks and the microVM runtime tier remain integrations.
+- **Model Intake (`/model-intake`)**: one numbered flow. Step 1 picks the model reference and the deployment target once; steps 2-3 apply the policy profile and queue the preflight evidence scan; step 4 is the controlled corporate admission workflow, which reuses the step 1 context instead of re-asking for it. Queue artifact checks with artifact URL, metadata URL/JSON, checksum, detached signature URL/value, public key URL/PEM, trusted key PEM/fingerprints, saved strict policy profile, model card, approval flags, timeout, and a GB-scale artifact acquisition limit that auto-sizes to the resolved artifact. Reports expose a control execution matrix and structured phase timeline. Strict profiles require complete authoritative acquisition, cryptographic trust/attestation, required scanners, and bound runtime evidence; unavailable controls fail closed. Rebuilt source workers package and functionally self-test ModelScan, Semgrep, Fickling, and offline Trivy; `/model-intake/scanners/readiness` proves their versions/rules/DB/receipt. Execution, evaluation, policy, and report capabilities are separately reported at `/model-intake/providers/readiness`. The core worker never imports model code, while an operator-provided digest-pinned sandbox adapter can perform bounded load/inference tests. Corporate promotion hooks and the microVM runtime tier remain integrations.
 - **Policy Profiles (`/settings/policy-profiles`)**: create, edit, activate/deactivate, and delete deployment gate profiles for AI Gate, Model Intake, and DAST decisions. Model Intake can select saved active profiles.
 - **Interactive Testing (`/interactive`)**: browser sessions, managed credential profiles, target principals, authz expectations, endpoint replay, screenshots, and explicit finding creation.
 - **Exceptions (`/exceptions`)**: exception queue, owner/approver/control repair, expiry visibility, and lifecycle sweep.
@@ -771,6 +771,7 @@ curl -X POST http://localhost:8080/model-intake/scan \
     "policy_profile": "production",
     "model_card_url": "https://example.com/models/model-card.md",
     "deployment_approved": true,
+    "max_download_bytes": 5000000000,
     "metadata_json": {
       "license": "apache-2.0",
       "sbom": {"components": []},
@@ -781,6 +782,20 @@ curl -X POST http://localhost:8080/model-intake/scan \
     }
   }'
 ```
+
+**Sizing the acquisition limit.** `max_download_bytes` is the artifact byte ceiling (up to 100 GB), not a
+memory budget. Production models are routinely 1 GB or larger, so set it to cover the whole file. Anything
+above the bounded in-memory inspection prefix is streamed into content-addressed quarantine automatically, and
+that is what makes a full-artifact SHA-256 — and therefore checksum and signature verification — reachable.
+Leaving it at the 10 MB default for a multi-gigabyte model returns `known_unverified_truncated`, never a
+verified subject and never a false hash mismatch. `complete_artifact_download` with `max_artifact_bytes`
+remains available to force complete acquisition under a separate ceiling.
+
+**Operator credential.** `scanner.sh start` generates `MODEL_INTAKE_OPERATOR_TOKEN` into the runtime `.env`,
+and on a loopback-bound install the web UI resolves it from the deployment rather than asking a human to paste
+it. Remote or reverse-proxied deployments still require explicit entry; set
+`SHAKERSCAN_UI_OPERATOR_AUTOFILL=0` to require it everywhere, or configure
+`MODEL_INTAKE_OPERATOR_CREDENTIALS_JSON` for per-reviewer identities and roles.
 
 After submitting a Model Intake scan, report the scan ID and UI link (`/scans/{scan_id}`), then stop. Do not poll unless the user explicitly asks.
 

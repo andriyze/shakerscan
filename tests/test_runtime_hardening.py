@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -418,3 +419,110 @@ def test_scanner_help_describes_bounded_fleet_tokens_and_safe_restart_path():
     assert "--max-uses 5 --transport broker" in scanner
     assert "Use scanner.sh rather than raw 'docker compose up' so remote-access trust is re-derived." in scanner
     assert "Mint a single-use ready-to-paste worker join command" not in scanner
+
+
+def _run_datastore_credential_bootstrap(
+    tmp_path, *, command, existing_env="", postgres_volume_exists=False
+):
+    """Execute scanner.sh's credential bootstrap in isolation.
+
+    The real function is embedded in a 2000-line CLI, so the helpers it depends
+    on are extracted verbatim and Docker/Compose are stubbed. That keeps this a
+    behavioural test of the persistence rules rather than a string match.
+    """
+    script = (ROOT / "scanner.sh").read_text()
+    wanted = (
+        "read_dotenv_value",
+        "write_dotenv_value",
+        "generate_datastore_secret",
+        "postgres_data_volume_exists",
+        "ensure_runtime_datastore_credentials",
+    )
+    extracted = []
+    for name in wanted:
+        marker = f"\n{name}() {{\n"
+        assert marker in script, f"{name} is missing from scanner.sh"
+        body = script.split(marker, 1)[1].split("\n}\n", 1)[0]
+        extracted.append(f"{name}() {{\n{body}\n}}\n")
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(existing_env)
+
+    harness = "\n".join([
+        "set -u",
+        f'SCRIPT_DIR="{tmp_path}"',
+        'RED=""; NC=""',
+        "command_exists() { [ \"$1\" = docker ]; }",
+        # Any real Compose/Docker call in this path is a bug: rotation must not
+        # be attempted for a fresh install with no PostgreSQL data volume.
+        'compose() { echo "compose must not run" >&2; return 1; }',
+        f'docker() {{ [ "{int(postgres_volume_exists)}" = "1" ]; }}',
+        *extracted,
+        f'COMMAND="{command}"',
+        "ensure_runtime_datastore_credentials",
+    ])
+
+    result = subprocess.run(
+        ["bash", "-c", harness],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "POSTGRES_PASSWORD": "", "REDIS_PASSWORD": ""},
+    )
+    assert result.returncode == 0, result.stderr
+    values = {}
+    for line in env_file.read_text().splitlines():
+        if "=" in line:
+            key, _, value = line.partition("=")
+            values[key] = value
+    return values
+
+
+def test_fresh_install_records_both_datastore_passwords_for_build_only_commands(tmp_path):
+    # Regression: a `build`/`rebuild` on a new install used to generate both
+    # passwords, export them, then return early before writing either one.
+    # `.env` was left without REDIS_PASSWORD, so a later plain `docker compose
+    # up` failed closed on the required-variable guard.
+    values = _run_datastore_credential_bootstrap(tmp_path, command="build")
+
+    assert len(values.get("REDIS_PASSWORD", "")) >= 32
+    assert len(values.get("POSTGRES_PASSWORD", "")) >= 32
+
+
+def test_generated_redis_password_persists_even_when_postgres_rotation_is_deferred(tmp_path):
+    # An existing data volume means the PostgreSQL role still holds the old
+    # password, so a build-only command must not record the new one. Redis has
+    # no durable credential and must still be persisted.
+    values = _run_datastore_credential_bootstrap(
+        tmp_path, command="build", postgres_volume_exists=True
+    )
+
+    assert len(values.get("REDIS_PASSWORD", "")) >= 32
+    assert "POSTGRES_PASSWORD" not in values
+
+
+def test_existing_datastore_passwords_are_preserved(tmp_path):
+    existing = f"POSTGRES_PASSWORD={'p' * 40}\nREDIS_PASSWORD={'r' * 40}\n"
+    values = _run_datastore_credential_bootstrap(
+        tmp_path, command="build", existing_env=existing, postgres_volume_exists=True
+    )
+
+    assert values["POSTGRES_PASSWORD"] == "p" * 40
+    assert values["REDIS_PASSWORD"] == "r" * 40
+
+
+def test_ui_receives_the_operator_credential_and_bind_host_for_local_autofill():
+    # The Model Intake page used to make a human copy MODEL_INTAKE_OPERATOR_TOKEN
+    # out of .env. The UI server now serves it to its own same-origin page, but
+    # only when the deployment is loopback-bound, so it needs both values.
+    for compose_name in ("docker-compose.yml", "docker-compose.release.yml"):
+        compose = (ROOT / compose_name).read_text()
+        ui_block = re.split(r"\n  [a-z]", compose.split("\n  ui:\n", 1)[1], maxsplit=1)[0]
+        assert "MODEL_INTAKE_OPERATOR_TOKEN=${MODEL_INTAKE_OPERATOR_TOKEN:-}" in ui_block
+        assert "SHAKERSCAN_BIND_HOST=${SHAKERSCAN_BIND_HOST:-}" in ui_block
+        assert "SHAKERSCAN_UI_OPERATOR_AUTOFILL=${SHAKERSCAN_UI_OPERATOR_AUTOFILL:-1}" in ui_block
+
+    route = (ROOT / "ui" / "src" / "app" / "api" / "model-intake" / "operator-credential" / "route.ts").read_text()
+    assert "deploymentIsLoopbackBound" in route
+    assert "requestIsLoopback" in route
+    # A remote deployment must fall back to explicit operator entry.
+    assert "remote_deployment" in route

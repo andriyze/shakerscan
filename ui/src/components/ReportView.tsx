@@ -1777,14 +1777,14 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                   <div className="text-sm font-semibold text-white">{modelIntakeFetch?.status ?? 'not applicable'}</div>
                 </div>
                 <div>
-                  <div className="text-xs text-gray-500">Bytes inspected</div>
+                  <div className="text-xs text-gray-500">Bytes acquired</div>
                   <div className="text-sm font-semibold text-white">
                     {formatBytes(modelIntakeFetch?.bytes_observed)}
                     {modelIntakeFetch?.truncated ? <span className="ml-2 text-xs text-yellow-300">truncated</span> : null}
                   </div>
                 </div>
                 <div>
-                  <div className="text-xs text-gray-500">Download limit</div>
+                  <div className="text-xs text-gray-500">Acquisition limit</div>
                   <div className="text-sm font-semibold text-white">{formatBytes(scan.options?.max_download_bytes || modelIntakeFetch?.content_length)}</div>
                 </div>
               </div>

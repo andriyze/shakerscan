@@ -3799,7 +3799,7 @@ export async function rescanModelIntakeTarget(targetId: string, operatorToken?: 
   ui_url?: string
 }> {
   const storedToken = typeof window !== 'undefined'
-    ? sessionStorage.getItem('shakerscan:model-intake-operator-token') || ''
+    ? sessionStorage.getItem(MODEL_INTAKE_OPERATOR_TOKEN_KEY) || ''
     : ''
   const token = operatorToken?.trim() || storedToken.trim()
   const res = await fetch(`${API_URL}/model-intake/targets/${targetId}/rescan`, {
@@ -3923,6 +3923,35 @@ function modelIntakeWorkflowHeaders(operatorToken: string, json = false): Header
   return {
     ...(json ? { 'Content-Type': 'application/json' } : {}),
     ...(operatorToken.trim() ? { Authorization: `Bearer ${operatorToken.trim()}` } : {}),
+  }
+}
+
+export const MODEL_INTAKE_OPERATOR_TOKEN_KEY = 'shakerscan:model-intake-operator-token'
+
+export interface ModelIntakeOperatorCredential {
+  available: boolean
+  reason: 'local_deployment' | 'remote_deployment' | 'not_configured' | 'disabled' | 'unavailable'
+  token?: string
+  detail?: string
+}
+
+// On a loopback-bound install the UI server owns the same operator credential
+// the API was started with, so the page can use it directly instead of asking
+// the human to copy MODEL_INTAKE_OPERATOR_TOKEN out of .env. Remote deployments
+// answer `available: false` and the manual field stays authoritative.
+export async function getModelIntakeOperatorCredential(): Promise<ModelIntakeOperatorCredential> {
+  try {
+    const res = await fetch('/api/model-intake/operator-credential', { cache: 'no-store' })
+    if (!res.ok) {
+      return { available: false, reason: 'unavailable', detail: `UI credential route returned ${res.status}` }
+    }
+    return res.json()
+  } catch (err) {
+    return {
+      available: false,
+      reason: 'unavailable',
+      detail: err instanceof Error ? err.message : 'UI credential route is unreachable',
+    }
   }
 }
 

@@ -1994,3 +1994,61 @@ def test_model_intake_emits_content_free_durable_activity(tmp_path):
     assert all(str(artifact) not in item["line"] for item in activity)
     assert activity[-1]["progress"] == 95
     assert "decision=" in activity[-1]["line"]
+
+
+def _gigabyte_scale_options(tmp_path, **overrides):
+    return _local_options({
+        "quarantine_dir": str(tmp_path / "quarantine"),
+        "require_signature": False,
+        "require_model_governance": False,
+        "require_deployment_approval": False,
+        **overrides,
+    })
+
+
+def test_download_cap_above_the_memory_prefix_streams_and_verifies_the_full_artifact(monkeypatch, tmp_path):
+    # Real models are routinely 1GB+. Asking for more bytes than the in-memory
+    # inspection prefix must escalate to quarantine streaming so the full
+    # artifact hash is observed, instead of failing closed at the prefix.
+    monkeypatch.setattr(model_intake, "MAX_INSPECTION_BYTES", 2048)
+    payload = b"\0" * 8192
+    artifact = tmp_path / "model.safetensors"
+    artifact.write_bytes(_safetensors_bytes(payload=payload))
+    expected = hashlib.sha256(artifact.read_bytes()).hexdigest()
+
+    result = asyncio.run(run_model_intake_scan(
+        str(artifact),
+        _gigabyte_scale_options(tmp_path, max_download_bytes=100_000, expected_sha256=expected),
+    ))
+
+    summary = result["model_intake"]["summary"]
+    fetch = result["model_intake"]["artifact"]["fetch"]
+    assert summary["acquisition_complete"] is True
+    assert summary["checksum_status"] == "verified"
+    assert fetch["sha256"] == expected
+    assert fetch["truncated"] is False
+    # Only the bounded prefix was ever resident in memory.
+    assert fetch["inspection_bytes_observed"] == 2048
+    assert fetch["quarantine_object"] == f"sha256:{expected}"
+
+
+def test_download_cap_within_the_memory_prefix_still_reports_truncation_honestly(monkeypatch, tmp_path):
+    # The bounded-prefix path is unchanged: a cap below the artifact size is
+    # reported as an unverified truncation, never as a false hash mismatch.
+    monkeypatch.setattr(model_intake, "MAX_INSPECTION_BYTES", 8192)
+    artifact = tmp_path / "model.safetensors"
+    artifact.write_bytes(_safetensors_bytes(payload=b"\0" * 8192))
+    expected = hashlib.sha256(artifact.read_bytes()).hexdigest()
+
+    result = asyncio.run(run_model_intake_scan(
+        str(artifact),
+        _gigabyte_scale_options(tmp_path, max_download_bytes=2048, expected_sha256=expected),
+    ))
+
+    summary = result["model_intake"]["summary"]
+    assert summary["checksum_status"] == "known_unverified_truncated"
+    assert summary["acquisition_complete"] is False
+    assert any(
+        finding["id"] == "model_intake:checksum_not_fully_verified"
+        for finding in result["findings"]
+    )

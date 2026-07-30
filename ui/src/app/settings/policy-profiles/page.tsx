@@ -11,6 +11,9 @@ import {
   type ModelIntakeTrustAnchor,
   type PolicyProfile,
   type PolicyProfilePayload,
+  getModelIntakeOperatorCredential,
+  MODEL_INTAKE_OPERATOR_TOKEN_KEY,
+  type ModelIntakeOperatorCredential,
 } from '@/lib/api'
 import { Button, Card, ConfirmDialog, ErrorState, PageHeader, SectionCard, fieldClasses, useToast } from '@/components/ui'
 
@@ -21,7 +24,6 @@ const selectClass = inputClass
 
 const SEVERITIES = ['critical', 'high', 'medium', 'low', 'info']
 const PRODUCT_AREAS = ['ai_gate', 'model_intake', 'dast']
-const MODEL_INTAKE_OPERATOR_TOKEN_KEY = 'shakerscan:model-intake-operator-token'
 
 interface ProfileFormState {
   id?: string
@@ -106,9 +108,24 @@ export default function PolicyProfilesPage() {
   const [form, setForm] = useState<ProfileFormState>(EMPTY_FORM)
   const [deleteTarget, setDeleteTarget] = useState<PolicyProfile | null>(null)
   const [operatorToken, setOperatorToken] = useState('')
+  const [operatorCredential, setOperatorCredential] = useState<ModelIntakeOperatorCredential | null>(null)
 
+  // Same contract as the Model Intake page: a loopback deployment supplies its
+  // own credential, so the manual field is only for remote installs.
   useEffect(() => {
-    setOperatorToken(sessionStorage.getItem(MODEL_INTAKE_OPERATOR_TOKEN_KEY) || '')
+    const stored = sessionStorage.getItem(MODEL_INTAKE_OPERATOR_TOKEN_KEY) || ''
+    if (stored) {
+      setOperatorToken(stored)
+      setOperatorCredential({ available: true, reason: 'local_deployment' })
+      return
+    }
+    getModelIntakeOperatorCredential().then((credential) => {
+      setOperatorCredential(credential)
+      if (credential.available && credential.token) {
+        setOperatorToken(credential.token)
+        sessionStorage.setItem(MODEL_INTAKE_OPERATOR_TOKEN_KEY, credential.token)
+      }
+    })
   }, [])
 
   function updateOperatorToken(value: string) {
@@ -230,20 +247,32 @@ export default function PolicyProfilesPage() {
 
       {error && <div role="alert" className="rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-sm text-red-300">{error}</div>}
 
-      <Card className="p-4">
-        <label className="block text-sm text-gray-300">
-          Model Intake operator token
-          <input
-            type="password"
-            autoComplete="off"
-            value={operatorToken}
-            onChange={(event) => updateOperatorToken(event.target.value)}
-            className={`${inputClass} mt-2`}
-            placeholder="Required for remote create, update, and delete"
-          />
-        </label>
-        <div className="mt-2 text-xs text-gray-500">Kept only in this browser session. Loopback administration does not require a token.</div>
-      </Card>
+      {operatorCredential?.available && operatorToken ? (
+        <Card className="p-4">
+          <div className="text-sm text-gray-300">Model Intake operator credential</div>
+          <div className="mt-1 text-xs text-gray-500">
+            Using this deployment&apos;s own credential. Create, update, and delete are authorized
+            without pasting a token.
+          </div>
+        </Card>
+      ) : (
+        <Card className="p-4">
+          <label className="block text-sm text-gray-300">
+            Model Intake operator token
+            <input
+              type="password"
+              autoComplete="off"
+              value={operatorToken}
+              onChange={(event) => updateOperatorToken(event.target.value)}
+              className={`${inputClass} mt-2`}
+              placeholder="Required for remote create, update, and delete"
+            />
+          </label>
+          <div className="mt-2 text-xs text-gray-500">
+            {operatorCredential?.detail || 'Kept only in this browser session.'}
+          </div>
+        </Card>
+      )}
 
       <div className="grid gap-3 sm:grid-cols-3">
         <Card className="p-4">
