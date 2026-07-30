@@ -1608,8 +1608,11 @@ Remaining product work:
   native library loading, and bounded file writes are review-required rather than mislabeled malicious.
   Image-build conformance now requires prohibited=`FAIL`, review-only=`WARNING`, and safe
   `weights_only=True`/safetensors=`PASS` fixtures.
-- Isolate each existing hostile-file parser with read-only input, no egress where databases permit, resource limits,
-  and bounded output.
+- **Implemented per-parser isolation:** every external adapter executes through the existing argv-only
+  unprivileged launcher over a copied read-only subject, bounded scratch/output, CPU/file/fd/process limits,
+  worker-cgroup memory, no-new-privileges, and an exec-persistent libseccomp filter denying external-capable
+  socket families plus `io_uring_setup` while preserving Unix-domain IPC required by scanner runtimes. Filter
+  installation is fail-closed. Trivy remains offline; no tool gets credentials or inherited network sockets.
 - Provide a scanner expectation matrix so a required missing engine blocks instead of silently reducing
   coverage.
 - **Implemented scanner-boundary freeze:** catalog, readiness, planning, and parsers expose only ModelScan,

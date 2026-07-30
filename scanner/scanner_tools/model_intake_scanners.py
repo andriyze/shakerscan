@@ -245,7 +245,7 @@ def _scanner_result(
             "status": status,
             "started_at": started_at,
             "finished_at": finished_at,
-            "network_policy": "credentials_removed_egress_not_isolated",
+            "network_policy": "seccomp_external_socket_domains_and_io_uring_denied",
             **(execution or {}),
         },
         "coverage": coverage or {},
