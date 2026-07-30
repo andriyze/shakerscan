@@ -1472,7 +1472,7 @@ Remaining product work:
 Operator/corporate work: approve scanner versions and licenses, host/update vulnerability and malware
 databases, supply organization rules, and define severity/freshness/exception policy.
 
-### Phase 3 — Disposable model execution and runtime telemetry — **official safetensors weight parsing and operator adapter implemented; microVM tier open**
+### Phase 3 — Disposable model execution and runtime telemetry — **official parser, generic loader profiles, Firecracker contract, and signed receipt boundary implemented; runner-host deployment open**
 
 The semantic container now includes a built-in exact-digest safetensors weights adapter and supports an
 operator runtime adapter. The built-in adapter only returns PASS after mmap/range/inventory/finiteness checks
@@ -1480,15 +1480,20 @@ and reports `load_level=weights`; the operator adapter must produce stronger pha
 evidence before claiming model load or inference. Both remain staging/integration tiers, not the disposable
 microVM required here.
 
-Remaining product work:
+Delivered additionally: a Firecracker/jailer controller contract emits no-network, read-only input/rootfs,
+quota-output, seccomp/cgroup/timeout/receipt-required VM configuration. Readiness verifies Linux/KVM plus the
+configured firecracker, jailer, kernel, and rootfs hashes and refuses any local-container fallback. Generic
+loader profiles select from artifact format, runtime library, custom-code facts, and pinned image identity,
+not from model names; executable serialization blocks for conversion, and custom code requires a reviewed
+digest.
 
-- Add an execution-controller contract separated from the API and static scanner workers.
-- Start a fresh KVM/QEMU/Firecracker/Kata microVM per exact model/runtime subject.
+Remaining product/infrastructure work:
+
+- Deploy dedicated Linux/KVM runner hosts and start a fresh Firecracker microVM per exact model/runtime subject.
 - Mount only the read-only quarantined snapshot and signed runtime plus a quota-limited scratch volume.
 - Disable network and credentials, collect file/process/network/syscall/import/resource telemetry, and destroy
   the VM after bounded evidence export.
-- Implement loader profiles for Transformers/SentenceTransformers first, then ONNX/GGUF as separately
-  versioned profiles. Profiles must be provider-neutral and selected from manifest facts, not model names.
+- Add separately versioned GGUF and additional framework loader profiles as their runtimes are approved.
 - Separate import, tokenizer construction, model construction, weight load, warmup, inference, and teardown
   so the report identifies the failing phase.
 - Add a controlled pickle-to-safetensors conversion workflow and numerical equivalence receipt.

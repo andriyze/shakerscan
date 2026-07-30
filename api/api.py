@@ -126,6 +126,13 @@ except ModuleNotFoundError:
     )
 
 try:
+    from model_intake_loader_profiles import resolve_loader_profile as _resolve_model_loader_profile
+    from model_intake_runner_controller import firecracker_readiness as _model_firecracker_readiness
+except ModuleNotFoundError:
+    from api.model_intake_loader_profiles import resolve_loader_profile as _resolve_model_loader_profile
+    from api.model_intake_runner_controller import firecracker_readiness as _model_firecracker_readiness
+
+try:
     from scanner_tools.model_intake_retention import execute_cleanup as _execute_model_quarantine_cleanup
     from scanner_tools.model_intake_retention import plan_cleanup as _plan_model_quarantine_cleanup
 except ModuleNotFoundError:
@@ -3904,6 +3911,14 @@ class ModelSubmissionStaticRunRequest(BaseModel):
 class ModelRunnerEvidenceReceiptRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     signature_envelope: dict[str, Any]
+
+
+class ModelLoaderProfileResolveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    repository_manifest: dict[str, Any]
+    artifact_path: str = Field(min_length=1, max_length=2000)
+    runtime_image_digest: str = Field(pattern="^sha256:[0-9a-fA-F]{64}$")
+    reviewed_custom_code_sha256: Optional[str] = Field(default=None, pattern="^[0-9a-fA-F]{64}$")
 
 
 class ModelEvidenceFreezeRequest(BaseModel):
@@ -11944,6 +11959,26 @@ async def model_intake_scanner_readiness():
 async def model_intake_provider_readiness():
     """Separate execution, evaluation, policy, and report providers from evidence scanners."""
     return await asyncio.to_thread(_model_provider_readiness)
+
+
+@app.get("/model-intake/runners/readiness")
+async def model_intake_runner_readiness():
+    """Fail-closed readiness for the external Linux/KVM execution tier."""
+    return await asyncio.to_thread(_model_firecracker_readiness)
+
+
+@app.post("/model-intake/loader-profiles/resolve")
+async def resolve_model_intake_loader_profile(request: ModelLoaderProfileResolveRequest):
+    """Resolve by format/library/custom-code facts, never by a model allowlist."""
+    return _resolve_model_loader_profile(
+        request.repository_manifest,
+        artifact_path=request.artifact_path,
+        runtime_image_digest=request.runtime_image_digest.lower(),
+        reviewed_custom_code_sha256=(
+            request.reviewed_custom_code_sha256.lower()
+            if request.reviewed_custom_code_sha256 else None
+        ),
+    )
 
 
 @app.post("/model-intake/admission/verify")
