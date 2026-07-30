@@ -26,7 +26,7 @@ def _rows(*, artifact_uri: str = "hf://example/model/model.safetensors", active_
     for index, evidence_type in enumerate((
         "static_analysis", "runtime_execution", "embedding_evaluation", "data_plane_evaluation",
     )):
-        evidence.append({
+        record = {
             "id": f"evidence-{index}",
             "evidence_type": evidence_type,
             "status": "PASS",
@@ -36,7 +36,26 @@ def _rows(*, artifact_uri: str = "hf://example/model/model.safetensors", active_
             "payload_sha256": DIGESTS["c"],
             "subject_bindings": {"artifact": DIGESTS["a"]},
             "expires_at": NOW + timedelta(days=30),
-        })
+        }
+        if evidence_type == "static_analysis":
+            record["payload_json"] = {
+                "required_static_checks": {
+                    "acquisition_complete": True,
+                    "inspection_complete": True,
+                    "repository_manifest_complete": True,
+                },
+                "checks": {"unsafe_serialization": True, "custom_code_review": True},
+                "scanner_results": [{
+                    "name": "semgrep",
+                    "version": "1.172.0",
+                    "status": "PASS",
+                    "required": True,
+                    "applicability": "repository_code",
+                    "finding_count": 0,
+                    "coverage": {"files_scanned": 3},
+                }],
+            }
+        evidence.append(record)
     phases = {
         name: {"status": "PASS", "duration_ms": index + 1}
         for index, name in enumerate(("import", "tokenizer", "model_load", "warmup", "inference", "teardown"))
@@ -139,8 +158,14 @@ def test_complete_exact_subject_report_allows_only_with_matching_active_admissio
     report = _report(_rows())
 
     assert report["outcome"] == "ALLOW"
-    assert report["schema_version"] == "model-intake-corporate-report/v1"
+    assert report["schema_version"] == "model-intake-corporate-report/v2"
     assert set(report["control_counts"]) == CONTROL_STATUSES
+    assert report["executive_summary"]["deployable_under_configured_shakerscan_policy"] is True
+    assert report["executive_summary"]["full_corporate_approval"] == "NOT_DETERMINED_BY_SHAKERSCAN"
+    assert report["executive_summary"]["coverage"]["external_corporate_requirements"] >= 10
+    assert report["detailed_review"]["static_analysis_detail"]["scanner_results"][0]["name"] == "semgrep"
+    assert len(report["detailed_review"]["shakerscan_check_catalog"]) >= 15
+    assert len(report["detailed_review"]["external_approval_requirements"]) >= 10
     assert _control(report, "firecracker_runtime")["status"] == "PASS"
     assert _control(report, "network_isolation")["status"] == "PASS"
     assert _control(report, "conversion_equivalence")["status"] == "NOT_APPLICABLE"
@@ -157,6 +182,8 @@ def test_missing_runtime_and_required_conversion_are_plainly_incomplete():
     assert _control(report, "runtime_execution")["status"] == "NOT_RUN"
     assert _control(report, "firecracker_runtime")["status"] == "NOT_RUN"
     assert _control(report, "conversion_equivalence")["status"] == "NOT_RUN"
+    assert "firecracker_runtime" in report["assessment_scope"]["checks_not_completed"]
+    assert any(item["control_id"] == "firecracker_runtime" for item in report["executive_summary"]["required_actions"])
 
 
 def test_network_attempt_is_a_blocking_control_failure():
@@ -231,8 +258,12 @@ def test_html_is_escaped_printable_and_sarif_preserves_normalized_failures():
     sarif = model_intake_report_to_sarif(report)
 
     assert "Print / Save PDF" in rendered
+    assert "Executive summary" in rendered
+    assert "Corporate requirements outside ShakerScan" in rendered
+    assert "Detailed technical review" in rendered
+    assert "NOT_DETERMINED_BY_SHAKERSCAN" in rendered
     assert "<script>alert(1)</script>" not in rendered
-    assert "model-intake-corporate-report/v1" == sarif["runs"][0]["properties"]["schemaVersion"]
+    assert "model-intake-corporate-report/v2" == sarif["runs"][0]["properties"]["schemaVersion"]
     assert sarif["runs"][0]["properties"]["reportSha256"] == report["report_sha256"]
     assert sarif["runs"][0]["results"]
     assert all(result["properties"]["status"] not in {"PASS", "NOT_APPLICABLE"} for result in sarif["runs"][0]["results"])

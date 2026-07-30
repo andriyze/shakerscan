@@ -736,6 +736,22 @@ def test_warning_only_required_scanner_evidence_stays_reviewable_not_pass_or_inc
     assert not all(checks.values())
 
 
+def test_static_report_coverage_is_content_free():
+    digest = "a" * 64
+    assert api._model_intake_content_free_coverage({
+        "files_analyzed": 12,
+        "inventory_truncated": False,
+        "rules_sha256": digest,
+        "first_path": "modeling_secret.py",
+        "source_url": "https://example.invalid/private",
+        "parse_errors": ["sensitive detail"],
+    }) == {
+        "files_analyzed": 12,
+        "inventory_truncated": False,
+        "rules_sha256": digest,
+    }
+
+
 def test_converted_snapshot_materialization_rehashes_every_member_and_derives_components(monkeypatch, tmp_path):
     monkeypatch.setattr(api, "RESULTS_DIR", tmp_path)
     monkeypatch.setenv("MODEL_INTAKE_RUNNER_HOST_RESULTS_ROOT", "/host/results")

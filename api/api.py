@@ -11208,6 +11208,20 @@ def _model_intake_static_evidence_status(
     return "WARNING" if warning_review and other_checks_pass else "INCOMPLETE"
 
 
+def _model_intake_content_free_coverage(value: Any) -> dict[str, Any]:
+    """Keep report-friendly counts/digests without copying paths, URLs, or scanner payloads."""
+    if not isinstance(value, dict):
+        return {}
+    denied_fragments = {"path", "url", "name", "content", "source", "sample", "match", "error"}
+    return {
+        str(key): item
+        for key, item in value.items()
+        if isinstance(item, (bool, int, float)) or item is None
+        or (isinstance(item, str) and bool(re.fullmatch(r"[0-9a-fA-F]{64}", item)))
+        if not any(fragment in str(key).lower() for fragment in denied_fragments)
+    }
+
+
 def _model_intake_snapshot_custom_code_sha256(model_intake: dict[str, Any]) -> str | None:
     """Derive the reviewed-code identity only from a complete authoritative snapshot."""
     snapshot = model_intake.get("repository_snapshot") if isinstance(model_intake.get("repository_snapshot"), dict) else {}
@@ -11735,6 +11749,35 @@ async def attach_model_intake_static_run(
             findings,
             required_static_checks,
         )
+        generated_evidence = (
+            model_intake.get("generated_evidence")
+            if isinstance(model_intake.get("generated_evidence"), dict)
+            else {}
+        )
+        static_evidence_payload = {
+            "schema_version": "model-intake-static-report-summary/v1",
+            "required_static_checks": required_static_checks,
+            "checks": (
+                model_intake.get("checks")
+                if isinstance(model_intake.get("checks"), dict)
+                else {}
+            ),
+            "scanner_results": [
+                {
+                    "name": str((item.get("scanner") or {}).get("name") or "unknown"),
+                    "version": (item.get("scanner") or {}).get("version"),
+                    "status": (item.get("execution") or {}).get("status"),
+                    "required": bool((item.get("execution") or {}).get("required")),
+                    "applicability": (item.get("execution") or {}).get("applicability"),
+                    "finding_count": len(item.get("findings") or []),
+                    "coverage": _model_intake_content_free_coverage(item.get("coverage")),
+                    "rules_sha256": (item.get("scanner") or {}).get("rules_sha256") or (item.get("execution") or {}).get("rules_sha256"),
+                    "database_sha256": (item.get("scanner") or {}).get("database_sha256") or (item.get("execution") or {}).get("database_sha256"),
+                }
+                for item in generated_evidence.get("results") or []
+                if isinstance(item, dict)
+            ],
+        }
         payload_digest = hashlib.sha256(json.dumps({
             "scan_id": str(scan_uuid),
             "summary": summary,
@@ -11814,9 +11857,9 @@ async def attach_model_intake_static_run(
             INSERT INTO model_intake_evidence_records
                 (submission_id,evidence_type,schema_version,provenance_class,producer_id,
                  producer_version,builder_id,invocation_id,subject_bindings,payload_sha256,
-                 object_storage_uri,status,started_at,finished_at,expires_at)
+                 payload_json,object_storage_uri,status,started_at,finished_at,expires_at)
             VALUES ($1,'static_analysis','model-intake-static-evidence/v1','GENERATED_STATIC',
-                    'shakerscan-static-worker',$2,$3,$4,$5::jsonb,$6,$7,$8,NOW(),NOW(),NOW()+INTERVAL '30 days')
+                    'shakerscan-static-worker',$2,$3,$4,$5::jsonb,$6,$7::jsonb,$8,$9,NOW(),NOW(),NOW()+INTERVAL '30 days')
             ON CONFLICT (producer_id,invocation_id) DO NOTHING
             RETURNING *
             """,
@@ -11832,6 +11875,7 @@ async def attach_model_intake_static_run(
                 "configuration_sha256": components["configuration_sha256"],
             }),
             payload_digest,
+            json.dumps(static_evidence_payload, sort_keys=True, separators=(",", ":"), default=str),
             f"scan://{scan_uuid}/result",
             static_status,
         )
