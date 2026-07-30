@@ -12,7 +12,17 @@ chown 65532:65532 /output/work
 
 /opt/venv/bin/python /opt/shakerscan/guest_worker.py --inventory > /output/interfaces.json
 status=0
-for phase in import tokenizer model_load warmup inference teardown; do
+mode="$(/opt/venv/bin/python -c 'import json; print(json.load(open("/input/job.json"))["mode"])')"
+if [ "$mode" = "runtime" ]; then
+  phases="import tokenizer model_load warmup inference teardown"
+elif [ "$mode" = "conversion" ]; then
+  phases="import deserialize_convert tensor_equivalence embedding_equivalence teardown"
+else
+  phases="invalid"
+  status=64
+fi
+for phase in $phases; do
+  [ "$status" -eq 0 ] || break
   /usr/bin/strace -ff -tt -T -s 256 -yy \
     -e trace=%network,execve,openat,clone,fork,vfork \
     -o "/output/traces/trace.${phase}" \

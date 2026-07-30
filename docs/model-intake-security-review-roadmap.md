@@ -1373,10 +1373,12 @@ must not use network-based `trust_remote_code` loading.
 **Automation status:** ShakerScan can automate complete snapshot/hash, semantic pickle classification,
 custom-code AST/Semgrep review assistance, evidence/policy/reporting, and bundled ModelScan/Fickling
 orchestration. Ordinary PyTorch tensor reconstruction is reported as `expected_framework_pickle`, not as a
-proven malicious callable; executable-format capability is a separate corporate policy failure. The current
-sandbox deliberately blocks `.bin` loading. Phase 3 must automate isolated deserialization, inference,
-optional conversion, and equivalence evidence; the corporation owns manual approval, benchmark fitness, and
-production promotion.
+proven malicious callable; executable-format capability is a separate corporate policy failure. The semantic
+sandbox deliberately blocks `.bin` loading. The fixed Firecracker guest now implements isolated
+`weights_only=True` deserialization, safetensors export, exact tensor comparison, and source/target embedding
+equivalence; the ordinary runtime path still prohibits pickle. The designated VPS lacks `/dev/kvm`, so the
+CodeSage physical run and automatic rescan of the exported identity remain pending. The corporation owns
+manual approval, benchmark fitness, and production promotion.
 
 Required evidence before a controlled pilot:
 
@@ -1479,12 +1481,13 @@ Each increment must be independently committed and leave required controls fail 
 2. **Existing evidence hardening:** enforce ModelScan/Fickling/Semgrep/Trivy applicability and freshness,
    improve Semgrep rules and safe fixtures, remove optional-tool claims, and make all unexpected worker/tool
    failures durable terminal non-pass states.
-3. **Physical Firecracker runner:** implement the existing controller contract on Linux/KVM with jailer,
+3. **Physical Firecracker runner — implementation complete, physical acceptance pending:** the controller uses Linux/KVM with jailer,
    exact read-only subjects, no egress/credentials, approved runtime/loader digests, resource limits,
    phase telemetry, known-answer embeddings, signed receipts, teardown, and no fallback.
-4. **CodeSage conversion:** execute the narrowly scoped `.bin` to safetensors conversion in Firecracker,
-   record deserialization globals, prove tensor/numeric/embedding equivalence, assign a new artifact identity,
-   and rerun the complete existing intake.
+4. **CodeSage conversion — fixed guest mechanism implemented:** the narrowly scoped `.bin` to safetensors
+   profile uses `torch.load(weights_only=True)` only inside Firecracker, proves exact tensor inventory/dtype/
+   shape/value equality plus source/target embedding equivalence, and exports a new content-addressed artifact
+   and complete manifest. Physical CodeSage execution and automatic complete re-intake remain release gates.
 5. **Control-plane and deployment hardening:** strengthen embedded policy tests, role separation, signer/KMS
    isolation, OCI push verification, CI/Kubernetes denial paths, revocation/cache behavior, storage quotas,
    restart/replay recovery, and first-screen reporting.
@@ -1638,9 +1641,10 @@ Remaining physical acceptance and infrastructure work:
   single Firecracker boundary; unsupported runtimes remain `INCOMPLETE`.
 - Verify phase-specific failure reporting for import, tokenizer construction, model construction/weight load,
   warmup, inference, and teardown against physical fixtures.
-- **Implemented evidence contract:** a signed conversion receipt must bind source/target digests, converter
-  image, tensor inventory, numeric equivalence, and embedding equivalence. Deploy the conversion job inside
-  the runner fleet; unsafe source serialization never executes in the API/static worker.
+- **Implemented conversion producer and evidence contract:** the fixed guest binds source/target digests,
+  converter image, tensor inventory, exact numeric equivalence, embedding equivalence, resource evidence,
+  and complete network telemetry into the signed receipt. Unsafe source serialization never executes in the
+  API/static worker. Physical runner-fleet execution and automatic full rescan remain acceptance work.
 - Prove the purpose-scoped KMS signer and trust-anchor rotation path on the physical runner host.
 
 Exit criteria: CodeRankEmbed and CodeSage Base can be loaded and exercised without corp network, credentials,
@@ -2040,10 +2044,12 @@ Owners must decide and record:
   self-tested, and expose rule/database/readiness identity.
 - [x] The external scanner set is frozen to ModelScan/Semgrep/Fickling/Trivy; unsupported optional adapter
   contracts do not count as installed coverage and are not future implementation work.
-- [ ] A disposable Firecracker/KVM+jailer model loader executes import/load/inference and produces signed
-  runtime telemetry, with no production fallback.
-- [ ] Firecracker receipts contain independently measured, complete guest/host network-attempt telemetry;
-  any prohibited attempt, telemetry loss, overflow, contradiction, or missing no-device proof is non-pass.
+- [x] The disposable Firecracker/KVM+jailer implementation executes fixed import/tokenizer/load/warmup/
+  inference/teardown and conversion/equivalence phases and produces signed runtime telemetry, with no
+  production fallback. Physical acceptance remains separately unchecked below because the VPS lacks KVM.
+- [x] Receipt v2 requires independently measured, complete guest/host network-attempt telemetry; any
+  prohibited attempt, telemetry loss, overflow, contradiction, missing no-device proof, or digest mutation
+  is non-pass. Deliberate-attempt physical validation remains part of the final VPS/KVM release gate.
 - [ ] The evaluator automatically consumes embeddings and measurements generated by that exact runner.
 - [ ] The UI/JSON report has explicit passed/failed/not-run/coverage/error detail and a phase timeline; HTML/PDF,
   SARIF, per-control evidence links, and admission-statement parity remain.

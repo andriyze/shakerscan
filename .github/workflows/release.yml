@@ -141,6 +141,9 @@ jobs:
           docker run --rm --entrypoint python shakerscan-model-intake-signer:release-candidate \
             -c 'import boto3, model_intake_signer_service; assert boto3.__version__'
 
+      - name: Build and self-test fixed Firecracker guest payload
+        run: scripts/selftest-model-intake-guest.sh
+
       - name: Unit, contract, documentation, and release gates
         run: |
           docker run --rm --entrypoint python \

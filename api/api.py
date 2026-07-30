@@ -126,9 +126,11 @@ except ModuleNotFoundError:
     )
 
 try:
+    from model_intake_loader_profiles import resolve_conversion_profile as _resolve_model_conversion_profile
     from model_intake_loader_profiles import resolve_loader_profile as _resolve_model_loader_profile
     from model_intake_runner_controller import firecracker_readiness as _model_firecracker_readiness
 except ModuleNotFoundError:
+    from api.model_intake_loader_profiles import resolve_conversion_profile as _resolve_model_conversion_profile
     from api.model_intake_loader_profiles import resolve_loader_profile as _resolve_model_loader_profile
     from api.model_intake_runner_controller import firecracker_readiness as _model_firecracker_readiness
 
@@ -12245,6 +12247,20 @@ async def model_intake_runner_readiness():
 async def resolve_model_intake_loader_profile(request: ModelLoaderProfileResolveRequest):
     """Resolve by format/library/custom-code facts, never by a model allowlist."""
     return _resolve_model_loader_profile(
+        request.repository_manifest,
+        artifact_path=request.artifact_path,
+        runtime_image_digest=request.runtime_image_digest.lower(),
+        reviewed_custom_code_sha256=(
+            request.reviewed_custom_code_sha256.lower()
+            if request.reviewed_custom_code_sha256 else None
+        ),
+    )
+
+
+@app.post("/model-intake/conversion-profiles/resolve")
+async def resolve_model_intake_conversion_profile(request: ModelLoaderProfileResolveRequest):
+    """Resolve the one fixed PyTorch-bin to safetensors Firecracker profile."""
+    return _resolve_model_conversion_profile(
         request.repository_manifest,
         artifact_path=request.artifact_path,
         runtime_image_digest=request.runtime_image_digest.lower(),

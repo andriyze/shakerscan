@@ -29,11 +29,13 @@ try:
     from model_intake_control_plane import AwsKmsSigner, LocalPemSigner
     from model_intake_runner_controller import build_firecracker_config, firecracker_readiness
     from model_intake_runner_receipts import SCHEMA, issue_runner_envelope
+    from model_intake_loader_profiles import CONVERSION_PROFILE_ID
 except ModuleNotFoundError:  # pragma: no cover
     from api.model_intake_control_plane import canonical_bytes
     from api.model_intake_control_plane import AwsKmsSigner, LocalPemSigner
     from api.model_intake_runner_controller import build_firecracker_config, firecracker_readiness
     from api.model_intake_runner_receipts import SCHEMA, issue_runner_envelope
+    from api.model_intake_loader_profiles import CONVERSION_PROFILE_ID
 
 
 class FirecrackerExecutionError(RuntimeError):
@@ -218,6 +220,7 @@ class FirecrackerRunner:
         self.quarantine_root = Path(self.env.get("MODEL_INTAKE_RUNNER_QUARANTINE_ROOT", "/var/lib/shakerscan/model-intake-quarantine")).resolve()
         self.work_root = Path(self.env.get("MODEL_INTAKE_RUNNER_WORK_ROOT", "/var/lib/shakerscan/model-intake-runner")).resolve()
         self.jailer_root = Path(self.env.get("MODEL_INTAKE_JAILER_ROOT", "/srv/jailer")).resolve()
+        self.conversion_root = Path(self.env.get("MODEL_INTAKE_RUNNER_CONVERSION_ROOT", str(self.quarantine_root / "conversions"))).resolve()
 
     def _validated_subject(self, value: str) -> Path:
         path = Path(value).resolve(strict=True)
@@ -264,7 +267,8 @@ class FirecrackerRunner:
         return manifest
 
     def _validate_job(self, subject: Path, request: dict[str, Any]) -> dict[str, Any]:
-        if request.get("mode", "runtime") != "runtime":
+        mode = request.get("mode", "runtime")
+        if mode not in {"runtime", "conversion"}:
             raise FirecrackerExecutionError("unsupported fixed runner mode")
         if request.get("environment") not in {"development", "test", "staging", "production"}:
             raise FirecrackerExecutionError("invalid target environment")
@@ -275,18 +279,27 @@ class FirecrackerRunner:
         profile = request.get("loader_profile")
         if not isinstance(profile, dict):
             raise FirecrackerExecutionError("loader profile is required")
-        profile_sha = hashlib.sha256(canonical_bytes(profile)).hexdigest()
+        profile_body = {key: value for key, value in profile.items() if key != "profile_sha256"}
+        profile_sha = hashlib.sha256(canonical_bytes(profile_body)).hexdigest()
         if _digest(request.get("loader_profile_sha256"), "loader_profile_sha256") != profile_sha:
             raise FirecrackerExecutionError("loader profile digest mismatch")
-        if profile.get("allow_pickle") is not False:
+        if profile.get("profile_sha256") not in {None, profile_sha}:
+            raise FirecrackerExecutionError("embedded loader profile digest mismatch")
+        if mode == "runtime" and profile.get("allow_pickle") is not False:
             raise FirecrackerExecutionError("runtime admission never permits pickle-capable loading")
+        if mode == "conversion" and (
+            profile.get("profile_id") != CONVERSION_PROFILE_ID
+            or profile.get("allow_pickle") is not True
+            or profile.get("allow_pickle_scope") != "single-reviewed-source-artifact-inside-firecracker"
+        ):
+            raise FirecrackerExecutionError("conversion requires the exact server-owned restricted profile")
         trust_remote_code = profile.get("trust_remote_code") is True
         reviewed = _custom_code_sha256(subject)
         if trust_remote_code and _digest(request.get("reviewed_custom_code_sha256"), "reviewed_custom_code_sha256") != reviewed:
             raise FirecrackerExecutionError("reviewed custom-code digest mismatch")
         normalized = dict(request)
         normalized["trust_remote_code"] = trust_remote_code
-        normalized["allow_pickle"] = False
+        normalized["allow_pickle"] = mode == "conversion"
         normalized["observed_custom_code_sha256"] = reviewed
         return normalized
 
@@ -356,6 +369,7 @@ class FirecrackerRunner:
         _copy_tree(subject, model)
         job = {
             "schema_version": "model-intake-firecracker-job/v1",
+            "mode": request.get("mode", "runtime"),
             "trust_remote_code": bool(request.get("trust_remote_code")),
             "allow_pickle": bool(request.get("allow_pickle")),
             "known_answer_inputs": request.get("known_answer_inputs") or [],
@@ -373,12 +387,61 @@ class FirecrackerRunner:
         with input_drive.open("wb") as handle:
             handle.truncate(image_size)
         _require_ok(_run(["mkfs.ext4", "-q", "-F", "-d", str(staging), str(input_drive)], timeout=600), "input drive creation")
-        output_bytes = min(max(int(request.get("output_bytes") or 512 * 1024**2), 64 * 1024**2), 2 * 1024**3)
+        default_output = 512 * 1024**2 if request.get("mode", "runtime") == "runtime" else max(1024**3, size * 13 // 10)
+        output_limit = int(self.env.get("MODEL_INTAKE_RUNNER_MAX_OUTPUT_BYTES", str(5 * 1024**3)))
+        output_bytes = min(max(int(request.get("output_bytes") or default_output), 64 * 1024**2), output_limit)
         output_drive = work / "output.ext4"
         with output_drive.open("wb") as handle:
             handle.truncate(output_bytes)
         _require_ok(_run(["mkfs.ext4", "-q", "-F", str(output_drive)], timeout=120), "output drive creation")
         return input_drive, output_drive
+
+    def _export_conversion(self, extracted: Path, result: dict[str, Any]) -> dict[str, Any]:
+        source = extracted / "work" / "converted"
+        target_artifact = source / "model.safetensors"
+        if not source.is_dir() or not target_artifact.is_file() or target_artifact.is_symlink():
+            raise FirecrackerExecutionError("converted snapshot is missing")
+        expected = _digest(result.get("target_artifact_sha256"), "target_artifact_sha256")
+        if _sha256(target_artifact) != expected:
+            raise FirecrackerExecutionError("converted artifact digest mismatch after guest export")
+        files = []
+        for path in sorted(source.rglob("*")):
+            if path.is_symlink() or (not path.is_dir() and not path.is_file()):
+                raise FirecrackerExecutionError("converted snapshot contains an unsafe member")
+            if path.is_file():
+                files.append({
+                    "path": path.relative_to(source).as_posix(),
+                    "size": path.stat().st_size,
+                    "sha256": _sha256(path),
+                })
+        manifest = {
+            "schema_version": "model-intake-converted-snapshot/v1",
+            "complete": True,
+            "files": files,
+            "target_artifact_sha256": expected,
+        }
+        manifest_sha = hashlib.sha256(canonical_bytes(manifest)).hexdigest()
+        self.conversion_root.mkdir(parents=True, mode=0o700, exist_ok=True)
+        destination = (self.conversion_root / expected).resolve()
+        manifest_path = (self.conversion_root / f"{expected}.manifest.json").resolve()
+        if self.conversion_root != destination.parent:
+            raise FirecrackerExecutionError("conversion destination escapes its content-addressed root")
+        if destination.exists():
+            if not manifest_path.is_file() or hashlib.sha256(manifest_path.read_bytes()).hexdigest() != manifest_sha:
+                raise FirecrackerExecutionError("content-addressed conversion destination conflicts")
+        else:
+            temporary = self.conversion_root / f".{expected}.{uuid.uuid4().hex}.tmp"
+            shutil.copytree(source, temporary)
+            os.replace(temporary, destination)
+            temporary_manifest = self.conversion_root / f".{expected}.{uuid.uuid4().hex}.manifest.tmp"
+            temporary_manifest.write_bytes(canonical_bytes(manifest))
+            os.replace(temporary_manifest, manifest_path)
+        return {
+            "target_artifact_sha256": expected,
+            "target_repository_snapshot_sha256": manifest_sha,
+            "target_repository_manifest_path": str(manifest_path),
+            "converted_snapshot_path": str(destination),
+        }
 
     def execute(self, request: dict[str, Any]) -> dict[str, Any]:
         readiness = firecracker_readiness(self.env)
@@ -487,7 +550,11 @@ class FirecrackerRunner:
                     1 for name in (firewall_after.get("interfaces") or []) if str(name).startswith("tap")
                 ),
             }, destination_salt=os.urandom(32))
-            required_phases = {"import", "tokenizer", "model_load", "warmup", "inference", "teardown"}
+            required_phases = (
+                {"import", "tokenizer", "model_load", "warmup", "inference", "teardown"}
+                if request.get("mode", "runtime") == "runtime"
+                else {"import", "deserialize_convert", "tensor_equivalence", "embedding_equivalence", "teardown"}
+            )
             if set(result.get("phases") or {}) != required_phases:
                 network["complete"] = False
                 network["telemetry_sha256"] = hashlib.sha256(canonical_bytes({
@@ -504,6 +571,11 @@ class FirecrackerRunner:
             result["resource_telemetry"] = cgroup
             result["resource_limits_enforced"] = cgroup["complete"]
             result["reviewed_custom_code_sha256"] = request.get("observed_custom_code_sha256")
+            if request.get("mode") == "conversion" and result.get("status") == "PASS":
+                if result.get("source_artifact_sha256") != request.get("model_artifact_sha256"):
+                    raise FirecrackerExecutionError("conversion source digest does not match the requested artifact")
+                result.update(self._export_conversion(extracted, result))
+                result["converter_image_digest"] = "sha256:" + _sha256(Path(self.env["MODEL_INTAKE_ROOTFS_IMAGE"]))
             result["runner_duration_seconds"] = round(time.monotonic() - started, 3)
             result["firecracker_component_sha256"] = readiness["verified_component_sha256"]
             result["firecracker_config_sha256"] = hashlib.sha256(canonical_bytes(config)).hexdigest()
@@ -548,10 +620,14 @@ class FirecrackerRunner:
             "schema_version": SCHEMA,
             "receipt_id": str(uuid.uuid4()),
             "submission_id": str(uuid.UUID(str(request["submission_id"]))),
-            "evidence_type": "runtime_execution",
+            "evidence_type": "conversion_equivalence" if request.get("mode") == "conversion" else "runtime_execution",
             "environment": str(request["environment"]),
             "deployment_bundle_sha256": str(request["deployment_bundle_sha256"]).lower(),
-            "model_artifact_sha256": str(request["model_artifact_sha256"]).lower(),
+            "model_artifact_sha256": (
+                str(observations["target_artifact_sha256"]).lower()
+                if request.get("mode") == "conversion"
+                else str(request["model_artifact_sha256"]).lower()
+            ),
             "repository_snapshot_sha256": str(request["repository_snapshot_sha256"]).lower(),
             "runtime_image_digest": str(request["runtime_image_digest"]).lower(),
             "loader_profile_sha256": str(request["loader_profile_sha256"]).lower(),

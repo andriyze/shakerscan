@@ -124,6 +124,9 @@ def _validate_pass_claim(payload: dict[str, Any]) -> list[str]:
             "cache_auth": observations.get("cache_authorization_verified") is True,
         }
     else:
+        network = observations.get("network_telemetry") if isinstance(observations.get("network_telemetry"), dict) else {}
+        network_digest_input = {key: value for key, value in network.items() if key != "telemetry_sha256"}
+        expected_network_digest = hashlib.sha256(canonical_bytes(network_digest_input)).hexdigest()
         required = {
             "source_digest": bool(observations.get("source_artifact_sha256")),
             "target_digest": observations.get("target_artifact_sha256") == payload.get("model_artifact_sha256"),
@@ -131,6 +134,20 @@ def _validate_pass_claim(payload: dict[str, Any]) -> list[str]:
             "numeric": observations.get("numeric_equivalence_status") == "PASS",
             "embedding": observations.get("embedding_equivalence_status") == "PASS",
             "converter": bool(observations.get("converter_image_digest")),
+            "no_egress": observations.get("network_egress_blocked") is True,
+            "no_network_device": network.get("no_network_device") is True,
+            "no_network_interface_config": network.get("network_interface_config_count") == 0,
+            "no_tap_device": network.get("tap_device_count") == 0,
+            "guest_interface_inventory": network.get("guest_interfaces") == ["lo"],
+            "host_interface_inventory": network.get("host_interfaces") == ["lo"],
+            "no_network_attempts": network.get("attempt_count") == 0 and network.get("attempted_operations") == [],
+            "host_firewall_quiet": network.get("host_firewall_drop_count") == 0,
+            "network_telemetry_complete": network.get("complete") is True,
+            "network_telemetry_not_overflowed": network.get("overflowed") is False,
+            "network_telemetry_no_loss": network.get("lost_events") == 0,
+            "network_telemetry_digest": network.get("telemetry_sha256") == expected_network_digest,
+            "network_raw_trace_digest": bool(network.get("raw_trace_sha256")),
+            "resource_limits": observations.get("resource_limits_enforced") is True,
         }
     for name, passed in required.items():
         if not passed:

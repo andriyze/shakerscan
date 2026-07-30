@@ -161,7 +161,8 @@ def test_signed_pass_with_network_attempt_or_tampered_telemetry_is_rejected():
 
 
 def test_conversion_receipt_requires_tensor_numeric_and_embedding_equivalence():
-    payload, envelope, key = _envelope("conversion_equivalence", {
+    observations = _runtime_observations()
+    observations.update({
         "source_artifact_sha256": "f" * 64,
         "target_artifact_sha256": "2" * 64,
         "tensor_inventory_equivalent": True,
@@ -169,4 +170,5 @@ def test_conversion_receipt_requires_tensor_numeric_and_embedding_equivalence():
         "embedding_equivalence_status": "PASS",
         "converter_image_digest": "sha256:" + "d" * 64,
     })
+    payload, envelope, key = _envelope("conversion_equivalence", observations)
     assert _verify(payload, envelope, key)["verified"] is True
