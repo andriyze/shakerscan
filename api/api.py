@@ -154,6 +154,19 @@ except ModuleNotFoundError:
     from api.model_intake_runner_evaluation import derive_embedding_evaluation as _derive_model_runner_embedding_evaluation
 
 try:
+    from model_intake_reporting import (
+        build_model_intake_report as _build_model_intake_report,
+        model_intake_report_to_sarif as _model_intake_report_to_sarif,
+        render_model_intake_html as _render_model_intake_html,
+    )
+except ModuleNotFoundError:
+    from api.model_intake_reporting import (
+        build_model_intake_report as _build_model_intake_report,
+        model_intake_report_to_sarif as _model_intake_report_to_sarif,
+        render_model_intake_html as _render_model_intake_html,
+    )
+
+try:
     from scanner_tools.model_intake_retention import execute_cleanup as _execute_model_quarantine_cleanup
     from scanner_tools.model_intake_retention import plan_cleanup as _plan_model_quarantine_cleanup
 except ModuleNotFoundError:
@@ -11371,6 +11384,128 @@ async def get_model_intake_submission(submission_id: str, http_request: Request)
         "admissions": [row_to_dict(item) for item in admissions],
         "events": [row_to_dict(item) for item in events],
     }
+
+
+@app.get("/model-intake/submissions/{submission_id}/report")
+async def get_model_intake_submission_report(
+    submission_id: str,
+    http_request: Request,
+    format: str = Query("json", pattern="^(json|html|sarif)$"),
+):
+    """Export one normalized, content-free report over authoritative workflow records."""
+    _model_intake_authenticated_subject(http_request)
+    submission_uuid = _model_intake_uuid(submission_id, "submission id")
+    async with db_pool.acquire() as conn:
+        submission = await conn.fetchrow("SELECT * FROM model_intake_submissions WHERE id=$1", submission_uuid)
+        if not submission:
+            raise HTTPException(status_code=404, detail="Model submission not found")
+        subjects = await conn.fetch(
+            "SELECT * FROM model_intake_subjects WHERE submission_id=$1 ORDER BY created_at", submission_uuid
+        )
+        evidence = await conn.fetch(
+            "SELECT * FROM model_intake_evidence_records WHERE submission_id=$1 ORDER BY created_at", submission_uuid
+        )
+        manifests = await conn.fetch(
+            "SELECT * FROM model_intake_evidence_manifests WHERE submission_id=$1 ORDER BY version", submission_uuid
+        )
+        approvals = await conn.fetch(
+            "SELECT * FROM model_intake_approval_receipts WHERE submission_id=$1 ORDER BY created_at", submission_uuid
+        )
+        decisions = await conn.fetch(
+            "SELECT * FROM model_intake_policy_decisions WHERE submission_id=$1 ORDER BY created_at", submission_uuid
+        )
+        admissions = await conn.fetch(
+            "SELECT * FROM model_intake_admissions WHERE submission_id=$1 ORDER BY created_at", submission_uuid
+        )
+        events = await conn.fetch(
+            "SELECT * FROM model_intake_submission_events WHERE submission_id=$1 ORDER BY created_at", submission_uuid
+        )
+        runner_jobs = await conn.fetch(
+            "SELECT * FROM model_intake_runner_jobs WHERE submission_id=$1 ORDER BY created_at", submission_uuid
+        )
+        agent_sessions = await conn.fetch(
+            "SELECT * FROM model_intake_agent_sessions WHERE submission_id=$1 ORDER BY created_at", submission_uuid
+        )
+        signer_anchors = await conn.fetch(
+            """
+            SELECT public_key_pem,builder_id_constraint FROM model_intake_trust_anchors
+            WHERE is_active=true AND revoked_at IS NULL AND purpose='admission_signer'
+              AND environment=$1 AND valid_from<=NOW()
+              AND (valid_until IS NULL OR valid_until>NOW())
+            """,
+            submission["requested_environment"],
+        )
+    admission_rows = [row_to_dict(item) for item in admissions]
+    manifest_rows = [row_to_dict(item) for item in manifests]
+    subject_rows = [row_to_dict(item) for item in subjects]
+    active_admission = next((
+        item for item in reversed(admission_rows) if item.get("status") == "active"
+    ), None)
+    admission_verification = None
+    if active_admission:
+        trusted_keys = [
+            str(item["public_key_pem"] or "") for item in signer_anchors if item["public_key_pem"]
+        ]
+        trusted_builders = {
+            str(item["builder_id_constraint"] or "")
+            for item in signer_anchors if item["builder_id_constraint"]
+        }
+        env_keys = os.getenv("MODEL_INTAKE_ADMISSION_V2_TRUSTED_PUBLIC_KEYS", "").strip()
+        if env_keys:
+            trusted_keys.extend(_model_admission_trusted_keys(env_keys))
+        trusted_builders.update({
+            item.strip()
+            for item in os.getenv("MODEL_INTAKE_ADMISSION_V2_TRUSTED_BUILDERS", "").split(",")
+            if item.strip()
+        })
+        latest_manifest = manifest_rows[-1] if manifest_rows else {}
+        subject_map = {str(item.get("subject_kind") or ""): item for item in subject_rows}
+        try:
+            admission_verification = _verify_model_admission_v2(
+                active_admission.get("admission_package"),
+                trusted_public_keys=trusted_keys,
+                trusted_builder_ids=trusted_builders,
+                expected_bundle_sha256=str(latest_manifest.get("subject_bundle_sha256") or ""),
+                expected_environment=str(submission["requested_environment"]),
+                expected_components={
+                    "model_artifact_sha256": str(subject_map.get("artifact", {}).get("sha256") or ""),
+                    "repository_snapshot_sha256": str(subject_map.get("repository_snapshot", {}).get("sha256") or ""),
+                },
+            )
+        except (ValueError, _ModelAdmissionContractError):
+            admission_verification = {
+                "verified": False,
+                "status": "FAIL",
+                "blockers": ["authoritative_report_admission_verification_error"],
+                "trusted_key_fingerprints": [],
+            }
+    report = _build_model_intake_report(
+        submission=row_to_dict(submission),
+        subjects=subject_rows,
+        evidence=[row_to_dict(item) for item in evidence],
+        manifests=manifest_rows,
+        approvals=[row_to_dict(item) for item in approvals],
+        policy_decisions=[row_to_dict(item) for item in decisions],
+        admissions=admission_rows,
+        events=[row_to_dict(item) for item in events],
+        runner_jobs=[row_to_dict(item) for item in runner_jobs],
+        agent_sessions=[row_to_dict(item) for item in agent_sessions],
+        admission_verification=admission_verification,
+    )
+    filename = f"model-intake-{submission_uuid}"
+    if format == "html":
+        return Response(
+            content=_render_model_intake_html(report),
+            media_type="text/html",
+            headers={"Content-Disposition": f'inline; filename="{filename}.html"'},
+        )
+    if format == "sarif":
+        return JSONResponse(
+            content=_model_intake_report_to_sarif(report),
+            media_type="application/sarif+json",
+            headers={"Content-Disposition": f'attachment; filename="{filename}.sarif.json"'},
+        )
+    return report
 
 
 @app.post("/model-intake/submissions/{submission_id}/static-runs")

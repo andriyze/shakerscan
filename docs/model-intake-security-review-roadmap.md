@@ -1771,10 +1771,17 @@ Remaining product work:
 - **Implemented bounded OCI promotion mechanism:** build the content-addressed layout, copy its exact admitted
   manifest to one configured non-local registry repository with `oras`, fetch and compare the remote descriptor,
   and emit a content-bound receipt. Live registry policy/credential/retention acceptance remains corporate work.
-- Make every failed/non-run required control link to evidence and a concrete remediation.
-- Keep JSON, HTML, PDF, SARIF, admission statement, and UI decisions consistent.
-- Add deterministic report fixtures proving the simple answer: what passed, what failed, what was not tested,
-  whether deployment is allowed, and why.
+- Add organization-specific remediation catalogs beyond the shipped per-control evidence references and
+  plain-language failure reason. This is enrichment, not an admission dependency.
+
+Implemented normalized export parity: authenticated JSON, printable HTML/browser-PDF, SARIF, and the UI are
+built from the same authoritative controlled-workflow records and stable report digest. They share
+`PASS`/`FAIL`/`REVIEW`/`INCOMPLETE`/`ERROR`/`NOT_RUN`/`NOT_APPLICABLE`, Firecracker phase/network/resource
+timelines, evidence references, expiry handling, and signed-admission/current-manifest parity. An active
+admission is cryptographically reverified against current server-owned signer trust on every report request;
+signature, statement, or current-record mismatch is an explicit `BLOCK`. Deterministic fixtures cover allow,
+missing execution, required conversion, network attempts, expiry, stale-manifest approvals/policy, untrusted
+signatures, statement mismatch, stable digesting, escaped HTML, and SARIF.
 
 ### Phase 6 — Harden existing supply-chain integration — **bounded scope**
 
@@ -2064,8 +2071,9 @@ Owners must decide and record:
 - [x] A verified exact-subject runtime receipt automatically produces separate durable embedding-evaluation
   evidence from its signed known-answer digest, output shape, resource limits, and network telemetry. Raw
   vectors are not retained, and this does not impersonate the separately required corporate data-plane run.
-- [ ] The UI/JSON report has explicit passed/failed/not-run/coverage/error detail and a phase timeline; HTML/PDF,
-  SARIF, per-control evidence links, and admission-statement parity remain.
+- [x] The UI/JSON report has explicit normalized status, coverage, evidence references, and a phase timeline;
+  printable HTML/browser-PDF, SARIF, stable digest parity, expiry handling, and active-admission/current-record
+  parity use the same authoritative report builder.
 - [ ] The embedded Python policy, production KMS rotation/outage path, and live configured registry/Kubernetes
   deployments pass their complete negative-path and recovery gates. OCI remote-digest verification and pure,
   scoped/certified webhook mechanisms are implemented and unit-tested.

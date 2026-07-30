@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
-import { Activity, Bot, CheckCircle2, Clipboard, LockKeyhole, RefreshCw, Server, ShieldAlert } from 'lucide-react'
+import { Activity, Bot, CheckCircle2, Clipboard, Download, FileText, LockKeyhole, RefreshCw, Server, ShieldAlert } from 'lucide-react'
 import { Card, useToast } from '@/components/ui'
 import {
   attachModelIntakeStaticRun,
@@ -12,10 +12,12 @@ import {
   createModelIntakePolicyDecision,
   createModelIntakeRunnerJob,
   createModelIntakeSubmission,
+  downloadModelIntakeSubmissionReport,
   freezeModelIntakeEvidence,
   getModelIntakeAgentSession,
   getModelIntakeRunnerReadiness,
   getModelIntakeSubmission,
+  getModelIntakeSubmissionReport,
   listModelIntakeRunnerJobs,
   listModelIntakeAgentSessions,
   listModelIntakeSubmissions,
@@ -24,6 +26,7 @@ import {
   replyModelIntakeAgentSession,
   type ModelIntakeDeploymentBundleRequest,
   type ModelIntakeAgentSession,
+  type ModelIntakeCorporateReport,
   type ModelIntakePlatform,
   type ModelIntakeRunnerJob,
   type ModelIntakeRunnerReadiness,
@@ -56,7 +59,7 @@ function shortDigest(value: unknown): string {
 function statusClass(status: string): string {
   const normalized = status.toLowerCase()
   if (['pass', 'ready', 'completed', 'admitted', 'allow', 'active'].includes(normalized)) return 'bg-green-950/60 text-green-300'
-  if (['failed', 'fail', 'blocked', 'reject', 'revoked', 'not_ready'].includes(normalized)) return 'bg-red-950/60 text-red-300'
+  if (['failed', 'fail', 'block', 'blocked', 'error', 'reject', 'revoked', 'not_ready'].includes(normalized)) return 'bg-red-950/60 text-red-300'
   return 'bg-yellow-950/60 text-yellow-300'
 }
 
@@ -111,6 +114,7 @@ export function ControlledModelIntakeWorkflow({
   const [detail, setDetail] = useState<ModelIntakeWorkflowDetail | null>(null)
   const [jobs, setJobs] = useState<ModelIntakeRunnerJob[]>([])
   const [agentSessions, setAgentSessions] = useState<ModelIntakeAgentSession[]>([])
+  const [report, setReport] = useState<ModelIntakeCorporateReport | null>(null)
   const [busy, setBusy] = useState('')
   const [error, setError] = useState<string | null>(null)
 
@@ -157,6 +161,8 @@ export function ControlledModelIntakeWorkflow({
   const loadSubmissions = useCallback(async () => {
     if (!operatorToken.trim()) {
       setSubmissions([])
+      setDetail(null)
+      setReport(null)
       return
     }
     try {
@@ -170,15 +176,18 @@ export function ControlledModelIntakeWorkflow({
 
   const loadSelected = useCallback(async (id = selectedId) => {
     if (!id || !operatorToken.trim()) return
+    setReport(null)
     try {
-      const [nextDetail, nextJobs, nextSessions] = await Promise.all([
+      const [nextDetail, nextJobs, nextSessions, nextReport] = await Promise.all([
         getModelIntakeSubmission(id, operatorToken),
         listModelIntakeRunnerJobs(id, operatorToken),
         listModelIntakeAgentSessions(id, operatorToken),
+        getModelIntakeSubmissionReport(id, operatorToken),
       ])
       setDetail(nextDetail)
       setJobs(nextJobs.jobs)
       setAgentSessions(nextSessions.sessions)
+      setReport(nextReport)
       setSelectedId(id)
       const latestManifest = nextDetail.manifests.at(-1)
       const latestDecision = nextDetail.policy_decisions.at(-1)
@@ -444,6 +453,28 @@ export function ControlledModelIntakeWorkflow({
     }
   }
 
+  async function exportReport(format: 'json' | 'html' | 'sarif') {
+    setBusy(`report:${format}`)
+    setError(null)
+    try {
+      const id = requireSelection()
+      const exported = await downloadModelIntakeSubmissionReport(id, format, operatorToken)
+      const url = URL.createObjectURL(exported.blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = exported.filename
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+      toast.success(format === 'html' ? 'Printable HTML report downloaded' : `${format.toUpperCase()} report downloaded`)
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Failed to export normalized report')
+    } finally {
+      setBusy('')
+    }
+  }
+
   return (
     <Card className="min-w-0 p-4" id="controlled-model-intake-workflow">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -625,6 +656,38 @@ export function ControlledModelIntakeWorkflow({
             {detail && <div className="rounded border border-gray-800 p-3 text-xs"><div className="mb-2 text-gray-300">Submission event timeline</div><div className="max-h-64 space-y-2 overflow-auto">{detail.events.slice().reverse().slice(0, 30).map((event) => <div key={event.id} className="border-l border-gray-700 pl-3"><div className="text-gray-300">{String(event.event_type || 'event').replace(/_/g, ' ')}</div><div className="text-[10px] text-gray-600">{String(event.created_at || '')} · {String(event.actor || 'system')}</div>{typeof event.reason === 'string' && event.reason && <div className="mt-0.5 text-[11px] text-gray-500">{event.reason}</div>}</div>)}</div></div>}
             <Link href="/settings/policy-profiles" className={`${buttonClass} text-center`}>Review deployment policy profiles</Link>
           </div>
+        </div>
+      </details>
+
+      <details className="mt-3 rounded-lg border border-gray-800 bg-gray-950" open={Boolean(report)}>
+        <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-white">6. Normalized corporate review report</summary>
+        <div className="border-t border-gray-800 p-4">
+          {!report ? <div className="text-xs text-gray-500">Select a controlled submission to generate its authoritative report.</div> : (
+            <div className="grid gap-4">
+              <div className="flex flex-wrap items-start justify-between gap-3 rounded-lg border border-gray-800 bg-gray-900 p-4">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2"><FileText className="h-4 w-4 text-cyan-300" /><span className={`rounded px-2 py-1 text-xs font-bold ${statusClass(report.outcome)}`}>{report.outcome}</span></div>
+                  <p className="mt-2 text-sm text-gray-200">{report.plain_language}</p>
+                  <div className="mt-2 break-all font-mono text-[10px] text-gray-600">report sha256:{report.report_sha256}</div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {(['json', 'html', 'sarif'] as const).map((format) => <button key={format} type="button" className={buttonClass} disabled={busy === `report:${format}`} onClick={() => void exportReport(format)}><Download className="h-3.5 w-3.5" /> {format === 'html' ? 'Printable HTML / PDF' : format.toUpperCase()}</button>)}
+                </div>
+              </div>
+              <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                {report.controls.map((control) => (
+                  <div key={control.id} className="rounded border border-gray-800 bg-gray-900 p-3">
+                    <div className="flex items-start justify-between gap-2"><span className="text-xs font-medium text-gray-200">{control.label}</span><span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold ${statusClass(control.status)}`}>{control.status}</span></div>
+                    <p className="mt-2 text-[11px] leading-5 text-gray-500">{control.detail}</p>
+                    {control.evidence_refs.length > 0 && <div className="mt-2 text-[10px] text-gray-600">{control.evidence_refs.length} evidence reference{control.evidence_refs.length === 1 ? '' : 's'}</div>}
+                  </div>
+                ))}
+              </div>
+              <div className="rounded border border-gray-800 bg-gray-900 p-3 text-[11px] text-gray-500">
+                Statuses are normalized to PASS, FAIL, REVIEW, INCOMPLETE, ERROR, NOT_RUN, or NOT_APPLICABLE. The printable HTML uses the same report digest and browser printing provides the PDF artifact; SARIF contains every non-passing control for CI ingestion.
+              </div>
+            </div>
+          )}
         </div>
       </details>
     </Card>

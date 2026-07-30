@@ -256,6 +256,24 @@ admission webhook are optional deployment-enforcement mechanisms after ShakerSca
 
 ## 9. Report the simple answer
 
+Generate the normalized report from authoritative controlled-workflow records, never from caller-supplied
+report JSON:
+
+```bash
+curl -s -H "Authorization: Bearer $OPERATOR_TOKEN" \
+  "$API_BASE/model-intake/submissions/$SUBMISSION_ID/report?format=json"
+curl -s -H "Authorization: Bearer $OPERATOR_TOKEN" \
+  "$API_BASE/model-intake/submissions/$SUBMISSION_ID/report?format=html" > model-intake-report.html
+curl -s -H "Authorization: Bearer $OPERATOR_TOKEN" \
+  "$API_BASE/model-intake/submissions/$SUBMISSION_ID/report?format=sarif" > model-intake-report.sarif.json
+```
+
+The HTML export is the printable/PDF source. JSON, HTML, SARIF, and the UI share one normalized report digest,
+control set, outcome, phase timeline, evidence references, and active-admission parity checks. The API
+cryptographically reverifies an active DSSE admission against current server-owned signer trust before the
+report can say `ALLOW`. Any signature, statement, or current-record mismatch is `BLOCK`; expired evidence or
+admission material cannot become `PASS`.
+
 Always report one final outcome: `ALLOW`, `BLOCK`, `INCOMPLETE`, or `REVIEW`. For each control state:
 
 - what passed and the generated evidence/subject digest;

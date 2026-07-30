@@ -32,6 +32,7 @@ def test_model_intake_skill_covers_the_same_controlled_api_and_planner_catalog()
         "/approvals",
         "/policy-decisions",
         "/promote",
+        "/report",
     )
     for route in required_routes:
         assert route in reference
@@ -39,6 +40,9 @@ def test_model_intake_skill_covers_the_same_controlled_api_and_planner_catalog()
     for action in ACTION_CATALOG:
         assert f"`{action}`" in reference
     assert "`run_command`" not in reference
+    for report_format in ("json", "html", "sarif"):
+        assert f"/report?format={report_format}" in reference
+    assert 'pattern="^(json|html|sarif)$"' in api_source
 
 
 def test_model_intake_skill_preserves_fail_closed_firecracker_and_report_semantics():
@@ -49,3 +53,6 @@ def test_model_intake_skill_preserves_fail_closed_firecracker_and_report_semanti
     assert "`ALLOW`, `BLOCK`, `INCOMPLETE`, or `REVIEW`" in reference
     assert "Kubernetes is not required" in reference
     assert "conformance fixtures, not a hard-coded allowlist" in reference
+    assert "cryptographically reverifies an active DSSE admission" in reference
+    assert "current-record mismatch is `BLOCK`" in reference
+    assert "printable/PDF source" in reference

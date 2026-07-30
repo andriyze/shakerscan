@@ -2141,6 +2141,29 @@ export interface FleetNodeEvent {
   created_at: string
 }
 
+export type ModelIntakeReportStatus = 'PASS' | 'FAIL' | 'REVIEW' | 'INCOMPLETE' | 'ERROR' | 'NOT_RUN' | 'NOT_APPLICABLE'
+
+export interface ModelIntakeCorporateReport {
+  schema_version: 'model-intake-corporate-report/v1' | string
+  generated_at: string
+  report_sha256: string
+  outcome: 'ALLOW' | 'BLOCK' | 'INCOMPLETE' | 'REVIEW'
+  plain_language: string
+  submission: Record<string, unknown> & { id: string; state: string }
+  controls: Array<{
+    id: string
+    label: string
+    status: ModelIntakeReportStatus
+    detail: string
+    coverage: Record<string, unknown>
+    evidence_refs: Array<Record<string, unknown>>
+  }>
+  control_counts: Record<ModelIntakeReportStatus, number>
+  runner_timelines: Array<Record<string, unknown>>
+  authority_bindings: Record<string, unknown>
+  limitations: string[]
+}
+
 export interface FleetNodeEventsResponse {
   node_id: string
   events: FleetNodeEvent[]
@@ -3902,6 +3925,27 @@ export async function getModelIntakeSubmission(id: string, operatorToken: string
   })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load Model Intake submission'))
   return res.json()
+}
+
+export async function getModelIntakeSubmissionReport(id: string, operatorToken: string): Promise<ModelIntakeCorporateReport> {
+  const res = await fetch(`${API_URL}/model-intake/submissions/${id}/report?format=json`, {
+    headers: modelIntakeWorkflowHeaders(operatorToken),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load normalized Model Intake report'))
+  return res.json()
+}
+
+export async function downloadModelIntakeSubmissionReport(
+  id: string,
+  format: 'json' | 'html' | 'sarif',
+  operatorToken: string,
+): Promise<{ blob: Blob; filename: string }> {
+  const res = await fetch(`${API_URL}/model-intake/submissions/${id}/report?format=${format}`, {
+    headers: modelIntakeWorkflowHeaders(operatorToken),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, `Failed to export Model Intake ${format.toUpperCase()} report`))
+  const suffix = format === 'sarif' ? 'sarif.json' : format
+  return { blob: await res.blob(), filename: `model-intake-${id}.${suffix}` }
 }
 
 export async function attachModelIntakeStaticRun(id: string, scanId: string, operatorToken: string): Promise<Record<string, unknown>> {

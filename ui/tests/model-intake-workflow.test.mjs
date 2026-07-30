@@ -21,6 +21,7 @@ test('controlled Model Intake UI exposes every authoritative workflow stage', ()
     '/approvals',
     '/policy-decisions',
     '/promote',
+    '/report',
   ]) {
     assert.match(api, new RegExp(fragment.replaceAll('/', '\\/')))
   }
@@ -44,4 +45,12 @@ test('Codex workflow is prominently advisory and promotion remains a separate op
   assert.match(workflow, /Operator credential for controlled workflow/)
   assert.match(workflow, /Durable advisory sessions/)
   assert.match(workflow, /cancelModelIntakeAgentSession/)
+})
+
+test('normalized corporate report has UI and export parity', () => {
+  assert.match(workflow, /Normalized corporate review report/)
+  assert.match(workflow, /PASS, FAIL, REVIEW, INCOMPLETE, ERROR, NOT_RUN, or NOT_APPLICABLE/)
+  assert.match(workflow, /Printable HTML \/ PDF/)
+  assert.match(api, /format: 'json' \| 'html' \| 'sarif'/)
+  assert.match(api, /ModelIntakeCorporateReport/)
 })

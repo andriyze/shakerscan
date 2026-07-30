@@ -1209,8 +1209,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 288 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 243 | `api/api.py` |
+| Public REST operations | 289 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 244 | `api/api.py` |
 | Check families | 14 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 13 | `api/command_arsenal.py` |
@@ -1407,6 +1407,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `POST` | `/model-intake/submissions/{submission_id}/freeze-evidence` | `freeze_model_intake_evidence` |
 | `POST` | `/model-intake/submissions/{submission_id}/policy-decisions` | `create_model_intake_policy_decision` |
 | `POST` | `/model-intake/submissions/{submission_id}/promote` | `promote_model_intake_submission` |
+| `GET` | `/model-intake/submissions/{submission_id}/report` | `get_model_intake_submission_report` |
 | `GET` | `/model-intake/submissions/{submission_id}/runner-jobs` | `list_model_intake_runner_jobs` |
 | `POST` | `/model-intake/submissions/{submission_id}/runner-jobs` | `create_model_intake_runner_job` |
 | `POST` | `/model-intake/submissions/{submission_id}/runner-jobs/{job_id}/refresh` | `refresh_model_intake_runner_job` |

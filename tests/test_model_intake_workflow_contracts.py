@@ -96,9 +96,55 @@ def test_submission_listing_and_detail_require_operator_authentication():
         asyncio.run(api.list_model_intake_submissions(unauthenticated))
     with pytest.raises(api.HTTPException) as detailed:
         asyncio.run(api.get_model_intake_submission(str(uuid.uuid4()), unauthenticated))
+    with pytest.raises(api.HTTPException) as reported:
+        asyncio.run(api.get_model_intake_submission_report(str(uuid.uuid4()), unauthenticated))
 
     assert listed.value.status_code == 401
     assert detailed.value.status_code == 401
+    assert reported.value.status_code == 401
+
+
+def test_normalized_report_route_reads_authoritative_records_only(monkeypatch):
+    submission_id = uuid.uuid4()
+
+    class _Connection:
+        async def fetchrow(self, query, *_args):
+            assert "model_intake_submissions" in query
+            return {
+                "id": submission_id,
+                "scan_id": None,
+                "requested_by": "operator:submitter",
+                "requested_environment": "production",
+                "source_kind": "huggingface",
+                "source_reference_hash": "a" * 64,
+                "state": "submitted",
+                "created_at": api.utc_now(),
+                "updated_at": api.utc_now(),
+            }
+
+        async def fetch(self, _query, *_args):
+            return []
+
+    class _Acquire:
+        async def __aenter__(self):
+            return _Connection()
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class _Pool:
+        def acquire(self):
+            return _Acquire()
+
+    monkeypatch.setattr(api, "db_pool", _Pool())
+    monkeypatch.setattr(api, "_model_intake_authenticated_subject", lambda _request: "operator:reviewer")
+
+    report = asyncio.run(api.get_model_intake_submission_report(str(submission_id), object(), "json"))
+
+    assert report["outcome"] == "INCOMPLETE"
+    assert report["submission"]["id"] == str(submission_id)
+    assert "source" not in report["submission"]
+    assert report["authority_bindings"]["admission_cryptographic_verification"]["verified"] is None
 
 
 def test_agent_session_cancel_is_durable_and_idempotent(monkeypatch):
