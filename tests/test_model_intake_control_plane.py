@@ -2,12 +2,16 @@ import base64
 import hashlib
 import json
 from datetime import timedelta
+from pathlib import Path
+import sys
 
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
-from api.model_intake_control_plane import (
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
+
+from model_intake_control_plane import (  # noqa: E402
     AdmissionContractError,
     LocalPemSigner,
     build_approval_receipt,

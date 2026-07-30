@@ -2814,7 +2814,9 @@ def test_custom_named_strict_model_intake_profile_enables_strict_governance_with
     assert updated.metadata_json["strict_governance"] is True
     assert updated.metadata_json["policy_required_trust_anchor_ids"] == []
     assert updated.complete_artifact_download is True
-    assert updated.complete_repository_snapshot is False
+    # Strict admission never silently treats one direct artifact URL as a
+    # complete deployable repository; unsupported providers fail closed.
+    assert updated.complete_repository_snapshot is True
     assert updated.require_dynamic_sandbox is True
 
 

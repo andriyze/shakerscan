@@ -1,7 +1,10 @@
 from pathlib import Path
+import sys
 
-from api.model_intake_loader_profiles import resolve_loader_profile
-from api.model_intake_runner_controller import build_firecracker_config, firecracker_readiness
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
+
+from model_intake_loader_profiles import resolve_loader_profile  # noqa: E402
+from model_intake_runner_controller import build_firecracker_config, firecracker_readiness  # noqa: E402
 
 
 def test_loader_selection_is_capability_based_and_supports_unseen_models():
@@ -51,7 +54,7 @@ def test_firecracker_contract_has_no_network_and_read_only_subject_drives():
 
 
 def test_firecracker_readiness_has_no_local_container_fallback(tmp_path, monkeypatch):
-    monkeypatch.setattr("api.model_intake_runner_controller.platform.system", lambda: "Linux")
+    monkeypatch.setattr("model_intake_runner_controller.platform.system", lambda: "Linux")
     readiness = firecracker_readiness({})
     assert readiness["status"] == "NOT_READY"
     assert readiness["fallback_execution"] is False

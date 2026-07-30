@@ -1,18 +1,15 @@
 import inspect
-import importlib.util
+import os
 from pathlib import Path
 import re
+import subprocess
 import sys
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "api"))
-spec = importlib.util.spec_from_file_location("shakerscan_api_workflow_test", ROOT / "api" / "api.py")
-api = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(api)
-import model_intake_signer_service as signer_service  # noqa: E402
-from model_intake_control_plane import AdmissionContractError  # noqa: E402
+import api  # noqa: E402
 
 
 def test_legacy_scan_is_preflight_by_default_and_submission_cannot_carry_authority():
@@ -71,23 +68,41 @@ def test_scoped_trust_anchor_routes_attestation_and_publisher_keys_separately():
     assert merged.required_attestation_builder_ids == ["https://builder.example/model"]
 
 
-def test_signer_has_no_generic_signing_endpoint_and_requires_internal_auth(monkeypatch):
-    routes = {route.path for route in signer_service.app.routes}
-    assert "/internal/model-intake/admissions/issue" in routes
-    assert all("/sign" not in route for route in routes)
-
-    monkeypatch.setenv("MODEL_INTAKE_SIGNER_INTERNAL_TOKEN", "x" * 32)
-    with pytest.raises(signer_service.HTTPException):
-        signer_service._authorize_internal("wrong")
-
-
-def test_local_pem_signer_cannot_issue_production(monkeypatch):
-    monkeypatch.setenv("MODEL_INTAKE_SIGNER_BACKEND", "local-pem")
-    monkeypatch.setenv("MODEL_INTAKE_SIGNER_ALLOW_LOCAL_PEM", "true")
-    monkeypatch.setenv("MODEL_INTAKE_CONTROL_PLANE_SIGNING_KEY_PEM", "not-used")
-
-    with pytest.raises(AdmissionContractError, match="prohibited for production"):
-        signer_service._signer_provider("production")
+def test_signer_has_narrow_route_auth_and_no_production_local_key():
+    code = """
+import os
+import model_intake_signer_service as service
+routes = {route.path for route in service.app.routes}
+assert '/internal/model-intake/admissions/issue' in routes
+assert all('/sign' not in route for route in routes)
+os.environ['MODEL_INTAKE_SIGNER_INTERNAL_TOKEN'] = 'x' * 32
+try:
+    service._authorize_internal('wrong')
+except service.HTTPException:
+    pass
+else:
+    raise AssertionError('wrong internal token accepted')
+os.environ['MODEL_INTAKE_SIGNER_BACKEND'] = 'local-pem'
+os.environ['MODEL_INTAKE_SIGNER_ALLOW_LOCAL_PEM'] = 'true'
+os.environ['MODEL_INTAKE_CONTROL_PLANE_SIGNING_KEY_PEM'] = 'not-used'
+try:
+    service._signer_provider('production')
+except Exception as exc:
+    assert 'prohibited for production' in str(exc)
+else:
+    raise AssertionError('production local PEM signer accepted')
+"""
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(ROOT / "api")
+    completed = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
 def test_compose_keeps_signer_authority_out_of_workers():

@@ -1,13 +1,17 @@
 import base64
 from datetime import datetime, timedelta, timezone
 import json
+from pathlib import Path
+import sys
 import uuid
 
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, PublicFormat
 
-from api.model_intake_control_plane import LocalPemSigner, canonical_bytes
-from api.model_intake_runner_receipts import PAYLOAD_TYPE, SCHEMA, verify_runner_envelope
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
+
+from model_intake_control_plane import LocalPemSigner, canonical_bytes  # noqa: E402
+from model_intake_runner_receipts import PAYLOAD_TYPE, SCHEMA, verify_runner_envelope  # noqa: E402
 
 
 def _envelope(evidence_type, observations):

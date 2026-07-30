@@ -1,7 +1,11 @@
 import base64
 import json
+from pathlib import Path
+import sys
 
-from api import model_intake_admission_webhook as webhook
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
+
+import model_intake_admission_webhook as webhook  # noqa: E402
 from scripts import model_intake_verify_deployment as cli
 
 
