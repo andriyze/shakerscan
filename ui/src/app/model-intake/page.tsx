@@ -54,34 +54,6 @@ const textareaClass =
   'min-w-0 w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 font-mono text-xs text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none'
 const fieldClass = 'grid min-w-0 gap-1 text-sm text-gray-300'
 const MODEL_INTAKE_OPERATOR_TOKEN_KEY = 'shakerscan:model-intake-operator-token'
-const ADMISSION_GOVERNANCE_KEYS = new Set([
-  'approved_by',
-  'approver',
-  'approved_at',
-  'approval_timestamp',
-  'approval_date',
-  'approval_policy_version',
-  'policy_version',
-  'approved_environment',
-  'deployment_environment',
-  'legal_approved',
-  'privacy_approved',
-  'security_approved',
-  'risk_accepted',
-])
-
-function stripAdmissionGovernance(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(stripAdmissionGovernance)
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .filter(([key]) => !ADMISSION_GOVERNANCE_KEYS.has(key.toLowerCase()))
-        .map(([key, child]) => [key, stripAdmissionGovernance(child)]),
-    )
-  }
-  return value
-}
-
 const COMPLETE_METADATA_EXAMPLE = {
   source_repo: 'https://github.com/example/model-release',
   commit_sha: '0123456789abcdef',
@@ -378,9 +350,7 @@ function ModelIntakeSettingsContent() {
   const [evaluationSpecJson, setEvaluationSpecJson] = useState('')
   const [runGeneratedEvaluation, setRunGeneratedEvaluation] = useState(false)
   const [requireGeneratedEvaluation, setRequireGeneratedEvaluation] = useState(false)
-  const [requireSignedAdmission, setRequireSignedAdmission] = useState(false)
   const [timeoutSeconds, setTimeoutSeconds] = useState('20')
-  const [intakeMode, setIntakeMode] = useState<'admission' | 'preflight'>('preflight')
   const [policyProfile, setPolicyProfile] = useState<string>('production')
   const [savedPolicyProfiles, setSavedPolicyProfiles] = useState<SavedPolicyProfile[]>([])
   const [policyProfilesLoading, setPolicyProfilesLoading] = useState(true)
@@ -504,7 +474,6 @@ function ModelIntakeSettingsContent() {
     setRequireDynamicSandbox(true)
     setRunGeneratedEvaluation(true)
     setRequireGeneratedEvaluation(true)
-    setRequireSignedAdmission(true)
     setTrustMode('trusted_key_fingerprint')
     setMaxDownloadBytes((current) => {
       const parsed = Number(current)
@@ -557,7 +526,6 @@ function ModelIntakeSettingsContent() {
   function applyScanPayload(payload: ModelIntakeScanRequest) {
     setFieldErrors({})
     setArtifactUrl(payload.artifact_url || '')
-    setIntakeMode(payload.intake_mode || 'preflight')
     setName(payload.name || '')
     setMetadataUrl(payload.metadata_url || '')
     setMetadataJson(payload.metadata_json ? JSON.stringify(payload.metadata_json, null, 2) : '')
@@ -590,7 +558,6 @@ function ModelIntakeSettingsContent() {
     setEvaluationSpecJson(payload.evaluation_spec_json ? JSON.stringify(payload.evaluation_spec_json, null, 2) : '')
     setRunGeneratedEvaluation(payload.run_generated_evaluation ?? false)
     setRequireGeneratedEvaluation(payload.require_generated_evaluation ?? false)
-    setRequireSignedAdmission(payload.require_signed_admission ?? false)
     setTimeoutSeconds(String(payload.timeout_seconds || 20))
     if (payload.policy_profile) setPolicyProfile(payload.policy_profile)
     setTrustMode(inferModelIntakeTrustMode({
@@ -666,12 +633,10 @@ function ModelIntakeSettingsContent() {
     const timeout = Number(timeoutSeconds || 20)
     const includeUrlSignature = trustMode === 'signature_url_key_url' || trustMode === 'trusted_key_fingerprint'
     const includeInlineSignature = trustMode === 'inline_signature_key' || trustMode === 'trusted_key_fingerprint'
-    const includeTrustAnchor = intakeMode === 'preflight' && trustMode === 'trusted_key_fingerprint'
+    const includeTrustAnchor = trustMode === 'trusted_key_fingerprint'
     const includeSignatureOptions = trustMode !== 'checksum_only'
     const parsedSubmissionMetadata = parseOptionalJsonObject(metadataJson)
-    const submissionMetadata = intakeMode === 'admission'
-      ? stripAdmissionGovernance(parsedSubmissionMetadata) as Record<string, unknown>
-      : parsedSubmissionMetadata
+    const submissionMetadata = parsedSubmissionMetadata
     if (!Number.isFinite(maxBytes) || maxBytes < 1024) throw new Error('Download limit must be at least 1024 bytes')
     if (!Number.isFinite(maxTotalBytes) || maxTotalBytes < 1024) throw new Error('Complete artifact limit must be at least 1024 bytes')
     if (completeArtifactDownload && maxTotalBytes < maxBytes) throw new Error('Complete artifact limit must be greater than or equal to the inspection limit')
@@ -679,7 +644,7 @@ function ModelIntakeSettingsContent() {
     if (!Number.isFinite(timeout) || timeout < 1) throw new Error('Timeout must be at least 1 second')
     const payload: ModelIntakeScanRequest = {
       artifact_url: artifactUrl.trim(),
-      intake_mode: intakeMode,
+      intake_mode: 'preflight',
       name: optionalText(name),
       metadata_url: optionalText(metadataUrl),
       metadata_json: submissionMetadata,
@@ -695,8 +660,8 @@ function ModelIntakeSettingsContent() {
       signature_trusted_key_sha256: includeTrustAnchor ? optionalList(signatureTrustedKeySha256) : undefined,
       trust_anchor_ids: includeTrustAnchor && selectedTrustAnchorIds.length ? selectedTrustAnchorIds : undefined,
       model_card_url: optionalText(modelCardUrl),
-      deployment_approved: intakeMode === 'preflight' ? deploymentApproved : undefined,
-      require_deployment_approval: intakeMode === 'preflight' ? requireDeploymentApproval : undefined,
+      deployment_approved: deploymentApproved,
+      require_deployment_approval: requireDeploymentApproval,
       require_signature: requireSignature,
       require_signature_verification: requireSignatureVerification,
       require_cryptographic_signature_verification: requireCryptographicSignatureVerification,
@@ -714,7 +679,7 @@ function ModelIntakeSettingsContent() {
       evaluation_spec_json: parseOptionalJsonObject(evaluationSpecJson),
       run_generated_evaluation: runGeneratedEvaluation,
       require_generated_evaluation: requireGeneratedEvaluation,
-      require_signed_admission: requireSignedAdmission,
+      require_signed_admission: false,
       timeout_seconds: timeout,
     }
     if (!payload.artifact_url) {
@@ -915,7 +880,7 @@ function ModelIntakeSettingsContent() {
       setError('Fix the highlighted fields before queueing.')
       return
     }
-    if (intakeMode === 'preflight' && trustPreview.blockingFailures.length > 0) {
+    if (trustPreview.blockingFailures.length > 0) {
       setError('Fix the failed trust preview checks before queueing.')
       return
     }
@@ -942,11 +907,9 @@ function ModelIntakeSettingsContent() {
     expected_sha256: expectedSha256.trim() || (metadataUrl.trim() ? 'manifest' : ''),
     signature_url: signatureUrl.trim() || signatureValue.trim() || (parsedMetadata?.signature_url as string | undefined),
     signature_public_key: signaturePublicKey.trim() || signaturePublicKeyUrl.trim() || (parsedMetadata?.signature_public_key as string | undefined),
-    signature_trusted_keys: intakeMode === 'preflight'
-      ? signatureTrustedKeys.trim() || signatureTrustedKeySha256.trim() || selectedAnchorPems || selectedAnchorFingerprints || (parsedMetadata?.signature_trusted_keys as string | undefined)
-      : undefined,
+    signature_trusted_keys: signatureTrustedKeys.trim() || signatureTrustedKeySha256.trim() || selectedAnchorPems || selectedAnchorFingerprints || (parsedMetadata?.signature_trusted_keys as string | undefined),
     model_card_url: modelCardUrl.trim() || (parsedMetadata?.model_card_url as string | undefined),
-    deployment_approved: intakeMode === 'preflight' ? deploymentApproved || parsedMetadata?.deployment_approved : undefined,
+    deployment_approved: deploymentApproved || parsedMetadata?.deployment_approved,
   }
   const readinessControls: AITestReadinessControl[] = scenario?.readiness_controls || []
   const missingControls = readinessControls.filter((control) => !hasMetadataKey(readinessMetadata, control.keys))
@@ -1247,23 +1210,11 @@ function ModelIntakeSettingsContent() {
             Manage
           </Link>
         </div>
-        <div className="mt-4 grid gap-2 sm:grid-cols-2">
-          <button
-            type="button"
-            onClick={() => setIntakeMode('admission')}
-            className={`rounded-lg border p-3 text-left ${intakeMode === 'admission' ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-950 hover:border-gray-700'}`}
-          >
-            <div className="text-sm font-medium text-white">Strict technical candidate</div>
-            <div className="mt-1 text-xs text-gray-500">Server-enforced acquisition and scanner minimums. This scan alone is never deployable.</div>
-          </button>
-          <button
-            type="button"
-            onClick={() => setIntakeMode('preflight')}
-            className={`rounded-lg border p-3 text-left ${intakeMode === 'preflight' ? 'border-yellow-500 bg-yellow-950/30' : 'border-gray-800 bg-gray-950 hover:border-gray-700'}`}
-          >
-            <div className="text-sm font-medium text-white">Preflight</div>
-            <div className="mt-1 text-xs text-gray-500">Exploratory scanner run only. It can never approve deployment.</div>
-          </button>
+        <div className="mt-4 rounded-lg border border-yellow-700/50 bg-yellow-950/20 p-3">
+          <div className="text-sm font-medium text-yellow-100">Technical preflight only</div>
+          <div className="mt-1 text-xs text-yellow-200/70">
+            This page produces non-deployable technical evidence. Corporate authorization is available only through the controlled submission, frozen-evidence, approval, policy, signer, and promotion workflow.
+          </div>
         </div>
         <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
           {POLICY_PROFILES.map((profile) => (
@@ -1271,7 +1222,6 @@ function ModelIntakeSettingsContent() {
               key={profile.value}
               type="button"
               onClick={() => applyPolicyProfile(profile.value)}
-              disabled={intakeMode === 'admission'}
               className={`min-w-0 rounded-lg border p-3 text-left ${
                 policyProfile === profile.value ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-950 hover:border-gray-700'
               }`}
@@ -1285,7 +1235,6 @@ function ModelIntakeSettingsContent() {
               key={profile.id}
               type="button"
               onClick={() => applyPolicyProfile(profile.environment)}
-              disabled={intakeMode === 'admission'}
               className={`min-w-0 rounded-lg border p-3 text-left ${
                 policyProfile === profile.environment ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-950 hover:border-gray-700'
               }`}
@@ -1305,11 +1254,6 @@ function ModelIntakeSettingsContent() {
             </button>
           ))}
         </div>
-        {intakeMode === 'admission' && (
-          <div className="mt-3 rounded border border-cyan-900/70 bg-cyan-950/20 p-3 text-xs text-cyan-200">
-            The API applies its configured strict profile, but the result is only generated static evidence. Corporate authorization requires a separate submission, exact frozen deployment bundle, signed runtime/evaluation/data-plane receipts, three segregated approvals, a policy decision, and signer promotion. Use the <span className="font-mono">/model-intake/submissions</span> workflow; preflight or this candidate can never authorize deployment by itself.
-          </div>
-        )}
         {policyProfilesLoading && <div className="mt-3 text-xs text-gray-500">Loading saved profiles...</div>}
         {!policyProfilesLoading && policyProfilesError && (
           <div role="alert" className="mt-3 break-words text-xs text-red-400">
@@ -1722,25 +1666,18 @@ function ModelIntakeSettingsContent() {
                 Require trusted crypto verification
               </label>
               <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
-                <input type="checkbox" checked={requireDeploymentApproval} onChange={(e) => setRequireDeploymentApproval(e.target.checked)} disabled={intakeMode === 'admission'} className="h-4 w-4 rounded border-gray-700 bg-gray-800 disabled:opacity-50" />
-                Require approval
+                <input type="checkbox" checked={requireDeploymentApproval} onChange={(e) => setRequireDeploymentApproval(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+                Flag missing approval context
               </label>
               <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
                 <input type="checkbox" checked={requireModelGovernance} onChange={(e) => setRequireModelGovernance(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
                 Require governance
               </label>
-              {intakeMode === 'preflight' && (
-                <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
-                  <input type="checkbox" checked={deploymentApproved} onChange={(e) => setDeploymentApproved(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
-                  Declare approval for preflight context
-                </label>
-              )}
+              <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
+                <input type="checkbox" checked={deploymentApproved} onChange={(e) => setDeploymentApproved(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+                Declare approval context (never grants authority)
+              </label>
             </div>
-            {intakeMode === 'admission' && (
-              <div className="rounded border border-cyan-700/40 bg-cyan-950/20 p-2 text-xs text-cyan-200">
-                Production trust anchors, approval requirements, and approval receipts are resolved by the server. This form submits publisher leaf evidence only.
-              </div>
-            )}
             <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
               <label className={fieldClass}>
                 Inspection prefix (bytes)
@@ -1787,7 +1724,7 @@ function ModelIntakeSettingsContent() {
             </label>
             <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
               <input type="checkbox" checked={requireDynamicSandbox} onChange={(e) => { setRequireDynamicSandbox(e.target.checked); if (e.target.checked) setRunDynamicSandbox(true) }} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
-              Require sandbox pass for admission
+              Require sandbox pass for this technical evidence
             </label>
             <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
               <input type="checkbox" checked={runGeneratedEvaluation} onChange={(e) => setRunGeneratedEvaluation(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
@@ -1795,7 +1732,7 @@ function ModelIntakeSettingsContent() {
             </label>
             <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
               <input type="checkbox" checked={requireGeneratedEvaluation} onChange={(e) => { setRequireGeneratedEvaluation(e.target.checked); if (e.target.checked) setRunGeneratedEvaluation(true) }} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
-              Require evaluation pass for admission
+              Require evaluation pass for this technical evidence
             </label>
             <label className={fieldClass}>
               Evaluation specification JSON
@@ -1809,10 +1746,6 @@ function ModelIntakeSettingsContent() {
               <span className="text-xs text-gray-500">
                 Requester-supplied observations are treated as declared/debug evidence and cannot satisfy an admission gate. A trusted isolated runner must produce provenance-bound retrieval results. Source text is not retained.
               </span>
-            </label>
-            <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
-              <input type="checkbox" checked={requireSignedAdmission} onChange={(e) => setRequireSignedAdmission(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
-              Require signed admission statement
             </label>
             <p className="text-xs text-gray-500">
               Required tools that are missing, unsupported, timed out, crashed, or incomplete fail closed instead of being reported as clean.

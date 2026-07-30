@@ -46,7 +46,8 @@ Every recent escaped bug lived at an **integration seam that unit tests mocked o
 | MI-4 | Implemented | crafted `.pkl`/`.pt` with dangerous opcode | unsafe-serialization finding | serialization detector |
 | MI-5 | Implemented | self-signed, no trust anchor | `signature_verification_status == untrusted_root` | trust root |
 | MI-6 | Implemented | trusted-anchor-signed | `verified`, `signature_trusted_root == true` | trust root positive |
-| MI-7 | **Planned** | Model-Intake deployment decision with an active policy/exception | decision honors the active policy (stays `block` when a required control/exception applies) | policy/exception-wiring regression |
+| MI-7 | Implemented | forged `intake_mode=admission` request through the compatibility scan endpoint | HTTP 409, controlled-workflow pointer, and no queued scan | accidental second admission-authority path |
+| MI-8 | **Planned** | Model-Intake deployment decision with an active policy/exception | decision honors the active policy (stays `block` when a required control/exception applies) | policy/exception-wiring regression |
 
 ### AI Gate (Phase 2)
 | # | Harness status | Scenario (honey `secure-rag-agent`) | Assertion | Catches |
@@ -82,7 +83,7 @@ Juice Shop answer key, crAPI dual-user BOLA/IDOR + mass-assignment + JWT, precis
 Implemented: MI-1 (206) · AI-2 (redaction) · AI-3 (prod bypass) · AI-4 (confirm) ·
 MI-5/6 (trust root) · D-4 (phantom chains).
 
-Planned: AI-5 (judge guard) · D-5 (truncation + crash) · AI-6 / MI-7 (policy wiring).
+Planned: AI-5 (judge guard) · D-5 (truncation + crash) · AI-6 / MI-8 (policy wiring).
 
 ## Workflow split
 - `.github/workflows/e2e-pr.yml` runs on every pull request so it can be a required check, but starts

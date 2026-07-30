@@ -3698,9 +3698,9 @@ class ModelIntakeScanRequest(BaseModel):
     intake_mode: Literal["admission", "preflight"] = Field(
         default="preflight",
         description=(
-            "Admission applies the server-owned minimum technical policy but still emits only a "
-            "non-deployable candidate. Preflight is the compatibility default. Production authorization "
-            "uses the separate submission/freeze/approval/policy/promotion workflow."
+            "This legacy field is retained for request compatibility, but only preflight is accepted. "
+            "Production authorization uses the separate submission/freeze/approval/policy/promotion "
+            "workflow; admission mode on this endpoint is rejected."
         ),
     )
     metadata_url: Optional[str] = None
@@ -12459,7 +12459,21 @@ async def _enrich_model_intake_scan_request(request: ModelIntakeScanRequest) -> 
 
 @app.post("/model-intake/scan")
 async def scan_model_intake(request: ModelIntakeScanRequest):
-    """Queue a model artifact intake scan."""
+    """Queue non-deployable technical evidence for the controlled workflow."""
+    if request.intake_mode != "preflight":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "legacy_model_intake_admission_mode_removed",
+                "message": (
+                    "POST /model-intake/scan is preflight-only and cannot create an admission candidate. "
+                    "Use /model-intake/submissions and the controlled evidence, approval, policy, and "
+                    "promotion workflow for deployment authorization."
+                ),
+                "required_intake_mode": "preflight",
+                "authoritative_workflow": "/model-intake/submissions",
+            },
+        )
     # Validate the raw public DTO before registry enrichment or policy
     # expansion can blur which authority came from the requester.
     _validate_model_intake_admission_request_authority(request)

@@ -224,13 +224,11 @@ def run_model_intake() -> H.Scorecard:
     except Exception as e:
         sc.error("MI-6 caller trust-anchor rejection", e)
 
-    # MI-7: exercise the hardened admission path in the real stack. A plain
-    # HTTPS/HTTP artifact has no provider-authoritative repository inventory, so
-    # a caller-authored one-file manifest must never satisfy the complete
-    # repository gate. This is deliberately NOT preflight: it protects the path
-    # that creates technical admission candidates.
+    # MI-7: the compatibility endpoint must not expose a second authority path.
+    # Admission requests are rejected before acquisition, including requests
+    # carrying forged repository completeness and custom-code declarations.
     try:
-        res = _mi_scan({
+        status, body = H.post("/model-intake/scan", {
             "artifact_url": fx_good,
             "intake_mode": "admission",
             "expected_sha256": FX.GOOD_SHA,
@@ -243,23 +241,16 @@ def run_model_intake() -> H.Scorecard:
                 "python_files": [],
                 "custom_code_required": False,
             },
-        }, "MI-7", timeout=300)
-        intake = res.get("model_intake") or {}
-        s = intake.get("summary") or {}
-        corporate = intake.get("corporate_use") or {}
-        fids = {str(f.get("id")) for f in (res.get("findings") or [])}
-        sc.check("MI-7 hardened admission path exercised",
-                 s.get("intake_mode") == "admission" and s.get("admission_eligible") is True,
-                 f"mode={s.get('intake_mode')} eligible={s.get('admission_eligible')}")
-        sc.check("MI-7 caller manifest cannot become a complete repository snapshot",
-                 s.get("repository_snapshot_complete") is not True,
-                 f"snapshot_complete={s.get('repository_snapshot_complete')}")
-        sc.check("MI-7 incomplete non-HF repository is not corporately approved",
-                 corporate.get("can_use_in_corporate_environment") is False
-                 and s.get("can_use_in_corporate_environment") is False,
-                 f"corporate={corporate.get('verdict')} findings={sorted(fids)[:8]}")
+        })
+        detail = body.get("detail") or {}
+        sc.check("MI-7 legacy admission endpoint is removed",
+                 status == 409
+                 and detail.get("code") == "legacy_model_intake_admission_mode_removed"
+                 and detail.get("authoritative_workflow") == "/model-intake/submissions"
+                 and not body.get("scan_id"),
+                 f"status={status} body={body}")
     except Exception as e:
-        sc.error("MI-7 strict admission manifest authority", e)
+        sc.error("MI-7 legacy admission endpoint rejection", e)
 
     return sc
 

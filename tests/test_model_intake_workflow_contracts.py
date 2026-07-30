@@ -1,3 +1,4 @@
+import asyncio
 import inspect
 import os
 from pathlib import Path
@@ -29,6 +30,36 @@ def test_legacy_scan_is_preflight_by_default_and_submission_cannot_carry_authori
     )
     with pytest.raises(api.HTTPException, match="server-owned"):
         api._validate_model_intake_admission_request_authority(request)
+
+
+def test_legacy_scan_rejects_admission_before_enrichment_or_queueing():
+    request = api.ModelIntakeScanRequest(
+        artifact_url="https://models.example/model.safetensors",
+        intake_mode="admission",
+        metadata_json={
+            "repository_manifest": {
+                "complete": True,
+                "files": [{"path": "model.safetensors", "size": 1}],
+            },
+            "python_files": [],
+            "custom_code_required": False,
+        },
+    )
+
+    with pytest.raises(api.HTTPException) as caught:
+        asyncio.run(api.scan_model_intake(request))
+
+    assert caught.value.status_code == 409
+    assert caught.value.detail == {
+        "code": "legacy_model_intake_admission_mode_removed",
+        "message": (
+            "POST /model-intake/scan is preflight-only and cannot create an admission candidate. "
+            "Use /model-intake/submissions and the controlled evidence, approval, policy, and "
+            "promotion workflow for deployment authorization."
+        ),
+        "required_intake_mode": "preflight",
+        "authoritative_workflow": "/model-intake/submissions",
+    }
 
 
 def test_approval_dto_has_no_identity_or_role_claim_fields():
