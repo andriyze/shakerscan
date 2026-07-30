@@ -1980,7 +1980,6 @@ Only key names and declaring sources are documented; secret values are never rea
 | `MODEL_INTAKE_CONTROL_PLANE_SIGNING_KEY_PEM` | `api/model_intake_signer_service.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_DEPLOYMENT_VERIFIER_TOKEN` | `api/model_intake_admission_webhook.py` |
 | `MODEL_INTAKE_OCI_REGISTRY_REPOSITORY` | `scripts/model_intake_push_oci.py` |
-| `MODEL_INTAKE_OPA_URL` | `scanner/scanner_tools/model_intake_providers.py` |
 | `MODEL_INTAKE_OPERATOR_CREDENTIALS_JSON` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_OPERATOR_ROLES` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_OPERATOR_TOKEN` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
@@ -1989,6 +1988,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `MODEL_INTAKE_RUNNER_HOST_RESULTS_ROOT` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_RUNNER_INTERNAL_TOKEN` | `api/api.py`, `api/model_intake_runner_service.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_RUNNER_JOB_ROOT` | `api/model_intake_runner_service.py` |
+| `MODEL_INTAKE_RUNNER_MAX_INPUT_BYTES` | `api/api.py` |
 | `MODEL_INTAKE_RUNNER_QUEUE_LIMIT` | `api/model_intake_runner_service.py` |
 | `MODEL_INTAKE_RUNNER_URL` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_SANDBOX_IMAGE` | `docker-compose.yml` |
