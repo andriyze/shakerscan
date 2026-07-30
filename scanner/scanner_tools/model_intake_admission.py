@@ -145,12 +145,16 @@ def verify_package(
     expected_artifact_sha256: str | None = None,
     expected_repository_snapshot_sha256: str | None = None,
     now: datetime | None = None,
+    allow_legacy_v1: bool = False,
 ) -> dict[str, Any]:
     result = {"verified": False, "status": "FAIL", "blockers": []}
     if not isinstance(package, dict) or not isinstance(package.get("statement"), dict):
         return {**result, "blockers": ["invalid_package"]}
     statement = package["statement"]
-    if statement.get("_type") != SCHEMA_VERSION:
+    statement_type = statement.get("_type")
+    if statement_type == SCHEMA_VERSION and not allow_legacy_v1:
+        result["blockers"].append("legacy_admission_v1_reassessment_required")
+    elif statement_type != SCHEMA_VERSION:
         result["blockers"].append("unsupported_statement_type")
     decision = statement.get("decision") if isinstance(statement.get("decision"), dict) else {}
     if decision.get("outcome") != "allow":

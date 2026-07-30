@@ -11206,6 +11206,8 @@ async def verify_model_intake_admission(request: ModelIntakeAdmissionVerifyReque
             if request.expected_repository_snapshot_sha256
             else None
         ),
+        allow_legacy_v1=os.getenv("MODEL_INTAKE_ALLOW_LEGACY_V1_VERIFICATION", "").strip().lower()
+        in {"1", "true", "yes"},
     )
     if not result.get("verified"):
         raise HTTPException(status_code=409, detail=result)
@@ -11216,7 +11218,7 @@ async def verify_model_intake_admission(request: ModelIntakeAdmissionVerifyReque
                WHERE status='active' AND expires_at <= NOW()"""
         )
         admission = await conn.fetchrow(
-            """SELECT id, scan_id, status, expires_at, reassessment_due_at
+            """SELECT id, scan_id, status, schema_version, expires_at, reassessment_due_at
                FROM model_intake_admissions
                WHERE statement_sha256=$1""",
             result.get("statement_sha256"),
@@ -11229,6 +11231,7 @@ async def verify_model_intake_admission(request: ModelIntakeAdmissionVerifyReque
         "admission_id": str(admission["id"]),
         "scan_id": str(admission["scan_id"]),
         "status": admission["status"],
+        "schema_version": admission["schema_version"],
         "expires_at": _iso_or_none(admission["expires_at"]),
         "reassessment_due_at": _iso_or_none(admission["reassessment_due_at"]),
     }
@@ -11263,7 +11266,7 @@ async def list_model_intake_admissions(
         await _expire_model_intake_admissions(conn)
         rows = await conn.fetch(
             f"""SELECT id, scan_id, target_id, artifact_sha256, repository_snapshot_sha256,
-                       statement_sha256, decision, status, policy_profile, policy_version,
+                       statement_sha256, decision, status, schema_version, policy_profile, policy_version,
                        issued_at, expires_at, reassessment_due_at, revoked_at, revoked_by,
                        revocation_reason, created_at, updated_at
                 FROM model_intake_admissions {where}

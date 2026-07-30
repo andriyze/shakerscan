@@ -257,10 +257,10 @@ but the exported status must remain unambiguous.
 | Provider-neutral evaluation contract | Deterministic scorer implemented | Public caller observations are `DECLARED` and fail closed for admission; actual result IDs/scores and connector/index/run identity are mandatory | Add the trusted isolated runner that alone may mark observations `GENERATED_DATA_PLANE` |
 | Corporate benchmark and thresholds | Integration point implemented | No universal corpus can ship | Organization supplies/version-controls corpus; ShakerScan automates execution and scoring |
 | Typed non-scanner providers | Implemented registry/readiness | Sandbox execution, embedding evaluation, embedded policy, and report export are separate classes; OPA is honestly `NOT_IMPLEMENTED` | Add OPA only with a fail-closed decision/bundle contract; keep the embedded policy fallback |
-| Signed admission statement and lifecycle registry | Implemented product mechanism | Signed denial is rejected; active registry is mandatory; remote lifecycle/verification is operator-authenticated | Add keyless/Cosign and deployment-platform integrations |
+| Signed admission statement and lifecycle registry | Legacy mechanism quarantined; v2 pending | Workers emit only unsigned non-deployable candidates; v1 verification rejects by default and active v1 rows migrate to `reassessment_required` | Build exact-bundle admission v2 in a separate authenticated control-plane service with narrow KMS/HSM signing, then add deployment-platform enforcement |
 | Saved Model Intake policy profiles | Implemented server-owned admission expansion | Admission uses the operator-selected server default; caller booleans/subsets/exceptions cannot weaken it; mutations require operator auth | Add organization-specific required scanner/runtime/benchmark fields |
 | One-page control matrix and detailed evidence | Implemented in UI/JSON | Corporate-use verdict, can-use boolean, malicious-vs-capable serialization distinction, control matrix, primary blockers, next actions, limitations, and activity are visible | Finish HTML/PDF/SARIF parity and per-control evidence links |
-| Deployment by exact approved digest | Authorization contract implemented | Core verifier and active registry are safe; no external deployment enforcement ships | Integrate with internal registry, CI/CD, Kubernetes/admission controller, or model serving platform |
+| Deployment by exact approved digest | Fail-closed legacy verifier exists; v2 authorization contract pending | No v1 admission can newly authorize deployment by default; no deployable v2 package or external enforcement ships | Implement v2, then integrate with internal registry, CI/CD, Kubernetes/admission controller, or model serving platform |
 | Legal, privacy, data provenance, and risk acceptance | Recorded as governance evidence | Organization-dependent | Keep human-owned; enforce required owner, approval, scope, and expiry |
 
 The source-built remote instance checked before this adapter bundle was implemented had none of the external
@@ -489,9 +489,9 @@ and implemented across the `model_intake*` modules in
    include actual result IDs/scores plus connector, index, principal, tenant, run, and timestamp identity.
 8. Apply a saved policy profile, preserve evidence provenance, create findings, display durable activity,
    and produce an `ALLOW`, `REVIEW`, or `BLOCK` decision.
-9. Optionally sign the admission statement and register its lifecycle. The core verifier accepts only an exact
-   signed `allow`; HTTP verification additionally requires an active matching lifecycle record. Deployment
-   systems must still integrate this verifier or registry check at their own promotion and serving boundary.
+9. Emit an unsigned, explicitly non-deployable technical decision candidate. Legacy v1 verification rejects
+   by default and active v1 registry rows are quarantined as `reassessment_required`. A separate admission v2
+   service, KMS/HSM signer, exact-bundle approval receipt, and deployment enforcement client remain to be built.
 
 ### 6.1 Complete acquisition versus bounded inspection
 
@@ -915,13 +915,15 @@ The data plane needs its own controls:
 
 ### 7.12 P2 — Produce a signed decision package
 
-**Delivery status: statement signing, safe core authorization, active-registry verification, operator-
-authenticated lifecycle, and UI/JSON control matrix implemented; external enforcement remains.** Both library
-and HTTP verification reject a signed non-`allow` decision. HTTP deployment verification always requires the
-statement to be active in the lifecycle registry and requires remote operator authentication. Revocation,
-reassessment, trust-anchor mutation, and quarantine deletion use the same operator boundary; `all_active`
-also requires explicit confirmation and a durable approval receipt. The remaining work is an actual
-registry/CI/CD/Kubernetes/serving enforcement client and HTML/PDF/SARIF parity.
+**Delivery status: legacy v1 quarantined; exact-bundle admission v2 and external enforcement remain.** Workers
+now emit only unsigned, non-deployable technical candidates and have no admission private key. Both library
+and HTTP legacy verification reject a signed non-`allow` decision, and v1 itself is rejected by default even
+when its signature and subject are valid. Schema migration marks active v1 registry rows
+`reassessment_required`. An explicit compatibility flag exists only for audit/recovery and still cannot make
+a migrated registry row active. Revocation, reassessment, and quarantine deletion retain the authenticated
+operator boundary. Next, a distinct control-plane service must freeze exact evidence/policy/approval receipts,
+issue admission v2 through a narrow KMS/HSM signer, and expose a deployment verification contract. Only then
+should registry/CI/CD/Kubernetes/serving enforcement clients be enabled.
 
 The final report must be machine-verifiable and human-readable. It should include:
 
@@ -938,9 +940,9 @@ The final report must be machine-verifiable and human-readable. It should includ
   owners, expiry, and compensating controls.
 - Signature or attestation over the complete report subject and the approved artifact/runtime digests.
 
-Produce CycloneDX and in-toto/SLSA-compatible evidence where practical, and sign the admission statement with
-an organization-controlled workload identity. The deployed system must verify the admission statement before
-pulling or loading the model.
+Produce CycloneDX and in-toto/SLSA-compatible evidence where practical. The future control-plane signer must
+use an organization-controlled workload identity; workers must never sign. The deployed system must verify
+the v2 admission and active lifecycle state before pulling or loading the model.
 
 ### 7.13 P2 — Correct documentation and public contract mismatches
 
@@ -1415,7 +1417,8 @@ Complete before adding more scanners or model-execution features:
   inconsistent spans, overlap, gaps, or incomplete payload coverage across intake, sandbox, and runtime paths.
   BF16 finiteness is sampled explicitly; unsupported floating encodings are non-pass. Replace the handwritten
   parser with a bounded official-library/Rust inspector before claiming the parser replacement complete.
-- Quarantine version 1 admissions and introduce an exact-bundle admission v2 through a dedicated signer.
+- **Implemented quarantine:** version 1 verification rejects by default and migration marks active v1 rows
+  `reassessment_required`. Introduce an exact-bundle admission v2 through a dedicated signer.
 
 Exit evidence: a correctly signed `block` is rejected by the core verifier used by both library and HTTP
 paths; HTTP verification additionally requires an active registry record; a one-file caller manifest cannot

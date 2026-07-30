@@ -3088,6 +3088,7 @@ async def run_schema_migrations(pool) -> None:
                     admission_package JSONB NOT NULL,
                     decision TEXT NOT NULL,
                     status TEXT NOT NULL,
+                    schema_version TEXT NOT NULL DEFAULT 'model-intake-admission/v1',
                     policy_profile TEXT,
                     policy_version TEXT,
                     issued_at TIMESTAMPTZ NOT NULL,
@@ -3101,6 +3102,10 @@ async def run_schema_migrations(pool) -> None:
                     CONSTRAINT model_intake_admission_status_check
                         CHECK (status IN ('active','denied','reassessment_required','revoked','expired','superseded'))
                 )
+            """)
+            await conn.execute("""
+                ALTER TABLE model_intake_admissions
+                ADD COLUMN IF NOT EXISTS schema_version TEXT NOT NULL DEFAULT 'model-intake-admission/v1'
             """)
             await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_model_intake_admissions_subject
@@ -3128,6 +3133,20 @@ async def run_schema_migrations(pool) -> None:
             await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_model_intake_admission_events_admission
                 ON model_intake_admission_events(admission_id, created_at DESC)
+            """)
+            await conn.execute("""
+                WITH quarantined AS (
+                    UPDATE model_intake_admissions
+                    SET status='reassessment_required', updated_at=NOW()
+                    WHERE status='active' AND schema_version='model-intake-admission/v1'
+                    RETURNING id, statement_sha256
+                )
+                INSERT INTO model_intake_admission_events
+                    (admission_id,event_type,actor,reason,previous_status,new_status,evidence_digest)
+                SELECT id,'legacy_schema_quarantined','schema_migration',
+                       'Legacy v1 authority model requires reassessment',
+                       'active','reassessment_required',statement_sha256
+                FROM quarantined
             """)
 
             # Canonical de-dupe prevention must be present before startup completes;

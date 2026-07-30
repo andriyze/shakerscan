@@ -803,9 +803,9 @@ CREATE TABLE IF NOT EXISTS finding_exceptions (
 CREATE INDEX IF NOT EXISTS idx_finding_exceptions_target_status ON finding_exceptions(target_id, status);
 CREATE INDEX IF NOT EXISTS idx_finding_exceptions_finding ON finding_exceptions(finding_id);
 
--- Model Intake reusable operator trust anchors. Scan requests may reference
--- these by id; the API expands active anchors into the existing trusted PEM /
--- fingerprint fields before queueing the worker job.
+-- Model Intake reusable operator trust anchors. Admission requests cannot
+-- select these records; only the trusted control plane may resolve them by
+-- purpose, environment, and policy.
 CREATE TABLE IF NOT EXISTS model_intake_trust_anchors (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name TEXT NOT NULL UNIQUE,
@@ -836,6 +836,7 @@ CREATE TABLE IF NOT EXISTS model_intake_admissions (
     admission_package JSONB NOT NULL,
     decision TEXT NOT NULL,
     status TEXT NOT NULL,
+    schema_version TEXT NOT NULL DEFAULT 'model-intake-admission/v1',
     policy_profile TEXT,
     policy_version TEXT,
     issued_at TIMESTAMPTZ NOT NULL,

@@ -8,8 +8,8 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+LEGACY_ADMISSION_SCHEMA_VERSION = "model-intake-admission/v1"
 REASSESSMENT_TRIGGERS = {
     "model_revision",
     "artifact_digest",
@@ -60,7 +60,14 @@ def record_from_result(
     if not SHA256_RE.fullmatch(artifact_sha256) or not SHA256_RE.fullmatch(statement_sha256) or not issued_at or not expires_at:
         return None
     decision = str(decision_data.get("outcome") or "block").lower()
+    schema_version = str(statement.get("_type") or LEGACY_ADMISSION_SCHEMA_VERSION)
+    if schema_version != LEGACY_ADMISSION_SCHEMA_VERSION:
+        # Admission v2 is not released yet. New schemas require a dedicated
+        # verifier/signer and exact-bundle regression suite before persistence.
+        return None
     status = "active" if decision == "allow" and expires_at > datetime.now(timezone.utc) else "denied"
+    if status == "active":
+        status = "reassessment_required"
     reassessment_due = min(expires_at, issued_at + timedelta(days=max(1, min(int(reassessment_days), 365))))
     return {
         "scan_id": str(uuid.UUID(str(scan_id))),
@@ -71,6 +78,7 @@ def record_from_result(
         "admission_package": package,
         "decision": decision,
         "status": status,
+        "schema_version": schema_version,
         "policy_profile": policy.get("profile"),
         "policy_version": policy.get("version"),
         "issued_at": issued_at,
@@ -101,9 +109,9 @@ async def persist_from_result(
     row = await conn.fetchrow(
         """INSERT INTO model_intake_admissions (
                scan_id, target_id, artifact_sha256, repository_snapshot_sha256,
-               statement_sha256, admission_package, decision, status,
+               statement_sha256, admission_package, decision, status, schema_version,
                policy_profile, policy_version, issued_at, expires_at, reassessment_due_at
-           ) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10,$11,$12,$13)
+           ) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10,$11,$12,$13,$14)
            ON CONFLICT (scan_id) DO UPDATE SET
                admission_package=EXCLUDED.admission_package,
                statement_sha256=EXCLUDED.statement_sha256,
@@ -117,6 +125,7 @@ async def persist_from_result(
         json.dumps(record["admission_package"]),
         record["decision"],
         record["status"],
+        record["schema_version"],
         record["policy_profile"],
         record["policy_version"],
         record["issued_at"],

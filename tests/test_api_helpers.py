@@ -17987,6 +17987,7 @@ def test_model_admission_endpoint_fails_closed_without_deployment_trust_roots(mo
 
 def test_model_admission_endpoint_passes_exact_deployment_subjects(monkeypatch):
     captured = {}
+    monkeypatch.delenv("MODEL_INTAKE_ALLOW_LEGACY_V1_VERIFICATION", raising=False)
 
     def verify(package, **kwargs):
         captured.update({"package": package, **kwargs})
@@ -18001,6 +18002,7 @@ def test_model_admission_endpoint_passes_exact_deployment_subjects(monkeypatch):
                 "id": "00000000-0000-4000-8000-000000000001",
                 "scan_id": "00000000-0000-4000-8000-000000000002",
                 "status": "active",
+                "schema_version": "model-intake-admission/v2",
                 "expires_at": None,
                 "reassessment_due_at": None,
             }
@@ -18036,6 +18038,7 @@ def test_model_admission_endpoint_passes_exact_deployment_subjects(monkeypatch):
     assert captured["trusted_public_keys"] == ["trusted-pem"]
     assert captured["expected_artifact_sha256"] == "a" * 64
     assert captured["expected_repository_snapshot_sha256"] == "b" * 64
+    assert captured["allow_legacy_v1"] is False
 
 
 def test_model_admission_endpoint_registry_requirement_cannot_be_disabled():

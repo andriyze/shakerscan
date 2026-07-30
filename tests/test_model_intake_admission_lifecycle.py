@@ -17,6 +17,7 @@ def _result(outcome="allow"):
                 "statement_sha256": "b" * 64,
                 "signature": "signature",
                 "statement": {
+                    "_type": "model-intake-admission/v1",
                     "subject": {"artifact_sha256": "a" * 64, "repository_snapshot_sha256": "c" * 64},
                     "decision": {"outcome": outcome},
                     "policy": {"profile": "production", "version": "v1"},
@@ -28,7 +29,7 @@ def _result(outcome="allow"):
     }
 
 
-def test_signed_allow_result_becomes_active_durable_admission():
+def test_signed_legacy_allow_result_requires_reassessment():
     record = record_from_result(
         scan_id="00000000-0000-4000-8000-000000000001",
         target_id="00000000-0000-4000-8000-000000000002",
@@ -36,7 +37,8 @@ def test_signed_allow_result_becomes_active_durable_admission():
         reassessment_days=30,
     )
 
-    assert record["status"] == "active"
+    assert record["status"] == "reassessment_required"
+    assert record["schema_version"] == "model-intake-admission/v1"
     assert record["artifact_sha256"] == "a" * 64
     assert record["reassessment_due_at"] < record["expires_at"]
 
@@ -45,6 +47,19 @@ def test_unsigned_or_malformed_package_is_not_registered():
     result = _result()
     result["model_intake"]["admission"]["status"] = "UNSUPPORTED"
     assert record_from_result(scan_id="00000000-0000-4000-8000-000000000001", target_id=None, result=result) is None
+
+
+def test_unreleased_schema_cannot_become_active_by_label_alone():
+    result = _result()
+    result["model_intake"]["admission"]["statement"]["_type"] = "model-intake-admission/v2"
+
+    record = record_from_result(
+        scan_id="00000000-0000-4000-8000-000000000001",
+        target_id=None,
+        result=result,
+    )
+
+    assert record is None
 
 
 def test_high_consequence_triggers_revoke_while_normal_changes_require_reassessment():

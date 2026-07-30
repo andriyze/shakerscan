@@ -53,11 +53,27 @@ def test_signed_admission_verifies_exact_subjects():
         trusted_public_keys=[public_pem],
         expected_artifact_sha256="a" * 64,
         expected_repository_snapshot_sha256="b" * 64,
+        allow_legacy_v1=True,
     )
 
     assert package["status"] == "SIGNED"
     assert result["status"] == "PASS"
     assert result["verified"] is True
+
+
+def test_legacy_v1_is_rejected_by_default_even_when_signature_and_subject_are_valid():
+    private_pem, public_pem = _keys()
+    package = sign_statement(_statement(), private_pem)
+
+    result = verify_package(
+        package,
+        trusted_public_keys=[public_pem],
+        expected_artifact_sha256="a" * 64,
+        expected_repository_snapshot_sha256="b" * 64,
+    )
+
+    assert result["verified"] is False
+    assert "legacy_admission_v1_reassessment_required" in result["blockers"]
 
 
 def test_worker_technical_candidate_is_explicitly_non_deployable():
