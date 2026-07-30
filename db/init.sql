@@ -907,6 +907,7 @@ CREATE TABLE IF NOT EXISTS model_intake_evidence_records (
     subject_bindings JSONB NOT NULL,
     input_manifest_sha256 TEXT,
     payload_sha256 TEXT NOT NULL,
+    payload_json JSONB,
     object_storage_uri TEXT,
     signature_envelope JSONB,
     status TEXT NOT NULL,

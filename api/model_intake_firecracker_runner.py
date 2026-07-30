@@ -571,6 +571,17 @@ class FirecrackerRunner:
             result["resource_telemetry"] = cgroup
             result["resource_limits_enforced"] = cgroup["complete"]
             result["reviewed_custom_code_sha256"] = request.get("observed_custom_code_sha256")
+            result["observations_generated_by_runner"] = True
+            result["benchmark_dataset_sha256"] = hashlib.sha256(canonical_bytes(
+                request.get("known_answer_inputs") or []
+            )).hexdigest()
+            result["thresholds_sha256"] = hashlib.sha256(canonical_bytes({
+                "known_answer_embedding_sha256": request.get("known_answer_embedding_sha256"),
+                "vcpu_count": int(request.get("vcpu_count") or 2),
+                "memory_mib": int(request.get("memory_mib") or 4096),
+                "timeout_seconds": min(int(request.get("timeout_seconds") or 600), 3600),
+                "network_attempts_allowed": 0,
+            })).hexdigest()
             if request.get("mode") == "conversion" and result.get("status") == "PASS":
                 if result.get("source_artifact_sha256") != request.get("model_artifact_sha256"):
                     raise FirecrackerExecutionError("conversion source digest does not match the requested artifact")

@@ -325,6 +325,17 @@ def test_fresh_and_upgrade_schemas_share_deployment_binding_admission_fk():
     assert "SET admission_id = NULL" in migrations
 
 
+def test_runtime_evaluation_payload_is_durable_and_not_confused_with_data_plane_evidence():
+    init_sql = (ROOT / "db" / "init.sql").read_text()
+    migrations = (ROOT / "api" / "retest_contract.py").read_text()
+    persist_source = inspect.getsource(api._persist_model_intake_runner_evidence)
+    for source in (init_sql, migrations):
+        assert "payload_json JSONB" in source
+    assert "derive_model_runner_embedding_evaluation" in persist_source
+    assert "'embedding_evaluation'" in persist_source
+    assert "data_plane_evaluation" not in persist_source
+
+
 def test_submission_state_machine_rejects_authority_skips():
     assert api._model_intake_transition_is_allowed("submitted", "evidence_ready") is True
     assert api._model_intake_transition_is_allowed("evidence_ready", "awaiting_approval") is True

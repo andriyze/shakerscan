@@ -149,6 +149,11 @@ except ModuleNotFoundError:
     )
 
 try:
+    from model_intake_runner_evaluation import derive_embedding_evaluation as _derive_model_runner_embedding_evaluation
+except ModuleNotFoundError:
+    from api.model_intake_runner_evaluation import derive_embedding_evaluation as _derive_model_runner_embedding_evaluation
+
+try:
     from scanner_tools.model_intake_retention import execute_cleanup as _execute_model_quarantine_cleanup
     from scanner_tools.model_intake_retention import plan_cleanup as _plan_model_quarantine_cleanup
 except ModuleNotFoundError:
@@ -11480,6 +11485,44 @@ async def _persist_model_intake_runner_evidence(
         )
         if not inserted or inserted["payload_sha256"] != verified["payload_sha256"]:
             raise HTTPException(status_code=409, detail="Runner invocation replay changed payload")
+    derived_evaluation = None
+    if evidence_type == "runtime_execution":
+        evaluation_report = _derive_model_runner_embedding_evaluation(payload, verified["payload_sha256"])
+        evaluation_producer = f"{payload['builder_id']}#embedding-evaluator-v1"
+        evaluation_invocation = f"{payload['invocation_id']}:embedding-evaluation"
+        derived_evaluation = await conn.fetchrow(
+            """
+            INSERT INTO model_intake_evidence_records
+                (submission_id,evidence_type,schema_version,provenance_class,producer_id,
+                 producer_version,builder_id,invocation_id,subject_bindings,input_manifest_sha256,
+                 payload_sha256,payload_json,status,started_at,finished_at,expires_at)
+            VALUES ($1,'embedding_evaluation',$2,'GENERATED_EVALUATION',$3,'1',$4,$5,
+                    $6::jsonb,$7,$8,$9::jsonb,$10,$11,$12,$13)
+            ON CONFLICT (producer_id,invocation_id) DO NOTHING
+            RETURNING *
+            """,
+            submission_uuid,
+            evaluation_report["schema_version"],
+            evaluation_producer,
+            payload["builder_id"],
+            evaluation_invocation,
+            json.dumps(bindings),
+            verified["payload_sha256"],
+            evaluation_report["evidence_sha256"],
+            json.dumps(evaluation_report),
+            evaluation_report["status"],
+            datetime.fromisoformat(payload["started_at"].replace("Z", "+00:00")),
+            datetime.fromisoformat(payload["finished_at"].replace("Z", "+00:00")),
+            datetime.fromisoformat(payload["expires_at"].replace("Z", "+00:00")),
+        )
+        if derived_evaluation is None:
+            derived_evaluation = await conn.fetchrow(
+                "SELECT * FROM model_intake_evidence_records WHERE producer_id=$1 AND invocation_id=$2",
+                evaluation_producer,
+                evaluation_invocation,
+            )
+            if not derived_evaluation or derived_evaluation["payload_sha256"] != evaluation_report["evidence_sha256"]:
+                raise HTTPException(status_code=409, detail="Derived evaluation invocation replay changed payload")
     invalidation = (
         {"admissions_invalidated": 0, "deployment_bindings_staled": 0}
         if duplicate
@@ -11493,6 +11536,7 @@ async def _persist_model_intake_runner_evidence(
     )
     return {
         "evidence": row_to_dict(inserted),
+        "derived_embedding_evaluation": row_to_dict(derived_evaluation) if derived_evaluation else None,
         "verified": True,
         "verified_by": actor,
         "downstream_invalidation": invalidation,

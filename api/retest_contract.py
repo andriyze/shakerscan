@@ -3250,6 +3250,7 @@ async def run_schema_migrations(pool) -> None:
                     subject_bindings JSONB NOT NULL,
                     input_manifest_sha256 TEXT,
                     payload_sha256 TEXT NOT NULL,
+                    payload_json JSONB,
                     object_storage_uri TEXT,
                     signature_envelope JSONB,
                     status TEXT NOT NULL,
@@ -3262,6 +3263,8 @@ async def run_schema_migrations(pool) -> None:
                 );
                 CREATE INDEX IF NOT EXISTS idx_model_intake_evidence_submission
                     ON model_intake_evidence_records(submission_id, evidence_type, created_at DESC);
+                ALTER TABLE model_intake_evidence_records
+                    ADD COLUMN IF NOT EXISTS payload_json JSONB;
                 CREATE TABLE IF NOT EXISTS model_intake_runner_jobs (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     submission_id UUID NOT NULL REFERENCES model_intake_submissions(id) ON DELETE CASCADE,
