@@ -69,3 +69,18 @@ def test_runner_job_id_cannot_escape_job_root(tmp_path, monkeypatch):
     with pytest.raises(Exception) as missing:
         queue.get("../../etc/passwd")
     assert missing.value.status_code == 404
+
+
+def test_runner_queue_adds_mandatory_bounded_smoke_inputs(tmp_path, monkeypatch):
+    monkeypatch.setenv("MODEL_INTAKE_RUNNER_JOB_ROOT", str(tmp_path))
+    monkeypatch.setattr(DurableRunnerQueue, "_loop", lambda self: None)
+    queue = DurableRunnerQueue()
+    request = RunnerJobRequest.model_validate({**_request(), "known_answer_inputs": ["operator case"]})
+
+    submitted = queue.submit(request)
+    stored = queue.get(submitted["id"])["request"]["known_answer_inputs"]
+
+    assert "operator case" in stored
+    assert "" in stored
+    assert any("東京" in item for item in stored)
+    assert any(len(item) > 4000 for item in stored)

@@ -30,12 +30,14 @@ try:
     from model_intake_runner_controller import build_firecracker_config, firecracker_readiness
     from model_intake_runner_receipts import SCHEMA, issue_runner_envelope
     from model_intake_loader_profiles import CONVERSION_PROFILE_ID
+    from model_intake_runner_inputs import suite_identity
 except ModuleNotFoundError:  # pragma: no cover
     from api.model_intake_control_plane import canonical_bytes
     from api.model_intake_control_plane import AwsKmsSigner, LocalPemSigner
     from api.model_intake_runner_controller import build_firecracker_config, firecracker_readiness
     from api.model_intake_runner_receipts import SCHEMA, issue_runner_envelope
     from api.model_intake_loader_profiles import CONVERSION_PROFILE_ID
+    from api.model_intake_runner_inputs import suite_identity
 
 
 class FirecrackerExecutionError(RuntimeError):
@@ -367,12 +369,18 @@ class FirecrackerRunner:
         model = staging / "model"
         staging.mkdir(mode=0o700)
         _copy_tree(subject, model)
+        try:
+            known_answer_suite = suite_identity(request.get("known_answer_inputs") or [])
+        except ValueError as exc:
+            raise FirecrackerExecutionError(str(exc)) from exc
         job = {
             "schema_version": "model-intake-firecracker-job/v1",
             "mode": request.get("mode", "runtime"),
             "trust_remote_code": bool(request.get("trust_remote_code")),
             "allow_pickle": bool(request.get("allow_pickle")),
-            "known_answer_inputs": request.get("known_answer_inputs") or [],
+            "known_answer_inputs": known_answer_suite["inputs"],
+            "known_answer_suite_version": known_answer_suite["suite_version"],
+            "known_answer_inputs_sha256": known_answer_suite["inputs_sha256"],
             "known_answer_embedding_sha256": request.get("known_answer_embedding_sha256"),
         }
         job_path = staging / "job.json"
@@ -572,9 +580,10 @@ class FirecrackerRunner:
             result["resource_limits_enforced"] = cgroup["complete"]
             result["reviewed_custom_code_sha256"] = request.get("observed_custom_code_sha256")
             result["observations_generated_by_runner"] = True
-            result["benchmark_dataset_sha256"] = hashlib.sha256(canonical_bytes(
-                request.get("known_answer_inputs") or []
-            )).hexdigest()
+            known_answer_suite = suite_identity(request.get("known_answer_inputs") or [])
+            result["benchmark_suite_version"] = known_answer_suite["suite_version"]
+            result["benchmark_dataset_sha256"] = known_answer_suite["inputs_sha256"]
+            result["benchmark_input_count"] = known_answer_suite["input_count"]
             result["thresholds_sha256"] = hashlib.sha256(canonical_bytes({
                 "known_answer_embedding_sha256": request.get("known_answer_embedding_sha256"),
                 "vcpu_count": int(request.get("vcpu_count") or 2),

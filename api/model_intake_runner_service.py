@@ -20,9 +20,11 @@ from pydantic import BaseModel, ConfigDict, Field
 try:
     from model_intake_control_plane import canonical_bytes
     from model_intake_firecracker_runner import FirecrackerRunner, firecracker_readiness
+    from model_intake_runner_inputs import normalize_known_answer_inputs
 except ModuleNotFoundError:  # pragma: no cover
     from api.model_intake_control_plane import canonical_bytes
     from api.model_intake_firecracker_runner import FirecrackerRunner, firecracker_readiness
+    from api.model_intake_runner_inputs import normalize_known_answer_inputs
 
 
 class RunnerJobRequest(BaseModel):
@@ -90,11 +92,18 @@ class DurableRunnerQueue:
     def submit(self, request: RunnerJobRequest) -> dict[str, Any]:
         if self.pending.full():
             raise HTTPException(status_code=429, detail="runner queue is full")
+        try:
+            normalized_inputs = normalize_known_answer_inputs(request.known_answer_inputs)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         job = {
             "schema_version": "model-intake-runner-job/v1",
             "id": str(uuid.uuid4()),
             "state": "pending",
-            "request": request.model_dump(mode="json"),
+            "request": {
+                **request.model_dump(mode="json"),
+                "known_answer_inputs": normalized_inputs,
+            },
             "created_at": _now(),
             "started_at": None,
             "finished_at": None,

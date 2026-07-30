@@ -156,6 +156,11 @@ except ModuleNotFoundError:
     from api.model_intake_runner_evaluation import derive_embedding_evaluation as _derive_model_runner_embedding_evaluation
 
 try:
+    from model_intake_runner_inputs import suite_identity as _model_intake_runner_input_suite
+except ModuleNotFoundError:
+    from api.model_intake_runner_inputs import suite_identity as _model_intake_runner_input_suite
+
+try:
     from model_intake_reporting import (
         build_model_intake_report as _build_model_intake_report,
         model_intake_report_to_sarif as _model_intake_report_to_sarif,
@@ -3954,7 +3959,7 @@ class ModelRunnerJobCreateRequest(BaseModel):
 
     operation: Literal["calibration", "runtime", "conversion"] = "runtime"
     deployment_bundle: dict[str, Any]
-    known_answer_inputs: list[str] = Field(default_factory=list, max_length=100)
+    known_answer_inputs: list[str] = Field(default_factory=list, max_length=94)
     known_answer_embedding_sha256: Optional[str] = Field(default=None, pattern="^[0-9a-fA-F]{64}$")
     vcpu_count: int = Field(default=2, ge=1, le=32)
     memory_mib: int = Field(default=4096, ge=256, le=262144)
@@ -12124,6 +12129,10 @@ async def create_model_intake_runner_job(
             status_code=422,
             detail="Runtime admission requires a reviewed known-answer embedding digest; use a failed calibration run only outside this admission endpoint",
         )
+    try:
+        known_answer_suite = _model_intake_runner_input_suite(request.known_answer_inputs)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     scan_result = _model_intake_json_object(row["result"])
     materialized = await asyncio.to_thread(
         _model_intake_snapshot_materialization,
@@ -12159,7 +12168,7 @@ async def create_model_intake_runner_job(
         "loader_profile": profile,
         "loader_profile_sha256": profile["profile_sha256"],
         "reviewed_custom_code_sha256": materialized["custom_code_sha256"],
-        "known_answer_inputs": request.known_answer_inputs,
+        "known_answer_inputs": known_answer_suite["inputs"],
         "known_answer_embedding_sha256": request.known_answer_embedding_sha256.lower() if request.known_answer_embedding_sha256 else None,
         "vcpu_count": request.vcpu_count,
         "memory_mib": request.memory_mib,
@@ -12176,10 +12185,10 @@ async def create_model_intake_runner_job(
         "runtime_image_digest": bundle["runtime_image_digest"],
         "loader_profile_id": profile["profile_id"],
         "loader_profile_sha256": profile["profile_sha256"],
-        "known_answer_input_count": len(request.known_answer_inputs),
-        "known_answer_inputs_sha256": hashlib.sha256(
-            json.dumps(request.known_answer_inputs, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest(),
+        "known_answer_suite_version": known_answer_suite["suite_version"],
+        "known_answer_input_count": known_answer_suite["input_count"],
+        "known_answer_inputs_sha256": known_answer_suite["inputs_sha256"],
+        "known_answer_total_utf8_bytes": known_answer_suite["total_utf8_bytes"],
         "known_answer_embedding_sha256": request.known_answer_embedding_sha256.lower() if request.known_answer_embedding_sha256 else None,
         "vcpu_count": request.vcpu_count,
         "memory_mib": request.memory_mib,

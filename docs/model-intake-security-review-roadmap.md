@@ -1716,9 +1716,13 @@ Remaining product/infrastructure work:
   non-authoritative.
 - Harden the existing versioned benchmark contract: corpus digest, query digest, expected relevance/ACL labels,
   thresholds, scoring version, and content-retention policy.
-- Ship a small synthetic public smoke corpus, never a claim of corporate fitness.
-- Automate deterministic, batching, malformed/Unicode/long-input, poisoning, resource, and conversion
-  equivalence cases.
+- **Implemented fixed embedding smoke suite:** every calibration/runtime/conversion job adds a versioned,
+  digest-bound mandatory corpus covering ordinary retrieval text, empty input, Unicode, control characters,
+  and a long-input boundary. Operator cases are additive and bounded by count, per-item UTF-8 bytes, and total
+  bytes at API, runner-service, and Firecracker boundaries. This proves deterministic loader robustness and
+  known-answer behavior; it is not a claim of corporate retrieval fitness.
+- Conversion tensor/numeric/embedding equivalence and resource/network cases are automated. Organization-
+  specific poisoning, ACL, deletion, retrieval-quality, and live index cases remain data-plane evidence.
 - Exercise vector-store and knowledge-graph observations through the existing signed data-plane receipt
   contract; do not build a general connector platform.
 - Ensure raw corporate documents, code, embeddings, and secrets are not persisted in ordinary scan results.
