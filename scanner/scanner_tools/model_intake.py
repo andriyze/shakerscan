@@ -3633,13 +3633,26 @@ async def run_model_intake_scan(
             scanner_name = str(scanner_result.get("scanner", {}).get("name") or "unknown")
             scanner_status = str(scanner_result.get("execution", {}).get("status") or "CRASHED")
             required = bool(scanner_result.get("execution", {}).get("required"))
+            review_remediation = (
+                "Review the digest-bound scanner findings, document a disposition for the exact subject, "
+                "and rerun after any required remediation."
+            )
             if scanner_status in _model_intake_scanners.REQUIRED_NON_PASS_STATUSES and required:
                 reviewable = scanner_status in {"WARNING", "REVIEW_REQUIRED"}
                 findings.append(_finding(
                     finding_id=f"generated_scanner_{re.sub(r'[^a-z0-9]+', '_', scanner_name.lower()).strip('_')}_non_pass",
-                    title=f"Required generated scanner did not pass: {scanner_name}",
+                    title=(
+                        f"Required generated scanner requires review: {scanner_name}"
+                        if reviewable else f"Required generated scanner did not pass: {scanner_name}"
+                    ),
                     severity="medium" if reviewable else "high",
-                    description=f"The required scanner ended with normalized status {scanner_status}; missing, crashed, timed-out, unsupported, and incomplete execution never counts as a pass.",
+                    description=(
+                        f"The required scanner completed with normalized status {scanner_status}; its exact "
+                        "digest-bound findings require an explicit review disposition."
+                        if reviewable else
+                        f"The required scanner ended with normalized status {scanner_status}; missing, crashed, "
+                        "timed-out, unsupported, and incomplete execution never counts as a pass."
+                    ),
                     artifact_ref=artifact_ref,
                     evidence={
                         "scanner": scanner_result.get("scanner"),
@@ -3647,7 +3660,12 @@ async def run_model_intake_scan(
                         "coverage": scanner_result.get("coverage"),
                         "evidence_sha256": scanner_result.get("evidence_sha256"),
                     },
-                    remediation="Install and pin the scanner, restore its rules/database, and rerun it against the same complete subject until it produces a valid PASS or reviewed finding result.",
+                    remediation=(
+                        review_remediation
+                        if reviewable else
+                        "Install and pin the scanner, restore its rules/database, and rerun it against the same "
+                        "complete subject until it produces a valid PASS or reviewed finding result."
+                    ),
                 ))
             if scanner_status in {"FAIL", "WARNING", "INCOMPLETE"} and scanner_result.get("findings"):
                 findings.append(_finding(
@@ -3662,7 +3680,12 @@ async def run_model_intake_scan(
                         "findings": (scanner_result.get("findings") or [])[:100],
                         "evidence_sha256": scanner_result.get("evidence_sha256"),
                     },
-                    remediation="Review the digest-bound raw scanner evidence, remove or replace the unsafe content, and rerun the complete intake.",
+                    remediation=(
+                        review_remediation
+                        if scanner_status == "WARNING" else
+                        "Review the digest-bound raw scanner evidence, remove or replace the unsafe content, "
+                        "and rerun the complete intake."
+                    ),
                 ))
 
     checksum_status = "missing"

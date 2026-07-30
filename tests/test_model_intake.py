@@ -1320,6 +1320,9 @@ def test_required_warning_stays_reviewable_and_does_not_emit_high_gate(monkeypat
         if finding["id"] == "model_intake:generated_scanner_modelscan_non_pass"
     )
     assert gate["severity"] == "medium"
+    assert gate["title"] == "Required generated scanner requires review: modelscan"
+    assert gate["remediation"].startswith("Review the digest-bound scanner findings")
+    assert "Install and pin" not in gate["remediation"]
 
 
 def test_generated_sbom_and_malware_evidence_satisfy_presence_checks(tmp_path):
