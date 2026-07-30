@@ -1972,7 +1972,7 @@ run `INCOMPLETE`.
 #### 14.5.1 Remote technical-preflight validation — 2026-07-30
 
 The source branch was rebuilt on `root@2.28.1.228` after the final report-semantics repair. The deployment ran
-checkout `de7adb9`; both workers reported build fingerprint `3983e55c083970d2` as current with zero stale
+checkout `58dd30d`; both workers reported build fingerprint `d5c556d7c43f3784` as current with zero stale
 workers. The image-build malicious/safe/review fixture receipt reported `PASS` for ModelScan 0.8.8, Semgrep
 1.172.0, Fickling 0.1.12, and Trivy 0.72.0. The API and Model Intake UI returned HTTP 200 and scanner
 readiness reported 4/4 ready with fresh Semgrep rules and Trivy data.
@@ -1987,21 +1987,23 @@ or self-authored-receipt substitution was used.
 
 | Exact subject | Final preflight scan | What ShakerScan proved | Corporate-use answer |
 |---|---|---|---|
-| `nomic-ai/CodeRankEmbed@3c4b60807d71f79b43f3c4363786d9493691f8b1` | `58434da2-3d03-4a46-b667-ab40a30f9b39` | Complete 546,938,168-byte artifact and 14/14-file repository snapshot; expected digest verified; safetensors inventory contained 112 tensors and all 136,731,648 numeric values were checked. The bounded no-egress/seccomp/non-root sandbox passed with `load_level=weights`. The malicious-primitive control passed. Semgrep produced one calibrated review warning at `modeling_hf_nomic_bert.py:332` because `torch.load` omits `weights_only`; it was not presented as proven exploitation. | **PREFLIGHT_ONLY / REVIEW; not proven malicious.** Do not deploy until custom code ownership review, hash-locked runtime dependency SCA, exact Firecracker import/load/inference and embedding tests, publisher provenance/signing, deployment restrictions, monitoring, and identity-separated approval are complete. |
+| `nomic-ai/CodeRankEmbed@3c4b60807d71f79b43f3c4363786d9493691f8b1` | `7dc7b8d7-0bed-4ca6-984f-7ad25066d25f` | Complete 546,938,168-byte artifact and 14/14-file repository snapshot; expected digest verified; safetensors inventory contained 112 tensors and all 136,731,648 numeric values were checked. The bounded no-egress/seccomp/non-root sandbox passed with `load_level=weights`. The malicious-primitive control passed. Semgrep produced one calibrated review warning at `modeling_hf_nomic_bert.py:332` because `torch.load` omits `weights_only`; it was not presented as proven exploitation. | **PREFLIGHT_ONLY / REVIEW; not proven malicious.** The report provides actionable custom-code review, exact scanner finding disposition, signing, evaluation, restrictions, and monitoring steps. Do not deploy until those controls, hash-locked runtime dependency SCA, exact Firecracker import/load/inference and embedding tests, and identity-separated approval are complete. |
 | `codesage/codesage-base-v2@92eac4f44c8674638f039f1b0d8280f2539cb4c7` | `f03d8570-e941-496b-a1af-43d3faebd754` | Complete 709,569,721-byte artifact and 16/16-file snapshot; expected digest verified; all 294 archive members and 709,514,499 expanded bytes inspected. ModelScan and semantic pickletools passed; only expected framework globals were present and `malicious_primitive_proven=false`. Semgrep produced two writable-file review warnings in `tokenization_codesage.py`. | **PREFLIGHT_ONLY / BLOCK; not proven malicious.** The malicious-primitive control passes, while the separate executable-serialization policy fails and the sandbox correctly returns `BLOCKED_BY_POLICY`. The report emits one useful next action: controlled safetensors conversion, tensor/numeric/embedding equivalence, target rescan, then an exact Firecracker runtime run. |
 | `codesage/codesage-large-v2@6e5d6dc15db3e310c37c6dbac072409f95ffa5c5` | `b90e25e7-e1ba-470e-a0d5-5a1a999359ad` | Complete 2,627,013,817-byte artifact and 16/16-file snapshot; expected digest verified; all 294 archive members and 2,626,958,595 expanded bytes inspected without truncation. ModelScan and pickletools passed with the same expected framework classification; Semgrep findings matched Base. | **PREFLIGHT_ONLY / BLOCK; not proven malicious.** The same conversion and corporate controls as Base remain, plus materially greater storage, memory, and accelerator exposure. Do not qualify Large unless Base first fails a versioned retrieval benchmark and Large proves a justified benefit inside a separately approved resource envelope. |
 
-The first rebuilt runs exposed two normalized-report defects: unrelated review warnings kept the
-malicious-primitive control indeterminate even after both relevant scanners passed, and a policy-refused
-pickle artifact was told to rerun the unchanged sandbox. Commit `de7adb9` corrected both without weakening
-the serialization block. The three final reruns above prove the correction through the public API path.
+The first rebuilt runs exposed three normalized-report defects: unrelated review warnings kept the
+malicious-primitive control indeterminate even after both relevant scanners passed, a policy-refused pickle
+artifact was told to rerun the unchanged sandbox, and review-only results either omitted next actions or told
+operators to reinstall healthy warning-producing scanners. Commits `de7adb9`, `53184c4`, and `58dd30d`
+corrected those issues without weakening the serialization block. The final reruns above prove the correction
+through the public API path.
 They contain no acquisition, worker, adapter-execution, model-card, hash, repository/archive completeness, or
 evidence-integrity error.
 
 These are successful ShakerScan executions and unsuccessful corporate admissions of the upstream subjects.
 That distinction is intentional: “the scanner worked” does not mean “the model passed.” Local release
 validation at checkout `2612f05` reported **2,862 passed, 0 failed** for the complete Python suite; the final
-report repair added **105 passing focused Model Intake tests** before the remote rebuild and reruns.
+report repairs added **106 passing focused Model Intake tests** before the final remote rebuild and rerun.
 
 ### 14.6 Application-control tests
 
