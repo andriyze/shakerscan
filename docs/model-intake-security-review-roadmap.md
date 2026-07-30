@@ -1613,8 +1613,10 @@ Remaining product work:
   worker-cgroup memory, no-new-privileges, and an exec-persistent libseccomp filter denying external-capable
   socket families plus `io_uring_setup` while preserving Unix-domain IPC required by scanner runtimes. Filter
   installation is fail-closed. Trivy remains offline; no tool gets credentials or inherited network sockets.
-- Provide a scanner expectation matrix so a required missing engine blocks instead of silently reducing
-  coverage.
+- **Implemented scanner expectation matrix:** generated evidence records every scanner's applicability,
+  requirement, acceptable statuses, actual status, and satisfaction state. Missing/unsupported, crashed,
+  timed-out, incomplete, skipped, review-required, and warning results cannot satisfy a required scanner;
+  a fact-derived `NOT_APPLICABLE` remains explicit and justified instead of becoming a fabricated pass.
 - **Implemented scanner-boundary freeze:** catalog, readiness, planning, and parsers expose only ModelScan,
   Semgrep, Fickling, and Trivy. Legacy optional names are unknown required adapters and fail as `UNSUPPORTED`;
   they cannot look installed or silently reduce coverage.

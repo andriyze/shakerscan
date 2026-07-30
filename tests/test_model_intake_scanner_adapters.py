@@ -134,6 +134,20 @@ def test_requested_adapter_is_required_and_unknown_names_are_not_in_plan(tmp_pat
     assert [(item["spec"].name, item["required"]) for item in plan] == [("trivy", True)]
 
 
+def test_requested_but_inapplicable_adapter_is_explicit_not_applicable_not_required(tmp_path):
+    artifact = tmp_path / "model.safetensors"
+    artifact.write_bytes(b"fixture")
+
+    plan = scanners.resolve_scanner_plan(artifact, requested_names={"semgrep"}, profile="strict")
+
+    assert len(plan) == 1
+    assert plan[0]["spec"].name == "semgrep"
+    assert plan[0]["requested"] is True
+    assert plan[0]["applicable"] is False
+    assert plan[0]["required"] is False
+    assert plan[0]["requirement_source"] == "not_applicable"
+
+
 def test_adapter_catalog_separates_provider_kind_and_policy():
     catalog = {item["name"]: item for item in scanners.scanner_adapter_catalog()}
     assert set(catalog) == {"modelscan", "semgrep", "fickling", "trivy"}

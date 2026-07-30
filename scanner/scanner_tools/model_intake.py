@@ -3023,6 +3023,7 @@ async def run_model_intake_scan(
         "status": "SKIPPED_BY_POLICY",
         "results": [],
         "statuses": {},
+        "expectation_matrix": [],
         "required_non_pass": [],
     }
     if run_generated_scanners:

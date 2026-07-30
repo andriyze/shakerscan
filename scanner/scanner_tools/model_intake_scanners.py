@@ -36,7 +36,10 @@ NORMALIZED_STATUSES = {
     "REVIEW_REQUIRED",
     "NOT_RUN",
 }
-NON_PASS_STATUSES = {"FAIL", "UNSUPPORTED", "TIMEOUT", "CRASHED", "INCOMPLETE", "REVIEW_REQUIRED", "NOT_RUN"}
+NON_PASS_STATUSES = {
+    "FAIL", "WARNING", "UNSUPPORTED", "TIMEOUT", "CRASHED", "INCOMPLETE",
+    "REVIEW_REQUIRED", "NOT_RUN",
+}
 REQUIRED_NON_PASS_STATUSES = NON_PASS_STATUSES | {"SKIPPED_BY_POLICY"}
 MAX_SCANNER_OUTPUT_BYTES = 20_000_000
 MAX_SOURCE_FILE_BYTES = 2_000_000
@@ -191,9 +194,9 @@ def resolve_scanner_plan(
     for spec in EXTERNAL_SCANNERS:
         applicability = scanner_applicability(spec, subject_path)
         requested = requested_names is not None and spec.name in requested_names
-        required = requested or (
+        required = bool(applicability["applicable"]) and (requested or (
             strict and profile in spec.required_profiles and bool(applicability["applicable"])
-        )
+        ))
         selected = requested or (requested_names is None and spec.enabled_by_default) or required
         if not selected and not required:
             continue
@@ -202,6 +205,12 @@ def resolve_scanner_plan(
             "selected": selected,
             "requested": requested,
             "required": required,
+            "requirement_source": (
+                "caller_requested" if requested and applicability["applicable"]
+                else "strict_profile" if required
+                else "not_applicable" if not applicability["applicable"]
+                else "default_optional"
+            ),
             **applicability,
         })
     return plan
@@ -1552,11 +1561,29 @@ def generated_evidence_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
         str(item.get("scanner", {}).get("name") or "unknown"): str(item.get("execution", {}).get("status") or "CRASHED")
         for item in results
     }
+    expectations = []
+    for item in results:
+        scanner = item.get("scanner") if isinstance(item.get("scanner"), dict) else {}
+        execution = item.get("execution") if isinstance(item.get("execution"), dict) else {}
+        name = str(scanner.get("name") or "unknown")
+        status = str(execution.get("status") or "CRASHED")
+        required = bool(execution.get("required"))
+        acceptable = ["PASS", "NOT_APPLICABLE"] if required else ["PASS", "WARNING", "NOT_APPLICABLE"]
+        expectations.append({
+            "scanner": name,
+            "required": required,
+            "applicability": execution.get("applicability") or "built_in",
+            "reason": execution.get("reason"),
+            "acceptable_statuses": acceptable,
+            "actual_status": status,
+            "satisfied": status in acceptable,
+        })
     return {
         "schema_version": "model-intake-generated-evidence/v1",
         "provenance_class": "shakerscan_generated",
         "results": results,
         "statuses": statuses,
+        "expectation_matrix": expectations,
         "required_non_pass": [
             name
             for name, status in statuses.items()

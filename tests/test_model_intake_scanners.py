@@ -59,6 +59,32 @@ def test_skipped_required_scanner_is_a_required_non_pass():
     summary = scanners.generated_evidence_summary([result])
 
     assert summary["required_non_pass"] == ["required-tool"]
+    assert summary["expectation_matrix"][0]["satisfied"] is False
+
+
+def test_required_warning_needs_resolution_and_cannot_satisfy_static_gate():
+    result = scanners._scanner_result(
+        name="semgrep",
+        version="1",
+        status="WARNING",
+        subject=_subject(),
+        started_at="2026-01-01T00:00:00+00:00",
+        finished_at="2026-01-01T00:00:01+00:00",
+        execution={"required": True, "applicability": "repository_code"},
+    )
+
+    summary = scanners.generated_evidence_summary([result])
+
+    assert summary["required_non_pass"] == ["semgrep"]
+    assert summary["expectation_matrix"] == [{
+        "scanner": "semgrep",
+        "required": True,
+        "applicability": "repository_code",
+        "reason": None,
+        "acceptable_statuses": ["PASS", "NOT_APPLICABLE"],
+        "actual_status": "WARNING",
+        "satisfied": False,
+    }]
 
 
 def test_external_scanner_without_parser_contract_can_never_pass_from_exit_zero():
