@@ -3,9 +3,10 @@
 **Status:** The admission-v2 control plane, authoritative Hugging Face acquisition, existing scanner bundle,
 official safetensors inspection, signed runner-receipt contracts, signer boundary, OCI layout, and deployment
 verifiers, physical-runner service/orchestration, and bounded keyless planner are implemented. Model Intake scans remain non-deployable technical evidence; only the controlled
-submission/freeze/approval/policy/signing/promotion workflow may authorize deployment. The remaining product
-work is deliberately limited to physical KVM acceptance, cross-surface/report parity, and organization-operated
-KMS/registry/Kubernetes negative-path acceptance of the implemented mechanisms.
+submission/freeze/approval/policy/signing/promotion workflow may authorize deployment. Product implementation
+inside the frozen scope is complete. Remaining acceptance requires a physical KVM host plus organization-operated
+trust/KMS, registry, benchmark, and data-plane systems. Kubernetes acceptance applies only when the organization
+chooses the already implemented webhook; Kubernetes is not required by ShakerScan or Firecracker.
 
 **Original audit checkout:** `239f887d9f10e997b9844c916c28073fab71ee79`
 
@@ -99,9 +100,10 @@ formats/code/dependencies, orchestrate built-in and external scanners, evaluate 
 observations, apply policy, preserve evidence, and issue and lifecycle-manage an admission decision.
 
 The original audit of checkout `239f887` identified serious gaps. Most acquisition, static-analysis,
-evidence, policy, admission, and lifecycle mechanisms were subsequently implemented. The remaining gap is
-not “scan more file extensions.” It is automated qualification of the exact model/runtime/application
-combination and reliable integration with organization-controlled tools and deployment systems.
+evidence, policy, admission, lifecycle, conversion/rescan, and exact-runtime qualification mechanisms were
+subsequently implemented. The remaining gap is not product code or “scan more file extensions.” It is physical
+and organization-specific execution of those mechanisms against KVM, corporate benchmarks/data planes, trust
+services, and whichever deployment enforcement point the corporation actually uses.
 
 Neither the original checkout nor the current product should be described as the sole corporate approval
 authority. ShakerScan can collect evidence, run deterministic controls, enforce product policy, and issue an
@@ -120,21 +122,23 @@ At the original checkout, the audit found these issues:
 
 Sections 2.1 and 2.4 identify which findings are now resolved, partially resolved, or still open.
 
-The remaining implementation and validation order is:
+The completed implementation and remaining validation order is:
 
 1. **Implemented:** remove ambiguity between non-deployable technical scans and the authoritative controlled
    admission workflow; enforce legal state transitions, latest-manifest authority, transactional mutation,
    durable workflow events, idempotent evidence replay, and downstream admission/deployment invalidation.
-2. Deploy one disposable no-egress Firecracker/KVM loader for custom code, model construction, inference,
-   known-answer embeddings, telemetry, and signed exact-bundle receipts. No alternate runner is in scope.
-3. Use that same Firecracker path to convert CodeSage Base v2 to safetensors and prove tensor and embedding
-   equivalence; do not admit the upstream pickle-capable artifact directly.
+2. **Implemented; physical acceptance pending:** deploy one disposable no-egress Firecracker/KVM loader for
+   custom code, model construction, inference, known-answer embeddings, telemetry, and signed exact-bundle
+   receipts. No alternate runner is in scope.
+3. **Implemented; physical model run pending:** use that same Firecracker path to convert CodeSage Base v2 to
+   safetensors, prove tensor/embedding equivalence, register and rescan the new identity, then require a separate
+   safe-loader runtime job. Do not admit the upstream pickle-capable artifact directly.
 4. Qualify CodeSage Large v2 only if it fits the approved Firecracker resource envelope and Base cannot meet
    the versioned retrieval requirement. Otherwise report it `INCOMPLETE`; do not add a GPU runner.
-5. Harden the existing policy, approvals, signer, OCI promotion, deployment verification, reporting,
-   reassessment, storage, and failure recovery, and prove their negative paths end to end.
-6. Add the bounded keyless Codex planner only after the deterministic Firecracker evidence producer is
-   operational; align its API, UI, and shipped skill surfaces without granting it decision authority.
+5. **Implemented; corporate acceptance pending:** harden policy, approvals, signer, OCI promotion, deployment
+   verification, reporting, reassessment, storage, and failure recovery, then prove configured external paths.
+6. **Implemented:** the bounded keyless Codex planner is aligned across API, UI, and shipped skill without
+   decision authority.
 
 For a production profile, the correct decision for any exact model revision is **block/incomplete** until
 every required automated control has generated digest-bound evidence and the required corporate approvals
@@ -197,8 +201,9 @@ Implemented controls include:
 - A durable admission registry with active/denied/reassessment-required/revoked/expired/superseded states,
   event history, automatic worker registration, expiry, scoped trigger ingestion, and revocation. Remote
   verification/trust/lifecycle mutations require an operator credential; fleet-wide reassessment requires
-  separate confirmation and an approval receipt. No external registry, Kubernetes, CI/CD, or serving-platform
-  enforcement point is shipped yet.
+  separate confirmation and an approval receipt. A pure CI/startup verifier, bounded OCI publisher, and
+  optional namespace/object-scoped Kubernetes webhook installer are shipped; live corporate infrastructure
+  acceptance remains external.
 - UI/API visibility for provider capabilities, complete acquisition, generated scanners, sandbox and
   evaluation gates, signed admission, admission age/reassessment/expiry, evaluation metrics, and redacted
   live/durable activity logs on running, completed, and failed Model Intake scans.
@@ -289,11 +294,11 @@ but the exported status must remain unambiguous.
 
 | Capability | Product mechanism | Installed/operational by default | Remaining action |
 |---|---:|---:|---|
-| Provider-neutral source adapters and pinned identities | Implemented | Hugging Face/HTTPS paths usable; other providers need credentials/configuration | Maintain adapters and add provider contract tests |
+| Provider-neutral source adapters and pinned identities | Implemented | Hugging Face/HTTPS paths usable; cloud/OCI/MLflow contracts are tested and need credentials/configuration | Maintain provider contract tests; unsupported repository-snapshot semantics remain explicit |
 | SSRF-resistant acquisition and complete quarantine | Implemented | Available when complete acquisition is enabled and storage is configured; strict saved profiles force it | Maintain provider/redirect contract tests and controlled egress |
-| Repository manifests, archives, custom code, safe-format checks | Implemented mechanism | Provider-authoritative pinned HF inventory, containment, recursive archive/config inspection, and explicit truncation are enforced | Add the same authoritative inventory contract to future providers |
+| Repository manifests, archives, custom code, safe-format checks | Implemented mechanism | Provider-authoritative pinned HF inventory, containment, recursive archive/config inspection, and explicit truncation are enforced | Other providers remain artifact-only unless they later supply an equivalent authoritative snapshot API |
 | Built-in semantic, source, secret, malware-rule, SBOM, binary, and license checks | Implemented | Yes | Improve detection depth and rule updates |
-| ModelScan, Semgrep, Fickling, and Trivy core adapters | Packaged and self-testing | **Yes in a newly rebuilt source worker image.** Hash-locked Python environments, checksum-pinned Trivy, offline DB/policy cache, bounded execution, strict parsers, rule/DB digests, and malicious-fixture receipts are exposed by `/model-intake/scanners/readiness` | Define DB-age policy and recurring rebuild/reassessment operations |
+| ModelScan, Semgrep, Fickling, and Trivy core adapters | Packaged and self-testing | **Yes in a newly rebuilt source worker image.** Hash-locked Python environments, checksum-pinned Trivy, offline DB/policy cache, bounded execution, strict parsers, rule/DB digests, age limits, and malicious-fixture receipts are exposed by `/model-intake/scanners/readiness` | Operate recurring image/data refresh and reassessment within the enforced age limits |
 | Additional external scanner adapters | Out of scope | Existing unshipped compatibility contracts cannot satisfy policy | Do not package or expand them; remove them from presets and future-roadmap claims |
 | Isolated semantic sandbox | Implemented container boundary | Request/subject/evidence binding, isolation/seccomp gating, broker-worker service, and per-job limits are present | Treat it as bounded staging evidence, not a substitute for host-independent execution isolation |
 | Built-in safetensors weights adapter | Official parser plus fail-closed defense-in-depth inspector implemented and enabled by format | A hash-locked safetensors 0.8.0 Rust binding is authoritative for format acceptance; ShakerScan independently checks shape/range/coverage, re-hashes the exact artifact, and vector-scans every F16/F32/F64/BF16 value through bounded NumPy memmap chunks. The release image runs non-skippable valid, hostile-metadata, non-finite, and truncated self-tests. Parser identity and full-value counts survive into evidence. | It still does not instantiate the model graph, tokenize, or generate embeddings; those belong to a loader profile in the disposable runner tier. |
@@ -305,7 +310,7 @@ but the exported status must remain unambiguous.
 | Typed non-scanner providers | Implemented and boundary-frozen | Sandbox execution, runner-derived embedding evaluation, source-bound embedded policy, and normalized report/signed-admission export are separate classes | OPA and additional provider frameworks are out of scope and are not advertised as product capabilities |
 | Signed admission statement and lifecycle registry | Exact-bundle v2 control plane and isolated signer implemented | Workers emit only unsigned non-deployable candidates. The signer has a dedicated minimal hash-locked image, isolated internal network, separate least-privilege database role, shipped AWS KMS client, request idempotency lock, and initiating-operator audit identity. Frozen evidence, approvals, exact component verification, latest-manifest checks, and evidence-change invalidation are durable. | Prove production KMS rotation/failure paths and remaining revocation/recovery negative paths |
 | Saved Model Intake policy profiles | Implemented server-owned admission expansion | Admission uses the operator-selected server default; caller booleans/subsets/exceptions cannot weaken it; mutations require operator auth | Add organization-specific required scanner/runtime/benchmark fields |
-| One-page control matrix and detailed evidence | Implemented in UI/JSON | Corporate-use verdict, can-use boolean, malicious-vs-capable serialization distinction, control matrix, primary blockers, next actions, limitations, and activity are visible | Finish HTML/PDF/SARIF parity and per-control evidence links |
+| One-page control matrix and detailed evidence | Implemented across UI/JSON/HTML/SARIF | Corporate-use verdict, can-use boolean, malicious-vs-capable serialization distinction, control matrix, primary blockers, next actions, limitations, activity, and shared report digest are visible | Add organization-specific remediation content only when useful; it is not an admission dependency |
 | Deployment by exact approved digest | Pure v2 verifier, explicit observation endpoint, configured OCI publisher, and namespace/object-scoped Kubernetes webhook installer implemented | `oras` performs one fixed HTTPS registry copy and verifies the remote descriptor; cert-manager injects the webhook CA; immutable image configuration and rollout are validated. No live corporate registry/cluster acceptance has been run. | Run digest-variant, outage, expiry, revocation, and recovery acceptance against the organization-operated registry and cluster; add no other orchestrator |
 | Legal, privacy, data provenance, and risk acceptance | Recorded as governance evidence | Organization-dependent | Keep human-owned; enforce required owner, approval, scope, and expiry |
 
@@ -1376,9 +1381,10 @@ orchestration. Ordinary PyTorch tensor reconstruction is reported as `expected_f
 proven malicious callable; executable-format capability is a separate corporate policy failure. The semantic
 sandbox deliberately blocks `.bin` loading. The fixed Firecracker guest now implements isolated
 `weights_only=True` deserialization, safetensors export, exact tensor comparison, and source/target embedding
-equivalence; the ordinary runtime path still prohibits pickle. The designated VPS lacks `/dev/kvm`, so the
-CodeSage physical run and automatic rescan of the exported identity remain pending. The corporation owns
-manual approval, benchmark fitness, and production promotion.
+equivalence; the ordinary runtime path still prohibits pickle. A verified conversion now creates separate
+source/target receipt bindings, registers and fully rescans the target snapshot, and returns the exact safe
+runtime bundle. The designated VPS lacks `/dev/kvm`, so the real CodeSage conversion/runtime run remains
+pending physical infrastructure. The corporation owns manual approval, benchmark fitness, and production promotion.
 
 Required evidence before a controlled pilot:
 
@@ -1486,17 +1492,18 @@ Each increment must be independently committed and leave required controls fail 
    workflow enforces legal state transitions, immutable/latest frozen inputs, transactional mutations,
    downstream admission/binding invalidation, replay idempotency, and unambiguous UI/API terminology. A real
    PostgreSQL smoke rolls back after proving the invalidation chain.
-2. **Existing evidence hardening:** enforce ModelScan/Fickling/Semgrep/Trivy applicability and freshness,
+2. **Existing evidence hardening — implemented:** enforce ModelScan/Fickling/Semgrep/Trivy applicability and freshness,
    improve Semgrep rules and safe fixtures, remove optional-tool claims, and make all unexpected worker/tool
    failures durable terminal non-pass states.
 3. **Physical Firecracker runner — implementation complete, physical acceptance pending:** the controller uses Linux/KVM with jailer,
    exact read-only subjects, no egress/credentials, approved runtime/loader digests, resource limits,
    phase telemetry, known-answer embeddings, signed receipts, teardown, and no fallback.
-4. **CodeSage conversion — fixed guest mechanism implemented:** the narrowly scoped `.bin` to safetensors
+4. **CodeSage conversion — implemented; physical model run pending:** the narrowly scoped `.bin` to safetensors
    profile uses `torch.load(weights_only=True)` only inside Firecracker, proves exact tensor inventory/dtype/
    shape/value equality plus source/target embedding equivalence, and exports a new content-addressed artifact
-   and complete manifest. Physical CodeSage execution and automatic complete re-intake remain release gates.
-5. **Control-plane and deployment hardening:** strengthen embedded policy tests, role separation, signer/KMS
+   and complete manifest. Verified output is registered and strictly rescanned under its target identity;
+   physical CodeSage execution remains the release gate.
+5. **Control-plane and deployment hardening — implemented; external acceptance pending:** strengthen embedded policy tests, role separation, signer/KMS
    isolation, OCI push verification, CI/Kubernetes denial paths, revocation/cache behavior, storage quotas,
    restart/replay recovery, and first-screen reporting.
 6. **Bounded agent guidance — implemented:** the keyless coding-agent turn contract exposes a fixed Model
@@ -1577,27 +1584,28 @@ identity, decision outcomes, redaction, durable activity, and corrected signatur
 Keep validating that no UI, API, export, or preset turns declared, truncated, skipped, crashed, unsupported,
 or stale evidence into a pass.
 
-### Phase 1 — Safe full acquisition and immutable manifests — **implemented for Hugging Face/HTTPS; provider expansion remains**
+### Phase 1 — Safe full acquisition and immutable manifests — **implemented within the frozen provider boundary**
 
 Delivered: every-hop acquisition policy, streamed full artifacts, content-addressed quarantine, snapshot
 materialization, normalized manifests, quotas, retention controls, full digest binding, custom-code inventory,
 and archive/path defenses. The Hugging Face acquisition path now fetches the authoritative pinned provider
 manifest and treats caller lists as declared comparison evidence.
 
-Remaining:
+Remaining operations:
 
-- Add full-snapshot contract tests for every supported provider adapter.
+- Preserve provider contract tests: Hugging Face is the only repository-snapshot provider; other configured
+  providers are complete artifact sources and must return explicit `UNSUPPORTED` for snapshot semantics.
 - Document object-store sizing, backup, tenant quotas, and cleanup for operators.
 - Run scheduled real-model acquisitions outside ordinary PR jobs.
 
-### Phase 2 — Generated static evidence — **scanner set frozen; hardening remains**
+### Phase 2 — Generated static evidence — **scanner set frozen and product hardening complete**
 
 Delivered: built-in semantic/source/secret/malware/SBOM/SCA/binary/license checks; normalized fail-closed
 contracts and packaged execution for ModelScan, Semgrep, Fickling, and Trivy; evidence provenance and digest
 binding; hash-locked/checksum-pinned
 installation; offline Trivy data; bounded execution; readiness API/UI; and image-build malicious-fixture tests.
 
-Remaining product work:
+Implemented hardening:
 
 - **Implemented scanner-material freshness:** Semgrep rule-file age and Trivy database `UpdatedAt` are measured
   against bounded server configuration (90/14-day defaults), exposed in API/UI, and checked again immediately
@@ -1669,7 +1677,7 @@ and then makes the Firecracker host independently recompute the same digest befo
 Tokenizer and configuration identities use the same exact-subject rule. ShakerScan derives canonical,
 order-independent component-set digests from the complete snapshot, persists and exposes both subjects, seeds
 them into the UI bundle, rejects mismatches before queueing, and makes the Firecracker host recompute them from
-the verified manifest. Signed runner receipt v3 and derived evaluation evidence carry both digests, closing the
+the verified manifest. Signed runner receipt v4 and derived evaluation evidence carry both digests, closing the
 earlier gap where required bundle labels were not independently matched to repository members.
 
 The policy engine now also compares every required evidence record's own subject bindings against the exact
@@ -1702,7 +1710,8 @@ Remaining physical acceptance and infrastructure work:
 - **Implemented conversion producer and evidence contract:** the fixed guest binds source/target digests,
   converter image, tensor inventory, exact numeric equivalence, embedding equivalence, resource evidence,
   and complete network telemetry into the signed receipt. Unsafe source serialization never executes in the
-  API/static worker. Physical runner-fleet execution and automatic full rescan remain acceptance work.
+  API/static worker. Target registration and strict full rescan are automatic after verified refresh;
+  only the physical runner-fleet execution remains acceptance work.
 - Prove the purpose-scoped KMS signer and trust-anchor rotation path on the physical runner host.
 
 Exit criteria: CodeRankEmbed and CodeSage Base can be loaded and exercised without corp network, credentials,
@@ -1727,7 +1736,7 @@ The report must distinguish:
 - **Communication succeeded** — critical isolation failure.
 - **Telemetry incomplete or contradictory** — `INCOMPLETE`; absence of evidence is not evidence of absence.
 
-### Phase 4 — Automated model and application evaluation — **scoring and signed-evidence verification contracts implemented; trusted producer absent**
+### Phase 4 — Automated model and application evaluation — **runtime producer implemented; corporate data-plane producer is external**
 
 Delivered: provider-neutral, content-free evaluation schema and deterministic scoring for vector validity,
 dimensions, retrieval, ACL/sensitive leakage, poisoning, stability, latency/RSS, tenant/graph/cache boundaries,
@@ -1738,15 +1747,17 @@ require both for admission.
 Delivered additionally: runtime, embedding-evaluation, and data-plane result verifiers accept only canonical
 signed receipts from environment- and purpose-scoped runner trust anchors. The verifier rejects a signed
 `PASS` unless exact bindings, freshness, builder identity, isolation/load fields, benchmark identity, and
-multi-principal data-plane controls are present. This is still a claim-verification contract: no trusted
-runner currently measures telemetry, produces its digest, or emits these receipts. Evidence freeze selects
-the newest unexpired record per type and rejects subject drift.
+multi-principal data-plane controls are present. The Firecracker runner measures and signs runtime telemetry,
+and the API deterministically derives embedding-evaluation evidence from its verified receipt. The separate
+data-plane receipt still requires an organization-operated connector because ShakerScan cannot invent vector-
+store principals, ACL expectations, deletion behavior, or a corporate relevance corpus. Evidence freeze
+selects the newest unexpired required record per type and rejects subject drift.
 
-Remaining product/infrastructure work:
+Remaining infrastructure/organization work:
 
 - Deploy the Phase 3 runner fleet to generate signed observations; caller-provided benchmark payloads remain
   non-authoritative.
-- Harden the existing versioned benchmark contract: corpus digest, query digest, expected relevance/ACL labels,
+- Supply the organization-owned benchmark contract: corpus/query digests, expected relevance/ACL labels,
   thresholds, scoring version, and content-retention policy.
 - **Implemented fixed embedding smoke suite:** every calibration/runtime/conversion job adds a versioned,
   digest-bound mandatory corpus covering ordinary retrieval text, empty input, Unicode, control characters,
@@ -1801,7 +1812,7 @@ same fixed action catalog and lifecycle endpoints, preserves Firecracker no-fall
 rules, and uses the same `ALLOW`/`BLOCK`/`INCOMPLETE`/`REVIEW` vocabulary. Cross-surface tests prove the API,
 UI, and skill carry the same permissions and cannot reach privileged admission mutations indirectly.
 
-### Phase 5 — Useful report and release gate — **corporate-use report implemented; deployment enforcement is not operationally complete**
+### Phase 5 — Useful report and release gate — **product mechanisms complete; corporate deployment acceptance pending**
 
 Delivered: a first-screen corporate-use verdict and can-use boolean, malicious-primitive proof separated from
 format capability, control matrix, primary blockers, limitations, concrete next actions, deployment
@@ -1811,17 +1822,16 @@ The exact-subject verifier authorizes only signed `allow` decisions, and the HTT
 an active matching registry record. Lifecycle mutation endpoints require an operator bearer token; global
 actions require explicit confirmation and a change receipt.
 
-Deployment-enforcement code includes a fail-closed CI/startup verifier and a Kubernetes
-`ValidatingAdmissionWebhook` implementation, but the supplied manifest is a non-installable template with
-certificate/image placeholders and unsafe cluster-wide defaults. Its verification call currently mutates
-deployment-binding state despite declaring `sideEffects: None`. Treat it as prototype code until the review
-path is side-effect-free, namespace-scoped, certificate/image installation is reproducible, outage recovery
-is tested, and a real cluster proves exact-subject allow plus mismatch/expiry/revocation denial.
+Deployment-enforcement code includes a fail-closed CI/startup verifier and an optional Kubernetes
+`ValidatingAdmissionWebhook`. The webhook uses the pure side-effect-free v2 verification endpoint, fails
+closed, is selected by namespace and workload labels, uses cert-manager CA injection, requires a digest-pinned
+image through the installer, and validates rollout. It is not required for Model Intake or Firecracker and
+must be installed only by organizations that deploy models through Kubernetes. A live corporate cluster is
+still required to prove outage, mismatch, expiry, revocation, certificate rotation, and recovery behavior.
 
-Remaining product work:
+Remaining organization-specific enrichment and acceptance:
 
-- Extend the implemented first-page execution matrix to include tool/rules database freshness and independent
-  microVM telemetry when those integrations ship.
+- Operate the implemented tool/rules freshness and independent microVM telemetry columns with real evidence.
 - **Implemented bounded OCI promotion mechanism:** build the content-addressed layout, copy its exact admitted
   manifest to one configured non-local registry repository with `oras`, fetch and compare the remote descriptor,
   and emit a content-bound receipt. Live registry policy/credential/retention acceptance remains corporate work.
@@ -2060,20 +2070,20 @@ every decision relying on the affected scanner image/rules digest as requiring r
 | Risk | Present control | Residual risk | Target treatment | Priority |
 |---|---|---|---|---|
 | SSRF through intake URLs | Every-hop URL/DNS/IP/redirect policy and approval-gated exceptions | Effective host egress can be weaker than application policy | Controlled acquisition network plus deployment self-test | P0 |
-| Prefix-only analysis mistaken for approval | Honest truncated status and separate complete acquisition | Production preset may leave complete mode disabled | Require complete artifact and snapshot in production profile | P0 |
-| Caller-defined “complete” repository | Authoritative pinned Hugging Face manifest; caller manifest compare-only | Other providers need equivalent authoritative adapters | Add provider adapters with immutable-manifest proof | P1 |
-| Signed denial accepted as authorization | Exact signed `allow` and active-registry enforcement with regression tests | External deployment can omit the integration | Add promotion/serving hooks and deployed-system negative tests | P0 |
+| Prefix-only analysis mistaken for approval | Honest truncated status, separate complete acquisition, and controlled-workflow complete-subject gate | Preflight remains intentionally usable for partial inspection | Keep preflight non-deployable and production admission fail-closed | P0 |
+| Caller-defined “complete” repository | Authoritative pinned Hugging Face manifest; caller manifest compare-only | Non-HF providers are artifact-only, not repository-snapshot providers | Preserve explicit unsupported snapshot status unless a provider supplies immutable authoritative inventory | P1 |
+| Signed denial accepted as authorization | Exact signed `allow`, active-registry enforcement, pure CI/webhook verification, and regression tests | A deployment can omit every enforcement integration | Operate at least one shipped exact-digest enforcement point and test bypasses | P0 |
 | Caller weakens required gates | Server-side strict-profile expansion and expectation matrix | Custom profiles can intentionally be less strict | Govern profile creation/activation and bind production environments to approved profiles | P1 |
 | External scanner adapters mistaken for installed coverage | Fail-closed status plus frozen packaged core bundle, rules/DB identity, readiness UI, and functional receipt | Legacy compatibility names can still be confused with supported coverage; bundled DB can age | Remove unshipped tools from presets/claims, enforce freshness, and preserve explicit `UNSUPPORTED` | P0 |
-| Unsafe PyTorch serialization | Built-in semantics, Fickling/ModelScan adapters, sandbox load prohibition | No actual isolated deserialization/load evidence | Multi-engine static analysis plus disposable VM load | P0 |
-| Malicious custom runtime behavior | Complete custom-code inventory, AST checks, hardened operator runtime adapter | Container isolation is weaker than a microVM and telemetry is self-reported/bound | KVM/microVM runner with independent runtime telemetry | P0 |
-| Model evaluation evidence supplied by caller | Public observations are labeled `DECLARED` and cannot pass admission; missing actual results fail closed | Trusted runner and connector do not yet generate the evidence | Bind runner-generated observations to exact model/runtime/index and permit `GENERATED_DATA_PLANE` only on that internal path | P0 |
+| Unsafe PyTorch serialization | Built-in semantics, Fickling/ModelScan, sandbox load prohibition, and fixed Firecracker conversion/equivalence/rescan | Physical conversion proof requires KVM and only the fixed supported `.bin` shape is eligible | Run the implemented conversion on KVM; unsupported layouts remain incomplete | P0 |
+| Malicious custom runtime behavior | Exact custom-code identity, AST/Semgrep, no-NIC Firecracker execution, independent syscall/network/resource telemetry | Current designated VPS cannot physically execute KVM acceptance | Operate and acceptance-test the implemented KVM runner | P0 |
+| Model evaluation evidence supplied by caller | Declared observations cannot pass; Firecracker runtime generates signed evidence and derived embedding evaluation | Corporate vector-store/data-plane evidence remains organization-specific | Use the signed data-plane contract with real principals/index/application or remain incomplete | P0 |
 | Dependency CVEs | Generated SBOM/SCA plus packaged offline Trivy | Runtime may not be locked; DB ages between image rebuilds | Locked runtime builder, freshness gate, recurring rescans | P1 |
 | Malware/secrets | Built-in checks plus packaged Semgrep/Trivy | Detection depth and rule freshness vary | Improve existing rules and enforce freshness/reassessment gates | P1 |
 | Retrieval/ACL leakage | Evaluation schema for ACL/tenant/graph/cache/deletion controls | No universal live data-plane connector or corporate fixture | Bounded connectors plus organization-provided principals/data | P1 |
-| Embedding poisoning/inversion | Deterministic scoring contract | No runner-generated adversarial corpus results | Automated benchmark plug-ins in isolated runner | P1 |
-| Ambiguous report coverage | Decision/control cards plus first-page execution matrix and phase timeline | Operators still need organization-specific interpretation | Add freshness/telemetry columns and organization report profiles | P1 |
-| Signed decision not enforced by deployment | Safe library verifier and active-registry HTTP verifier | Deployment may bypass both | Add promotion hooks and deployed-system negative-path enforcement test | P0 |
+| Embedding poisoning/inversion | Mandatory bounded smoke suite plus deterministic organization-benchmark contract | Shipped smoke inputs are not a corporate adversarial/relevance corpus | Supply a versioned corporate corpus through the existing bounded contract | P1 |
+| Ambiguous report coverage | Shared-digest UI/JSON/HTML/SARIF control matrix, freshness, phase, network, and resource timelines | Operators still need organization-specific interpretation | Add local remediation/profile content without changing admission semantics | P1 |
+| Signed decision not enforced by deployment | Library/HTTP verifier, bounded OCI publisher, CI verifier, and optional Kubernetes webhook | Deployment may bypass every integration | Mandate and negative-test one shipped enforcement point in the corporate release path | P0 |
 | Security tests silently skipped | Mandatory crypto dependencies and focused no-skip CI job | CI images can still be misconfigured outside the supported pipeline | Preserve focused trust job and release evidence | P1 |
 | Unauthenticated admission lifecycle mutation | Operator bearer auth; confirmation/change receipt for global actions | Static shared token lacks enterprise identity/RBAC | Integrate OIDC/mTLS workload identities and scoped authorization | P1 |
 | Legal/privacy/business decision automated incorrectly | Governance evidence and approvals | Product cannot determine corporate acceptability | Keep human authority; bind owner/scope/expiry to subjects | P1 |
