@@ -1969,39 +1969,39 @@ digests, rule/database versions and freshness, loader/evaluator versions, hardwa
 digests, and which controls were intentionally not applicable. Missing required stamps or controls make the
 run `INCOMPLETE`.
 
-#### 14.5.1 Remote corporate-admission mechanism validation — 2026-07-29
+#### 14.5.1 Remote technical-preflight validation — 2026-07-30
 
-The source branch was rebuilt on `root@2.28.1.228` after the final repairs. The deployment ran checkout
-`2a88737`; both workers reported build fingerprint `0398b2a53379d635` as current with zero stale workers. The
-image-build malicious-fixture receipt reported `PASS` for ModelScan 0.8.8, Semgrep 1.172.0, Fickling 0.1.12,
-and Trivy 0.72.0. Unlike the earlier static-mechanism run, these requests used `intake_mode=admission`, so the
-server-owned production profile forced complete acquisition/snapshot/scanners/sandbox/evaluation,
-attestation, signing, governance, and deployment approval. The caller did not receive a way to turn those
-gates off or inject an inline exception. Missing corporate inputs therefore appear as real failed controls
-rather than being hidden to obtain a cleaner result.
+The source branch was rebuilt on `root@2.28.1.228` after the final report-semantics repair. The deployment ran
+checkout `de7adb9`; both workers reported build fingerprint `3983e55c083970d2` as current with zero stale
+workers. The image-build malicious/safe/review fixture receipt reported `PASS` for ModelScan 0.8.8, Semgrep
+1.172.0, Fickling 0.1.12, and Trivy 0.72.0. The API and Model Intake UI returned HTTP 200 and scanner
+readiness reported 4/4 ready with fresh Semgrep rules and Trivy data.
 
-| Exact subject | Final admission scan | What ShakerScan proved | Corporate-use answer |
+These requests intentionally used the public `intake_mode=preflight` path. That path produces useful,
+content-addressed technical evidence but cannot authorize deployment. The obsolete admission mode on
+`POST /model-intake/scan` is rejected; corporate authorization requires a controlled submission, frozen
+evidence, identity-separated approvals, deterministic policy, isolated signing, and promotion. The VPS had
+no `/dev/kvm` or configured Firecracker binary, kernel, rootfs, builder identity, signer, or egress policy, so
+runner readiness correctly returned `NOT_READY` with `fallback_execution:false`. No Docker, QEMU, host-process,
+or self-authored-receipt substitution was used.
+
+| Exact subject | Final preflight scan | What ShakerScan proved | Corporate-use answer |
 |---|---|---|---|
-| `nomic-ai/CodeRankEmbed@3c4b60807d71f79b43f3c4363786d9493691f8b1` | `12e54c36-0ff9-4b25-a358-222f6d050ab2` | Complete 546,938,168-byte artifact and 14-file repository snapshot; expected digest verified; safetensors inventory contained 112 tensors; no-egress/seccomp/non-root sandbox passed exact-digest mmap, nonempty inventory, byte-range, and sampled-finiteness tests with `load_level=weights`. Semgrep reported one medium warning at `modeling_hf_nomic_bert.py:332`: omitted `weights_only` is version-dependent and requires PyTorch 2.6+ or a patch to `weights_only=True`; it is not presented as proven exploitation. | **NOT_APPROVED; not proven malicious.** Five controls passed, custom code requires review, and four corporate controls failed. Do not deploy until the custom code has a hash-locked runtime dependency SBOM/SCA result, an exact-runner security evaluation passes, publisher provenance/signing is established, and deployment approval is recorded. Custom code, model construction, and embeddings did not run. |
-| `codesage/codesage-base-v2@92eac4f44c8674638f039f1b0d8280f2539cb4c7` | `da4aebe2-e17e-4150-be47-e67117cf1237` | Complete 709,569,721-byte artifact and 16-file snapshot; expected digest verified; ModelScan 0.8.8 passed with zero findings. Pickletools classified `collections.OrderedDict`, `torch.BFloat16Storage`, and `torch._utils._rebuild_tensor_v2` as `expected_framework_pickle`; `malicious_primitive_proven=false`. Semgrep produced two medium writable-file review warnings in `tokenization_codesage.py`; Fickling was correctly not applicable to the PyTorch ZIP. | **NOT_APPROVED; not proven malicious.** The upstream format is still executable-capable and prohibited by default corporate policy, so the sandbox correctly returned `BLOCKED_BY_POLICY`. Convert in no-egress quarantine to safetensors, prove tensor/numeric and embedding equivalence, then rerun with a locked runtime, SCA, security evaluation, provenance, signing, and approval. |
-| `codesage/codesage-large-v2@6e5d6dc15db3e310c37c6dbac072409f95ffa5c5` | `bdc08d2d-9939-431a-8822-994da2c5f1be` | Complete 2,627,013,817-byte artifact and 16-file snapshot; expected digest verified; all 294 archive members and 2,626,958,595 expanded bytes inspected without truncation. ModelScan passed with zero findings; pickle semantics and the two Semgrep writable-file warnings matched Base; `malicious_primitive_proven=false`; evaluation evidence integrity verified independently. | **NOT_APPROVED; not proven malicious.** Same executable-format, runtime, dependency, evaluation, provenance, signing, and approval failures as Base, plus materially greater storage/memory/GPU exposure. Do not qualify Large unless Base first fails a versioned corporate retrieval benchmark and Large proves a justified benefit within a separately approved resource envelope. |
+| `nomic-ai/CodeRankEmbed@3c4b60807d71f79b43f3c4363786d9493691f8b1` | `58434da2-3d03-4a46-b667-ab40a30f9b39` | Complete 546,938,168-byte artifact and 14/14-file repository snapshot; expected digest verified; safetensors inventory contained 112 tensors and all 136,731,648 numeric values were checked. The bounded no-egress/seccomp/non-root sandbox passed with `load_level=weights`. The malicious-primitive control passed. Semgrep produced one calibrated review warning at `modeling_hf_nomic_bert.py:332` because `torch.load` omits `weights_only`; it was not presented as proven exploitation. | **PREFLIGHT_ONLY / REVIEW; not proven malicious.** Do not deploy until custom code ownership review, hash-locked runtime dependency SCA, exact Firecracker import/load/inference and embedding tests, publisher provenance/signing, deployment restrictions, monitoring, and identity-separated approval are complete. |
+| `codesage/codesage-base-v2@92eac4f44c8674638f039f1b0d8280f2539cb4c7` | `f03d8570-e941-496b-a1af-43d3faebd754` | Complete 709,569,721-byte artifact and 16/16-file snapshot; expected digest verified; all 294 archive members and 709,514,499 expanded bytes inspected. ModelScan and semantic pickletools passed; only expected framework globals were present and `malicious_primitive_proven=false`. Semgrep produced two writable-file review warnings in `tokenization_codesage.py`. | **PREFLIGHT_ONLY / BLOCK; not proven malicious.** The malicious-primitive control passes, while the separate executable-serialization policy fails and the sandbox correctly returns `BLOCKED_BY_POLICY`. The report emits one useful next action: controlled safetensors conversion, tensor/numeric/embedding equivalence, target rescan, then an exact Firecracker runtime run. |
+| `codesage/codesage-large-v2@6e5d6dc15db3e310c37c6dbac072409f95ffa5c5` | `b90e25e7-e1ba-470e-a0d5-5a1a999359ad` | Complete 2,627,013,817-byte artifact and 16/16-file snapshot; expected digest verified; all 294 archive members and 2,626,958,595 expanded bytes inspected without truncation. ModelScan and pickletools passed with the same expected framework classification; Semgrep findings matched Base. | **PREFLIGHT_ONLY / BLOCK; not proven malicious.** The same conversion and corporate controls as Base remain, plus materially greater storage, memory, and accelerator exposure. Do not qualify Large unless Base first fails a versioned retrieval benchmark and Large proves a justified benefit inside a separately approved resource envelope. |
 
-The earlier validation found and repaired sandbox extension routing, pinned model-card retrieval, unprivileged
-adapter traversal, archive byte-policy, Fickling exit semantics, ModelScan diagnostics, Semgrep coordinates,
-and streaming large-file inspection. The admission reruns then exposed and repaired two further report defects:
-missing evaluation input incorrectly produced a report-digest mismatch, and custom executable code with no
-runtime dependency manifest looked like an empty clean SBOM. The final reruns contain no acquisition, worker,
-adapter-execution, model-card, hash, repository/archive completeness, or evidence-integrity error.
+The first rebuilt runs exposed two normalized-report defects: unrelated review warnings kept the
+malicious-primitive control indeterminate even after both relevant scanners passed, and a policy-refused
+pickle artifact was told to rerun the unchanged sandbox. Commit `de7adb9` corrected both without weakening
+the serialization block. The three final reruns above prove the correction through the public API path.
+They contain no acquisition, worker, adapter-execution, model-card, hash, repository/archive completeness, or
+evidence-integrity error.
 
-These are successful tests of ShakerScan and unsuccessful admission reviews of the exact upstream subjects.
-That distinction is intentional: “the scanner worked” does not mean “the model passed.”
-
-Final focused regression evidence was generated inside the exact rebuilt remote worker image against source
-checkout `2a88737`: **177 passed, 0 failed, 0 skipped** across all `test_model_intake*.py` modules, with only a
-read-only pytest-cache warning. A separate exact-image crypto run reported **24 passed, 0 skipped**. The
-deterministic E2E reported 12 executed gates passing plus one intentionally skipped opt-in public-network
-shard; its new complete malicious-artifact gate proved the `posix.system` callable, a `REJECT` verdict, and
-that a caller inline exception cannot weaken admission.
+These are successful ShakerScan executions and unsuccessful corporate admissions of the upstream subjects.
+That distinction is intentional: “the scanner worked” does not mean “the model passed.” Local release
+validation at checkout `2612f05` reported **2,862 passed, 0 failed** for the complete Python suite; the final
+report repair added **105 passing focused Model Intake tests** before the remote rebuild and reruns.
 
 ### 14.6 Application-control tests
 
@@ -2154,8 +2154,10 @@ Owners must decide and record:
 - [x] The optional keyless Codex planner exposes only five typed bounded advisory actions, has no admission,
   promotion, evidence-writing, or arbitrary-execution authority, and durably enforces iteration/action budgets.
   Physical and UI cross-surface acceptance remains part of the release run below.
-- [ ] The exact release branch is rebuilt on the designated Linux/KVM VPS and physical runs for
-  CodeRankEmbed, CodeSage Base v2, and CodeSage Large v2 retain cross-surface evidence and accurate outcomes.
+- [x] The exact release branch is rebuilt on the designated VPS and complete public preflight runs for
+  CodeRankEmbed, CodeSage Base v2, and CodeSage Large v2 retain accurate API/UI evidence and outcomes.
+- [ ] Physical Firecracker import/load/inference/conversion runs for those exact subjects pass on a designated
+  Linux/KVM runner. The current VPS is not a KVM runner and correctly reports `NOT_READY` without fallback.
 
 ### 19.2 Per-model admission-run checklist
 
