@@ -142,8 +142,13 @@ def _load_layout(path: Path) -> dict[str, Any]:
             continue
         dtype_counts[dtype] = dtype_counts.get(dtype, 0) + 1
         tensor_specs.append({
+            # Names and shapes are retained only in this internal layout so an
+            # independent pass can cross-check the official parser inventory.
+            # Public evidence continues to expose content-free tensor refs.
+            "name": name,
             "tensor_ref": ref,
             "dtype": dtype,
+            "shape": list(tensor.get("shape") or []),
             "elements": elements,
             "start": start,
             "end": end,

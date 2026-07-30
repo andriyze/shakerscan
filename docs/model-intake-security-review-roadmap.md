@@ -359,7 +359,7 @@ between schemas and working capabilities. These corrections are authoritative fo
 | The local operator guard trusts loopback, target rescan replays stored acquisition authority without revalidating it, and several resolver/readiness endpoints have no explicit operator boundary | Local network placement is being treated as identity and expired authority can be replayed | Require authenticated operator/deployment identity for mutations and authority-bearing replay; revalidate scope/approval receipts and strip stale acquisition grants |
 | Hugging Face enrichment previously returned the original request when provider resolution failed | Provider failure could preserve caller-declared inventory in preflight | **Implemented:** both public resolution and scan enrichment now discard caller identity/inventory/custom-code authority, retain only a digest of discarded claims, and emit a server-generated `INCOMPLETE` manifest; successful resolution reasserts provider-owned fields |
 | `model_intake_deployment_bindings.admission_id` had different constraints in `db/init.sql` and runtime migration code | Fresh and upgraded installations could have different integrity guarantees | **Implemented:** both paths install the same named `ON DELETE SET NULL` foreign key; upgrades null orphan references before adding it, and the idempotent migration smoke verifies the live constraint |
-| The official safetensors parser decides format acceptance, but the independent full numeric scan still uses offsets from ShakerScan's handwritten layout parser | Untrusted header arithmetic still reaches `numpy.memmap` under an `authoritative` result label | Cross-check every tensor range against official parser inventory/access before mmap and remove the authoritative label from independently derived facts |
+| The official safetensors parser previously decided only format acceptance while the independent full numeric scan used handwritten offsets | Untrusted header arithmetic reached `numpy.memmap` under an ambiguous authority label | **Implemented:** the isolated, hash-locked official parser now owns format acceptance, exact inventory cross-checking, and bounded full numeric tensor access, including BF16 through pinned `ml-dtypes`; the handwritten parser is defense-in-depth only and no longer supplies full-scan offsets or an unscoped authoritative label |
 | Current E2E signature cases are negative controls; there is no durable operator-anchor positive trust case | Signature trust can regress while the suite remains green | Add a real-stack positive verification case using an operator-created trust anchor, plus wrong-key, expiry, and rotation negatives |
 
 The report also correctly identifies weakened or misleading tests. Tests that replace the vulnerable
@@ -1585,10 +1585,11 @@ and rule data, supply organization Semgrep rules where needed, and define severi
 ### Phase 3 — Disposable model execution and runtime telemetry — **official parser implemented; loader, Firecracker, and receipt work are contracts only**
 
 The semantic container now includes a built-in exact-digest safetensors weights adapter and supports an
-operator runtime adapter. The built-in adapter only returns PASS after mmap/range/inventory/finiteness checks
-and reports `load_level=weights`; the operator adapter must produce stronger phase-specific known-answer
-evidence before claiming model load or inference. Both remain staging/integration tiers, not the disposable
-microVM required here.
+operator runtime adapter. The built-in adapter only returns PASS after official Rust parser acceptance,
+exact independent-inventory cross-checking, and bounded official-slice finiteness checks over every supported
+floating value, and reports `load_level=weights`; the operator adapter must produce stronger phase-specific
+known-answer evidence before claiming model load or inference. Both remain staging/integration tiers, not the
+disposable microVM required here.
 
 Contract work only: a Firecracker/jailer configuration builder describes no-network, read-only input/rootfs,
 quota-output, seccomp/cgroup/timeout/receipt-required settings. Readiness hashes configured binaries/images

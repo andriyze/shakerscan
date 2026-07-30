@@ -229,17 +229,36 @@ def _run_runtime_adapter(
     try:
         numeric_values_checked = int(report.get("numeric_values_checked") or 0)
         non_finite_values = int(report.get("non_finite_values") or 0)
+        official_tensors_accessed = int(report.get("official_tensors_accessed") or 0)
+        official_numeric_chunks = int(report.get("official_numeric_chunks") or 0)
     except (TypeError, ValueError):
         numeric_values_checked = -1
         non_finite_values = -1
-    if numeric_values_checked < 0 or non_finite_values < 0:
+        official_tensors_accessed = -1
+        official_numeric_chunks = -1
+    if min(numeric_values_checked, non_finite_values, official_tensors_accessed, official_numeric_chunks) < 0:
         blockers.append("runtime_numeric_evidence_invalid")
     official_parser = report.get("official_parser") if isinstance(report.get("official_parser"), dict) else {}
+    parser_authority = str(report.get("parser_authority") or "")
+    if parser_authority == "official_safetensors_rust":
+        authority_scope = official_parser.get("authority_scope")
+        if (
+            official_parser.get("status") != "PASS"
+            or official_parser.get("inventory_crosscheck_status") != "PASS"
+            or not isinstance(authority_scope, list)
+            or not {"format_acceptance", "tensor_inventory", "numeric_payload_access"}.issubset(authority_scope)
+        ):
+            blockers.append("official_parser_authority_not_proven")
+        if report.get("numeric_scan_mode") == "full" and numeric_values_checked > 0 and (
+            official_tensors_accessed <= 0 or official_numeric_chunks <= 0
+        ):
+            blockers.append("official_numeric_payload_access_not_proven")
     safe_official_parser = {
         key: official_parser.get(key)
         for key in (
-            "name", "version", "authoritative", "status", "tensor_count",
-            "rank_counts", "metadata_present", "error",
+            "name", "version", "authority_scope", "status", "tensor_count",
+            "rank_counts", "metadata_present", "inventory_crosscheck_status",
+            "inventory_tensors_crosschecked", "error",
         )
         if official_parser.get(key) is not None
     }
@@ -257,11 +276,13 @@ def _run_runtime_adapter(
         "load_level": report.get("load_level"),
         "artifact_sha256": report.get("artifact_sha256"),
         "known_answer_tests": known_answers[:100],
-        "parser_authority": str(report.get("parser_authority") or "") or None,
+        "parser_authority": parser_authority or None,
         "official_parser": safe_official_parser or None,
         "numeric_scan_mode": str(report.get("numeric_scan_mode") or "") or None,
         "numeric_values_checked": max(0, numeric_values_checked),
         "non_finite_values": max(0, non_finite_values),
+        "official_tensors_accessed": max(0, official_tensors_accessed),
+        "official_numeric_chunks": max(0, official_numeric_chunks),
         "imports": report.get("imports", [])[:100] if isinstance(report.get("imports"), list) else [],
         "spawned_processes": spawned_processes,
         "network_attempts": report.get("network_attempts", []),
