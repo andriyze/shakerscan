@@ -15,6 +15,7 @@ Code, database schemas, runtime receipts, and tests remain authoritative when a 
 | [`../AGENTS.md`](../AGENTS.md) | Canonical coding-agent operations and request examples |
 | [`product-model.md`](product-model.md) | Canonical product names, natural-language routing, source labels, and compatibility terms |
 | [`functionality-reference.md`](functionality-reference.md) | Exhaustive product map plus generated code-surface inventory |
+| [`source-assisted-scanning-and-microvm-isolation-proposal.md`](source-assisted-scanning-and-microvm-isolation-proposal.md) | Proposal for Semgrep-backed source intelligence and narrowly scoped future Firecracker reuse |
 
 ## Product And Operations
 
