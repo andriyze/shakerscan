@@ -40,7 +40,9 @@ class IssueRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     policy_decision_id: str
     idempotency_key: str = Field(min_length=16, max_length=200)
-    requested_by_subject: str = Field(pattern=r"^operator-token:[0-9a-f]{24}$")
+    requested_by_subject: str = Field(
+        pattern=r"^(?:operator-token:[0-9a-f]{24}|operator:[A-Za-z0-9][A-Za-z0-9_.:@/-]{1,199})$"
+    )
 
 
 def _json_object(value: Any) -> dict[str, Any]:

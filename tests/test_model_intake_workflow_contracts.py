@@ -456,7 +456,7 @@ def test_signer_request_preserves_only_server_derived_operator_identity():
     source = inspect.getsource(api.promote_model_intake_submission)
     assert "requested_by_subject = _model_intake_authenticated_subject" in source
     signer_source = (ROOT / "api" / "model_intake_signer_service.py").read_text()
-    assert r'^operator-token:[0-9a-f]{24}$' in signer_source
+    assert r'operator-token:[0-9a-f]{24}|operator:[A-Za-z0-9]' in signer_source
     assert '"issued_by_service": "model-intake-signer"' in signer_source
 
 

@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 
 import pytest
+from pydantic import ValidationError
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
@@ -22,6 +23,20 @@ from model_intake_control_plane import (  # noqa: E402
     utc_now,
     verify_admission_v2,
 )
+from model_intake_signer_service import IssueRequest  # noqa: E402
+
+
+def test_narrow_signer_accepts_only_server_derived_legacy_or_configured_operator_subjects():
+    base = {
+        "policy_decision_id": "00000000-0000-4000-8000-000000000001",
+        "idempotency_key": "release-request-0001",
+    }
+    assert IssueRequest(**base, requested_by_subject="operator-token:" + "a" * 24)
+    assert IssueRequest(**base, requested_by_subject="operator:corp:alice")
+
+    for untrusted in ("alice", "operator:", "operator:corp alice", "submitter-peer:" + "a" * 24):
+        with pytest.raises(ValidationError):
+            IssueRequest(**base, requested_by_subject=untrusted)
 
 
 def _keys():
