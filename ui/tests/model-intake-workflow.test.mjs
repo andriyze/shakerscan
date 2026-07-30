@@ -59,6 +59,12 @@ test('Codex workflow is prominently advisory and promotion remains a separate op
 
 test('normalized corporate report has UI and export parity', () => {
   assert.match(workflow, /Normalized corporate review report/)
+  assert.match(workflow, /Executive summary/)
+  assert.match(workflow, /Full corporate approval: not determined by ShakerScan/)
+  assert.match(workflow, /Checks performed/)
+  assert.match(workflow, /Supported checks not completed/)
+  assert.match(workflow, /Corporate approval requirements outside ShakerScan/)
+  assert.match(workflow, /Detailed control evidence/)
   assert.match(workflow, /PASS, FAIL, REVIEW, INCOMPLETE, ERROR, NOT_RUN, or NOT_APPLICABLE/)
   assert.match(workflow, /Printable HTML \/ PDF/)
   assert.match(api, /format: 'json' \| 'html' \| 'sarif'/)

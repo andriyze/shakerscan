@@ -2153,24 +2153,62 @@ export interface FleetNodeEvent {
 
 export type ModelIntakeReportStatus = 'PASS' | 'FAIL' | 'REVIEW' | 'INCOMPLETE' | 'ERROR' | 'NOT_RUN' | 'NOT_APPLICABLE'
 
+export interface ModelIntakeReportControl {
+  id: string
+  label: string
+  status: ModelIntakeReportStatus
+  detail: string
+  coverage: Record<string, unknown>
+  evidence_refs: Array<Record<string, unknown>>
+  category: string
+  question: string
+  method: string
+  remediation: string
+}
+
 export interface ModelIntakeCorporateReport {
-  schema_version: 'model-intake-corporate-report/v1' | string
+  schema_version: 'model-intake-corporate-report/v2' | string
   generated_at: string
   report_sha256: string
   outcome: 'ALLOW' | 'BLOCK' | 'INCOMPLETE' | 'REVIEW'
   plain_language: string
+  executive_summary: {
+    shakerscan_decision: 'ALLOW' | 'BLOCK' | 'INCOMPLETE' | 'REVIEW'
+    deployable_under_configured_shakerscan_policy: boolean
+    full_corporate_approval: 'NOT_DETERMINED_BY_SHAKERSCAN' | string
+    decision_statement: string
+    authorization_scope: string
+    scope_warning: string
+    coverage: Record<string, number>
+    key_results: Array<{ control_id: string; label: string; status: ModelIntakeReportStatus; result: string }>
+    required_actions: Array<{ control_id: string; status: ModelIntakeReportStatus; action: string }>
+  }
+  assessment_scope: {
+    checks_performed: string[]
+    checks_not_completed: string[]
+    checks_not_applicable: string[]
+    status_semantics: Record<string, string>
+  }
   submission: Record<string, unknown> & { id: string; state: string }
-  controls: Array<{
-    id: string
-    label: string
-    status: ModelIntakeReportStatus
-    detail: string
-    coverage: Record<string, unknown>
-    evidence_refs: Array<Record<string, unknown>>
-  }>
+  controls: ModelIntakeReportControl[]
   control_counts: Record<ModelIntakeReportStatus, number>
   runner_timelines: Array<Record<string, unknown>>
   authority_bindings: Record<string, unknown>
+  detailed_review: {
+    control_matrix: ModelIntakeReportControl[]
+    static_analysis_detail: Record<string, unknown>
+    shakerscan_check_catalog: Array<Record<string, unknown>>
+    external_approval_requirements: Array<{
+      id: string
+      status: 'EXTERNAL_REQUIRED' | string
+      category: string
+      requirement: string
+      why_external: string
+      typical_owner: string
+      expected_evidence: string
+    }>
+    required_actions: Array<{ control_id: string; status: ModelIntakeReportStatus; action: string }>
+  }
   limitations: string[]
 }
 

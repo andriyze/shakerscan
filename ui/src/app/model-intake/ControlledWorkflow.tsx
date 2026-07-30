@@ -491,6 +491,11 @@ export function ControlledModelIntakeWorkflow({
     }
   }
 
+  const performedControlIds = new Set(report?.assessment_scope?.checks_performed || [])
+  const incompleteControlIds = new Set(report?.assessment_scope?.checks_not_completed || [])
+  const performedControls = report?.controls.filter((control) => performedControlIds.has(control.id)) || []
+  const incompleteControls = report?.controls.filter((control) => incompleteControlIds.has(control.id)) || []
+
   return (
     <Card className="min-w-0 p-4" id="controlled-model-intake-workflow">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -687,25 +692,80 @@ export function ControlledModelIntakeWorkflow({
         <div className="border-t border-gray-800 p-4">
           {!report ? <div className="text-xs text-gray-500">Select a controlled submission to generate its authoritative report.</div> : (
             <div className="grid gap-4">
-              <div className="flex flex-wrap items-start justify-between gap-3 rounded-lg border border-gray-800 bg-gray-900 p-4">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2"><FileText className="h-4 w-4 text-cyan-300" /><span className={`rounded px-2 py-1 text-xs font-bold ${statusClass(report.outcome)}`}>{report.outcome}</span></div>
-                  <p className="mt-2 text-sm text-gray-200">{report.plain_language}</p>
-                  <div className="mt-2 break-all font-mono text-[10px] text-gray-600">report sha256:{report.report_sha256}</div>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  {(['json', 'html', 'sarif'] as const).map((format) => <button key={format} type="button" className={buttonClass} disabled={busy === `report:${format}`} onClick={() => void exportReport(format)}><Download className="h-3.5 w-3.5" /> {format === 'html' ? 'Printable HTML / PDF' : format.toUpperCase()}</button>)}
-                </div>
-              </div>
-              <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
-                {report.controls.map((control) => (
-                  <div key={control.id} className="rounded border border-gray-800 bg-gray-900 p-3">
-                    <div className="flex items-start justify-between gap-2"><span className="text-xs font-medium text-gray-200">{control.label}</span><span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold ${statusClass(control.status)}`}>{control.status}</span></div>
-                    <p className="mt-2 text-[11px] leading-5 text-gray-500">{control.detail}</p>
-                    {control.evidence_refs.length > 0 && <div className="mt-2 text-[10px] text-gray-600">{control.evidence_refs.length} evidence reference{control.evidence_refs.length === 1 ? '' : 's'}</div>}
+              <section className="rounded-lg border border-gray-800 bg-gray-900 p-4" aria-label="Model Intake executive summary">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">Executive summary</div>
+                    <div className="mt-2 flex items-center gap-2"><FileText className="h-4 w-4 text-cyan-300" /><span className={`rounded px-2 py-1 text-xs font-bold ${statusClass(report.outcome)}`}>ShakerScan: {report.outcome}</span></div>
+                    <p className="mt-2 max-w-4xl text-sm text-gray-200">{report.executive_summary.decision_statement}</p>
+                    <p className="mt-2 text-xs text-gray-500">{report.executive_summary.authorization_scope}</p>
                   </div>
-                ))}
-              </div>
+                  <div className="flex flex-wrap gap-2">
+                    {(['json', 'html', 'sarif'] as const).map((format) => <button key={format} type="button" className={buttonClass} disabled={busy === `report:${format}`} onClick={() => void exportReport(format)}><Download className="h-3.5 w-3.5" /> {format === 'html' ? 'Printable HTML / PDF' : format.toUpperCase()}</button>)}
+                  </div>
+                </div>
+                <div className="mt-4 rounded border border-yellow-800/60 bg-yellow-950/20 p-3 text-xs text-yellow-100">
+                  <div className="font-semibold">Full corporate approval: not determined by ShakerScan</div>
+                  <p className="mt-1 text-yellow-100/80">{report.executive_summary.scope_warning}</p>
+                </div>
+                <div className="mt-4 grid gap-2 sm:grid-cols-3 xl:grid-cols-6">
+                  {[
+                    ['performed', report.executive_summary.coverage.performed],
+                    ['passed', report.executive_summary.coverage.passed],
+                    ['failed', report.executive_summary.coverage.failed],
+                    ['review', report.executive_summary.coverage.review],
+                    ['not completed', report.executive_summary.coverage.not_completed],
+                    ['external', report.executive_summary.coverage.external_corporate_requirements],
+                  ].map(([label, value]) => <div key={String(label)} className="rounded border border-gray-800 bg-gray-950 p-2 text-center"><div className="text-lg font-semibold text-white">{String(value ?? 0)}</div><div className="text-[10px] uppercase tracking-wide text-gray-500">{label}</div></div>)}
+                </div>
+                {report.executive_summary.required_actions.length > 0 && <div className="mt-4"><div className="text-xs font-semibold text-gray-300">Required next actions</div><ol className="mt-2 list-decimal space-y-1 pl-5 text-xs text-gray-400">{report.executive_summary.required_actions.map((action) => <li key={`${action.control_id}-${action.status}`}><span className={statusClass(action.status)}>{action.status}</span> · {action.action}</li>)}</ol></div>}
+                <div className="mt-3 break-all font-mono text-[10px] text-gray-600">report sha256:{report.report_sha256}</div>
+              </section>
+
+              <section className="rounded-lg border border-gray-800 bg-gray-900 p-4" aria-label="Checks performed">
+                <div className="text-sm font-semibold text-white">Checks performed</div>
+                <p className="mt-1 text-xs text-gray-500">These controls produced a determinate PASS, FAIL, or REVIEW result for this exact submission.</p>
+                <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                  {performedControls.length === 0 ? <div className="text-xs text-gray-500">No determinate control results.</div> : performedControls.map((control) => (
+                    <div key={control.id} className="rounded border border-gray-800 bg-gray-950 p-3">
+                      <div className="text-[10px] uppercase tracking-wide text-gray-600">{control.category}</div>
+                      <div className="mt-1 flex items-start justify-between gap-2"><span className="text-xs font-medium text-gray-200">{control.label}</span><span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold ${statusClass(control.status)}`}>{control.status}</span></div>
+                      <p className="mt-2 text-[11px] leading-5 text-gray-500">{control.detail}</p>
+                    </div>
+                  ))}
+                </div>
+              </section>
+
+              <section className="rounded-lg border border-gray-800 bg-gray-900 p-4" aria-label="Checks not completed">
+                <div className="text-sm font-semibold text-white">Supported checks not completed</div>
+                <p className="mt-1 text-xs text-gray-500">ERROR, INCOMPLETE, and NOT_RUN are visible gaps and never count as approval evidence.</p>
+                <div className="mt-3 space-y-2">
+                  {incompleteControls.length === 0 ? <div className="text-xs text-green-300">No supported controls are incomplete or not run.</div> : incompleteControls.map((control) => (
+                    <div key={control.id} className="rounded border border-red-900/50 bg-red-950/10 p-3">
+                      <div className="flex flex-wrap items-start justify-between gap-2"><div><div className="text-[10px] uppercase tracking-wide text-gray-600">{control.category}</div><div className="mt-1 text-xs font-medium text-gray-200">{control.label}</div></div><span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${statusClass(control.status)}`}>{control.status}</span></div>
+                      <p className="mt-2 text-[11px] text-gray-500">{control.detail}</p><p className="mt-1 text-[11px] text-cyan-300">Next: {control.remediation}</p>
+                    </div>
+                  ))}
+                </div>
+              </section>
+
+              <details className="rounded-lg border border-gray-800 bg-gray-900">
+                <summary className="cursor-pointer px-4 py-3 text-sm font-semibold text-white">Corporate approval requirements outside ShakerScan ({report.detailed_review.external_approval_requirements.length})</summary>
+                <div className="border-t border-gray-800 p-4"><p className="mb-3 text-xs text-gray-500">These are expected corporate reviews—not hidden scanner failures. ShakerScan can bind resulting evidence, but it does not make these decisions.</p><div className="space-y-2">{report.detailed_review.external_approval_requirements.map((item) => <div key={item.id} className="rounded border border-gray-800 bg-gray-950 p-3"><div className="flex flex-wrap items-center gap-2"><span className="font-mono text-[10px] text-gray-600">{item.id}</span><span className="text-[10px] uppercase tracking-wide text-gray-500">{item.category}</span><span className="rounded bg-blue-950 px-1.5 py-0.5 text-[9px] font-semibold text-blue-300">{item.status}</span></div><div className="mt-1 text-xs text-gray-200">{item.requirement}</div><div className="mt-2 text-[11px] text-gray-500">Owner: {item.typical_owner} · Evidence: {item.expected_evidence}</div></div>)}</div></div>
+              </details>
+
+              <details className="rounded-lg border border-gray-800 bg-gray-900">
+                <summary className="cursor-pointer px-4 py-3 text-sm font-semibold text-white">Detailed control evidence ({report.controls.length})</summary>
+                <div className="grid gap-2 border-t border-gray-800 p-4 sm:grid-cols-2 xl:grid-cols-3">
+                  {report.controls.map((control) => (
+                    <div key={control.id} className="rounded border border-gray-800 bg-gray-950 p-3">
+                      <div className="flex items-start justify-between gap-2"><span className="text-xs font-medium text-gray-200">{control.question}</span><span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold ${statusClass(control.status)}`}>{control.status}</span></div>
+                      <p className="mt-2 text-[11px] leading-5 text-gray-500">{control.detail}</p><p className="mt-2 text-[10px] text-gray-600">Method: {control.method}</p>
+                      {control.evidence_refs.length > 0 && <div className="mt-2 text-[10px] text-gray-600">{control.evidence_refs.length} evidence reference{control.evidence_refs.length === 1 ? '' : 's'}</div>}
+                    </div>
+                  ))}
+                </div>
+              </details>
               <div className="rounded border border-gray-800 bg-gray-900 p-3 text-[11px] text-gray-500">
                 Statuses are normalized to PASS, FAIL, REVIEW, INCOMPLETE, ERROR, NOT_RUN, or NOT_APPLICABLE. The printable HTML uses the same report digest and browser printing provides the PDF artifact; SARIF contains every non-passing control for CI ingestion.
               </div>
