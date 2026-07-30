@@ -1496,7 +1496,9 @@ Remaining product/infrastructure work:
 - Add separately versioned GGUF and additional framework loader profiles as their runtimes are approved.
 - Separate import, tokenizer construction, model construction, weight load, warmup, inference, and teardown
   so the report identifies the failing phase.
-- Add a controlled pickle-to-safetensors conversion workflow and numerical equivalence receipt.
+- **Implemented evidence contract:** a signed conversion receipt must bind source/target digests, converter
+  image, tensor inventory, numeric equivalence, and embedding equivalence. Deploy the conversion job inside
+  the runner fleet; unsafe source serialization never executes in the API/static worker.
 - Produce a signed runtime-execution receipt bound to snapshot, runtime, loader, configuration, hardware,
   limits, and telemetry digests.
 
@@ -1556,7 +1558,9 @@ Remaining product work:
 
 - Extend the implemented first-page execution matrix to include tool/rules database freshness and independent
   microVM telemetry when those integrations ship.
-- Add internal OCI-registry promotion after organizational registry credentials and naming policy are supplied.
+- **Implemented promotion artifact:** build a standard content-addressed OCI image layout containing the exact
+  bundle, admission, and optionally digest-verified model/snapshot blobs. Corporate registry credentials and
+  naming policy are still required to push the layout with ORAS or an equivalent registry client.
 - Make every failed/non-run required control link to evidence and a concrete remediation.
 - Keep JSON, HTML, PDF, SARIF, admission statement, and UI decisions consistent.
 - Add deterministic report fixtures proving the simple answer: what passed, what failed, what was not tested,

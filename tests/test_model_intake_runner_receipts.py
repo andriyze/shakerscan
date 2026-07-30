@@ -98,3 +98,15 @@ def test_signed_pass_with_missing_runtime_observation_is_rejected():
     result = _verify(payload, envelope, key)
     assert result["verified"] is False
     assert "pass_claim_missing:syscall_telemetry" in result["blockers"]
+
+
+def test_conversion_receipt_requires_tensor_numeric_and_embedding_equivalence():
+    payload, envelope, key = _envelope("conversion_equivalence", {
+        "source_artifact_sha256": "f" * 64,
+        "target_artifact_sha256": "2" * 64,
+        "tensor_inventory_equivalent": True,
+        "numeric_equivalence_status": "PASS",
+        "embedding_equivalence_status": "PASS",
+        "converter_image_digest": "sha256:" + "d" * 64,
+    })
+    assert _verify(payload, envelope, key)["verified"] is True

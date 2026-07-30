@@ -21,6 +21,7 @@ EVIDENCE_POLICY = {
     "runtime_execution": ("GENERATED_RUNTIME", "runtime_runner"),
     "embedding_evaluation": ("GENERATED_EVALUATION", "evaluation_runner"),
     "data_plane_evaluation": ("GENERATED_DATA_PLANE", "data_plane_runner"),
+    "conversion_equivalence": ("GENERATED_RUNTIME", "runtime_runner"),
 }
 
 
@@ -66,7 +67,7 @@ def _validate_pass_claim(payload: dict[str, Any]) -> list[str]:
             "thresholds": bool(observations.get("thresholds_sha256")),
             "embedding_digest": bool(observations.get("embedding_output_sha256")),
         }
-    else:
+    elif kind == "data_plane_evaluation":
         required = {
             "security": observations.get("security_status") == "PASS",
             "connector": bool(observations.get("connector_id")),
@@ -78,6 +79,15 @@ def _validate_pass_claim(payload: dict[str, Any]) -> list[str]:
             ),
             "deletion": observations.get("deletion_verified") is True,
             "cache_auth": observations.get("cache_authorization_verified") is True,
+        }
+    else:
+        required = {
+            "source_digest": bool(observations.get("source_artifact_sha256")),
+            "target_digest": observations.get("target_artifact_sha256") == payload.get("model_artifact_sha256"),
+            "tensor_inventory": observations.get("tensor_inventory_equivalent") is True,
+            "numeric": observations.get("numeric_equivalence_status") == "PASS",
+            "embedding": observations.get("embedding_equivalence_status") == "PASS",
+            "converter": bool(observations.get("converter_image_digest")),
         }
     for name, passed in required.items():
         if not passed:
