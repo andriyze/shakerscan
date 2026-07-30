@@ -42,6 +42,9 @@ test('runner evidence is rendered as phases, network telemetry, and resource tel
   assert.match(workflow, /attempted_operations/)
   assert.match(workflow, /lost_events/)
   assert.match(workflow, /telemetry_sha256/)
+  assert.match(workflow, /Converted target identity/)
+  assert.match(workflow, /conversion_rescan/)
+  assert.match(workflow, /Runtime bundle seeded/)
 })
 
 test('Codex workflow is prominently advisory and promotion remains a separate operator action', () => {

@@ -151,8 +151,11 @@ curl -s -X POST "$API_BASE/model-intake/submissions/$SUBMISSION_ID/runner-jobs" 
 - `runtime` requires a reviewed known-answer digest and runs import, tokenizer, model load, warmup, inference,
   and teardown for the exact materialized subject.
 - `conversion` is only the fixed PyTorch-bin-to-safetensors profile. It uses `weights_only=True` inside the
-  microVM, proves tensor and embedding equivalence, and emits a new content-addressed artifact. Re-intake the
-  converted artifact; conversion does not silently replace the submitted subject.
+  microVM, proves tensor and embedding equivalence, and emits a new content-addressed snapshot. On refresh,
+  the server independently rehashes and registers the target artifact/snapshot/code/tokenizer/configuration,
+  reruns the existing strict scanners against that target, and returns `conversion_rescan` with
+  `next_runtime_subjects`. Use those exact values for a separate `runtime` job. Conversion does not silently
+  replace the source subject, count as target runtime evidence, or bypass a rescan non-pass.
 
 List and explicitly refresh jobs:
 
@@ -170,6 +173,11 @@ host firewall drops; completeness, overflow, and lost-event counters; and a tele
 on any attempt, loss, overflow, contradiction, missing loopback-only/no-device proof, or digest mismatch.
 Resource evidence is host-cgroup measured. The receipt and derived embedding evaluation retain digests and
 bounded measurements, not raw source text or vectors.
+
+The bundle's `loader_profile_sha256` must equal the server-resolved profile for that exact source. The runner
+endpoint rejects a stale conversion profile or caller-invented profile digest. The UI seeds the verified
+converted target and safe runtime profile after refresh; API/agent clients must copy `next_runtime_subjects`
+without altering the digests.
 
 ## 7. Optional keyless Codex planner
 

@@ -12071,6 +12071,14 @@ async def _register_and_rescan_converted_snapshot(
         "REVIEW_REQUIRED": "WARNING",
         "FAIL": "FAIL",
     }.get(generated_status, "INCOMPLETE")
+    runtime_resolution = _resolve_model_loader_profile(
+        materialized["profile_manifest"],
+        artifact_path=materialized["artifact_path"],
+        runtime_image_digest=str(receipt_payload["runtime_image_digest"]),
+        reviewed_custom_code_sha256=materialized["custom_code_sha256"],
+    )
+    if runtime_resolution.get("status") != "READY" or not isinstance(runtime_resolution.get("profile"), dict):
+        static_status = "INCOMPLETE"
     report = {
         "schema_version": "model-intake-conversion-static-rescan/v1",
         "source_conversion_receipt_sha256": hashlib.sha256(
@@ -12181,6 +12189,19 @@ async def _register_and_rescan_converted_snapshot(
         "status": static_status,
         "evidence": row_to_dict(evidence),
         "generated_evidence": generated,
+        "next_runtime_subjects": {
+            "model_artifact_sha256": artifact_sha,
+            "repository_snapshot_sha256": snapshot_sha,
+            "custom_code_sha256": materialized["custom_code_sha256"],
+            "tokenizer_sha256": materialized["tokenizer_sha256"],
+            "configuration_sha256": materialized["configuration_sha256"],
+            "runtime_image_digest": receipt_payload["runtime_image_digest"],
+            "loader_profile_sha256": (
+                runtime_resolution["profile"]["profile_sha256"]
+                if runtime_resolution.get("status") == "READY" else None
+            ),
+        },
+        "runtime_loader_profile": runtime_resolution,
         "downstream_invalidation": invalidation,
     }
 
@@ -12541,6 +12562,11 @@ async def create_model_intake_runner_job(
     if resolution.get("status") != "READY" or not isinstance(resolution.get("profile"), dict):
         raise HTTPException(status_code=409, detail={"code": "runner_loader_profile_not_ready", **resolution})
     profile = resolution["profile"]
+    if bundle["loader_profile_sha256"] != profile["profile_sha256"]:
+        raise HTTPException(
+            status_code=409,
+            detail="Deployment bundle loader-profile digest differs from the authoritative server resolution",
+        )
     runner_request = {
         "submission_id": str(submission_uuid),
         "mode": "conversion" if request.operation == "conversion" else "runtime",
@@ -12786,38 +12812,37 @@ async def _execute_model_intake_agent_action(
         if ("repository_snapshot", bundle["repository_snapshot_sha256"]) not in subject_pairs:
             blockers.append("repository_snapshot_subject_mismatch")
         result = _model_intake_json_object(submission["result"])
-        model = result.get("model_intake") if isinstance(result.get("model_intake"), dict) else {}
-        snapshot = model.get("repository_snapshot") if isinstance(model.get("repository_snapshot"), dict) else {}
-        selected = next(
-            (
-                item for item in snapshot.get("files", [])
-                if isinstance(item, dict) and item.get("sha256") == bundle["model_artifact_sha256"]
-            ),
-            None,
-        )
-        if snapshot.get("complete") is not True or not selected:
-            blockers.append("complete_snapshot_or_selected_artifact_missing")
-            resolution = None
-        else:
-            python_files = [
-                str(item.get("path")) for item in snapshot.get("files", [])
-                if isinstance(item, dict) and str(item.get("path") or "").endswith(".py")
-            ]
-            semantic = model.get("metadata") if isinstance(model.get("metadata"), dict) else {}
-            manifest = {
-                "library_name": str(semantic.get("library_name") or "transformers"),
-                "custom_code_required": bool(python_files),
-                "architectures": semantic.get("architectures") if isinstance(semantic.get("architectures"), list) else [],
-            }
+        try:
+            try:
+                materialized = await asyncio.to_thread(
+                    _model_intake_snapshot_materialization,
+                    result,
+                    artifact_sha256=bundle["model_artifact_sha256"],
+                    repository_snapshot_sha256=bundle["repository_snapshot_sha256"],
+                )
+            except HTTPException as source_error:
+                if source_error.status_code != 409:
+                    raise
+                materialized = await asyncio.to_thread(
+                    _model_intake_converted_snapshot_materialization,
+                    artifact_sha256=bundle["model_artifact_sha256"],
+                    repository_snapshot_sha256=bundle["repository_snapshot_sha256"],
+                )
+            for field in ("custom_code_sha256", "tokenizer_sha256", "configuration_sha256"):
+                if bundle.get(field) != materialized[field]:
+                    blockers.append(f"{field}_mismatch")
             resolver = _resolve_model_conversion_profile if operation == "conversion" else _resolve_model_loader_profile
             resolution = resolver(
-                manifest,
-                artifact_path=str(selected.get("path")),
+                materialized["profile_manifest"],
+                artifact_path=materialized["artifact_path"],
                 runtime_image_digest=bundle["runtime_image_digest"],
-                reviewed_custom_code_sha256=None,
+                reviewed_custom_code_sha256=materialized["custom_code_sha256"],
             )
             if resolution.get("status") != "READY":
                 blockers.append(f"loader_profile:{resolution.get('reason') or resolution.get('status')}")
+        except (HTTPException, OSError, ValueError) as exc:
+            blockers.append(f"complete_snapshot_or_selected_artifact_missing:{str(exc)[:300]}")
+            resolution = None
         known_digest = str(arguments.get("known_answer_embedding_sha256") or "").lower()
         if operation == "runtime" and not re.fullmatch(r"[0-9a-f]{64}", known_digest):
             blockers.append("known_answer_embedding_digest_required")

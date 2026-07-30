@@ -70,7 +70,7 @@ function runnerObservations(job: ModelIntakeRunnerJob): JsonObject {
 }
 
 function subjectDigest(detail: ModelIntakeWorkflowDetail | null, kind: string): string {
-  const subject = detail?.subjects.find((item) => item.subject_kind === kind)
+  const subject = detail?.subjects.filter((item) => item.subject_kind === kind).at(-1)
   return typeof subject?.sha256 === 'string' ? subject.sha256 : ''
 }
 
@@ -306,7 +306,20 @@ export function ControlledModelIntakeWorkflow({
     setError(null)
     try {
       const id = requireSelection()
-      await refreshModelIntakeRunnerJob(id, jobId, operatorToken)
+      const response = await refreshModelIntakeRunnerJob(id, jobId, operatorToken)
+      const nextSubjects = response.conversion_rescan?.next_runtime_subjects
+      if (nextSubjects) {
+        setBundleJson((current) => {
+          try {
+            const parsed = parseObject(current, 'Deployment bundle') as unknown as ModelIntakeDeploymentBundleRequest
+            return JSON.stringify({ ...parsed, ...nextSubjects }, null, 2)
+          } catch {
+            return JSON.stringify({ ...blankBundle(detail?.submission.requested_environment), ...nextSubjects }, null, 2)
+          }
+        })
+        setRunnerOperation('runtime')
+        toast.success(`Converted target rescan: ${response.conversion_rescan?.status || 'complete'}. Runtime bundle seeded.`)
+      }
       await loadSelected(id)
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Failed to refresh runner job')
@@ -605,6 +618,12 @@ export function ControlledModelIntakeWorkflow({
               const phases = objectValue(observations.phases)
               const network = objectValue(observations.network_telemetry)
               const resources = objectValue(observations.resource_telemetry)
+              const convertedSnapshot = typeof observations.target_repository_snapshot_sha256 === 'string' ? observations.target_repository_snapshot_sha256 : ''
+              const convertedArtifact = typeof observations.target_artifact_sha256 === 'string' ? observations.target_artifact_sha256 : ''
+              const convertedStatic = detail?.evidence.filter((item) => {
+                const bindings = objectValue(item.subject_bindings)
+                return item.evidence_type === 'static_analysis' && bindings.repository_snapshot_sha256 === convertedSnapshot
+              }).at(-1)
               return (
                 <div key={job.id} className="rounded-lg border border-gray-800 bg-gray-900 p-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
@@ -614,6 +633,7 @@ export function ControlledModelIntakeWorkflow({
                   {Object.keys(phases).length > 0 && <div className="mt-3"><div className="mb-2 flex items-center gap-2 text-xs text-gray-400"><Activity className="h-3.5 w-3.5" /> Phase timeline</div><div className="grid gap-2 sm:grid-cols-2">{Object.entries(phases).map(([name, value]) => { const phase = objectValue(value); const phaseStatus = String(phase.status || value); return <div key={name} className="rounded border border-gray-800 px-2 py-1.5 text-[11px]"><div className="flex justify-between gap-2"><span className="text-gray-300">{name.replace(/_/g, ' ')}</span><span className={statusClass(phaseStatus)}>{phaseStatus}</span></div>{phase.duration_ms !== undefined && <div className="mt-1 text-gray-600">{String(phase.duration_ms)} ms</div>}</div> })}</div></div>}
                   {Object.keys(network).length > 0 && <div className="mt-3 rounded border border-gray-800 p-3 text-[11px]"><div className="flex items-center justify-between gap-2"><span className="font-medium text-gray-300">Independent network telemetry</span><span className={network.complete === true && network.overflowed === false && network.lost_events === 0 ? 'text-green-300' : 'text-red-300'}>{network.complete === true ? 'complete' : 'incomplete'}</span></div><div className="mt-2 grid gap-1 text-gray-500 sm:grid-cols-2"><span>attempts: <b className="text-gray-200">{String(network.attempt_count ?? 'unknown')}</b></span><span>lost: <b className="text-gray-200">{String(network.lost_events ?? 'unknown')}</b></span><span>overflowed: <b className="text-gray-200">{String(network.overflowed ?? 'unknown')}</b></span><span>guest interfaces: <b className="text-gray-200">{Array.isArray(network.guest_interfaces) ? network.guest_interfaces.join(', ') : 'unknown'}</b></span><span>host drops: <b className="text-gray-200">{String(network.host_firewall_drop_count ?? 'unknown')}</b></span><span>digest: <b className="font-mono text-gray-200">{shortDigest(network.telemetry_sha256)}</b></span></div>{Number(network.attempt_count || 0) > 0 && <pre className="mt-2 max-h-32 overflow-auto whitespace-pre-wrap break-all rounded bg-gray-950 p-2 text-red-300">{JSON.stringify({ attempted_operations: network.attempted_operations, attempts_by_phase: network.attempts_by_phase }, null, 2)}</pre>}</div>}
                   {Object.keys(resources).length > 0 && <div className="mt-2 rounded border border-gray-800 p-3 text-[11px] text-gray-500"><span className="font-medium text-gray-300">Host resource envelope</span><pre className="mt-2 max-h-36 overflow-auto whitespace-pre-wrap break-all font-mono text-gray-400">{JSON.stringify(resources, null, 2)}</pre></div>}
+                  {convertedSnapshot && <div className="mt-2 rounded border border-cyan-800/60 bg-cyan-950/20 p-3 text-[11px]"><div className="flex items-center justify-between gap-2"><span className="font-medium text-cyan-200">Converted target identity</span><span className={`rounded px-1.5 py-0.5 font-semibold ${statusClass(String(convertedStatic?.status || 'INCOMPLETE'))}`}>static {String(convertedStatic?.status || 'INCOMPLETE')}</span></div><div className="mt-2 grid gap-1 text-cyan-100/70 sm:grid-cols-2"><span>artifact: <b className="font-mono text-cyan-100">{shortDigest(convertedArtifact)}</b></span><span>snapshot: <b className="font-mono text-cyan-100">{shortDigest(convertedSnapshot)}</b></span></div><p className="mt-2 text-cyan-100/60">The converted snapshot is separately registered and rescanned. Seeded runtime fields still require a safe-loader Firecracker run and known-answer digest.</p></div>}
                   {job.error_json && <pre className="mt-2 max-h-36 overflow-auto whitespace-pre-wrap break-all rounded border border-red-900 bg-red-950/20 p-2 text-[11px] text-red-300">{JSON.stringify(job.error_json, null, 2)}</pre>}
                 </div>
               )

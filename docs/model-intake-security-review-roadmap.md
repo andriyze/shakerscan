@@ -1624,6 +1624,10 @@ Remaining product work:
   adapters against that target identity. The resulting exact-bound static evidence is `PASS`, `WARNING`,
   `FAIL`, or `INCOMPLETE`; high/critical findings remain blocking. Conversion evidence is excluded from the
   final required-evidence set and a separate safe-loader runtime job is still mandatory.
+- **Implemented UI/API/agent conversion handoff:** the refresh response returns the exact converted subjects
+  and server-resolved safe-loader profile for the next runtime bundle; the UI seeds them and shows the target
+  rescan status, and the bounded planner validates either the source or converted snapshot. Runner submission
+  rejects any bundle whose loader-profile digest differs from the authoritative resolution.
 - **Implemented per-parser isolation:** every external adapter executes through the existing argv-only
   unprivileged launcher over a copied read-only subject, bounded scratch/output, CPU/file/fd/process limits,
   worker-cgroup memory, no-new-privileges, and an exec-persistent libseccomp filter denying external-capable

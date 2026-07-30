@@ -250,6 +250,13 @@ def test_keyless_runner_plan_uses_authoritative_static_artifact_subject_name():
     source = inspect.getsource(api._execute_model_intake_agent_action)
     assert '("artifact", bundle["model_artifact_sha256"]) not in subject_pairs' in source
     assert '("repository_snapshot", bundle["repository_snapshot_sha256"]) not in subject_pairs' in source
+    assert "_model_intake_converted_snapshot_materialization" in source
+
+
+def test_runner_submission_rejects_bundle_profile_that_differs_from_server_resolution():
+    source = inspect.getsource(api.create_model_intake_runner_job)
+    assert 'bundle["loader_profile_sha256"] != profile["profile_sha256"]' in source
+    assert "authoritative server resolution" in source
 
 
 def test_runner_materialization_reconstructs_exact_content_addressed_snapshot(tmp_path, monkeypatch):

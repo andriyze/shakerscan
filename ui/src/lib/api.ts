@@ -3994,7 +3994,17 @@ export async function createModelIntakeRunnerJob(id: string, data: {
   return res.json()
 }
 
-export async function refreshModelIntakeRunnerJob(submissionId: string, jobId: string, operatorToken: string): Promise<{ job: ModelIntakeRunnerJob; evidence?: ModelIntakeWorkflowRecord | null; deployable: false }> {
+export async function refreshModelIntakeRunnerJob(submissionId: string, jobId: string, operatorToken: string): Promise<{
+  job: ModelIntakeRunnerJob
+  evidence?: ModelIntakeWorkflowRecord | null
+  conversion_rescan?: {
+    status: string
+    evidence?: ModelIntakeWorkflowRecord
+    next_runtime_subjects?: Partial<ModelIntakeDeploymentBundleRequest>
+    runtime_loader_profile?: Record<string, unknown>
+  } | null
+  deployable: false
+}> {
   const res = await fetch(`${API_URL}/model-intake/submissions/${submissionId}/runner-jobs/${jobId}/refresh`, {
     method: 'POST',
     headers: modelIntakeWorkflowHeaders(operatorToken),
