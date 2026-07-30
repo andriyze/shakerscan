@@ -3323,6 +3323,34 @@ async def run_schema_migrations(pool) -> None:
                 END
                 $$
             """)
+            # Older fresh-install schemas created deployment bindings before
+            # admissions existed and therefore omitted this FK. Preserve the
+            # binding row, clear any orphan reference, and converge both fresh
+            # and upgraded databases on the same ON DELETE SET NULL contract.
+            await conn.execute("""
+                UPDATE model_intake_deployment_bindings AS binding
+                SET admission_id = NULL
+                WHERE admission_id IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM model_intake_admissions AS admission
+                      WHERE admission.id = binding.admission_id
+                  )
+            """)
+            await conn.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'model_intake_deployment_bindings_admission_id_fkey'
+                          AND conrelid = 'model_intake_deployment_bindings'::regclass
+                    ) THEN
+                        ALTER TABLE model_intake_deployment_bindings
+                        ADD CONSTRAINT model_intake_deployment_bindings_admission_id_fkey
+                        FOREIGN KEY (admission_id) REFERENCES model_intake_admissions(id) ON DELETE SET NULL;
+                    END IF;
+                END
+                $$
+            """)
 
             # Canonical de-dupe prevention must be present before startup completes;
             # current ON CONFLICT insert paths rely on this unique index.

@@ -1004,6 +1004,20 @@ CREATE INDEX IF NOT EXISTS idx_model_intake_admissions_subject
 CREATE INDEX IF NOT EXISTS idx_model_intake_admissions_reassessment
     ON model_intake_admissions(status, reassessment_due_at);
 
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'model_intake_deployment_bindings_admission_id_fkey'
+          AND conrelid = 'model_intake_deployment_bindings'::regclass
+    ) THEN
+        ALTER TABLE model_intake_deployment_bindings
+        ADD CONSTRAINT model_intake_deployment_bindings_admission_id_fkey
+        FOREIGN KEY (admission_id) REFERENCES model_intake_admissions(id) ON DELETE SET NULL;
+    END IF;
+END
+$$;
+
 CREATE TABLE IF NOT EXISTS model_intake_admission_events (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     admission_id UUID NOT NULL REFERENCES model_intake_admissions(id) ON DELETE CASCADE,

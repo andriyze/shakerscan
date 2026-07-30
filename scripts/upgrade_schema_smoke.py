@@ -34,6 +34,17 @@ async def _assert_common(conn) -> None:
     if not await conn.fetchval("SELECT to_regclass('public.app_schema_migrations') IS NOT NULL"):
         raise RuntimeError("app_schema_migrations is missing after migration")
 
+    deployment_binding_fk = await conn.fetchval(
+        """
+        SELECT pg_get_constraintdef(oid)
+        FROM pg_constraint
+        WHERE conname = 'model_intake_deployment_bindings_admission_id_fkey'
+          AND conrelid = 'model_intake_deployment_bindings'::regclass
+        """
+    )
+    if not deployment_binding_fk or "ON DELETE SET NULL" not in deployment_binding_fk:
+        raise RuntimeError("model intake deployment binding admission FK is missing or inconsistent")
+
     join_token_columns = {
         row["column_name"]
         for row in await conn.fetch(

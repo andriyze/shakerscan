@@ -151,6 +151,19 @@ def test_compose_keeps_signer_authority_out_of_workers():
         assert "MODEL_INTAKE_SIGNER_AWS_KMS_KEY_ID" not in worker_block
 
 
+def test_fresh_and_upgrade_schemas_share_deployment_binding_admission_fk():
+    root = Path(__file__).resolve().parents[1]
+    init_sql = (root / "db" / "init.sql").read_text()
+    migrations = (root / "api" / "retest_contract.py").read_text()
+    constraint = "model_intake_deployment_bindings_admission_id_fkey"
+
+    for source in (init_sql, migrations):
+        assert constraint in source
+        assert "FOREIGN KEY (admission_id) REFERENCES model_intake_admissions(id) ON DELETE SET NULL" in source
+
+    assert "SET admission_id = NULL" in migrations
+
+
 def test_promotion_api_sends_only_stored_decision_id_and_idempotency_key():
     source = inspect.getsource(api._call_model_intake_signer)
     assert '"policy_decision_id"' in source
