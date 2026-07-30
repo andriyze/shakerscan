@@ -1253,8 +1253,8 @@ function ModelIntakeSettingsContent() {
             onClick={() => setIntakeMode('admission')}
             className={`rounded-lg border p-3 text-left ${intakeMode === 'admission' ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-950 hover:border-gray-700'}`}
           >
-            <div className="text-sm font-medium text-white">Admission</div>
-            <div className="mt-1 text-xs text-gray-500">Server-enforced corporate minimums; eligible for a deployable signed allow statement.</div>
+            <div className="text-sm font-medium text-white">Strict technical candidate</div>
+            <div className="mt-1 text-xs text-gray-500">Server-enforced acquisition and scanner minimums. This scan alone is never deployable.</div>
           </button>
           <button
             type="button"
@@ -1306,8 +1306,8 @@ function ModelIntakeSettingsContent() {
           ))}
         </div>
         {intakeMode === 'admission' && (
-          <div className="mt-3 text-xs text-cyan-200">
-            The API applies its configured admission profile (production by default); caller-selected profiles and inline exceptions cannot weaken it.
+          <div className="mt-3 rounded border border-cyan-900/70 bg-cyan-950/20 p-3 text-xs text-cyan-200">
+            The API applies its configured strict profile, but the result is only generated static evidence. Corporate authorization requires a separate submission, exact frozen deployment bundle, signed runtime/evaluation/data-plane receipts, three segregated approvals, a policy decision, and signer promotion. Use the <span className="font-mono">/model-intake/submissions</span> workflow; preflight or this candidate can never authorize deployment by itself.
           </div>
         )}
         {policyProfilesLoading && <div className="mt-3 text-xs text-gray-500">Loading saved profiles...</div>}
