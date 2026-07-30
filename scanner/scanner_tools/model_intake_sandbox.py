@@ -17,6 +17,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+try:
+    from .model_intake_runtime import inspect_safetensors_layout
+except ImportError:  # pragma: no cover - service script execution path
+    from model_intake_runtime import inspect_safetensors_layout  # type: ignore
+
 
 SCHEMA_VERSION = "model-intake-sandbox/v1"
 HEARTBEAT_MAX_AGE_SECONDS = 15
@@ -93,7 +98,7 @@ def _runtime_adapter(extension: str) -> tuple[dict[str, Any] | None, str | None]
         if extension == ".safetensors":
             return {
                 "name": "shakerscan-safetensors-weights",
-                "version": "1",
+                "version": "2",
                 "required_load_level": "weights",
                 "argv": [
                     sys.executable,
@@ -240,33 +245,7 @@ def _run_runtime_adapter(
 
 
 def _inspect_safetensors(path: Path) -> dict[str, Any]:
-    with path.open("rb") as handle:
-        length_raw = handle.read(8)
-        if len(length_raw) != 8:
-            return {"status": "FAIL", "error": "truncated_header_length"}
-        header_length = int.from_bytes(length_raw, "little")
-        if header_length <= 0 or header_length > 100_000_000:
-            return {"status": "FAIL", "error": "invalid_header_length", "header_length": header_length}
-        header = json.loads(handle.read(header_length).decode("utf-8"))
-    if not isinstance(header, dict):
-        return {"status": "FAIL", "error": "header_not_object"}
-    payload_size = path.stat().st_size - 8 - header_length
-    invalid = []
-    for name, tensor in header.items():
-        if name == "__metadata__":
-            continue
-        offsets = tensor.get("data_offsets") if isinstance(tensor, dict) else None
-        if not isinstance(offsets, list) or len(offsets) != 2 or not all(isinstance(item, int) for item in offsets):
-            invalid.append({"tensor": name, "reason": "invalid_offsets"})
-        elif offsets[0] < 0 or offsets[1] < offsets[0] or offsets[1] > payload_size:
-            invalid.append({"tensor": name, "reason": "out_of_bounds"})
-    return {
-        "status": "FAIL" if invalid else "PASS",
-        "format": "safetensors",
-        "tensor_count": len([name for name in header if name != "__metadata__"]),
-        "invalid_tensors": invalid[:100],
-        "payload_size": payload_size,
-    }
+    return inspect_safetensors_layout(path)
 
 
 def _inspect_onnx(path: Path) -> dict[str, Any]:

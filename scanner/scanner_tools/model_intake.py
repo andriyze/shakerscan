@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import os
 import pickletools
 import re
@@ -40,6 +41,7 @@ from .model_intake_attestation import verify_dsse_in_toto as _verify_dsse_in_tot
 from .model_intake_evaluation import evaluate as _evaluate_model_intake
 from .model_intake_evaluation import verify_report as _verify_model_intake_evaluation
 from .model_intake_registry import adapter_capabilities as _adapter_capabilities
+from .model_intake_runtime import DTYPE_SIZES as _SAFETENSORS_DTYPE_SIZES
 from .model_intake_sandbox import request_sandbox_analysis as _request_sandbox_analysis
 
 if __package__ == "scanner_tools":
@@ -2467,28 +2469,44 @@ def _inspect_safetensors(
     for name, tensor in parsed.items():
         if name == "__metadata__":
             continue
+        tensor_ref = hashlib.sha256(str(name).encode("utf-8", "replace")).hexdigest()[:16]
         if not isinstance(tensor, dict):
-            invalid_tensors.append({"tensor": name, "reason": "metadata_not_object"})
+            invalid_tensors.append({"tensor_ref": tensor_ref, "reason": "metadata_not_object"})
             continue
         offsets = tensor.get("data_offsets")
+        dtype = tensor.get("dtype")
+        shape = tensor.get("shape")
         if not (
             isinstance(offsets, list)
             and len(offsets) == 2
-            and all(isinstance(item, int) for item in offsets)
+            and all(type(item) is int for item in offsets)
         ):
-            invalid_tensors.append({"tensor": name, "reason": "missing_or_invalid_data_offsets"})
+            invalid_tensors.append({"tensor_ref": tensor_ref, "reason": "missing_or_invalid_data_offsets"})
+            continue
+        if not isinstance(dtype, str) or dtype not in _SAFETENSORS_DTYPE_SIZES:
+            invalid_tensors.append({"tensor_ref": tensor_ref, "reason": "unsupported_dtype"})
+            continue
+        if not isinstance(shape, list) or not all(type(item) is int and item >= 0 for item in shape):
+            invalid_tensors.append({"tensor_ref": tensor_ref, "reason": "invalid_shape"})
             continue
         start, end = offsets
         if start < 0 or end < start or (payload_size is not None and end > payload_size):
             invalid_tensors.append({
-                "tensor": name,
+                "tensor_ref": tensor_ref,
                 "reason": "offset_out_of_bounds",
                 "start": start,
                 "end": end,
                 "payload_size": payload_size,
             })
             continue
-        tensor_ranges.append((start, end, str(name)))
+        elements = math.prod(shape)
+        if end - start != elements * _SAFETENSORS_DTYPE_SIZES[dtype]:
+            invalid_tensors.append({
+                "tensor_ref": tensor_ref,
+                "reason": "shape_byte_span_mismatch",
+            })
+            continue
+        tensor_ranges.append((start, end, tensor_ref))
 
     overlaps: list[dict[str, Any]] = []
     for previous, current in zip(sorted(tensor_ranges), sorted(tensor_ranges)[1:]):
@@ -2500,17 +2518,39 @@ def _inspect_safetensors(
                 "start": current[0],
             })
 
-    conclusive_invalid = bool(duplicate_keys or invalid_tensors or overlaps)
+    coverage_errors: list[str] = []
+    if payload_size is not None:
+        cursor = 0
+        for start, end, _tensor_ref in sorted(item for item in tensor_ranges if item[1] > item[0]):
+            if start < cursor:
+                coverage_errors.append("overlapping_tensor_spans")
+            elif start > cursor:
+                coverage_errors.append("unexplained_payload_gap")
+            cursor = max(cursor, end)
+        if cursor != payload_size:
+            coverage_errors.append("unexplained_trailing_payload" if cursor < payload_size else "payload_overrun")
+
+    tensor_count = len([key for key in parsed.keys() if key != "__metadata__"])
+    if not tensor_count:
+        invalid_tensors.append({"reason": "tensor_inventory_empty"})
+    if metadata is not None and (
+        not isinstance(metadata, dict)
+        or not all(isinstance(key, str) and isinstance(value, str) for key, value in metadata.items())
+    ):
+        invalid_tensors.append({"reason": "invalid_metadata_map"})
+    conclusive_invalid = bool(duplicate_keys or invalid_tensors or overlaps or coverage_errors)
     validation_complete = payload_size is not None
     header.update({
         "valid": False if conclusive_invalid else True if validation_complete else None,
         "conclusive_invalid": conclusive_invalid,
         "validation_complete": validation_complete,
-        "tensor_count": len([key for key in parsed.keys() if key != "__metadata__"]),
+        "tensor_count": tensor_count,
         "metadata_keys": metadata_keys,
         "suspicious_metadata_keys": sorted(set(suspicious_metadata_keys))[:25],
         "invalid_tensors": invalid_tensors[:25],
         "overlapping_tensors": overlaps[:25],
+        "payload_coverage_complete": validation_complete and not coverage_errors,
+        "coverage_errors": sorted(set(coverage_errors)),
         "payload_size": payload_size,
         "payload_bounds_checked": payload_size is not None,
         "artifact_size": artifact_size if artifact_size is not None else len(data) if not artifact_truncated else None,

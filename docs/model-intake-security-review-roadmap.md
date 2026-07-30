@@ -250,7 +250,7 @@ but the exported status must remain unambiguous.
 | ModelScan, Semgrep, Fickling, and Trivy core adapters | Packaged and self-testing | **Yes in a newly rebuilt source worker image.** Hash-locked Python environments, checksum-pinned Trivy, offline DB/policy cache, bounded execution, strict parsers, rule/DB digests, and malicious-fixture receipts are exposed by `/model-intake/scanners/readiness` | Define DB-age policy and recurring rebuild/reassessment operations |
 | ClamAV, Gitleaks, Syft, OSV-Scanner, and pip-audit adapters | Fail-closed integration contracts | No; a missing requested/required tool is `UNSUPPORTED` | Package only where organization policy needs the complementary depth; do not duplicate the core bundle by default |
 | Isolated semantic sandbox | Implemented container boundary | Request/subject/evidence binding, isolation/seccomp gating, broker-worker service, and per-job limits are present | Treat it as bounded staging evidence, not a substitute for host-independent execution isolation |
-| Built-in safetensors weights adapter | Implemented and enabled by format | Re-hashes and memory-maps the exact artifact; validates tensor inventory/ranges and sampled numeric finiteness; reports `load_level=weights` | Does not import custom code, instantiate the model graph, tokenize, or generate embeddings |
+| Built-in safetensors weights adapter | Fail-closed bounded parser implemented and enabled by format | Re-hashes and memory-maps the exact artifact; rejects duplicate keys, unsupported dtypes, invalid shapes/spans, overlap, gaps/trailing payload, and unmeasured floating tensors; samples F16/F32/F64/BF16 finiteness; reports `load_level=weights` | Replace the handwritten parser with a bounded official-library/Rust inspector; it still does not instantiate the model graph, tokenize, or generate embeddings |
 | Operator runtime adapter | Implemented integration contract | Can prove exact-digest model load and known-answer tests in the hardened container when an operator image/argv adapter is installed | Treat as staging evidence, not a substitute for the microVM tier |
 | Actual tokenizer/model load and inference in disposable microVM | Not implemented | No | Add KVM/Firecracker/Kata runner and loader profiles |
 | Runtime behavior telemetry | Not implemented | No | Integrate Tracee/Falco/auditd/eBPF or equivalent in the execution runner |
@@ -324,7 +324,7 @@ fully server-owned:
 | **P0** | `deployment_approved` and approval-shaped metadata originate in the submission request | Accept only authenticated, exact-subject approval receipts bound to a frozen evidence manifest and policy digest |
 | **P0** | Hostile-artifact scanner workers receive the admission private key and sign their own final decision | Workers emit unsigned technical decision candidates; a separate control-plane admission service verifies frozen evidence/policy/approvals and invokes a narrow KMS/HSM signer |
 | **P0** | Missing actual retrieval results fall back to an internally computed ideal authorized ranking | Missing connector/runner observations are `INCOMPLETE`; declared observations cannot satisfy a mandatory production security gate |
-| **P0** | Safetensors numeric sampling can pass with zero samples, unsupported dtypes, inconsistent shape spans, overlaps, or unexplained payload | Fail closed now; replace the handwritten parser with a bounded official-library/Rust inspector supporting exact structure and explicit sampled/full numeric coverage |
+| **P0** | Safetensors numeric sampling could pass with zero samples, unsupported dtypes, inconsistent shape spans, overlaps, or unexplained payload | **Immediate fail-closed repair implemented:** all three parsing paths enforce exact structure/coverage, BF16-aware sampling, and `NOT_MEASURED`/`UNSUPPORTED` non-pass states. Still replace the handwritten parser with a bounded official-library/Rust inspector and add explicit full numeric coverage |
 | **P0** | Version 1 admissions were issued under the old authority model | Stop producing deployable v1 packages, mark active v1 records `reassessment_required`, and reject them by default during deployment verification |
 
 Gate 0 exit criteria:
@@ -1411,8 +1411,10 @@ Complete before adding more scanners or model-execution features:
   approval-shaped metadata from admission requests.
 - Remove admission signing material and final signing from hostile evidence-producing workers.
 - Require actual connector/runner retrieval results; never substitute an internally ideal ranking.
-- Fail safetensors coverage closed for unsupported dtype, zero samples, inconsistent spans, overlap, or
-  incomplete payload coverage.
+- **Implemented immediate repair:** fail safetensors coverage closed for unsupported dtype, zero samples,
+  inconsistent spans, overlap, gaps, or incomplete payload coverage across intake, sandbox, and runtime paths.
+  BF16 finiteness is sampled explicitly; unsupported floating encodings are non-pass. Replace the handwritten
+  parser with a bounded official-library/Rust inspector before claiming the parser replacement complete.
 - Quarantine version 1 admissions and introduce an exact-bundle admission v2 through a dedicated signer.
 
 Exit evidence: a correctly signed `block` is rejected by the core verifier used by both library and HTTP
