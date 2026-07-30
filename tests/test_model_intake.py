@@ -780,7 +780,7 @@ def test_model_intake_records_fetch_failures_as_findings(tmp_path):
     assert result["model_intake"]["artifact"]["fetch"]["error"].startswith("FileNotFoundError")
 
 
-def test_model_intake_generates_digest_bound_embedding_and_data_plane_evidence(tmp_path):
+def test_model_intake_rejects_caller_declared_embedding_and_data_plane_observations(tmp_path):
     artifact = tmp_path / "model.safetensors"
     artifact.write_bytes(_safetensors_bytes())
     digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
@@ -818,10 +818,15 @@ def test_model_intake_generates_digest_bound_embedding_and_data_plane_evidence(t
     })))
 
     evaluation = result["model_intake"]["generated_evaluation"]
-    assert evaluation["status"] == "PASS"
+    assert evaluation["status"] == "FAIL"
     assert evaluation["artifact_sha256"] == digest
-    assert result["model_intake"]["summary"]["generated_evaluation_status"] == "PASS"
-    assert "model_intake:generated_evaluation_non_pass" not in {item["id"] for item in result["findings"]}
+    assert evaluation["observation_provenance_class"] == "DECLARED"
+    assert result["model_intake"]["summary"]["generated_evaluation_status"] == "FAIL"
+    assert "model_intake:generated_evaluation_non_pass" in {item["id"] for item in result["findings"]}
+    assert {item["code"] for item in evaluation["blockers"]} >= {
+        "evaluation_observations_untrusted",
+        "actual_retrieval_results_missing",
+    }
 
 
 def test_model_intake_blocks_local_file_reads_by_default(tmp_path):

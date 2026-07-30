@@ -74,7 +74,12 @@ def _authorized(document: dict[str, Any], principal: str, tenant: str) -> bool:
     )
 
 
-def evaluate(spec: Any, *, artifact_sha256: str | None) -> dict[str, Any]:
+def evaluate(
+    spec: Any,
+    *,
+    artifact_sha256: str | None,
+    observations_trusted: bool = False,
+) -> dict[str, Any]:
     started_at = datetime.now(timezone.utc).isoformat()
     blockers: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
@@ -109,6 +114,7 @@ def evaluate(spec: Any, *, artifact_sha256: str | None) -> dict[str, Any]:
         return _finalize_report({
             "schema_version": SCHEMA_VERSION,
             "provenance_class": "shakerscan_generated",
+            "observation_provenance_class": "DECLARED",
             "status": "INDETERMINATE",
             "artifact_sha256": artifact_sha256,
             "blockers": [{"code": "evaluation_spec_missing", "detail": "No evaluation specification was supplied."}],
@@ -122,12 +128,20 @@ def evaluate(spec: Any, *, artifact_sha256: str | None) -> dict[str, Any]:
         return _finalize_report({
             "schema_version": SCHEMA_VERSION,
             "provenance_class": "shakerscan_generated",
+            "observation_provenance_class": "DECLARED",
             "status": "FAIL",
             "artifact_sha256": artifact_sha256,
             "blockers": [{"code": "evaluation_spec_invalid", "detail": str(exc)}],
             "warnings": [],
             "started_at": started_at,
         })
+
+    observation_provenance = "GENERATED_DATA_PLANE" if observations_trusted else "DECLARED"
+    if not observations_trusted:
+        block(
+            "evaluation_observations_untrusted",
+            "Requester-supplied vectors and retrieval observations cannot satisfy a production evaluation gate.",
+        )
 
     thresholds = spec.get("thresholds") if isinstance(spec.get("thresholds"), dict) else {}
     raw_scope = spec.get("suite_scope")
@@ -212,17 +226,60 @@ def evaluate(spec: Any, *, artifact_sha256: str | None) -> dict[str, Any]:
         except (TypeError, ValueError, OverflowError):
             block("invalid_top_k", "Query top_k must be an integer from 1 through 100.", query_id)
             top_k = 10
-        scored = [(doc_id, _cosine(vector, doc["vector"])) for doc_id, doc in documents.items()]
-        scored = [(doc_id, score) for doc_id, score in scored if math.isfinite(score)]
-        scored.sort(key=lambda item: (-item[1], item[0]))
-        authorized_ranked = [doc_id for doc_id, _score in scored if _authorized(documents[doc_id], principal, tenant)][:top_k]
-        returned_ids = [str(item) for item in raw.get("returned_ids", authorized_ranked)][:top_k]
+        if "returned_ids" not in raw:
+            block(
+                "actual_retrieval_results_missing",
+                "The query has no connector- or runner-generated returned_ids.",
+                query_id,
+            )
+            continue
+        if not isinstance(raw.get("returned_ids"), list):
+            block("returned_ids_invalid", "returned_ids must be a list, including for an empty result.", query_id)
+            continue
+        returned_ids_all = [str(item) for item in raw.get("returned_ids", [])]
+        if len(returned_ids_all) != len(set(returned_ids_all)):
+            block("duplicate_returned_ids", "The connector returned duplicate document IDs.", query_id)
+        if "returned_scores" not in raw or not isinstance(raw.get("returned_scores"), list):
+            block("returned_scores_missing", "Actual retrieval results must include returned_scores.", query_id)
+            continue
+        returned_scores_all = raw.get("returned_scores", [])
+        if len(returned_scores_all) != len(returned_ids_all):
+            block("returned_score_count_mismatch", "returned_scores count does not match returned_ids.", query_id)
+            continue
+        try:
+            if not all(math.isfinite(float(item)) for item in returned_scores_all):
+                raise ValueError
+        except (TypeError, ValueError, OverflowError):
+            block("returned_scores_invalid", "returned_scores must contain only finite numbers.", query_id)
+            continue
+        required_observation_fields = (
+            "retrieval_run_id",
+            "connector_id",
+            "connector_version",
+            "index_id",
+            "index_version",
+            "principal_id_hash",
+            "tenant_id_hash",
+            "query_timestamp",
+        )
+        missing_observation_fields = [field for field in required_observation_fields if not str(raw.get(field) or "").strip()]
+        if missing_observation_fields:
+            block(
+                "retrieval_observation_metadata_missing",
+                f"Actual retrieval observation is missing: {', '.join(missing_observation_fields)}.",
+                query_id,
+            )
+            continue
+        returned_ids = returned_ids_all[:top_k]
         relevant = {str(item) for item in raw.get("relevant_ids", [])}
         if relevant:
             recalls.append(len(relevant.intersection(returned_ids)) / len(relevant))
         for document_id in returned_ids:
             document = documents.get(document_id)
-            if document is None or not _authorized(document, principal, tenant):
+            if document is None:
+                block("unknown_returned_document", "The connector returned a document ID absent from the frozen corpus manifest.", query_id)
+                acl_leaks += 1
+            elif not _authorized(document, principal, tenant):
                 acl_leaks += 1
                 if document and document.get("sensitive"):
                     sensitive_leaks += 1
@@ -327,6 +384,7 @@ def evaluate(spec: Any, *, artifact_sha256: str | None) -> dict[str, Any]:
     report = {
         "schema_version": SCHEMA_VERSION,
         "provenance_class": "shakerscan_generated",
+        "observation_provenance_class": observation_provenance,
         "status": status,
         "suite_id": str(spec.get("suite_id") or ""),
         "suite_version": str(spec.get("suite_version") or ""),

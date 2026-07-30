@@ -1806,7 +1806,9 @@ function ModelIntakeSettingsContent() {
                 rows={8}
                 placeholder='{"suite_id":"corp-embedding-security","suite_version":"1","thresholds":{"min_recall_at_k":0.8,"max_acl_leaks":0,"max_poisoned_top_k_rate":0,"min_stability_cosine":0.999},"documents":[],"queries":[],"runtime_runs":[],"data_plane_controls":{}}'
               />
-              <span className="text-xs text-gray-500">Source text is not retained; results contain metrics and hashed case references only.</span>
+              <span className="text-xs text-gray-500">
+                Requester-supplied observations are treated as declared/debug evidence and cannot satisfy an admission gate. A trusted isolated runner must produce provenance-bound retrieval results. Source text is not retained.
+              </span>
             </label>
             <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
               <input type="checkbox" checked={requireSignedAdmission} onChange={(e) => setRequireSignedAdmission(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
