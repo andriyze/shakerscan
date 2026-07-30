@@ -945,6 +945,37 @@ CREATE TABLE IF NOT EXISTS model_intake_runner_jobs (
 CREATE INDEX IF NOT EXISTS idx_model_intake_runner_jobs_submission
     ON model_intake_runner_jobs(submission_id, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS model_intake_agent_sessions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    submission_id UUID NOT NULL REFERENCES model_intake_submissions(id) ON DELETE CASCADE,
+    objective TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('awaiting_planner','completed','cancelled')),
+    max_iterations INTEGER NOT NULL CHECK (max_iterations BETWEEN 1 AND 30),
+    iteration INTEGER NOT NULL DEFAULT 0,
+    action_budget INTEGER NOT NULL CHECK (action_budget BETWEEN 1 AND 100),
+    actions_used INTEGER NOT NULL DEFAULT 0,
+    transcript_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+    final_assessment_json JSONB,
+    created_by TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_model_intake_agent_sessions_submission
+    ON model_intake_agent_sessions(submission_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS model_intake_agent_actions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id UUID NOT NULL REFERENCES model_intake_agent_sessions(id) ON DELETE CASCADE,
+    iteration INTEGER NOT NULL,
+    action_name TEXT NOT NULL,
+    arguments_sha256 TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('completed','rejected','error')),
+    result_json JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_model_intake_agent_actions_session
+    ON model_intake_agent_actions(session_id, created_at);
+
 CREATE TABLE IF NOT EXISTS model_intake_evidence_manifests (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     submission_id UUID NOT NULL REFERENCES model_intake_submissions(id) ON DELETE CASCADE,

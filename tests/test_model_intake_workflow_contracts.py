@@ -48,6 +48,16 @@ def test_runner_job_dto_has_no_path_profile_or_command_authority():
         )
 
 
+def test_keyless_model_intake_agent_dtos_have_no_authority_or_provider_fields():
+    assert set(api.ModelIntakeAgentSessionRequest.model_fields) == {
+        "objective", "max_iterations", "action_budget",
+    }
+    assert set(api.ModelIntakeAgentReplyRequest.model_fields) == {"reply"}
+    source = inspect.getsource(api._execute_model_intake_agent_action)
+    for forbidden in ("subprocess", "shell=True", "model_intake_admissions", "model_intake_approval_receipts"):
+        assert forbidden not in source
+
+
 def test_runner_materialization_reconstructs_exact_content_addressed_snapshot(tmp_path, monkeypatch):
     results = tmp_path / "results"
     content = b"bounded safetensors fixture"

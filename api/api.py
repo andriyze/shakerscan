@@ -136,6 +136,19 @@ except ModuleNotFoundError:
     from api.model_intake_runner_controller import firecracker_readiness as _model_firecracker_readiness
 
 try:
+    from model_intake_agent import (
+        embedding_test_plan as _model_intake_embedding_test_plan,
+        parse_planner_reply as _parse_model_intake_planner_reply,
+        planner_prompt as _model_intake_planner_prompt,
+    )
+except ModuleNotFoundError:
+    from api.model_intake_agent import (
+        embedding_test_plan as _model_intake_embedding_test_plan,
+        parse_planner_reply as _parse_model_intake_planner_reply,
+        planner_prompt as _model_intake_planner_prompt,
+    )
+
+try:
     from scanner_tools.model_intake_retention import execute_cleanup as _execute_model_quarantine_cleanup
     from scanner_tools.model_intake_retention import plan_cleanup as _plan_model_quarantine_cleanup
 except ModuleNotFoundError:
@@ -3926,6 +3939,20 @@ class ModelRunnerJobCreateRequest(BaseModel):
     vcpu_count: int = Field(default=2, ge=1, le=32)
     memory_mib: int = Field(default=4096, ge=256, le=262144)
     timeout_seconds: int = Field(default=600, ge=30, le=3600)
+
+
+class ModelIntakeAgentSessionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    objective: str = Field(min_length=3, max_length=2000)
+    max_iterations: int = Field(default=10, ge=1, le=30)
+    action_budget: int = Field(default=20, ge=1, le=100)
+
+
+class ModelIntakeAgentReplyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reply: str = Field(min_length=1, max_length=64000)
 
 
 class ModelLoaderProfileResolveRequest(BaseModel):
@@ -11800,6 +11827,294 @@ async def refresh_model_intake_runner_job(submission_id: str, job_id: str, http_
             datetime.fromisoformat(str(remote["finished_at"]).replace("Z", "+00:00")) if remote.get("finished_at") else None,
         )
     return {"job": row_to_dict(updated), "evidence": evidence, "deployable": False}
+
+
+async def _execute_model_intake_agent_action(
+    conn: Any,
+    submission_uuid: uuid.UUID,
+    name: str,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    if name == "inspect_submission":
+        if arguments:
+            raise ValueError("inspect_submission takes no arguments")
+        submission = await conn.fetchrow(
+            """SELECT id,scan_id,requested_environment,source_kind,source_reference_hash,
+                      expected_artifact_sha256,intended_use,state,created_at,updated_at
+               FROM model_intake_submissions WHERE id=$1""",
+            submission_uuid,
+        )
+        if not submission:
+            raise ValueError("submission not found")
+        subjects = await conn.fetch(
+            """SELECT subject_kind,sha256,size_bytes,manifest_sha256,source_revision,created_at
+               FROM model_intake_subjects WHERE submission_id=$1 ORDER BY created_at""",
+            submission_uuid,
+        )
+        evidence = await conn.fetch(
+            """SELECT id,evidence_type,provenance_class,producer_id,builder_id,status,
+                      subject_bindings,payload_sha256,started_at,finished_at,expires_at,created_at
+               FROM model_intake_evidence_records WHERE submission_id=$1 ORDER BY created_at""",
+            submission_uuid,
+        )
+        runner_jobs = await conn.fetch(
+            """SELECT id,operation,state,request_sha256,request_json,evidence_record_id,
+                      error_json,created_at,started_at,finished_at
+               FROM model_intake_runner_jobs WHERE submission_id=$1 ORDER BY created_at""",
+            submission_uuid,
+        )
+        return {
+            "submission": row_to_dict(submission),
+            "subjects": [row_to_dict(row) for row in subjects],
+            "evidence": [row_to_dict(row) for row in evidence],
+            "runner_jobs": [row_to_dict(row) for row in runner_jobs],
+            "authority": "read_only_non_admission_evidence",
+        }
+    if name == "inspect_readiness":
+        if arguments:
+            raise ValueError("inspect_readiness takes no arguments")
+        runner = (
+            await asyncio.to_thread(_model_intake_runner_http, "GET", "/health", None)
+            if os.getenv("MODEL_INTAKE_RUNNER_URL", "").strip()
+            else await asyncio.to_thread(_model_firecracker_readiness)
+        )
+        return {
+            "scanners": await asyncio.to_thread(_model_scanner_adapter_readiness),
+            "providers": await asyncio.to_thread(_model_provider_readiness),
+            "runner": runner,
+        }
+    if name == "validate_runner_plan":
+        allowed = {"operation", "deployment_bundle", "known_answer_embedding_sha256"}
+        if set(arguments) - allowed:
+            raise ValueError("validate_runner_plan has unsupported arguments")
+        operation = str(arguments.get("operation") or "runtime")
+        if operation not in {"calibration", "runtime", "conversion"}:
+            raise ValueError("runner operation is unsupported")
+        try:
+            bundle = _build_model_deployment_bundle(arguments.get("deployment_bundle"))
+        except _ModelAdmissionContractError as exc:
+            return {"status": "BLOCKED", "reason": str(exc), "deployable": False}
+        submission = await conn.fetchrow(
+            """SELECT s.requested_environment,s.scan_id,sc.result FROM model_intake_submissions s
+               LEFT JOIN scans sc ON sc.id=s.scan_id WHERE s.id=$1""",
+            submission_uuid,
+        )
+        if not submission:
+            raise ValueError("submission not found")
+        blockers: list[str] = []
+        if bundle["target_environment"] != submission["requested_environment"]:
+            blockers.append("environment_mismatch")
+        subjects = await conn.fetch(
+            "SELECT subject_kind,sha256 FROM model_intake_subjects WHERE submission_id=$1",
+            submission_uuid,
+        )
+        subject_map = {str(row["subject_kind"]): str(row["sha256"]) for row in subjects}
+        if subject_map.get("model_artifact") != bundle["model_artifact_sha256"]:
+            blockers.append("model_artifact_subject_mismatch")
+        if subject_map.get("repository_snapshot") != bundle["repository_snapshot_sha256"]:
+            blockers.append("repository_snapshot_subject_mismatch")
+        result = _model_intake_json_object(submission["result"])
+        model = result.get("model_intake") if isinstance(result.get("model_intake"), dict) else {}
+        snapshot = model.get("repository_snapshot") if isinstance(model.get("repository_snapshot"), dict) else {}
+        selected = next(
+            (
+                item for item in snapshot.get("files", [])
+                if isinstance(item, dict) and item.get("sha256") == bundle["model_artifact_sha256"]
+            ),
+            None,
+        )
+        if snapshot.get("complete") is not True or not selected:
+            blockers.append("complete_snapshot_or_selected_artifact_missing")
+            resolution = None
+        else:
+            python_files = [
+                str(item.get("path")) for item in snapshot.get("files", [])
+                if isinstance(item, dict) and str(item.get("path") or "").endswith(".py")
+            ]
+            semantic = model.get("metadata") if isinstance(model.get("metadata"), dict) else {}
+            manifest = {
+                "library_name": str(semantic.get("library_name") or "transformers"),
+                "custom_code_required": bool(python_files),
+                "architectures": semantic.get("architectures") if isinstance(semantic.get("architectures"), list) else [],
+            }
+            resolver = _resolve_model_conversion_profile if operation == "conversion" else _resolve_model_loader_profile
+            resolution = resolver(
+                manifest,
+                artifact_path=str(selected.get("path")),
+                runtime_image_digest=bundle["runtime_image_digest"],
+                reviewed_custom_code_sha256=None,
+            )
+            if resolution.get("status") != "READY":
+                blockers.append(f"loader_profile:{resolution.get('reason') or resolution.get('status')}")
+        known_digest = str(arguments.get("known_answer_embedding_sha256") or "").lower()
+        if operation == "runtime" and not re.fullmatch(r"[0-9a-f]{64}", known_digest):
+            blockers.append("known_answer_embedding_digest_required")
+        return {
+            "status": "READY" if not blockers else "BLOCKED",
+            "blockers": blockers,
+            "deployment_bundle_sha256": bundle["bundle_sha256"],
+            "loader_profile": resolution,
+            "next_endpoint": (
+                f"POST /model-intake/submissions/{submission_uuid}/runner-jobs"
+                if not blockers else None
+            ),
+            "deployable": False,
+        }
+    if name == "draft_embedding_test_plan":
+        if set(arguments) - {"use_case", "languages"}:
+            raise ValueError("draft_embedding_test_plan has unsupported arguments")
+        return _model_intake_embedding_test_plan(arguments)
+    if name == "recommend_follow_up":
+        if set(arguments) != {"action", "rationale"}:
+            raise ValueError("recommend_follow_up requires action and rationale")
+        action = str(arguments.get("action") or "")
+        allowed = {
+            "runtime", "conversion", "manual_custom_code_review", "embedding_baseline",
+            "data_plane_evaluation", "block", "abstain",
+        }
+        rationale = str(arguments.get("rationale") or "").strip()
+        if action not in allowed or not rationale or len(rationale) > 2000:
+            raise ValueError("follow-up recommendation is outside the bounded catalog")
+        return {
+            "recorded": True,
+            "action": action,
+            "rationale": rationale,
+            "executed": False,
+            "authority": "operator_review_required",
+        }
+    raise ValueError("unknown planner action")
+
+
+@app.post("/model-intake/submissions/{submission_id}/agent/session")
+async def create_model_intake_agent_session(
+    submission_id: str,
+    request: ModelIntakeAgentSessionRequest,
+    http_request: Request,
+):
+    """Create a keyless Codex-driven planning session; no model provider is called."""
+    actor = _model_intake_authenticated_subject(http_request)
+    submission_uuid = _model_intake_uuid(submission_id, "submission id")
+    async with db_pool.acquire() as conn:
+        exists = await conn.fetchval("SELECT EXISTS(SELECT 1 FROM model_intake_submissions WHERE id=$1)", submission_uuid)
+        if not exists:
+            raise HTTPException(status_code=404, detail="Model submission not found")
+        session_id = uuid.uuid4()
+        prompt = _model_intake_planner_prompt(str(submission_uuid), request.objective, request.action_budget)
+        row = await conn.fetchrow(
+            """
+            INSERT INTO model_intake_agent_sessions
+                (id,submission_id,objective,status,max_iterations,action_budget,transcript_json,created_by)
+            VALUES ($1,$2,$3,'awaiting_planner',$4,$5,$6::jsonb,$7) RETURNING *
+            """,
+            session_id,
+            submission_uuid,
+            request.objective,
+            request.max_iterations,
+            request.action_budget,
+            json.dumps([{"role": "system", "content": prompt}]),
+            actor,
+        )
+    return {"session": row_to_dict(row), "observation": prompt, "authority": "advisory_only"}
+
+
+@app.post("/model-intake/agent/session/{session_id}/reply")
+async def reply_model_intake_agent_session(
+    session_id: str,
+    request: ModelIntakeAgentReplyRequest,
+    http_request: Request,
+):
+    actor = _model_intake_authenticated_subject(http_request)
+    session_uuid = _model_intake_uuid(session_id, "agent session id")
+    try:
+        parsed = _parse_model_intake_planner_reply(request.reply)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    async with db_pool.acquire() as conn, conn.transaction():
+        session = await conn.fetchrow(
+            "SELECT * FROM model_intake_agent_sessions WHERE id=$1 FOR UPDATE",
+            session_uuid,
+        )
+        if not session:
+            raise HTTPException(status_code=404, detail="Model Intake agent session not found")
+        if session["status"] != "awaiting_planner":
+            raise HTTPException(status_code=409, detail="Model Intake agent session is terminal")
+        if int(session["iteration"]) >= int(session["max_iterations"]):
+            raise HTTPException(status_code=409, detail="Model Intake agent iteration budget exhausted")
+        transcript = _decode_json_value(session["transcript_json"])
+        transcript = transcript if isinstance(transcript, list) else []
+        transcript.append({"role": "planner", "content": request.reply})
+        next_iteration = int(session["iteration"]) + 1
+        if parsed["done"]:
+            transcript.append({"role": "controller", "content": {"status": "completed", "authority": "advisory_only"}})
+            updated = await conn.fetchrow(
+                """UPDATE model_intake_agent_sessions
+                   SET status='completed',iteration=$2,transcript_json=$3::jsonb,
+                       final_assessment_json=$4::jsonb,updated_at=NOW()
+                   WHERE id=$1 RETURNING *""",
+                session_uuid,
+                next_iteration,
+                json.dumps(transcript),
+                json.dumps(parsed),
+            )
+            return {"session": row_to_dict(updated), "final_assessment": parsed, "authority": "advisory_only"}
+        calls = parsed["tool_calls"]
+        if int(session["actions_used"]) + len(calls) > int(session["action_budget"]):
+            raise HTTPException(status_code=409, detail="Model Intake agent action budget exhausted")
+        observations = []
+        for call in calls:
+            status = "completed"
+            try:
+                result = await _execute_model_intake_agent_action(
+                    conn,
+                    session["submission_id"],
+                    call["name"],
+                    call["arguments"],
+                )
+            except Exception as exc:
+                status = "error"
+                result = {"error": type(exc).__name__, "message": str(exc)[:2000]}
+            arguments_sha = hashlib.sha256(
+                json.dumps(call["arguments"], sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            action = await conn.fetchrow(
+                """INSERT INTO model_intake_agent_actions
+                       (session_id,iteration,action_name,arguments_sha256,status,result_json)
+                   VALUES ($1,$2,$3,$4,$5,$6::jsonb) RETURNING id,action_name,status,result_json""",
+                session_uuid,
+                next_iteration,
+                call["name"],
+                arguments_sha,
+                status,
+                json.dumps(result, default=str),
+            )
+            observations.append(row_to_dict(action))
+        remaining = int(session["action_budget"]) - int(session["actions_used"]) - len(calls)
+        controller_observation = {
+            "actions": observations,
+            "remaining_actions": remaining,
+            "authority": "advisory_only",
+            "deployable": False,
+        }
+        transcript.append({"role": "controller", "content": controller_observation})
+        updated = await conn.fetchrow(
+            """UPDATE model_intake_agent_sessions
+               SET iteration=$2,actions_used=actions_used+$3,transcript_json=$4::jsonb,updated_at=NOW()
+               WHERE id=$1 RETURNING *""",
+            session_uuid,
+            next_iteration,
+            len(calls),
+            json.dumps(transcript, default=str),
+        )
+    return {
+        "session": row_to_dict(updated),
+        "observation": controller_observation,
+        "next_prompt": _model_intake_planner_prompt(
+            str(updated["submission_id"]),
+            str(updated["objective"]),
+            remaining,
+        ),
+        "authority": "advisory_only",
+    }
 
 
 @app.post("/model-intake/submissions/{submission_id}/freeze-evidence")
