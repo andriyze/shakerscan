@@ -417,6 +417,11 @@ def _semgrep_finding(item: Any) -> dict[str, Any]:
         "line": int(start["line"]) if isinstance(start.get("line"), int) else None,
         "message": str(extra.get("message") or "Semgrep rule matched")[:500],
         "tool_severity": semgrep_severity,
+        "classification": (
+            "prohibited_capability" if semgrep_severity == "ERROR"
+            else "review_required" if semgrep_severity == "WARNING"
+            else "informational"
+        ),
     })
     return {key: value for key, value in normalized.items() if value is not None}
 

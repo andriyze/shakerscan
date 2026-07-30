@@ -1603,8 +1603,11 @@ Remaining product work:
   against bounded server configuration (90/14-day defaults), exposed in API/UI, and checked again immediately
   before execution. Missing, malformed, future-dated, or stale required material returns `INCOMPLETE` before
   the tool starts and identifies the `scanner_data_stale` admission-reassessment trigger.
-- Improve the existing Semgrep model-intake rules, safe-pattern fixtures, PyTorch-version context, severity,
-  and malicious-capability versus review-required classification.
+- **Implemented Semgrep calibration:** explicit unsafe deserialization/command/network/hub-fetch capabilities
+  are blocking, while version-dependent `torch.load`, dynamic import, `trust_remote_code`, environment access,
+  native library loading, and bounded file writes are review-required rather than mislabeled malicious.
+  Image-build conformance now requires prohibited=`FAIL`, review-only=`WARNING`, and safe
+  `weights_only=True`/safetensors=`PASS` fixtures.
 - Isolate each existing hostile-file parser with read-only input, no egress where databases permit, resource limits,
   and bounded output.
 - Provide a scanner expectation matrix so a required missing engine blocks instead of silently reducing

@@ -36,6 +36,18 @@ def run_self_test() -> dict[str, object]:
         unsafe_pickle.write_bytes(b"\x80\x04cposix\nsystem\nq\x00.")
         unsafe_source = root / "unsafe.py"
         unsafe_source.write_text('import os\nos.system("id")\n', encoding="utf-8")
+        safe_source = root / "safe.py"
+        safe_source.write_text(
+            'import torch\nfrom safetensors.torch import load_file\n'
+            'def load(path):\n    return torch.load(path, weights_only=True, map_location="cpu")\n',
+            encoding="utf-8",
+        )
+        review_source = root / "review.py"
+        review_source.write_text(
+            'import importlib\nimport torch\n'
+            'def load(path):\n    importlib.import_module("reviewed_local_module")\n    return torch.load(path)\n',
+            encoding="utf-8",
+        )
         vulnerable_repo = root / "vulnerable-repository"
         vulnerable_repo.mkdir()
         (vulnerable_repo / "requirements.txt").write_text("requests==2.19.0\n", encoding="utf-8")
@@ -46,17 +58,32 @@ def run_self_test() -> dict[str, object]:
             "trivy": vulnerable_repo,
         }
         for name, expected in EXPECTED_STATUSES.items():
-            result = run_external_scanner(
-                dataclasses.replace(specs[name], required=True), targets[name], subject
-            )
+            spec = dataclasses.replace(specs[name], required=True)
+            result = run_external_scanner(spec, targets[name], subject)
             actual = str(result.get("execution", {}).get("status") or "CRASHED")
+            variants = []
+            if name == "semgrep":
+                for variant_name, target, variant_expected in (
+                    ("safe", safe_source, "PASS"),
+                    ("review", review_source, "WARNING"),
+                ):
+                    variant_result = run_external_scanner(spec, target, subject)
+                    variant_actual = str(variant_result.get("execution", {}).get("status") or "CRASHED")
+                    variants.append({
+                        "name": variant_name,
+                        "expected_status": variant_expected,
+                        "actual_status": variant_actual,
+                        "passed": variant_actual == variant_expected,
+                        "evidence_sha256": variant_result.get("evidence_sha256"),
+                    })
             checks.append({
                 "name": name,
                 "expected_status": expected,
                 "actual_status": actual,
-                "passed": actual == expected,
+                "passed": actual == expected and all(bool(item["passed"]) for item in variants),
                 "version": result.get("scanner", {}).get("version"),
                 "evidence_sha256": result.get("evidence_sha256"),
+                "variants": variants,
                 "diagnostic": {
                     "summary": result.get("summary"),
                     "exit_code": result.get("execution", {}).get("exit_code"),
@@ -66,7 +93,7 @@ def run_self_test() -> dict[str, object]:
     receipt: dict[str, object] = {
         "schema_version": "model-intake-adapter-self-test/v1",
         "tested_at": datetime.now(timezone.utc).isoformat(),
-        "fixture_sha256": _sha256_json({"revision": 1, "expected": EXPECTED_STATUSES}),
+        "fixture_sha256": _sha256_json({"revision": 2, "expected": EXPECTED_STATUSES, "semgrep_variants": ["safe", "review"]}),
         "status": "PASS" if all(bool(item["passed"]) for item in checks) else "FAIL",
         "checks": checks,
     }

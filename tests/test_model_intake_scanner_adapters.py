@@ -62,18 +62,37 @@ def test_semgrep_parser_requires_schema_and_preserves_findings():
         "line": 42,
         "message": "Dynamic execution is unsafe.",
         "tool_severity": "ERROR",
+        "classification": "prohibited_capability",
     }
     assert summary["finding_count"] == 1
     assert _parse_external_scanner("semgrep", '{"results":[]}', "", 0)[0] == "PASS"
     assert _parse_external_scanner("semgrep", '{"errors":[]}', "", 0)[0] == "INCOMPLETE"
-    warning_status, _, warning_summary = _parse_external_scanner(
+    warning_status, warning_findings, warning_summary = _parse_external_scanner(
         "semgrep",
         json.dumps({"results": [{"check_id": "review", "extra": {"severity": "WARNING"}}], "errors": []}),
         "",
         0,
     )
     assert warning_status == "WARNING"
+    assert warning_findings[0]["classification"] == "review_required"
     assert warning_summary["warning_only"] is True
+
+
+def test_semgrep_rule_contract_distinguishes_prohibited_review_and_safe_patterns():
+    rules = (Path(__file__).resolve().parents[1] / "scanner/scanner_tools/model_intake_semgrep.yml").read_text()
+
+    assert "torch.load(..., weights_only=False, ...)" in rules
+    assert "pattern-not: torch.load(..., weights_only=$VALUE, ...)" in rules
+    assert "shakerscan.model-intake.hub-code-or-artifact-fetch" in rules
+    assert "shakerscan.model-intake.native-library-load" in rules
+    dynamic = rules.split("shakerscan.model-intake.dynamic-import", 1)[1].split("  - id:", 1)[0]
+    remote = rules.split("shakerscan.model-intake.remote-code-opt-in", 1)[1].split("  - id:", 1)[0]
+    assert "severity: WARNING" in dynamic
+    assert "severity: WARNING" in remote
+    fixtures = Path(__file__).resolve().parent / "fixtures/model_intake_semgrep"
+    assert "weights_only=True" in (fixtures / "safe.py").read_text()
+    assert "weights_only=False" in (fixtures / "prohibited.py").read_text()
+    assert "import_module" in (fixtures / "review.py").read_text()
 
 
 def test_scanner_plan_is_format_and_repository_fact_driven(tmp_path):

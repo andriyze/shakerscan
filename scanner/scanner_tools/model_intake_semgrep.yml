@@ -17,7 +17,7 @@ rules:
   - id: shakerscan.model-intake.dynamic-import
     languages: [python]
     message: Model repository code performs a dynamic import that requires manual review.
-    severity: ERROR
+    severity: WARNING
     pattern-either:
       - pattern: __import__(...)
       - pattern: importlib.import_module(...)
@@ -52,9 +52,19 @@ rules:
 
   - id: shakerscan.model-intake.remote-code-opt-in
     languages: [python]
-    message: Model repository code enables trust_remote_code and must not fetch executable code at runtime.
-    severity: ERROR
+    message: Model repository code enables trust_remote_code; pin and review the complete custom-code snapshot.
+    severity: WARNING
     pattern: $LOADER(..., trust_remote_code=True, ...)
+
+  - id: shakerscan.model-intake.hub-code-or-artifact-fetch
+    languages: [python]
+    message: Model repository code can fetch code or artifacts at runtime; the admitted runtime must use only the pinned local snapshot.
+    severity: ERROR
+    pattern-either:
+      - pattern: torch.hub.load(...)
+      - pattern: torch.hub.load_state_dict_from_url(...)
+      - pattern: huggingface_hub.hf_hub_download(...)
+      - pattern: huggingface_hub.snapshot_download(...)
 
   - id: shakerscan.model-intake.network-access
     languages: [python]
@@ -69,6 +79,15 @@ rules:
       - pattern: urllib.request.urlopen(...)
       - pattern: socket.create_connection(...)
       - pattern: $SOCKET.connect(...)
+
+  - id: shakerscan.model-intake.native-library-load
+    languages: [python]
+    message: Model repository code loads a native library; bind the library digest and review its ABI and behavior.
+    severity: WARNING
+    pattern-either:
+      - pattern: ctypes.CDLL(...)
+      - pattern: ctypes.PyDLL(...)
+      - pattern: torch.ops.load_library(...)
 
   - id: shakerscan.model-intake.unsafe-yaml-load
     languages: [python]
