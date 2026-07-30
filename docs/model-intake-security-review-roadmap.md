@@ -4,7 +4,8 @@
 official safetensors inspection, signed runner-receipt contracts, signer boundary, OCI layout, and deployment
 verifiers are implemented. Model Intake scans remain non-deployable technical evidence; only the controlled
 submission/freeze/approval/policy/signing/promotion workflow may authorize deployment. The remaining product
-work is deliberately limited to hardening these mechanisms and deploying one real Firecracker runner.
+work is deliberately limited to hardening these mechanisms, deploying one real Firecracker runner, and then
+adding one bounded advisory keyless-agent planner over the existing Model Intake actions.
 
 **Original audit checkout:** `239f887d9f10e997b9844c916c28073fab71ee79`
 
@@ -36,6 +37,9 @@ Implement and harden:
    Kubernetes admission webhook, UI/reporting, reassessment, and worker/storage lifecycle.
 6. Reliability work: idempotency, leases, terminal failures, bounded retries, recovery, quotas, revocation,
    freshness, negative-path tests, and physical Firecracker/KVM end-to-end validation.
+7. After the deterministic runner and evidence path are operational, one optional keyless coding-agent
+   planner for bounded Model Intake investigation. It may select and interpret existing actions, but it is
+   never an admission, trust, policy, exception, signing, promotion, or guest-command authority.
 
 Do not implement:
 
@@ -47,6 +51,8 @@ Do not implement:
   backends, or a generic workflow engine;
 - a general-purpose conversion service, enterprise IAM product, registry-management product, or support for
   deployment orchestrators beyond the existing CI verifier and Kubernetes webhook.
+- a second AI execution framework, an agent-controlled shell, arbitrary guest commands, agent-defined trust
+  or policy, or an AI-only path that the deterministic Model Intake workflow depends on to remain safe.
 
 The design remains model-agnostic: applicability is selected from immutable repository and artifact facts,
 never a three-model allowlist. A format/provider/runtime that the bounded implementation cannot fully assess
@@ -121,6 +127,8 @@ The remaining implementation and validation order is:
    the versioned retrieval requirement. Otherwise report it `INCOMPLETE`; do not add a GPU runner.
 5. Harden the existing policy, approvals, signer, OCI promotion, deployment verification, reporting,
    reassessment, storage, and failure recovery, and prove their negative paths end to end.
+6. Add the bounded keyless Codex planner only after the deterministic Firecracker evidence producer is
+   operational; align its API, UI, and shipped skill surfaces without granting it decision authority.
 
 For a production profile, the correct decision for any exact model revision is **block/incomplete** until
 every required automated control has generated digest-bound evidence and the required corporate approvals
@@ -1044,6 +1052,8 @@ The API, policy schema, UI, report, and docs must consistently distinguish:
 11. **Attestation signer** — signs the decision and approved subject digests.
 12. **Internal registry/promoter** — copies only approved artifacts and runtimes into production distribution.
 13. **Continuous monitor** — re-evaluates CVEs, rules, policy, signatures, exceptions, and registry drift.
+14. **Optional keyless agent planner** — proposes bounded follow-up actions and explains evidence while the
+    controller continues to own scope, authorization, budgets, execution, evidence, policy, and decisions.
 
 ### 8.2 State machine
 
@@ -1472,6 +1482,9 @@ Each increment must be independently committed and leave required controls fail 
 5. **Control-plane and deployment hardening:** strengthen embedded policy tests, role separation, signer/KMS
    isolation, OCI push verification, CI/Kubernetes denial paths, revocation/cache behavior, storage quotas,
    restart/replay recovery, and first-screen reporting.
+6. **Bounded agent guidance:** reuse the keyless coding-agent turn contract only after physical runner
+   evidence is available; expose a fixed Model Intake action catalog, immutable transcripts, strict budgets,
+   and identical API/UI/skill semantics while keeping all AI output advisory.
 
 Release acceptance requires a physical Firecracker run and controlled deployment test. Mocked or
 caller-signed receipts prove contract handling only and cannot close those gates.
@@ -1603,8 +1616,19 @@ Remaining product/infrastructure work:
 
 - Deploy dedicated Linux/KVM runner hosts and start a fresh Firecracker microVM per exact model/runtime subject.
 - Mount only the read-only quarantined snapshot and signed runtime plus a quota-limited scratch volume.
-- Disable network and credentials, collect file/process/network/syscall/import/resource telemetry, and destroy
-  the VM after bounded evidence export.
+- Do not attach a Firecracker network interface; place the jailed process in a deny-all host namespace as a
+  second boundary, expose no credentials, and destroy the VM after bounded evidence export.
+- Wrap every guest phase and all descendants with a measured syscall collector. Record `socket`, `connect`,
+  `bind`, `listen`, DNS-related calls, send/receive calls, address family, result, phase, and a job-salted
+  destination digest/port without retaining payloads. Record the guest interface inventory and the host
+  namespace/interface/firewall counters plus whether a TAP/network descriptor ever existed.
+- Bind a canonical network-telemetry digest, event count, per-phase counts, collector identity/version,
+  collection-complete flag, dropped/overflow count, guest-interface digest, host-counter digest, and
+  no-network-device proof into the signed runner receipt. Missing, malformed, truncated, overflowed, or
+  unsigned telemetry is `INCOMPLETE`, never evidence of silence.
+- Fail strict admission on any AF_INET/AF_INET6 or DNS attempt, even when egress was successfully blocked.
+  Record local/Unix-socket activity too; only a server-owned loader policy may classify an exact non-egress
+  local pattern as expected, and requesters or agents cannot add such allowances.
 - Add only loader profiles needed by formats already supported by the current product and executable in the
   single Firecracker boundary; unsupported runtimes remain `INCOMPLETE`.
 - Separate import, tokenizer construction, model construction, weight load, warmup, inference, and teardown
@@ -1619,6 +1643,23 @@ Exit criteria: CodeRankEmbed and CodeSage Base can be loaded and exercised witho
 or host access; prohibited behavior and resource breaches reliably block. CodeSage Large runs only if the
 same Firecracker implementation can satisfy its approved CPU/memory envelope; otherwise it remains
 `INCOMPLETE` and no GPU-specific backend is added.
+
+### Phase 3.1 — Measured network isolation acceptance contract
+
+Network acceptance requires both prevention and observation. `network_egress_blocked=true` by itself is not
+sufficient. The trusted runner producer must derive the claim from measured host configuration and complete
+guest telemetry; the receipt verifier must recompute the decision from signed fields rather than trust that
+boolean. Tests must cover successful denied `connect`, DNS, bind/listen, child-process attempts, telemetry
+tampering, wrong phase, collector crash, output truncation, event overflow, interface appearance, host-counter
+drift, and a clean zero-attempt run. Physical acceptance must additionally prove that the microVM has no
+network device and cannot reach a VPS-local service, metadata address, public address, or corporate route.
+
+The report must distinguish:
+
+- **No attempt observed and collection complete** — eligible to pass this control.
+- **Attempt observed but blocked** — isolation worked, behavior control failed.
+- **Communication succeeded** — critical isolation failure.
+- **Telemetry incomplete or contradictory** — `INCOMPLETE`; absence of evidence is not evidence of absence.
 
 ### Phase 4 — Automated model and application evaluation — **scoring and signed-evidence verification contracts implemented; trusted producer absent**
 
@@ -1651,6 +1692,41 @@ Remaining product/infrastructure work:
 Corporate work: supply representative synthetic/internal corpora, relevance judgments, classification/ACL
 labels, non-production services and principals, quality/capacity thresholds, data approvals, and authorization
 to run the tests.
+
+### Phase 4.1 — Bounded keyless Codex guidance — **approved scope; not implemented**
+
+Model Intake may use the current coding-agent session as an optional planner, following the same suspend/reply
+shape as Deep Hunt but with a separate, smaller action catalog. The deterministic intake runs normally when
+no agent is present. Agent refusal, timeout, malformed output, or absence cannot weaken a gate or prevent the
+baseline review from reaching its evidence-based result.
+
+Allowed planner actions are typed operations such as: inspect the authoritative submission and control
+matrix; read redacted evidence; request an applicable existing ModelScan/Fickling/Semgrep/Trivy or built-in
+check; request a named Firecracker phase or approved loader profile; request a schema-validated known-answer,
+embedding, or equivalence case within a pre-approved corpus/threshold contract; compare results; record an
+analyst note; propose remediation/follow-up; and finish or abstain. The controller resolves action IDs to
+fixed implementations and enforces workflow state, applicability, exact subject, authorization, concurrency,
+cost, time, byte, model-token, and action-count budgets. There is no shell, arbitrary argv, arbitrary Python,
+arbitrary guest entrypoint, direct database mutation, or caller/agent-selected evidence signer.
+
+Agent outputs are untrusted advisory records. They cannot declare approval; override policy or required
+gates; suppress findings; trust keys/builders; modify authoritative manifests or evidence; approve exceptions;
+sign, promote, verify, revoke, or reassess admissions; turn a non-pass state into pass; or create post-hoc
+thresholds after observing results. Only generated evidence from the existing workers and trusted Firecracker
+runner can satisfy controls. The deterministic policy engine alone calculates the decision, and human roles
+retain required review and risk authority.
+
+Repository text, model cards, source comments, scanner output, and runtime strings are prompt-injection-capable
+data. The planner receives bounded redacted/context-labeled records, never secrets or raw credentials. Every
+turn, proposal, validation rejection, dispatched action, resulting evidence ID/digest, budget change, and
+abstention is durably recorded. Replays are idempotent and bind the session to one submission and frozen
+manifest generation; new evidence or reassessment invalidates stale planner conclusions.
+
+Surface parity is mandatory: the API exposes session start/read/reply/cancel and typed action/result schemas;
+the UI shows objective, current turn, budgets, proposed/accepted/rejected actions, evidence links, limitations,
+and a prominent “advisory only” label; the shipped `shakerscan` skill teaches Codex the same contract and stop
+conditions. Cross-surface tests must prove that direct API calls, UI actions, and skill-driven sessions receive
+the same permissions and cannot reach legacy preflight or privileged admission mutations indirectly.
 
 ### Phase 5 — Useful report and release gate — **corporate-use report implemented; deployment enforcement is not operationally complete**
 
@@ -1957,6 +2033,8 @@ Owners must decide and record:
   contracts do not count as installed coverage and are not future implementation work.
 - [ ] A disposable Firecracker/KVM+jailer model loader executes import/load/inference and produces signed
   runtime telemetry, with no production fallback.
+- [ ] Firecracker receipts contain independently measured, complete guest/host network-attempt telemetry;
+  any prohibited attempt, telemetry loss, overflow, contradiction, or missing no-device proof is non-pass.
 - [ ] The evaluator automatically consumes embeddings and measurements generated by that exact runner.
 - [ ] The UI/JSON report has explicit passed/failed/not-run/coverage/error detail and a phase timeline; HTML/PDF,
   SARIF, per-control evidence links, and admission-statement parity remain.
@@ -1964,6 +2042,8 @@ Owners must decide and record:
   and Kubernetes admission webhook pass their complete negative-path and recovery gates.
 - [ ] API, UI, and the shipped `shakerscan` agent skill expose the same controlled Model Intake workflow,
   authorization requirements, evidence, state transitions, and fail-closed decision semantics.
+- [ ] The optional keyless Codex planner exposes only typed bounded advisory actions, has no admission or
+  arbitrary-execution authority, and passes prompt-injection, budget, replay, and cross-surface negative tests.
 - [ ] The exact release branch is rebuilt on the designated Linux/KVM VPS and physical runs for
   CodeRankEmbed, CodeSage Base v2, and CodeSage Large v2 retain cross-surface evidence and accurate outcomes.
 
