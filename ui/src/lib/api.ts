@@ -3636,13 +3636,20 @@ export interface ExposureChangesResponse {
 
 // Re-run the most recent model intake scan for a model target (same policy
 // profile, metadata, and requirement options it was last evaluated with).
-export async function rescanModelIntakeTarget(targetId: string): Promise<{
+export async function rescanModelIntakeTarget(targetId: string, operatorToken?: string): Promise<{
   scan_id: string
   job_id: string
   status: string
   ui_url?: string
 }> {
-  const res = await fetch(`${API_URL}/model-intake/targets/${targetId}/rescan`, { method: 'POST' })
+  const storedToken = typeof window !== 'undefined'
+    ? sessionStorage.getItem('shakerscan:model-intake-operator-token') || ''
+    : ''
+  const token = operatorToken?.trim() || storedToken.trim()
+  const res = await fetch(`${API_URL}/model-intake/targets/${targetId}/rescan`, {
+    method: 'POST',
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+  })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to queue model intake re-check'))
   return res.json()
 }

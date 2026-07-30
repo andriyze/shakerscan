@@ -224,6 +224,40 @@ def test_model_intake_operator_actions_require_explicit_token_even_on_loopback(m
     assert api_module._require_fleet_operator(_fleet_request(host="127.0.0.1", scheme="http")) is None
     monkeypatch.delenv("SHAKERSCAN_BIND_HOST", raising=False)
 
+
+def test_model_intake_rescan_strips_stale_authority_and_forces_preflight():
+    options, approval_id, authority_bearing = api_module._prepare_model_intake_rescan_options({
+        "intake_mode": "admission",
+        "require_signed_admission": True,
+        "approval_receipt_id": "approval-id",
+        "scope_receipt_id": "scope-id",
+        "approved_by": "old-operator",
+        "risk_tier": "active",
+        "runtime_scope_guard": {"allowed_hosts": ["internal.example"]},
+        "allow_private_networks": True,
+        "allowed_acquisition_hosts": ["internal.example"],
+    })
+
+    assert approval_id == "approval-id"
+    assert authority_bearing is True
+    assert options["intake_mode"] == "preflight"
+    assert options["require_signed_admission"] is False
+    assert options["run_kind"] == "model_intake"
+    for key in ("approval_receipt_id", "scope_receipt_id", "approved_by", "risk_tier", "runtime_scope_guard"):
+        assert key not in options
+
+
+def test_model_intake_rescan_requires_operator_before_database_access(monkeypatch):
+    monkeypatch.delenv("MODEL_INTAKE_OPERATOR_TOKEN", raising=False)
+    monkeypatch.delenv("FLEET_OPERATOR_TOKEN", raising=False)
+    with pytest.raises(api_module.HTTPException) as caught:
+        asyncio.run(api_module.rescan_model_intake_target(
+            str(uuid.uuid4()),
+            _fleet_request(host="127.0.0.1", scheme="http"),
+        ))
+    assert caught.value.status_code == 403
+    assert "credential" in str(caught.value.detail).lower()
+
     operator_token = "operator-" + "x" * 40
     monkeypatch.setenv("FLEET_OPERATOR_TOKEN", operator_token)
     assert api_module._require_fleet_operator(

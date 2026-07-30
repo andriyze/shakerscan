@@ -12780,14 +12780,34 @@ async def get_model_intake_evidence_export(scan_id: str):
     return _model_intake_evidence_export(payload)
 
 
+def _prepare_model_intake_rescan_options(raw_options: Any) -> tuple[dict[str, Any], str | None, bool]:
+    """Drop stale authority and force legacy target rechecks back to preflight."""
+    options = dict(raw_options) if isinstance(raw_options, dict) else {}
+    approval_receipt_id = str(options.pop("approval_receipt_id", "") or "").strip() or None
+    for key in ("scope_receipt_id", "approved_by", "risk_tier", "runtime_scope_guard"):
+        options.pop(key, None)
+    authority_bearing = bool(
+        approval_receipt_id
+        or options.get("allow_insecure_http")
+        or options.get("allow_private_networks")
+        or options.get("allowed_acquisition_hosts")
+        or options.get("allowed_acquisition_ports")
+    )
+    options["intake_mode"] = "preflight"
+    options["require_signed_admission"] = False
+    options["run_kind"] = "model_intake"
+    return options, approval_receipt_id, authority_bearing
+
+
 @app.post("/model-intake/targets/{target_id}/rescan")
-async def rescan_model_intake_target(target_id: str):
+async def rescan_model_intake_target(target_id: str, http_request: Request):
     """Re-queue a model intake scan for an existing model target.
 
     Reuses the options of the target's most recent intake scan (policy profile,
     metadata, signature/hash requirements), so one-click re-checks from the
     exposure inventory run the same evaluation the artifact was admitted with.
     """
+    actor = _model_intake_authenticated_subject(http_request)
     try:
         target_uuid = uuid.UUID(target_id)
     except ValueError:
@@ -12813,9 +12833,25 @@ async def rescan_model_intake_target(target_id: str):
                 status_code=409,
                 detail="No previous model intake scan to re-run. Submit one from Model Intake settings first.",
             )
-        options = _decode_json_value(last_scan["options"]) or {}
-        options["run_kind"] = "model_intake"
+        options, approval_receipt_id, authority_bearing = _prepare_model_intake_rescan_options(
+            _decode_json_value(last_scan["options"])
+        )
         artifact_ref = target["url"]
+
+        approval_context = await _validate_approval_receipt_for_action(
+            conn,
+            approval_receipt_id,
+            target_url=artifact_ref,
+            target_id=target_uuid,
+            action_name="model_intake.scan",
+            risk_tier="active",
+            always_require_receipt=authority_bearing,
+            required_action_name="model_intake.scan" if approval_receipt_id else None,
+            require_expiry=bool(approval_receipt_id),
+            created_by=actor,
+        )
+        if approval_context:
+            options.update(approval_context)
 
         r = get_redis()
         job_id = str(uuid.uuid4())
@@ -12831,6 +12867,25 @@ async def rescan_model_intake_target(target_id: str):
             job_id,
             json.dumps(options),
             f"model_artifact:{hashlib.sha256(artifact_ref.encode()).hexdigest()[:16]}",
+        )
+        command_result = await _record_command_result(
+            conn,
+            command="model_intake.scan",
+            status="queued",
+            risk_tier="active",
+            scan_id=scan_id,
+            scope_receipt_id=options.get("scope_receipt_id"),
+            approval_receipt_id=options.get("approval_receipt_id"),
+            operator_message=f"Queued Model Intake re-check for {_short_url_label(artifact_ref)}",
+            result_json={
+                "target": artifact_ref,
+                "target_id": str(target_uuid),
+                "scan_type": "model_intake",
+                "job_id": job_id,
+                "rescan": True,
+            },
+            created_by=actor,
+            next_action=f"/scans/{scan_id}",
         )
 
     job_data = {
@@ -12851,6 +12906,7 @@ async def rescan_model_intake_target(target_id: str):
         "scan_type": "model_intake",
         "run_kind": "model_intake",
         "ui_url": f"/scans/{scan_id}",
+        "operation_id": str(command_result["id"]) if command_result else None,
     }
 
 

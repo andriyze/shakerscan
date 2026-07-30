@@ -370,8 +370,9 @@ Implementation progress after this correction: Model Intake mutation/deployment 
 configured bearer credential even over loopback; localhost is accepted only as a transport. `scanner.sh`
 generates and persists a strong dedicated credential, both Compose variants pass it to API processes, and
 audit subjects are derived from the credential rather than a shared `local-operator` identity. Approval roles
-must be explicitly configured; loopback no longer receives every reviewer role implicitly. Authority-bearing
-target rescan replay remains the next separate repair.
+must be explicitly configured; loopback no longer receives every reviewer role implicitly. Target rechecks
+also authenticate the operator, discard cached scope/identity fields, force `preflight`, and revalidate any
+authority-bearing acquisition receipt, including its action binding and expiry, before queueing.
 
 ### 2.6 Release Gate 0 — trusted control-plane separation
 
