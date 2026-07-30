@@ -22,6 +22,22 @@ def test_loader_selection_is_capability_based_and_supports_unseen_models():
     assert len(result["profile"]["profile_sha256"]) == 64
 
 
+def test_firecracker_provisioner_installs_every_first_party_runner_module():
+    root = Path(__file__).resolve().parents[1]
+    provisioner = (root / "scripts/provision-model-intake-firecracker.sh").read_text()
+    required = {
+        "model_intake_control_plane.py",
+        "model_intake_components.py",
+        "model_intake_loader_profiles.py",
+        "model_intake_runner_controller.py",
+        "model_intake_runner_inputs.py",
+        "model_intake_runner_receipts.py",
+        "model_intake_firecracker_runner.py",
+        "model_intake_runner_service.py",
+    }
+    assert all(f'api/{name}' in provisioner for name in required)
+
+
 def test_custom_code_and_pickle_require_review_or_conversion():
     custom = resolve_loader_profile(
         {"library_name": "transformers", "custom_code_required": True},

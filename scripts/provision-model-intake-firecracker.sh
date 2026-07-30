@@ -55,7 +55,9 @@ install -m 0644 "$TEMP_DIR/vmlinux" "$INSTALL_ROOT/kernel/vmlinux"
 install -m 0644 "$ROOTFS_SOURCE" "$INSTALL_ROOT/rootfs/rootfs.ext4"
 install -m 0644 \
     "$ROOT_DIR/api/model_intake_control_plane.py" \
+    "$ROOT_DIR/api/model_intake_components.py" \
     "$ROOT_DIR/api/model_intake_loader_profiles.py" \
+    "$ROOT_DIR/api/model_intake_runner_inputs.py" \
     "$ROOT_DIR/api/model_intake_runner_controller.py" \
     "$ROOT_DIR/api/model_intake_runner_receipts.py" \
     "$ROOT_DIR/api/model_intake_firecracker_runner.py" \
