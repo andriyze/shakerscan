@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shakerscan-model-admission
+  namespace: shakerscan-system
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: shakerscan-model-admission}
+  template:
+    metadata:
+      labels: {app: shakerscan-model-admission}
+    spec:
+      automountServiceAccountToken: false
+      securityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: webhook
+          image: ghcr.io/andriyze/shakerscan:REPLACE_WITH_DIGEST
+          imagePullPolicy: IfNotPresent
+          command: ["uvicorn", "model_intake_admission_webhook:app"]
+          args: ["--host", "0.0.0.0", "--port", "8092", "--ssl-keyfile", "/tls/tls.key", "--ssl-certfile", "/tls/tls.crt"]
+          env:
+            - name: SHAKERSCAN_API_URL
+              valueFrom: {secretKeyRef: {name: shakerscan-model-admission-config, key: api-url}}
+            - name: MODEL_INTAKE_DEPLOYMENT_VERIFIER_TOKEN
+              valueFrom: {secretKeyRef: {name: shakerscan-model-admission-config, key: verifier-token}}
+          ports: [{name: https, containerPort: 8092}]
+          readinessProbe: {httpGet: {path: /health, port: https, scheme: HTTPS}}
+          resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {cpu: 500m, memory: 256Mi}}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts: [{name: tls, mountPath: /tls, readOnly: true}]
+      volumes: [{name: tls, secret: {secretName: shakerscan-model-admission-webhook-tls}}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shakerscan-model-admission
+  namespace: shakerscan-system
+spec:
+  selector: {app: shakerscan-model-admission}
+  ports: [{name: https, port: 443, targetPort: https}]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: shakerscan-model-admission
+webhooks:
+  - name: model-admission.shakerscan.dev
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Fail
+    timeoutSeconds: 10
+    matchPolicy: Equivalent
+    rules:
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["deployments", "statefulsets", "daemonsets"]
+        scope: Namespaced
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+        scope: Namespaced
+    clientConfig:
+      service: {name: shakerscan-model-admission, namespace: shakerscan-system, path: /validate, port: 443}
+      caBundle: REPLACE_WITH_BASE64_CA_BUNDLE

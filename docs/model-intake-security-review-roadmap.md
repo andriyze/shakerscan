@@ -1535,7 +1535,7 @@ Corporate work: supply representative synthetic/internal corpora, relevance judg
 labels, non-production services and principals, quality/capacity thresholds, data approvals, and authorization
 to run the tests.
 
-### Phase 5 — Useful report and release gate — **corporate-use UI/JSON implemented; export/deployment parity open**
+### Phase 5 — Useful report and release gate — **corporate-use report and fail-closed deployment enforcement implemented; export parity remains**
 
 Delivered: a first-screen corporate-use verdict and can-use boolean, malicious-primitive proof separated from
 format capability, control matrix, primary blockers, limitations, concrete next actions, deployment
@@ -1545,11 +1545,18 @@ The exact-subject verifier authorizes only signed `allow` decisions, and the HTT
 an active matching registry record. Lifecycle mutation endpoints require an operator bearer token; global
 actions require explicit confirmation and a change receipt.
 
+Deployment enforcement now includes a fail-closed CI/startup command and a Kubernetes
+`ValidatingAdmissionWebhook`. Model-labeled workloads must carry the exact canonical bundle and admission
+package; the webhook calls the live v2 registry verifier, records the admission/bundle identities as audit
+annotations, uses `failurePolicy: Fail`, and denies missing, expired, revoked, unavailable, mismatched, or
+unregistered admissions. The supplied deployment runs with TLS, no service-account token, a read-only root,
+runtime-default seccomp, and dropped capabilities.
+
 Remaining product work:
 
 - Extend the implemented first-page execution matrix to include tool/rules database freshness and independent
   microVM telemetry when those integrations ship.
-- Add corporate promotion hooks and a deployed-system negative-path enforcement test.
+- Add internal OCI-registry promotion after organizational registry credentials and naming policy are supplied.
 - Make every failed/non-run required control link to evidence and a concrete remediation.
 - Keep JSON, HTML, PDF, SARIF, admission statement, and UI decisions consistent.
 - Add deterministic report fixtures proving the simple answer: what passed, what failed, what was not tested,
@@ -1561,8 +1568,8 @@ Product work:
 
 - Add optional OPA policy-bundle evaluation while retaining an embedded policy fallback.
 - Add Cosign/Sigstore identity and Rekor bundle verification where configured.
-- Publish internal-registry promotion hooks and deploy-time verification examples for common CI/CD,
-  Kubernetes/admission-controller, and model-serving paths.
+- **Implemented:** fail-closed CI/startup verification and Kubernetes admission-controller enforcement.
+  Add model-serving-native hooks as organizations select serving platforms.
 - Trigger reassessment on CVE/rule/policy changes and surface stale tool/database/fleet state.
 - Add signed webhooks/events for admission, denial, expiry, revocation, and reassessment.
 
