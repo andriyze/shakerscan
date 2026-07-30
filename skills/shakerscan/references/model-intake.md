@@ -36,6 +36,11 @@ The Firecracker endpoint must return `ready:true` and `status:"READY"` before a 
 reports `NOT_READY`, stop the physical execution path and report `INCOMPLETE` with the failed readiness checks.
 Do not substitute the container sandbox, QEMU, Docker, a host process, or a self-authored receipt.
 
+Scanner readiness must also show every applicable shipped adapter ready. Semgrep rule and Trivy database
+freshness are server-measured and enforced again immediately before execution. If readiness reports
+`reassessment_required:true`, do not treat a prior clean scan as current: rebuild the scanner material and use
+the controlled `scanner_data_stale` reassessment event for affected admissions.
+
 ## 2. Resolve and run technical preflight
 
 Resolve the source first. Hugging Face must resolve to an immutable commit for complete admission evidence.

@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timedelta, timezone
 import zipfile
 from pathlib import Path
 
@@ -141,6 +142,11 @@ def test_readiness_requires_functional_self_test_for_default_adapters(tmp_path, 
     monkeypatch.setattr(Path, "is_file", lambda path: True)
     monkeypatch.setattr(scanners, "_hash_path", lambda path: "b" * 64)
     monkeypatch.setattr(Path, "read_text", lambda path, *args, **kwargs: json.dumps(receipt))
+    monkeypatch.setattr(scanners, "_scanner_material_state", lambda spec: {
+        "ready": True,
+        "rules": {"present": True, "fresh": True, "sha256": "b" * 64} if spec.rules_path else None,
+        "database": {"present": True, "fresh": True, "sha256": "b" * 64} if spec.database_path else None,
+    })
 
     readiness = scanners.scanner_adapter_readiness()
     by_name = {item["name"]: item for item in readiness["adapters"]}
@@ -148,3 +154,43 @@ def test_readiness_requires_functional_self_test_for_default_adapters(tmp_path, 
     assert readiness["self_test"]["status"] == "PASS"
     assert all(by_name[name]["ready"] for name in ("modelscan", "semgrep", "fickling", "trivy"))
     assert by_name["modelscan"]["last_self_test"]["passed"] is True
+
+
+def test_scanner_material_freshness_is_measured_and_bounded(tmp_path, monkeypatch):
+    now = datetime(2026, 7, 30, tzinfo=timezone.utc)
+    rules = tmp_path / "rules.yml"
+    rules.write_text("rules: []\n")
+    recent = (now - timedelta(days=1)).timestamp()
+    __import__("os").utime(rules, (recent, recent))
+    database = tmp_path / "metadata.json"
+    database.write_text(json.dumps({"UpdatedAt": now.isoformat(), "NextUpdate": (now + timedelta(days=1)).isoformat()}))
+    monkeypatch.setenv("MODEL_INTAKE_SCANNER_MAX_RULE_AGE_DAYS", "90")
+    monkeypatch.setenv("MODEL_INTAKE_SCANNER_MAX_DATABASE_AGE_DAYS", "14")
+    spec = scanners.ScannerSpec(
+        "fixture", "fixture", (), rules_path=str(rules), database_path=str(database), required=True,
+    )
+
+    state = scanners._scanner_material_state(spec, now=now)
+
+    assert state["ready"] is True
+    assert state["rules"]["fresh"] is True
+    assert state["database"]["fresh"] is True
+    assert state["database"]["max_age_days"] == 14
+
+
+def test_stale_scanner_material_fails_before_tool_execution(tmp_path, monkeypatch):
+    now = datetime.now(timezone.utc)
+    rules = tmp_path / "rules.yml"
+    rules.write_text("rules: []\n")
+    old = (now - timedelta(days=100)).timestamp()
+    __import__("os").utime(rules, (old, old))
+    monkeypatch.setenv("MODEL_INTAKE_SCANNER_MAX_RULE_AGE_DAYS", "30")
+    monkeypatch.setattr(scanners.shutil, "which", lambda _name: (_ for _ in ()).throw(AssertionError("tool must not run")))
+    spec = scanners.ScannerSpec("fixture", "fixture", (), rules_path=str(rules), required=True)
+
+    result = scanners.run_external_scanner(spec, tmp_path, {"kind": "repository", "digest": "sha256:" + "a" * 64})
+
+    assert result["execution"]["status"] == "INCOMPLETE"
+    assert result["execution"]["error"] == "scanner_material_missing_or_stale"
+    assert result["execution"]["reassessment_trigger"] == "scanner_data_stale"
+    assert result["summary"]["materials"]["rules"]["reason"] == "material_stale"

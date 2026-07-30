@@ -48,6 +48,8 @@ ADAPTER_SELF_TEST_PATH = os.getenv(
     "SHAKERSCAN_MODEL_INTAKE_ADAPTER_SELF_TEST",
     "/opt/model-intake-tools/self-test.json",
 )
+DEFAULT_MAX_RULE_AGE_DAYS = 90
+DEFAULT_MAX_DATABASE_AGE_DAYS = 14
 
 
 @dataclass(frozen=True)
@@ -509,8 +511,141 @@ def _parse_external_scanner(
     return _default_external_parser(stdout, stderr, exit_code)
 
 
+def _configured_max_age(name: str, default: int) -> tuple[int | None, str | None]:
+    raw = os.getenv(name, str(default)).strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return None, f"{name}_invalid"
+    if value < 1 or value > 3650:
+        return None, f"{name}_out_of_range"
+    return value, None
+
+
+def _material_timestamp(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        try:
+            parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _freshness(
+    *,
+    updated_at: datetime | None,
+    max_age_days: int | None,
+    configuration_error: str | None,
+    now: datetime,
+) -> dict[str, Any]:
+    age_seconds = (now - updated_at).total_seconds() if updated_at else None
+    fresh = bool(
+        updated_at
+        and max_age_days is not None
+        and age_seconds is not None
+        and age_seconds >= -300
+        and age_seconds <= max_age_days * 86400
+    )
+    if configuration_error:
+        reason = configuration_error
+    elif updated_at is None:
+        reason = "timestamp_missing_or_invalid"
+    elif age_seconds is not None and age_seconds < -300:
+        reason = "timestamp_in_future"
+    elif not fresh:
+        reason = "material_stale"
+    else:
+        reason = None
+    return {
+        "fresh": fresh,
+        "status": "FRESH" if fresh else "STALE",
+        "updated_at": updated_at.isoformat() if updated_at else None,
+        "age_days": round(max(0.0, age_seconds or 0.0) / 86400, 3) if updated_at else None,
+        "max_age_days": max_age_days,
+        "reason": reason,
+    }
+
+
+def _scanner_material_state(spec: ScannerSpec, *, now: datetime | None = None) -> dict[str, Any]:
+    """Measure rules/database freshness from shipped material, never caller declarations."""
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    rule_max_age, rule_error = _configured_max_age(
+        "MODEL_INTAKE_SCANNER_MAX_RULE_AGE_DAYS", DEFAULT_MAX_RULE_AGE_DAYS,
+    )
+    database_max_age, database_error = _configured_max_age(
+        "MODEL_INTAKE_SCANNER_MAX_DATABASE_AGE_DAYS", DEFAULT_MAX_DATABASE_AGE_DAYS,
+    )
+    rules: dict[str, Any] | None = None
+    if spec.rules_path:
+        path = Path(spec.rules_path)
+        updated_at = None
+        if path.is_file():
+            try:
+                updated_at = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+            except OSError:
+                pass
+        rules = {
+            "present": path.is_file(),
+            "sha256": _hash_path(path) if path.is_file() else None,
+            **_freshness(
+                updated_at=updated_at,
+                max_age_days=rule_max_age,
+                configuration_error=rule_error,
+                now=current,
+            ),
+        }
+    database: dict[str, Any] | None = None
+    if spec.database_path:
+        path = Path(spec.database_path)
+        metadata: dict[str, Any] = {}
+        if path.is_file():
+            try:
+                parsed = json.loads(path.read_text("utf-8"))
+                metadata = parsed if isinstance(parsed, dict) else {}
+            except (OSError, ValueError):
+                pass
+        updated_value = metadata.get("UpdatedAt") or metadata.get("updated_at")
+        database = {
+            "present": path.is_file(),
+            "sha256": _hash_path(path) if path.is_file() else None,
+            "next_update": metadata.get("NextUpdate") or metadata.get("next_update"),
+            **_freshness(
+                updated_at=_material_timestamp(updated_value),
+                max_age_days=database_max_age,
+                configuration_error=database_error,
+                now=current,
+            ),
+        }
+    required_materials = [item for item in (rules, database) if item is not None]
+    return {
+        "ready": all(item.get("present") is True and item.get("fresh") is True for item in required_materials),
+        "rules": rules,
+        "database": database,
+    }
+
+
 def run_external_scanner(spec: ScannerSpec, subject_path: Path, subject: dict[str, Any]) -> dict[str, Any]:
     started_at = _utc_iso()
+    materials = _scanner_material_state(spec)
+    if not materials["ready"]:
+        return _scanner_result(
+            name=spec.name,
+            version=None,
+            status="INCOMPLETE",
+            subject=subject,
+            started_at=started_at,
+            finished_at=_utc_iso(),
+            execution={
+                "error": "scanner_material_missing_or_stale",
+                "required": spec.required,
+                "reassessment_trigger": "scanner_data_stale",
+            },
+            summary={"materials": materials},
+        )
     executable = shutil.which(spec.executable)
     if not executable:
         return _scanner_result(
@@ -667,21 +802,9 @@ def scanner_adapter_readiness() -> dict[str, Any]:
     adapters: list[dict[str, Any]] = []
     for spec in EXTERNAL_SCANNERS:
         executable = shutil.which(spec.executable)
-        rules_digest = None
-        if spec.rules_path and Path(spec.rules_path).is_file():
-            rules_digest = _hash_path(Path(spec.rules_path))
-        database: dict[str, Any] | None = None
-        if spec.database_path:
-            database_path = Path(spec.database_path)
-            database = {"present": database_path.is_file(), "path": spec.database_path}
-            if database_path.is_file():
-                database["sha256"] = _hash_path(database_path)
-                try:
-                    metadata = json.loads(database_path.read_text("utf-8"))
-                    database["updated_at"] = metadata.get("UpdatedAt") or metadata.get("updated_at")
-                    database["next_update"] = metadata.get("NextUpdate") or metadata.get("next_update")
-                except (OSError, ValueError):
-                    database["metadata_status"] = "unparseable"
+        materials = _scanner_material_state(spec)
+        rules = materials["rules"]
+        database = materials["database"]
         version = None
         if executable:
             with tempfile.TemporaryDirectory(prefix=f"model-intake-readiness-{spec.name}-") as scratch_raw:
@@ -692,8 +815,7 @@ def scanner_adapter_readiness() -> dict[str, Any]:
         self_test_required = spec.enabled_by_default or bool(spec.required_profiles)
         ready = bool(
             executable
-            and (not spec.rules_path or rules_digest)
-            and (not database or database.get("present"))
+            and materials["ready"]
             and (not self_test_required or (self_test and self_test.get("passed") is True))
         )
         adapters.append({
@@ -701,7 +823,8 @@ def scanner_adapter_readiness() -> dict[str, Any]:
             "ready": ready,
             "installed": bool(executable),
             "version": version,
-            "rules_sha256": rules_digest,
+            "rules_sha256": rules.get("sha256") if rules else None,
+            "rules": rules,
             "database": database,
             "last_self_test": self_test,
             "status": "READY" if ready else "UNAVAILABLE",
@@ -712,6 +835,15 @@ def scanner_adapter_readiness() -> dict[str, Any]:
         "status": "READY" if all(item["ready"] for item in required) else "DEGRADED",
         "required_ready": sum(1 for item in required if item["ready"]),
         "required_total": len(required),
+        "reassessment_required": any(
+            not item.get("ready")
+            and (
+                (item.get("rules") and not item["rules"].get("fresh"))
+                or (item.get("database") and not item["database"].get("fresh"))
+            )
+            for item in required
+        ),
+        "reassessment_trigger": "scanner_data_stale",
         "self_test": {
             "status": (self_test_receipt or {}).get("status") or "MISSING",
             "tested_at": (self_test_receipt or {}).get("tested_at"),

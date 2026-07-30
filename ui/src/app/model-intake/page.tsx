@@ -1019,7 +1019,9 @@ function ModelIntakeSettingsContent() {
         {scannerReadinessError ? (
           <div className="mt-3 text-xs text-red-300">{scannerReadinessError}</div>
         ) : scannerReadiness ? (
-          <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+          <div className="mt-3">
+            {scannerReadiness.reassessment_required && <div className="mb-3 rounded border border-red-800/60 bg-red-950/20 p-3 text-xs text-red-300">Required scanner rules or vulnerability data are stale. Strict scans fail incomplete; rebuild scanner material and trigger <code>{scannerReadiness.reassessment_trigger || 'scanner_data_stale'}</code> reassessment for affected active admissions.</div>}
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
             {scannerReadiness.adapters.filter((adapter) => adapter.enabled_by_default).map((adapter) => (
               <div key={adapter.name} className="rounded border border-gray-800 bg-gray-950 p-3">
                 <div className="flex items-center justify-between gap-2">
@@ -1030,8 +1032,11 @@ function ModelIntakeSettingsContent() {
                 </div>
                 <div className="mt-2 text-xs text-gray-500">{adapter.applicability.replace(/_/g, ' ')}</div>
                 <div className="mt-1 truncate font-mono text-[10px] text-gray-600">{adapter.version || 'not installed'}</div>
+                {adapter.rules && <div className={`mt-2 text-[10px] ${adapter.rules.fresh ? 'text-green-400' : 'text-red-400'}`}>rules {adapter.rules.status?.toLowerCase()} · {adapter.rules.age_days ?? '?'}d / {adapter.rules.max_age_days ?? '?'}d</div>}
+                {adapter.database && <div className={`mt-1 text-[10px] ${adapter.database.fresh ? 'text-green-400' : 'text-red-400'}`}>database {adapter.database.status?.toLowerCase()} · {adapter.database.age_days ?? '?'}d / {adapter.database.max_age_days ?? '?'}d</div>}
               </div>
             ))}
+          </div>
           </div>
         ) : (
           <div className="mt-3 text-xs text-gray-500">Checking adapter readiness…</div>

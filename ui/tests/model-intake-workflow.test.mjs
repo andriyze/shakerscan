@@ -9,6 +9,13 @@ const api = readFileSync(path.join(root, 'src/lib/api.ts'), 'utf8')
 const workflow = readFileSync(path.join(root, 'src/app/model-intake/ControlledWorkflow.tsx'), 'utf8')
 const page = readFileSync(path.join(root, 'src/app/model-intake/page.tsx'), 'utf8')
 
+test('scanner readiness surfaces enforceable material freshness and reassessment', () => {
+  assert.match(page, /scanner rules or vulnerability data are stale/)
+  assert.match(page, /scanner_data_stale/)
+  assert.match(page, /database\.status/)
+  assert.match(api, /reassessment_required/)
+})
+
 test('controlled Model Intake UI exposes every authoritative workflow stage', () => {
   for (const fragment of [
     '/model-intake/submissions',

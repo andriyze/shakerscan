@@ -1599,7 +1599,10 @@ installation; offline Trivy data; bounded execution; readiness API/UI; and image
 
 Remaining product work:
 
-- Define enforceable maximum DB/rule age and trigger rebuild/reassessment when the bundled data becomes stale.
+- **Implemented scanner-material freshness:** Semgrep rule-file age and Trivy database `UpdatedAt` are measured
+  against bounded server configuration (90/14-day defaults), exposed in API/UI, and checked again immediately
+  before execution. Missing, malformed, future-dated, or stale required material returns `INCOMPLETE` before
+  the tool starts and identifies the `scanner_data_stale` admission-reassessment trigger.
 - Improve the existing Semgrep model-intake rules, safe-pattern fixtures, PyTorch-version context, severity,
   and malicious-capability versus review-required classification.
 - Isolate each existing hostile-file parser with read-only input, no egress where databases permit, resource limits,

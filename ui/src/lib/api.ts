@@ -1348,13 +1348,21 @@ export interface ModelIntakeScannerAdapterReadiness {
   installed: boolean
   version?: string | null
   rules_sha256?: string | null
-  database?: {
+  rules?: ModelIntakeScannerMaterialReadiness | null
+  database?: ModelIntakeScannerMaterialReadiness | null
+  status: 'READY' | 'UNAVAILABLE' | string
+}
+
+export interface ModelIntakeScannerMaterialReadiness {
     present?: boolean
     sha256?: string
     updated_at?: string | null
     next_update?: string | null
-  } | null
-  status: 'READY' | 'UNAVAILABLE' | string
+    fresh?: boolean
+    status?: 'FRESH' | 'STALE' | string
+    age_days?: number | null
+    max_age_days?: number | null
+    reason?: string | null
 }
 
 export interface ModelIntakeScannerReadiness {
@@ -1362,6 +1370,8 @@ export interface ModelIntakeScannerReadiness {
   status: 'READY' | 'DEGRADED' | string
   required_ready: number
   required_total: number
+  reassessment_required?: boolean
+  reassessment_trigger?: string
   adapters: ModelIntakeScannerAdapterReadiness[]
 }
 

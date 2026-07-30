@@ -20,6 +20,7 @@ REASSESSMENT_TRIGGERS = {
     "secret_rules_update",
     "unsafe_model_rules_update",
     "scanner_update",
+    "scanner_data_stale",
     "policy_change",
     "data_classification_change",
     "exception_expiry",

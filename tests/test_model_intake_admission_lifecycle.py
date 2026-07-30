@@ -64,6 +64,7 @@ def test_unreleased_schema_cannot_become_active_by_label_alone():
 
 def test_high_consequence_triggers_revoke_while_normal_changes_require_reassessment():
     assert triggered_status("cve_update") == "reassessment_required"
+    assert triggered_status("scanner_data_stale") == "reassessment_required"
     assert triggered_status("authorization_incident") == "revoked"
     assert triggered_status("scheduled_review", "revoke") == "revoked"
     with pytest.raises(ValueError):
