@@ -10999,9 +10999,9 @@ async def list_model_intake_trust_anchors(active_only: bool = True):
 
 @app.post("/model-intake/trust-anchors")
 async def create_model_intake_trust_anchor(req: ModelIntakeTrustAnchorRequest, http_request: Request):
-    _require_model_intake_operator(http_request)
+    actor = _model_intake_authenticated_subject(http_request)
     _validate_model_intake_trust_anchor_request(req)
-    async with db_pool.acquire() as conn:
+    async with db_pool.acquire() as conn, conn.transaction():
         try:
             row = await conn.fetchrow(
                 """
@@ -11031,14 +11031,30 @@ async def create_model_intake_trust_anchor(req: ModelIntakeTrustAnchorRequest, h
             )
         except asyncpg.UniqueViolationError:
             raise HTTPException(status_code=409, detail="Model Intake trust anchor name already exists")
-    return row_to_dict(row)
+        invalidation = (
+            await _invalidate_model_intake_authority_change(
+                conn,
+                actor=actor,
+                trigger_type="trust_anchor_change",
+                reason=f"Activated trust anchor {row['id']}",
+                environments=[str(row["environment"])],
+            )
+            if row["is_active"] else {"admissions_invalidated": 0, "deployment_bindings_staled": 0}
+        )
+    return {**row_to_dict(row), "downstream_invalidation": invalidation}
 
 
 @app.patch("/model-intake/trust-anchors/{anchor_id}")
 async def update_model_intake_trust_anchor(anchor_id: str, req: ModelIntakeTrustAnchorRequest, http_request: Request):
-    _require_model_intake_operator(http_request)
+    actor = _model_intake_authenticated_subject(http_request)
     _validate_model_intake_trust_anchor_request(req)
-    async with db_pool.acquire() as conn:
+    async with db_pool.acquire() as conn, conn.transaction():
+        previous = await conn.fetchrow(
+            "SELECT id,environment,is_active FROM model_intake_trust_anchors WHERE id=$1 FOR UPDATE",
+            uuid.UUID(anchor_id),
+        )
+        if not previous:
+            raise HTTPException(status_code=404, detail="Model Intake trust anchor not found")
         row = await conn.fetchrow(
             """
             UPDATE model_intake_trust_anchors SET
@@ -11068,28 +11084,48 @@ async def update_model_intake_trust_anchor(anchor_id: str, req: ModelIntakeTrust
             req.owner,
             req.is_active,
         )
-        if not row:
-            raise HTTPException(status_code=404, detail="Model Intake trust anchor not found")
-    return row_to_dict(row)
+        affected = bool(previous["is_active"] or row["is_active"])
+        invalidation = (
+            await _invalidate_model_intake_authority_change(
+                conn,
+                actor=actor,
+                trigger_type="trust_anchor_change",
+                reason=f"Changed trust anchor {anchor_id}",
+                environments=[str(previous["environment"]), str(row["environment"])],
+            )
+            if affected else {"admissions_invalidated": 0, "deployment_bindings_staled": 0}
+        )
+    return {**row_to_dict(row), "downstream_invalidation": invalidation}
 
 
 @app.delete("/model-intake/trust-anchors/{anchor_id}")
 async def deactivate_model_intake_trust_anchor(anchor_id: str, http_request: Request):
-    _require_model_intake_operator(http_request)
-    async with db_pool.acquire() as conn:
+    actor = _model_intake_authenticated_subject(http_request)
+    async with db_pool.acquire() as conn, conn.transaction():
         row = await conn.fetchrow(
             """
             UPDATE model_intake_trust_anchors
             SET is_active=false, revoked_at=NOW(),
                 revocation_reason='operator deactivated trust anchor', updated_at=NOW()
-            WHERE id=$1
+            WHERE id=$1 AND is_active=true
             RETURNING *
             """,
             uuid.UUID(anchor_id),
         )
         if not row:
-            raise HTTPException(status_code=404, detail="Model Intake trust anchor not found")
-    return {"deactivated": True, "trust_anchor": row_to_dict(row)}
+            raise HTTPException(status_code=409, detail="Model Intake trust anchor is absent or already inactive")
+        invalidation = await _invalidate_model_intake_authority_change(
+            conn,
+            actor=actor,
+            trigger_type="trust_anchor_change",
+            reason=f"Deactivated trust anchor {anchor_id}",
+            environments=[str(row["environment"])],
+        )
+    return {
+        "deactivated": True,
+        "trust_anchor": row_to_dict(row),
+        "downstream_invalidation": invalidation,
+    }
 
 
 def _model_intake_policy_bundle_sha256() -> str:
@@ -11249,6 +11285,71 @@ async def _reset_model_intake_for_new_evidence(
             "deployment_bindings_staled": stale_bindings,
         },
     )
+    return {
+        "admissions_invalidated": len(invalidated),
+        "deployment_bindings_staled": stale_bindings,
+    }
+
+
+async def _invalidate_model_intake_authority_change(
+    conn: Any,
+    *,
+    actor: str,
+    trigger_type: str,
+    reason: str,
+    environments: list[str] | None = None,
+    policy_profiles: list[str] | None = None,
+) -> dict[str, int]:
+    """Fail active admissions closed after a server-owned trust or policy mutation."""
+    if trigger_type not in REASSESSMENT_TRIGGERS:
+        raise ValueError("unsupported Model Intake authority-change trigger")
+    normalized_environments = sorted({str(item).strip().lower() for item in environments or [] if str(item).strip()})
+    normalized_profiles = sorted({str(item).strip() for item in policy_profiles or [] if str(item).strip()})
+    invalidated = await conn.fetch(
+        """
+        UPDATE model_intake_admissions
+        SET status='reassessment_required',updated_at=NOW()
+        WHERE status='active'
+          AND ($1::text[] = '{}'::text[] OR COALESCE(target_environment,'') = ANY($1::text[]))
+          AND ($2::text[] = '{}'::text[] OR COALESCE(policy_profile,'') = ANY($2::text[]))
+        RETURNING id,statement_sha256
+        """,
+        normalized_environments,
+        normalized_profiles,
+    )
+    admission_ids = [item["id"] for item in invalidated]
+    for admission in invalidated:
+        await conn.execute(
+            """
+            INSERT INTO model_intake_admission_events
+                (admission_id,event_type,trigger_type,actor,reason,previous_status,new_status,
+                 evidence_digest,metadata_json)
+            VALUES ($1,'authority_changed',$2,$3,$4,'active','reassessment_required',$5,$6::jsonb)
+            """,
+            admission["id"],
+            trigger_type,
+            actor,
+            reason,
+            admission["statement_sha256"],
+            json.dumps({
+                "environments": normalized_environments,
+                "policy_profiles": normalized_profiles,
+            }),
+        )
+    stale_bindings = 0
+    if admission_ids:
+        binding_result = await conn.execute(
+            """
+            UPDATE model_intake_deployment_bindings
+            SET verifier_status='STALE',observed_bundle_sha256=NULL,observed_at=NULL
+            WHERE admission_id = ANY($1::uuid[]) AND verifier_status <> 'STALE'
+            """,
+            admission_ids,
+        )
+        try:
+            stale_bindings = int(str(binding_result).rsplit(" ", 1)[-1])
+        except ValueError:
+            stale_bindings = 0
     return {
         "admissions_invalidated": len(invalidated),
         "deployment_bindings_staled": stale_bindings,
@@ -18470,7 +18571,7 @@ async def list_policy_profiles():
 
 @app.post("/policy-profiles")
 async def create_policy_profile(req: PolicyProfileRequest, http_request: Request):
-    _require_model_intake_operator(http_request)
+    _model_intake_authenticated_subject(http_request)
     async with db_pool.acquire() as conn:
         required_anchor_ids = await _validate_policy_profile_required_anchor_ids(conn, req)
         try:
@@ -18495,8 +18596,14 @@ async def create_policy_profile(req: PolicyProfileRequest, http_request: Request
 
 @app.patch("/policy-profiles/{profile_id}")
 async def update_policy_profile(profile_id: str, req: PolicyProfileRequest, http_request: Request):
-    _require_model_intake_operator(http_request)
-    async with db_pool.acquire() as conn:
+    actor = _model_intake_authenticated_subject(http_request)
+    async with db_pool.acquire() as conn, conn.transaction():
+        previous = await conn.fetchrow(
+            "SELECT * FROM policy_profiles WHERE id=$1 FOR UPDATE",
+            uuid.UUID(profile_id),
+        )
+        if not previous:
+            raise HTTPException(status_code=404, detail="Policy profile not found")
         required_anchor_ids = await _validate_policy_profile_required_anchor_ids(conn, req)
         row = await conn.fetchrow(
             """
@@ -18511,19 +18618,44 @@ async def update_policy_profile(profile_id: str, req: PolicyProfileRequest, http
             req.allow_active_exceptions, json.dumps(required_anchor_ids),
             req.owner, req.version, req.is_active,
         )
-        if not row:
-            raise HTTPException(status_code=404, detail="Policy profile not found")
-    return row_to_dict(row)
+        affected = previous["product_area"] == "model_intake" or row["product_area"] == "model_intake"
+        invalidation = (
+            await _invalidate_model_intake_authority_change(
+                conn,
+                actor=actor,
+                trigger_type="policy_change",
+                reason=f"Changed Model Intake policy profile {profile_id}",
+                environments=[str(previous["environment"]), str(row["environment"])],
+                policy_profiles=[str(previous["name"]), str(row["name"])],
+            )
+            if affected else {"admissions_invalidated": 0, "deployment_bindings_staled": 0}
+        )
+    return {**row_to_dict(row), "downstream_invalidation": invalidation}
 
 
 @app.delete("/policy-profiles/{profile_id}")
 async def delete_policy_profile(profile_id: str, http_request: Request):
-    _require_model_intake_operator(http_request)
-    async with db_pool.acquire() as conn:
-        result = await conn.execute("DELETE FROM policy_profiles WHERE id=$1", uuid.UUID(profile_id))
-    if result.endswith("0"):
-        raise HTTPException(status_code=404, detail="Policy profile not found")
-    return {"deleted": True, "id": profile_id}
+    actor = _model_intake_authenticated_subject(http_request)
+    async with db_pool.acquire() as conn, conn.transaction():
+        previous = await conn.fetchrow(
+            "DELETE FROM policy_profiles WHERE id=$1 RETURNING *",
+            uuid.UUID(profile_id),
+        )
+        if not previous:
+            raise HTTPException(status_code=404, detail="Policy profile not found")
+        invalidation = (
+            await _invalidate_model_intake_authority_change(
+                conn,
+                actor=actor,
+                trigger_type="policy_change",
+                reason=f"Deleted Model Intake policy profile {profile_id}",
+                environments=[str(previous["environment"])],
+                policy_profiles=[str(previous["name"])],
+            )
+            if previous["product_area"] == "model_intake"
+            else {"admissions_invalidated": 0, "deployment_bindings_staled": 0}
+        )
+    return {"deleted": True, "id": profile_id, "downstream_invalidation": invalidation}
 
 
 @app.get("/finding-exceptions")

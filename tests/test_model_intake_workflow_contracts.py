@@ -583,6 +583,44 @@ def test_new_authoritative_evidence_invalidates_active_deployment_authority():
     assert any("authoritative_evidence_attached" in args for _query, args in conn.executions)
 
 
+def test_trust_or_policy_change_invalidates_scoped_active_authority_and_bindings():
+    class Conn:
+        def __init__(self):
+            self.fetch_args = None
+            self.executions = []
+
+        async def fetch(self, query, *args):
+            assert "status='reassessment_required'" in query
+            assert "target_environment" in query
+            assert "policy_profile" in query
+            self.fetch_args = args
+            return [
+                {"id": uuid.UUID("11111111-1111-4111-8111-111111111111"), "statement_sha256": "a" * 64},
+                {"id": uuid.UUID("22222222-2222-4222-8222-222222222222"), "statement_sha256": "b" * 64},
+            ]
+
+        async def execute(self, query, *args):
+            self.executions.append((query, args))
+            return "UPDATE 2" if "UPDATE model_intake_deployment_bindings" in query else "INSERT 0 1"
+
+    conn = Conn()
+    result = asyncio.run(api._invalidate_model_intake_authority_change(
+        conn,
+        actor="operator:corp:alice",
+        trigger_type="trust_anchor_change",
+        reason="rotated runner trust",
+        environments=["Production", "production"],
+        policy_profiles=["corp-strict", "corp-strict"],
+    ))
+
+    assert result == {"admissions_invalidated": 2, "deployment_bindings_staled": 2}
+    assert conn.fetch_args == (["production"], ["corp-strict"])
+    sql = "\n".join(query for query, _args in conn.executions)
+    assert sql.count("authority_changed") == 2
+    assert "verifier_status='STALE'" in sql
+    assert all("operator:corp:alice" in args for query, args in conn.executions if "authority_changed" in query)
+
+
 def test_promotion_api_sends_only_stored_decision_id_and_idempotency_key():
     source = inspect.getsource(api._call_model_intake_signer)
     assert '"policy_decision_id"' in source

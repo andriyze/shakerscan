@@ -1815,8 +1815,12 @@ Product work:
   registry; do not build registry administration.
 - Acceptance-test the pure fail-closed CI/startup verifier and scoped/certified Kubernetes admission webhook,
   including outage, expiry, revocation, cache invalidation, and component substitution; add no other orchestrator.
-- Trigger reassessment on changes to existing scanner rules/databases, embedded policy, trust anchors,
-  runtime/loader digests, approvals, and upstream subjects.
+- **Implemented authority-change invalidation:** active trust-anchor and Model Intake policy-profile create,
+  update, deactivation, or deletion paths run under database transactions, move affected active admissions to
+  `reassessment_required`, append actor/trigger audit events, and stale deployment observations. The trigger
+  vocabulary also covers scanner/rule/database freshness, policy bundle, signer/trust keys, approval changes
+  and expiry, runtime/loader changes, CVEs, upstream subjects, and incidents; generated evidence changes
+  already invalidate the exact submission automatically.
 
 Corporate work:
 
