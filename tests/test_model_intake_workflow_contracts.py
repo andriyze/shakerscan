@@ -248,8 +248,8 @@ def test_keyless_model_intake_agent_dtos_have_no_authority_or_provider_fields():
 
 def test_keyless_runner_plan_uses_authoritative_static_artifact_subject_name():
     source = inspect.getsource(api._execute_model_intake_agent_action)
-    assert 'subject_map.get("artifact")' in source
-    assert 'subject_map.get("model_artifact")' not in source
+    assert '("artifact", bundle["model_artifact_sha256"]) not in subject_pairs' in source
+    assert '("repository_snapshot", bundle["repository_snapshot_sha256"]) not in subject_pairs' in source
 
 
 def test_runner_materialization_reconstructs_exact_content_addressed_snapshot(tmp_path, monkeypatch):
@@ -727,3 +727,52 @@ def test_warning_only_required_scanner_evidence_stays_reviewable_not_pass_or_inc
         model_intake, summary, [{"severity": "high"}], checks,
     ) == "FAIL"
     assert not all(checks.values())
+
+
+def test_converted_snapshot_materialization_rehashes_every_member_and_derives_components(monkeypatch, tmp_path):
+    monkeypatch.setattr(api, "RESULTS_DIR", tmp_path)
+    monkeypatch.setenv("MODEL_INTAKE_RUNNER_HOST_RESULTS_ROOT", "/host/results")
+    root = tmp_path / "model-intake-conversions"
+    files = {
+        "model.safetensors": b"safe-weights",
+        "config.json": b'{"model_type":"bert"}',
+        "tokenizer.json": b'{"version":"1"}',
+        "modeling_custom.py": b"class SafeModel: pass\n",
+    }
+    entries = [
+        {"path": name, "size_bytes": len(content), "sha256": hashlib.sha256(content).hexdigest()}
+        for name, content in sorted(files.items())
+    ]
+    artifact_sha = next(item["sha256"] for item in entries if item["path"] == "model.safetensors")
+    manifest = {
+        "provider": "shakerscan-conversion",
+        "repository": "example/model",
+        "revision": artifact_sha,
+        "files": entries,
+    }
+    snapshot_sha = hashlib.sha256(json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    subject = root / snapshot_sha
+    subject.mkdir(parents=True)
+    for name, content in files.items():
+        (subject / name).write_bytes(content)
+    (root / f"{snapshot_sha}.manifest.json").write_text(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+    )
+
+    materialized = api._model_intake_converted_snapshot_materialization(
+        artifact_sha256=artifact_sha,
+        repository_snapshot_sha256=snapshot_sha,
+    )
+
+    assert materialized["artifact_path"] == "model.safetensors"
+    assert materialized["subject_path"] == f"/host/results/model-intake-conversions/{snapshot_sha}"
+    assert re.fullmatch(r"[0-9a-f]{64}", materialized["custom_code_sha256"])
+    assert re.fullmatch(r"[0-9a-f]{64}", materialized["tokenizer_sha256"])
+    assert re.fullmatch(r"[0-9a-f]{64}", materialized["configuration_sha256"])
+
+    (subject / "config.json").write_bytes(b"tampered")
+    with pytest.raises(api.HTTPException, match="invalid|digest mismatch"):
+        api._model_intake_converted_snapshot_materialization(
+            artifact_sha256=artifact_sha,
+            repository_snapshot_sha256=snapshot_sha,
+        )

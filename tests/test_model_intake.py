@@ -1209,6 +1209,45 @@ def test_irrelevant_external_adapter_is_not_a_required_failure(tmp_path):
     assert "fickling" not in evidence["required_non_pass"]
 
 
+def test_required_warning_stays_reviewable_and_does_not_emit_high_gate(monkeypatch, tmp_path):
+    artifact = tmp_path / "model.bin"
+    artifact.write_bytes(b"\x80\x04}\x94.")
+
+    def warning_scanner(spec, _path, subject):
+        return model_intake._model_intake_scanners._scanner_result(
+            name=spec.name,
+            version="test",
+            status="WARNING",
+            subject=subject,
+            started_at="2026-01-01T00:00:00+00:00",
+            finished_at="2026-01-01T00:00:01+00:00",
+            findings=[{"id": "review-me", "severity": "medium"}],
+            execution={"required": True},
+        )
+
+    monkeypatch.setattr(model_intake._model_intake_scanners, "run_external_scanner", warning_scanner)
+    result = asyncio.run(run_model_intake_scan(
+        str(artifact),
+        _local_options({
+            "complete_artifact_download": True,
+            "quarantine_dir": str(tmp_path / "quarantine"),
+            "run_generated_scanners": True,
+            "generated_scanner_names": ["modelscan"],
+            "require_hash": False,
+            "require_signature": False,
+            "require_model_governance": False,
+            "require_deployment_approval": False,
+        }),
+    ))
+
+    assert result["model_intake"]["generated_evidence"]["status"] == "REVIEW_REQUIRED"
+    gate = next(
+        finding for finding in result["findings"]
+        if finding["id"] == "model_intake:generated_scanner_modelscan_non_pass"
+    )
+    assert gate["severity"] == "medium"
+
+
 def test_generated_sbom_and_malware_evidence_satisfy_presence_checks(tmp_path):
     artifact = tmp_path / "model.safetensors"
     artifact.write_bytes(_safetensors_bytes())

@@ -1618,6 +1618,12 @@ Remaining product work:
   The host independently proves that every non-weight repository member is byte-identical, recomputes
   custom-code/tokenizer/configuration identities, and exports by the target snapshot digest so identical
   weights from different repositories cannot collide.
+- **Implemented converted-snapshot registration and rescan:** after a verified conversion PASS, the API
+  independently rehashes the exported tree, registers its artifact/snapshot/code/tokenizer/configuration
+  subjects, and reruns the existing strict built-ins plus applicable ModelScan, Fickling, Semgrep, and Trivy
+  adapters against that target identity. The resulting exact-bound static evidence is `PASS`, `WARNING`,
+  `FAIL`, or `INCOMPLETE`; high/critical findings remain blocking. Conversion evidence is excluded from the
+  final required-evidence set and a separate safe-loader runtime job is still mandatory.
 - **Implemented per-parser isolation:** every external adapter executes through the existing argv-only
   unprivileged launcher over a copied read-only subject, bounded scratch/output, CPU/file/fd/process limits,
   worker-cgroup memory, no-new-privileges, and an exec-persistent libseccomp filter denying external-capable

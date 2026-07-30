@@ -388,3 +388,46 @@ def test_builtin_license_inventory_identifies_license_and_binds_file_digest(tmp_
     assert result["execution"]["status"] == "PASS"
     assert result["summary"]["licenses"][0]["spdx_candidates"] == ["MIT"]
     assert len(result["summary"]["licenses"][0]["sha256"]) == 64
+
+
+def test_materialized_converted_snapshot_is_rescanned_as_exact_safe_subject(monkeypatch, tmp_path):
+    snapshot = tmp_path / "converted"
+    snapshot.mkdir()
+    (snapshot / "model.safetensors").write_bytes(b"safe")
+    (snapshot / "config.json").write_text('{"model_type":"bert"}')
+    monkeypatch.setattr(scanners, "resolve_scanner_plan", lambda *_args, **_kwargs: [])
+
+    result = scanners.scan_materialized_snapshot(
+        snapshot,
+        artifact_relative_path="model.safetensors",
+        snapshot_sha256="a" * 64,
+    )
+
+    assert result["status"] == "REVIEW_REQUIRED"
+    assert result["statuses"]["python-pickletools"] == "NOT_APPLICABLE"
+    assert all(
+        item["subject"]["digest"] == "sha256:" + "a" * 64
+        for item in result["results"]
+    )
+
+
+def test_materialized_converted_snapshot_rescan_blocks_unchanged_dangerous_code(monkeypatch, tmp_path):
+    snapshot = tmp_path / "converted"
+    snapshot.mkdir()
+    (snapshot / "model.safetensors").write_bytes(b"safe")
+    (snapshot / "modeling.py").write_text("import os\nos.system('id')\n")
+    monkeypatch.setattr(scanners, "resolve_scanner_plan", lambda *_args, **_kwargs: [])
+
+    result = scanners.scan_materialized_snapshot(
+        snapshot,
+        artifact_relative_path="model.safetensors",
+        snapshot_sha256="b" * 64,
+    )
+
+    assert result["status"] == "FAIL"
+    assert result["statuses"]["python-ast-security"] == "WARNING"
+    assert any(
+        finding.get("severity") == "high"
+        for item in result["results"]
+        for finding in item.get("findings") or []
+    )

@@ -3608,10 +3608,11 @@ async def run_model_intake_scan(
             scanner_status = str(scanner_result.get("execution", {}).get("status") or "CRASHED")
             required = bool(scanner_result.get("execution", {}).get("required"))
             if scanner_status in _model_intake_scanners.REQUIRED_NON_PASS_STATUSES and required:
+                reviewable = scanner_status in {"WARNING", "REVIEW_REQUIRED"}
                 findings.append(_finding(
                     finding_id=f"generated_scanner_{re.sub(r'[^a-z0-9]+', '_', scanner_name.lower()).strip('_')}_non_pass",
                     title=f"Required generated scanner did not pass: {scanner_name}",
-                    severity="high",
+                    severity="medium" if reviewable else "high",
                     description=f"The required scanner ended with normalized status {scanner_status}; missing, crashed, timed-out, unsupported, and incomplete execution never counts as a pass.",
                     artifact_ref=artifact_ref,
                     evidence={

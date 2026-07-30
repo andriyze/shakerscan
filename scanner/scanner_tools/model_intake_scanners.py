@@ -1595,3 +1595,87 @@ def generated_evidence_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
         ],
         "evidence_sha256": _sha256_json(results),
     }
+
+
+def scan_materialized_snapshot(
+    snapshot_root: Path,
+    *,
+    artifact_relative_path: str,
+    snapshot_sha256: str,
+    profile: str = "strict",
+) -> dict[str, Any]:
+    """Rescan one already materialized, immutable repository snapshot.
+
+    This is used for Firecracker conversion outputs. It intentionally accepts no
+    URL, command, scanner override, or caller-authored manifest.
+    """
+    root = snapshot_root.resolve(strict=True)
+    relative = Path(artifact_relative_path)
+    if not root.is_dir() or relative.is_absolute() or not relative.parts or ".." in relative.parts:
+        raise ValueError("materialized model snapshot or artifact path is invalid")
+    artifact = (root / relative).resolve(strict=True)
+    if root not in artifact.parents or not artifact.is_file() or artifact.is_symlink():
+        raise ValueError("materialized model artifact escapes the snapshot")
+    if not re.fullmatch(r"[0-9a-f]{64}", snapshot_sha256):
+        raise ValueError("materialized model snapshot digest is invalid")
+    subject = {
+        "kind": "repository_snapshot",
+        "filename": artifact.name,
+        "digest": f"sha256:{snapshot_sha256}",
+        "complete": True,
+    }
+    results = [
+        run_builtin_pickle_scan(artifact, subject),
+        run_builtin_source_scan(root, subject),
+        run_builtin_secret_scan(root, subject),
+        run_builtin_malware_scan(root, subject),
+        run_builtin_sbom_scan(root, subject),
+        run_builtin_binary_inventory(root, subject),
+        run_builtin_license_inventory(root, subject),
+    ]
+    for planned in resolve_scanner_plan(root, profile=profile):
+        spec = planned["spec"]
+        if not planned["applicable"]:
+            now = datetime.now(timezone.utc).isoformat()
+            results.append(_scanner_result(
+                name=spec.name,
+                version=None,
+                status="NOT_APPLICABLE",
+                subject=subject,
+                started_at=now,
+                finished_at=now,
+                coverage={"files_considered": planned["files_considered"]},
+                execution={
+                    "required": False,
+                    "reason": planned["reason"],
+                    "adapter_kind": spec.adapter_kind,
+                    "applicability": spec.applicability,
+                    "target_scope": spec.target_scope,
+                },
+            ))
+            continue
+        results.append(run_external_scanner(
+            spec,
+            artifact if spec.target_scope == "artifact" else root,
+            subject,
+        ))
+    summary = generated_evidence_summary(results)
+    severity = {
+        str(finding.get("severity") or "").lower()
+        for scanner_result in results
+        for finding in scanner_result.get("findings") or [] if isinstance(finding, dict)
+    }
+    required_non_pass = [
+        item for item in results
+        if item.get("execution", {}).get("status") in REQUIRED_NON_PASS_STATUSES
+        and bool(item.get("execution", {}).get("required"))
+    ]
+    status = (
+        "FAIL" if severity.intersection({"critical", "high"})
+        else "PASS" if not required_non_pass
+        else "REVIEW_REQUIRED" if all(
+            item.get("execution", {}).get("status") == "WARNING" for item in required_non_pass
+        )
+        else "FAIL"
+    )
+    return {**summary, "status": status}

@@ -61,9 +61,15 @@ except ModuleNotFoundError:
     from scanner.scanner_tools.model_intake_registry import adapter_catalog as _model_adapter_catalog
 
 try:
-    from scanner_tools.model_intake_scanners import scanner_adapter_readiness as _model_scanner_adapter_readiness
+    from scanner_tools.model_intake_scanners import (
+        scan_materialized_snapshot as _scan_materialized_model_snapshot,
+        scanner_adapter_readiness as _model_scanner_adapter_readiness,
+    )
 except ModuleNotFoundError:
-    from scanner.scanner_tools.model_intake_scanners import scanner_adapter_readiness as _model_scanner_adapter_readiness
+    from scanner.scanner_tools.model_intake_scanners import (
+        scan_materialized_snapshot as _scan_materialized_model_snapshot,
+        scanner_adapter_readiness as _model_scanner_adapter_readiness,
+    )
 
 try:
     from scanner_tools.model_intake_providers import provider_readiness as _model_provider_readiness
@@ -11696,6 +11702,10 @@ async def attach_model_intake_static_run(
             "SELECT * FROM model_intake_submissions WHERE id=$1 FOR UPDATE",
             submission_uuid,
         )
+        registered_subjects = await conn.fetch(
+            "SELECT subject_kind,sha256 FROM model_intake_subjects WHERE submission_id=$1",
+            submission_uuid,
+        )
         scan = await conn.fetchrow("SELECT id,status,result FROM scans WHERE id=$1", scan_uuid)
         if not submission:
             raise HTTPException(status_code=404, detail="Model submission not found")
@@ -12013,6 +12023,168 @@ async def _persist_model_intake_runner_evidence(
     }
 
 
+async def _register_and_rescan_converted_snapshot(
+    submission_uuid: uuid.UUID,
+    receipt_payload: dict[str, Any],
+    *,
+    actor: str,
+) -> dict[str, Any]:
+    """Register and strictly rescan a verified Firecracker conversion output."""
+    observations = receipt_payload.get("observations") if isinstance(receipt_payload.get("observations"), dict) else {}
+    if receipt_payload.get("evidence_type") != "conversion_equivalence" or receipt_payload.get("status") != "PASS":
+        return {"status": "NOT_APPLICABLE", "reason": "conversion_receipt_not_pass"}
+    artifact_sha = str(receipt_payload.get("model_artifact_sha256") or "")
+    snapshot_sha = str(receipt_payload.get("repository_snapshot_sha256") or "")
+    materialized = await asyncio.to_thread(
+        _model_intake_converted_snapshot_materialization,
+        artifact_sha256=artifact_sha,
+        repository_snapshot_sha256=snapshot_sha,
+    )
+    expected_identities = {
+        "target_artifact_sha256": artifact_sha,
+        "target_repository_snapshot_sha256": snapshot_sha,
+        "target_custom_code_sha256": materialized["custom_code_sha256"],
+        "target_tokenizer_sha256": materialized["tokenizer_sha256"],
+        "target_configuration_sha256": materialized["configuration_sha256"],
+    }
+    mismatches = [key for key, value in expected_identities.items() if observations.get(key) != value]
+    if mismatches:
+        raise HTTPException(status_code=409, detail={
+            "error": "converted_snapshot_identity_mismatch",
+            "fields": sorted(mismatches),
+        })
+    generated = await asyncio.to_thread(
+        _scan_materialized_model_snapshot,
+        Path(materialized["container_subject_path"]),
+        artifact_relative_path=materialized["artifact_path"],
+        snapshot_sha256=snapshot_sha,
+        profile="strict",
+    )
+    generated_status = str(generated.get("status") or "INCOMPLETE")
+    generated_severity = {
+        str(finding.get("severity") or "").lower()
+        for scanner_result in generated.get("results") or [] if isinstance(scanner_result, dict)
+        for finding in scanner_result.get("findings") or [] if isinstance(finding, dict)
+    }
+    static_status = "FAIL" if generated_severity.intersection({"critical", "high"}) else {
+        "PASS": "PASS",
+        "REVIEW_REQUIRED": "WARNING",
+        "FAIL": "FAIL",
+    }.get(generated_status, "INCOMPLETE")
+    report = {
+        "schema_version": "model-intake-conversion-static-rescan/v1",
+        "source_conversion_receipt_sha256": hashlib.sha256(
+            json.dumps(receipt_payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+        "model_artifact_sha256": artifact_sha,
+        "repository_snapshot_sha256": snapshot_sha,
+        "custom_code_sha256": materialized["custom_code_sha256"],
+        "tokenizer_sha256": materialized["tokenizer_sha256"],
+        "configuration_sha256": materialized["configuration_sha256"],
+        "generated_evidence": generated,
+        "status": static_status,
+    }
+    report_sha = hashlib.sha256(json.dumps(report, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    invocation = f"{receipt_payload['invocation_id']}:converted-static-rescan"
+    bindings = {
+        "model_artifact_sha256": artifact_sha,
+        "repository_snapshot_sha256": snapshot_sha,
+        "custom_code_sha256": materialized["custom_code_sha256"],
+        "tokenizer_sha256": materialized["tokenizer_sha256"],
+        "configuration_sha256": materialized["configuration_sha256"],
+    }
+    async with db_pool.acquire() as conn, conn.transaction():
+        verified_conversion = await conn.fetchrow(
+            """
+            SELECT id FROM model_intake_evidence_records
+            WHERE submission_id=$1 AND evidence_type='conversion_equivalence'
+              AND invocation_id=$2 AND status='PASS'
+            """,
+            submission_uuid,
+            receipt_payload["invocation_id"],
+        )
+        if not verified_conversion:
+            raise HTTPException(status_code=409, detail="Verified conversion evidence is unavailable")
+        for subject_kind, digest, size, manifest_sha, metadata in (
+            ("artifact", artifact_sha, materialized["artifact_size_bytes"], snapshot_sha, {"converted": True}),
+            ("repository_snapshot", snapshot_sha, materialized["repository_size_bytes"], snapshot_sha, {"converted": True}),
+            ("custom_code", materialized["custom_code_sha256"], None, snapshot_sha, {"converted": True}),
+            ("tokenizer", materialized["tokenizer_sha256"], None, snapshot_sha, {"converted": True}),
+            ("configuration", materialized["configuration_sha256"], None, snapshot_sha, {"converted": True}),
+        ):
+            if not digest:
+                continue
+            await conn.execute(
+                """
+                INSERT INTO model_intake_subjects
+                    (submission_id,subject_kind,immutable_uri,sha256,size_bytes,manifest_sha256,source_revision,metadata_json)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb)
+                ON CONFLICT (submission_id,subject_kind,sha256) DO NOTHING
+                """,
+                submission_uuid,
+                subject_kind,
+                f"conversion://sha256/{snapshot_sha}/{subject_kind}",
+                digest,
+                size,
+                manifest_sha,
+                snapshot_sha,
+                json.dumps({
+                    **metadata,
+                    "registered_by": actor,
+                    "conversion_evidence_id": str(verified_conversion["id"]),
+                    "source_model_artifact_sha256": receipt_payload.get("source_model_artifact_sha256"),
+                    "source_repository_snapshot_sha256": receipt_payload.get("source_repository_snapshot_sha256"),
+                }),
+            )
+        evidence = await conn.fetchrow(
+            """
+            INSERT INTO model_intake_evidence_records
+                (submission_id,evidence_type,schema_version,provenance_class,producer_id,
+                 producer_version,builder_id,invocation_id,subject_bindings,input_manifest_sha256,
+                 payload_sha256,payload_json,status,started_at,finished_at,expires_at)
+            VALUES ($1,'static_analysis',$2,'GENERATED_STATIC','shakerscan-conversion-static-rescan',
+                    $3,$4,$5,$6::jsonb,$7,$8,$9::jsonb,$10,NOW(),NOW(),NOW()+INTERVAL '30 days')
+            ON CONFLICT (producer_id,invocation_id) DO NOTHING RETURNING *
+            """,
+            submission_uuid,
+            report["schema_version"],
+            os.getenv("SCANNER_VERSION", "unknown"),
+            os.getenv("GIT_COMMIT", "shakerscan-api"),
+            invocation,
+            json.dumps(bindings),
+            report["source_conversion_receipt_sha256"],
+            report_sha,
+            json.dumps(report),
+            static_status,
+        )
+        duplicate = evidence is None
+        if duplicate:
+            evidence = await conn.fetchrow(
+                "SELECT * FROM model_intake_evidence_records WHERE producer_id=$1 AND invocation_id=$2",
+                "shakerscan-conversion-static-rescan",
+                invocation,
+            )
+            if not evidence or evidence["payload_sha256"] != report_sha:
+                raise HTTPException(status_code=409, detail="Converted static rescan replay changed payload")
+        invalidation = (
+            {"admissions_invalidated": 0, "deployment_bindings_staled": 0}
+            if duplicate
+            else await _reset_model_intake_for_new_evidence(
+                conn,
+                submission_uuid,
+                actor=actor,
+                evidence_type="static_analysis",
+                evidence_id=str(evidence["id"]),
+            )
+        )
+    return {
+        "status": static_status,
+        "evidence": row_to_dict(evidence),
+        "generated_evidence": generated,
+        "downstream_invalidation": invalidation,
+    }
+
+
 @app.post("/model-intake/submissions/{submission_id}/evidence-receipts")
 async def attach_model_intake_runner_evidence(
     submission_id: str,
@@ -12178,6 +12350,114 @@ def _model_intake_snapshot_materialization(
     }
 
 
+def _model_intake_converted_snapshot_materialization(
+    *,
+    artifact_sha256: str,
+    repository_snapshot_sha256: str,
+) -> dict[str, Any]:
+    """Independently verify and map one Firecracker-exported snapshot."""
+    conversion_root = (RESULTS_DIR / "model-intake-conversions").resolve()
+    subject_candidate = conversion_root / repository_snapshot_sha256
+    manifest_candidate = conversion_root / f"{repository_snapshot_sha256}.manifest.json"
+    if not subject_candidate.exists() or not manifest_candidate.exists():
+        raise HTTPException(status_code=409, detail="Converted snapshot or manifest is unavailable")
+    subject = subject_candidate.resolve(strict=True)
+    manifest_path = manifest_candidate.resolve(strict=True)
+    if subject.parent != conversion_root or manifest_path.parent != conversion_root:
+        raise HTTPException(status_code=409, detail="Converted snapshot escaped its content-addressed root")
+    if not subject.is_dir() or not manifest_path.is_file() or manifest_path.stat().st_size > 20_000_000:
+        raise HTTPException(status_code=409, detail="Converted snapshot or manifest is unavailable")
+    manifest_bytes = manifest_path.read_bytes()
+    try:
+        manifest = json.loads(manifest_bytes)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=409, detail="Converted repository manifest is invalid") from exc
+    if not isinstance(manifest, dict) or manifest.get("provider") != "shakerscan-conversion":
+        raise HTTPException(status_code=409, detail="Converted repository manifest provider is invalid")
+    if hashlib.sha256(json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()).hexdigest() != repository_snapshot_sha256:
+        raise HTTPException(status_code=409, detail="Converted repository snapshot digest mismatch")
+    files = manifest.get("files") if isinstance(manifest.get("files"), list) else []
+    if not files or len(files) > 10_000:
+        raise HTTPException(status_code=409, detail="Converted repository inventory is invalid")
+    normalized: list[tuple[Path, str, int]] = []
+    selected_path: str | None = None
+    seen: set[str] = set()
+    total_bytes = 0
+    for entry in files:
+        if not isinstance(entry, dict):
+            raise HTTPException(status_code=409, detail="Converted repository entry is invalid")
+        relative = Path(str(entry.get("path") or ""))
+        digest = str(entry.get("sha256") or "").lower()
+        size = int(entry.get("size_bytes") if entry.get("size_bytes") is not None else -1)
+        relative_text = relative.as_posix()
+        if (
+            relative.is_absolute() or not relative.parts or ".." in relative.parts
+            or relative_text in seen or not re.fullmatch(r"[0-9a-f]{64}", digest) or size < 0
+        ):
+            raise HTTPException(status_code=409, detail="Converted repository entry is unsafe")
+        seen.add(relative_text)
+        total_bytes += size
+        if total_bytes > int(os.getenv("MODEL_INTAKE_RUNNER_MAX_INPUT_BYTES", str(20 * 1024**3))):
+            raise HTTPException(status_code=409, detail="Converted repository exceeds the configured quota")
+        path = (subject / relative).resolve(strict=True)
+        if subject not in path.parents or not path.is_file() or path.is_symlink() or path.stat().st_size != size:
+            raise HTTPException(status_code=409, detail=f"Converted repository member is invalid: {relative_text}")
+        with path.open("rb") as handle:
+            observed = hashlib.file_digest(handle, "sha256").hexdigest()
+        if observed != digest:
+            raise HTTPException(status_code=409, detail=f"Converted repository member digest mismatch: {relative_text}")
+        normalized.append((relative, digest, size))
+        if digest == artifact_sha256:
+            selected_path = relative_text
+    observed_paths = {
+        path.relative_to(subject).as_posix()
+        for path in subject.rglob("*") if path.is_file() and not path.is_symlink()
+    }
+    if observed_paths != seen or not selected_path:
+        raise HTTPException(status_code=409, detail="Converted repository inventory is incomplete or lacks the artifact")
+    custom_entries = sorted(
+        ({"path": relative.as_posix(), "sha256": digest} for relative, digest, _ in normalized if relative.suffix.lower() == ".py"),
+        key=lambda item: item["path"],
+    )
+    custom_code_sha256 = (
+        hashlib.sha256(json.dumps(custom_entries, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        if custom_entries else None
+    )
+    canonical_files = [
+        {"path": relative.as_posix(), "size_bytes": size, "sha256": digest}
+        for relative, digest, size in normalized
+    ]
+    try:
+        components = _model_intake_component_identities(canonical_files)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    host_root = os.getenv("MODEL_INTAKE_RUNNER_HOST_RESULTS_ROOT", "").strip()
+    if not host_root or not Path(host_root).is_absolute():
+        raise HTTPException(status_code=503, detail="MODEL_INTAKE_RUNNER_HOST_RESULTS_ROOT is not configured")
+    relative_subject = subject.relative_to(RESULTS_DIR.resolve())
+    relative_manifest = manifest_path.relative_to(RESULTS_DIR.resolve())
+    python_files = [relative.as_posix() for relative, _digest, _size in normalized if relative.suffix.lower() == ".py"]
+    return {
+        "subject_path": str(Path(host_root) / relative_subject),
+        "container_subject_path": str(subject),
+        "repository_manifest_path": str(Path(host_root) / relative_manifest),
+        "container_repository_manifest_path": str(manifest_path),
+        "artifact_path": selected_path,
+        "custom_code_sha256": custom_code_sha256,
+        "tokenizer_sha256": components["tokenizer_sha256"],
+        "configuration_sha256": components["configuration_sha256"],
+        "artifact_size_bytes": next(size for relative, digest, size in normalized if digest == artifact_sha256),
+        "repository_size_bytes": total_bytes,
+        "profile_manifest": {
+            **manifest,
+            "library_name": "transformers",
+            "custom_code_required": bool(python_files),
+            "python_files": python_files,
+            "architectures": [],
+        },
+    }
+
+
 @app.post("/model-intake/submissions/{submission_id}/runner-jobs")
 async def create_model_intake_runner_job(
     submission_id: str,
@@ -12213,12 +12493,29 @@ async def create_model_intake_runner_job(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     scan_result = _model_intake_json_object(row["result"])
-    materialized = await asyncio.to_thread(
-        _model_intake_snapshot_materialization,
-        scan_result,
-        artifact_sha256=bundle["model_artifact_sha256"],
-        repository_snapshot_sha256=bundle["repository_snapshot_sha256"],
-    )
+    subject_pairs = {(str(item["subject_kind"]), str(item["sha256"])) for item in registered_subjects}
+    if ("artifact", bundle["model_artifact_sha256"]) not in subject_pairs or (
+        "repository_snapshot", bundle["repository_snapshot_sha256"]
+    ) not in subject_pairs:
+        raise HTTPException(status_code=409, detail="Deployment bundle subjects were not registered for this submission")
+    try:
+        materialized = await asyncio.to_thread(
+            _model_intake_snapshot_materialization,
+            scan_result,
+            artifact_sha256=bundle["model_artifact_sha256"],
+            repository_snapshot_sha256=bundle["repository_snapshot_sha256"],
+        )
+    except HTTPException as source_error:
+        if source_error.status_code != 409:
+            raise
+        try:
+            materialized = await asyncio.to_thread(
+                _model_intake_converted_snapshot_materialization,
+                artifact_sha256=bundle["model_artifact_sha256"],
+                repository_snapshot_sha256=bundle["repository_snapshot_sha256"],
+            )
+        except (HTTPException, OSError):
+            raise source_error
     if bundle.get("custom_code_sha256") != materialized["custom_code_sha256"]:
         raise HTTPException(
             status_code=409,
@@ -12351,6 +12648,7 @@ async def refresh_model_intake_runner_job(submission_id: str, job_id: str, http_
     result = remote.get("result") if isinstance(remote.get("result"), dict) else None
     error = remote.get("error") if isinstance(remote.get("error"), dict) else None
     evidence = None
+    verified_evidence_envelope: dict[str, Any] = {}
     async with db_pool.acquire() as conn, conn.transaction():
         current = await conn.fetchrow(
             "SELECT * FROM model_intake_runner_jobs WHERE id=$1 AND submission_id=$2 FOR UPDATE",
@@ -12381,7 +12679,26 @@ async def refresh_model_intake_runner_job(submission_id: str, job_id: str, http_
             datetime.fromisoformat(str(remote["started_at"]).replace("Z", "+00:00")) if remote.get("started_at") else None,
             datetime.fromisoformat(str(remote["finished_at"]).replace("Z", "+00:00")) if remote.get("finished_at") else None,
         )
-    return {"job": row_to_dict(updated), "evidence": evidence, "deployable": False}
+        if evidence_id:
+            verified_evidence_envelope = _model_intake_json_object(await conn.fetchval(
+                "SELECT signature_envelope FROM model_intake_evidence_records WHERE id=$1",
+                evidence_id,
+            ))
+    conversion_rescan = None
+    if state == "completed" and result:
+        claims = _model_intake_untrusted_runner_claims(verified_evidence_envelope)
+        if claims.get("evidence_type") == "conversion_equivalence" and claims.get("status") == "PASS":
+            conversion_rescan = await _register_and_rescan_converted_snapshot(
+                submission_uuid,
+                claims,
+                actor=actor,
+            )
+    return {
+        "job": row_to_dict(updated),
+        "evidence": evidence,
+        "conversion_rescan": conversion_rescan,
+        "deployable": False,
+    }
 
 
 async def _execute_model_intake_agent_action(
@@ -12463,10 +12780,10 @@ async def _execute_model_intake_agent_action(
             "SELECT subject_kind,sha256 FROM model_intake_subjects WHERE submission_id=$1",
             submission_uuid,
         )
-        subject_map = {str(row["subject_kind"]): str(row["sha256"]) for row in subjects}
-        if subject_map.get("artifact") != bundle["model_artifact_sha256"]:
+        subject_pairs = {(str(row["subject_kind"]), str(row["sha256"])) for row in subjects}
+        if ("artifact", bundle["model_artifact_sha256"]) not in subject_pairs:
             blockers.append("model_artifact_subject_mismatch")
-        if subject_map.get("repository_snapshot") != bundle["repository_snapshot_sha256"]:
+        if ("repository_snapshot", bundle["repository_snapshot_sha256"]) not in subject_pairs:
             blockers.append("repository_snapshot_subject_mismatch")
         result = _model_intake_json_object(submission["result"])
         model = result.get("model_intake") if isinstance(result.get("model_intake"), dict) else {}
@@ -12779,16 +13096,25 @@ async def freeze_model_intake_evidence(
         subjects = await conn.fetch(
             "SELECT subject_kind,sha256 FROM model_intake_subjects WHERE submission_id=$1", submission_uuid
         )
-        subject_map = {item["subject_kind"]: item["sha256"] for item in subjects}
-        if subject_map.get("artifact") != bundle["model_artifact_sha256"]:
+        subject_pairs = {(str(item["subject_kind"]), str(item["sha256"])) for item in subjects}
+        if ("artifact", bundle["model_artifact_sha256"]) not in subject_pairs:
             raise HTTPException(status_code=409, detail="Deployment bundle artifact was not generated for this submission")
-        if subject_map.get("repository_snapshot") != bundle["repository_snapshot_sha256"]:
+        if ("repository_snapshot", bundle["repository_snapshot_sha256"]) not in subject_pairs:
             raise HTTPException(status_code=409, detail="Deployment bundle snapshot was not generated for this submission")
+        for kind, digest in (
+            ("custom_code", bundle.get("custom_code_sha256")),
+            ("tokenizer", bundle["tokenizer_sha256"]),
+            ("configuration", bundle["configuration_sha256"]),
+        ):
+            if digest and (kind, digest) not in subject_pairs:
+                raise HTTPException(status_code=409, detail=f"Deployment bundle {kind} was not generated for this submission")
         records = [row_to_dict(item) for item in await conn.fetch(
             """
             SELECT DISTINCT ON (evidence_type) *
             FROM model_intake_evidence_records
-            WHERE submission_id=$1 AND (expires_at IS NULL OR expires_at>NOW())
+            WHERE submission_id=$1
+              AND evidence_type IN ('static_analysis','runtime_execution','embedding_evaluation','data_plane_evaluation')
+              AND (expires_at IS NULL OR expires_at>NOW())
             ORDER BY evidence_type,created_at DESC
             """,
             submission_uuid,
