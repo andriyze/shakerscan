@@ -12015,16 +12015,15 @@ def _resolve_huggingface_model_intake(request: ModelIntakeResolveRequest) -> dic
     requested_filename = request.filename or hf_ref.get("filename")
     if not model_info and not requested_filename:
         warnings.append("Hugging Face metadata is required to choose a model artifact. Enter a direct artifact file path or retry when the Hub is reachable.")
-        metadata_out = {
-            **metadata,
-            "huggingface_repo": repo_id,
-            "revision": hf_ref.get("revision") or metadata.get("revision") or "main",
-            "source_repo": f"https://huggingface.co/{repo_id}",
-            "model_card_url": (
-                f"https://huggingface.co/{repo_id}/resolve/"
-                f"{urllib.parse.quote(str(hf_ref.get('revision') or metadata.get('revision') or 'main'), safe='')}/README.md"
-            ),
-        }
+        metadata_out = _model_intake_provider_resolution_failed_metadata(
+            metadata,
+            provider="huggingface",
+            error_code="provider_resolution_failed:model_metadata_unavailable",
+        )
+        metadata_out["provider_resolution"].update({
+            "requested_repository": repo_id,
+            "requested_revision": hf_ref.get("revision") or metadata.get("revision") or "main",
+        })
         return {
             "platform": "huggingface",
             "normalized_ref": request.ref,
@@ -12064,10 +12063,38 @@ def _resolve_huggingface_model_intake(request: ModelIntakeResolveRequest) -> dic
     if repository_manifest.get("custom_code_required"):
         warnings.append("Repository contains custom executable model code; scan and sandbox every executable file before approval.")
 
-    metadata_out = {
-        **_hf_metadata_from_model_info(model_info, repo_id, str(hf_ref.get("revision") or "main"), selected),
-        **metadata,
-    }
+    provider_metadata = _hf_metadata_from_model_info(
+        model_info,
+        repo_id,
+        str(hf_ref.get("revision") or "main"),
+        selected,
+    )
+    if model_info:
+        metadata_out = {**provider_metadata, **metadata}
+        for key in _MODEL_INTAKE_PROVIDER_AUTHORITY_KEYS:
+            if key in provider_metadata:
+                metadata_out[key] = provider_metadata[key]
+        metadata_out["python_files"] = list(repository_manifest.get("python_files") or [])
+        metadata_out["custom_code_required"] = repository_manifest.get("custom_code_required")
+        metadata_out["auto_map"] = repository_manifest.get("auto_map")
+        metadata_out["provider_resolution"] = {
+            "provider": "huggingface",
+            "status": "PASS",
+            "repository": repo_id,
+            "revision": repository_manifest.get("revision"),
+            "manifest_sha256": repository_manifest.get("manifest_sha256"),
+        }
+    else:
+        metadata_out = _model_intake_provider_resolution_failed_metadata(
+            metadata,
+            provider="huggingface",
+            error_code="provider_resolution_failed:model_metadata_unavailable",
+        )
+        metadata_out["provider_resolution"].update({
+            "requested_repository": repo_id,
+            "requested_revision": hf_ref.get("revision") or "main",
+            "requested_file": requested_filename,
+        })
     artifact_url = str(hf_ref.get("resolve_url") or request.ref).strip()
     model_card_url = str(metadata_out.get("model_card_url") or "") or None
     scan_payload = {
@@ -12633,8 +12660,69 @@ async def cleanup_model_intake_quarantine(
     }
 
 
+_MODEL_INTAKE_PROVIDER_AUTHORITY_KEYS = {
+    "huggingface_repo",
+    "revision",
+    "huggingface_file",
+    "huggingface_file_inventory",
+    "repository_manifest",
+    "source_repo",
+    "python_files",
+    "custom_code_required",
+    "auto_map",
+}
+
+
+def _model_intake_provider_resolution_failed_metadata(
+    metadata: dict[str, Any],
+    *,
+    provider: str,
+    error_code: str,
+) -> dict[str, Any]:
+    declared_authority = {
+        key: metadata[key]
+        for key in sorted(_MODEL_INTAKE_PROVIDER_AUTHORITY_KEYS)
+        if key in metadata
+    }
+    sanitized = {
+        key: value
+        for key, value in metadata.items()
+        if key not in _MODEL_INTAKE_PROVIDER_AUTHORITY_KEYS
+    }
+    sanitized.update({
+        "provider_resolution": {
+            "provider": provider,
+            "status": "INCOMPLETE",
+            "error_code": error_code,
+            "caller_authority_discarded": bool(declared_authority),
+            "discarded_declarations_sha256": (
+                hashlib.sha256(
+                    json.dumps(declared_authority, sort_keys=True, separators=(",", ":"), default=str).encode()
+                ).hexdigest()
+                if declared_authority else None
+            ),
+        },
+        "repository_manifest": {
+            "schema_version": "model-intake-repository-manifest/v1",
+            "provider": provider,
+            "complete": False,
+            "files_discovered": 0,
+            "files_recorded": 0,
+            "files": [],
+            "python_files": [],
+            "custom_code_required": None,
+            "inventory_status": "INCOMPLETE",
+            "error": error_code,
+        },
+        "huggingface_file_inventory": [],
+        "python_files": [],
+        "custom_code_required": None,
+    })
+    return sanitized
+
+
 async def _enrich_model_intake_scan_request(request: ModelIntakeScanRequest) -> ModelIntakeScanRequest:
-    """Best-effort provider metadata lookup for direct API/UI scan submissions."""
+    """Resolve provider authority or preserve an explicit incomplete result."""
     artifact_ref = (request.artifact_url or "").strip()
     metadata = dict(request.metadata_json or {})
     if _detect_model_intake_platform(artifact_ref, metadata) != "huggingface":
@@ -12654,7 +12742,14 @@ async def _enrich_model_intake_scan_request(request: ModelIntakeScanRequest) -> 
         resolved = await asyncio.to_thread(_resolve_huggingface_model_intake, resolve_request)
     except Exception as exc:
         logger.warning("Could not auto-enrich Hugging Face model intake request: %s: %s", type(exc).__name__, exc)
-        return request
+        error_code = f"provider_resolution_failed:{type(exc).__name__}"
+        return request.model_copy(update={
+            "metadata_json": _model_intake_provider_resolution_failed_metadata(
+                metadata,
+                provider="huggingface",
+                error_code=error_code,
+            ),
+        })
 
     scan_payload = resolved.get("scan_payload") if isinstance(resolved.get("scan_payload"), dict) else {}
     resolved_metadata = scan_payload.get("metadata_json") if isinstance(scan_payload.get("metadata_json"), dict) else {}
@@ -12673,6 +12768,21 @@ async def _enrich_model_intake_scan_request(request: ModelIntakeScanRequest) -> 
     ):
         if key in resolved_metadata:
             merged_metadata[key] = resolved_metadata[key]
+    authoritative_manifest = (
+        resolved_metadata.get("repository_manifest")
+        if isinstance(resolved_metadata.get("repository_manifest"), dict)
+        else {}
+    )
+    merged_metadata["python_files"] = list(authoritative_manifest.get("python_files") or [])
+    merged_metadata["custom_code_required"] = authoritative_manifest.get("custom_code_required")
+    merged_metadata["auto_map"] = authoritative_manifest.get("auto_map")
+    merged_metadata["provider_resolution"] = {
+        "provider": "huggingface",
+        "status": "PASS",
+        "repository": resolved_metadata.get("huggingface_repo"),
+        "revision": resolved_metadata.get("revision"),
+        "manifest_sha256": authoritative_manifest.get("manifest_sha256"),
+    }
     expected_sha = request.expected_sha256 or scan_payload.get("expected_sha256") or merged_metadata.get("sha256")
     model_card_url = request.model_card_url or scan_payload.get("model_card_url") or merged_metadata.get("model_card_url")
     artifact_url = scan_payload.get("artifact_url") or request.artifact_url

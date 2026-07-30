@@ -2352,6 +2352,67 @@ def test_real_huggingface_enrichment_does_not_relabel_caller_manifest_as_provide
     assert {item["path"] for item in manifest["files"]} == {"model.safetensors", "modeling_evil.py"}
 
 
+def test_huggingface_enrichment_failure_discards_caller_inventory_authority(monkeypatch):
+    def fail_resolution(_request):
+        raise TimeoutError("provider unavailable")
+
+    monkeypatch.setattr(api_module, "_resolve_huggingface_model_intake", fail_resolution)
+    request = api_module.ModelIntakeScanRequest(
+        artifact_url="acme/ranker",
+        metadata_json={
+            "license": "apache-2.0",
+            "huggingface_repo": "attacker/other",
+            "revision": "b" * 40,
+            "python_files": [],
+            "custom_code_required": False,
+            "repository_manifest": {
+                "complete": True,
+                "files": [{"path": "model.safetensors"}],
+            },
+        },
+    )
+
+    enriched = asyncio.run(api_module._enrich_model_intake_scan_request(request))
+
+    assert enriched.metadata_json["license"] == "apache-2.0"
+    assert "huggingface_repo" not in enriched.metadata_json
+    assert "revision" not in enriched.metadata_json
+    assert enriched.metadata_json["provider_resolution"]["status"] == "INCOMPLETE"
+    assert enriched.metadata_json["provider_resolution"]["caller_authority_discarded"] is True
+    assert len(enriched.metadata_json["provider_resolution"]["discarded_declarations_sha256"]) == 64
+    manifest = enriched.metadata_json["repository_manifest"]
+    assert manifest["complete"] is False
+    assert manifest["inventory_status"] == "INCOMPLETE"
+    assert manifest["custom_code_required"] is None
+    assert enriched.metadata_json["custom_code_required"] is None
+
+
+def test_public_huggingface_resolver_failure_cannot_return_forged_complete_manifest(monkeypatch):
+    def fail_model_info(*_args, **_kwargs):
+        raise TimeoutError("provider unavailable")
+
+    monkeypatch.setattr(api_module, "_hf_api_model_info", fail_model_info)
+    resolved = api_module._resolve_huggingface_model_intake(api_module.ModelIntakeResolveRequest(
+        platform="huggingface",
+        ref="https://huggingface.co/acme/ranker",
+        revision="main",
+        filename="model.safetensors",
+        metadata_json={
+            "repository_manifest": {"complete": True, "files": [{"path": "model.safetensors"}]},
+            "python_files": [],
+            "custom_code_required": False,
+        },
+    ))
+
+    metadata = resolved["scan_payload"]["metadata_json"]
+    assert metadata["provider_resolution"]["status"] == "INCOMPLETE"
+    assert metadata["provider_resolution"]["requested_repository"] == "acme/ranker"
+    assert metadata["repository_manifest"]["complete"] is False
+    assert metadata["repository_manifest"]["custom_code_required"] is None
+    assert "huggingface_repo" not in metadata
+    assert "revision" not in metadata
+
+
 # --- Focused check_family auto-sharding policy (locked: this path has regressed) ---
 
 def test_focused_family_runs_direct_without_explicit_parallel(monkeypatch):
