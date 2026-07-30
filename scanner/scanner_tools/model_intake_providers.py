@@ -82,7 +82,8 @@ class EmbeddingEvaluationProvider(ModelIntakeProvider):
         return self.result(
             ready=True,
             status="READY",
-            runner_included=False,
+            runtime_receipt_derivation_included=True,
+            data_plane_runner_included=False,
             evaluates=[
                 "retrieval_quality", "acl_and_tenant_isolation", "poisoning", "sensitive_leakage",
                 "dimension_and_collision", "stability", "deletion", "capacity",
@@ -107,24 +108,6 @@ class EmbeddedPolicyProvider(ModelIntakeProvider):
         )
 
 
-class OpaPolicyProvider(ModelIntakeProvider):
-    descriptor = ProviderDescriptor(
-        id="opa-policy",
-        kind="policy_provider",
-        implementation="external_opa_bundle",
-        trust_boundary="external_policy_decision_point",
-        optional=True,
-    )
-
-    def readiness(self) -> dict[str, Any]:
-        return self.result(
-            ready=False,
-            status="NOT_IMPLEMENTED",
-            configured=bool(os.getenv("MODEL_INTAKE_OPA_URL")),
-            limitation="no fail-closed OPA decision contract is release-gated; use embedded policy profiles",
-        )
-
-
 class CoreReportProvider(ModelIntakeProvider):
     descriptor = ProviderDescriptor(
         id="core-report-exporter",
@@ -137,8 +120,15 @@ class CoreReportProvider(ModelIntakeProvider):
         return self.result(
             ready=True,
             status="READY",
-            formats=["normalized_json", "evidence_export", "technical_decision_candidate"],
-            limitation="dedicated admission service and signer are not implemented; report output cannot authorize deployment",
+            formats=[
+                "normalized_json", "printable_html", "browser_pdf", "sarif",
+                "evidence_export", "signed_admission_package",
+            ],
+            admission_authority="isolated_signer_plus_active_lifecycle_registry",
+            limitation=(
+                "report rendering alone never authorizes deployment; consumers must verify the exact signed "
+                "allow package and active lifecycle record"
+            ),
         )
 
 
@@ -146,7 +136,6 @@ PROVIDERS: tuple[ModelIntakeProvider, ...] = (
     SandboxExecutionProvider(),
     EmbeddingEvaluationProvider(),
     EmbeddedPolicyProvider(),
-    OpaPolicyProvider(),
     CoreReportProvider(),
 )
 

@@ -20,12 +20,14 @@ def test_provider_registry_keeps_scanners_out_of_execution_and_policy_classes(tm
 
     assert by_id["isolated-sandbox-service"]["ready"] is True
     assert by_id["isolated-sandbox-service"]["kind"] == "execution_provider"
-    assert by_id["embedding-security-evaluator"]["runner_included"] is False
+    assert by_id["embedding-security-evaluator"]["runtime_receipt_derivation_included"] is True
+    assert by_id["embedding-security-evaluator"]["data_plane_runner_included"] is False
     assert by_id["embedded-admission-policy"]["kind"] == "policy_provider"
-    assert by_id["opa-policy"]["status"] == "NOT_IMPLEMENTED"
+    assert "opa-policy" not in by_id
     assert by_id["core-report-exporter"]["kind"] == "report_provider"
-    assert "technical_decision_candidate" in by_id["core-report-exporter"]["formats"]
-    assert "signed_admission_package" not in by_id["core-report-exporter"]["formats"]
+    assert "sarif" in by_id["core-report-exporter"]["formats"]
+    assert "signed_admission_package" in by_id["core-report-exporter"]["formats"]
+    assert by_id["core-report-exporter"]["admission_authority"] == "isolated_signer_plus_active_lifecycle_registry"
 
 
 def test_sandbox_provider_is_explicit_when_runtime_adapter_is_absent(tmp_path, monkeypatch):
