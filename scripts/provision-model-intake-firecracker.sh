@@ -4,6 +4,7 @@ set -euo pipefail
 FIRECRACKER_VERSION="${FIRECRACKER_VERSION:-v1.16.1}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INSTALL_ROOT="${MODEL_INTAKE_RUNNER_INSTALL_ROOT:-/opt/shakerscan/model-intake-runner}"
+SHARED_RESULTS_ROOT="${MODEL_INTAKE_RUNNER_SHARED_RESULTS_ROOT:-/var/lib/shakerscan/model-intake-results}"
 KERNEL_URL="${MODEL_INTAKE_KERNEL_URL:-}"
 KERNEL_SHA256="${MODEL_INTAKE_KERNEL_SHA256:-}"
 ROOTFS_SOURCE="${MODEL_INTAKE_ROOTFS_SOURCE:-}"
@@ -26,6 +27,10 @@ if [[ -z "$KERNEL_URL" || ! "$KERNEL_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
 fi
 if [[ -z "$ROOTFS_SOURCE" || ! -f "$ROOTFS_SOURCE" ]]; then
     echo "MODEL_INTAKE_ROOTFS_SOURCE must name a locally built guest rootfs" >&2
+    exit 1
+fi
+if [[ "$SHARED_RESULTS_ROOT" != /* ]]; then
+    echo "MODEL_INTAKE_RUNNER_SHARED_RESULTS_ROOT must be an absolute host path" >&2
     exit 1
 fi
 for command in curl debugfs docker ip mkfs.ext4 nft python3 sha256sum tar; do
@@ -75,9 +80,9 @@ if [[ ! -f /etc/shakerscan/model-intake-runner.env ]]; then
     cat > /etc/shakerscan/model-intake-runner.env <<EOF
 MODEL_INTAKE_RUNNER_INTERNAL_TOKEN=$runner_token
 MODEL_INTAKE_RUNNER_JOB_ROOT=/var/lib/shakerscan/model-intake-runner/jobs
-MODEL_INTAKE_RUNNER_QUARANTINE_ROOT=/var/lib/shakerscan/model-intake-quarantine
+MODEL_INTAKE_RUNNER_QUARANTINE_ROOT=$SHARED_RESULTS_ROOT
 MODEL_INTAKE_RUNNER_WORK_ROOT=/var/lib/shakerscan/model-intake-runner/work
-MODEL_INTAKE_RUNNER_CONVERSION_ROOT=/var/lib/shakerscan/model-intake-quarantine/conversions
+MODEL_INTAKE_RUNNER_CONVERSION_ROOT=$SHARED_RESULTS_ROOT/model-intake-conversions
 MODEL_INTAKE_JAILER_ROOT=/srv/jailer
 MODEL_INTAKE_FIRECRACKER_BIN=$INSTALL_ROOT/bin/firecracker
 MODEL_INTAKE_FIRECRACKER_SHA256=$(sha256sum "$INSTALL_ROOT/bin/firecracker" | awk '{print $1}')
@@ -94,7 +99,7 @@ fi
 install -d -m 0700 \
     /var/lib/shakerscan/model-intake-runner/jobs \
     /var/lib/shakerscan/model-intake-runner/work \
-    /var/lib/shakerscan/model-intake-quarantine/conversions
+    "$SHARED_RESULTS_ROOT/model-intake-conversions"
 cat > /etc/systemd/system/shakerscan-model-intake-runner.service <<EOF
 [Unit]
 Description=ShakerScan physical Model Intake Firecracker runner

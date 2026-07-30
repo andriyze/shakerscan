@@ -134,8 +134,14 @@ def run_phase(phase: str) -> None:
             state["embedding_output_sha256"] = hashlib.sha256(vector_bytes).hexdigest()
             state["embedding_shape"] = list(vectors.shape)
             expected = job.get("known_answer_embedding_sha256")
-            state["embedding_known_answers_status"] = "PASS" if not expected or expected == state["embedding_output_sha256"] else "FAIL"
-            state["phases"][phase] = "PASS"
+            state["embedding_known_answers_status"] = (
+                "NOT_CONFIGURED" if not expected
+                else "PASS" if expected == state["embedding_output_sha256"]
+                else "FAIL"
+            )
+            state["phases"][phase] = state["embedding_known_answers_status"]
+            if state["embedding_known_answers_status"] != "PASS":
+                raise ValueError("known-answer embedding digest is absent or does not match")
         elif phase == "deserialize_convert":
             import shutil
             import torch

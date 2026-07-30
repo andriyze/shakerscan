@@ -20,6 +20,7 @@ import os
 import random
 import re
 import secrets
+import shutil
 import time
 import urllib.error
 import urllib.parse
@@ -3913,6 +3914,18 @@ class ModelSubmissionStaticRunRequest(BaseModel):
 class ModelRunnerEvidenceReceiptRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     signature_envelope: dict[str, Any]
+
+
+class ModelRunnerJobCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    operation: Literal["calibration", "runtime", "conversion"] = "runtime"
+    deployment_bundle: dict[str, Any]
+    known_answer_inputs: list[str] = Field(default_factory=list, max_length=100)
+    known_answer_embedding_sha256: Optional[str] = Field(default=None, pattern="^[0-9a-fA-F]{64}$")
+    vcpu_count: int = Field(default=2, ge=1, le=32)
+    memory_mib: int = Field(default=4096, ge=256, le=262144)
+    timeout_seconds: int = Field(default=600, ge=30, le=3600)
 
 
 class ModelLoaderProfileResolveRequest(BaseModel):
@@ -11358,6 +11371,108 @@ def _model_intake_untrusted_runner_claims(envelope: dict[str, Any]) -> dict[str,
     return value if isinstance(value, dict) else {}
 
 
+async def _persist_model_intake_runner_evidence(
+    conn: Any,
+    submission_uuid: uuid.UUID,
+    signature_envelope: dict[str, Any],
+    *,
+    actor: str,
+) -> dict[str, Any]:
+    """Verify and persist one runner receipt inside the caller's transaction."""
+    untrusted = _model_intake_untrusted_runner_claims(signature_envelope)
+    evidence_type = str(untrusted.get("evidence_type") or "")
+    policy = _MODEL_RUNNER_EVIDENCE_POLICY.get(evidence_type)
+    if not policy:
+        raise HTTPException(status_code=422, detail="Unsupported runner evidence type")
+    _provenance, purpose = policy
+    submission = await conn.fetchrow(
+        "SELECT id,requested_environment FROM model_intake_submissions WHERE id=$1 FOR UPDATE",
+        submission_uuid,
+    )
+    if not submission:
+        raise HTTPException(status_code=404, detail="Model submission not found")
+    anchors = await conn.fetch(
+        """
+        SELECT public_key_pem,builder_id_constraint FROM model_intake_trust_anchors
+        WHERE is_active=true AND revoked_at IS NULL AND purpose=$1 AND environment=$2
+          AND valid_from<=NOW() AND (valid_until IS NULL OR valid_until>NOW())
+        """,
+        purpose,
+        submission["requested_environment"],
+    )
+    verified = _verify_model_runner_envelope(
+        signature_envelope,
+        expected_submission_id=str(submission_uuid),
+        expected_environment=submission["requested_environment"],
+        trusted_public_keys=[str(item["public_key_pem"] or "") for item in anchors if item["public_key_pem"]],
+        trusted_builder_ids={str(item["builder_id_constraint"] or "") for item in anchors if item["builder_id_constraint"]},
+    )
+    if not verified["verified"]:
+        raise HTTPException(status_code=409, detail=verified)
+    payload = verified["payload"]
+    bindings = {
+        key: payload[key]
+        for key in (
+            "deployment_bundle_sha256", "model_artifact_sha256",
+            "repository_snapshot_sha256", "runtime_image_digest",
+            "loader_profile_sha256",
+        )
+    }
+    inserted = await conn.fetchrow(
+        """
+        INSERT INTO model_intake_evidence_records
+            (submission_id,evidence_type,schema_version,provenance_class,producer_id,
+             producer_version,builder_id,invocation_id,subject_bindings,payload_sha256,
+             signature_envelope,status,started_at,finished_at,expires_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11::jsonb,$12,$13,$14,$15)
+        ON CONFLICT (producer_id,invocation_id) DO NOTHING
+        RETURNING *
+        """,
+        submission_uuid,
+        evidence_type,
+        payload["schema_version"],
+        verified["provenance_class"],
+        payload["builder_id"],
+        str(payload.get("runner_version") or "unknown"),
+        payload["builder_id"],
+        payload["invocation_id"],
+        json.dumps(bindings),
+        verified["payload_sha256"],
+        json.dumps(signature_envelope),
+        payload["status"],
+        datetime.fromisoformat(payload["started_at"].replace("Z", "+00:00")),
+        datetime.fromisoformat(payload["finished_at"].replace("Z", "+00:00")),
+        datetime.fromisoformat(payload["expires_at"].replace("Z", "+00:00")),
+    )
+    duplicate = inserted is None
+    if duplicate:
+        inserted = await conn.fetchrow(
+            "SELECT * FROM model_intake_evidence_records WHERE producer_id=$1 AND invocation_id=$2",
+            payload["builder_id"],
+            payload["invocation_id"],
+        )
+        if not inserted or inserted["payload_sha256"] != verified["payload_sha256"]:
+            raise HTTPException(status_code=409, detail="Runner invocation replay changed payload")
+    invalidation = (
+        {"admissions_invalidated": 0, "deployment_bindings_staled": 0}
+        if duplicate
+        else await _reset_model_intake_for_new_evidence(
+            conn,
+            submission_uuid,
+            actor=actor,
+            evidence_type=evidence_type,
+            evidence_id=str(inserted["id"]),
+        )
+    )
+    return {
+        "evidence": row_to_dict(inserted),
+        "verified": True,
+        "verified_by": actor,
+        "downstream_invalidation": invalidation,
+        "deployable": False,
+    }
+
+
 @app.post("/model-intake/submissions/{submission_id}/evidence-receipts")
 async def attach_model_intake_runner_evidence(
     submission_id: str,
@@ -11367,99 +11482,324 @@ async def attach_model_intake_runner_evidence(
     """Verify a trusted runner signature before persisting generated evidence."""
     actor = _model_intake_authenticated_subject(http_request)
     submission_uuid = _model_intake_uuid(submission_id, "submission id")
-    untrusted = _model_intake_untrusted_runner_claims(request.signature_envelope)
-    evidence_type = str(untrusted.get("evidence_type") or "")
-    policy = _MODEL_RUNNER_EVIDENCE_POLICY.get(evidence_type)
-    if not policy:
-        raise HTTPException(status_code=422, detail="Unsupported runner evidence type")
-    _provenance, purpose = policy
     async with db_pool.acquire() as conn, conn.transaction():
-        submission = await conn.fetchrow(
-            "SELECT id,requested_environment FROM model_intake_submissions WHERE id=$1 FOR UPDATE",
+        return await _persist_model_intake_runner_evidence(
+            conn,
             submission_uuid,
-        )
-        if not submission:
-            raise HTTPException(status_code=404, detail="Model submission not found")
-        anchors = await conn.fetch(
-            """
-            SELECT public_key_pem,builder_id_constraint FROM model_intake_trust_anchors
-            WHERE is_active=true AND revoked_at IS NULL AND purpose=$1 AND environment=$2
-              AND valid_from<=NOW() AND (valid_until IS NULL OR valid_until>NOW())
-            """,
-            purpose,
-            submission["requested_environment"],
-        )
-        verified = _verify_model_runner_envelope(
             request.signature_envelope,
-            expected_submission_id=str(submission_uuid),
-            expected_environment=submission["requested_environment"],
-            trusted_public_keys=[str(item["public_key_pem"] or "") for item in anchors if item["public_key_pem"]],
-            trusted_builder_ids={str(item["builder_id_constraint"] or "") for item in anchors if item["builder_id_constraint"]},
+            actor=actor,
         )
-        if not verified["verified"]:
-            raise HTTPException(status_code=409, detail=verified)
-        payload = verified["payload"]
-        bindings = {
-            key: payload[key]
-            for key in (
-                "deployment_bundle_sha256", "model_artifact_sha256",
-                "repository_snapshot_sha256", "runtime_image_digest",
-                "loader_profile_sha256",
-            )
-        }
-        inserted = await conn.fetchrow(
+
+
+def _model_intake_runner_http(method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    base = os.getenv("MODEL_INTAKE_RUNNER_URL", "").strip().rstrip("/")
+    token = os.getenv("MODEL_INTAKE_RUNNER_INTERNAL_TOKEN", "")
+    if not base or len(token) < 32:
+        raise RuntimeError("model_intake_runner_service_not_configured")
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode() if payload is not None else None
+    request = urllib.request.Request(
+        f"{base}{path}",
+        data=encoded,
+        method=method,
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "X-Shakerscan-Runner-Token": token,
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            raw = response.read(4_000_001)
+    except urllib.error.HTTPError as exc:
+        detail = exc.read(32_000).decode("utf-8", "replace")
+        raise RuntimeError(f"runner_service_rejected:{exc.code}:{detail}") from exc
+    except (OSError, urllib.error.URLError) as exc:
+        raise RuntimeError(f"runner_service_unavailable:{type(exc).__name__}") from exc
+    if len(raw) > 4_000_000:
+        raise RuntimeError("runner_service_response_too_large")
+    decoded = json.loads(raw)
+    if not isinstance(decoded, dict):
+        raise RuntimeError("runner_service_response_invalid")
+    return decoded
+
+
+def _model_intake_snapshot_materialization(
+    scan_result: dict[str, Any],
+    *,
+    artifact_sha256: str,
+    repository_snapshot_sha256: str,
+) -> dict[str, Any]:
+    model = scan_result.get("model_intake") if isinstance(scan_result.get("model_intake"), dict) else {}
+    snapshot = model.get("repository_snapshot") if isinstance(model.get("repository_snapshot"), dict) else {}
+    if snapshot.get("complete") is not True or snapshot.get("snapshot_sha256") != repository_snapshot_sha256:
+        raise HTTPException(status_code=409, detail="Exact complete repository snapshot is unavailable")
+    files = snapshot.get("files") if isinstance(snapshot.get("files"), list) else []
+    if not files or len(files) > 10_000:
+        raise HTTPException(status_code=409, detail="Repository snapshot file inventory is invalid")
+    canonical_files: list[dict[str, Any]] = []
+    selected_path: str | None = None
+    normalized: list[tuple[Path, str, int]] = []
+    for entry in files:
+        if not isinstance(entry, dict):
+            raise HTTPException(status_code=409, detail="Repository snapshot entry is invalid")
+        relative = Path(str(entry.get("path") or ""))
+        digest = str(entry.get("sha256") or "").lower()
+        size = int(entry.get("size_bytes") or -1)
+        if relative.is_absolute() or not relative.parts or ".." in relative.parts or not re.fullmatch(r"[0-9a-f]{64}", digest) or size < 0:
+            raise HTTPException(status_code=409, detail="Repository snapshot entry is unsafe")
+        canonical_files.append({"path": relative.as_posix(), "size_bytes": size, "sha256": digest})
+        normalized.append((relative, digest, size))
+        if digest == artifact_sha256:
+            selected_path = relative.as_posix()
+    canonical = {
+        "provider": str(snapshot.get("repository_manifest", {}).get("provider") or "huggingface"),
+        "repository": str(snapshot.get("repository") or ""),
+        "revision": str(snapshot.get("revision") or ""),
+        "files": sorted(canonical_files, key=lambda item: item["path"]),
+    }
+    canonical_bytes_value = json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()
+    if hashlib.sha256(canonical_bytes_value).hexdigest() != repository_snapshot_sha256:
+        raise HTTPException(status_code=409, detail="Repository snapshot canonical digest mismatch")
+    if not selected_path:
+        raise HTTPException(status_code=409, detail="Deployment artifact is absent from repository snapshot")
+
+    container_root = (RESULTS_DIR / "model-intake-runner-subjects").resolve()
+    subject = (container_root / repository_snapshot_sha256).resolve()
+    manifest_dir = (container_root / "manifests").resolve()
+    if container_root not in subject.parents:
+        raise HTTPException(status_code=409, detail="Runner subject path escaped its root")
+    source_root = (RESULTS_DIR / "model-intake-quarantine" / "sha256").resolve()
+    if not subject.exists():
+        temporary = container_root / f".{repository_snapshot_sha256}.{uuid.uuid4().hex}.tmp"
+        temporary.mkdir(parents=True, mode=0o700)
+        try:
+            for relative, digest, size in normalized:
+                source = (source_root / digest[:2] / digest).resolve(strict=True)
+                if source_root not in source.parents or not source.is_file() or source.stat().st_size != size:
+                    raise HTTPException(status_code=409, detail=f"Quarantine object unavailable for {relative.as_posix()}")
+                with source.open("rb") as handle:
+                    observed = hashlib.file_digest(handle, "sha256").hexdigest()
+                if observed != digest:
+                    raise HTTPException(status_code=409, detail=f"Quarantine object digest mismatch for {relative.as_posix()}")
+                target = temporary / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, target)
+                target.chmod(0o400)
+            os.replace(temporary, subject)
+        except Exception:
+            shutil.rmtree(temporary, ignore_errors=True)
+            raise
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = manifest_dir / f"{repository_snapshot_sha256}.json"
+    if not manifest_path.exists():
+        temporary_manifest = manifest_dir / f".{repository_snapshot_sha256}.{uuid.uuid4().hex}.tmp"
+        temporary_manifest.write_bytes(canonical_bytes_value)
+        temporary_manifest.chmod(0o400)
+        os.replace(temporary_manifest, manifest_path)
+
+    host_root = os.getenv("MODEL_INTAKE_RUNNER_HOST_RESULTS_ROOT", "").strip()
+    if not host_root or not Path(host_root).is_absolute():
+        raise HTTPException(status_code=503, detail="MODEL_INTAKE_RUNNER_HOST_RESULTS_ROOT is not configured")
+    relative_subject = subject.relative_to(RESULTS_DIR.resolve())
+    relative_manifest = manifest_path.relative_to(RESULTS_DIR.resolve())
+    semantic = model.get("metadata") if isinstance(model.get("metadata"), dict) else {}
+    python_files = [item[0].as_posix() for item in normalized if item[0].suffix.lower() == ".py"]
+    profile_manifest = {
+        **canonical,
+        "library_name": str(semantic.get("library_name") or "transformers"),
+        "custom_code_required": bool(python_files),
+        "python_files": python_files,
+        "architectures": semantic.get("architectures") if isinstance(semantic.get("architectures"), list) else [],
+    }
+    return {
+        "subject_path": str(Path(host_root) / relative_subject),
+        "repository_manifest_path": str(Path(host_root) / relative_manifest),
+        "artifact_path": selected_path,
+        "profile_manifest": profile_manifest,
+    }
+
+
+@app.post("/model-intake/submissions/{submission_id}/runner-jobs")
+async def create_model_intake_runner_job(
+    submission_id: str,
+    request: ModelRunnerJobCreateRequest,
+    http_request: Request,
+):
+    """Queue a fixed server-derived Firecracker runtime or conversion job."""
+    actor = _model_intake_authenticated_subject(http_request)
+    submission_uuid = _model_intake_uuid(submission_id, "submission id")
+    try:
+        bundle = _build_model_deployment_bundle(request.deployment_bundle)
+    except _ModelAdmissionContractError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
             """
-            INSERT INTO model_intake_evidence_records
-                (submission_id,evidence_type,schema_version,provenance_class,producer_id,
-                 producer_version,builder_id,invocation_id,subject_bindings,payload_sha256,
-                 signature_envelope,status,started_at,finished_at,expires_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11::jsonb,$12,$13,$14,$15)
-            ON CONFLICT (producer_id,invocation_id) DO NOTHING
-            RETURNING *
+            SELECT s.*,sc.result FROM model_intake_submissions s
+            LEFT JOIN scans sc ON sc.id=s.scan_id WHERE s.id=$1
             """,
             submission_uuid,
-            evidence_type,
-            payload["schema_version"],
-            verified["provenance_class"],
-            payload["builder_id"],
-            str(payload.get("runner_version") or "unknown"),
-            payload["builder_id"],
-            payload["invocation_id"],
-            json.dumps(bindings),
-            verified["payload_sha256"],
-            json.dumps(request.signature_envelope),
-            payload["status"],
-            datetime.fromisoformat(payload["started_at"].replace("Z", "+00:00")),
-            datetime.fromisoformat(payload["finished_at"].replace("Z", "+00:00")),
-            datetime.fromisoformat(payload["expires_at"].replace("Z", "+00:00")),
         )
-        duplicate = inserted is None
-        if duplicate:
-            inserted = await conn.fetchrow(
-                "SELECT * FROM model_intake_evidence_records WHERE producer_id=$1 AND invocation_id=$2",
-                payload["builder_id"],
-                payload["invocation_id"],
-            )
-            if not inserted or inserted["payload_sha256"] != verified["payload_sha256"]:
-                raise HTTPException(status_code=409, detail="Runner invocation replay changed payload")
-        invalidation = (
-            {"admissions_invalidated": 0, "deployment_bindings_staled": 0}
-            if duplicate
-            else await _reset_model_intake_for_new_evidence(
-                conn,
-                submission_uuid,
-                actor=actor,
-                evidence_type=evidence_type,
-                evidence_id=str(inserted["id"]),
-            )
+    if not row:
+        raise HTTPException(status_code=404, detail="Model submission not found")
+    if bundle["target_environment"] != row["requested_environment"]:
+        raise HTTPException(status_code=409, detail="Deployment bundle environment differs from submission")
+    if request.operation == "runtime" and not request.known_answer_embedding_sha256:
+        raise HTTPException(
+            status_code=422,
+            detail="Runtime admission requires a reviewed known-answer embedding digest; use a failed calibration run only outside this admission endpoint",
         )
-    return {
-        "evidence": row_to_dict(inserted),
-        "verified": True,
-        "verified_by": actor,
-        "downstream_invalidation": invalidation,
-        "deployable": False,
+    scan_result = _model_intake_json_object(row["result"])
+    materialized = await asyncio.to_thread(
+        _model_intake_snapshot_materialization,
+        scan_result,
+        artifact_sha256=bundle["model_artifact_sha256"],
+        repository_snapshot_sha256=bundle["repository_snapshot_sha256"],
+    )
+    resolver = _resolve_model_conversion_profile if request.operation == "conversion" else _resolve_model_loader_profile
+    resolution = resolver(
+        materialized["profile_manifest"],
+        artifact_path=materialized["artifact_path"],
+        runtime_image_digest=bundle["runtime_image_digest"],
+        reviewed_custom_code_sha256=None,
+    )
+    if resolution.get("status") != "READY" or not isinstance(resolution.get("profile"), dict):
+        raise HTTPException(status_code=409, detail={"code": "runner_loader_profile_not_ready", **resolution})
+    profile = resolution["profile"]
+    runner_request = {
+        "submission_id": str(submission_uuid),
+        "mode": "conversion" if request.operation == "conversion" else "runtime",
+        "environment": row["requested_environment"],
+        "subject_path": materialized["subject_path"],
+        "repository_manifest_path": materialized["repository_manifest_path"],
+        "repository_snapshot_sha256": bundle["repository_snapshot_sha256"],
+        "model_artifact_sha256": bundle["model_artifact_sha256"],
+        "deployment_bundle_sha256": bundle["bundle_sha256"],
+        "runtime_image_digest": bundle["runtime_image_digest"],
+        "loader_profile": profile,
+        "loader_profile_sha256": profile["profile_sha256"],
+        "reviewed_custom_code_sha256": None,
+        "known_answer_inputs": request.known_answer_inputs,
+        "known_answer_embedding_sha256": request.known_answer_embedding_sha256.lower() if request.known_answer_embedding_sha256 else None,
+        "vcpu_count": request.vcpu_count,
+        "memory_mib": request.memory_mib,
+        "timeout_seconds": request.timeout_seconds,
     }
+    request_bytes = json.dumps(runner_request, sort_keys=True, separators=(",", ":")).encode()
+    stored_request = {
+        "schema_version": "model-intake-runner-request-record/v1",
+        "operation": request.operation,
+        "environment": row["requested_environment"],
+        "deployment_bundle_sha256": bundle["bundle_sha256"],
+        "model_artifact_sha256": bundle["model_artifact_sha256"],
+        "repository_snapshot_sha256": bundle["repository_snapshot_sha256"],
+        "runtime_image_digest": bundle["runtime_image_digest"],
+        "loader_profile_id": profile["profile_id"],
+        "loader_profile_sha256": profile["profile_sha256"],
+        "known_answer_input_count": len(request.known_answer_inputs),
+        "known_answer_inputs_sha256": hashlib.sha256(
+            json.dumps(request.known_answer_inputs, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+        "known_answer_embedding_sha256": request.known_answer_embedding_sha256.lower() if request.known_answer_embedding_sha256 else None,
+        "vcpu_count": request.vcpu_count,
+        "memory_mib": request.memory_mib,
+        "timeout_seconds": request.timeout_seconds,
+    }
+    remote = await asyncio.to_thread(
+        _model_intake_runner_http,
+        "POST",
+        "/internal/model-intake/runner/jobs",
+        runner_request,
+    )
+    try:
+        remote_id = uuid.UUID(str(remote["id"]))
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail="Runner returned an invalid job identifier") from exc
+    async with db_pool.acquire() as conn:
+        job = await conn.fetchrow(
+            """
+            INSERT INTO model_intake_runner_jobs
+                (submission_id,operation,state,remote_job_id,request_sha256,request_json,created_by)
+            VALUES ($1,$2,'pending',$3,$4,$5::jsonb,$6) RETURNING *
+            """,
+            submission_uuid,
+            request.operation,
+            remote_id,
+            hashlib.sha256(request_bytes).hexdigest(),
+            json.dumps(stored_request),
+            actor,
+        )
+    return {"job": row_to_dict(job), "loader_profile": profile, "deployable": False}
+
+
+@app.get("/model-intake/submissions/{submission_id}/runner-jobs")
+async def list_model_intake_runner_jobs(submission_id: str, http_request: Request):
+    _model_intake_authenticated_subject(http_request)
+    submission_uuid = _model_intake_uuid(submission_id, "submission id")
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM model_intake_runner_jobs WHERE submission_id=$1 ORDER BY created_at DESC",
+            submission_uuid,
+        )
+    return {"jobs": [row_to_dict(row) for row in rows]}
+
+
+@app.post("/model-intake/submissions/{submission_id}/runner-jobs/{job_id}/refresh")
+async def refresh_model_intake_runner_job(submission_id: str, job_id: str, http_request: Request):
+    actor = _model_intake_authenticated_subject(http_request)
+    submission_uuid = _model_intake_uuid(submission_id, "submission id")
+    job_uuid = _model_intake_uuid(job_id, "runner job id")
+    async with db_pool.acquire() as conn:
+        job = await conn.fetchrow(
+            "SELECT * FROM model_intake_runner_jobs WHERE id=$1 AND submission_id=$2",
+            job_uuid,
+            submission_uuid,
+        )
+    if not job:
+        raise HTTPException(status_code=404, detail="Runner job not found")
+    remote = await asyncio.to_thread(
+        _model_intake_runner_http,
+        "GET",
+        f"/internal/model-intake/runner/jobs/{job['remote_job_id']}",
+        None,
+    )
+    state = str(remote.get("state") or "")
+    if state not in {"pending", "running", "completed", "failed"}:
+        raise HTTPException(status_code=502, detail="Runner returned an invalid job state")
+    result = remote.get("result") if isinstance(remote.get("result"), dict) else None
+    error = remote.get("error") if isinstance(remote.get("error"), dict) else None
+    evidence = None
+    async with db_pool.acquire() as conn, conn.transaction():
+        current = await conn.fetchrow(
+            "SELECT * FROM model_intake_runner_jobs WHERE id=$1 AND submission_id=$2 FOR UPDATE",
+            job_uuid,
+            submission_uuid,
+        )
+        if not current:
+            raise HTTPException(status_code=404, detail="Runner job not found")
+        evidence_id = current["evidence_record_id"]
+        if state == "completed" and result and not evidence_id:
+            envelope = result.get("receipt") if isinstance(result.get("receipt"), dict) else None
+            if not envelope:
+                raise HTTPException(status_code=502, detail="Completed runner job omitted its signed receipt")
+            persisted = await _persist_model_intake_runner_evidence(conn, submission_uuid, envelope, actor=actor)
+            evidence = persisted["evidence"]
+            evidence_id = uuid.UUID(evidence["id"])
+        updated = await conn.fetchrow(
+            """
+            UPDATE model_intake_runner_jobs SET state=$2,result_json=$3::jsonb,error_json=$4::jsonb,
+                evidence_record_id=$5,started_at=COALESCE(started_at,$6),finished_at=$7,updated_at=NOW()
+            WHERE id=$1 RETURNING *
+            """,
+            job_uuid,
+            state,
+            json.dumps(result) if result else None,
+            json.dumps(error) if error else None,
+            evidence_id,
+            datetime.fromisoformat(str(remote["started_at"]).replace("Z", "+00:00")) if remote.get("started_at") else None,
+            datetime.fromisoformat(str(remote["finished_at"]).replace("Z", "+00:00")) if remote.get("finished_at") else None,
+        )
+    return {"job": row_to_dict(updated), "evidence": evidence, "deployable": False}
 
 
 @app.post("/model-intake/submissions/{submission_id}/freeze-evidence")
@@ -12240,6 +12580,18 @@ async def model_intake_provider_readiness():
 @app.get("/model-intake/runners/readiness")
 async def model_intake_runner_readiness():
     """Fail-closed readiness for the external Linux/KVM execution tier."""
+    if os.getenv("MODEL_INTAKE_RUNNER_URL", "").strip():
+        try:
+            return await asyncio.to_thread(_model_intake_runner_http, "GET", "/health", None)
+        except Exception as exc:
+            return {
+                "status": "NOT_READY",
+                "ready": False,
+                "executor": "firecracker-jailer",
+                "checks": {"runner_service_reachable": False},
+                "error": f"runner_service_unavailable:{type(exc).__name__}",
+                "fallback_execution": False,
+            }
     return await asyncio.to_thread(_model_firecracker_readiness)
 
 

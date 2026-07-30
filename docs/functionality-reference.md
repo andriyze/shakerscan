@@ -1209,8 +1209,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 278 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 235 | `api/api.py` |
+| Public REST operations | 281 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 237 | `api/api.py` |
 | Check families | 14 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 13 | `api/command_arsenal.py` |
@@ -1219,13 +1219,13 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Scanner wrapper commands | 26 | `scanner.sh` |
 | Make targets | 11 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
-| Runtime environment keys | 301 | Python sources + Compose manifests |
+| Runtime environment keys | 306 | Python sources + Compose manifests |
 | Scanner modules | 98 | `scanner/scanner_tools/` |
 | UI pages | 31 | `ui/src/app/` |
 | Skills | 6 | `skills/` |
 | Slash commands | 15 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
-| Durable tables | 63 | `db/init.sql` + migrations |
+| Durable tables | 64 | `db/init.sql` + migrations |
 
 ### Public REST Operations
 
@@ -1400,6 +1400,9 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `POST` | `/model-intake/submissions/{submission_id}/freeze-evidence` | `freeze_model_intake_evidence` |
 | `POST` | `/model-intake/submissions/{submission_id}/policy-decisions` | `create_model_intake_policy_decision` |
 | `POST` | `/model-intake/submissions/{submission_id}/promote` | `promote_model_intake_submission` |
+| `GET` | `/model-intake/submissions/{submission_id}/runner-jobs` | `list_model_intake_runner_jobs` |
+| `POST` | `/model-intake/submissions/{submission_id}/runner-jobs` | `create_model_intake_runner_job` |
+| `POST` | `/model-intake/submissions/{submission_id}/runner-jobs/{job_id}/refresh` | `refresh_model_intake_runner_job` |
 | `POST` | `/model-intake/submissions/{submission_id}/static-runs` | `attach_model_intake_static_run` |
 | `POST` | `/model-intake/targets/{target_id}/rescan` | `rescan_model_intake_target` |
 | `GET` | `/model-intake/trust-anchors` | `list_model_intake_trust_anchors` |
@@ -1973,6 +1976,11 @@ Only key names and declaring sources are documented; secret values are never rea
 | `MODEL_INTAKE_OPERATOR_TOKEN` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_POLICY_BUNDLE_SHA256` | `api/api.py` |
 | `MODEL_INTAKE_QUARANTINE_DIR` | `api/api.py`, `scanner/scanner_tools/model_intake.py` |
+| `MODEL_INTAKE_RUNNER_HOST_RESULTS_ROOT` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `MODEL_INTAKE_RUNNER_INTERNAL_TOKEN` | `api/api.py`, `api/model_intake_runner_service.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `MODEL_INTAKE_RUNNER_JOB_ROOT` | `api/model_intake_runner_service.py` |
+| `MODEL_INTAKE_RUNNER_QUEUE_LIMIT` | `api/model_intake_runner_service.py` |
+| `MODEL_INTAKE_RUNNER_URL` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_SANDBOX_IMAGE` | `docker-compose.yml` |
 | `MODEL_INTAKE_SANDBOX_NETWORK_MODE` | `scanner/scanner_tools/model_intake_sandbox.py` |
 | `MODEL_INTAKE_SANDBOX_NO_NEW_PRIVILEGES` | `scanner/scanner_tools/model_intake_sandbox.py` |
@@ -2235,6 +2243,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `model_intake_evidence_manifests` | `db/init.sql` |
 | `model_intake_evidence_records` | `db/init.sql` |
 | `model_intake_policy_decisions` | `db/init.sql` |
+| `model_intake_runner_jobs` | `db/init.sql` |
 | `model_intake_subjects` | `db/init.sql` |
 | `model_intake_submission_events` | `db/init.sql` |
 | `model_intake_submissions` | `db/init.sql` |

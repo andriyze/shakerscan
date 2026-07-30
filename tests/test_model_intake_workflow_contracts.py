@@ -1,5 +1,7 @@
 import asyncio
+import hashlib
 import inspect
+import json
 import os
 from pathlib import Path
 import re
@@ -23,7 +25,6 @@ def test_legacy_scan_is_preflight_by_default_and_submission_cannot_carry_authori
             intended_environment="production",
             trust_anchor_ids=["requester-selected"],
         )
-
     request = api.ModelIntakeScanRequest(
         artifact_url="https://models.example/model.safetensors",
         intake_mode="admission",
@@ -32,6 +33,66 @@ def test_legacy_scan_is_preflight_by_default_and_submission_cannot_carry_authori
     with pytest.raises(api.HTTPException, match="server-owned"):
         api._validate_model_intake_admission_request_authority(request)
 
+
+def test_runner_job_dto_has_no_path_profile_or_command_authority():
+    fields = set(api.ModelRunnerJobCreateRequest.model_fields)
+    assert fields == {
+        "operation", "deployment_bundle", "known_answer_inputs",
+        "known_answer_embedding_sha256", "vcpu_count", "memory_mib", "timeout_seconds",
+    }
+    with pytest.raises(Exception):
+        api.ModelRunnerJobCreateRequest(
+            operation="runtime",
+            deployment_bundle={},
+            command=["/bin/sh"],
+        )
+
+
+def test_runner_materialization_reconstructs_exact_content_addressed_snapshot(tmp_path, monkeypatch):
+    results = tmp_path / "results"
+    content = b"bounded safetensors fixture"
+    artifact_sha = hashlib.sha256(content).hexdigest()
+    object_path = results / "model-intake-quarantine" / "sha256" / artifact_sha[:2] / artifact_sha
+    object_path.parent.mkdir(parents=True)
+    object_path.write_bytes(content)
+    canonical = {
+        "provider": "huggingface",
+        "repository": "acme/model",
+        "revision": "1" * 40,
+        "files": [{"path": "model.safetensors", "size_bytes": len(content), "sha256": artifact_sha}],
+    }
+    snapshot_sha = hashlib.sha256(
+        json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    scan_result = {"model_intake": {
+        "metadata": {"library_name": "transformers"},
+        "repository_snapshot": {
+            "complete": True,
+            "snapshot_sha256": snapshot_sha,
+            "repository": "acme/model",
+            "revision": "1" * 40,
+            "repository_manifest": {"provider": "huggingface"},
+            "files": [{
+                "path": "model.safetensors",
+                "size_bytes": len(content),
+                "sha256": artifact_sha,
+                "quarantine_object": f"sha256:{artifact_sha}",
+            }],
+        },
+    }}
+    monkeypatch.setattr(api, "RESULTS_DIR", results)
+    monkeypatch.setenv("MODEL_INTAKE_RUNNER_HOST_RESULTS_ROOT", "/srv/shakerscan/results")
+
+    materialized = api._model_intake_snapshot_materialization(
+        scan_result,
+        artifact_sha256=artifact_sha,
+        repository_snapshot_sha256=snapshot_sha,
+    )
+
+    assert materialized["subject_path"] == f"/srv/shakerscan/results/model-intake-runner-subjects/{snapshot_sha}"
+    assert materialized["artifact_path"] == "model.safetensors"
+    assert materialized["profile_manifest"]["custom_code_required"] is False
+    assert (results / "model-intake-runner-subjects" / snapshot_sha / "model.safetensors").read_bytes() == content
 
 def test_legacy_scan_rejects_admission_before_enrichment_or_queueing():
     request = api.ModelIntakeScanRequest(

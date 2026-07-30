@@ -3262,6 +3262,25 @@ async def run_schema_migrations(pool) -> None:
                 );
                 CREATE INDEX IF NOT EXISTS idx_model_intake_evidence_submission
                     ON model_intake_evidence_records(submission_id, evidence_type, created_at DESC);
+                CREATE TABLE IF NOT EXISTS model_intake_runner_jobs (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    submission_id UUID NOT NULL REFERENCES model_intake_submissions(id) ON DELETE CASCADE,
+                    operation TEXT NOT NULL CHECK (operation IN ('calibration','runtime','conversion')),
+                    state TEXT NOT NULL CHECK (state IN ('pending','running','completed','failed')),
+                    remote_job_id UUID NOT NULL UNIQUE,
+                    request_sha256 TEXT NOT NULL,
+                    request_json JSONB NOT NULL,
+                    result_json JSONB,
+                    error_json JSONB,
+                    evidence_record_id UUID REFERENCES model_intake_evidence_records(id) ON DELETE SET NULL,
+                    created_by TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    started_at TIMESTAMPTZ,
+                    finished_at TIMESTAMPTZ,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_model_intake_runner_jobs_submission
+                    ON model_intake_runner_jobs(submission_id, created_at DESC);
                 CREATE TABLE IF NOT EXISTS model_intake_evidence_manifests (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     submission_id UUID NOT NULL REFERENCES model_intake_submissions(id) ON DELETE CASCADE,
