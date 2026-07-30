@@ -1969,7 +1969,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `MODEL_INTAKE_DEPLOYMENT_VERIFIER_TOKEN` | `api/model_intake_admission_webhook.py` |
 | `MODEL_INTAKE_OPA_URL` | `scanner/scanner_tools/model_intake_providers.py` |
 | `MODEL_INTAKE_OPERATOR_ROLES` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
-| `MODEL_INTAKE_OPERATOR_TOKEN` | `api/api.py` |
+| `MODEL_INTAKE_OPERATOR_TOKEN` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_POLICY_BUNDLE_SHA256` | `api/api.py` |
 | `MODEL_INTAKE_QUARANTINE_DIR` | `api/api.py`, `scanner/scanner_tools/model_intake.py` |
 | `MODEL_INTAKE_SANDBOX_IMAGE` | `docker-compose.yml` |

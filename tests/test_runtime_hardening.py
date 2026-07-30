@@ -380,12 +380,15 @@ def test_standalone_datastore_credentials_are_generated_and_compose_has_no_known
     script = (ROOT / "scanner.sh").read_text()
     assert "ensure_runtime_datastore_credentials" in script
     assert "generate_datastore_secret" in script
+    assert "ensure_model_intake_operator_credential" in script
+    assert "write_dotenv_value MODEL_INTAKE_OPERATOR_TOKEN" in script
     for compose_name in ("docker-compose.yml", "docker-compose.release.yml"):
         compose = (ROOT / compose_name).read_text()
         assert "${POSTGRES_PASSWORD:-scanner}" not in compose
         assert "${REDIS_PASSWORD:-scanner}" not in compose
         assert "POSTGRES_PASSWORD is required" in compose
         assert "REDIS_PASSWORD is required" in compose
+        assert "MODEL_INTAKE_OPERATOR_TOKEN=${MODEL_INTAKE_OPERATOR_TOKEN:-}" in compose
 
 
 def test_go_tool_builder_retries_transient_network_failures_with_buildkit_caches():

@@ -5155,10 +5155,9 @@ def _require_model_intake_operator(request: Request) -> None:
     """Authorize deployment verification and Model Intake trust mutations."""
     peer = getattr(getattr(request, "client", None), "host", None)
     try:
-        if peer and ipaddress.ip_address(peer).is_loopback:
-            return
+        peer_is_loopback = bool(peer) and ipaddress.ip_address(peer).is_loopback
     except ValueError:
-        pass
+        peer_is_loopback = False
     configured_bind = os.environ.get("SHAKERSCAN_BIND_HOST", "").strip()
     try:
         configured_bind_ip = ipaddress.ip_address(configured_bind) if configured_bind else None
@@ -5169,7 +5168,7 @@ def _require_model_intake_operator(request: Request) -> None:
         and isinstance(configured_bind_ip, ipaddress.IPv4Address)
         and configured_bind_ip in ipaddress.ip_network("100.64.0.0/10")
     )
-    if request.url.scheme != "https" and not trusted_tailscale_http:
+    if request.url.scheme != "https" and not peer_is_loopback and not trusted_tailscale_http:
         raise HTTPException(
             status_code=403,
             detail="Model Intake operator access requires loopback, verified Tailscale, or authenticated HTTPS",
@@ -5179,7 +5178,7 @@ def _require_model_intake_operator(request: Request) -> None:
         or os.environ.get("FLEET_OPERATOR_TOKEN", "").strip()
     )
     if len(expected) < 32:
-        raise HTTPException(status_code=403, detail="Model Intake operator access is not enabled remotely")
+        raise HTTPException(status_code=403, detail="Model Intake operator credential is not configured")
     presented = _fleet_bearer_credential(request)
     if not secrets.compare_digest(presented, expected):
         raise HTTPException(status_code=403, detail="Model Intake operator authentication failed")
@@ -5188,12 +5187,6 @@ def _require_model_intake_operator(request: Request) -> None:
 def _model_intake_authenticated_subject(request: Request) -> str:
     """Return a server-derived identity; never accept approver identity in JSON."""
     _require_model_intake_operator(request)
-    peer = getattr(getattr(request, "client", None), "host", None)
-    try:
-        if peer and ipaddress.ip_address(peer).is_loopback:
-            return "local-operator"
-    except ValueError:
-        pass
     credential = _fleet_bearer_credential(request)
     if not credential:
         raise HTTPException(status_code=403, detail="Model Intake authenticated identity is unavailable")
@@ -5201,22 +5194,12 @@ def _model_intake_authenticated_subject(request: Request) -> str:
 
 
 def _model_intake_operator_roles(request: Request) -> set[str]:
-    subject = _model_intake_authenticated_subject(request)
+    _model_intake_authenticated_subject(request)
     configured = {
         item.strip()
         for item in os.getenv("MODEL_INTAKE_OPERATOR_ROLES", "").split(",")
         if item.strip()
     }
-    if subject == "local-operator" and not configured:
-        return {
-            "model_security_reviewer",
-            "ml_platform_reviewer",
-            "release_manager",
-            "legal_reviewer",
-            "privacy_reviewer",
-            "data_owner",
-            "risk_acceptance",
-        }
     return configured
 
 

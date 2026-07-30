@@ -198,6 +198,26 @@ ensure_runtime_datastore_credentials() {
     chmod 600 "$SCRIPT_DIR/.env"
 }
 
+ensure_model_intake_operator_credential() {
+    local current_token next_token
+
+    touch "$SCRIPT_DIR/.env"
+    chmod 600 "$SCRIPT_DIR/.env"
+    current_token="${MODEL_INTAKE_OPERATOR_TOKEN:-$(read_dotenv_value MODEL_INTAKE_OPERATOR_TOKEN)}"
+    next_token="$current_token"
+    if [ "${#next_token}" -lt 32 ]; then
+        next_token="$(generate_datastore_secret)"
+    fi
+    if [ "${#next_token}" -lt 32 ]; then
+        echo -e "${RED}Error: could not generate a strong Model Intake operator credential.${NC}" >&2
+        return 1
+    fi
+
+    export MODEL_INTAKE_OPERATOR_TOKEN="$next_token"
+    write_dotenv_value MODEL_INTAKE_OPERATOR_TOKEN "$next_token"
+    chmod 600 "$SCRIPT_DIR/.env"
+}
+
 persist_remote_access_env() {
     if [ "$REMOTE_ACCESS" -ne 1 ]; then
         return 0
@@ -1390,6 +1410,7 @@ prepare_runtime_files() {
     mkdir -p .shakerscan-fleet
     chmod 700 .shakerscan-fleet
     ensure_runtime_datastore_credentials
+    ensure_model_intake_operator_credential
 
     if [ "$USE_PREBUILT" -eq 1 ]; then
         mkdir -p db

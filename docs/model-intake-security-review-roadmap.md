@@ -366,6 +366,13 @@ resolver/runner function, loosen exact booleans without a documented contract ch
 exceptions are not release evidence for that boundary. Replace them with public-boundary or real-process
 tests as each repair lands.
 
+Implementation progress after this correction: Model Intake mutation/deployment routes now require a
+configured bearer credential even over loopback; localhost is accepted only as a transport. `scanner.sh`
+generates and persists a strong dedicated credential, both Compose variants pass it to API processes, and
+audit subjects are derived from the credential rather than a shared `local-operator` identity. Approval roles
+must be explicitly configured; loopback no longer receives every reviewer role implicitly. Authority-bearing
+target rescan replay remains the next separate repair.
+
 ### 2.6 Release Gate 0 — trusted control-plane separation
 
 A second 2026-07-29 review found five remaining fail-open or confused-authority paths in the current

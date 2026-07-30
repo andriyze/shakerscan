@@ -189,10 +189,12 @@ def test_fleet_operator_actions_are_loopback_or_explicit_token_only(monkeypatch)
     assert exc.value.status_code == 403
 
 
-def test_model_intake_operator_actions_require_loopback_or_explicit_token(monkeypatch):
+def test_model_intake_operator_actions_require_explicit_token_even_on_loopback(monkeypatch):
     monkeypatch.delenv("MODEL_INTAKE_OPERATOR_TOKEN", raising=False)
     monkeypatch.delenv("FLEET_OPERATOR_TOKEN", raising=False)
-    assert api_module._require_model_intake_operator(_fleet_request(host="127.0.0.1", scheme="http")) is None
+    with pytest.raises(api_module.HTTPException) as exc:
+        api_module._require_model_intake_operator(_fleet_request(host="127.0.0.1", scheme="http"))
+    assert exc.value.status_code == 403
 
     with pytest.raises(api_module.HTTPException) as exc:
         api_module._require_model_intake_operator(_fleet_request(host="203.0.113.2", scheme="https"))
@@ -203,6 +205,15 @@ def test_model_intake_operator_actions_require_loopback_or_explicit_token(monkey
     assert api_module._require_model_intake_operator(
         _fleet_request(host="203.0.113.2", scheme="https", authorization=f"Bearer {token}")
     ) is None
+    loopback_request = _fleet_request(host="127.0.0.1", scheme="http", authorization=f"Bearer {token}")
+    assert api_module._require_model_intake_operator(loopback_request) is None
+    assert api_module._model_intake_authenticated_subject(loopback_request).startswith("operator-token:")
+
+    with pytest.raises(api_module.HTTPException) as exc:
+        api_module._require_model_intake_operator(
+            _fleet_request(host="203.0.113.2", scheme="http", authorization=f"Bearer {token}")
+        )
+    assert exc.value.status_code == 403
 
     # A loopback host publish does not make Docker-network peers trusted.
     monkeypatch.setenv("SHAKERSCAN_BIND_HOST", "127.0.0.1")
