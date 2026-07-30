@@ -19,6 +19,9 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
+    networks:
+      - default
+      - signer-control
 
   redis:
     image: redis:7-alpine
@@ -189,11 +192,36 @@ services:
       redis:
         condition: service_healthy
     restart: unless-stopped
+    networks:
+      - default
+      - signer-control
+
+  model-intake-signer-db-init:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      - MODEL_INTAKE_SIGNER_DATABASE_PASSWORD=${MODEL_INTAKE_SIGNER_DATABASE_PASSWORD:?MODEL_INTAKE_SIGNER_DATABASE_PASSWORD is required; run ./scanner.sh start}
+    volumes:
+      - ./db/configure-model-intake-signer-role.sh:/configure-model-intake-signer-role.sh:ro
+    command: ["/bin/sh", "/configure-model-intake-signer-role.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - signer-control
+    read_only: true
+    tmpfs:
+      - /tmp:size=8m,noexec,nosuid,nodev
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
 
   model-intake-signer:
-    image: ${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}:${SCANNER_IMAGE_TAG:-latest}
+    image: ${MODEL_INTAKE_SIGNER_IMAGE_REPO:-shakerscan/shakerscan-model-intake-signer}:${SCANNER_IMAGE_TAG:-latest}
     environment:
-      - DATABASE_URL=postgresql://scanner:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/scanner
+      - DATABASE_URL=postgresql://model_intake_signer:${MODEL_INTAKE_SIGNER_DATABASE_PASSWORD:?MODEL_INTAKE_SIGNER_DATABASE_PASSWORD is required}@postgres:5432/scanner
       - MODEL_INTAKE_SIGNER_INTERNAL_TOKEN=${MODEL_INTAKE_SIGNER_INTERNAL_TOKEN:-}
       - MODEL_INTAKE_SIGNER_BACKEND=${MODEL_INTAKE_SIGNER_BACKEND:-}
       - MODEL_INTAKE_SIGNER_AWS_KMS_KEY_ID=${MODEL_INTAKE_SIGNER_AWS_KMS_KEY_ID:-}
@@ -203,8 +231,10 @@ services:
       - MODEL_INTAKE_ADMISSION_BUILDER_ID=${MODEL_INTAKE_ADMISSION_BUILDER_ID:-https://shakerscan.dev/builders/model-admission/v2}
     command: ["uvicorn", "model_intake_signer_service:app", "--host", "0.0.0.0", "--port", "8091"]
     depends_on:
-      postgres:
-        condition: service_healthy
+      model-intake-signer-db-init:
+        condition: service_completed_successfully
+    networks:
+      - signer-control
     read_only: true
     tmpfs:
       - /tmp:size=32m,noexec,nosuid,nodev
@@ -425,3 +455,7 @@ volumes:
   minio-data:
   caddy-data:
   caddy-config:
+
+networks:
+  signer-control:
+    internal: true

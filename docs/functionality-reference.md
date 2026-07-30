@@ -1219,7 +1219,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Scanner wrapper commands | 26 | `scanner.sh` |
 | Make targets | 11 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
-| Runtime environment keys | 299 | Python sources + Compose manifests |
+| Runtime environment keys | 301 | Python sources + Compose manifests |
 | Scanner modules | 98 | `scanner/scanner_tools/` |
 | UI pages | 31 | `ui/src/app/` |
 | Skills | 6 | `skills/` |
@@ -1983,6 +1983,8 @@ Only key names and declaring sources are documented; secret values are never rea
 | `MODEL_INTAKE_SIGNER_AWS_KMS_KEY_ID` | `api/model_intake_signer_service.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_SIGNER_AWS_REGION` | `api/model_intake_signer_service.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_SIGNER_BACKEND` | `api/model_intake_signer_service.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `MODEL_INTAKE_SIGNER_DATABASE_PASSWORD` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `MODEL_INTAKE_SIGNER_IMAGE_REPO` | `docker-compose.release.yml` |
 | `MODEL_INTAKE_SIGNER_INTERNAL_TOKEN` | `api/api.py`, `api/model_intake_signer_service.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_SIGNER_URL` | `api/api.py` |
 | `MODEL_INTAKE_TRUSTED_KEY_SHA256` | `scanner/scanner_tools/model_intake.py` |

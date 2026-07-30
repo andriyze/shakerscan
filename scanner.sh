@@ -218,6 +218,37 @@ ensure_model_intake_operator_credential() {
     chmod 600 "$SCRIPT_DIR/.env"
 }
 
+ensure_model_intake_signer_credentials() {
+    local current_token current_database_password next_token next_database_password
+
+    touch "$SCRIPT_DIR/.env"
+    chmod 600 "$SCRIPT_DIR/.env"
+    current_token="${MODEL_INTAKE_SIGNER_INTERNAL_TOKEN:-$(read_dotenv_value MODEL_INTAKE_SIGNER_INTERNAL_TOKEN)}"
+    current_database_password="${MODEL_INTAKE_SIGNER_DATABASE_PASSWORD:-$(read_dotenv_value MODEL_INTAKE_SIGNER_DATABASE_PASSWORD)}"
+    next_token="$current_token"
+    next_database_password="$current_database_password"
+    if [ "${#next_token}" -lt 32 ]; then
+        next_token="$(generate_datastore_secret)"
+    fi
+    if [ "${#next_database_password}" -lt 32 ]; then
+        next_database_password="$(generate_datastore_secret)"
+    fi
+    if [ "${#next_token}" -lt 32 ] || [ "${#next_database_password}" -lt 32 ]; then
+        echo -e "${RED}Error: could not generate strong Model Intake signer credentials.${NC}" >&2
+        return 1
+    fi
+    if ! [[ "$next_database_password" =~ ^[A-Za-z0-9._~-]+$ ]]; then
+        echo -e "${RED}Error: Model Intake signer database password must be URL-safe.${NC}" >&2
+        return 1
+    fi
+
+    export MODEL_INTAKE_SIGNER_INTERNAL_TOKEN="$next_token"
+    export MODEL_INTAKE_SIGNER_DATABASE_PASSWORD="$next_database_password"
+    write_dotenv_value MODEL_INTAKE_SIGNER_INTERNAL_TOKEN "$next_token"
+    write_dotenv_value MODEL_INTAKE_SIGNER_DATABASE_PASSWORD "$next_database_password"
+    chmod 600 "$SCRIPT_DIR/.env"
+}
+
 persist_remote_access_env() {
     if [ "$REMOTE_ACCESS" -ne 1 ]; then
         return 0
@@ -1411,6 +1442,7 @@ prepare_runtime_files() {
     chmod 700 .shakerscan-fleet
     ensure_runtime_datastore_credentials
     ensure_model_intake_operator_credential
+    ensure_model_intake_signer_credentials
 
     if [ "$USE_PREBUILT" -eq 1 ]; then
         mkdir -p db

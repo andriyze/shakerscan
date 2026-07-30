@@ -7,6 +7,7 @@ not accept bytes to sign, trust roots, approvals, policy input, or model data.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import secrets
@@ -39,6 +40,7 @@ class IssueRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     policy_decision_id: str
     idempotency_key: str = Field(min_length=16, max_length=200)
+    requested_by_subject: str = Field(pattern=r"^operator-token:[0-9a-f]{24}$")
 
 
 def _json_object(value: Any) -> dict[str, Any]:
@@ -99,11 +101,21 @@ async def health():
         backend == "aws-kms" and os.getenv("MODEL_INTAKE_SIGNER_AWS_KMS_KEY_ID")
         or backend == "local-pem" and os.getenv("MODEL_INTAKE_CONTROL_PLANE_SIGNING_KEY_PEM")
     )
+    dependency_available = backend != "aws-kms" or importlib.util.find_spec("boto3") is not None
+    database_ready = False
+    if app.state.pool is not None:
+        try:
+            database_ready = bool(await app.state.pool.fetchval("SELECT 1"))
+        except (asyncpg.PostgresError, OSError):
+            database_ready = False
+    ready = configured and dependency_available and database_ready
     return {
-        "status": "healthy" if configured else "not_ready",
+        "status": "healthy" if ready else "not_ready",
         "service": "model-intake-signer",
         "backend": backend or None,
         "configured": configured,
+        "dependency_available": dependency_available,
+        "database_ready": database_ready,
         "generic_signing_api": False,
     }
 
@@ -124,8 +136,14 @@ async def issue(
     idempotency_digest = hashlib.sha256(request.idempotency_key.encode()).hexdigest()
     async with pool.acquire() as conn:
         async with conn.transaction():
+            # Serialize one digest without granting the signer UPDATE on the
+            # admission registry. The unique index remains the final guard.
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                idempotency_digest,
+            )
             existing = await conn.fetchrow(
-                "SELECT * FROM model_intake_admissions WHERE idempotency_key_sha256=$1 FOR UPDATE",
+                "SELECT * FROM model_intake_admissions WHERE idempotency_key_sha256=$1",
                 idempotency_digest,
             )
             if existing:
@@ -150,7 +168,7 @@ async def issue(
                 JOIN model_intake_evidence_manifests AS manifest ON manifest.id=decision.evidence_manifest_id
                 LEFT JOIN scans AS scan ON scan.id=submission.scan_id
                 WHERE decision.id=$1
-                FOR UPDATE OF decision,submission
+                FOR UPDATE OF submission
                 """,
                 decision_uuid,
             )
@@ -223,12 +241,16 @@ async def issue(
                 """
                 INSERT INTO model_intake_admission_events
                     (admission_id,event_type,actor,reason,new_status,evidence_digest,metadata_json)
-                VALUES ($1,'admission_v2_issued','model-intake-signer',
-                        'Exact frozen bundle admitted by narrow signer','active',$2,$3::jsonb)
+                VALUES ($1,'admission_v2_issued',$3,
+                        'Exact frozen bundle admitted by narrow signer','active',$2,$4::jsonb)
                 """,
                 admission_id,
                 package["statement_sha256"],
-                json.dumps({"signer_provider": package["envelope"]["signatures"][0]["provider"]}),
+                request.requested_by_subject,
+                json.dumps({
+                    "issued_by_service": "model-intake-signer",
+                    "signer_provider": package["envelope"]["signatures"][0]["provider"],
+                }),
             )
             transitioned = await conn.fetchrow(
                 """
@@ -245,15 +267,17 @@ async def issue(
                 """
                 INSERT INTO model_intake_submission_events
                     (submission_id,event_type,actor,reason,previous_state,new_state,metadata_json)
-                VALUES ($1,'admission_issued','model-intake-signer',
+                VALUES ($1,'admission_issued',$3,
                         'Narrow signer issued an exact-bundle admission','policy_decided','admitted',$2::jsonb)
                 """,
                 row["submission_id"],
                 json.dumps({
+                    "issued_by_service": "model-intake-signer",
                     "admission_id": str(admission_id),
                     "policy_decision_id": str(decision_uuid),
                     "statement_sha256": package["statement_sha256"],
                 }),
+                request.requested_by_subject,
             )
             await conn.execute(
                 """

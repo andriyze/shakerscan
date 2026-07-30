@@ -34,7 +34,11 @@ Implement and harden:
 4. Controlled CodeSage `.bin` to safetensors conversion inside Firecracker, followed by tensor and embedding
    equivalence evidence and a complete rescan of the new artifact identity.
 5. The existing Python policy engine, approval model, signer service, OCI promotion path, CI verifier,
-   Kubernetes admission webhook, UI/reporting, reassessment, and worker/storage lifecycle.
+   Kubernetes admission webhook, UI/reporting, reassessment, and worker/storage lifecycle. The signer now
+   runs from a dedicated hash-locked image containing only the signer/control-plane modules, on an internal
+   API/PostgreSQL-only network, under a separate non-superuser database role with table/column-minimal
+   grants. Its production AWS KMS dependency is shipped, and audit events retain the server-derived
+   initiating operator identity while identifying the signer service separately.
 6. Reliability work: idempotency, leases, terminal failures, bounded retries, recovery, quotas, revocation,
    freshness, negative-path tests, and physical Firecracker/KVM end-to-end validation.
 7. After the deterministic runner and evidence path are operational, one optional keyless coding-agent
@@ -297,7 +301,7 @@ but the exported status must remain unambiguous.
 | Provider-neutral evaluation contract | Deterministic scorer implemented | Public caller observations are `DECLARED` and fail closed for admission; actual result IDs/scores and connector/index/run identity are mandatory | Add the trusted isolated runner that alone may mark observations `GENERATED_DATA_PLANE` |
 | Corporate benchmark and thresholds | Integration point implemented | No universal corpus can ship | Organization supplies/version-controls corpus; ShakerScan automates execution and scoring |
 | Typed non-scanner providers | Implemented registry/readiness | Sandbox execution, embedding evaluation, embedded Python policy, and report export are separate classes | Harden only the embedded policy provider; OPA remains out of scope |
-| Signed admission statement and lifecycle registry | Exact-bundle v2 control plane implemented | Workers emit only unsigned non-deployable candidates; frozen evidence, approvals, policy decisions, narrow signer invocation, registry state, exact component verification, legal transition events, latest-manifest checks, and automatic evidence-change invalidation are durable | Harden signer isolation/KMS operation, revocation triggers, and remaining negative-path tests |
+| Signed admission statement and lifecycle registry | Exact-bundle v2 control plane and isolated signer implemented | Workers emit only unsigned non-deployable candidates. The signer has a dedicated minimal hash-locked image, isolated internal network, separate least-privilege database role, shipped AWS KMS client, request idempotency lock, and initiating-operator audit identity. Frozen evidence, approvals, exact component verification, latest-manifest checks, and evidence-change invalidation are durable. | Prove production KMS rotation/failure paths and remaining revocation/recovery negative paths |
 | Saved Model Intake policy profiles | Implemented server-owned admission expansion | Admission uses the operator-selected server default; caller booleans/subsets/exceptions cannot weaken it; mutations require operator auth | Add organization-specific required scanner/runtime/benchmark fields |
 | One-page control matrix and detailed evidence | Implemented in UI/JSON | Corporate-use verdict, can-use boolean, malicious-vs-capable serialization distinction, control matrix, primary blockers, next actions, limitations, and activity are visible | Finish HTML/PDF/SARIF parity and per-control evidence links |
 | Deployment by exact approved digest | v2 verifier code and Kubernetes manifest template implemented | The checked-in webhook manifest is not deployable as-is, and promotion currently stops at a local OCI layout; no live cluster/registry enforcement is proven | Complete one digest-preserving registry push and a correctly scoped/certified Kubernetes negative-path deployment test; add no other orchestrator |
@@ -1762,8 +1766,13 @@ Remaining product work:
 Product work:
 
 - Version, hash, regression-test, and fail closed the existing embedded Python policy implementation.
-- Harden the separate signer, KMS-only production mode, key rotation, restricted database authority,
-  idempotency, and audit events; do not add a second signing ecosystem.
+- **Implemented signer boundary:** a dedicated minimal hash-locked image contains no worker/scanner code;
+  only the API and PostgreSQL share its internal network; workers cannot resolve it; a separate
+  `model_intake_signer` role is non-superuser and receives only required SELECT/INSERT plus two-column
+  submission UPDATE authority; AWS KMS dependencies ship; digest-scoped advisory locking protects
+  idempotency; and events preserve both the server-derived initiating operator and signer-service identity.
+  Remaining corporate acceptance is live KMS rotation/outage/recovery testing; do not add another signing
+  ecosystem.
 - Complete digest-preserving push and post-push verification using the existing OCI layout and one configured
   internal registry; do not build registry administration.
 - Harden the implemented fail-closed CI/startup verifier and Kubernetes admission webhook, including outage,
@@ -2038,7 +2047,7 @@ Owners must decide and record:
 - [ ] The evaluator automatically consumes embeddings and measurements generated by that exact runner.
 - [ ] The UI/JSON report has explicit passed/failed/not-run/coverage/error detail and a phase timeline; HTML/PDF,
   SARIF, per-control evidence links, and admission-statement parity remain.
-- [ ] The embedded Python policy, existing signer/KMS path, configured OCI registry promotion, CI verifier,
+- [ ] The embedded Python policy, production KMS rotation/outage path, configured OCI registry promotion, CI verifier,
   and Kubernetes admission webhook pass their complete negative-path and recovery gates.
 - [ ] API, UI, and the shipped `shakerscan` agent skill expose the same controlled Model Intake workflow,
   authorization requirements, evidence, state transitions, and fail-closed decision semantics.

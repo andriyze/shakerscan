@@ -200,11 +200,45 @@ def test_compose_keeps_signer_authority_out_of_workers():
             r"(?ms)^  model-intake-signer:\n.*?(?=^  [A-Za-z0-9_-]+:\n|\Z)", source
         ).group(0)
         assert "MODEL_INTAKE_CONTROL_PLANE_SIGNING_KEY_PEM" in signer_block
+        assert "postgresql://model_intake_signer:" in signer_block
+        assert "- signer-control" in signer_block
+        assert "- default" not in signer_block
         worker_block = re.search(
             r"(?ms)^  worker:\n.*?(?=^  [A-Za-z0-9_-]+:\n|\Z)", source
         ).group(0)
         assert "MODEL_INTAKE_CONTROL_PLANE_SIGNING_KEY_PEM" not in worker_block
         assert "MODEL_INTAKE_SIGNER_AWS_KMS_KEY_ID" not in worker_block
+        assert "signer-control" not in worker_block
+
+
+def test_signer_image_and_database_role_are_narrow_and_releasable():
+    dockerfile = (ROOT / "api" / "model_intake_signer.Dockerfile").read_text()
+    role_script = (ROOT / "db" / "configure-model-intake-signer-role.sh").read_text()
+    publisher = (ROOT / "scripts" / "publish-images.sh").read_text()
+    release_workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text()
+
+    assert "scanner/Dockerfile" not in dockerfile
+    assert "worker.py" not in dockerfile
+    assert "model_intake_signer_service.py" in dockerfile
+    assert "--require-hashes" in dockerfile
+    assert "USER 65532:65532" in dockerfile
+    assert "boto3==" in (ROOT / "api" / "model_intake_signer.requirements.lock").read_text()
+    assert "NOSUPERUSER NOCREATEDB NOCREATEROLE" in role_script
+    assert "UPDATE (state, updated_at)" in role_script
+    assert "REVOKE CREATE ON SCHEMA public" in role_script
+    assert "shakerscan-model-intake-signer" in publisher
+    assert "file: api/model_intake_signer.Dockerfile" in release_workflow
+    assert "Create Model Intake signer manifest list" in release_workflow
+
+
+def test_signer_request_preserves_only_server_derived_operator_identity():
+    fields = api.ModelPromotionRequest.model_fields
+    assert "requested_by_subject" not in fields
+    source = inspect.getsource(api.promote_model_intake_submission)
+    assert "requested_by_subject = _model_intake_authenticated_subject" in source
+    signer_source = (ROOT / "api" / "model_intake_signer_service.py").read_text()
+    assert r'^operator-token:[0-9a-f]{24}$' in signer_source
+    assert '"issued_by_service": "model-intake-signer"' in signer_source
 
 
 def test_fresh_and_upgrade_schemas_share_deployment_binding_admission_fk():

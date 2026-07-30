@@ -12306,7 +12306,11 @@ async def verify_model_intake_admission(request: ModelIntakeAdmissionVerifyReque
     return result
 
 
-def _call_model_intake_signer(policy_decision_id: str, idempotency_key: str) -> dict[str, Any]:
+def _call_model_intake_signer(
+    policy_decision_id: str,
+    idempotency_key: str,
+    requested_by_subject: str,
+) -> dict[str, Any]:
     url = os.getenv(
         "MODEL_INTAKE_SIGNER_URL",
         "http://model-intake-signer:8091/internal/model-intake/admissions/issue",
@@ -12317,6 +12321,7 @@ def _call_model_intake_signer(policy_decision_id: str, idempotency_key: str) -> 
     payload = json.dumps({
         "policy_decision_id": policy_decision_id,
         "idempotency_key": idempotency_key,
+        "requested_by_subject": requested_by_subject,
     }).encode()
     req = urllib.request.Request(
         url,
@@ -12348,7 +12353,7 @@ async def promote_model_intake_submission(
     http_request: Request,
 ):
     """Invoke the separate narrow signer by stored IDs; no evidence JSON crosses this API."""
-    _model_intake_authenticated_subject(http_request)
+    requested_by_subject = _model_intake_authenticated_subject(http_request)
     submission_uuid = _model_intake_uuid(submission_id, "submission id")
     decision_uuid = _model_intake_uuid(request.policy_decision_id, "policy decision id")
     async with db_pool.acquire() as conn:
@@ -12378,6 +12383,7 @@ async def promote_model_intake_submission(
             _call_model_intake_signer,
             str(decision_uuid),
             request.idempotency_key,
+            requested_by_subject,
         )
     except (RuntimeError, OSError, json.JSONDecodeError) as exc:
         raise HTTPException(

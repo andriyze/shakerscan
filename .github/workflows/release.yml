@@ -27,6 +27,7 @@ permissions:
 env:
   SCANNER_IMAGE: shakerscan/shakerscan-scanner
   UI_IMAGE: shakerscan/shakerscan-ui
+  SIGNER_IMAGE: shakerscan/shakerscan-model-intake-signer
   SOURCE_URL: https://github.com/andriyze/shakerscan
 
 jobs:
@@ -133,6 +134,12 @@ jobs:
 
       - name: Build locked scanner image
         run: docker build -f scanner/Dockerfile -t shakerscan-scanner:release-candidate .
+
+      - name: Build and smoke-test locked Model Intake signer image
+        run: |
+          docker build -f api/model_intake_signer.Dockerfile -t shakerscan-model-intake-signer:release-candidate .
+          docker run --rm --entrypoint python shakerscan-model-intake-signer:release-candidate \
+            -c 'import boto3, model_intake_signer_service; assert boto3.__version__'
 
       - name: Unit, contract, documentation, and release gates
         run: |
@@ -241,14 +248,36 @@ jobs:
             org.opencontainers.image.vendor=ShakerScan
           outputs: type=image,name=${{ env.UI_IMAGE }},push-by-digest=true,name-canonical=true,push=true
 
+      - name: Build and push Model Intake signer by digest
+        id: signer
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: api/model_intake_signer.Dockerfile
+          platforms: ${{ matrix.platform }}
+          labels: |
+            org.opencontainers.image.title=ShakerScan Model Intake Signer
+            org.opencontainers.image.description=Narrow Model Intake admission signer trust service
+            org.opencontainers.image.created=${{ needs.meta.outputs.created }}
+            org.opencontainers.image.version=${{ needs.meta.outputs.version }}
+            org.opencontainers.image.revision=${{ needs.meta.outputs.candidate_sha }}
+            org.opencontainers.image.source=${{ env.SOURCE_URL }}
+            org.opencontainers.image.url=https://hub.docker.com/r/shakerscan/shakerscan-model-intake-signer
+            org.opencontainers.image.documentation=${{ env.SOURCE_URL }}#readme
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.vendor=ShakerScan
+          outputs: type=image,name=${{ env.SIGNER_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
       - name: Export digests
         shell: bash
         run: |
-          mkdir -p /tmp/digests/scanner /tmp/digests/ui
+          mkdir -p /tmp/digests/scanner /tmp/digests/ui /tmp/digests/signer
           scanner_digest="${{ steps.scanner.outputs.digest }}"
           ui_digest="${{ steps.ui.outputs.digest }}"
+          signer_digest="${{ steps.signer.outputs.digest }}"
           touch "/tmp/digests/scanner/${scanner_digest#sha256:}"
           touch "/tmp/digests/ui/${ui_digest#sha256:}"
+          touch "/tmp/digests/signer/${signer_digest#sha256:}"
 
       - name: Upload digests
         uses: actions/upload-artifact@v7
@@ -270,6 +299,7 @@ jobs:
       version: ${{ needs.meta.outputs.version }}
       scanner_image: shakerscan/shakerscan-scanner:${{ needs.meta.outputs.version }}
       ui_image: shakerscan/shakerscan-ui:${{ needs.meta.outputs.version }}
+      signer_image: shakerscan/shakerscan-model-intake-signer:${{ needs.meta.outputs.version }}
     steps:
       - name: Download digests
         uses: actions/download-artifact@v8
@@ -316,6 +346,21 @@ jobs:
           docker buildx imagetools create $tags \
             $(printf "${UI_IMAGE}@sha256:%s " *)
           docker buildx imagetools inspect "${UI_IMAGE}:${VERSION}"
+
+      - name: Create Model Intake signer manifest list
+        working-directory: /tmp/digests/signer
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+          PUSH_LATEST: ${{ needs.meta.outputs.push_latest }}
+        shell: bash
+        run: |
+          tags="-t ${SIGNER_IMAGE}:${VERSION}"
+          if [[ "$PUSH_LATEST" == "true" ]]; then
+            tags="$tags -t ${SIGNER_IMAGE}:latest"
+          fi
+          docker buildx imagetools create $tags \
+            $(printf "${SIGNER_IMAGE}@sha256:%s " *)
+          docker buildx imagetools inspect "${SIGNER_IMAGE}:${VERSION}"
 
   github-release:
     name: Create GitHub Release
