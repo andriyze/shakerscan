@@ -41,6 +41,12 @@ def _envelope(evidence_type, observations):
         "finished_at": (now - timedelta(minutes=1)).isoformat(),
         "expires_at": (now + timedelta(days=1)).isoformat(),
     }
+    if evidence_type == "conversion_equivalence":
+        payload.update({
+            "source_deployment_bundle_sha256": payload["deployment_bundle_sha256"],
+            "source_model_artifact_sha256": "f" * 64,
+            "source_repository_snapshot_sha256": "e" * 64,
+        })
     private = ed25519.Ed25519PrivateKey.generate()
     private_pem = private.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()).decode()
     public_pem = private.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode()
@@ -200,6 +206,11 @@ def test_conversion_receipt_requires_tensor_numeric_and_embedding_equivalence():
     observations.update({
         "source_artifact_sha256": "f" * 64,
         "target_artifact_sha256": "2" * 64,
+        "target_repository_snapshot_sha256": "3" * 64,
+        "target_custom_code_sha256": None,
+        "target_tokenizer_sha256": "6" * 64,
+        "target_configuration_sha256": "7" * 64,
+        "non_weight_members_preserved": True,
         "tensor_inventory_equivalent": True,
         "numeric_equivalence_status": "PASS",
         "embedding_equivalence_status": "PASS",
@@ -207,3 +218,9 @@ def test_conversion_receipt_requires_tensor_numeric_and_embedding_equivalence():
     })
     payload, envelope, key = _envelope("conversion_equivalence", observations)
     assert _verify(payload, envelope, key)["verified"] is True
+
+    observations["target_repository_snapshot_sha256"] = "0" * 64
+    payload, envelope, key = _envelope("conversion_equivalence", observations)
+    result = _verify(payload, envelope, key)
+    assert result["verified"] is False
+    assert "pass_claim_missing:target_snapshot" in result["blockers"]

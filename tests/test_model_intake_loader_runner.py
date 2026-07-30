@@ -259,19 +259,69 @@ def test_conversion_export_creates_new_content_addressed_identity_and_complete_m
     artifact = converted / "model.safetensors"
     artifact.write_bytes(b"converted-safe-weights")
     (converted / "config.json").write_text('{"model_type":"bert"}')
+    (converted / "tokenizer.json").write_text('{"version":"1"}')
     digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    source_weight = b"legacy-weights"
+    source_manifest = {
+        "provider": "huggingface",
+        "repository": "example/model",
+        "revision": "source-revision",
+        "files": [
+            {"path": "config.json", "size_bytes": (converted / "config.json").stat().st_size,
+             "sha256": hashlib.sha256((converted / "config.json").read_bytes()).hexdigest()},
+            {"path": "tokenizer.json", "size_bytes": (converted / "tokenizer.json").stat().st_size,
+             "sha256": hashlib.sha256((converted / "tokenizer.json").read_bytes()).hexdigest()},
+            {"path": "pytorch_model.bin", "size_bytes": len(source_weight),
+             "sha256": hashlib.sha256(source_weight).hexdigest()},
+        ],
+    }
     root = tmp_path / "conversion-root"
     runner = FirecrackerRunner({
         "MODEL_INTAKE_RUNNER_QUARANTINE_ROOT": str(tmp_path),
         "MODEL_INTAKE_RUNNER_CONVERSION_ROOT": str(root),
     })
-    result = runner._export_conversion(extracted, {"target_artifact_sha256": digest})
+    result = runner._export_conversion(
+        extracted,
+        {"target_artifact_sha256": digest},
+        source_manifest,
+        hashlib.sha256(source_weight).hexdigest(),
+    )
     assert result["target_artifact_sha256"] == digest
     destination = Path(result["converted_snapshot_path"])
     manifest_path = Path(result["target_repository_manifest_path"])
-    assert destination.name == digest
+    assert destination.name == result["target_repository_snapshot_sha256"]
     assert (destination / "model.safetensors").read_bytes() == b"converted-safe-weights"
     manifest = json.loads(manifest_path.read_text())
-    assert manifest["complete"] is True
-    assert {item["path"] for item in manifest["files"]} == {"config.json", "model.safetensors"}
+    assert manifest["provider"] == "shakerscan-conversion"
+    assert {item["path"] for item in manifest["files"]} == {
+        "config.json", "model.safetensors", "tokenizer.json",
+    }
     assert hashlib.sha256(manifest_path.read_bytes()).hexdigest() == result["target_repository_snapshot_sha256"]
+    assert result["non_weight_members_preserved"] is True
+
+
+def test_conversion_export_rejects_changed_non_weight_member(tmp_path):
+    import hashlib
+    import pytest
+    extracted = tmp_path / "extracted"
+    converted = extracted / "work" / "converted"
+    converted.mkdir(parents=True)
+    (converted / "model.safetensors").write_bytes(b"converted")
+    (converted / "config.json").write_text('{"tampered":true}')
+    source_weight_sha = hashlib.sha256(b"legacy").hexdigest()
+    manifest = {"provider": "huggingface", "repository": "example/model", "revision": "source", "files": [
+        {"path": "pytorch_model.bin", "size_bytes": 6, "sha256": source_weight_sha},
+        {"path": "config.json", "size_bytes": 2, "sha256": hashlib.sha256(b"{}").hexdigest()},
+    ]}
+    runner = FirecrackerRunner({
+        "MODEL_INTAKE_RUNNER_QUARANTINE_ROOT": str(tmp_path),
+        "MODEL_INTAKE_RUNNER_CONVERSION_ROOT": str(tmp_path / "conversions"),
+    })
+
+    with pytest.raises(Exception, match="changed or omitted"):
+        runner._export_conversion(
+            extracted,
+            {"target_artifact_sha256": hashlib.sha256(b"converted").hexdigest()},
+            manifest,
+            source_weight_sha,
+        )

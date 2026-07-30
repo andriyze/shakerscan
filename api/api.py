@@ -11914,6 +11914,8 @@ async def _persist_model_intake_runner_evidence(
             "repository_snapshot_sha256", "custom_code_sha256", "tokenizer_sha256", "configuration_sha256", "runtime_image_digest",
             "retrieval_application_digest", "index_schema_digest",
             "loader_profile_sha256",
+            "source_deployment_bundle_sha256", "source_model_artifact_sha256",
+            "source_repository_snapshot_sha256",
         )
         if key in payload
     }

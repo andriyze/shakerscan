@@ -16,7 +16,7 @@ except ModuleNotFoundError:  # pragma: no cover - package import in tests
 
 
 PAYLOAD_TYPE = "https://shakerscan.dev/attestation/model-evidence/v1"
-SCHEMA = "model-intake-runner-receipt/v3"
+SCHEMA = "model-intake-runner-receipt/v4"
 EVIDENCE_POLICY = {
     "runtime_execution": ("GENERATED_RUNTIME", "runtime_runner"),
     "embedding_evaluation": ("GENERATED_EVALUATION", "evaluation_runner"),
@@ -129,8 +129,21 @@ def _validate_pass_claim(payload: dict[str, Any]) -> list[str]:
         network_digest_input = {key: value for key, value in network.items() if key != "telemetry_sha256"}
         expected_network_digest = hashlib.sha256(canonical_bytes(network_digest_input)).hexdigest()
         required = {
-            "source_digest": bool(observations.get("source_artifact_sha256")),
+            "source_digest": (
+                observations.get("source_artifact_sha256") == payload.get("source_model_artifact_sha256")
+            ),
             "target_digest": observations.get("target_artifact_sha256") == payload.get("model_artifact_sha256"),
+            "source_snapshot": bool(payload.get("source_repository_snapshot_sha256")),
+            "source_bundle": payload.get("source_deployment_bundle_sha256") == payload.get("deployment_bundle_sha256"),
+            "target_snapshot": (
+                observations.get("target_repository_snapshot_sha256") == payload.get("repository_snapshot_sha256")
+            ),
+            "target_components": (
+                observations.get("target_custom_code_sha256") == payload.get("custom_code_sha256")
+                and observations.get("target_tokenizer_sha256") == payload.get("tokenizer_sha256")
+                and observations.get("target_configuration_sha256") == payload.get("configuration_sha256")
+            ),
+            "non_weight_members": observations.get("non_weight_members_preserved") is True,
             "tensor_inventory": observations.get("tensor_inventory_equivalent") is True,
             "numeric": observations.get("numeric_equivalence_status") == "PASS",
             "embedding": observations.get("embedding_equivalence_status") == "PASS",
@@ -194,6 +207,10 @@ def verify_runner_envelope(
         if evidence_type == "data_plane_evaluation":
             _sha(payload.get("retrieval_application_digest"), "retrieval_application_digest")
             _sha(payload.get("index_schema_digest"), "index_schema_digest")
+        if evidence_type == "conversion_equivalence":
+            _sha(payload.get("source_deployment_bundle_sha256"), "source_deployment_bundle_sha256")
+            _sha(payload.get("source_model_artifact_sha256"), "source_model_artifact_sha256")
+            _sha(payload.get("source_repository_snapshot_sha256"), "source_repository_snapshot_sha256")
         image = str(payload.get("runtime_image_digest") or "")
         if not image.startswith("sha256:"):
             blockers.append("runtime_image_not_digest_pinned")
