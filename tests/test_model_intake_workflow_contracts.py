@@ -16,6 +16,31 @@ sys.path.insert(0, str(ROOT / "api"))
 import api  # noqa: E402
 
 
+def _operator_request(token: str):
+    return api.Request({
+        "type": "http",
+        "method": "POST",
+        "path": "/model-intake/submissions",
+        "headers": [(b"authorization", f"Bearer {token}".encode())],
+        "client": ("127.0.0.1", 40123),
+        "server": ("127.0.0.1", 8080),
+        "scheme": "http",
+        "query_string": b"",
+    })
+
+
+def test_submission_and_approval_use_one_authenticated_subject(monkeypatch):
+    token = "model-intake-operator-token-that-is-long-enough"
+    monkeypatch.setenv("MODEL_INTAKE_OPERATOR_TOKEN", token)
+    request = _operator_request(token)
+
+    submitter = api._model_intake_submission_subject(request)
+    approver = api._model_intake_authenticated_subject(request)
+
+    assert submitter == approver
+    assert submitter.startswith("operator-token:")
+
+
 def test_legacy_scan_is_preflight_by_default_and_submission_cannot_carry_authority():
     assert api.ModelIntakeScanRequest(artifact_url="https://models.example/model.safetensors").intake_mode == "preflight"
 

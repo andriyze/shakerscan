@@ -5258,11 +5258,14 @@ def _model_intake_operator_roles(request: Request) -> set[str]:
 
 
 def _model_intake_submission_subject(request: Request) -> str:
-    credential = _fleet_bearer_credential(request)
-    if credential:
-        return f"submitter-token:{hashlib.sha256(credential.encode()).hexdigest()[:24]}"
-    peer = str(getattr(getattr(request, "client", None), "host", None) or "unknown")
-    return f"submitter-peer:{hashlib.sha256(peer.encode()).hexdigest()[:24]}"
+    """Bind submitter identity to the same authenticated principal used downstream.
+
+    Submissions are part of the controlled admission workflow and already require a
+    bearer credential.  Deriving a second, role-prefixed identity from that same
+    credential would make one principal appear distinct at approval time and defeat
+    submitter/approver separation.
+    """
+    return _model_intake_authenticated_subject(request)
 
 
 def _fleet_connection_bundle() -> dict[str, Any]:
