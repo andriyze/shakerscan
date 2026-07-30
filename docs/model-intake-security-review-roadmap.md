@@ -1,10 +1,10 @@
 # Model Intake Security Review and Implementation Roadmap
 
-**Status:** Server-owned admission policy, the core static adapter bundle, semantic serialization analysis,
-built-in safetensors weight loading, security/quality evaluation separation, and useful corporate-use verdicts
-are implemented and remotely validated through `2a88737`. Disposable microVM execution, full model/code
-inference, runner-generated embedding evaluation, deployment-platform enforcement, and organization-specific
-qualification remain incomplete.
+**Status:** Static acquisition/scanning, semantic serialization analysis, bounded safetensors weight inspection,
+security/quality reporting, and lifecycle mechanisms are implemented. A 2026-07-29 trust-boundary re-audit
+found Release Gate 0 defects in requester trust/approval authority, worker-side admission signing, evaluation
+observations, safetensors status semantics, and legacy admission handling. Until Gate 0 is complete, Model
+Intake results are technical/preflight evidence and no version 1 package should authorize production.
 
 **Original audit checkout:** `239f887d9f10e997b9844c916c28073fab71ee79`
 
@@ -163,7 +163,9 @@ synthetic benchmark, application/vector-store observations, and the required hum
 Admission mode now uses a server-owned policy profile (`production` by default); callers cannot select a
 weaker profile, cannot turn required gates off, and cannot inject inline policy exceptions. Only durable,
 approved, unexpired exceptions are eligible. Policy-profile mutations require the Model Intake operator
-credential. Preflight remains available for exploratory evidence but can never issue a signed `allow`.
+credential. However, the public request still exposes trust material, trust-anchor selection, and
+deployment-approval declarations; Section 2.6 supersedes any earlier claim that the complete admission trust
+boundary is server-owned. Preflight remains non-admissible.
 Active strict saved profiles impose non-weakenable minimum acquisition, full Hugging Face snapshot, scanner,
 sandbox, evaluation, signed-admission, hash, governance, and deployment-approval requirements.
 Likewise, the CodeRankEmbed and CodeSage model-specific runbooks are not marked complete until real controlled
@@ -309,6 +311,43 @@ The re-audit also correctly distinguishes the semantic container from the future
 GGUF parsing is static evidence only, and pickle-backed formats are refused. An installed runtime adapter can
 now perform exact-digest load and known-answer tests in the no-egress container, but that receipt is staging
 evidence and does not claim microVM-grade containment or independent syscall telemetry.
+
+### 2.6 Release Gate 0 — trusted control-plane separation
+
+A second 2026-07-29 review found five remaining fail-open or confused-authority paths in the current
+admission design. These findings are accepted and supersede earlier statements that production admission was
+fully server-owned:
+
+| Priority | Verified defect | Required repair |
+|---|---|---|
+| **P0** | Admission requests can provide trusted signature/attestation keys and select additional durable trust-anchor IDs | Reject requester trust/policy/approval fields in admission mode; resolve trust only from purpose- and environment-scoped server records or secret-manager configuration |
+| **P0** | `deployment_approved` and approval-shaped metadata originate in the submission request | Accept only authenticated, exact-subject approval receipts bound to a frozen evidence manifest and policy digest |
+| **P0** | Hostile-artifact scanner workers receive the admission private key and sign their own final decision | Workers emit unsigned technical decision candidates; a separate control-plane admission service verifies frozen evidence/policy/approvals and invokes a narrow KMS/HSM signer |
+| **P0** | Missing actual retrieval results fall back to an internally computed ideal authorized ranking | Missing connector/runner observations are `INCOMPLETE`; declared observations cannot satisfy a mandatory production security gate |
+| **P0** | Safetensors numeric sampling can pass with zero samples, unsupported dtypes, inconsistent shape spans, overlaps, or unexplained payload | Fail closed now; replace the handwritten parser with a bounded official-library/Rust inspector supporting exact structure and explicit sampled/full numeric coverage |
+| **P0** | Version 1 admissions were issued under the old authority model | Stop producing deployable v1 packages, mark active v1 records `reassessment_required`, and reject them by default during deployment verification |
+
+Gate 0 exit criteria:
+
+1. A requester cannot supply or select production trust roots, policy, exceptions, or approval state.
+2. Scanner and runtime workers contain no admission private key or generic signing capability.
+3. Production approval comes only from authenticated or signed exact-bound receipts.
+4. Missing actual retrieval observations and zero numeric coverage cannot pass.
+5. Existing version 1 admissions cannot authorize a new production deployment.
+6. Adversarial regression tests exercise every path with no skipped cryptographic modules.
+
+After Gate 0, implementation proceeds through: a submission/evidence/approval API split; immutable evidence
+records and frozen manifests; purpose/environment trust; admission v2 and a dedicated signer; strict
+safetensors inspection; a separate CPU microVM execution fleet; provider-neutral loader profiles; isolated
+CodeSage conversion; runner-generated benchmark observations; one pgvector and one graph connector; exact OCI
+promotion; deployment enforcement; and event-driven reassessment. Firecracker is the CPU reference tier, not
+a claim of equivalent GPU isolation. Production GPU qualification requires a separately designed Kata/QEMU
+or dedicated runner boundary.
+
+Not every leaf result needs an independent signature. Content-addressed raw evidence may be grouped into a
+canonical signed producer receipt and frozen evidence manifest. Policy serialization may be Python, Rego, or
+YAML; the invariant is a stable server-built facts document, a versioned policy digest, and a reproducible
+decision—not a particular file format.
 
 ## 3. Review principles
 
@@ -1342,7 +1381,7 @@ Production must block when any of the following is true:
 The phases are ordered by risk dependency. Status refers to reusable product mechanisms, not approval of a
 specific model.
 
-### Phase -1 — Restore admission correctness — **completed through `df8df46`**
+### Phase -1 — Restore admission correctness — **reopened as Release Gate 0**
 
 Complete before adding more scanners or model-execution features:
 
@@ -1363,10 +1402,19 @@ Complete before adding more scanners or model-execution features:
 - Select the production admission profile on the server, reject request-supplied inline exceptions, and make
   preflight structurally unable to issue a signed allow.
 - Require Model Intake operator authentication for policy-profile mutations.
+- Reject requester-provided trust roots, trust-anchor selection, builder constraints, approval state, and
+  approval-shaped metadata from admission requests.
+- Remove admission signing material and final signing from hostile evidence-producing workers.
+- Require actual connector/runner retrieval results; never substitute an internally ideal ranking.
+- Fail safetensors coverage closed for unsupported dtype, zero samples, inconsistent spans, overlap, or
+  incomplete payload coverage.
+- Quarantine version 1 admissions and introduce an exact-bundle admission v2 through a dedicated signer.
 
 Exit evidence: a correctly signed `block` is rejected by the core verifier used by both library and HTTP
 paths; HTTP verification additionally requires an active registry record; a one-file caller manifest cannot
-become complete; required scanners cannot disappear; and all trust-surface modules execute without skips.
+become complete; required scanners cannot disappear; a requester cannot self-trust or self-approve; workers
+have no admission signing key; missing actual observations and zero sampling cannot pass; version 1 cannot
+authorize a new deployment; and all trust-surface modules execute without skips.
 
 ### Phase 0 — Contract and immediate containment — **implemented**
 
