@@ -662,17 +662,27 @@ def _corporate_use_assessment(
         "PASS" if checksum_status == "verified" else "FAIL" if checksum_status == "mismatch" else "INDETERMINATE",
         f"Checksum status: {checksum_status}.",
     )
-    generated_scanners_complete = generated_evidence.get("status") == "PASS"
+    pickle_status = scanner_statuses.get("python-pickletools")
+    modelscan_status = scanner_statuses.get("modelscan")
+    malicious_primitive_coverage_complete = (
+        pickle_classification == "expected_framework_pickle"
+        and pickle_status == "PASS"
+        and modelscan_status in {"PASS", "NOT_APPLICABLE"}
+    ) or (
+        not serialization_finding
+        and pickle_status == "NOT_APPLICABLE"
+        and modelscan_status in {"PASS", "NOT_APPLICABLE"}
+    )
     control(
         "malicious_primitives", "Known malicious serialization primitives",
-        "FAIL" if proven_malicious else "PASS" if generated_scanners_complete and (pickle_classification == "expected_framework_pickle" or not serialization_finding) else "INDETERMINATE",
+        "FAIL" if proven_malicious else "PASS" if malicious_primitive_coverage_complete else "INDETERMINATE",
         (
             "A dangerous callable, known malicious primitive, or digest mismatch was proven."
             if proven_malicious
             else "No known malicious callable was proven; executable-format capability is assessed separately."
             if pickle_classification == "expected_framework_pickle"
-            else "No executable serialization was detected and all applicable generated scanners completed."
-            if generated_scanners_complete and not serialization_finding
+            else "No executable serialization was detected and the applicable malicious-primitive scanners completed."
+            if malicious_primitive_coverage_complete and not serialization_finding
             else "Semantic malicious-primitive coverage is incomplete."
         ),
     )
@@ -3431,14 +3441,23 @@ async def run_model_intake_scan(
         ))
 
     if require_dynamic_sandbox and dynamic_sandbox.get("status") != "PASS":
+        sandbox_status = str(dynamic_sandbox.get("status") or "NOT_RUN")
+        sandbox_remediation = (
+            "Convert in a no-egress sandbox to safetensors or another non-executable format, then verify "
+            "tensor equivalence and rerun intake. If a temporary exception is approved, bind it to a "
+            "digest and an isolated weights-only loader."
+            if sandbox_status == "BLOCKED_BY_POLICY"
+            else "Run the exact quarantined artifact through the no-network sandbox and resolve all format, "
+            "runtime, isolation, or resource failures."
+        )
         findings.append(_finding(
             finding_id="dynamic_sandbox_non_pass",
             title="Required no-egress model sandbox did not pass",
             severity="high",
-            description=f"The isolated dynamic inspection ended with status {dynamic_sandbox.get('status')}; unsupported, blocked, timed-out, crashed, and incomplete runs never count as approval evidence.",
+            description=f"The isolated dynamic inspection ended with status {sandbox_status}; unsupported, blocked, timed-out, crashed, and incomplete runs never count as approval evidence.",
             artifact_ref=artifact_ref,
             evidence={"sandbox": dynamic_sandbox},
-            remediation="Run the exact quarantined artifact through the no-network sandbox and resolve all format, runtime, isolation, or resource failures.",
+            remediation=sandbox_remediation,
         ))
 
     if require_generated_evaluation and generated_evaluation.get("status") != "PASS":

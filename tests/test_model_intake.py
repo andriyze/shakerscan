@@ -39,7 +39,7 @@ def test_corporate_use_report_distinguishes_malicious_proof_from_format_capabili
             "description": "Framework pickle capability.",
             "remediation": "Convert to safetensors.",
         }],
-        generated_evidence={"results": [{
+        generated_evidence={"status": "REVIEW_REQUIRED", "results": [{
             "scanner": {"name": "python-pickletools"},
             "execution": {"status": "PASS"},
             "summary": {"semantic_classification": "expected_framework_pickle"},
@@ -68,9 +68,48 @@ def test_corporate_use_report_distinguishes_malicious_proof_from_format_capabili
     assert capability_only["verdict"] == "NOT_APPROVED"
     assert capability_only["malicious_primitive_proven"] is False
     assert capability_only["pickle_semantic_classification"] == "expected_framework_pickle"
+    assert next(
+        control for control in capability_only["controls"]
+        if control["id"] == "malicious_primitives"
+    )["status"] == "PASS"
     assert "Convert to safetensors." in capability_only["next_actions"]
     assert malicious["verdict"] == "REJECT"
     assert malicious["malicious_primitive_proven"] is True
+
+
+def test_policy_blocked_sandbox_recommends_conversion_once(monkeypatch, tmp_path):
+    artifact = tmp_path / "model.bin"
+    artifact.write_bytes(b"\x80\x04}\x94.")
+    monkeypatch.setattr(model_intake, "_request_sandbox_analysis", lambda *args, **kwargs: {
+        "schema_version": "model-intake-sandbox/v1",
+        "provenance_class": "shakerscan_generated",
+        "status": "BLOCKED_BY_POLICY",
+    })
+
+    result = asyncio.run(run_model_intake_scan(
+        str(artifact),
+        _local_options({
+            "complete_artifact_download": True,
+            "quarantine_dir": str(tmp_path / "quarantine"),
+            "run_dynamic_sandbox": True,
+            "require_dynamic_sandbox": True,
+            "require_hash": False,
+            "require_signature": False,
+            "require_model_governance": False,
+            "require_deployment_approval": False,
+        }),
+    ))
+
+    sandbox_finding = next(
+        finding for finding in result["findings"]
+        if finding["id"] == "model_intake:dynamic_sandbox_non_pass"
+    )
+    assert result["model_intake"]["dynamic_sandbox"]["status"] == "BLOCKED_BY_POLICY"
+    assert sandbox_finding["remediation"].startswith("Convert in a no-egress sandbox")
+    assert "Run the exact quarantined artifact" not in sandbox_finding["remediation"]
+    assert result["model_intake"]["corporate_use"]["next_actions"].count(
+        sandbox_finding["remediation"]
+    ) == 1
 
 
 def _local_options(options=None):
