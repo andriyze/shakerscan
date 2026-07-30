@@ -1,14 +1,14 @@
 # Model Intake Security Review and Implementation Roadmap
 
-**Status:** Static acquisition/scanning, semantic serialization analysis, bounded safetensors weight inspection,
-security/quality reporting, and lifecycle mechanisms are implemented. A 2026-07-29 trust-boundary re-audit
-found Release Gate 0 defects in requester trust/approval authority, worker-side admission signing, evaluation
-observations, safetensors status semantics, and legacy admission handling. Until Gate 0 is complete, Model
-Intake results are technical/preflight evidence and no version 1 package should authorize production.
+**Status:** The admission-v2 control plane, authoritative Hugging Face acquisition, existing scanner bundle,
+official safetensors inspection, signed runner-receipt contracts, signer boundary, OCI layout, and deployment
+verifiers are implemented. Model Intake scans remain non-deployable technical evidence; only the controlled
+submission/freeze/approval/policy/signing/promotion workflow may authorize deployment. The remaining product
+work is deliberately limited to hardening these mechanisms and deploying one real Firecracker runner.
 
 **Original audit checkout:** `239f887d9f10e997b9844c916c28073fab71ee79`
 
-**Current implementation checkout:** `2a88737` (implementation series beginning at `8f721ce`)
+**Scoped-roadmap baseline checkout:** `c1900af` (implementation series beginning at `8f721ce`)
 
 **Review date:** 2026-07-28
 
@@ -17,6 +17,40 @@ Intake results are technical/preflight evidence and no version 1 package should 
 **Scope:** ShakerScan Model Intake, CodeRankEmbed, CodeSage Base v2, CodeSage Large v2, and the knowledge-graph/vector-embedding deployment path
 
 **Audience:** Security engineering, ML platform, application security, infrastructure, legal/privacy, model owners, and release approvers
+
+## 0. Scope freeze — harden, do not expand
+
+This section is authoritative for future implementation. When an older section describes an optional tool,
+runner, policy engine, identity system, registry platform, or orchestrator outside this boundary, treat it as
+historical analysis or a rejected alternative, not backlog.
+
+Implement and harden:
+
+1. One authoritative admission workflow; the legacy scan path remains preflight/technical review only.
+2. The existing ModelScan, Fickling, Semgrep, and Trivy adapters plus ShakerScan's current built-in archive,
+   pickle, Python AST, secret/malware-rule, SBOM, dependency, native-binary, safetensors, ONNX, and GGUF checks.
+3. One production execution backend: Firecracker with KVM and jailer. There is no production fallback.
+4. Controlled CodeSage `.bin` to safetensors conversion inside Firecracker, followed by tensor and embedding
+   equivalence evidence and a complete rescan of the new artifact identity.
+5. The existing Python policy engine, approval model, signer service, OCI promotion path, CI verifier,
+   Kubernetes admission webhook, UI/reporting, reassessment, and worker/storage lifecycle.
+6. Reliability work: idempotency, leases, terminal failures, bounded retries, recovery, quotas, revocation,
+   freshness, negative-path tests, and physical Firecracker/KVM end-to-end validation.
+
+Do not implement:
+
+- additional scanners or scanner plug-ins, including CodeQL, Syft, Grype, OSV-Scanner, pip-audit, ClamAV,
+  Gitleaks, YARA, TruffleHog, Bandit, or ScanCode/ORT;
+- OPA or another policy engine;
+- Sigstore, Cosign, Rekor, or a new transparency-log service;
+- gVisor, Kata Containers, QEMU as a separate backend, Docker as a production fallback, multiple runner
+  backends, or a generic workflow engine;
+- a general-purpose conversion service, enterprise IAM product, registry-management product, or support for
+  deployment orchestrators beyond the existing CI verifier and Kubernetes webhook.
+
+The design remains model-agnostic: applicability is selected from immutable repository and artifact facts,
+never a three-model allowlist. A format/provider/runtime that the bounded implementation cannot fully assess
+returns `INCOMPLETE`; it does not cause a new subsystem to be added.
 
 ## 1. Purpose
 
@@ -76,16 +110,16 @@ Sections 2.1 and 2.4 identify which findings are now resolved, partially resolve
 
 The remaining implementation and validation order is:
 
-1. Build the disposable no-egress VM/microVM loader and independent telemetry contract for custom model
-   code. The built-in safetensors adapter now proves weight readability, shape/range integrity, and sampled
-   numeric finiteness, but deliberately does not import model code or claim inference.
-2. Connect the security evaluator to embeddings and measurements produced by that exact runner, and keep
-   organization-specific retrieval quality as a separate approval gate.
-3. Convert CodeSage Base v2 to `safetensors` in a controlled environment and prove tensor/evaluation
+1. Remove remaining ambiguity between non-deployable technical scans and the authoritative controlled
+   admission workflow; enforce legal state transitions and evidence invalidation in the database and UI.
+2. Deploy one disposable no-egress Firecracker/KVM loader for custom code, model construction, inference,
+   known-answer embeddings, telemetry, and signed exact-bundle receipts. No alternate runner is in scope.
+3. Use that same Firecracker path to convert CodeSage Base v2 to safetensors and prove tensor and embedding
    equivalence; do not admit the upstream pickle-capable artifact directly.
-4. Qualify CodeSage Large v2 only if Base cannot meet retrieval requirements, using a separately approved
-   high-resource runner after the same conversion/equivalence controls.
-5. Finish corporate registry/deployment enforcement examples and report-format parity.
+4. Qualify CodeSage Large v2 only if it fits the approved Firecracker resource envelope and Base cannot meet
+   the versioned retrieval requirement. Otherwise report it `INCOMPLETE`; do not add a GPU runner.
+5. Harden the existing policy, approvals, signer, OCI promotion, deployment verification, reporting,
+   reassessment, storage, and failure recovery, and prove their negative paths end to end.
 
 For a production profile, the correct decision for any exact model revision is **block/incomplete** until
 every required automated control has generated digest-bound evidence and the required corporate approvals
@@ -112,12 +146,11 @@ Implemented controls include:
 - Generated evidence contracts for pickle semantics, Python AST, secrets, malware rules, CycloneDX SBOM,
   dependencies/SCA adapters, native binaries, and licenses. Caller assertions remain `declared`; they are not
   silently promoted to generated evidence.
-- Normalized ModelScan, Semgrep, Fickling, Trivy, ClamAV, Gitleaks, Syft, OSV-Scanner, and pip-audit adapters. Missing
-  binaries, bad schemas, empty output, timeout, crash, incomplete execution, explicit omission, `NOT_RUN`, and
-  `REVIEW_REQUIRED` are non-pass when required. ModelScan 0.8.8, Semgrep 1.172.0, Fickling 0.1.12, and Trivy
-  0.72.0 are bundled in isolated hash-locked environments; Trivy's vulnerability and policy data is captured
-  during the image build for offline scans. The other named adapters remain fail-closed contracts, not shipped
-  coverage.
+- Normalized ModelScan, Semgrep, Fickling, and Trivy adapters. Missing binaries, bad schemas, empty output,
+  timeout, crash, incomplete execution, explicit omission, `NOT_RUN`, and `REVIEW_REQUIRED` are non-pass when
+  required. ModelScan 0.8.8, Semgrep 1.172.0, Fickling 0.1.12, and Trivy 0.72.0 are bundled in isolated
+  hash-locked environments; Trivy's vulnerability and policy data is captured during the image build for
+  offline scans. No additional external scanner adapter will be added under this roadmap.
 - The core bundle is selected from immutable repository facts, never a model-name allowlist: ModelScan for
   supported serialized artifacts, Fickling for raw pickle artifacts it can parse reliably, Semgrep for
   repository code/config, and Trivy when dependency manifests are present. Fickling is explicitly
@@ -127,8 +160,8 @@ Implemented controls include:
   fixtures and fails if any tool cannot generate and normalize its expected finding.
 - Atomic detached-signature trust decisions and offline DSSE/in-toto subject verification. Explicit key pins
   are enforced as an allowlist and cannot be widened by request-supplied keys. Transparency-log policy fails
-  closed when no locally verified inclusion/checkpoint proof exists; native Rekor verification remains an
-  external integration.
+  closed when no locally verified inclusion/checkpoint proof exists; native transparency integration is out
+  of scope.
 - A separate non-root, read-only, capability-free, no-egress sandbox service with request/nonce/subject-bound
   evidence, digest revalidation, isolation gating, seccomp verification, per-job child termination, and CPU,
   memory, PID, file, descriptor, and wall-clock limits. Static format inspection cannot produce a dynamic
@@ -156,9 +189,9 @@ Implemented controls include:
   live/durable activity logs on running, completed, and failed Model Intake scans.
 
 The framework deliberately does not fabricate external evidence. The intended production profile must block
-until the core adapter readiness receipt is valid and the operator supplies any additional policy-required
-scanner engines/rules, an organization-controlled signing key
-and deployment trust roots, a purpose-built runtime image for the chosen model loader, a versioned corporate
+until the core adapter readiness receipt is valid and the operator supplies approved rules for the existing
+scanner set, an organization-controlled signing key and deployment trust roots, a purpose-built runtime
+image for the chosen model loader, a versioned corporate
 synthetic benchmark, application/vector-store observations, and the required human/legal/privacy approvals.
 Admission mode now uses a server-owned policy profile (`production` by default); callers cannot select a
 weaker profile, cannot turn required gates off, and cannot inject inline policy exceptions. Only durable,
@@ -180,13 +213,13 @@ engine. The product boundary has three classes:
 | Class | Meaning | Examples | ShakerScan responsibility |
 |---|---|---|---|
 | **A — Product-native automation** | Deterministic controls ShakerScan can safely own | Source resolution, safe acquisition, complete hashing, manifests, archive/format checks, evidence normalization, policy evaluation, reporting, admission registry, reassessment | Implement, test, ship, and fail closed |
-| **B — Orchestrated integration** | Automatable controls requiring an external engine, runtime, database, corpus, or organization trust material | ModelScan, Fickling, Syft, Trivy, ClamAV, OSV, microVM execution, eBPF telemetry, OPA, Cosign, vector-store probes | Provide a versioned plug-in contract, isolation, evidence provenance, status handling, and operator configuration; never claim coverage when the integration is absent |
+| **B — Bounded integration** | Automatable controls requiring an existing engine, Firecracker runtime, database, corpus, or organization trust material | ModelScan, Fickling, Semgrep, Trivy, Firecracker execution, runtime telemetry, signed receipts, vector/graph observations | Harden the existing contract, isolation, evidence provenance, status handling, and operator configuration; never claim coverage when the integration is absent |
 | **C — Corporate/human authority** | Decisions that cannot be responsibly automated by an open-source scanner | Legal/license approval, training-data acceptability, privacy impact assessment, business owner acceptance, production credentials, representative internal corpus, exception approval, deployment change control | Collect the decision, bind it to exact subjects and policy, enforce its expiry, and expose missing evidence; do not fabricate or make the decision |
 
 The intended product is therefore a **security orchestration and admission layer**, not another monolithic
 scanner and not a universal legal or ML-quality authority.
 
-#### 2.2.1 Implemented plug-in/provider boundary and recommended tool set
+#### 2.2.1 Frozen scanner/provider boundary
 
 The useful default is deliberately smaller than the original ten-tool sketch:
 
@@ -196,12 +229,10 @@ The useful default is deliberately smaller than the original ten-tool sketch:
 | Fickling | **Ship for raw pickle artifacts; declare PyTorch ZIP not applicable** | Deep raw-pickle semantics and a second engine where its parser is reliable; ordinary PyTorch state-dict reconstruction produces unusable false positives after manual member extraction |
 | Semgrep | **Ship and enable for repository code/config** | Mature source-pattern engine with a narrow, versioned model-intake ruleset; complements the built-in AST analyzer |
 | Trivy | **Ship and enable when dependency manifests exist** | One maintained engine provides vulnerability, secret, misconfiguration, and license evidence without shipping four overlapping defaults |
-| Syft/Grype/OSV/pip-audit | Keep optional | Useful for organizations needing independent SBOM/advisory corroboration, but overlapping as a universal default |
-| CodeQL | Keep optional/CI-side | High value for deep source repositories, but costly and license/workflow dependent for small model repos |
-| ClamAV/Gitleaks/YARA | Keep optional by policy | Add when enterprise malware, Git-history, or organization rule depth is required |
-| Sandbox | Separate execution provider | Loading/import/inference is a stronger trust boundary than static evidence scanning |
+| Any additional external scanner | **Do not implement** | Harden the four existing engines and built-in checks; unsupported organization-specific depth remains external to ShakerScan |
+| Firecracker | **Only production execution provider** | Loading/import/inference and controlled conversion require a stronger boundary than static evidence scanning; unavailable Firecracker is `INCOMPLETE` with no fallback |
 | Embedding test | Separate evaluation provider | Needs an approved runner, benchmark corpus, thresholds, and data-plane observations |
-| OPA | Separate optional policy provider | Do not pretend an external PDP is installed; embedded policy remains enforcing until an OPA bundle/decision contract is implemented |
+| Embedded Python policy | **Only policy provider** | Harden, version, hash, and regression-test the existing engine; OPA is out of scope |
 | Report | Core report provider | A normalized decision and evidence export are product behavior, not a replaceable hostile-file scanner |
 
 The code reflects this split. `GET /model-intake/scanners/readiness` reports evidence adapters, versions,
@@ -248,19 +279,19 @@ but the exported status must remain unambiguous.
 | Repository manifests, archives, custom code, safe-format checks | Implemented mechanism | Provider-authoritative pinned HF inventory, containment, recursive archive/config inspection, and explicit truncation are enforced | Add the same authoritative inventory contract to future providers |
 | Built-in semantic, source, secret, malware-rule, SBOM, binary, and license checks | Implemented | Yes | Improve detection depth and rule updates |
 | ModelScan, Semgrep, Fickling, and Trivy core adapters | Packaged and self-testing | **Yes in a newly rebuilt source worker image.** Hash-locked Python environments, checksum-pinned Trivy, offline DB/policy cache, bounded execution, strict parsers, rule/DB digests, and malicious-fixture receipts are exposed by `/model-intake/scanners/readiness` | Define DB-age policy and recurring rebuild/reassessment operations |
-| ClamAV, Gitleaks, Syft, OSV-Scanner, and pip-audit adapters | Fail-closed integration contracts | No; a missing requested/required tool is `UNSUPPORTED` | Package only where organization policy needs the complementary depth; do not duplicate the core bundle by default |
+| Additional external scanner adapters | Out of scope | Existing unshipped compatibility contracts cannot satisfy policy | Do not package or expand them; remove them from presets and future-roadmap claims |
 | Isolated semantic sandbox | Implemented container boundary | Request/subject/evidence binding, isolation/seccomp gating, broker-worker service, and per-job limits are present | Treat it as bounded staging evidence, not a substitute for host-independent execution isolation |
 | Built-in safetensors weights adapter | Official parser plus fail-closed defense-in-depth inspector implemented and enabled by format | A hash-locked safetensors 0.8.0 Rust binding is authoritative for format acceptance; ShakerScan independently checks shape/range/coverage, re-hashes the exact artifact, and vector-scans every F16/F32/F64/BF16 value through bounded NumPy memmap chunks. The release image runs non-skippable valid, hostile-metadata, non-finite, and truncated self-tests. Parser identity and full-value counts survive into evidence. | It still does not instantiate the model graph, tokenize, or generate embeddings; those belong to a loader profile in the disposable runner tier. |
 | Operator runtime adapter | Implemented integration contract | Can prove exact-digest model load and known-answer tests in the hardened container when an operator image/argv adapter is installed | Treat as staging evidence, not a substitute for the microVM tier |
-| Actual tokenizer/model load and inference in disposable microVM | Not implemented | No | Add KVM/Firecracker/Kata runner and loader profiles |
-| Runtime behavior telemetry | Not implemented | No | Integrate Tracee/Falco/auditd/eBPF or equivalent in the execution runner |
+| Actual tokenizer/model load and inference in disposable microVM | Firecracker contract implemented; physical runner open | No | Deploy one KVM/Firecracker+jailer runner and approved loader profiles; fail closed without it |
+| Runtime behavior telemetry | Receipt contract implemented; physical collection open | No | Collect bounded process/import/file/network/resource facts inside the Firecracker path without adding another execution backend |
 | Provider-neutral evaluation contract | Deterministic scorer implemented | Public caller observations are `DECLARED` and fail closed for admission; actual result IDs/scores and connector/index/run identity are mandatory | Add the trusted isolated runner that alone may mark observations `GENERATED_DATA_PLANE` |
 | Corporate benchmark and thresholds | Integration point implemented | No universal corpus can ship | Organization supplies/version-controls corpus; ShakerScan automates execution and scoring |
-| Typed non-scanner providers | Implemented registry/readiness | Sandbox execution, embedding evaluation, embedded policy, and report export are separate classes; OPA is honestly `NOT_IMPLEMENTED` | Add OPA only with a fail-closed decision/bundle contract; keep the embedded policy fallback |
-| Signed admission statement and lifecycle registry | Exact-bundle v2 cryptographic contract implemented; service persistence pending | Workers emit only unsigned non-deployable candidates; v1 verification rejects by default; v2 canonical bundle/manifest/approval/policy binding, DSSE-style signing, narrow non-allow refusal, and component-substitution verification are implemented | Wire the contract to frozen server records in the separate authenticated control-plane service and KMS/HSM signer, then add deployment enforcement |
+| Typed non-scanner providers | Implemented registry/readiness | Sandbox execution, embedding evaluation, embedded Python policy, and report export are separate classes | Harden only the embedded policy provider; OPA remains out of scope |
+| Signed admission statement and lifecycle registry | Exact-bundle v2 control plane implemented | Workers emit only unsigned non-deployable candidates; frozen evidence, approvals, policy decisions, narrow signer invocation, registry state, and exact component verification are durable | Harden database state transitions, signer isolation/KMS operation, revocation, idempotency, and negative-path tests |
 | Saved Model Intake policy profiles | Implemented server-owned admission expansion | Admission uses the operator-selected server default; caller booleans/subsets/exceptions cannot weaken it; mutations require operator auth | Add organization-specific required scanner/runtime/benchmark fields |
 | One-page control matrix and detailed evidence | Implemented in UI/JSON | Corporate-use verdict, can-use boolean, malicious-vs-capable serialization distinction, control matrix, primary blockers, next actions, limitations, and activity are visible | Finish HTML/PDF/SARIF parity and per-control evidence links |
-| Deployment by exact approved digest | Fail-closed legacy verifier exists; v2 authorization contract pending | No v1 admission can newly authorize deployment by default; no deployable v2 package or external enforcement ships | Implement v2, then integrate with internal registry, CI/CD, Kubernetes/admission controller, or model serving platform |
+| Deployment by exact approved digest | v2 CI verifier and Kubernetes webhook implemented | No v1 admission can newly authorize deployment; v2 verifies active registry state, bundle, components, environment, expiry, and signature | Harden the existing OCI registry push and Kubernetes negative-path deployment test; add no other orchestrator |
 | Legal, privacy, data provenance, and risk acceptance | Recorded as governance evidence | Organization-dependent | Keep human-owned; enforce required owner, approval, scope, and expiry |
 
 The source-built remote instance checked before this adapter bundle was implemented had none of the external
@@ -338,16 +369,15 @@ Gate 0 exit criteria:
 
 After Gate 0, implementation proceeds through: a submission/evidence/approval API split; immutable evidence
 records and frozen manifests; purpose/environment trust; admission v2 and a dedicated signer; strict
-safetensors inspection; a separate CPU microVM execution fleet; provider-neutral loader profiles; isolated
-CodeSage conversion; runner-generated benchmark observations; one pgvector and one graph connector; exact OCI
-promotion; deployment enforcement; and event-driven reassessment. Firecracker is the CPU reference tier, not
-a claim of equivalent GPU isolation. Production GPU qualification requires a separately designed Kata/QEMU
-or dedicated runner boundary.
+safetensors inspection; one Firecracker/KVM execution service; fact-selected loader profiles; isolated
+CodeSage conversion; runner-generated benchmark observations; exact OCI promotion; existing CI/Kubernetes
+deployment enforcement; and event-driven reassessment. Models that cannot run inside the approved
+Firecracker resource envelope remain `INCOMPLETE`; this roadmap does not add a GPU or alternate runner.
 
 Not every leaf result needs an independent signature. Content-addressed raw evidence may be grouped into a
-canonical signed producer receipt and frozen evidence manifest. Policy serialization may be Python, Rego, or
-YAML; the invariant is a stable server-built facts document, a versioned policy digest, and a reproducible
-decision—not a particular file format.
+canonical signed producer receipt and frozen evidence manifest. Policy serialization remains Python-backed;
+the invariant is a stable server-built facts document, a versioned policy digest, and a reproducible
+decision.
 
 ## 3. Review principles
 
@@ -478,8 +508,9 @@ and implemented across the `model_intake*` modules in
    manifests are comparison input only and cannot define completeness.
 4. Inventory paths, digests, formats, custom code/`auto_map`, archives, native binaries, dependencies,
    licenses, and governance material.
-5. Run built-in deterministic checks and optional external scanner adapters against the quarantined subject.
-   Saved strict profiles expand non-weakenable requirements; unavailable required adapters fail closed.
+5. Run built-in deterministic checks and the four existing external scanner adapters against the quarantined
+   subject according to applicability. Saved strict profiles expand non-weakenable requirements; unavailable
+   required adapters fail closed.
 6. Perform safe-format semantic inspection in a separate no-egress, read-only, non-root container. An
    operator-configured, digest-pinned runtime adapter can additionally load an exact subject and run
    deterministic known-answer cases; the core worker never imports model code itself.
@@ -489,9 +520,11 @@ and implemented across the `model_intake*` modules in
    include actual result IDs/scores plus connector, index, principal, tenant, run, and timestamp identity.
 8. Apply a saved policy profile, preserve evidence provenance, create findings, display durable activity,
    and produce an `ALLOW`, `REVIEW`, or `BLOCK` decision.
-9. Emit an unsigned, explicitly non-deployable technical decision candidate. Legacy v1 verification rejects
-   by default and active v1 registry rows are quarantined as `reassessment_required`. A separate admission v2
-   service, KMS/HSM signer, exact-bundle approval receipt, and deployment enforcement client remain to be built.
+9. Emit an unsigned, explicitly non-deployable technical decision candidate. The controlled workflow freezes
+   exact evidence and approvals, evaluates the embedded policy, invokes the separate v2 signer by stored
+   decision ID, records lifecycle state, builds the OCI promotion subject, and exposes CI/Kubernetes
+   deployment verification. Production KMS, registry, Firecracker, and cluster configuration remain
+   deployment responsibilities and hardening targets.
 
 ### 6.1 Complete acquisition versus bounded inspection
 
@@ -651,8 +684,8 @@ policy version. User-supplied metadata must never be silently promoted to genera
 **Delivery status: core cryptographic, subject, pin, and required-transparency semantics implemented.**
 Detached signature trust is atomic and offline DSSE/in-toto subject verification enforces configured key
 fingerprint pins. A profile requiring transparency evidence fails closed when it is absent. Native online
-Sigstore/Cosign identity flows and trusted Rekor inclusion verification remain integration work when corporate
-policy requires them.
+Sigstore/Cosign/Rekor integration is out of scope; deployments that require it remain `INCOMPLETE` rather
+than causing ShakerScan to implement another signing ecosystem.
 
 **Required decision rule:** An artifact signature passes only when all are true:
 
@@ -663,9 +696,9 @@ policy requires them.
 5. The signature/attestation type, algorithm, issuance time, and trust-root status meet policy.
 6. Required transparency-log and inclusion-proof checks pass when the profile requires them.
 
-Add native verification contracts for Sigstore/Cosign, Rekor inclusion, DSSE, and in-toto/SLSA provenance.
-Offline verification must use a trusted bundle captured at acquisition time. Keyless identity policy must
-bind issuer and subject, not merely accept any valid Fulcio certificate.
+Continue to support the existing offline DSSE/in-toto exact-subject contracts. A deployment requiring a
+different signing or transparency ecosystem remains `INCOMPLETE`; do not add another verifier under this
+roadmap.
 
 ### 7.6 P0 — Add semantic unsafe-model analysis
 
@@ -712,34 +745,27 @@ discipline as the model loader.
 ### 7.7 P1 — Generate SBOMs and perform SCA
 
 **Delivery status: built-in generation and packaged Trivy filesystem SCA are implemented; complete runtime
-construction and complementary engines remain.** Trivy 0.72.0 is checksum-pinned, its vulnerability and
+construction and freshness enforcement remain.** Trivy 0.72.0 is checksum-pinned, its vulnerability and
 misconfiguration data is captured at image build, and runtime scans disable updates and external dependency
-lookups. Syft, OSV-Scanner, and pip-audit remain fail-closed optional adapters. Grype, ScanCode/ORT, complete
-locked-environment construction, freshness policy, and recurring database-driven rescans remain target work.
+lookups. No complementary SCA engine will be added. Complete locked-environment construction, freshness
+policy, and recurring database-driven Trivy rescans remain target work.
 
 Model weights do not have CVEs in the same way as conventional packages. SCA applies to custom model code,
 Python packages, native libraries, base images, GPU runtimes, model servers, and supporting services.
 
-The recommended tool set is layered:
+The frozen tool set is:
 
 | Purpose | Primary tool | Complement | Required output |
 |---|---|---|---|
-| Repository/runtime SBOM | [Syft](https://oss.anchore.com/) | Trivy SBOM | CycloneDX JSON and SPDX JSON |
-| SBOM vulnerability match | Grype | Trivy | Vulnerabilities with package evidence and DB version |
-| Python dependency audit | [pip-audit](https://github.com/pypa/pip-audit) | OSV-Scanner | PyPI advisories and dependency paths |
-| Source/lock/container scan | [OSV-Scanner](https://google.github.io/osv-scanner/usage/) | Trivy | OSV IDs, reachability/context where available |
-| Filesystem/image scan | [Trivy](https://trivy.dev/docs/latest/target/filesystem/) | Grype | Vulnerability, secret, misconfiguration, and license results |
-| License inventory | ScanCode or ORT | Trivy license scan | License expressions, files, and obligations |
+| Repository/runtime SBOM | ShakerScan built-in generator | Trivy SBOM | CycloneDX JSON, subject digest, and generator identity |
+| Package vulnerability match | Trivy | ShakerScan dependency facts | Vulnerabilities with package evidence and DB identity/freshness |
+| Source/lock/container scan | Trivy | ShakerScan source/config checks | Vulnerability, secret, misconfiguration, and license results |
+| License inventory | ShakerScan built-in inventory | Trivy license scan | License expressions, files, and obligations |
 
-Representative scanner commands for a quarantined snapshot are:
+The representative external scanner command for a quarantined snapshot is:
 
 ```bash
-syft dir:/snapshot -o cyclonedx-json=sbom.cdx.json
-syft dir:/snapshot -o spdx-json=sbom.spdx.json
-grype sbom:sbom.cdx.json -o json
 trivy fs --scanners vuln,secret,misconfig,license --format json /snapshot
-pip-audit -r /snapshot/requirements.lock --format=json
-osv-scanner scan source -r /snapshot --format json
 ```
 
 These are command contracts, not instructions to run untrusted code on the ShakerScan API host. Execute them
@@ -758,16 +784,14 @@ Required SCA policy:
 
 ### 7.8 P1 — Add malware, secrets, and native-binary scanning
 
-**Delivery status: partially implemented.** Built-in secret, malware-rule, archive, and native-binary checks
-exist, and packaged Trivy adds secret, misconfiguration, and license evidence. ClamAV and Gitleaks remain
-optional fail-closed adapters. YARA, optional TruffleHog/enterprise anti-malware, Git-history scanning, and
-versioned organization rule distribution remain.
+**Delivery status: implemented with rule/freshness hardening remaining.** Built-in secret, malware-rule,
+archive, and native-binary checks exist, and packaged Semgrep/Trivy add source, secret, misconfiguration, and
+license evidence. No additional malware or secret scanner will be added.
 
 Run at least:
 
-- YARA with versioned organization and community rule sets.
-- ClamAV or an approved enterprise anti-malware engine.
-- Gitleaks or TruffleHog against the complete snapshot and relevant Git history metadata.
+- The existing ShakerScan malware/secret rules, Semgrep rules, and Trivy checks with versioned rule/database
+  identity and freshness.
 - File-type identification by magic bytes, not extension.
 - Native binary inventory, signature checks where available, strings/import analysis, and platform hardening
   checks for `.so`, `.dll`, `.dylib`, wheels, and executables.
@@ -945,8 +969,8 @@ The final report must be machine-verifiable and human-readable. It should includ
   owners, expiry, and compensating controls.
 - Signature or attestation over the complete report subject and the approved artifact/runtime digests.
 
-Produce CycloneDX and in-toto/SLSA-compatible evidence where practical. The future control-plane signer must
-use an organization-controlled workload identity; workers must never sign. The deployed system must verify
+Produce CycloneDX and in-toto/SLSA-compatible evidence where practical. The separate control-plane signer
+must use an organization-controlled workload identity; workers must never sign. The deployed system must verify
 the v2 admission and active lifecycle state before pulling or loading the model.
 
 ### 7.13 P2 — Correct documentation and public contract mismatches
@@ -1177,14 +1201,14 @@ A cursory review is not sufficient for a production gate.
 - Download packages through the approved package proxy into quarantine.
 - Verify package hashes and signatures where policy requires them.
 - Generate SBOMs for the source snapshot and the actual runtime image.
-- Run pip-audit, OSV-Scanner, Grype, and Trivy as applicable.
+- Run the existing built-in dependency checks and Trivy as applicable.
 - Review licenses for direct and transitive components.
 - Block prohibited packages, critical exploitable vulnerabilities, unapproved package indexes, unhashed direct
   URLs, and unresolved dependency conflicts.
 
 ### Step 9 — Scan for malware, secrets, and suspicious binaries
 
-- Run YARA, anti-malware, and secret scanners.
+- Run ShakerScan's existing malware-rule, secret, native-binary, Semgrep, and Trivy checks.
 - Analyze native binaries and wheels.
 - Review registry-provided scan indicators as external evidence.
 - Quarantine any positive result until independently resolved.
@@ -1311,7 +1335,8 @@ Required evidence before a controlled pilot:
 1. Complete snapshot of revision `92eac4f44c8674638f039f1b0d8280f2539cb4c7`.
 2. Full SHA-256 verification of `pytorch_model.bin` against
    `4a3ec46f2ba2027c541e159b4f1598ddbc4043ad41ac2b1f704adc69b96bcbfe`.
-3. ModelScan, Fickling, pickletools, archive-member, malware, and YARA analysis of the complete `.bin`.
+3. ModelScan, pickletools, archive-member, built-in malware/secret, Semgrep, and Trivy analysis of the complete
+   `.bin`; record Fickling as `NOT_APPLICABLE` when the artifact is a PyTorch ZIP checkpoint.
 4. Full static and manual review of `config_codesage.py`, `modeling_codesage.py`,
    `tokenization_codesage.py`, and every other executable file.
 5. Locked runtime SBOM and all SCA/license gates.
@@ -1329,9 +1354,11 @@ loaded or prove that conversion was isolated.
 ### 11.3 CodeSage Large v2
 
 **Automation status:** The same current static controls apply without model-name-specific code. Complete
-acquisition fits the product ceilings, but the ordinary PR path should not spend the storage/GPU budget.
-Phase 3/4 must run this profile in scheduled GPU-capable infrastructure after Base passes. The corporation
-must justify the larger model against its own quality, capacity, cost, and data requirements.
+acquisition fits the product ceilings, but the ordinary PR path should not spend the storage/memory budget.
+Phase 3/4 may run this profile only after Base passes and only when the same Firecracker runner has an
+approved resource envelope large enough for it. Otherwise the result remains `INCOMPLETE`; a GPU-specific
+runner is outside this roadmap. The corporation must justify the larger model against its own quality,
+capacity, cost, and data requirements.
 
 Perform every Base v2 step against revision `6e5d6dc15db3e310c37c6dbac072409f95ffa5c5` and digest
 `78a7ed76ffa5ca4e145100610e5541201ca0f3ecc75f1b73433303ae9348c77c`.
@@ -1342,7 +1369,7 @@ Additional gates:
   and review.
 - Increase acquisition, scanner, sandbox, and registry quotas for a 2.6 GB artifact without relaxing global
   safety limits.
-- Measure cold-start, peak host memory, GPU memory, concurrency, maximum-length input, and out-of-memory
+- Measure cold-start, peak Firecracker guest/host memory, concurrency, maximum-length input, and out-of-memory
   recovery.
 - Confirm resource exhaustion cannot destabilize colocated services.
 - Demonstrate a material quality benefit over Base v2 for the corporate corpus. Size alone is not a security
@@ -1352,9 +1379,9 @@ Recommended initial decision: **hold until Base v2 succeeds**.
 
 ## 12. Policy model
 
-ShakerScan currently uses saved Python policy profiles. Keep that path for compatibility, but make evidence
-and policy inputs stable enough that an external engine such as OPA could be added later without redefining
-security semantics.
+ShakerScan uses saved Python policy profiles. This is the only policy engine in scope. Keep evidence and
+policy inputs stable, canonical, versioned, hashed, and regression-tested so policy decisions are
+reproducible without adding an external policy service.
 
 ### 12.1 Decision outcomes
 
@@ -1393,9 +1420,32 @@ Production must block when any of the following is true:
 The phases are ordered by risk dependency. Status refers to reusable product mechanisms, not approval of a
 specific model.
 
-### Phase -1 — Restore admission correctness — **reopened as Release Gate 0**
+### 13.0 Scoped delivery order
 
-Complete before adding more scanners or model-execution features:
+Each increment must be independently committed and leave required controls fail closed:
+
+1. **Authoritative workflow:** make technical scans structurally preflight-only; enforce controlled-workflow
+   state transitions, immutable frozen inputs, downstream invalidation, idempotency, and unambiguous UI/API
+   terminology.
+2. **Existing evidence hardening:** enforce ModelScan/Fickling/Semgrep/Trivy applicability and freshness,
+   improve Semgrep rules and safe fixtures, remove optional-tool claims, and make all unexpected worker/tool
+   failures durable terminal non-pass states.
+3. **Physical Firecracker runner:** implement the existing controller contract on Linux/KVM with jailer,
+   exact read-only subjects, no egress/credentials, approved runtime/loader digests, resource limits,
+   phase telemetry, known-answer embeddings, signed receipts, teardown, and no fallback.
+4. **CodeSage conversion:** execute the narrowly scoped `.bin` to safetensors conversion in Firecracker,
+   record deserialization globals, prove tensor/numeric/embedding equivalence, assign a new artifact identity,
+   and rerun the complete existing intake.
+5. **Control-plane and deployment hardening:** strengthen embedded policy tests, role separation, signer/KMS
+   isolation, OCI push verification, CI/Kubernetes denial paths, revocation/cache behavior, storage quotas,
+   restart/replay recovery, and first-screen reporting.
+
+Release acceptance requires a physical Firecracker run and controlled deployment test. Mocked or
+caller-signed receipts prove contract handling only and cannot close those gates.
+
+### Phase -1 — Admission correctness — **closed; retained as Release Gate 0**
+
+Maintain these invariants before any further model-execution or hardening feature:
 
 - Reject any signed admission whose decision is not exactly `allow` in the core library verifier.
 - Make active admission-registry verification mandatory for production integrations.
@@ -1418,10 +1468,10 @@ Complete before adding more scanners or model-execution features:
   approval-shaped metadata from admission requests.
 - Remove admission signing material and final signing from hostile evidence-producing workers.
 - Require actual connector/runner retrieval results; never substitute an internally ideal ranking.
-- **Implemented immediate repair:** fail safetensors coverage closed for unsupported dtype, zero samples,
-  inconsistent spans, overlap, gaps, or incomplete payload coverage across intake, sandbox, and runtime paths.
-  BF16 finiteness is sampled explicitly; unsupported floating encodings are non-pass. Replace the handwritten
-  parser with a bounded official-library/Rust inspector before claiming the parser replacement complete.
+- **Implemented:** fail safetensors coverage closed for unsupported dtype, zero values, inconsistent spans,
+  overlap, gaps, incomplete payload coverage, and non-finite values across intake, sandbox, and runtime paths.
+  The hash-locked official safetensors Rust binding is authoritative, with independent structural checks and
+  full bounded numeric coverage retained as defense in depth.
 - **Implemented quarantine:** version 1 verification rejects by default and migration marks active v1 rows
   `reassessment_required`. Introduce an exact-bundle admission v2 through a dedicated signer.
 
@@ -1452,25 +1502,27 @@ Remaining:
 - Document object-store sizing, backup, tenant quotas, and cleanup for operators.
 - Run scheduled real-model acquisitions outside ordinary PR jobs.
 
-### Phase 2 — Generated static evidence — **core bundle implemented; optional depth remains**
+### Phase 2 — Generated static evidence — **scanner set frozen; hardening remains**
 
 Delivered: built-in semantic/source/secret/malware/SBOM/SCA/binary/license checks; normalized fail-closed
-contracts for ModelScan, Semgrep, Fickling, Trivy, ClamAV, Gitleaks, Syft, OSV-Scanner, and pip-audit;
-evidence provenance and digest binding; packaged ModelScan/Semgrep/Fickling/Trivy; hash-locked/checksum-pinned
+contracts and packaged execution for ModelScan, Semgrep, Fickling, and Trivy; evidence provenance and digest
+binding; hash-locked/checksum-pinned
 installation; offline Trivy data; bounded execution; readiness API/UI; and image-build malicious-fixture tests.
 
 Remaining product work:
 
 - Define enforceable maximum DB/rule age and trigger rebuild/reassessment when the bundled data becomes stale.
-- Add YARA and optionally Grype, Bandit/CodeQL, TruffleHog, and ScanCode/ORT through the same contract only
-  where their incremental evidence justifies image size, latency, and maintenance.
-- Isolate each hostile-file parser with read-only input, no egress where databases permit, resource limits,
+- Improve the existing Semgrep model-intake rules, safe-pattern fixtures, PyTorch-version context, severity,
+  and malicious-capability versus review-required classification.
+- Isolate each existing hostile-file parser with read-only input, no egress where databases permit, resource limits,
   and bounded output.
 - Provide a scanner expectation matrix so a required missing engine blocks instead of silently reducing
   coverage.
+- Remove unshipped optional scanner names from presets/readiness claims so compatibility code cannot be
+  mistaken for supported coverage.
 
-Operator/corporate work: approve scanner versions and licenses, host/update vulnerability and malware
-databases, supply organization rules, and define severity/freshness/exception policy.
+Operator/corporate work: approve the four scanner versions and licenses, update the existing vulnerability
+and rule data, supply organization Semgrep rules where needed, and define severity/freshness/exception policy.
 
 ### Phase 3 — Disposable model execution and runtime telemetry — **official parser, generic loader profiles, Firecracker contract, and signed receipt boundary implemented; runner-host deployment open**
 
@@ -1493,7 +1545,8 @@ Remaining product/infrastructure work:
 - Mount only the read-only quarantined snapshot and signed runtime plus a quota-limited scratch volume.
 - Disable network and credentials, collect file/process/network/syscall/import/resource telemetry, and destroy
   the VM after bounded evidence export.
-- Add separately versioned GGUF and additional framework loader profiles as their runtimes are approved.
+- Add only loader profiles needed by formats already supported by the current product and executable in the
+  single Firecracker boundary; unsupported runtimes remain `INCOMPLETE`.
 - Separate import, tokenizer construction, model construction, weight load, warmup, inference, and teardown
   so the report identifies the failing phase.
 - **Implemented evidence contract:** a signed conversion receipt must bind source/target digests, converter
@@ -1503,8 +1556,9 @@ Remaining product/infrastructure work:
   limits, and telemetry digests.
 
 Exit criteria: CodeRankEmbed and CodeSage Base can be loaded and exercised without corp network, credentials,
-or host access; prohibited behavior and resource breaches reliably block. CodeSage Large runs in a separate
-scheduled GPU-capable tier after Base passes.
+or host access; prohibited behavior and resource breaches reliably block. CodeSage Large runs only if the
+same Firecracker implementation can satisfy its approved CPU/memory envelope; otherwise it remains
+`INCOMPLETE` and no GPU-specific backend is added.
 
 ### Phase 4 — Automated model and application evaluation — **signed runner-evidence admission implemented; runner fleet deployment remains infrastructure**
 
@@ -1524,13 +1578,13 @@ Remaining product/infrastructure work:
 
 - Deploy the Phase 3 runner fleet to generate signed observations; caller-provided benchmark payloads remain
   non-authoritative.
-- Define a versioned benchmark plug-in contract: corpus digest, query digest, expected relevance/ACL labels,
+- Harden the existing versioned benchmark contract: corpus digest, query digest, expected relevance/ACL labels,
   thresholds, scoring version, and content-retention policy.
 - Ship a small synthetic public smoke corpus, never a claim of corporate fitness.
 - Automate deterministic, batching, malformed/Unicode/long-input, poisoning, resource, and conversion
   equivalence cases.
-- Add bounded connectors for vector stores and knowledge graphs to test pre-query authorization, tenant
-  isolation, deletion, reindex, rollback, and graph traversal.
+- Exercise vector-store and knowledge-graph observations through the existing signed data-plane receipt
+  contract; do not build a general connector platform.
 - Ensure raw corporate documents, code, embeddings, and secrets are not persisted in ordinary scan results.
 
 Corporate work: supply representative synthetic/internal corpora, relevance judgments, classification/ACL
@@ -1566,21 +1620,24 @@ Remaining product work:
 - Add deterministic report fixtures proving the simple answer: what passed, what failed, what was not tested,
   whether deployment is allowed, and why.
 
-### Phase 6 — Corporate supply-chain integration — **product seams exist; organization-specific**
+### Phase 6 — Harden existing supply-chain integration — **bounded scope**
 
 Product work:
 
-- Add optional OPA policy-bundle evaluation while retaining an embedded policy fallback.
-- Add Cosign/Sigstore identity and Rekor bundle verification where configured.
-- **Implemented:** fail-closed CI/startup verification and Kubernetes admission-controller enforcement.
-  Add model-serving-native hooks as organizations select serving platforms.
-- Trigger reassessment on CVE/rule/policy changes and surface stale tool/database/fleet state.
-- Add signed webhooks/events for admission, denial, expiry, revocation, and reassessment.
+- Version, hash, regression-test, and fail closed the existing embedded Python policy implementation.
+- Harden the separate signer, KMS-only production mode, key rotation, restricted database authority,
+  idempotency, and audit events; do not add a second signing ecosystem.
+- Complete digest-preserving push and post-push verification using the existing OCI layout and one configured
+  internal registry; do not build registry administration.
+- Harden the implemented fail-closed CI/startup verifier and Kubernetes admission webhook, including outage,
+  expiry, revocation, cache invalidation, and component-substitution negative tests; add no other orchestrator.
+- Trigger reassessment on changes to existing scanner rules/databases, embedded policy, trust anchors,
+  runtime/loader digests, approvals, and upstream subjects.
 
 Corporate work:
 
 - Operate the internal artifact/runtime registry and enforce exact approved digests.
-- Own signing identities, trust roots, OPA/policy bundles, scanner databases, benchmark corpus, approvals,
+- Own signing identities, trust roots, embedded policy configuration, existing scanner databases, benchmark corpus, approvals,
   exceptions, incident response, rollback, runtime monitoring, data lifecycle, and audit retention.
 - Verify that production cannot download mutable upstream model code or bypass ShakerScan admission.
 
@@ -1662,8 +1719,9 @@ Maintain these tiers:
    weight-load evidence where applicable, and corporate-use report assertions.
 4. **Scheduled isolated execution:** CodeRankEmbed and Base import/load/inference, telemetry, embedding tests,
    and optional Base conversion equivalence in the Phase 3 runner.
-5. **Release/GPU qualification:** CodeSage Large complete snapshot, scanners, load/inference, GPU resource
-   envelope, robustness, evaluation, report, and admission/deployment verification.
+5. **Conditional Large qualification:** CodeSage Large complete snapshot, scanners, Firecracker
+   load/inference, CPU/memory envelope, robustness, evaluation, report, and admission/deployment verification;
+   if it does not fit, report `INCOMPLETE` without adding a backend.
 
 Every tier must stamp the expected ShakerScan worker build, model/snapshot/runtime digests, scanner image
 digests, rule/database versions and freshness, loader/evaluator versions, hardware class, policy/benchmark
@@ -1775,12 +1833,12 @@ every decision relying on the affected scanner image/rules digest as requiring r
 | Caller-defined “complete” repository | Authoritative pinned Hugging Face manifest; caller manifest compare-only | Other providers need equivalent authoritative adapters | Add provider adapters with immutable-manifest proof | P1 |
 | Signed denial accepted as authorization | Exact signed `allow` and active-registry enforcement with regression tests | External deployment can omit the integration | Add promotion/serving hooks and deployed-system negative tests | P0 |
 | Caller weakens required gates | Server-side strict-profile expansion and expectation matrix | Custom profiles can intentionally be less strict | Govern profile creation/activation and bind production environments to approved profiles | P1 |
-| External scanner adapters mistaken for installed coverage | Fail-closed status plus packaged core bundle, rules/DB identity, readiness UI, and functional receipt | Optional tools can still be requested without being installed; bundled DB can age | Enforce freshness policy and preserve explicit `UNSUPPORTED` for optional tools | P0 |
+| External scanner adapters mistaken for installed coverage | Fail-closed status plus frozen packaged core bundle, rules/DB identity, readiness UI, and functional receipt | Legacy compatibility names can still be confused with supported coverage; bundled DB can age | Remove unshipped tools from presets/claims, enforce freshness, and preserve explicit `UNSUPPORTED` | P0 |
 | Unsafe PyTorch serialization | Built-in semantics, Fickling/ModelScan adapters, sandbox load prohibition | No actual isolated deserialization/load evidence | Multi-engine static analysis plus disposable VM load | P0 |
 | Malicious custom runtime behavior | Complete custom-code inventory, AST checks, hardened operator runtime adapter | Container isolation is weaker than a microVM and telemetry is self-reported/bound | KVM/microVM runner with independent runtime telemetry | P0 |
 | Model evaluation evidence supplied by caller | Public observations are labeled `DECLARED` and cannot pass admission; missing actual results fail closed | Trusted runner and connector do not yet generate the evidence | Bind runner-generated observations to exact model/runtime/index and permit `GENERATED_DATA_PLANE` only on that internal path | P0 |
 | Dependency CVEs | Generated SBOM/SCA plus packaged offline Trivy | Runtime may not be locked; DB ages between image rebuilds | Locked runtime builder, freshness gate, recurring rescans | P1 |
-| Malware/secrets | Built-in checks plus packaged Trivy and optional ClamAV/Gitleaks adapters | Detection depth and rule freshness vary | YARA/org rules and enforceable freshness/reassessment gates | P1 |
+| Malware/secrets | Built-in checks plus packaged Semgrep/Trivy | Detection depth and rule freshness vary | Improve existing rules and enforce freshness/reassessment gates | P1 |
 | Retrieval/ACL leakage | Evaluation schema for ACL/tenant/graph/cache/deletion controls | No universal live data-plane connector or corporate fixture | Bounded connectors plus organization-provided principals/data | P1 |
 | Embedding poisoning/inversion | Deterministic scoring contract | No runner-generated adversarial corpus results | Automated benchmark plug-ins in isolated runner | P1 |
 | Ambiguous report coverage | Decision/control cards plus first-page execution matrix and phase timeline | Operators still need organization-specific interpretation | Add freshness/telemetry columns and organization report profiles | P1 |
@@ -1833,13 +1891,15 @@ Owners must decide and record:
 - [x] Durable UI/API activity and deployment decisions exist.
 - [x] The core ModelScan/Semgrep/Fickling/Trivy adapters are pinned, isolated, packaged, functionally
   self-tested, and expose rule/database/readiness identity.
-- [ ] Optional ClamAV/Gitleaks/Syft/OSV/pip-audit/YARA or organization engines are packaged where policy
-  requires them, with recurring freshness and reassessment operations.
-- [ ] A disposable KVM/microVM model loader executes import/load/inference and produces runtime telemetry.
+- [x] The external scanner set is frozen to ModelScan/Semgrep/Fickling/Trivy; unsupported optional adapter
+  contracts do not count as installed coverage and are not future implementation work.
+- [ ] A disposable Firecracker/KVM+jailer model loader executes import/load/inference and produces signed
+  runtime telemetry, with no production fallback.
 - [ ] The evaluator automatically consumes embeddings and measurements generated by that exact runner.
 - [ ] The UI/JSON report has explicit passed/failed/not-run/coverage/error detail and a phase timeline; HTML/PDF,
   SARIF, per-control evidence links, and admission-statement parity remain.
-- [ ] Common OPA/Cosign/internal-registry/deployment enforcement integrations and examples are shipped.
+- [ ] The embedded Python policy, existing signer/KMS path, configured OCI registry promotion, CI verifier,
+  and Kubernetes admission webhook pass their complete negative-path and recovery gates.
 
 ### 19.2 Per-model admission-run checklist
 
@@ -1883,11 +1943,7 @@ deployment. Shipping a mechanism does not check a run box.
 - [Hugging Face Protect AI integration](https://huggingface.co/docs/hub/security-protectai)
 - [Protect AI ModelScan](https://github.com/protectai/modelscan)
 - [Trail of Bits Fickling](https://github.com/trailofbits/fickling)
-- [Python Packaging Authority pip-audit](https://github.com/pypa/pip-audit)
-- [OSV-Scanner usage](https://google.github.io/osv-scanner/usage/)
 - [Trivy filesystem scanning](https://trivy.dev/docs/latest/target/filesystem/)
-- [Anchore Syft and Grype](https://oss.anchore.com/)
-- [Sigstore Cosign verification](https://docs.sigstore.dev/cosign/verifying/verify/)
 - [NIST adversarial machine learning taxonomy](https://www.nist.gov/publications/adversarial-machine-learning-taxonomy-and-terminology-attacks-and-mitigations)
 
 These sources describe tool and ecosystem capabilities. ShakerScan acceptance must depend on locally generated,
