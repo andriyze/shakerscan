@@ -101,6 +101,7 @@ try:
         issue_admission_v2 as _issue_model_admission_v2,
         verify_admission_v2 as _verify_model_admission_v2,
     )
+
 except ModuleNotFoundError:
     from api.model_intake_control_plane import (
         AdmissionContractError as _ModelAdmissionContractError,
@@ -111,6 +112,17 @@ except ModuleNotFoundError:
         freeze_evidence_manifest as _freeze_model_evidence_manifest,
         issue_admission_v2 as _issue_model_admission_v2,
         verify_admission_v2 as _verify_model_admission_v2,
+    )
+
+try:
+    from model_intake_runner_receipts import (
+        EVIDENCE_POLICY as _MODEL_RUNNER_EVIDENCE_POLICY,
+        verify_runner_envelope as _verify_model_runner_envelope,
+    )
+except ModuleNotFoundError:
+    from api.model_intake_runner_receipts import (
+        EVIDENCE_POLICY as _MODEL_RUNNER_EVIDENCE_POLICY,
+        verify_runner_envelope as _verify_model_runner_envelope,
     )
 
 try:
@@ -3887,6 +3899,11 @@ class ModelSubmissionRequest(BaseModel):
 class ModelSubmissionStaticRunRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     scan_id: str
+
+
+class ModelRunnerEvidenceReceiptRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    signature_envelope: dict[str, Any]
 
 
 class ModelEvidenceFreezeRequest(BaseModel):
@@ -11137,6 +11154,110 @@ async def attach_model_intake_static_run(
     }
 
 
+def _model_intake_untrusted_runner_claims(envelope: dict[str, Any]) -> dict[str, Any]:
+    try:
+        payload = base64.b64decode(str(envelope.get("payload") or ""), validate=True)
+        value = json.loads(payload)
+    except (ValueError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+@app.post("/model-intake/submissions/{submission_id}/evidence-receipts")
+async def attach_model_intake_runner_evidence(
+    submission_id: str,
+    request: ModelRunnerEvidenceReceiptRequest,
+    http_request: Request,
+):
+    """Verify a trusted runner signature before persisting generated evidence."""
+    actor = _model_intake_authenticated_subject(http_request)
+    submission_uuid = _model_intake_uuid(submission_id, "submission id")
+    untrusted = _model_intake_untrusted_runner_claims(request.signature_envelope)
+    evidence_type = str(untrusted.get("evidence_type") or "")
+    policy = _MODEL_RUNNER_EVIDENCE_POLICY.get(evidence_type)
+    if not policy:
+        raise HTTPException(status_code=422, detail="Unsupported runner evidence type")
+    _provenance, purpose = policy
+    async with db_pool.acquire() as conn:
+        submission = await conn.fetchrow(
+            "SELECT id,requested_environment FROM model_intake_submissions WHERE id=$1",
+            submission_uuid,
+        )
+        if not submission:
+            raise HTTPException(status_code=404, detail="Model submission not found")
+        anchors = await conn.fetch(
+            """
+            SELECT public_key_pem,builder_id_constraint FROM model_intake_trust_anchors
+            WHERE is_active=true AND revoked_at IS NULL AND purpose=$1 AND environment=$2
+              AND valid_from<=NOW() AND (valid_until IS NULL OR valid_until>NOW())
+            """,
+            purpose,
+            submission["requested_environment"],
+        )
+        verified = _verify_model_runner_envelope(
+            request.signature_envelope,
+            expected_submission_id=str(submission_uuid),
+            expected_environment=submission["requested_environment"],
+            trusted_public_keys=[str(item["public_key_pem"] or "") for item in anchors if item["public_key_pem"]],
+            trusted_builder_ids={str(item["builder_id_constraint"] or "") for item in anchors if item["builder_id_constraint"]},
+        )
+        if not verified["verified"]:
+            raise HTTPException(status_code=409, detail=verified)
+        payload = verified["payload"]
+        bindings = {
+            key: payload[key]
+            for key in (
+                "deployment_bundle_sha256", "model_artifact_sha256",
+                "repository_snapshot_sha256", "runtime_image_digest",
+                "loader_profile_sha256",
+            )
+        }
+        inserted = await conn.fetchrow(
+            """
+            INSERT INTO model_intake_evidence_records
+                (submission_id,evidence_type,schema_version,provenance_class,producer_id,
+                 producer_version,builder_id,invocation_id,subject_bindings,payload_sha256,
+                 signature_envelope,status,started_at,finished_at,expires_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11::jsonb,$12,$13,$14,$15)
+            ON CONFLICT (producer_id,invocation_id) DO NOTHING
+            RETURNING *
+            """,
+            submission_uuid,
+            evidence_type,
+            payload["schema_version"],
+            verified["provenance_class"],
+            payload["builder_id"],
+            str(payload.get("runner_version") or "unknown"),
+            payload["builder_id"],
+            payload["invocation_id"],
+            json.dumps(bindings),
+            verified["payload_sha256"],
+            json.dumps(request.signature_envelope),
+            payload["status"],
+            datetime.fromisoformat(payload["started_at"].replace("Z", "+00:00")),
+            datetime.fromisoformat(payload["finished_at"].replace("Z", "+00:00")),
+            datetime.fromisoformat(payload["expires_at"].replace("Z", "+00:00")),
+        )
+        if not inserted:
+            inserted = await conn.fetchrow(
+                "SELECT * FROM model_intake_evidence_records WHERE producer_id=$1 AND invocation_id=$2",
+                payload["builder_id"],
+                payload["invocation_id"],
+            )
+            if not inserted or inserted["payload_sha256"] != verified["payload_sha256"]:
+                raise HTTPException(status_code=409, detail="Runner invocation replay changed payload")
+        await conn.execute(
+            "UPDATE model_intake_submissions SET state='evidence_ready',updated_at=NOW() WHERE id=$1",
+            submission_uuid,
+        )
+    return {
+        "evidence": row_to_dict(inserted),
+        "verified": True,
+        "verified_by": actor,
+        "deployable": False,
+    }
+
+
 @app.post("/model-intake/submissions/{submission_id}/freeze-evidence")
 async def freeze_model_intake_evidence(
     submission_id: str,
@@ -11164,8 +11285,34 @@ async def freeze_model_intake_evidence(
         if subject_map.get("repository_snapshot") != bundle["repository_snapshot_sha256"]:
             raise HTTPException(status_code=409, detail="Deployment bundle snapshot was not generated for this submission")
         records = [row_to_dict(item) for item in await conn.fetch(
-            "SELECT * FROM model_intake_evidence_records WHERE submission_id=$1 ORDER BY created_at", submission_uuid
+            """
+            SELECT DISTINCT ON (evidence_type) *
+            FROM model_intake_evidence_records
+            WHERE submission_id=$1 AND (expires_at IS NULL OR expires_at>NOW())
+            ORDER BY evidence_type,created_at DESC
+            """,
+            submission_uuid,
         )]
+        for record in records:
+            bindings = _model_intake_json_object(record.get("subject_bindings"))
+            if record.get("evidence_type") == "static_analysis":
+                matches = (
+                    bindings.get("model_artifact_sha256") == bundle["model_artifact_sha256"]
+                    and bindings.get("repository_snapshot_sha256") == bundle["repository_snapshot_sha256"]
+                )
+            else:
+                matches = (
+                    bindings.get("deployment_bundle_sha256") == bundle["bundle_sha256"]
+                    and bindings.get("model_artifact_sha256") == bundle["model_artifact_sha256"]
+                    and bindings.get("repository_snapshot_sha256") == bundle["repository_snapshot_sha256"]
+                    and bindings.get("runtime_image_digest") == bundle["runtime_image_digest"]
+                    and bindings.get("loader_profile_sha256") == bundle["loader_profile_sha256"]
+                )
+            if not matches:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Evidence {record.get('evidence_type')} does not bind the exact deployment bundle",
+                )
         version = int(await conn.fetchval(
             "SELECT COALESCE(MAX(version),0)+1 FROM model_intake_evidence_manifests WHERE submission_id=$1",
             submission_uuid,

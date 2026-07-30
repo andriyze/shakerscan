@@ -1,13 +1,16 @@
 import inspect
+import importlib.util
 from pathlib import Path
 import re
 import sys
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
-
-import api  # noqa: E402
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "api"))
+spec = importlib.util.spec_from_file_location("shakerscan_api_workflow_test", ROOT / "api" / "api.py")
+api = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(api)
 import model_intake_signer_service as signer_service  # noqa: E402
 from model_intake_control_plane import AdmissionContractError  # noqa: E402
 

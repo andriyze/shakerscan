@@ -1209,8 +1209,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 274 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 231 | `api/api.py` |
+| Public REST operations | 275 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 232 | `api/api.py` |
 | Check families | 14 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 13 | `api/command_arsenal.py` |
@@ -1393,6 +1393,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `POST` | `/model-intake/submissions` | `create_model_intake_submission` |
 | `GET` | `/model-intake/submissions/{submission_id}` | `get_model_intake_submission` |
 | `POST` | `/model-intake/submissions/{submission_id}/approvals` | `create_model_intake_approval` |
+| `POST` | `/model-intake/submissions/{submission_id}/evidence-receipts` | `attach_model_intake_runner_evidence` |
 | `POST` | `/model-intake/submissions/{submission_id}/freeze-evidence` | `freeze_model_intake_evidence` |
 | `POST` | `/model-intake/submissions/{submission_id}/policy-decisions` | `create_model_intake_policy_decision` |
 | `POST` | `/model-intake/submissions/{submission_id}/promote` | `promote_model_intake_submission` |

@@ -1499,7 +1499,7 @@ Exit criteria: CodeRankEmbed and CodeSage Base can be loaded and exercised witho
 or host access; prohibited behavior and resource breaches reliably block. CodeSage Large runs in a separate
 scheduled GPU-capable tier after Base passes.
 
-### Phase 4 — Automated model and application evaluation — **security/quality contract implemented; runner incomplete**
+### Phase 4 — Automated model and application evaluation — **signed runner-evidence admission implemented; runner fleet deployment remains infrastructure**
 
 Delivered: provider-neutral, content-free evaluation schema and deterministic scoring for vector validity,
 dimensions, retrieval, ACL/sensitive leakage, poisoning, stability, latency/RSS, tenant/graph/cache boundaries,
@@ -1507,10 +1507,16 @@ deletion, and model/index compatibility. Security and organization-specific retr
 scopes so the report does not confuse “no quality corpus supplied” with “security failed”; policy may still
 require both for admission.
 
-Remaining product work:
+Delivered additionally: runtime, embedding-evaluation, and data-plane results now enter the admission workflow
+only as canonical signed receipts from environment- and purpose-scoped runner trust anchors. A signed `PASS`
+is rejected unless exact artifact/snapshot/runtime/loader/bundle bindings, freshness, builder identity,
+isolation/load telemetry, generated benchmark identity, and multi-principal data-plane controls are present.
+Evidence freeze selects the newest unexpired record per type and rejects subject drift.
 
-- Generate embeddings and measurements inside the Phase 3 runner rather than accepting them only from a
-  caller.
+Remaining product/infrastructure work:
+
+- Deploy the Phase 3 runner fleet to generate signed observations; caller-provided benchmark payloads remain
+  non-authoritative.
 - Define a versioned benchmark plug-in contract: corpus digest, query digest, expected relevance/ACL labels,
   thresholds, scoring version, and content-retention policy.
 - Ship a small synthetic public smoke corpus, never a claim of corporate fitness.
