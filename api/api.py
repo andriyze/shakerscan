@@ -11173,6 +11173,35 @@ def _model_intake_required_static_checks(summary: dict[str, Any]) -> dict[str, b
     }
 
 
+def _model_intake_static_evidence_status(
+    model_intake: dict[str, Any],
+    summary: dict[str, Any],
+    findings: list[Any],
+    required_static_checks: dict[str, bool],
+) -> str:
+    severity = {str(item.get("severity") or "").lower() for item in findings if isinstance(item, dict)}
+    if severity.intersection({"critical", "high"}):
+        return "FAIL"
+    if all(required_static_checks.values()):
+        return "PASS"
+    generated = model_intake.get("generated_evidence") if isinstance(model_intake.get("generated_evidence"), dict) else {}
+    required_warning_names = set(generated.get("required_non_pass") or [])
+    warning_results = [
+        item for item in generated.get("results") or []
+        if isinstance(item, dict) and item.get("scanner", {}).get("name") in required_warning_names
+    ]
+    warning_review = (
+        summary.get("generated_evidence_status") == "REVIEW_REQUIRED"
+        and bool(required_warning_names)
+        and len(warning_results) == len(required_warning_names)
+        and all(item.get("execution", {}).get("status") == "WARNING" for item in warning_results)
+    )
+    other_checks_pass = all(
+        passed for name, passed in required_static_checks.items() if name != "generated_evidence_pass"
+    )
+    return "WARNING" if warning_review and other_checks_pass else "INCOMPLETE"
+
+
 def _model_intake_snapshot_custom_code_sha256(model_intake: dict[str, Any]) -> str | None:
     """Derive the reviewed-code identity only from a complete authoritative snapshot."""
     snapshot = model_intake.get("repository_snapshot") if isinstance(model_intake.get("repository_snapshot"), dict) else {}
@@ -11689,10 +11718,13 @@ async def attach_model_intake_static_run(
         if expected and expected != artifact_sha:
             raise HTTPException(status_code=409, detail="Scan artifact does not match submission expectation")
         findings = result.get("findings") if isinstance(result.get("findings"), list) else []
-        severity = {str(item.get("severity") or "").lower() for item in findings if isinstance(item, dict)}
         required_static_checks = _model_intake_required_static_checks(summary)
-        complete = all(required_static_checks.values())
-        static_status = "FAIL" if severity.intersection({"critical", "high"}) else "PASS" if complete else "INCOMPLETE"
+        static_status = _model_intake_static_evidence_status(
+            model_intake,
+            summary,
+            findings,
+            required_static_checks,
+        )
         payload_digest = hashlib.sha256(json.dumps({
             "scan_id": str(scan_uuid),
             "summary": summary,

@@ -702,4 +702,28 @@ def test_partial_or_scanner_omitting_scan_cannot_become_pass_static_evidence():
     checks = api._model_intake_required_static_checks(apparently_clean)
     assert checks["repository_snapshot_complete"] is False
     assert checks["generated_evidence_pass"] is False
+
+
+def test_warning_only_required_scanner_evidence_stays_reviewable_not_pass_or_incomplete():
+    summary = {
+        "acquisition_complete": True,
+        "inspection_complete": True,
+        "repository_manifest_complete": True,
+        "repository_snapshot_complete": True,
+        "generated_evidence_status": "REVIEW_REQUIRED",
+        "checksum_status": "verified",
+    }
+    model_intake = {"generated_evidence": {
+        "required_non_pass": ["semgrep"],
+        "results": [{
+            "scanner": {"name": "semgrep"},
+            "execution": {"status": "WARNING", "required": True},
+        }],
+    }}
+    checks = api._model_intake_required_static_checks(summary)
+
+    assert api._model_intake_static_evidence_status(model_intake, summary, [], checks) == "WARNING"
+    assert api._model_intake_static_evidence_status(
+        model_intake, summary, [{"severity": "high"}], checks,
+    ) == "FAIL"
     assert not all(checks.values())

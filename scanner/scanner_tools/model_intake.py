@@ -3172,13 +3172,22 @@ async def run_model_intake_scan(
                             subject,
                         )
                     )
+        generated_summary = _model_intake_scanners.generated_evidence_summary(scanner_results)
+        required_non_pass_results = [
+            item for item in scanner_results
+            if item.get("execution", {}).get("status") in _model_intake_scanners.REQUIRED_NON_PASS_STATUSES
+            and bool(item.get("execution", {}).get("required"))
+        ]
         generated_evidence = {
-            **_model_intake_scanners.generated_evidence_summary(scanner_results),
-            "status": "PASS" if not any(
-                item.get("execution", {}).get("status") in _model_intake_scanners.REQUIRED_NON_PASS_STATUSES
-                and bool(item.get("execution", {}).get("required"))
-                for item in scanner_results
-            ) else "FAIL",
+            **generated_summary,
+            "status": (
+                "PASS" if not required_non_pass_results
+                else "REVIEW_REQUIRED" if all(
+                    item.get("execution", {}).get("status") == "WARNING"
+                    for item in required_non_pass_results
+                )
+                else "FAIL"
+            ),
         }
     await _emit_model_intake_activity(
         activity,

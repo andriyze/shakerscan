@@ -1608,6 +1608,11 @@ Remaining product work:
   native library loading, and bounded file writes are review-required rather than mislabeled malicious.
   Image-build conformance now requires prohibited=`FAIL`, review-only=`WARNING`, and safe
   `weights_only=True`/safetensors=`PASS` fixtures.
+- **Implemented bounded warning resolution:** a strict required `WARNING` yields generated
+  `REVIEW_REQUIRED` and durable static `WARNING` evidence, never `PASS`. It can satisfy policy only when an
+  independently authenticated `model_security_reviewer` approves the exact deployment bundle, frozen
+  evidence manifest, policy bundle, environment, and expiry. High/critical findings, errors, unsupported or
+  missing tools, timeouts, crashes, incomplete coverage, and prohibited capabilities remain non-waivable.
 - **Implemented per-parser isolation:** every external adapter executes through the existing argv-only
   unprivileged launcher over a copied read-only subject, bounded scratch/output, CPU/file/fd/process limits,
   worker-cgroup memory, no-new-privileges, and an exec-persistent libseccomp filter denying external-capable

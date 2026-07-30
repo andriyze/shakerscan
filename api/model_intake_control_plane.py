@@ -325,6 +325,7 @@ def evaluate_policy(
     environment = str(deployment_bundle.get("target_environment") or "")
     evidence = evidence_manifest.get("evidence") if isinstance(evidence_manifest.get("evidence"), list) else []
     evidence_by_type = {str(item.get("evidence_type")): item for item in evidence if isinstance(item, dict)}
+    reviewable_evidence: list[str] = []
     required_evidence = PRODUCTION_REQUIRED_EVIDENCE if environment == "production" else {
         "static_analysis": "GENERATED_STATIC"
     }
@@ -334,11 +335,13 @@ def evaluate_policy(
             missing_controls.append(f"evidence:{evidence_type}")
         elif item.get("provenance_class") != provenance:
             blockers.append(f"untrusted_provenance:{evidence_type}")
-        elif item.get("status") != "PASS":
-            blockers.append(f"evidence_non_pass:{evidence_type}:{str(item.get('status')).lower()}")
-        elif item.get("expires_at") and _timestamp(item["expires_at"], "evidence expires_at") <= now:
-            blockers.append(f"evidence_expired:{evidence_type}")
         else:
+            if item.get("status") == "WARNING" and evidence_type == "static_analysis":
+                reviewable_evidence.append(evidence_type)
+            elif item.get("status") != "PASS":
+                blockers.append(f"evidence_non_pass:{evidence_type}:{str(item.get('status')).lower()}")
+            if item.get("expires_at") and _timestamp(item["expires_at"], "evidence expires_at") <= now:
+                blockers.append(f"evidence_expired:{evidence_type}")
             bindings = item.get("subject_bindings") if isinstance(item.get("subject_bindings"), dict) else {}
             mismatches = [
                 key for key in EVIDENCE_BINDING_KEYS[evidence_type]
@@ -371,6 +374,8 @@ def evaluate_policy(
         role = str(approval.get("approved_by_role") or "")
         if role in required_approvals:
             required_role_subjects[role] = str(approval.get("approved_by_subject") or "")
+    if reviewable_evidence and "model_security_reviewer" not in approved_roles:
+        blockers.extend(f"evidence_review_required:{item}" for item in reviewable_evidence)
     for role in sorted(required_approvals - approved_roles):
         missing_controls.append(f"approval:{role}")
     if len(set(required_role_subjects.values())) < len(required_role_subjects):
@@ -412,6 +417,9 @@ def evaluate_policy(
             "authorization_incident",
         ],
         "policy_provider": policy_provider,
+        "reviewed_warning_evidence": (
+            sorted(reviewable_evidence) if "model_security_reviewer" in approved_roles else []
+        ),
         "policy_bundle_sha256": _sha256(policy_bundle_sha256, "policy_bundle_sha256"),
         "input_sha256": digest_json(facts),
         "facts": facts,

@@ -165,6 +165,32 @@ def test_policy_rejects_valid_evidence_bound_to_a_different_runtime_or_index():
     assert "evidence_subject_mismatch:data_plane_evaluation:index_schema_digest" in decision["reasons"]
 
 
+def test_warning_only_static_evidence_requires_and_accepts_bound_security_review():
+    bundle = _bundle()
+    evidence = _evidence(bundle)
+    evidence["evidence"][0]["status"] = "WARNING"
+    evidence["manifest_sha256"] = digest_json({key: value for key, value in evidence.items() if key != "manifest_sha256"})
+    without_review = evaluate_policy(
+        deployment_bundle=bundle,
+        evidence_manifest=evidence,
+        approvals=[],
+        submitter_subject="operator:submitter",
+        policy_bundle_sha256="6" * 64,
+    )
+    approvals = _approvals(bundle, evidence)
+    with_review = evaluate_policy(
+        deployment_bundle=bundle,
+        evidence_manifest=evidence,
+        approvals=approvals,
+        submitter_subject="operator:submitter",
+        policy_bundle_sha256="6" * 64,
+    )
+
+    assert "evidence_review_required:static_analysis" in without_review["reasons"]
+    assert with_review["decision"] == "allow"
+    assert with_review["reviewed_warning_evidence"] == ["static_analysis"]
+
+
 def _approvals(bundle, evidence, policy_digest="6" * 64):
     return [
         build_approval_receipt(
