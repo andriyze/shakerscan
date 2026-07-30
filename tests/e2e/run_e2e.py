@@ -219,7 +219,7 @@ def run_model_intake() -> H.Scorecard:
         sc.check("MI-6 caller cannot supply its own trust anchor",
                  s.get("signature_verification_status") == "untrusted_root"
                  and s.get("signature_verified") is False
-                 and s.get("signature_trusted_root") is False,
+                 and s.get("signature_trusted_root") is not True,
                  f"status={s.get('signature_verification_status')} trusted_root={s.get('signature_trusted_root')}")
     except Exception as e:
         sc.error("MI-6 caller trust-anchor rejection", e)

@@ -6995,6 +6995,29 @@ def _failure_result_for_scan_error(result: dict[str, Any], error: Any, diag: Any
     }
 
 
+def _unexpected_scan_exception_result(target: str, exc: Exception) -> dict[str, Any]:
+    """Turn an unhandled scanner exception into a durable terminal failure.
+
+    Letting the exception escape leaves the already-claimed scan in ``running``;
+    a redelivered queue message then refuses the running row and acknowledges it.
+    Preserve bounded diagnostics so the ordinary failure-finalization path can
+    mark both PostgreSQL and Redis terminal instead.
+    """
+    error_type = type(exc).__name__
+    message = str(exc).replace("\x00", "")[:1000]
+    error = f"{error_type}: {message}" if message else error_type
+    return {
+        "target": target,
+        "error": error,
+        "result": {"score": None, "grade": None},
+        "findings": [],
+        "failure_diagnostics": {
+            "failure_type": "unhandled_scan_exception",
+            "exception_type": error_type,
+        },
+    }
+
+
 _QUEUE_HANDOFF_CONFIRMATION_KEY = "queue_handoff_confirmed"
 QUEUE_HANDOFF_CONFIRM_RECHECKS = 5
 QUEUE_HANDOFF_CONFIRM_RECHECK_SECONDS = 0.1
@@ -7314,6 +7337,9 @@ async def process_scan_job(job_data: dict):
                 'findings': []
             }
             print(f"[{job_id[:8]}] Validation error: {e}", flush=True)
+        except Exception as e:
+            result = _unexpected_scan_exception_result(str(target or ""), e)
+            print(f"[{job_id[:8]}] Unexpected scan failure: {result['error']}", flush=True)
 
         result['job_id'] = job_id
         result['scan_id'] = scan_id

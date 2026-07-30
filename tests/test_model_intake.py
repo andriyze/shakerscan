@@ -91,6 +91,14 @@ def test_sandbox_uses_selected_artifact_filename_instead_of_display_name():
     ) == "model.safetensors"
 
 
+def test_sandbox_artifact_filename_falls_back_to_reference_path():
+    assert _sandbox_artifact_filename(
+        "https://models.example.invalid/releases/model.safetensors?download=1",
+        {},
+        {},
+    ) == "model.safetensors"
+
+
 def test_model_intake_detects_pickle_and_missing_controls(tmp_path):
     artifact = tmp_path / "unsafe.pkl"
     artifact.write_bytes(b"\x80\x04cposix\nsystem\nq\x00.")

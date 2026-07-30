@@ -230,7 +230,7 @@ def _sandbox_artifact_filename(
         huggingface_fetch.get("filename")
         or metadata.get("huggingface_file")
         or metadata.get("hf_file")
-        or _artifact_name(artifact_ref, metadata)
+        or _artifact_name(artifact_ref)
     )
 
 

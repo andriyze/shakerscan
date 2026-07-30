@@ -1739,6 +1739,22 @@ class _FakeAsmPool:
         return False
 
 
+def test_unexpected_scan_exception_becomes_bounded_terminal_failure():
+    result = worker._unexpected_scan_exception_result(
+        "https://example.test/model.safetensors",
+        TypeError("adapter failed\x00" + "x" * 2000),
+    )
+
+    assert result["error"].startswith("TypeError: adapter failed")
+    assert "\x00" not in result["error"]
+    assert len(result["error"]) <= len("TypeError: ") + 1000
+    assert result["findings"] == []
+    assert result["failure_diagnostics"] == {
+        "failure_type": "unhandled_scan_exception",
+        "exception_type": "TypeError",
+    }
+
+
 def test_scan_worker_does_not_revive_failed_queue_handoff_during_claim(monkeypatch):
     class ClaimRaceConn:
         def __init__(self):
