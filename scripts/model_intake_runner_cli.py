@@ -131,11 +131,17 @@ def python_venv_package() -> str | None:
     return f"python{suffix}-venv" if suffix else "python3-venv"
 
 
-def _safe_listdir(path: Path) -> list[Path]:
+def _path_exists(path: Path) -> bool:
+    """Existence without asserting readability.
+
+    A root-only parent directory makes stat() raise PermissionError instead of
+    returning False, which crashed `status` for the non-root user it is meant
+    to serve. Falling back to a root-capable test keeps the answer honest.
+    """
     try:
-        return list(path.iterdir())
+        return path.is_file()
     except OSError:
-        return []
+        return _run(["sudo", "-n", "test", "-f", str(path)], capture_output=True).returncode == 0
 
 
 def _sha256_path(path: Path) -> str:
@@ -173,14 +179,9 @@ def host_facts(runtime: Path) -> dict:
         "jailer": (INSTALL_ROOT / "bin/jailer").is_file(),
         "kernel": (INSTALL_ROOT / "kernel/vmlinux").is_file(),
         "rootfs": (INSTALL_ROOT / "rootfs/rootfs.ext4").is_file(),
-        # Root-owned and 0600, so a non-root status run must ask the parent
-        # directory rather than stat the file and report a false negative.
-        "runner_env": RUNNER_ENV_FILE.is_file() or _run(
-            ["test", "-f", str(RUNNER_ENV_FILE)], capture_output=True
-        ).returncode == 0 or RUNNER_ENV_FILE.parent.is_dir() and any(
-            entry.name == RUNNER_ENV_FILE.name
-            for entry in _safe_listdir(RUNNER_ENV_FILE.parent)
-        ),
+        # Root-owned inside a root-only directory, so stat() raises rather
+        # than returning False for the ordinary user who runs status.
+        "runner_env": _path_exists(RUNNER_ENV_FILE),
     }
     unit = _run(["systemctl", "is-active", SERVICE], capture_output=True)
     tools = {name: shutil.which(name) is not None for name in
