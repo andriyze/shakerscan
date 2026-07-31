@@ -131,17 +131,24 @@ def python_venv_package() -> str | None:
     return f"python{suffix}-venv" if suffix else "python3-venv"
 
 
-def _path_exists(path: Path) -> bool:
-    """Existence without asserting readability.
+def _path_exists(path: Path) -> bool | None:
+    """Existence without asserting readability. None means "cannot tell".
 
-    A root-only parent directory makes stat() raise PermissionError instead of
-    returning False, which crashed `status` for the non-root user it is meant
-    to serve. Falling back to a root-capable test keeps the answer honest.
+    The runner env file is root-owned inside a root-only directory, so stat()
+    raises PermissionError for the ordinary user `status` exists to serve.
+    `sudo -n` answers only for an operator with passwordless sudo, which most
+    do not have — and reporting that unreadable file as absent made a complete
+    install look like no install at all, telling the operator to run it again.
+    Unknown is its own answer; callers corroborate it with a readable signal.
     """
     try:
         return path.is_file()
     except OSError:
-        return _run(["sudo", "-n", "test", "-f", str(path)], capture_output=True).returncode == 0
+        probe = _run(["sudo", "-n", "test", "-f", str(path)], capture_output=True)
+        if probe.returncode == 0:
+            return True
+        # Distinguish "sudo says no such file" from "sudo would not run at all".
+        return False if probe.returncode == 1 and not (probe.stderr or "").strip() else None
 
 
 def _sha256_path(path: Path) -> str:
@@ -171,6 +178,33 @@ def _staged_inputs(runtime: Path) -> dict:
     return result
 
 
+def _runtime_runner_url(runtime: Path) -> bool:
+    """Whether a completed install wired the API to the runner."""
+    env_path = runtime / ".env"
+    try:
+        for line in env_path.read_text("utf-8", errors="replace").splitlines():
+            if line.startswith("MODEL_INTAKE_RUNNER_URL="):
+                return bool(line.split("=", 1)[1].strip())
+    except OSError:
+        return False
+    return False
+
+
+def install_is_complete(facts: dict) -> bool:
+    """Installed unless a component is definitely missing.
+
+    An unreadable component is not a missing one. Treating unknown as missing
+    reported a working install as absent.
+    """
+    if any(present is False for present in facts["installed"].values()):
+        return False
+    if all(present is True for present in facts["installed"].values()):
+        return True
+    # Something is unreadable; accept it only when a readable signal agrees the
+    # install completed.
+    return facts["service_state"] == "active" or bool(facts.get("api_wired_to_runner"))
+
+
 def host_facts(runtime: Path) -> dict:
     kvm = Path("/dev/kvm").exists()
     virt = cpu_virtualization()
@@ -179,8 +213,8 @@ def host_facts(runtime: Path) -> dict:
         "jailer": (INSTALL_ROOT / "bin/jailer").is_file(),
         "kernel": (INSTALL_ROOT / "kernel/vmlinux").is_file(),
         "rootfs": (INSTALL_ROOT / "rootfs/rootfs.ext4").is_file(),
-        # Root-owned inside a root-only directory, so stat() raises rather
-        # than returning False for the ordinary user who runs status.
+        # Root-owned inside a root-only directory, so this may be None
+        # (unreadable) rather than a definite yes or no.
         "runner_env": _path_exists(RUNNER_ENV_FILE),
     }
     unit = _run(["systemctl", "is-active", SERVICE], capture_output=True)
@@ -194,6 +228,9 @@ def host_facts(runtime: Path) -> dict:
         "cpu_virtualization": virt,
         "cgroup_v2": Path("/sys/fs/cgroup/cgroup.controllers").is_file(),
         "installed": installed,
+        # Readable without root and written by a completed install, so it
+        # corroborates an unreadable runner env file.
+        "api_wired_to_runner": _runtime_runner_url(runtime),
         "service_state": (unit.stdout or "unknown").strip(),
         "host_tools": tools,
         "missing_host_tools": sorted(name for name, present in tools.items() if not present),
@@ -233,7 +270,7 @@ def installability(facts: dict) -> tuple[bool, str]:
 def cmd_status(args, runtime: Path) -> int:
     facts = host_facts(runtime)
     ok, reason = installability(facts)
-    complete = all(facts["installed"].values())
+    complete = install_is_complete(facts)
     facts["can_install"] = ok
     facts["reason"] = reason
     facts["installed_complete"] = complete
@@ -246,12 +283,24 @@ def cmd_status(args, runtime: Path) -> int:
     print(f"  /dev/kvm        : {'present' if facts['kvm'] else 'absent'}")
     print(f"  cpu virt ext    : {facts['cpu_virtualization']}")
     print(f"  components      : " + ", ".join(
-        f"{name}={'yes' if present else 'no'}" for name, present in facts["installed"].items()))
+        f"{name}={'yes' if present is True else 'no' if present is False else 'unreadable'}"
+        for name, present in facts["installed"].items()))
     print(f"  systemd service : {facts['service_state']}")
+    print(f"  api wired       : {'yes' if facts['api_wired_to_runner'] else 'no'}")
     print()
     if complete and facts["service_state"] == "active":
         print("Installed and running.")
         return 0
+    if complete:
+        # Installed but not running is a service fault, not a missing install.
+        print(f"Installed, but {SERVICE} is {facts['service_state']}.")
+        print(f"  sudo systemctl status {SERVICE}")
+        print(f"  sudo journalctl -u {SERVICE} -n 50")
+        return 0
+    if any(present is None for present in facts["installed"].values()):
+        print("Some components are root-only and could not be read as this user.")
+        print("  sudo ./scanner.sh model-intake-runner status")
+        print()
     print(reason)
     if ok:
         print()
