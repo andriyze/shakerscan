@@ -193,7 +193,7 @@ export function RunnerInstallCard({
   onRecheck: () => void
 }) {
   const [open, setOpen] = useState(false)
-  const [signer, setSigner] = useState('kms:<key-id>')
+  const [signer, setSigner] = useState('local-pem')
   const [copied, setCopied] = useState(false)
   const [stage, setStage] = useState<ModelIntakeRunnerStageState | null>(null)
   const [stageError, setStageError] = useState<string | null>(null)

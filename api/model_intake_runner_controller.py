@@ -80,11 +80,18 @@ def firecracker_readiness(
 ) -> dict[str, Any]:
     env = environment or os.environ
     signer_backend = env.get("MODEL_INTAKE_RUNNER_SIGNER_BACKEND", "").lower()
+    # A PEM in the environment is readable through /proc/PID/environ by anything
+    # sharing the namespace, and systemd EnvironmentFile cannot hold a multi-line
+    # value anyway, so a key file is both safer and the only workable shape.
+    local_pem_material = bool(
+        env.get("MODEL_INTAKE_RUNNER_SIGNING_KEY_PEM")
+        or env.get("MODEL_INTAKE_RUNNER_SIGNING_KEY_PEM_FILE")
+    )
     signer_ready = bool(
         signer_backend == "aws-kms" and env.get("MODEL_INTAKE_RUNNER_SIGNER_KEY_ID")
         or signer_backend == "local-pem"
         and env.get("MODEL_INTAKE_RUNNER_ALLOW_LOCAL_PEM") == "true"
-        and env.get("MODEL_INTAKE_RUNNER_SIGNING_KEY_PEM")
+        and local_pem_material
     )
     checks: dict[str, Any] = {
         "linux": platform.system() == "Linux",

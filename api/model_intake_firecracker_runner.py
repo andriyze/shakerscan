@@ -743,7 +743,20 @@ class FirecrackerRunner:
                 region=self.env.get("MODEL_INTAKE_RUNNER_AWS_REGION") or None,
             )
         elif backend == "local-pem" and request.get("environment") != "production" and self.env.get("MODEL_INTAKE_RUNNER_ALLOW_LOCAL_PEM") == "true":
-            signer = LocalPemSigner(self.env.get("MODEL_INTAKE_RUNNER_SIGNING_KEY_PEM", ""))
+            # Prefer a key file: systemd EnvironmentFile cannot carry a
+            # multi-line PEM, and an inline one is exposed through
+            # /proc/PID/environ to anything sharing the namespace.
+            key_file = self.env.get("MODEL_INTAKE_RUNNER_SIGNING_KEY_PEM_FILE", "").strip()
+            if key_file:
+                try:
+                    key_material = Path(key_file).read_text()
+                except OSError as exc:
+                    raise FirecrackerExecutionError(
+                        f"runner signing key file is unreadable: {exc}"
+                    ) from exc
+            else:
+                key_material = self.env.get("MODEL_INTAKE_RUNNER_SIGNING_KEY_PEM", "")
+            signer = LocalPemSigner(key_material)
         else:
             raise FirecrackerExecutionError("no permitted runner receipt signer is configured")
         return {"receipt": issue_runner_envelope(payload, signer), "payload": payload}

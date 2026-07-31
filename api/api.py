@@ -14093,6 +14093,25 @@ async def model_intake_runner_stage_status():
     with _MODEL_INTAKE_STAGE_LOCK:
         state = json.loads(json.dumps(_MODEL_INTAKE_STAGE_STATE, default=str))
     state.setdefault("status", "idle")
+    # Progress is in-memory, but the artifacts are not. After an API restart the
+    # UI would otherwise offer to re-stage a guest image that is already built
+    # and verified on disk, which is a multi-gigabyte rebuild for nothing.
+    if state["status"] == "idle":
+        stage_dir = _model_intake_stage_dir()
+        kernel = stage_dir / "vmlinux"
+        rootfs = stage_dir / "rootfs.ext4"
+        if kernel.is_file() and rootfs.is_file():
+            kernel_digest = await asyncio.to_thread(_sha256_file, kernel)
+            if kernel_digest == MODEL_INTAKE_GUEST_KERNEL_SHA256:
+                state.update({
+                    "status": "ready",
+                    "phase": "complete",
+                    "recovered_from_disk": True,
+                    "artifacts": {
+                        "kernel": {"path": str(kernel), "sha256": kernel_digest},
+                        "rootfs": {"path": str(rootfs), "bytes": rootfs.stat().st_size},
+                    },
+                })
     return state
 
 
@@ -14135,12 +14154,18 @@ async def model_intake_runner_install_plan():
             # cannot and should not do on the operator's behalf.
             "executed_by": "operator_on_host",
             "command": "sudo ./scanner.sh model-intake-runner install --signer <choice> --confirm",
+            "default_command": "sudo ./scanner.sh model-intake-runner install --confirm",
             "status_command": "./scanner.sh model-intake-runner status",
+            # local-pem is the default because it is the only option that works
+            # without external setup. It is listed first for that reason, and
+            # labelled non-production so the default never implies more trust
+            # than it carries.
+            "default_signer": "local-pem",
             "signer_choices": [
+                {"value": "local-pem", "label": "Local key (default)", "production": False,
+                 "detail": "Generated on the host. Proves the receipt path end to end; not a production trust anchor."},
                 {"value": "kms:<key-id>", "label": "AWS KMS", "production": True,
                  "detail": "Purpose-scoped key; the production trust anchor for signed receipts."},
-                {"value": "local-pem", "label": "Local PEM", "production": False,
-                 "detail": "Proves the receipt path end to end; not a production trust anchor."},
             ],
             "host_mutations": [
                 "install firecracker + jailer, a pinned guest kernel, and the guest rootfs into /opt/shakerscan/model-intake-runner",

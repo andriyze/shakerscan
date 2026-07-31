@@ -34,6 +34,8 @@ DEFAULT_KERNEL_URL = (
 DEFAULT_KERNEL_SHA256 = "27a8310b9a727517e9eb02044524b6ceb77de5728e3491b6974d5c846227ecc8"
 
 RUNNER_ENV_FILE = Path("/etc/shakerscan/model-intake-runner.env")
+SIGNING_KEY_FILE = Path("/etc/shakerscan/model-intake-runner-signing-key.pem")
+DEFAULT_SIGNER = "local-pem"
 INSTALL_ROOT = Path("/opt/shakerscan/model-intake-runner")
 SERVICE = "shakerscan-model-intake-runner"
 DEFAULT_BIND_PORT = 8092
@@ -43,6 +45,7 @@ HOST_MUTATIONS = [
     "create /srv/jailer and /var/lib/shakerscan/model-intake-runner",
     "create the cgroup-v2 parent /sys/fs/cgroup/shakerscan-model-intake and enable +cpu +memory +pids",
     f"write {RUNNER_ENV_FILE} (mode 0600) with the runner's internal token and component digests",
+    f"generate {SIGNING_KEY_FILE} (mode 0600) when signing receipts with a local key",
     f"install and enable the systemd unit {SERVICE}.service",
     "record MODEL_INTAKE_RUNNER_* wiring in the ShakerScan .env and restart the api container",
 ]
@@ -211,7 +214,7 @@ def cmd_status(args, runtime: Path) -> int:
     if ok:
         print()
         print("Not installed. To install it (this mutates the host, and asks before doing so):")
-        print("  sudo ./scanner.sh model-intake-runner install --signer local-pem")
+        print("  sudo ./scanner.sh model-intake-runner install --confirm")
     return 0
 
 
@@ -249,26 +252,42 @@ def cmd_install(args, runtime: Path) -> int:
     if os.geteuid() != 0:
         print("The microVM tier installs host binaries and a systemd unit, so this needs root:",
               file=sys.stderr)
-        print(f"  sudo ./scanner.sh model-intake-runner install --signer {args.signer or '<choice>'}",
+        print(f"  sudo ./scanner.sh model-intake-runner install --signer {args.signer or DEFAULT_SIGNER} --confirm",
               file=sys.stderr)
         return 2
 
     signer_env: dict[str, str] = {}
-    if args.signer == "local-pem":
-        # A local PEM proves the receipt path end to end but is explicitly not a
-        # production trust anchor, so it must be asked for by name.
+    signer = args.signer or DEFAULT_SIGNER
+    if signer == "local-pem":
+        # Proves the receipt path end to end, but the receipts it signs are not
+        # backed by a production trust anchor. Say so every time rather than
+        # letting the default quietly decide the trust story.
+        print("NOTE: signing runner receipts with a locally generated key.")
+        print("      This is not a production trust anchor. Use --signer kms:<key-id> for that.\n")
+        if not SIGNING_KEY_FILE.is_file():
+            SIGNING_KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
+            generated = _run(
+                ["openssl", "genpkey", "-algorithm", "ed25519", "-out", str(SIGNING_KEY_FILE)],
+                capture_output=True,
+            )
+            if generated.returncode != 0:
+                print(f"Could not generate a signing key: {generated.stderr}", file=sys.stderr)
+                return 2
+        # The key never enters the environment, where /proc/PID/environ would
+        # expose it; the runner reads the file instead.
+        SIGNING_KEY_FILE.chmod(0o600)
         signer_env["MODEL_INTAKE_RUNNER_SIGNER_BACKEND"] = "local-pem"
         signer_env["MODEL_INTAKE_RUNNER_ALLOW_LOCAL_PEM"] = "true"
-    elif args.signer and args.signer.startswith("kms:"):
-        key_id = args.signer.split(":", 1)[1].strip()
+        signer_env["MODEL_INTAKE_RUNNER_SIGNING_KEY_PEM_FILE"] = str(SIGNING_KEY_FILE)
+    elif signer.startswith("kms:"):
+        key_id = signer.split(":", 1)[1].strip()
         if not key_id:
             print("--signer kms:<key-id> requires a key id", file=sys.stderr)
             return 2
         signer_env["MODEL_INTAKE_RUNNER_SIGNER_BACKEND"] = "aws-kms"
         signer_env["MODEL_INTAKE_RUNNER_SIGNER_KEY_ID"] = key_id
     else:
-        print("Choose a receipt signer: --signer kms:<key-id> (production) or "
-              "--signer local-pem (non-production proof run).", file=sys.stderr)
+        print(f"Unknown signer {signer!r}. Use kms:<key-id> or local-pem.", file=sys.stderr)
         return 2
 
     print("This will change the host:")
@@ -362,7 +381,11 @@ def main(argv: list[str] | None = None) -> int:
 
     install = sub.add_parser("install", help="Install the microVM tier on this host")
     install.add_argument("--confirm", action="store_true", help="Apply the host changes")
-    install.add_argument("--signer", help="kms:<key-id> for production, or local-pem")
+    install.add_argument(
+        "--signer",
+        default=DEFAULT_SIGNER,
+        help=f"kms:<key-id> for a production trust anchor, or local-pem (default: {DEFAULT_SIGNER})",
+    )
     install.add_argument("--builder-id", help="Recorded in signed runner receipts")
     install.add_argument("--rootfs", help="Reuse a prebuilt guest rootfs.ext4")
     install.add_argument("--bind-host", help="Address the API container reaches the runner on")
