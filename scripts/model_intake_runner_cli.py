@@ -131,6 +131,13 @@ def python_venv_package() -> str | None:
     return f"python{suffix}-venv" if suffix else "python3-venv"
 
 
+def _safe_listdir(path: Path) -> list[Path]:
+    try:
+        return list(path.iterdir())
+    except OSError:
+        return []
+
+
 def _sha256_path(path: Path) -> str:
     import hashlib
 
@@ -166,7 +173,14 @@ def host_facts(runtime: Path) -> dict:
         "jailer": (INSTALL_ROOT / "bin/jailer").is_file(),
         "kernel": (INSTALL_ROOT / "kernel/vmlinux").is_file(),
         "rootfs": (INSTALL_ROOT / "rootfs/rootfs.ext4").is_file(),
-        "runner_env": RUNNER_ENV_FILE.is_file(),
+        # Root-owned and 0600, so a non-root status run must ask the parent
+        # directory rather than stat the file and report a false negative.
+        "runner_env": RUNNER_ENV_FILE.is_file() or _run(
+            ["test", "-f", str(RUNNER_ENV_FILE)], capture_output=True
+        ).returncode == 0 or RUNNER_ENV_FILE.parent.is_dir() and any(
+            entry.name == RUNNER_ENV_FILE.name
+            for entry in _safe_listdir(RUNNER_ENV_FILE.parent)
+        ),
     }
     unit = _run(["systemctl", "is-active", SERVICE], capture_output=True)
     tools = {name: shutil.which(name) is not None for name in
@@ -389,7 +403,13 @@ def cmd_install(args, runtime: Path) -> int:
         "MODEL_INTAKE_RUNNER_INTERNAL_TOKEN": token,
         "MODEL_INTAKE_RUNNER_HOST_RESULTS_ROOT": "/var/lib/shakerscan/model-intake-results",
     })
-    _run(["docker", "compose", "restart", "api"], cwd=str(runtime))
+    # `docker compose restart` reuses the existing container and never re-reads
+    # .env, so the API would keep an empty MODEL_INTAKE_RUNNER_URL and go on
+    # answering readiness from its own container instead of the runner.
+    recreated = _run(["docker", "compose", "up", "-d", "api"], cwd=str(runtime))
+    if recreated.returncode != 0:
+        print("Could not recreate the api container; run 'docker compose up -d api' by hand.",
+              file=sys.stderr)
 
     print("\nInstalled. Verify with:")
     print("  ./scanner.sh model-intake-runner status")
