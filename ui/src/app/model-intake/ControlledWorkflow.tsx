@@ -31,6 +31,7 @@ import {
   type ModelIntakePlatform,
   type ModelIntakeRunnerJob,
   type ModelIntakeRunnerReadiness,
+  type ModelIntakeScanSummary,
   type ModelIntakeWorkflowDetail,
   type ModelIntakeWorkflowSubmission,
 } from '@/lib/api'
@@ -105,6 +106,10 @@ export function ControlledModelIntakeWorkflow({
   sourceKind,
   environment,
   expectedArtifactSha256,
+  availableScans,
+  staticScanId,
+  onStaticScanIdChange,
+  onEditContext,
 }: {
   operatorToken: string
   onOperatorTokenChange: (value: string) => void
@@ -115,6 +120,12 @@ export function ControlledModelIntakeWorkflow({
   sourceKind: ModelIntakePlatform
   environment: ModelIntakeWorkflowSubmission['requested_environment']
   expectedArtifactSha256: string
+  // Completed preflight scans, so binding evidence is a choice rather than a
+  // UUID the operator has to copy back from the scan report.
+  availableScans: ModelIntakeScanSummary[]
+  staticScanId: string
+  onStaticScanIdChange: (value: string) => void
+  onEditContext: () => void
 }) {
   const toast = useToast()
   const [runnerReadiness, setRunnerReadiness] = useState<ModelIntakeRunnerReadiness | null>(null)
@@ -128,7 +139,6 @@ export function ControlledModelIntakeWorkflow({
   const [error, setError] = useState<string | null>(null)
 
   const [intendedUse, setIntendedUse] = useState('{"purpose":"knowledge-graph vector embeddings","data_classification":"internal"}')
-  const [staticScanId, setStaticScanId] = useState('')
   const [bundleJson, setBundleJson] = useState(JSON.stringify(blankBundle(environment), null, 2))
   const [runnerOperation, setRunnerOperation] = useState<'calibration' | 'runtime' | 'conversion'>('runtime')
   const [knownAnswerInputs, setKnownAnswerInputs] = useState('["corporate security review","knowledge graph entity retrieval"]')
@@ -505,6 +515,7 @@ export function ControlledModelIntakeWorkflow({
     }
   }
 
+  const attachableScans = availableScans.filter((scan) => scan.status === 'completed')
   // A loopback deployment resolves its own credential, so the manual field
   // only appears when the UI server declined to provide one.
   const operatorCredentialAutofilled = Boolean(operatorToken.trim()) && operatorCredential?.available === true
@@ -576,7 +587,7 @@ export function ControlledModelIntakeWorkflow({
             <div className="rounded border border-gray-800 bg-gray-900 p-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="text-xs font-medium text-gray-300">Intake context from step 1</span>
-                <a href="#model-intake-source" className={buttonClass}>Change</a>
+                <button type="button" className={buttonClass} onClick={onEditContext}>Change</button>
               </div>
               <dl className="mt-3 grid gap-2 text-[11px] sm:grid-cols-2">
                 <div className="min-w-0">
@@ -623,11 +634,33 @@ export function ControlledModelIntakeWorkflow({
         <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-white">4.2 Bind completed static evidence</summary>
         <div className="border-t border-gray-800 p-4">
           <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
-            <label className="grid gap-1 text-xs text-gray-300">Completed Model Intake scan ID
-              <input className={inputClass} value={staticScanId} onChange={(event) => setStaticScanId(event.target.value)} placeholder="UUID from a completed complete-snapshot scan" />
+            <label className="grid gap-1 text-xs text-gray-300">Completed Model Intake scan
+              <select className={inputClass} value={attachableScans.some((scan) => scan.id === staticScanId) ? staticScanId : ''} onChange={(event) => onStaticScanIdChange(event.target.value)}>
+                <option value="">{attachableScans.length ? 'Select a completed preflight scan' : 'No completed Model Intake scans yet'}</option>
+                {attachableScans.map((scan) => (
+                  <option key={scan.id} value={scan.id}>
+                    {`${new Date(scan.created_at).toLocaleString()} · ${scan.target_url}`}
+                  </option>
+                ))}
+              </select>
             </label>
             <button type="button" className={`${buttonClass} self-end`} disabled={busy === 'static' || !selectedId || !staticScanId.trim()} onClick={attachStaticRun}>Attach generated evidence</button>
           </div>
+          <details className="mt-2">
+            <summary className="cursor-pointer text-[11px] text-gray-500">Bind a scan from another session by ID</summary>
+            <input
+              className={`${inputClass} mt-2`}
+              value={staticScanId}
+              onChange={(event) => onStaticScanIdChange(event.target.value)}
+              placeholder="UUID from a completed complete-snapshot scan"
+            />
+          </details>
+          {attachableScans.length === 0 && (
+            <div className="mt-2 text-[11px] text-yellow-200">
+              Queue a preflight scan in step 2 first. Only a completed scan with a complete artifact
+              subject can be bound as generated evidence.
+            </div>
+          )}
           {detail && (
             <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
               <div className="rounded border border-gray-800 p-3 text-xs"><div className="text-gray-500">State</div><div className="mt-1 text-gray-200">{detail.submission.state}</div></div>

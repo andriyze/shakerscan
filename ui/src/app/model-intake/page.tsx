@@ -1,7 +1,7 @@
 'use client'
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useRouter, useSearchParams } from 'next/navigation'
+import { useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 import { Card, CardSkeleton, ErrorState, useToast } from '@/components/ui'
 import {
@@ -28,7 +28,9 @@ import {
   getModelIntakeAdmissions,
   getModelIntakeOperatorCredential,
   getModelIntakeScannerReadiness,
+  getModelIntakeRunnerReadiness,
   getPolicyProfiles,
+  listRecentModelIntakeScans,
   resolveModelIntakeReference,
   submitModelIntakeScan,
   MODEL_INTAKE_OPERATOR_TOKEN_KEY,
@@ -39,6 +41,8 @@ import {
   type ModelIntakePreset,
   type ModelIntakeResolveResponse,
   type ModelIntakeScanRequest,
+  type ModelIntakeRunnerReadiness,
+  type ModelIntakeScanSummary,
   type ModelIntakeScannerReadiness,
   type ModelIntakeTrustAnchor,
   type ModelIntakeAdmission,
@@ -51,6 +55,13 @@ import {
   type ModelIntakeTrustPreviewStatus,
 } from '@/lib/modelIntakeTrust'
 import { ControlledModelIntakeWorkflow } from './ControlledWorkflow'
+import {
+  IntakeContextBar,
+  IntakePhaseTabs,
+  PreflightScanTracker,
+  isTerminalScanStatus,
+  type IntakePhase,
+} from './IntakeShell'
 
 const inputClass =
   'min-w-0 w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none'
@@ -198,6 +209,8 @@ const ARTIFACT_LIMIT_PRESETS: Array<{ label: string; bytes: number; helper: stri
 
 // Strict signing verification is meaningless against a truncated prefix, so
 // strict profiles pull the acquisition limit up to at least a whole small model.
+const QUEUED_SCANS_KEY = 'shakerscan:model-intake-queued-scans'
+
 const STRICT_ARTIFACT_LIMIT_FLOOR = 1_000_000_000
 
 // Fetch the whole artifact plus headroom so the full-artifact SHA-256 is
@@ -350,11 +363,11 @@ function ModelIntakePageFallback() {
 }
 
 function ModelIntakeSettingsContent() {
-  const router = useRouter()
   const searchParams = useSearchParams()
   const toast = useToast()
   const trustSectionRef = useRef<HTMLDivElement | null>(null)
   const [trustRemediationApplied, setTrustRemediationApplied] = useState(false)
+  const [phase, setPhase] = useState<IntakePhase>('source')
   const [platform, setPlatform] = useState<ModelIntakePlatform>('auto')
   const [environment, setEnvironment] = useState<ModelIntakeEnvironment>('production')
   const [sourceRef, setSourceRef] = useState('')
@@ -405,6 +418,10 @@ function ModelIntakeSettingsContent() {
   const [admissions, setAdmissions] = useState<ModelIntakeAdmission[]>([])
   const [admissionsError, setAdmissionsError] = useState<string | null>(null)
   const [scannerReadiness, setScannerReadiness] = useState<ModelIntakeScannerReadiness | null>(null)
+  const [runnerReadiness, setRunnerReadiness] = useState<ModelIntakeRunnerReadiness | null>(null)
+  const [intakeScans, setIntakeScans] = useState<ModelIntakeScanSummary[]>([])
+  const [queuedScanIds, setQueuedScanIds] = useState<string[]>([])
+  const [staticScanId, setStaticScanId] = useState('')
   const [scannerReadinessError, setScannerReadinessError] = useState<string | null>(null)
   const [selectedTrustAnchorIds, setSelectedTrustAnchorIds] = useState<string[]>([])
   const [trustAnchorsLoading, setTrustAnchorsLoading] = useState(true)
@@ -487,6 +504,22 @@ function ModelIntakeSettingsContent() {
     }
   }, [])
 
+  const loadRunnerReadiness = useCallback(async () => {
+    try {
+      setRunnerReadiness(await getModelIntakeRunnerReadiness())
+    } catch {
+      setRunnerReadiness(null)
+    }
+  }, [])
+
+  const loadIntakeScans = useCallback(async () => {
+    try {
+      setIntakeScans(await listRecentModelIntakeScans(25))
+    } catch {
+      // A scan-list hiccup must not take down the intake form.
+    }
+  }, [])
+
   // A local install already owns its operator credential; asking the human to
   // find it in .env was pure friction. Fall back to the manual field only when
   // the UI server declines (remote bind, autofill disabled, or unconfigured).
@@ -506,13 +539,55 @@ function ModelIntakeSettingsContent() {
   }, [])
 
   useEffect(() => {
+    setQueuedScanIds(JSON.parse(sessionStorage.getItem(QUEUED_SCANS_KEY) || '[]'))
     loadOperatorCredential()
     loadScenario()
     loadPolicyProfiles()
     loadTrustAnchors()
     loadAdmissions()
     loadScannerReadiness()
-  }, [loadOperatorCredential, loadScenario, loadPolicyProfiles, loadTrustAnchors, loadAdmissions, loadScannerReadiness])
+    loadRunnerReadiness()
+    loadIntakeScans()
+  }, [
+    loadOperatorCredential,
+    loadScenario,
+    loadPolicyProfiles,
+    loadTrustAnchors,
+    loadAdmissions,
+    loadScannerReadiness,
+    loadRunnerReadiness,
+    loadIntakeScans,
+  ])
+
+  const queuedScans = useMemo(
+    () => queuedScanIds
+      .map((id) => intakeScans.find((scan) => scan.id === id))
+      .filter((scan): scan is ModelIntakeScanSummary => Boolean(scan)),
+    [queuedScanIds, intakeScans]
+  )
+  const awaitingScanCompletion = queuedScans.some((scan) => !isTerminalScanStatus(scan.status))
+
+  // Poll only while a scan this page queued is still running, so the handoff
+  // into admission lights up on its own instead of needing a manual reload.
+  useEffect(() => {
+    if (!awaitingScanCompletion) return
+    const timer = setInterval(loadIntakeScans, 10_000)
+    return () => clearInterval(timer)
+  }, [awaitingScanCompletion, loadIntakeScans])
+
+  function trackQueuedScan(scanId: string) {
+    setQueuedScanIds((prev) => {
+      const next = [scanId, ...prev.filter((id) => id !== scanId)].slice(0, 10)
+      sessionStorage.setItem(QUEUED_SCANS_KEY, JSON.stringify(next))
+      return next
+    })
+  }
+
+  function useScanInAdmission(scanId: string) {
+    setStaticScanId(scanId)
+    setPhase('admission')
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
 
   function updateOperatorToken(value: string) {
     setOperatorToken(value)
@@ -525,6 +600,9 @@ function ModelIntakeSettingsContent() {
 
   useEffect(() => {
     if (!trustRemediationMode || trustRemediationApplied) return
+    // The trust controls live in the preflight phase, so a remediation deep
+    // link has to open that phase before scrolling to them.
+    setPhase('preflight')
     setPolicyProfile('strict')
     setRequireHash(true)
     setRequireSignature(true)
@@ -976,10 +1054,13 @@ function ModelIntakeSettingsContent() {
     setError(null)
     try {
       const result = await submitModelIntakeScan(buildPayload())
-      toast.success('Model intake scan started', {
-        link: { href: `/scans/${result.scan_id}`, label: 'View scan' },
+      // Stay on the pipeline. Navigating away to the report was what forced the
+      // operator to copy the scan UUID back into the admission stage by hand.
+      trackQueuedScan(result.scan_id)
+      await loadIntakeScans()
+      toast.success('Preflight scan queued', {
+        link: { href: `/scans/${result.scan_id}`, label: 'Open report' },
       })
-      router.push(`/scans/${result.scan_id}`)
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to queue model intake scan'
       setError(msg)
@@ -1063,9 +1144,32 @@ function ModelIntakeSettingsContent() {
             <PackageCheck className="h-6 w-6 text-cyan-300" />
             <h1 className="text-2xl font-bold text-white">Model Intake</h1>
           </div>
-          <p className="mt-1 text-gray-400">Resolve model artifacts, collect supply-chain evidence, and queue deployment checks.</p>
+          <p className="mt-1 text-gray-400">
+            One pipeline: pick the model, produce technical evidence, then take that exact evidence
+            through controlled admission.
+          </p>
         </div>
       </div>
+
+      <IntakeContextBar
+        source={intakeSource}
+        environment={environment}
+        policyProfile={policyProfile}
+        operatorReady={Boolean(operatorToken.trim())}
+        adaptersReady={scannerReadiness?.required_ready ?? null}
+        adaptersTotal={scannerReadiness?.required_total ?? null}
+        runnerStatus={runnerReadiness?.status ?? null}
+      />
+
+      <IntakePhaseTabs
+        phase={phase}
+        onPhaseChange={setPhase}
+        completed={{
+          source: Boolean(intakeSource),
+          preflight: queuedScans.some((scan) => scan.status === 'completed'),
+          admission: false,
+        }}
+      />
 
       {error && <div role="alert" className="rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-sm text-red-400">{error}</div>}
 
@@ -1094,936 +1198,973 @@ function ModelIntakeSettingsContent() {
         </div>
       )}
 
-      <Card className="min-w-0 p-4" id="model-intake-source">
-        <div className="flex items-center gap-2 text-white">
-          <Wand2 className="h-4 w-4 text-cyan-300" />
-          <h2 className="text-sm font-semibold">1. Model &amp; Target</h2>
-        </div>
-        <p className="mt-1 text-xs text-gray-500">
-          Pick the model and where it is headed once. Every stage below — the preflight scan and the
-          controlled admission workflow — reads this reference and this environment.
-        </p>
-
-        <div className="mt-4 grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(9rem,0.35fr)_minmax(10rem,0.45fr)_auto]">
-          <label className={fieldClass}>
-            Model reference
-            <input
-              value={sourceRef}
-              onChange={(e) => {
-                setSourceRef(e.target.value)
-                setResolverResult(null)
-                setFilename('')
-              }}
-              className={inputClass}
-              placeholder={selectedPlatform.placeholder}
-            />
-          </label>
-          <label className={fieldClass}>
-            Revision
-            <input value={revision} onChange={(e) => setRevision(e.target.value)} className={inputClass} placeholder="main or commit" />
-          </label>
-          <label className={fieldClass}>
-            Artifact file
-            <input value={filename} onChange={(e) => setFilename(e.target.value)} className={inputClass} placeholder="optional" />
-          </label>
-          <button
-            type="button"
-            onClick={() => resolveReference()}
-            disabled={resolving || !sourceRef.trim()}
-            className="inline-flex w-full items-center justify-center gap-2 self-end whitespace-nowrap rounded-lg bg-cyan-700 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-600 disabled:opacity-50"
-          >
-            {resolving ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Wand2 className="h-4 w-4" />}
-            Resolve
-          </button>
-        </div>
-
-        <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-          {[AUTO_PLATFORM_OPTION, ...PLATFORM_OPTIONS].map((option) => {
-            const Icon = option.icon
-            const active = option.value === platform
-            return (
-              <button
-                key={option.value}
-                type="button"
-                onClick={() => {
-                  setPlatform(option.value)
-                  setResolverResult(null)
-                }}
-                className={`min-w-0 rounded-lg border p-3 text-left transition ${
-                  active ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-950 hover:border-gray-700'
-                }`}
-              >
-                <div className="flex min-w-0 items-center gap-2 text-sm font-medium text-white">
-                  <Icon className="h-4 w-4 shrink-0 text-cyan-300" />
-                  <span className="min-w-0 break-words">{option.label}</span>
-                </div>
-                <div className="mt-1 break-words text-xs text-gray-500">{option.helper}</div>
-              </button>
-            )
-          })}
-        </div>
-
-        <div className="mt-5 rounded-lg border border-gray-800 bg-gray-950 p-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="text-sm font-medium text-gray-200">Deployment target</div>
-            <span className="text-xs text-gray-500">
-              Sets the preflight policy profile and the controlled submission environment
-            </span>
-          </div>
-          <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-            {ENVIRONMENT_OPTIONS.map((option) => (
-              <button
-                key={option.value}
-                type="button"
-                onClick={() => applyEnvironment(option.value)}
-                className={`min-w-0 rounded-lg border p-3 text-left ${
-                  environment === option.value ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-900 hover:border-gray-700'
-                }`}
-              >
-                <div className="break-words text-sm font-medium text-white">{option.label}</div>
-                <div className="mt-1 break-words text-xs text-gray-500">{option.helper}</div>
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {resolverResult && (
-          <div className="mt-4 grid gap-3 xl:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)]">
-            <div className="min-w-0 rounded-lg border border-gray-800 bg-gray-950 p-3">
-              <div className="text-sm font-medium text-white">Resolved artifact</div>
-              <div className="mt-2 break-all rounded border border-gray-800 bg-gray-900 px-3 py-2 font-mono text-xs text-gray-300">
-                {resolverResult.normalized_ref}
-              </div>
-              <div className="mt-3 grid min-w-0 gap-2 text-xs text-gray-400 sm:grid-cols-2">
-                <div className="min-w-0 break-words">Provider: <span className="text-gray-200">{resolverResult.platform.replace(/_/g, ' ')}</span></div>
-                <div className="min-w-0 break-words">Repository: <span className="text-gray-200">{resolverResult.repository || 'not detected'}</span></div>
-                <div className="min-w-0 break-words">Revision: <span className="text-gray-200">{resolverResult.revision || 'not pinned'}</span></div>
-                <div className="min-w-0 break-words">File: <span className="break-all text-gray-200">{resolverResult.selected_file?.path || 'manual'}</span></div>
-                <div className="min-w-0 break-words">License: <span className="text-gray-200">{metadataString(resolverResult.metadata_json, 'license') || 'not found'}</span></div>
-                <div className="min-w-0 break-words">Registry SHA: <span className="text-gray-200">{resolverResult.selected_file?.sha256 ? 'available' : 'not found'}</span></div>
-                <div className="min-w-0 break-words">Evidence: <span className="text-gray-200">{Object.keys(resolverResult.metadata_json || {}).length} keys</span></div>
-                <div className="min-w-0 break-words">Artifact acquisition: <span className="text-gray-200">{resolverResult.capabilities?.artifact_acquisition || 'unknown'}</span></div>
-                <div className="min-w-0 break-words">Repository snapshot: <span className="text-gray-200">{resolverResult.capabilities?.repository_snapshot || 'unknown'}</span></div>
-              </div>
-              {resolverResult.warnings.length > 0 && (
-                <div className="mt-3 space-y-2">
-                  {resolverResult.warnings.map((warning) => (
-                    <div key={warning} className="flex gap-2 rounded border border-yellow-600/30 bg-yellow-950/20 p-2 text-xs text-yellow-200">
-                      <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                      <span>{warning}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            <div className="min-w-0 rounded-lg border border-gray-800 bg-gray-950 p-3">
-              <div className="text-sm font-medium text-white">Candidate files</div>
-              {resolverResult.candidate_files.length === 0 ? (
-                <div className="mt-3 break-words rounded border border-gray-800 bg-gray-900 p-3 text-sm text-gray-500">
-                  No artifact list was available. Enter a direct artifact URL or file path before queueing.
-                </div>
-              ) : (
-                <div className="mt-3 grid gap-2">
-                  {resolverResult.candidate_files.slice(0, 6).map((file) => {
-                    const selected = file.path === resolverResult.selected_file?.path
-                    return (
-                      <button
-                        key={file.path}
-                        type="button"
-                        onClick={() => resolveReference(file.path)}
-                        className={`min-w-0 rounded border px-3 py-2 text-left text-xs ${
-                          selected ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-900 hover:border-gray-700'
-                        }`}
-                      >
-                        <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
-                          <span className="min-w-0 break-all font-mono text-gray-200">{file.path}</span>
-                          <span className={file.risk === 'lower' ? 'text-green-300' : 'text-orange-300'}>
-                            {file.risk === 'lower' ? 'lower risk' : 'review'}
-                          </span>
-                        </div>
-                        <div className="mt-1 break-words text-gray-500">
-                          {file.extension || 'unknown'} - {formatBytes(file.size_bytes)}{file.sha256 ? ' - registry SHA-256 available' : ''}
-                        </div>
-                      </button>
-                    )
-                  })}
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-      </Card>
-
-      <Card className="min-w-0 p-4">
-        <div className="flex flex-wrap items-center justify-between gap-2">
+      {phase === 'source' && (
+        <Card className="min-w-0 p-4" id="model-intake-source">
           <div className="flex items-center gap-2 text-white">
-            <ShieldCheck className="h-4 w-4 text-cyan-300" />
-            <h2 className="text-sm font-semibold">2. Policy Profile</h2>
+            <Wand2 className="h-4 w-4 text-cyan-300" />
+            <h2 className="text-sm font-semibold">1. Model &amp; Target</h2>
           </div>
-          <Link href="/settings/policy-profiles" className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
-            Manage
-          </Link>
-        </div>
-        <div className="mt-4 rounded-lg border border-yellow-700/50 bg-yellow-950/20 p-3">
-          <div className="text-sm font-medium text-yellow-100">Technical preflight only</div>
-          <div className="mt-1 text-xs text-yellow-200/70">
-            This page produces non-deployable technical evidence. Corporate authorization is available only through the controlled submission, frozen-evidence, approval, policy, signer, and promotion workflow.
-          </div>
-        </div>
-        <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-          {POLICY_PROFILES.map((profile) => (
+          <p className="mt-1 text-xs text-gray-500">
+            Pick the model and where it is headed once. Every stage below — the preflight scan and the
+            controlled admission workflow — reads this reference and this environment.
+          </p>
+
+          <div className="mt-4 grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(9rem,0.35fr)_minmax(10rem,0.45fr)_auto]">
+            <label className={fieldClass}>
+              Model reference
+              <input
+                value={sourceRef}
+                onChange={(e) => {
+                  setSourceRef(e.target.value)
+                  setResolverResult(null)
+                  setFilename('')
+                }}
+                className={inputClass}
+                placeholder={selectedPlatform.placeholder}
+              />
+            </label>
+            <label className={fieldClass}>
+              Revision
+              <input value={revision} onChange={(e) => setRevision(e.target.value)} className={inputClass} placeholder="main or commit" />
+            </label>
+            <label className={fieldClass}>
+              Artifact file
+              <input value={filename} onChange={(e) => setFilename(e.target.value)} className={inputClass} placeholder="optional" />
+            </label>
             <button
-              key={profile.value}
               type="button"
-              onClick={() => applyPolicyProfile(profile.value)}
-              className={`min-w-0 rounded-lg border p-3 text-left ${
-                policyProfile === profile.value ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-950 hover:border-gray-700'
-              }`}
+              onClick={() => resolveReference()}
+              disabled={resolving || !sourceRef.trim()}
+              className="inline-flex w-full items-center justify-center gap-2 self-end whitespace-nowrap rounded-lg bg-cyan-700 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-600 disabled:opacity-50"
             >
-              <div className="break-words text-sm font-medium text-white">{profile.label}</div>
-              <div className="mt-1 break-words text-xs text-gray-500">{profile.helper}</div>
+              {resolving ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Wand2 className="h-4 w-4" />}
+              Resolve
             </button>
-          ))}
-          {activeSavedPolicyProfiles.map((profile) => (
-            <button
-              key={profile.id}
-              type="button"
-              onClick={() => applyPolicyProfile(profile.environment)}
-              className={`min-w-0 rounded-lg border p-3 text-left ${
-                policyProfile === profile.environment ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-950 hover:border-gray-700'
-              }`}
-            >
-              <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
-                <div className="min-w-0 break-words text-sm font-medium text-white">{profile.name}</div>
-                <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-400">{profile.environment}</span>
-              </div>
-              <div className="mt-1 break-words text-xs text-gray-500">
-                Block {profile.minimum_block_severity}+{profile.strict_model_intake ? ' + verified signing' : ''}
-              </div>
-              {profile.strict_model_intake && (profile.required_trust_anchor_ids || []).length > 0 && (
-                <div className="mt-2 text-xs text-cyan-200">
-                  {(profile.required_trust_anchor_ids || []).length} policy-bound trust anchor{(profile.required_trust_anchor_ids || []).length === 1 ? '' : 's'}
-                </div>
-              )}
-            </button>
-          ))}
-        </div>
-        {policyProfilesLoading && <div className="mt-3 text-xs text-gray-500">Loading saved profiles...</div>}
-        {!policyProfilesLoading && policyProfilesError && (
-          <div role="alert" className="mt-3 break-words text-xs text-red-400">
-            {policyProfilesError} — showing built-in profiles only.
-          </div>
-        )}
-      </Card>
-
-      <form onSubmit={handleSubmit} className="min-w-0 space-y-5 rounded-lg border border-gray-800 bg-gray-900 p-4">
-        <div className="flex items-center gap-2 text-white">
-          <Play className="h-4 w-4 text-cyan-300" />
-          <h2 className="text-sm font-semibold">3. Preflight Evidence Scan</h2>
-        </div>
-        <p className="-mt-2 text-xs text-gray-500">
-          Technical evidence for the model selected in step 1. This never grants deployment
-          authority — step 4 does that.
-        </p>
-
-        <div className="grid gap-3 md:grid-cols-[minmax(0,1.3fr)_minmax(0,0.7fr)]">
-          <label className={fieldClass}>
-            Artifact URL
-            <input
-              value={artifactUrl}
-              onChange={(e) => setArtifactUrl(e.target.value)}
-              onBlur={() => validateField('artifactUrl')}
-              aria-invalid={fieldErrors.artifactUrl ? true : undefined}
-              className={fieldErrors.artifactUrl ? invalidFieldClass(inputClass) : inputClass}
-              placeholder="https://.../model.safetensors"
-              required
-            />
-            {fieldErrors.artifactUrl && <span role="alert" className="text-sm text-red-400">{fieldErrors.artifactUrl}</span>}
-            <span className="text-xs text-gray-500">Resolved HTTP(S), hf://, and public cloud object references are supported. Use signed HTTPS URLs for private artifacts.</span>
-          </label>
-          <label className={fieldClass}>
-            Name
-            <input value={name} onChange={(e) => setName(e.target.value)} className={inputClass} placeholder="Release model v1" />
-          </label>
-        </div>
-
-        <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-          <label className={fieldClass}>
-            Metadata URL
-            <input
-              value={metadataUrl}
-              onChange={(e) => setMetadataUrl(e.target.value)}
-              onBlur={() => validateField('metadataUrl')}
-              aria-invalid={fieldErrors.metadataUrl ? true : undefined}
-              className={fieldErrors.metadataUrl ? invalidFieldClass(inputClass) : inputClass}
-              placeholder="https://.../manifest.json"
-            />
-            {fieldErrors.metadataUrl && <span role="alert" className="text-sm text-red-400">{fieldErrors.metadataUrl}</span>}
-          </label>
-          <label className={fieldClass}>
-            Expected SHA-256
-            <input
-              value={expectedSha256}
-              onChange={(e) => setExpectedSha256(e.target.value)}
-              onBlur={() => validateField('expectedSha256')}
-              aria-invalid={fieldErrors.expectedSha256 ? true : undefined}
-              className={fieldErrors.expectedSha256 ? invalidFieldClass(inputClass) : inputClass}
-              placeholder="optional digest pin"
-            />
-            {fieldErrors.expectedSha256 && <span role="alert" className="text-sm text-red-400">{fieldErrors.expectedSha256}</span>}
-          </label>
-        </div>
-
-        <div className="min-w-0 space-y-3 rounded-lg border border-gray-800 bg-gray-950 p-3">
-          <div className="flex flex-wrap items-start justify-between gap-2">
-            <div>
-              <div className="text-sm font-medium text-gray-200">Artifact acquisition limit</div>
-              <div className="mt-1 text-xs text-gray-500">
-                How many artifact bytes intake may fetch. A full-artifact checksum and signature can
-                only be verified when this covers the whole file — anything above the in-memory
-                inspection prefix streams into content-addressed quarantine instead.
-              </div>
-            </div>
-            <span className="rounded bg-gray-800 px-2 py-1 font-mono text-xs text-gray-200">
-              {formatBytes(Number(maxDownloadBytes) || 0)}
-            </span>
-          </div>
-          <div className="grid gap-2 sm:grid-cols-3 xl:grid-cols-5">
-            {ARTIFACT_LIMIT_PRESETS.map((preset) => (
-              <button
-                key={preset.bytes}
-                type="button"
-                onClick={() => setMaxDownloadBytes(String(preset.bytes))}
-                className={`min-w-0 rounded-lg border p-2 text-left ${
-                  Number(maxDownloadBytes) === preset.bytes ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-900 hover:border-gray-700'
-                }`}
-              >
-                <div className="text-sm font-medium text-white">{preset.label}</div>
-                <div className="mt-0.5 break-words text-[11px] text-gray-500">{preset.helper}</div>
-              </button>
-            ))}
-          </div>
-          {resolvedArtifactSize > 0 && (
-            <div className={`text-xs ${artifactLimitCoversArtifact ? 'text-gray-500' : 'text-yellow-200'}`}>
-              {artifactLimitCoversArtifact
-                ? `Resolved artifact is ${formatBytes(resolvedArtifactSize)}; the full file will be acquired and hashed.`
-                : `Resolved artifact is ${formatBytes(resolvedArtifactSize)}, larger than this limit. Intake will report a truncated, unverified checksum.`}
-            </div>
-          )}
-          <label className={fieldClass}>
-            Exact limit (bytes)
-            <input value={maxDownloadBytes} onChange={(e) => setMaxDownloadBytes(e.target.value)} className={inputClass} inputMode="numeric" />
-          </label>
-        </div>
-
-        <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)]">
-          <label className={fieldClass}>
-            Model Card URL
-            <input
-              value={modelCardUrl}
-              onChange={(e) => setModelCardUrl(e.target.value)}
-              onBlur={() => validateField('modelCardUrl')}
-              aria-invalid={fieldErrors.modelCardUrl ? true : undefined}
-              className={fieldErrors.modelCardUrl ? invalidFieldClass(inputClass) : inputClass}
-              placeholder="https://.../model-card.md"
-            />
-            {fieldErrors.modelCardUrl && <span role="alert" className="text-sm text-red-400">{fieldErrors.modelCardUrl}</span>}
-          </label>
-        </div>
-
-        <div
-          id="model-intake-trust-remediation"
-          ref={trustSectionRef}
-          className={`min-w-0 scroll-mt-24 space-y-3 rounded-lg border bg-gray-950 p-3 ${
-            trustRemediationMode ? 'border-cyan-500/60 shadow-[0_0_0_1px_rgba(34,211,238,0.18)]' : 'border-gray-800'
-          }`}
-        >
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div className="flex items-center gap-2 text-sm font-medium text-gray-200">
-              <ShieldCheck className="h-4 w-4 text-cyan-300" />
-              Trust mode
-            </div>
-            <span className={`rounded px-2 py-1 text-xs ${
-              hasIntakeInput ? TRUST_PREVIEW_BADGE[trustPreview.headlineStatus] : 'bg-gray-800 text-gray-400'
-            }`}>
-              {hasIntakeInput ? trustPreview.headline : 'Add an artifact to preview requirements'}
-            </span>
-          </div>
-          {hasIntakeInput ? (
-          <>
-          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
-            {TRUST_MODE_OPTIONS.map((mode) => (
-              <button
-                key={mode.value}
-                type="button"
-                onClick={() => applyTrustMode(mode.value)}
-                className={`min-w-0 rounded-lg border p-3 text-left ${
-                  trustMode === mode.value ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-900 hover:border-gray-700'
-                }`}
-              >
-                <div className="break-words text-sm font-medium text-white">{mode.label}</div>
-                <div className="mt-1 break-words text-xs text-gray-500">{mode.helper}</div>
-              </button>
-            ))}
           </div>
 
-          {(trustMode === 'signature_url_key_url' || trustMode === 'trusted_key_fingerprint') && (
-            <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-              <label className={fieldClass}>
-                Signature URL
-                <input
-                  value={signatureUrl}
-                  onChange={(e) => setSignatureUrl(e.target.value)}
-                  onBlur={() => validateField('signatureUrl')}
-                  aria-invalid={fieldErrors.signatureUrl ? true : undefined}
-                  className={fieldErrors.signatureUrl ? invalidFieldClass(inputClass) : inputClass}
-                  placeholder="https://.../model.sig"
-                />
-                {fieldErrors.signatureUrl && <span role="alert" className="text-sm text-red-400">{fieldErrors.signatureUrl}</span>}
-              </label>
-              <label className={fieldClass}>
-                Public key URL
-                <input
-                  value={signaturePublicKeyUrl}
-                  onChange={(e) => setSignaturePublicKeyUrl(e.target.value)}
-                  onBlur={() => validateField('signaturePublicKeyUrl')}
-                  aria-invalid={fieldErrors.signaturePublicKeyUrl ? true : undefined}
-                  className={fieldErrors.signaturePublicKeyUrl ? invalidFieldClass(inputClass) : inputClass}
-                  placeholder="https://.../signing-key.pem"
-                />
-                {fieldErrors.signaturePublicKeyUrl && <span role="alert" className="text-sm text-red-400">{fieldErrors.signaturePublicKeyUrl}</span>}
-              </label>
-            </div>
-          )}
-
-          {(trustMode === 'inline_signature_key' || trustMode === 'trusted_key_fingerprint') && (
-            <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-              <label className={fieldClass}>
-                Public key PEM
-                <textarea
-                  value={signaturePublicKey}
-                  onChange={(e) => setSignaturePublicKey(e.target.value)}
-                  className={textareaClass}
-                  rows={5}
-                  placeholder="-----BEGIN PUBLIC KEY-----"
-                />
-              </label>
-              <label className={fieldClass}>
-                Signature value
-                <textarea
-                  value={signatureValue}
-                  onChange={(e) => setSignatureValue(e.target.value)}
-                  className={textareaClass}
-                  rows={5}
-                  placeholder="base64 detached signature"
-                />
-              </label>
-            </div>
-          )}
-
-          {trustMode === 'trusted_key_fingerprint' && (
-            <div className="space-y-3">
-              <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-                <label className={fieldClass}>
-                  Trusted key SHA-256
-                  <input
-                    value={signatureTrustedKeySha256}
-                    onChange={(e) => setSignatureTrustedKeySha256(e.target.value)}
-                    onBlur={() => validateField('signatureTrustedKeySha256')}
-                    aria-invalid={fieldErrors.signatureTrustedKeySha256 ? true : undefined}
-                    className={fieldErrors.signatureTrustedKeySha256 ? invalidFieldClass(inputClass) : inputClass}
-                    placeholder="one or more fingerprints"
-                  />
-                  {fieldErrors.signatureTrustedKeySha256 && <span role="alert" className="text-sm text-red-400">{fieldErrors.signatureTrustedKeySha256}</span>}
-                </label>
-                <label className={fieldClass}>
-                  Trusted key PEM
-                  <textarea
-                    value={signatureTrustedKeys}
-                    onChange={(e) => setSignatureTrustedKeys(e.target.value)}
-                    className={textareaClass}
-                    rows={4}
-                    placeholder="Optional operator trust anchor PEM"
-                  />
-                </label>
-              </div>
-
-              <div className="rounded border border-gray-800 bg-gray-900 p-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <div className="text-sm font-medium text-gray-200">Saved trust anchors</div>
-                    <div className="mt-1 text-xs text-gray-500">Reusable operator roots. Selected anchors are included in the queued scan as trusted PEM/fingerprint material.</div>
+          <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+            {[AUTO_PLATFORM_OPTION, ...PLATFORM_OPTIONS].map((option) => {
+              const Icon = option.icon
+              const active = option.value === platform
+              return (
+                <button
+                  key={option.value}
+                  type="button"
+                  onClick={() => {
+                    setPlatform(option.value)
+                    setResolverResult(null)
+                  }}
+                  className={`min-w-0 rounded-lg border p-3 text-left transition ${
+                    active ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-950 hover:border-gray-700'
+                  }`}
+                >
+                  <div className="flex min-w-0 items-center gap-2 text-sm font-medium text-white">
+                    <Icon className="h-4 w-4 shrink-0 text-cyan-300" />
+                    <span className="min-w-0 break-words">{option.label}</span>
                   </div>
-                  <button type="button" onClick={loadTrustAnchors} className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
-                    Refresh
-                  </button>
+                  <div className="mt-1 break-words text-xs text-gray-500">{option.helper}</div>
+                </button>
+              )
+            })}
+          </div>
+
+          <div className="mt-5 rounded-lg border border-gray-800 bg-gray-950 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="text-sm font-medium text-gray-200">Deployment target</div>
+              <span className="text-xs text-gray-500">
+                Sets the preflight policy profile and the controlled submission environment
+              </span>
+            </div>
+            <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+              {ENVIRONMENT_OPTIONS.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  onClick={() => applyEnvironment(option.value)}
+                  className={`min-w-0 rounded-lg border p-3 text-left ${
+                    environment === option.value ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-900 hover:border-gray-700'
+                  }`}
+                >
+                  <div className="break-words text-sm font-medium text-white">{option.label}</div>
+                  <div className="mt-1 break-words text-xs text-gray-500">{option.helper}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {resolverResult && (
+            <div className="mt-4 grid gap-3 xl:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)]">
+              <div className="min-w-0 rounded-lg border border-gray-800 bg-gray-950 p-3">
+                <div className="text-sm font-medium text-white">Resolved artifact</div>
+                <div className="mt-2 break-all rounded border border-gray-800 bg-gray-900 px-3 py-2 font-mono text-xs text-gray-300">
+                  {resolverResult.normalized_ref}
                 </div>
-                <div className="mt-3 rounded border border-gray-800 bg-gray-950 p-2 text-xs">
-                  {operatorToken ? (
-                    <span className="text-gray-500">
-                      Trust-anchor changes are authorized with the operator credential resolved in
-                      step 4. No separate token is needed here.
-                    </span>
-                  ) : (
-                    <span className="text-yellow-200">
-                      No operator credential is active. Set one in step 4 before creating or
-                      deactivating a trust anchor.
-                    </span>
-                  )}
+                <div className="mt-3 grid min-w-0 gap-2 text-xs text-gray-400 sm:grid-cols-2">
+                  <div className="min-w-0 break-words">Provider: <span className="text-gray-200">{resolverResult.platform.replace(/_/g, ' ')}</span></div>
+                  <div className="min-w-0 break-words">Repository: <span className="text-gray-200">{resolverResult.repository || 'not detected'}</span></div>
+                  <div className="min-w-0 break-words">Revision: <span className="text-gray-200">{resolverResult.revision || 'not pinned'}</span></div>
+                  <div className="min-w-0 break-words">File: <span className="break-all text-gray-200">{resolverResult.selected_file?.path || 'manual'}</span></div>
+                  <div className="min-w-0 break-words">License: <span className="text-gray-200">{metadataString(resolverResult.metadata_json, 'license') || 'not found'}</span></div>
+                  <div className="min-w-0 break-words">Registry SHA: <span className="text-gray-200">{resolverResult.selected_file?.sha256 ? 'available' : 'not found'}</span></div>
+                  <div className="min-w-0 break-words">Evidence: <span className="text-gray-200">{Object.keys(resolverResult.metadata_json || {}).length} keys</span></div>
+                  <div className="min-w-0 break-words">Artifact acquisition: <span className="text-gray-200">{resolverResult.capabilities?.artifact_acquisition || 'unknown'}</span></div>
+                  <div className="min-w-0 break-words">Repository snapshot: <span className="text-gray-200">{resolverResult.capabilities?.repository_snapshot || 'unknown'}</span></div>
                 </div>
-                {trustAnchorsLoading && <div className="mt-3 text-xs text-gray-500">Loading trust anchors...</div>}
-                {trustAnchorsError && <div role="alert" className="mt-3 text-xs text-red-400">{trustAnchorsError}</div>}
-                {!trustAnchorsLoading && savedTrustAnchors.length === 0 && (
-                  <div className="mt-3 rounded border border-gray-800 bg-gray-950 p-3 text-sm text-gray-500">
-                    No saved trust anchors yet. Save a fingerprint or PEM below, then select it for strict scans.
+                {resolverResult.warnings.length > 0 && (
+                  <div className="mt-3 space-y-2">
+                    {resolverResult.warnings.map((warning) => (
+                      <div key={warning} className="flex gap-2 rounded border border-yellow-600/30 bg-yellow-950/20 p-2 text-xs text-yellow-200">
+                        <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                        <span>{warning}</span>
+                      </div>
+                    ))}
                   </div>
                 )}
-                {savedTrustAnchors.length > 0 && (
-                  <div className="mt-3 grid gap-2 md:grid-cols-2">
-                    {savedTrustAnchors.map((anchor) => {
-                      const selected = selectedTrustAnchorIds.includes(anchor.id)
+              </div>
+
+              <div className="min-w-0 rounded-lg border border-gray-800 bg-gray-950 p-3">
+                <div className="text-sm font-medium text-white">Candidate files</div>
+                {resolverResult.candidate_files.length === 0 ? (
+                  <div className="mt-3 break-words rounded border border-gray-800 bg-gray-900 p-3 text-sm text-gray-500">
+                    No artifact list was available. Enter a direct artifact URL or file path before queueing.
+                  </div>
+                ) : (
+                  <div className="mt-3 grid gap-2">
+                    {resolverResult.candidate_files.slice(0, 6).map((file) => {
+                      const selected = file.path === resolverResult.selected_file?.path
                       return (
-                        <div key={anchor.id} className={`rounded border p-3 ${selected ? 'border-cyan-500 bg-cyan-950/30' : 'border-gray-800 bg-gray-950'}`}>
-                          <label className="flex min-w-0 items-start gap-2 text-sm text-gray-300">
-                            <input
-                              type="checkbox"
-                              checked={selected}
-                              onChange={(event) => {
-                                setSelectedTrustAnchorIds((prev) => event.target.checked
-                                  ? Array.from(new Set([...prev, anchor.id]))
-                                  : prev.filter((id) => id !== anchor.id)
-                                )
-                              }}
-                              className="mt-0.5 h-4 w-4 rounded border-gray-700 bg-gray-800"
-                            />
-                            <span className="min-w-0">
-                              <span className="block break-words font-medium text-gray-100">{anchor.name}</span>
-                              <span className="mt-1 block break-words text-xs text-gray-500">
-                                {anchor.policy_profile || 'any profile'}{anchor.owner ? ` - ${anchor.owner}` : ''}{anchor.public_key_sha256 ? ` - ${anchor.public_key_sha256.slice(0, 12)}...` : ' - PEM anchor'}
-                              </span>
+                        <button
+                          key={file.path}
+                          type="button"
+                          onClick={() => resolveReference(file.path)}
+                          className={`min-w-0 rounded border px-3 py-2 text-left text-xs ${
+                            selected ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-900 hover:border-gray-700'
+                          }`}
+                        >
+                          <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+                            <span className="min-w-0 break-all font-mono text-gray-200">{file.path}</span>
+                            <span className={file.risk === 'lower' ? 'text-green-300' : 'text-orange-300'}>
+                              {file.risk === 'lower' ? 'lower risk' : 'review'}
                             </span>
-                          </label>
-                          <button
-                            type="button"
-                            onClick={() => deactivateTrustAnchor(anchor.id)}
-                            className="mt-2 rounded border border-gray-700 px-2 py-1 text-xs text-gray-400 hover:bg-gray-800"
-                          >
-                            Deactivate
-                          </button>
-                        </div>
+                          </div>
+                          <div className="mt-1 break-words text-gray-500">
+                            {file.extension || 'unknown'} - {formatBytes(file.size_bytes)}{file.sha256 ? ' - registry SHA-256 available' : ''}
+                          </div>
+                        </button>
                       )
                     })}
                   </div>
                 )}
-
-                <div className="mt-3 grid gap-2 lg:grid-cols-[minmax(0,0.7fr)_minmax(0,0.7fr)_minmax(0,1fr)_minmax(0,0.7fr)_auto]">
-                  <input value={newAnchorName} onChange={(e) => setNewAnchorName(e.target.value)} className={inputClass} placeholder="Anchor name" />
-                  <input value={newAnchorOwner} onChange={(e) => setNewAnchorOwner(e.target.value)} className={inputClass} placeholder="Owner" />
-                  <input value={newAnchorSha256} onChange={(e) => setNewAnchorSha256(e.target.value)} className={inputClass} placeholder="Key SHA-256 fingerprint" />
-                  <textarea value={newAnchorPem} onChange={(e) => setNewAnchorPem(e.target.value)} className={textareaClass} rows={2} placeholder="Optional PEM" />
-                  <button
-                    type="button"
-                    onClick={saveTrustAnchor}
-                    disabled={savingAnchor || !newAnchorName.trim() || (!newAnchorSha256.trim() && !newAnchorPem.trim())}
-                    className="inline-flex items-center justify-center rounded bg-cyan-700 px-3 py-2 text-sm font-medium text-white hover:bg-cyan-600 disabled:opacity-50"
-                  >
-                    {savingAnchor ? 'Saving...' : 'Save'}
-                  </button>
-                </div>
               </div>
             </div>
           )}
 
-          {trustMode === 'metadata_evidence' && (
-            <div className="flex gap-2 rounded border border-yellow-600/30 bg-yellow-950/20 p-3 text-sm text-yellow-200">
-              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-              <span>Metadata-supplied signing data is treated as evidence of a publisher claim. It cannot establish a trusted signature unless an operator supplies the verifier key and trust anchor.</span>
-            </div>
-          )}
-
-          {trustMode !== 'checksum_only' && (
-            <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)]">
-              <label className={fieldClass}>
-                Payload
-                <select value={signaturePayload} onChange={(e) => setSignaturePayload(e.target.value)} className={inputClass}>
-                  <option value="artifact">Artifact bytes</option>
-                  <option value="digest_hex">SHA-256 hex digest</option>
-                  <option value="digest_raw">SHA-256 raw digest</option>
-                </select>
-              </label>
-              <label className={fieldClass}>
-                Hash
-                <select value={signatureHash} onChange={(e) => setSignatureHash(e.target.value)} className={inputClass}>
-                  <option value="sha256">SHA-256</option>
-                  <option value="sha384">SHA-384</option>
-                  <option value="sha512">SHA-512</option>
-                </select>
-              </label>
-              <label className={fieldClass}>
-                RSA padding
-                <select value={signatureRsaPadding} onChange={(e) => setSignatureRsaPadding(e.target.value)} className={inputClass}>
-                  <option value="pss">PSS</option>
-                  <option value="pkcs1v15">PKCS#1 v1.5</option>
-                </select>
-              </label>
-            </div>
-          )}
-
-          <div className="grid gap-2 lg:grid-cols-5">
-            {trustPreview.items.map((previewItem) => (
-              <div key={previewItem.id} className="min-w-0 rounded border border-gray-800 bg-gray-900 p-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span className="break-words text-xs font-medium text-gray-200">{previewItem.label}</span>
-                  <span className={`rounded px-1.5 py-0.5 text-[10px] ${TRUST_PREVIEW_BADGE[previewItem.status]}`}>
-                    {previewItem.status}
-                  </span>
-                </div>
-                <div className="mt-1 break-words text-xs text-gray-500">{previewItem.detail}</div>
-              </div>
-            ))}
-          </div>
-          </>
-          ) : (
-            <p className="text-sm text-gray-500">
-              Enter or resolve a model artifact first. ShakerScan will then explain the trust evidence required by the selected policy.
-            </p>
-          )}
-        </div>
-
-        <details className="rounded-lg border border-gray-800 bg-gray-950/50">
-          <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-gray-300 hover:text-white">
-            Advanced: evidence metadata and policy overrides
-          </summary>
-          <div className="grid gap-3 border-t border-gray-800 p-3 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
-          <div className="min-w-0 space-y-3 rounded-lg border border-gray-800 bg-gray-950 p-3">
-            <div className="flex items-center gap-2 text-sm font-medium text-gray-200">
-              <FileJson className="h-4 w-4 text-cyan-300" />
-              Evidence fields
-            </div>
-            <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-              <label className={fieldClass}>
-                Source repo
-                <input value={metadataString(parsedMetadata, 'source_repo')} onChange={(e) => updateMetadataField('source_repo', e.target.value)} className={inputClass} placeholder="https://github.com/org/repo" />
-              </label>
-              <label className={fieldClass}>
-                License
-                <input value={metadataString(parsedMetadata, 'license')} onChange={(e) => updateMetadataField('license', e.target.value)} className={inputClass} placeholder="apache-2.0" />
-              </label>
-              <label className={fieldClass}>
-                Base model
-                <input value={metadataString(parsedMetadata, 'base_model')} onChange={(e) => updateMetadataField('base_model', e.target.value)} className={inputClass} placeholder="org/base-model" />
-              </label>
-              <label className={fieldClass}>
-                Training data
-                <input value={metadataString(parsedMetadata, 'training_data_ref')} onChange={(e) => updateMetadataField('training_data_ref', e.target.value)} className={inputClass} placeholder="internal-approved-dataset:v1" />
-              </label>
-              <label className={fieldClass}>
-                Security evals
-                <input value={metadataString(parsedMetadata, 'security_evals')} onChange={(e) => updateMetadataField('security_evals', e.target.value)} className={inputClass} placeholder="eval report URL or suite" />
-              </label>
-              <label className={fieldClass}>
-                Monitoring plan
-                <input value={metadataString(parsedMetadata, 'monitoring_plan')} onChange={(e) => updateMetadataField('monitoring_plan', e.target.value)} className={inputClass} placeholder="model-monitoring-v1" />
-              </label>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <span className={`text-xs ${metadataPreview === null ? 'text-red-300' : 'text-gray-500'}`}>
-                {metadataPreview === null ? 'Invalid JSON object' : metadataPreview ? `${metadataPreview} metadata key(s)` : 'No inline metadata yet'}
-              </span>
-              <button type="button" onClick={() => applyMetadataExample('complete')} className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
-                Complete example
-              </button>
-              <button type="button" onClick={() => applyMetadataExample('minimal')} className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
-                Minimal example
-              </button>
-              {metadataJson.trim() && (
-                <button type="button" onClick={() => setMetadataJson('')} className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-400 hover:bg-gray-800">
-                  Clear
-                </button>
-              )}
-            </div>
-          </div>
-
-          <div className="min-w-0 space-y-3 rounded-lg border border-gray-800 bg-gray-950 p-3">
-            <div className="flex items-center gap-2 text-sm font-medium text-gray-200">
-              <FileJson className="h-4 w-4 text-cyan-300" />
-              Requirements and raw metadata
-            </div>
-            <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-              <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
-                <input type="checkbox" checked={requireHash} onChange={(e) => setRequireHash(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
-                Require checksum
-              </label>
-              <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
-                <input type="checkbox" checked={requireSignature} onChange={(e) => setRequireSignature(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
-                Require signature
-              </label>
-              <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
-                <input type="checkbox" checked={requireSignatureVerification} onChange={(e) => setRequireSignatureVerification(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
-                Verify signature
-              </label>
-              <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
-                <input type="checkbox" checked={requireCryptographicSignatureVerification} onChange={(e) => setRequireCryptographicSignatureVerification(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
-                Require trusted crypto verification
-              </label>
-              <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
-                <input type="checkbox" checked={requireDeploymentApproval} onChange={(e) => setRequireDeploymentApproval(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
-                Flag missing approval context
-              </label>
-              <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
-                <input type="checkbox" checked={requireModelGovernance} onChange={(e) => setRequireModelGovernance(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
-                Require governance
-              </label>
-              <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
-                <input type="checkbox" checked={deploymentApproved} onChange={(e) => setDeploymentApproved(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
-                Declare approval context (never grants authority)
-              </label>
-            </div>
-            <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-              <label className={fieldClass}>
-                Timeout (seconds)
-                <input value={timeoutSeconds} onChange={(e) => setTimeoutSeconds(e.target.value)} className={inputClass} inputMode="numeric" />
-              </label>
-              <label className={fieldClass}>
-                Complete artifact limit (bytes)
-                <input value={maxArtifactBytes} onChange={(e) => setMaxArtifactBytes(e.target.value)} className={inputClass} inputMode="numeric" disabled={!completeArtifactDownload} />
-              </label>
-            </div>
-            <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
-              <input type="checkbox" checked={completeArtifactDownload} onChange={(e) => setCompleteArtifactDownload(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
-              Always acquire the complete artifact, whatever the limit above
-            </label>
-            <p className="text-xs text-gray-500">
-              The acquisition limit in step 3 already escalates to complete streaming acquisition on
-              its own. Use this only to force complete acquisition under a separate ceiling.
-            </p>
-            <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-              <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
-                <input type="checkbox" checked={completeRepositorySnapshot} onChange={(e) => setCompleteRepositorySnapshot(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
-                Snapshot every pinned repository file
-              </label>
-              <label className={fieldClass}>
-                Repository snapshot limit (bytes)
-                <input value={maxRepositoryBytes} onChange={(e) => setMaxRepositoryBytes(e.target.value)} className={inputClass} inputMode="numeric" disabled={!completeRepositorySnapshot} />
-              </label>
-            </div>
-            <p className="text-xs text-gray-500">
-              Full repository snapshots currently require a complete Hugging Face manifest pinned to an immutable commit.
-            </p>
-            <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
-              <input type="checkbox" checked={runGeneratedScanners} onChange={(e) => setRunGeneratedScanners(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
-              Run generated model, malware, secret, SBOM, and SCA scanners
-            </label>
-            <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
-              <input type="checkbox" checked={runDynamicSandbox} onChange={(e) => setRunDynamicSandbox(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
-              Run no-egress dynamic sandbox
-            </label>
-            <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
-              <input type="checkbox" checked={requireDynamicSandbox} onChange={(e) => { setRequireDynamicSandbox(e.target.checked); if (e.target.checked) setRunDynamicSandbox(true) }} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
-              Require sandbox pass for this technical evidence
-            </label>
-            <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
-              <input type="checkbox" checked={runGeneratedEvaluation} onChange={(e) => setRunGeneratedEvaluation(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
-              Evaluate embeddings and the vector/graph data plane
-            </label>
-            <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
-              <input type="checkbox" checked={requireGeneratedEvaluation} onChange={(e) => { setRequireGeneratedEvaluation(e.target.checked); if (e.target.checked) setRunGeneratedEvaluation(true) }} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
-              Require evaluation pass for this technical evidence
-            </label>
-            <label className={fieldClass}>
-              Evaluation specification JSON
-              <textarea
-                value={evaluationSpecJson}
-                onChange={(e) => setEvaluationSpecJson(e.target.value)}
-                className={textareaClass}
-                rows={8}
-                placeholder='{"suite_id":"corp-embedding-security","suite_version":"1","thresholds":{"min_recall_at_k":0.8,"max_acl_leaks":0,"max_poisoned_top_k_rate":0,"min_stability_cosine":0.999},"documents":[],"queries":[],"runtime_runs":[],"data_plane_controls":{}}'
-              />
-              <span className="text-xs text-gray-500">
-                Requester-supplied observations are treated as declared/debug evidence and cannot satisfy an admission gate. A trusted isolated runner must produce provenance-bound retrieval results. Source text is not retained.
-              </span>
-            </label>
-            <p className="text-xs text-gray-500">
-              Required tools that are missing, unsupported, timed out, crashed, or incomplete fail closed instead of being reported as clean.
-            </p>
-            <label className={fieldClass}>
-              Metadata JSON
-              <textarea
-                value={metadataJson}
-                onChange={(e) => setMetadataJson(e.target.value)}
-                className={textareaClass}
-                rows={8}
-                placeholder='{"source_repo":"https://github.com/acme/model","commit_sha":"abc123","license":"apache-2.0"}'
-              />
-            </label>
-          </div>
-          </div>
-        </details>
-
-        <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
-          <button type="submit" disabled={submitting || scanBlockedByResolver || hasFieldErrors || hasTrustFailures} className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-cyan-700 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-600 disabled:opacity-50">
-            {submitting ? <RefreshCw className="h-4 w-4 animate-spin" aria-hidden="true" /> : <Play className="h-4 w-4" aria-hidden="true" />}
-            {scanBlockedByResolver ? 'Resolve an artifact file first' : 'Queue Model Intake Scan'}
-          </button>
-          <button type="button" onClick={copyPayload} className="inline-flex items-center justify-center gap-2 rounded-lg border border-gray-700 px-4 py-2 text-sm text-gray-300 hover:bg-gray-800">
-            <Clipboard className="h-4 w-4" aria-hidden="true" />
-            {copied ? 'Copied' : 'Copy payload'}
-          </button>
-        </div>
-        {hasFieldErrors && (
-          <p role="alert" className="text-sm text-red-400">Fix the highlighted fields above to queue this scan.</p>
-        )}
-        {hasIntakeInput && hasTrustFailures && (
-          <p role="alert" className="text-sm text-red-400">Fix the failed trust preview checks before queueing this scan.</p>
-        )}
-      </form>
-
-      <ControlledModelIntakeWorkflow
-        operatorToken={operatorToken}
-        onOperatorTokenChange={updateOperatorToken}
-        operatorCredential={operatorCredential}
-        source={intakeSource}
-        sourceKind={platform}
-        environment={environment}
-        expectedArtifactSha256={expectedSha256.trim()}
-      />
-
-      <Card className="min-w-0 p-4">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div>
-            <h2 className="text-sm font-semibold text-white">Admission lifecycle</h2>
-            <p className="mt-1 text-xs text-gray-500">Deployment accepts only active, registered, non-expired signed subjects.</p>
-          </div>
-          <button type="button" onClick={loadAdmissions} className="rounded border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800">Refresh</button>
-        </div>
-        {admissionsError ? (
-          <div className="mt-3 text-xs text-red-300">{admissionsError}</div>
-        ) : admissions.length === 0 ? (
-          <div className="mt-3 text-xs text-gray-500">No signed admissions are registered yet.</div>
-        ) : (
-          <div className="mt-3 grid gap-2">
-            {admissions.slice(0, 10).map((admission) => (
-              <div key={admission.id} className="grid min-w-0 gap-2 rounded border border-gray-800 bg-gray-950 p-3 sm:grid-cols-[minmax(0,1fr)_auto]">
-                <div className="min-w-0">
-                  <div className="truncate font-mono text-xs text-gray-300">sha256:{admission.artifact_sha256}</div>
-                  <div className="mt-1 text-xs text-gray-500">Policy {admission.policy_profile || 'unspecified'} · reassess {new Date(admission.reassessment_due_at).toLocaleString()} · expires {new Date(admission.expires_at).toLocaleString()}</div>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className={`rounded px-2 py-1 text-xs font-semibold ${admission.status === 'active' ? 'bg-green-950/50 text-green-300' : admission.status === 'reassessment_required' ? 'bg-yellow-950/50 text-yellow-300' : 'bg-red-950/50 text-red-300'}`}>{admission.status.replace(/_/g, ' ')}</span>
-                  <Link href={`/scans/${admission.scan_id}`} className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">Scan</Link>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </Card>
-
-      <Card className="min-w-0 p-4">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div>
-            <h2 className="text-sm font-semibold text-white">Evidence adapter readiness</h2>
-            <p className="mt-1 text-xs text-gray-500">Strict intake requires applicable adapters; irrelevant formats report not applicable.</p>
-          </div>
-          <div className="flex items-center gap-2">
-            {scannerReadiness && (
-              <span className={`rounded px-2 py-1 text-xs font-semibold ${scannerReadiness.status === 'READY' ? 'bg-green-950/50 text-green-300' : 'bg-yellow-950/50 text-yellow-300'}`}>
-                {scannerReadiness.required_ready}/{scannerReadiness.required_total} ready
-              </span>
-            )}
-            <button type="button" onClick={loadScannerReadiness} className="rounded border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800">Refresh</button>
-          </div>
-        </div>
-        {scannerReadinessError ? (
-          <div className="mt-3 text-xs text-red-300">{scannerReadinessError}</div>
-        ) : scannerReadiness ? (
-          <div className="mt-3">
-            {scannerReadiness.reassessment_required && <div className="mb-3 rounded border border-red-800/60 bg-red-950/20 p-3 text-xs text-red-300">Required scanner rules or vulnerability data are stale. Strict scans fail incomplete; rebuild scanner material and trigger <code>{scannerReadiness.reassessment_trigger || 'scanner_data_stale'}</code> reassessment for affected active admissions.</div>}
-          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-            {scannerReadiness.adapters.filter((adapter) => adapter.enabled_by_default).map((adapter) => (
-              <div key={adapter.name} className="rounded border border-gray-800 bg-gray-950 p-3">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="font-mono text-xs text-gray-200">{adapter.name}</span>
-                  <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${adapter.ready ? 'bg-green-950/60 text-green-300' : 'bg-red-950/60 text-red-300'}`}>
-                    {adapter.status}
-                  </span>
-                </div>
-                <div className="mt-2 text-xs text-gray-500">{adapter.applicability.replace(/_/g, ' ')}</div>
-                <div className="mt-1 truncate font-mono text-[10px] text-gray-600">{adapter.version || 'not installed'}</div>
-                {adapter.rules && <div className={`mt-2 text-[10px] ${adapter.rules.fresh ? 'text-green-400' : 'text-red-400'}`}>rules {adapter.rules.status?.toLowerCase()} · {adapter.rules.age_days ?? '?'}d / {adapter.rules.max_age_days ?? '?'}d</div>}
-                {adapter.database && <div className={`mt-1 text-[10px] ${adapter.database.fresh ? 'text-green-400' : 'text-red-400'}`}>database {adapter.database.status?.toLowerCase()} · {adapter.database.age_days ?? '?'}d / {adapter.database.max_age_days ?? '?'}d</div>}
-              </div>
-            ))}
-          </div>
-          </div>
-        ) : (
-          <div className="mt-3 text-xs text-gray-500">Checking adapter readiness…</div>
-        )}
-      </Card>
-
-
-      {scenarioLoading && <CardSkeleton count={2} />}
-      {!scenarioLoading && scenarioError && <ErrorState message={scenarioError} onRetry={loadScenario} />}
-
-      {scenario && (scenario.request_presets || []).length > 0 && (
-        <Card className="p-4">
-          <div className="flex items-center gap-2 text-white">
-            <Wand2 className="h-4 w-4 text-cyan-300" />
-            <h2 className="text-sm font-semibold">Starter Presets</h2>
-          </div>
-          <p className="mt-1 text-sm text-gray-400">Optional quick-fill requests for model intake practice. Review every value before queueing a scan.</p>
-          <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-            {(scenario.request_presets || []).map((preset) => (
-              <button
-                key={preset.key}
-                type="button"
-                onClick={() => applyPreset(preset)}
-                className="rounded-lg border border-gray-700 bg-gray-950 p-3 text-left hover:border-cyan-500/60 hover:bg-gray-800"
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-sm font-medium text-white">{preset.name}</span>
-                  <Wand2 className="h-4 w-4 text-cyan-300" />
-                </div>
-                <div className={`mt-2 text-xs ${preset.should_pass ? 'text-green-300' : 'text-orange-300'}`}>
-                  {preset.should_pass ? 'expected pass' : `expected ${preset.expected_min_severity || 'finding'}`}
-                </div>
-              </button>
-            ))}
+          <div className="mt-5 flex flex-wrap items-center justify-between gap-2 border-t border-gray-800 pt-4">
+            <span className="text-xs text-gray-500">
+              {intakeSource ? 'Model and deployment target selected.' : 'Resolve a reference, or paste an artifact URL in the preflight step.'}
+            </span>
+            <button
+              type="button"
+              onClick={() => setPhase('preflight')}
+              className="inline-flex items-center gap-2 rounded-lg bg-cyan-700 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-600"
+            >
+              Continue to preflight
+            </button>
           </div>
         </Card>
       )}
 
-      {scenario && readinessControls.length > 0 && (
-        <Card className="p-4">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <div className="flex items-center gap-2 text-white">
-                <ShieldCheck className="h-4 w-4 text-cyan-300" />
-                <h2 className="text-sm font-semibold">Evidence Checklist</h2>
-              </div>
-              <p className="mt-1 max-w-3xl text-sm text-gray-400">
-                Platform metadata covers public model facts. Your organization still owns approval, SBOM, malware scan, eval, and monitoring evidence.
-              </p>
+      {phase === 'preflight' && (
+        <>
+        <Card className="min-w-0 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-white">
+              <ShieldCheck className="h-4 w-4 text-cyan-300" />
+              <h2 className="text-sm font-semibold">2. Policy Profile</h2>
             </div>
-            <span className={`rounded px-2 py-1 text-xs ${evidenceBadgeClass}`}>{evidenceBadgeText}</span>
+            <Link href="/settings/policy-profiles" className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
+              Manage
+            </Link>
+          </div>
+          <div className="mt-4 rounded-lg border border-yellow-700/50 bg-yellow-950/20 p-3">
+            <div className="text-sm font-medium text-yellow-100">Technical preflight only</div>
+            <div className="mt-1 text-xs text-yellow-200/70">
+              This page produces non-deployable technical evidence. Corporate authorization is available only through the controlled submission, frozen-evidence, approval, policy, signer, and promotion workflow.
+            </div>
+          </div>
+          <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            {POLICY_PROFILES.map((profile) => (
+              <button
+                key={profile.value}
+                type="button"
+                onClick={() => applyPolicyProfile(profile.value)}
+                className={`min-w-0 rounded-lg border p-3 text-left ${
+                  policyProfile === profile.value ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-950 hover:border-gray-700'
+                }`}
+              >
+                <div className="break-words text-sm font-medium text-white">{profile.label}</div>
+                <div className="mt-1 break-words text-xs text-gray-500">{profile.helper}</div>
+              </button>
+            ))}
+            {activeSavedPolicyProfiles.map((profile) => (
+              <button
+                key={profile.id}
+                type="button"
+                onClick={() => applyPolicyProfile(profile.environment)}
+                className={`min-w-0 rounded-lg border p-3 text-left ${
+                  policyProfile === profile.environment ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-950 hover:border-gray-700'
+                }`}
+              >
+                <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+                  <div className="min-w-0 break-words text-sm font-medium text-white">{profile.name}</div>
+                  <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-400">{profile.environment}</span>
+                </div>
+                <div className="mt-1 break-words text-xs text-gray-500">
+                  Block {profile.minimum_block_severity}+{profile.strict_model_intake ? ' + verified signing' : ''}
+                </div>
+                {profile.strict_model_intake && (profile.required_trust_anchor_ids || []).length > 0 && (
+                  <div className="mt-2 text-xs text-cyan-200">
+                    {(profile.required_trust_anchor_ids || []).length} policy-bound trust anchor{(profile.required_trust_anchor_ids || []).length === 1 ? '' : 's'}
+                  </div>
+                )}
+              </button>
+            ))}
+          </div>
+          {policyProfilesLoading && <div className="mt-3 text-xs text-gray-500">Loading saved profiles...</div>}
+          {!policyProfilesLoading && policyProfilesError && (
+            <div role="alert" className="mt-3 break-words text-xs text-red-400">
+              {policyProfilesError} — showing built-in profiles only.
+            </div>
+          )}
+        </Card>
+
+        <form onSubmit={handleSubmit} className="min-w-0 space-y-5 rounded-lg border border-gray-800 bg-gray-900 p-4">
+          <div className="flex items-center gap-2 text-white">
+            <Play className="h-4 w-4 text-cyan-300" />
+            <h2 className="text-sm font-semibold">3. Preflight Evidence Scan</h2>
+          </div>
+          <p className="-mt-2 text-xs text-gray-500">
+            Technical evidence for the model selected in step 1. This never grants deployment
+            authority — step 4 does that.
+          </p>
+
+          <div className="grid gap-3 md:grid-cols-[minmax(0,1.3fr)_minmax(0,0.7fr)]">
+            <label className={fieldClass}>
+              Artifact URL
+              <input
+                value={artifactUrl}
+                onChange={(e) => setArtifactUrl(e.target.value)}
+                onBlur={() => validateField('artifactUrl')}
+                aria-invalid={fieldErrors.artifactUrl ? true : undefined}
+                className={fieldErrors.artifactUrl ? invalidFieldClass(inputClass) : inputClass}
+                placeholder="https://.../model.safetensors"
+                required
+              />
+              {fieldErrors.artifactUrl && <span role="alert" className="text-sm text-red-400">{fieldErrors.artifactUrl}</span>}
+              <span className="text-xs text-gray-500">Resolved HTTP(S), hf://, and public cloud object references are supported. Use signed HTTPS URLs for private artifacts.</span>
+            </label>
+            <label className={fieldClass}>
+              Name
+              <input value={name} onChange={(e) => setName(e.target.value)} className={inputClass} placeholder="Release model v1" />
+            </label>
           </div>
 
-          {!hasIntakeInput ? (
-            <div className="mt-4 rounded-lg border border-gray-800 bg-gray-950 p-3 text-sm text-gray-500">
-              Resolve a platform reference or enter artifact evidence to preview readiness gaps.
+          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+            <label className={fieldClass}>
+              Metadata URL
+              <input
+                value={metadataUrl}
+                onChange={(e) => setMetadataUrl(e.target.value)}
+                onBlur={() => validateField('metadataUrl')}
+                aria-invalid={fieldErrors.metadataUrl ? true : undefined}
+                className={fieldErrors.metadataUrl ? invalidFieldClass(inputClass) : inputClass}
+                placeholder="https://.../manifest.json"
+              />
+              {fieldErrors.metadataUrl && <span role="alert" className="text-sm text-red-400">{fieldErrors.metadataUrl}</span>}
+            </label>
+            <label className={fieldClass}>
+              Expected SHA-256
+              <input
+                value={expectedSha256}
+                onChange={(e) => setExpectedSha256(e.target.value)}
+                onBlur={() => validateField('expectedSha256')}
+                aria-invalid={fieldErrors.expectedSha256 ? true : undefined}
+                className={fieldErrors.expectedSha256 ? invalidFieldClass(inputClass) : inputClass}
+                placeholder="optional digest pin"
+              />
+              {fieldErrors.expectedSha256 && <span role="alert" className="text-sm text-red-400">{fieldErrors.expectedSha256}</span>}
+            </label>
+          </div>
+
+          <div className="min-w-0 space-y-3 rounded-lg border border-gray-800 bg-gray-950 p-3">
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <div>
+                <div className="text-sm font-medium text-gray-200">Artifact acquisition limit</div>
+                <div className="mt-1 text-xs text-gray-500">
+                  How many artifact bytes intake may fetch. A full-artifact checksum and signature can
+                  only be verified when this covers the whole file — anything above the in-memory
+                  inspection prefix streams into content-addressed quarantine instead.
+                </div>
+              </div>
+              <span className="rounded bg-gray-800 px-2 py-1 font-mono text-xs text-gray-200">
+                {formatBytes(Number(maxDownloadBytes) || 0)}
+              </span>
+            </div>
+            <div className="grid gap-2 sm:grid-cols-3 xl:grid-cols-5">
+              {ARTIFACT_LIMIT_PRESETS.map((preset) => (
+                <button
+                  key={preset.bytes}
+                  type="button"
+                  onClick={() => setMaxDownloadBytes(String(preset.bytes))}
+                  className={`min-w-0 rounded-lg border p-2 text-left ${
+                    Number(maxDownloadBytes) === preset.bytes ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-900 hover:border-gray-700'
+                  }`}
+                >
+                  <div className="text-sm font-medium text-white">{preset.label}</div>
+                  <div className="mt-0.5 break-words text-[11px] text-gray-500">{preset.helper}</div>
+                </button>
+              ))}
+            </div>
+            {resolvedArtifactSize > 0 && (
+              <div className={`text-xs ${artifactLimitCoversArtifact ? 'text-gray-500' : 'text-yellow-200'}`}>
+                {artifactLimitCoversArtifact
+                  ? `Resolved artifact is ${formatBytes(resolvedArtifactSize)}; the full file will be acquired and hashed.`
+                  : `Resolved artifact is ${formatBytes(resolvedArtifactSize)}, larger than this limit. Intake will report a truncated, unverified checksum.`}
+              </div>
+            )}
+            <label className={fieldClass}>
+              Exact limit (bytes)
+              <input value={maxDownloadBytes} onChange={(e) => setMaxDownloadBytes(e.target.value)} className={inputClass} inputMode="numeric" />
+            </label>
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)]">
+            <label className={fieldClass}>
+              Model Card URL
+              <input
+                value={modelCardUrl}
+                onChange={(e) => setModelCardUrl(e.target.value)}
+                onBlur={() => validateField('modelCardUrl')}
+                aria-invalid={fieldErrors.modelCardUrl ? true : undefined}
+                className={fieldErrors.modelCardUrl ? invalidFieldClass(inputClass) : inputClass}
+                placeholder="https://.../model-card.md"
+              />
+              {fieldErrors.modelCardUrl && <span role="alert" className="text-sm text-red-400">{fieldErrors.modelCardUrl}</span>}
+            </label>
+          </div>
+
+          <div
+            id="model-intake-trust-remediation"
+            ref={trustSectionRef}
+            className={`min-w-0 scroll-mt-24 space-y-3 rounded-lg border bg-gray-950 p-3 ${
+              trustRemediationMode ? 'border-cyan-500/60 shadow-[0_0_0_1px_rgba(34,211,238,0.18)]' : 'border-gray-800'
+            }`}
+          >
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="flex items-center gap-2 text-sm font-medium text-gray-200">
+                <ShieldCheck className="h-4 w-4 text-cyan-300" />
+                Trust mode
+              </div>
+              <span className={`rounded px-2 py-1 text-xs ${
+                hasIntakeInput ? TRUST_PREVIEW_BADGE[trustPreview.headlineStatus] : 'bg-gray-800 text-gray-400'
+              }`}>
+                {hasIntakeInput ? trustPreview.headline : 'Add an artifact to preview requirements'}
+              </span>
+            </div>
+            {hasIntakeInput ? (
+            <>
+            <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
+              {TRUST_MODE_OPTIONS.map((mode) => (
+                <button
+                  key={mode.value}
+                  type="button"
+                  onClick={() => applyTrustMode(mode.value)}
+                  className={`min-w-0 rounded-lg border p-3 text-left ${
+                    trustMode === mode.value ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-900 hover:border-gray-700'
+                  }`}
+                >
+                  <div className="break-words text-sm font-medium text-white">{mode.label}</div>
+                  <div className="mt-1 break-words text-xs text-gray-500">{mode.helper}</div>
+                </button>
+              ))}
+            </div>
+
+            {(trustMode === 'signature_url_key_url' || trustMode === 'trusted_key_fingerprint') && (
+              <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+                <label className={fieldClass}>
+                  Signature URL
+                  <input
+                    value={signatureUrl}
+                    onChange={(e) => setSignatureUrl(e.target.value)}
+                    onBlur={() => validateField('signatureUrl')}
+                    aria-invalid={fieldErrors.signatureUrl ? true : undefined}
+                    className={fieldErrors.signatureUrl ? invalidFieldClass(inputClass) : inputClass}
+                    placeholder="https://.../model.sig"
+                  />
+                  {fieldErrors.signatureUrl && <span role="alert" className="text-sm text-red-400">{fieldErrors.signatureUrl}</span>}
+                </label>
+                <label className={fieldClass}>
+                  Public key URL
+                  <input
+                    value={signaturePublicKeyUrl}
+                    onChange={(e) => setSignaturePublicKeyUrl(e.target.value)}
+                    onBlur={() => validateField('signaturePublicKeyUrl')}
+                    aria-invalid={fieldErrors.signaturePublicKeyUrl ? true : undefined}
+                    className={fieldErrors.signaturePublicKeyUrl ? invalidFieldClass(inputClass) : inputClass}
+                    placeholder="https://.../signing-key.pem"
+                  />
+                  {fieldErrors.signaturePublicKeyUrl && <span role="alert" className="text-sm text-red-400">{fieldErrors.signaturePublicKeyUrl}</span>}
+                </label>
+              </div>
+            )}
+
+            {(trustMode === 'inline_signature_key' || trustMode === 'trusted_key_fingerprint') && (
+              <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+                <label className={fieldClass}>
+                  Public key PEM
+                  <textarea
+                    value={signaturePublicKey}
+                    onChange={(e) => setSignaturePublicKey(e.target.value)}
+                    className={textareaClass}
+                    rows={5}
+                    placeholder="-----BEGIN PUBLIC KEY-----"
+                  />
+                </label>
+                <label className={fieldClass}>
+                  Signature value
+                  <textarea
+                    value={signatureValue}
+                    onChange={(e) => setSignatureValue(e.target.value)}
+                    className={textareaClass}
+                    rows={5}
+                    placeholder="base64 detached signature"
+                  />
+                </label>
+              </div>
+            )}
+
+            {trustMode === 'trusted_key_fingerprint' && (
+              <div className="space-y-3">
+                <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+                  <label className={fieldClass}>
+                    Trusted key SHA-256
+                    <input
+                      value={signatureTrustedKeySha256}
+                      onChange={(e) => setSignatureTrustedKeySha256(e.target.value)}
+                      onBlur={() => validateField('signatureTrustedKeySha256')}
+                      aria-invalid={fieldErrors.signatureTrustedKeySha256 ? true : undefined}
+                      className={fieldErrors.signatureTrustedKeySha256 ? invalidFieldClass(inputClass) : inputClass}
+                      placeholder="one or more fingerprints"
+                    />
+                    {fieldErrors.signatureTrustedKeySha256 && <span role="alert" className="text-sm text-red-400">{fieldErrors.signatureTrustedKeySha256}</span>}
+                  </label>
+                  <label className={fieldClass}>
+                    Trusted key PEM
+                    <textarea
+                      value={signatureTrustedKeys}
+                      onChange={(e) => setSignatureTrustedKeys(e.target.value)}
+                      className={textareaClass}
+                      rows={4}
+                      placeholder="Optional operator trust anchor PEM"
+                    />
+                  </label>
+                </div>
+
+                <div className="rounded border border-gray-800 bg-gray-900 p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <div className="text-sm font-medium text-gray-200">Saved trust anchors</div>
+                      <div className="mt-1 text-xs text-gray-500">Reusable operator roots. Selected anchors are included in the queued scan as trusted PEM/fingerprint material.</div>
+                    </div>
+                    <button type="button" onClick={loadTrustAnchors} className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
+                      Refresh
+                    </button>
+                  </div>
+                  <div className="mt-3 rounded border border-gray-800 bg-gray-950 p-2 text-xs">
+                    {operatorToken ? (
+                      <span className="text-gray-500">
+                        Trust-anchor changes are authorized with the operator credential resolved in
+                        step 4. No separate token is needed here.
+                      </span>
+                    ) : (
+                      <span className="text-yellow-200">
+                        No operator credential is active. Set one in step 4 before creating or
+                        deactivating a trust anchor.
+                      </span>
+                    )}
+                  </div>
+                  {trustAnchorsLoading && <div className="mt-3 text-xs text-gray-500">Loading trust anchors...</div>}
+                  {trustAnchorsError && <div role="alert" className="mt-3 text-xs text-red-400">{trustAnchorsError}</div>}
+                  {!trustAnchorsLoading && savedTrustAnchors.length === 0 && (
+                    <div className="mt-3 rounded border border-gray-800 bg-gray-950 p-3 text-sm text-gray-500">
+                      No saved trust anchors yet. Save a fingerprint or PEM below, then select it for strict scans.
+                    </div>
+                  )}
+                  {savedTrustAnchors.length > 0 && (
+                    <div className="mt-3 grid gap-2 md:grid-cols-2">
+                      {savedTrustAnchors.map((anchor) => {
+                        const selected = selectedTrustAnchorIds.includes(anchor.id)
+                        return (
+                          <div key={anchor.id} className={`rounded border p-3 ${selected ? 'border-cyan-500 bg-cyan-950/30' : 'border-gray-800 bg-gray-950'}`}>
+                            <label className="flex min-w-0 items-start gap-2 text-sm text-gray-300">
+                              <input
+                                type="checkbox"
+                                checked={selected}
+                                onChange={(event) => {
+                                  setSelectedTrustAnchorIds((prev) => event.target.checked
+                                    ? Array.from(new Set([...prev, anchor.id]))
+                                    : prev.filter((id) => id !== anchor.id)
+                                  )
+                                }}
+                                className="mt-0.5 h-4 w-4 rounded border-gray-700 bg-gray-800"
+                              />
+                              <span className="min-w-0">
+                                <span className="block break-words font-medium text-gray-100">{anchor.name}</span>
+                                <span className="mt-1 block break-words text-xs text-gray-500">
+                                  {anchor.policy_profile || 'any profile'}{anchor.owner ? ` - ${anchor.owner}` : ''}{anchor.public_key_sha256 ? ` - ${anchor.public_key_sha256.slice(0, 12)}...` : ' - PEM anchor'}
+                                </span>
+                              </span>
+                            </label>
+                            <button
+                              type="button"
+                              onClick={() => deactivateTrustAnchor(anchor.id)}
+                              className="mt-2 rounded border border-gray-700 px-2 py-1 text-xs text-gray-400 hover:bg-gray-800"
+                            >
+                              Deactivate
+                            </button>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+
+                  <div className="mt-3 grid gap-2 lg:grid-cols-[minmax(0,0.7fr)_minmax(0,0.7fr)_minmax(0,1fr)_minmax(0,0.7fr)_auto]">
+                    <input value={newAnchorName} onChange={(e) => setNewAnchorName(e.target.value)} className={inputClass} placeholder="Anchor name" />
+                    <input value={newAnchorOwner} onChange={(e) => setNewAnchorOwner(e.target.value)} className={inputClass} placeholder="Owner" />
+                    <input value={newAnchorSha256} onChange={(e) => setNewAnchorSha256(e.target.value)} className={inputClass} placeholder="Key SHA-256 fingerprint" />
+                    <textarea value={newAnchorPem} onChange={(e) => setNewAnchorPem(e.target.value)} className={textareaClass} rows={2} placeholder="Optional PEM" />
+                    <button
+                      type="button"
+                      onClick={saveTrustAnchor}
+                      disabled={savingAnchor || !newAnchorName.trim() || (!newAnchorSha256.trim() && !newAnchorPem.trim())}
+                      className="inline-flex items-center justify-center rounded bg-cyan-700 px-3 py-2 text-sm font-medium text-white hover:bg-cyan-600 disabled:opacity-50"
+                    >
+                      {savingAnchor ? 'Saving...' : 'Save'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {trustMode === 'metadata_evidence' && (
+              <div className="flex gap-2 rounded border border-yellow-600/30 bg-yellow-950/20 p-3 text-sm text-yellow-200">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                <span>Metadata-supplied signing data is treated as evidence of a publisher claim. It cannot establish a trusted signature unless an operator supplies the verifier key and trust anchor.</span>
+              </div>
+            )}
+
+            {trustMode !== 'checksum_only' && (
+              <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)]">
+                <label className={fieldClass}>
+                  Payload
+                  <select value={signaturePayload} onChange={(e) => setSignaturePayload(e.target.value)} className={inputClass}>
+                    <option value="artifact">Artifact bytes</option>
+                    <option value="digest_hex">SHA-256 hex digest</option>
+                    <option value="digest_raw">SHA-256 raw digest</option>
+                  </select>
+                </label>
+                <label className={fieldClass}>
+                  Hash
+                  <select value={signatureHash} onChange={(e) => setSignatureHash(e.target.value)} className={inputClass}>
+                    <option value="sha256">SHA-256</option>
+                    <option value="sha384">SHA-384</option>
+                    <option value="sha512">SHA-512</option>
+                  </select>
+                </label>
+                <label className={fieldClass}>
+                  RSA padding
+                  <select value={signatureRsaPadding} onChange={(e) => setSignatureRsaPadding(e.target.value)} className={inputClass}>
+                    <option value="pss">PSS</option>
+                    <option value="pkcs1v15">PKCS#1 v1.5</option>
+                  </select>
+                </label>
+              </div>
+            )}
+
+            <div className="grid gap-2 lg:grid-cols-5">
+              {trustPreview.items.map((previewItem) => (
+                <div key={previewItem.id} className="min-w-0 rounded border border-gray-800 bg-gray-900 p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="break-words text-xs font-medium text-gray-200">{previewItem.label}</span>
+                    <span className={`rounded px-1.5 py-0.5 text-[10px] ${TRUST_PREVIEW_BADGE[previewItem.status]}`}>
+                      {previewItem.status}
+                    </span>
+                  </div>
+                  <div className="mt-1 break-words text-xs text-gray-500">{previewItem.detail}</div>
+                </div>
+              ))}
+            </div>
+            </>
+            ) : (
+              <p className="text-sm text-gray-500">
+                Enter or resolve a model artifact first. ShakerScan will then explain the trust evidence required by the selected policy.
+              </p>
+            )}
+          </div>
+
+          <details className="rounded-lg border border-gray-800 bg-gray-950/50">
+            <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-gray-300 hover:text-white">
+              Advanced: evidence metadata and policy overrides
+            </summary>
+            <div className="grid gap-3 border-t border-gray-800 p-3 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
+            <div className="min-w-0 space-y-3 rounded-lg border border-gray-800 bg-gray-950 p-3">
+              <div className="flex items-center gap-2 text-sm font-medium text-gray-200">
+                <FileJson className="h-4 w-4 text-cyan-300" />
+                Evidence fields
+              </div>
+              <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+                <label className={fieldClass}>
+                  Source repo
+                  <input value={metadataString(parsedMetadata, 'source_repo')} onChange={(e) => updateMetadataField('source_repo', e.target.value)} className={inputClass} placeholder="https://github.com/org/repo" />
+                </label>
+                <label className={fieldClass}>
+                  License
+                  <input value={metadataString(parsedMetadata, 'license')} onChange={(e) => updateMetadataField('license', e.target.value)} className={inputClass} placeholder="apache-2.0" />
+                </label>
+                <label className={fieldClass}>
+                  Base model
+                  <input value={metadataString(parsedMetadata, 'base_model')} onChange={(e) => updateMetadataField('base_model', e.target.value)} className={inputClass} placeholder="org/base-model" />
+                </label>
+                <label className={fieldClass}>
+                  Training data
+                  <input value={metadataString(parsedMetadata, 'training_data_ref')} onChange={(e) => updateMetadataField('training_data_ref', e.target.value)} className={inputClass} placeholder="internal-approved-dataset:v1" />
+                </label>
+                <label className={fieldClass}>
+                  Security evals
+                  <input value={metadataString(parsedMetadata, 'security_evals')} onChange={(e) => updateMetadataField('security_evals', e.target.value)} className={inputClass} placeholder="eval report URL or suite" />
+                </label>
+                <label className={fieldClass}>
+                  Monitoring plan
+                  <input value={metadataString(parsedMetadata, 'monitoring_plan')} onChange={(e) => updateMetadataField('monitoring_plan', e.target.value)} className={inputClass} placeholder="model-monitoring-v1" />
+                </label>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className={`text-xs ${metadataPreview === null ? 'text-red-300' : 'text-gray-500'}`}>
+                  {metadataPreview === null ? 'Invalid JSON object' : metadataPreview ? `${metadataPreview} metadata key(s)` : 'No inline metadata yet'}
+                </span>
+                <button type="button" onClick={() => applyMetadataExample('complete')} className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
+                  Complete example
+                </button>
+                <button type="button" onClick={() => applyMetadataExample('minimal')} className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
+                  Minimal example
+                </button>
+                {metadataJson.trim() && (
+                  <button type="button" onClick={() => setMetadataJson('')} className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-400 hover:bg-gray-800">
+                    Clear
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="min-w-0 space-y-3 rounded-lg border border-gray-800 bg-gray-950 p-3">
+              <div className="flex items-center gap-2 text-sm font-medium text-gray-200">
+                <FileJson className="h-4 w-4 text-cyan-300" />
+                Requirements and raw metadata
+              </div>
+              <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+                <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
+                  <input type="checkbox" checked={requireHash} onChange={(e) => setRequireHash(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+                  Require checksum
+                </label>
+                <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
+                  <input type="checkbox" checked={requireSignature} onChange={(e) => setRequireSignature(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+                  Require signature
+                </label>
+                <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
+                  <input type="checkbox" checked={requireSignatureVerification} onChange={(e) => setRequireSignatureVerification(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+                  Verify signature
+                </label>
+                <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
+                  <input type="checkbox" checked={requireCryptographicSignatureVerification} onChange={(e) => setRequireCryptographicSignatureVerification(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+                  Require trusted crypto verification
+                </label>
+                <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
+                  <input type="checkbox" checked={requireDeploymentApproval} onChange={(e) => setRequireDeploymentApproval(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+                  Flag missing approval context
+                </label>
+                <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
+                  <input type="checkbox" checked={requireModelGovernance} onChange={(e) => setRequireModelGovernance(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+                  Require governance
+                </label>
+                <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
+                  <input type="checkbox" checked={deploymentApproved} onChange={(e) => setDeploymentApproved(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+                  Declare approval context (never grants authority)
+                </label>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+                <label className={fieldClass}>
+                  Timeout (seconds)
+                  <input value={timeoutSeconds} onChange={(e) => setTimeoutSeconds(e.target.value)} className={inputClass} inputMode="numeric" />
+                </label>
+                <label className={fieldClass}>
+                  Complete artifact limit (bytes)
+                  <input value={maxArtifactBytes} onChange={(e) => setMaxArtifactBytes(e.target.value)} className={inputClass} inputMode="numeric" disabled={!completeArtifactDownload} />
+                </label>
+              </div>
+              <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
+                <input type="checkbox" checked={completeArtifactDownload} onChange={(e) => setCompleteArtifactDownload(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+                Always acquire the complete artifact, whatever the limit above
+              </label>
+              <p className="text-xs text-gray-500">
+                The acquisition limit in step 3 already escalates to complete streaming acquisition on
+                its own. Use this only to force complete acquisition under a separate ceiling.
+              </p>
+              <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+                <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
+                  <input type="checkbox" checked={completeRepositorySnapshot} onChange={(e) => setCompleteRepositorySnapshot(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+                  Snapshot every pinned repository file
+                </label>
+                <label className={fieldClass}>
+                  Repository snapshot limit (bytes)
+                  <input value={maxRepositoryBytes} onChange={(e) => setMaxRepositoryBytes(e.target.value)} className={inputClass} inputMode="numeric" disabled={!completeRepositorySnapshot} />
+                </label>
+              </div>
+              <p className="text-xs text-gray-500">
+                Full repository snapshots currently require a complete Hugging Face manifest pinned to an immutable commit.
+              </p>
+              <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
+                <input type="checkbox" checked={runGeneratedScanners} onChange={(e) => setRunGeneratedScanners(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+                Run generated model, malware, secret, SBOM, and SCA scanners
+              </label>
+              <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
+                <input type="checkbox" checked={runDynamicSandbox} onChange={(e) => setRunDynamicSandbox(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+                Run no-egress dynamic sandbox
+              </label>
+              <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
+                <input type="checkbox" checked={requireDynamicSandbox} onChange={(e) => { setRequireDynamicSandbox(e.target.checked); if (e.target.checked) setRunDynamicSandbox(true) }} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+                Require sandbox pass for this technical evidence
+              </label>
+              <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
+                <input type="checkbox" checked={runGeneratedEvaluation} onChange={(e) => setRunGeneratedEvaluation(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+                Evaluate embeddings and the vector/graph data plane
+              </label>
+              <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
+                <input type="checkbox" checked={requireGeneratedEvaluation} onChange={(e) => { setRequireGeneratedEvaluation(e.target.checked); if (e.target.checked) setRunGeneratedEvaluation(true) }} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+                Require evaluation pass for this technical evidence
+              </label>
+              <label className={fieldClass}>
+                Evaluation specification JSON
+                <textarea
+                  value={evaluationSpecJson}
+                  onChange={(e) => setEvaluationSpecJson(e.target.value)}
+                  className={textareaClass}
+                  rows={8}
+                  placeholder='{"suite_id":"corp-embedding-security","suite_version":"1","thresholds":{"min_recall_at_k":0.8,"max_acl_leaks":0,"max_poisoned_top_k_rate":0,"min_stability_cosine":0.999},"documents":[],"queries":[],"runtime_runs":[],"data_plane_controls":{}}'
+                />
+                <span className="text-xs text-gray-500">
+                  Requester-supplied observations are treated as declared/debug evidence and cannot satisfy an admission gate. A trusted isolated runner must produce provenance-bound retrieval results. Source text is not retained.
+                </span>
+              </label>
+              <p className="text-xs text-gray-500">
+                Required tools that are missing, unsupported, timed out, crashed, or incomplete fail closed instead of being reported as clean.
+              </p>
+              <label className={fieldClass}>
+                Metadata JSON
+                <textarea
+                  value={metadataJson}
+                  onChange={(e) => setMetadataJson(e.target.value)}
+                  className={textareaClass}
+                  rows={8}
+                  placeholder='{"source_repo":"https://github.com/acme/model","commit_sha":"abc123","license":"apache-2.0"}'
+                />
+              </label>
+            </div>
+            </div>
+          </details>
+
+          <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+            <button type="submit" disabled={submitting || scanBlockedByResolver || hasFieldErrors || hasTrustFailures} className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-cyan-700 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-600 disabled:opacity-50">
+              {submitting ? <RefreshCw className="h-4 w-4 animate-spin" aria-hidden="true" /> : <Play className="h-4 w-4" aria-hidden="true" />}
+              {scanBlockedByResolver ? 'Resolve an artifact file first' : 'Queue Model Intake Scan'}
+            </button>
+            <button type="button" onClick={copyPayload} className="inline-flex items-center justify-center gap-2 rounded-lg border border-gray-700 px-4 py-2 text-sm text-gray-300 hover:bg-gray-800">
+              <Clipboard className="h-4 w-4" aria-hidden="true" />
+              {copied ? 'Copied' : 'Copy payload'}
+            </button>
+          </div>
+          {hasFieldErrors && (
+            <p role="alert" className="text-sm text-red-400">Fix the highlighted fields above to queue this scan.</p>
+          )}
+          {hasIntakeInput && hasTrustFailures && (
+            <p role="alert" className="text-sm text-red-400">Fix the failed trust preview checks before queueing this scan.</p>
+          )}
+        </form>
+
+        <PreflightScanTracker
+          scans={queuedScans}
+          onUseInAdmission={useScanInAdmission}
+          onRefresh={loadIntakeScans}
+        />
+
+        {scenarioLoading && <CardSkeleton count={2} />}
+        {!scenarioLoading && scenarioError && <ErrorState message={scenarioError} onRetry={loadScenario} />}
+
+        {scenario && (scenario.request_presets || []).length > 0 && (
+          <Card className="p-4">
+            <div className="flex items-center gap-2 text-white">
+              <Wand2 className="h-4 w-4 text-cyan-300" />
+              <h2 className="text-sm font-semibold">Starter Presets</h2>
+            </div>
+            <p className="mt-1 text-sm text-gray-400">Optional quick-fill requests for model intake practice. Review every value before queueing a scan.</p>
+            <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+              {(scenario.request_presets || []).map((preset) => (
+                <button
+                  key={preset.key}
+                  type="button"
+                  onClick={() => applyPreset(preset)}
+                  className="rounded-lg border border-gray-700 bg-gray-950 p-3 text-left hover:border-cyan-500/60 hover:bg-gray-800"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-medium text-white">{preset.name}</span>
+                    <Wand2 className="h-4 w-4 text-cyan-300" />
+                  </div>
+                  <div className={`mt-2 text-xs ${preset.should_pass ? 'text-green-300' : 'text-orange-300'}`}>
+                    {preset.should_pass ? 'expected pass' : `expected ${preset.expected_min_severity || 'finding'}`}
+                  </div>
+                </button>
+              ))}
+            </div>
+          </Card>
+        )}
+
+        {scenario && readinessControls.length > 0 && (
+          <Card className="p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <div className="flex items-center gap-2 text-white">
+                  <ShieldCheck className="h-4 w-4 text-cyan-300" />
+                  <h2 className="text-sm font-semibold">Evidence Checklist</h2>
+                </div>
+                <p className="mt-1 max-w-3xl text-sm text-gray-400">
+                  Platform metadata covers public model facts. Your organization still owns approval, SBOM, malware scan, eval, and monitoring evidence.
+                </p>
+              </div>
+              <span className={`rounded px-2 py-1 text-xs ${evidenceBadgeClass}`}>{evidenceBadgeText}</span>
+            </div>
+
+            {!hasIntakeInput ? (
+              <div className="mt-4 rounded-lg border border-gray-800 bg-gray-950 p-3 text-sm text-gray-500">
+                Resolve a platform reference or enter artifact evidence to preview readiness gaps.
+              </div>
+            ) : (
+              <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                {(missingControls.length ? missingControls : readinessControls).slice(0, 12).map((control) => {
+                  const present = hasMetadataKey(readinessMetadata, control.keys)
+                  return (
+                    <div key={control.id} className="flex min-w-0 items-center gap-2 rounded border border-gray-800 bg-gray-950 px-3 py-2 text-xs">
+                      <CheckCircle2 className={`h-3.5 w-3.5 shrink-0 ${present ? 'text-green-300' : 'text-gray-600'}`} />
+                      <span className={present ? 'truncate text-gray-300' : 'truncate text-yellow-200'}>{control.label}</span>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </Card>
+        )}
+        </>
+      )}
+
+      {phase === 'admission' && (
+        <>
+        <ControlledModelIntakeWorkflow
+          operatorToken={operatorToken}
+          onOperatorTokenChange={updateOperatorToken}
+          operatorCredential={operatorCredential}
+          source={intakeSource}
+          sourceKind={platform}
+          environment={environment}
+          expectedArtifactSha256={expectedSha256.trim()}
+          availableScans={intakeScans}
+          staticScanId={staticScanId}
+          onStaticScanIdChange={setStaticScanId}
+          onEditContext={() => {
+            setPhase('source')
+            window.scrollTo({ top: 0, behavior: 'smooth' })
+          }}
+        />
+
+        <Card className="min-w-0 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h2 className="text-sm font-semibold text-white">Admission lifecycle</h2>
+              <p className="mt-1 text-xs text-gray-500">Deployment accepts only active, registered, non-expired signed subjects.</p>
+            </div>
+            <button type="button" onClick={loadAdmissions} className="rounded border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800">Refresh</button>
+          </div>
+          {admissionsError ? (
+            <div className="mt-3 text-xs text-red-300">{admissionsError}</div>
+          ) : admissions.length === 0 ? (
+            <div className="mt-3 text-xs text-gray-500">No signed admissions are registered yet.</div>
+          ) : (
+            <div className="mt-3 grid gap-2">
+              {admissions.slice(0, 10).map((admission) => (
+                <div key={admission.id} className="grid min-w-0 gap-2 rounded border border-gray-800 bg-gray-950 p-3 sm:grid-cols-[minmax(0,1fr)_auto]">
+                  <div className="min-w-0">
+                    <div className="truncate font-mono text-xs text-gray-300">sha256:{admission.artifact_sha256}</div>
+                    <div className="mt-1 text-xs text-gray-500">Policy {admission.policy_profile || 'unspecified'} · reassess {new Date(admission.reassessment_due_at).toLocaleString()} · expires {new Date(admission.expires_at).toLocaleString()}</div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className={`rounded px-2 py-1 text-xs font-semibold ${admission.status === 'active' ? 'bg-green-950/50 text-green-300' : admission.status === 'reassessment_required' ? 'bg-yellow-950/50 text-yellow-300' : 'bg-red-950/50 text-red-300'}`}>{admission.status.replace(/_/g, ' ')}</span>
+                    <Link href={`/scans/${admission.scan_id}`} className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">Scan</Link>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+        </>
+      )}
+
+      {phase === 'status' && (
+        <Card className="min-w-0 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h2 className="text-sm font-semibold text-white">Evidence adapter readiness</h2>
+              <p className="mt-1 text-xs text-gray-500">Strict intake requires applicable adapters; irrelevant formats report not applicable.</p>
+            </div>
+            <div className="flex items-center gap-2">
+              {scannerReadiness && (
+                <span className={`rounded px-2 py-1 text-xs font-semibold ${scannerReadiness.status === 'READY' ? 'bg-green-950/50 text-green-300' : 'bg-yellow-950/50 text-yellow-300'}`}>
+                  {scannerReadiness.required_ready}/{scannerReadiness.required_total} ready
+                </span>
+              )}
+              <button type="button" onClick={loadScannerReadiness} className="rounded border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800">Refresh</button>
+            </div>
+          </div>
+          {scannerReadinessError ? (
+            <div className="mt-3 text-xs text-red-300">{scannerReadinessError}</div>
+          ) : scannerReadiness ? (
+            <div className="mt-3">
+              {scannerReadiness.reassessment_required && <div className="mb-3 rounded border border-red-800/60 bg-red-950/20 p-3 text-xs text-red-300">Required scanner rules or vulnerability data are stale. Strict scans fail incomplete; rebuild scanner material and trigger <code>{scannerReadiness.reassessment_trigger || 'scanner_data_stale'}</code> reassessment for affected active admissions.</div>}
+            <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+              {scannerReadiness.adapters.filter((adapter) => adapter.enabled_by_default).map((adapter) => (
+                <div key={adapter.name} className="rounded border border-gray-800 bg-gray-950 p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-mono text-xs text-gray-200">{adapter.name}</span>
+                    <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${adapter.ready ? 'bg-green-950/60 text-green-300' : 'bg-red-950/60 text-red-300'}`}>
+                      {adapter.status}
+                    </span>
+                  </div>
+                  <div className="mt-2 text-xs text-gray-500">{adapter.applicability.replace(/_/g, ' ')}</div>
+                  <div className="mt-1 truncate font-mono text-[10px] text-gray-600">{adapter.version || 'not installed'}</div>
+                  {adapter.rules && <div className={`mt-2 text-[10px] ${adapter.rules.fresh ? 'text-green-400' : 'text-red-400'}`}>rules {adapter.rules.status?.toLowerCase()} · {adapter.rules.age_days ?? '?'}d / {adapter.rules.max_age_days ?? '?'}d</div>}
+                  {adapter.database && <div className={`mt-1 text-[10px] ${adapter.database.fresh ? 'text-green-400' : 'text-red-400'}`}>database {adapter.database.status?.toLowerCase()} · {adapter.database.age_days ?? '?'}d / {adapter.database.max_age_days ?? '?'}d</div>}
+                </div>
+              ))}
+            </div>
             </div>
           ) : (
-            <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-              {(missingControls.length ? missingControls : readinessControls).slice(0, 12).map((control) => {
-                const present = hasMetadataKey(readinessMetadata, control.keys)
-                return (
-                  <div key={control.id} className="flex min-w-0 items-center gap-2 rounded border border-gray-800 bg-gray-950 px-3 py-2 text-xs">
-                    <CheckCircle2 className={`h-3.5 w-3.5 shrink-0 ${present ? 'text-green-300' : 'text-gray-600'}`} />
-                    <span className={present ? 'truncate text-gray-300' : 'truncate text-yellow-200'}>{control.label}</span>
-                  </div>
-                )
-              })}
-            </div>
+            <div className="mt-3 text-xs text-gray-500">Checking adapter readiness…</div>
           )}
         </Card>
       )}

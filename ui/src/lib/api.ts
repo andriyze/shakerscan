@@ -3928,6 +3928,43 @@ function modelIntakeWorkflowHeaders(operatorToken: string, json = false): Header
 
 export const MODEL_INTAKE_OPERATOR_TOKEN_KEY = 'shakerscan:model-intake-operator-token'
 
+export interface ModelIntakeScanSummary {
+  id: string
+  status: Scan['status']
+  target_url: string
+  created_at: string
+  progress?: number
+  current_phase?: string
+  grade?: string
+  findings_count?: number
+  complete_snapshot: boolean
+}
+
+// Feeds the preflight -> admission handoff: the controlled workflow needs a
+// completed Model Intake scan to bind as generated evidence, and asking the
+// operator to copy a UUID between two halves of the same page was the seam
+// where the flow fell apart.
+export async function listRecentModelIntakeScans(limit = 25): Promise<ModelIntakeScanSummary[]> {
+  const { scans } = await getScans({ limit })
+  return scans
+    .filter((scan) => scan.scan_type === 'model_intake')
+    .map((scan) => ({
+      id: scan.id,
+      status: scan.status,
+      target_url: scan.target_url,
+      created_at: scan.created_at,
+      progress: scan.progress,
+      current_phase: scan.current_phase,
+      grade: scan.grade,
+      findings_count: scan.findings_count,
+      // Only a complete artifact subject can be attached to a controlled
+      // submission, so surface that rather than letting the attach fail later.
+      complete_snapshot: Boolean(
+        (scan.options as Record<string, unknown> | null | undefined)?.complete_repository_snapshot
+      ),
+    }))
+}
+
 export interface ModelIntakeOperatorCredential {
   available: boolean
   reason: 'local_deployment' | 'remote_deployment' | 'not_configured' | 'disabled' | 'unavailable'

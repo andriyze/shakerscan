@@ -137,3 +137,65 @@ test('artifact acquisition is presented in model-sized units, not a 100MB prefix
   assert.doesNotMatch(page, /setMaxDownloadBytes\('10000000'\)/)
   assert.doesNotMatch(page, /setMaxDownloadBytes\('50000000'\)/)
 })
+
+const shell = readFileSync(path.join(root, 'src/app/model-intake/IntakeShell.tsx'), 'utf8')
+
+test('model intake renders as one phased pipeline instead of eight stacked panels', () => {
+  assert.match(shell, /INTAKE_PHASES/)
+  for (const label of ['Source', 'Preflight', 'Admission', 'Status']) {
+    assert.ok(shell.includes(`label: '${label}'`), `${label} phase is missing`)
+  }
+  // Exactly one phase is rendered at a time, and the shared context stays pinned.
+  for (const phase of ['source', 'preflight', 'admission', 'status']) {
+    assert.ok(page.includes(`phase === '${phase}' &&`), `${phase} phase is not gated`)
+  }
+  assert.match(page, /<IntakeContextBar/)
+  assert.match(page, /<IntakePhaseTabs/)
+  assert.match(shell, /operatorReady/)
+  assert.match(shell, /adaptersReady/)
+  assert.match(shell, /runnerStatus/)
+})
+
+test('queueing a preflight scan hands off to admission instead of navigating away', () => {
+  // The old flow pushed the operator to /scans/{id}, so the only way back into
+  // the admission stage was pasting that UUID into a free-text field.
+  assert.doesNotMatch(page, /router\.push\(`\/scans\//)
+  assert.match(page, /trackQueuedScan\(result\.scan_id\)/)
+  assert.match(page, /useScanInAdmission/)
+  assert.match(page, /setPhase\('admission'\)/)
+  assert.match(page, /<PreflightScanTracker/)
+  assert.match(shell, /Use in admission/)
+
+  // The handoff lights up on its own while the scan is still running.
+  assert.match(page, /awaitingScanCompletion/)
+  assert.match(page, /setInterval\(loadIntakeScans/)
+  assert.match(api, /listRecentModelIntakeScans/)
+})
+
+test('binding generated evidence is a picker over completed scans', () => {
+  assert.match(workflow, /attachableScans/)
+  assert.match(workflow, /scan\.status === 'completed'/)
+  assert.match(workflow, /Select a completed preflight scan/)
+  // A scan from another session can still be bound by ID.
+  assert.match(workflow, /Bind a scan from another session by ID/)
+  assert.match(workflow, /availableScans: ModelIntakeScanSummary\[\]/)
+})
+
+test('cross-phase navigation targets the phase that renders the control', () => {
+  // Both of these used to be anchors into markup that a hidden phase no longer
+  // renders, so they would silently do nothing.
+  assert.match(workflow, /onEditContext: \(\) => void/)
+  assert.doesNotMatch(workflow, /href="#model-intake-source"/)
+  assert.match(page, /setPhase\('source'\)/)
+  assert.match(page, /setPhase\('preflight'\)\n    setPolicyProfile\('strict'\)/)
+})
+
+test('operator credential autofill inspects forwarded hops rather than their presence', () => {
+  const route = readFileSync(path.join(root, 'src/app/api/model-intake/operator-credential/route.ts'), 'utf8')
+  // Next populates x-forwarded-for on every request, so treating the header's
+  // presence as proof of a proxy silently disabled autofill everywhere.
+  assert.match(route, /forwarded\.split\(','\)\.every/)
+  assert.match(route, /::ffff:/)
+  // An IPv6 host is "[::1]:3000"; splitting on ':' would mangle it.
+  assert.match(route, /replace\(\/:\\d\+\$\/, ''\)/)
+})

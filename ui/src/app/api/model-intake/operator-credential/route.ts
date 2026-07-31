@@ -25,14 +25,22 @@ function deploymentIsLoopbackBound(): boolean {
   return LOOPBACK_HOSTS.has(bind)
 }
 
+function normalizeHop(value: string): string {
+  // IPv4-mapped IPv6 (::ffff:127.0.0.1) still denotes the local machine.
+  return value.trim().toLowerCase().replace(/^::ffff:/, '')
+}
+
 function requestIsLoopback(request: Request): boolean {
   // A cross-origin page cannot read this response, but a reverse proxy in front
   // of the UI could still forward a remote browser here. Require the request to
   // look like it came from the local machine as well.
-  const host = (request.headers.get('host') || '').split(':')[0].toLowerCase()
+  const host = (request.headers.get('host') || '').replace(/:\d+$/, '').toLowerCase()
   if (!LOOPBACK_HOSTS.has(host)) return false
+  // Next populates x-forwarded-for on every request, so its presence proves
+  // nothing. What matters is that no hop in the chain is remote.
   const forwarded = request.headers.get('x-forwarded-for')
-  return !forwarded
+  if (!forwarded) return true
+  return forwarded.split(',').every((hop) => LOOPBACK_HOSTS.has(normalizeHop(hop)))
 }
 
 export async function GET(request: Request) {
