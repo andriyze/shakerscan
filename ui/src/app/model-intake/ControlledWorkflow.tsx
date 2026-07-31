@@ -601,6 +601,26 @@ export function ControlledModelIntakeWorkflow({
     runnerReadiness?.unsupported_reason === 'no_hardware_virtualization'
       ? 'unavailable: no KVM on this host'
       : `not available on ${runnerReadiness?.host_platform || 'this host'}`
+  const queueBlockers: Array<{ summary: string; detail?: string }> = []
+  if (!selectedId) {
+    queueBlockers.push({ summary: 'No submission selected', detail: 'Create or pick one in stage 4.1' })
+  }
+  if (runnerReadiness && !runnerReadiness.ready) {
+    queueBlockers.push({
+      summary: runnerUnsupported ? 'This host cannot run a microVM' : 'Runner prerequisites are incomplete',
+      detail: runnerUnsupported
+        ? `runner reports ${runnerReadiness.unsupported_reason || 'unsupported host'}`
+        : runnerReadiness.error || 'see the runner status below',
+    })
+  }
+  if (!runnerReadiness) {
+    queueBlockers.push({ summary: 'Runner readiness is still being checked' })
+  }
+  for (const gap of embeddingGaps) {
+    const [summary, detail] = gap.split(' \u2014 ')
+    queueBlockers.push({ summary: `Undeclared ${summary}`, detail })
+  }
+
   const attachableScans = availableScans.filter((scan) => scan.status === 'completed')
   // A loopback deployment resolves its own credential, so the manual field
   // only appears when the UI server declined to provide one.
@@ -824,7 +844,32 @@ export function ControlledModelIntakeWorkflow({
             <label className="grid gap-1 text-xs text-gray-300">Known-answer inputs (bounded JSON string array)<textarea className={textareaClass} rows={3} value={knownAnswerInputs} onChange={(event) => setKnownAnswerInputs(event.target.value)} /></label>
             <label className="grid gap-1 text-xs text-gray-300">Reviewed known-answer embedding SHA-256 {runnerOperation === 'runtime' ? '(required)' : '(optional)'}<input className={inputClass} value={knownAnswerDigest} onChange={(event) => setKnownAnswerDigest(event.target.value)} /></label>
             <label className="grid gap-1 text-xs text-gray-300">Wall-clock timeout seconds<input className={inputClass} type="number" min={30} max={3600} value={timeoutSeconds} onChange={(event) => setTimeoutSeconds(Number(event.target.value))} /></label>
-            <button type="button" className={buttonClass} disabled={busy === 'runner' || !selectedId || !runnerReadiness?.ready || embeddingGaps.length > 0} onClick={queueRunnerJob}><Server className="h-3.5 w-3.5" /> Queue exact-subject Firecracker job</button>
+            <button
+              type="button"
+              className={buttonClass}
+              disabled={busy === 'runner' || queueBlockers.length > 0}
+              title={queueBlockers.length ? `Blocked: ${queueBlockers.map((item) => item.summary).join('; ')}` : undefined}
+              onClick={queueRunnerJob}
+            >
+              <Server className="h-3.5 w-3.5" /> Queue exact-subject Firecracker job
+            </button>
+            {queueBlockers.length > 0 && (
+              // A disabled control has to say why. Three of these conditions
+              // were previously silent, so the button just looked broken.
+              <div className="rounded border border-gray-700 bg-gray-950 p-3 text-xs text-gray-400">
+                <div className="font-medium text-gray-300">
+                  {queueBlockers.length === 1 ? 'One thing is missing before this can run:' : `${queueBlockers.length} things are missing before this can run:`}
+                </div>
+                <ul className="mt-2 list-disc space-y-1 pl-5">
+                  {queueBlockers.map((item) => (
+                    <li key={item.summary}>
+                      <span className="text-gray-200">{item.summary}</span>
+                      {item.detail ? <span className="text-gray-500"> &mdash; {item.detail}</span> : null}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
             {runnerUnsupported ? (
               <div className="rounded border border-gray-700 bg-gray-950 p-3 text-xs text-gray-400">
                 {runnerReadiness?.reason || 'The Firecracker microVM tier requires a Linux host with KVM.'}

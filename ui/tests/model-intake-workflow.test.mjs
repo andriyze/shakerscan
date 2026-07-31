@@ -346,3 +346,21 @@ test('fields the operator should not have to invent are offered, not demanded', 
   assert.match(workflow, /setManifestId\(latestManifest\.id\)/)
   assert.match(workflow, /setPolicyDecisionId\(latestDecision\.id\)/)
 })
+
+test('a disabled queue button always states what is blocking it', () => {
+  // Four conditions gate this button and three of them used to be silent, so
+  // it simply looked broken — including the one that says the host cannot run
+  // a microVM at all.
+  assert.match(workflow, /const queueBlockers/)
+  assert.match(workflow, /No submission selected/)
+  assert.match(workflow, /Create or pick one in stage 4\.1/)
+  assert.match(workflow, /This host cannot run a microVM/)
+  assert.match(workflow, /Runner prerequisites are incomplete/)
+  assert.match(workflow, /Runner readiness is still being checked/)
+  assert.match(workflow, /Undeclared \$\{summary\}/)
+
+  // The reason is rendered next to the control and repeated on hover.
+  assert.match(workflow, /things are missing before this can run/)
+  assert.match(workflow, /title=\{queueBlockers\.length \? `Blocked: /)
+  assert.match(workflow, /disabled=\{busy === 'runner' \|\| queueBlockers\.length > 0\}/)
+})
