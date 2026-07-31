@@ -13959,6 +13959,69 @@ async def model_intake_runner_readiness():
     return await asyncio.to_thread(_model_firecracker_readiness)
 
 
+@app.get("/model-intake/runners/install-plan")
+async def model_intake_runner_install_plan():
+    """What it takes to install the microVM tier, and whether this host can.
+
+    The API runs in a container and cannot install a root systemd unit on the
+    host, so this deliberately returns a plan rather than performing one. It
+    reports only what it can actually observe: /proc/cpuinfo is not namespaced,
+    so the CPU verdict is the real host's, while /dev/kvm and the installed
+    components live outside the container and are left to the CLI.
+    """
+    def _plan() -> dict[str, Any]:
+        from model_intake_runner_controller import cpu_exposes_virtualization, host_platform
+
+        platform_name = host_platform()
+        virtualization = cpu_exposes_virtualization()
+        configured = bool(os.getenv("MODEL_INTAKE_RUNNER_URL", "").strip())
+        if platform_name not in {"linux", "unknown"}:
+            supported, reason = False, (
+                f"The microVM tier requires a Linux host; this deployment is on {platform_name}."
+            )
+        elif virtualization is False:
+            supported, reason = False, (
+                "This host exposes no CPU virtualization extension, so KVM cannot start. "
+                "On a cloud instance that is usually a per-instance setting: AWS exposes it as "
+                "the nested-virtualization CPU option on a stopped instance."
+            )
+        else:
+            supported, reason = True, "This host can run the Model Intake microVM tier."
+        return {
+            "schema_version": "model-intake-runner-install-plan/v1",
+            "supported": supported,
+            "reason": reason,
+            "already_configured": configured,
+            "host_platform": platform_name,
+            "cpu_virtualization": virtualization,
+            # Installing mutates the host as root, which the API container
+            # cannot and should not do on the operator's behalf.
+            "executed_by": "operator_on_host",
+            "command": "sudo ./scanner.sh model-intake-runner install --signer <choice> --confirm",
+            "status_command": "./scanner.sh model-intake-runner status",
+            "signer_choices": [
+                {"value": "kms:<key-id>", "label": "AWS KMS", "production": True,
+                 "detail": "Purpose-scoped key; the production trust anchor for signed receipts."},
+                {"value": "local-pem", "label": "Local PEM", "production": False,
+                 "detail": "Proves the receipt path end to end; not a production trust anchor."},
+            ],
+            "host_mutations": [
+                "install firecracker + jailer, a pinned guest kernel, and the guest rootfs into /opt/shakerscan/model-intake-runner",
+                "create /srv/jailer and /var/lib/shakerscan/model-intake-runner",
+                "create the cgroup-v2 parent /sys/fs/cgroup/shakerscan-model-intake",
+                "write /etc/shakerscan/model-intake-runner.env (mode 0600)",
+                "install and enable the systemd unit shakerscan-model-intake-runner.service",
+                "record MODEL_INTAKE_RUNNER_* in the ShakerScan .env and restart the api container",
+            ],
+            "cost": (
+                "The guest rootfs bundles CPU PyTorch and transformers; expect a multi-gigabyte "
+                "image and several minutes to build."
+            ),
+        }
+
+    return await asyncio.to_thread(_plan)
+
+
 @app.post("/model-intake/loader-profiles/resolve")
 async def resolve_model_intake_loader_profile(request: ModelLoaderProfileResolveRequest):
     """Resolve by format/library/custom-code facts, never by a model allowlist."""

@@ -8,6 +8,11 @@ SHARED_RESULTS_ROOT="${MODEL_INTAKE_RUNNER_SHARED_RESULTS_ROOT:-/var/lib/shakers
 KERNEL_URL="${MODEL_INTAKE_KERNEL_URL:-}"
 KERNEL_SHA256="${MODEL_INTAKE_KERNEL_SHA256:-}"
 ROOTFS_SOURCE="${MODEL_INTAKE_ROOTFS_SOURCE:-}"
+# The API reaches the runner over HTTP. It runs in a container, so a loopback
+# bind is unreachable from it; the installer passes the Docker bridge address.
+# The deny-all egress policy and the internal token are what keep that safe.
+RUNNER_BIND_HOST="${MODEL_INTAKE_RUNNER_BIND_HOST:-127.0.0.1}"
+RUNNER_BIND_PORT="${MODEL_INTAKE_RUNNER_BIND_PORT:-8092}"
 TEMP_DIR="$(mktemp -d)"
 
 cleanup() { rm -rf "$TEMP_DIR"; }
@@ -114,7 +119,7 @@ User=root
 Group=root
 WorkingDirectory=$INSTALL_ROOT/app
 EnvironmentFile=/etc/shakerscan/model-intake-runner.env
-ExecStart=$INSTALL_ROOT/venv/bin/uvicorn model_intake_runner_service:app --host 127.0.0.1 --port 8092 --no-access-log
+ExecStart=$INSTALL_ROOT/venv/bin/uvicorn model_intake_runner_service:app --host $RUNNER_BIND_HOST --port $RUNNER_BIND_PORT --no-access-log
 Restart=on-failure
 RestartSec=3
 UMask=0077

@@ -1,0 +1,325 @@
+#!/usr/bin/env python3
+"""Opt-in installer for the Model Intake Firecracker microVM tier.
+
+The microVM tier is deliberately not installed by `scanner.sh start`. It needs
+root, it mutates the host (systemd unit, cgroup parent, /srv/jailer, nftables),
+and it costs a multi-gigabyte guest image that most hosts cannot even use --
+macOS and Windows control planes, and any cloud instance without nested
+virtualization. Paying that on every install for a tier the majority cannot run
+is how an installer earns distrust.
+
+What was missing was not the decision to opt in, it was that opting in meant
+reading three shell scripts, sourcing a Firecracker-compatible kernel yourself,
+and hand-wiring four environment variables. This turns that into one command
+with a pinned kernel and an explicit confirmation.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import platform
+import re
+import shutil
+import subprocess
+import sys
+
+# Pinned Firecracker CI guest kernel. Verified against the published artifact:
+# a bare URL with no digest would defeat the point of a measured runner.
+DEFAULT_KERNEL_URL = (
+    "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.12/x86_64/vmlinux-6.1.128"
+)
+DEFAULT_KERNEL_SHA256 = "27a8310b9a727517e9eb02044524b6ceb77de5728e3491b6974d5c846227ecc8"
+
+RUNNER_ENV_FILE = Path("/etc/shakerscan/model-intake-runner.env")
+INSTALL_ROOT = Path("/opt/shakerscan/model-intake-runner")
+SERVICE = "shakerscan-model-intake-runner"
+DEFAULT_BIND_PORT = 8092
+
+HOST_MUTATIONS = [
+    f"install firecracker + jailer, a pinned guest kernel, and the guest rootfs into {INSTALL_ROOT}",
+    "create /srv/jailer and /var/lib/shakerscan/model-intake-runner",
+    "create the cgroup-v2 parent /sys/fs/cgroup/shakerscan-model-intake and enable +cpu +memory +pids",
+    f"write {RUNNER_ENV_FILE} (mode 0600) with the runner's internal token and component digests",
+    f"install and enable the systemd unit {SERVICE}.service",
+    "record MODEL_INTAKE_RUNNER_* wiring in the ShakerScan .env and restart the api container",
+]
+
+
+def _run(argv: list[str], **kwargs) -> subprocess.CompletedProcess:
+    """Run a command, treating an absent binary as a failed run.
+
+    `status` has to answer on any control plane, including a macOS host with no
+    systemctl and no docker. Reporting "this host cannot run the tier" is the
+    correct answer there, so a missing binary must not raise.
+    """
+    try:
+        return subprocess.run(argv, text=True, **kwargs)
+    except (FileNotFoundError, PermissionError) as exc:
+        return subprocess.CompletedProcess(argv, 127, stdout="", stderr=str(exc))
+
+
+def cpu_virtualization() -> bool | None:
+    """None when undecidable, matching the readiness probe's fail-eligible rule."""
+    try:
+        text = Path("/proc/cpuinfo").read_text(errors="replace")
+    except OSError:
+        return None
+    saw = False
+    for line in text.splitlines():
+        label, sep, values = line.partition(":")
+        if not sep or label.strip().lower() not in {"flags", "features"}:
+            continue
+        saw = True
+        if any(flag in values.split() for flag in ("vmx", "svm")):
+            return True
+    return False if saw else None
+
+
+def docker_bridge_address() -> str | None:
+    """Address the API container can use to reach a host service.
+
+    The runner binds a real interface rather than loopback precisely so the
+    containerized API can reach it; the deny-all egress policy and the internal
+    bearer token are the controls, not the bind address.
+    """
+    result = _run(
+        ["docker", "network", "inspect", "bridge", "--format", "{{range .IPAM.Config}}{{.Gateway}}{{end}}"],
+        capture_output=True,
+    )
+    gateway = (result.stdout or "").strip()
+    return gateway if result.returncode == 0 and gateway else None
+
+
+def host_facts() -> dict:
+    kvm = Path("/dev/kvm").exists()
+    virt = cpu_virtualization()
+    installed = {
+        "firecracker": (INSTALL_ROOT / "bin/firecracker").is_file(),
+        "jailer": (INSTALL_ROOT / "bin/jailer").is_file(),
+        "kernel": (INSTALL_ROOT / "kernel/vmlinux").is_file(),
+        "rootfs": (INSTALL_ROOT / "rootfs/rootfs.ext4").is_file(),
+        "runner_env": RUNNER_ENV_FILE.is_file(),
+    }
+    unit = _run(["systemctl", "is-active", SERVICE], capture_output=True)
+    tools = {name: shutil.which(name) is not None for name in
+             ("docker", "ip", "nft", "mkfs.ext4", "debugfs", "curl", "tar", "sha256sum")}
+    return {
+        "platform": platform.system().lower(),
+        "arch": platform.machine(),
+        "kvm": kvm,
+        "cpu_virtualization": virt,
+        "cgroup_v2": Path("/sys/fs/cgroup/cgroup.controllers").is_file(),
+        "installed": installed,
+        "service_state": (unit.stdout or "unknown").strip(),
+        "host_tools": tools,
+        "missing_host_tools": sorted(name for name, present in tools.items() if not present),
+    }
+
+
+def installability(facts: dict) -> tuple[bool, str]:
+    if facts["platform"] != "linux":
+        return False, f"The microVM tier requires a Linux host; this is {facts['platform']}."
+    if facts["arch"] != "x86_64":
+        return False, f"The pinned guest runtime is x86_64 only; this host is {facts['arch']}."
+    if not facts["kvm"]:
+        if facts["cpu_virtualization"] is False:
+            return False, (
+                "/dev/kvm is absent and this CPU exposes no virtualization extension. "
+                "On a cloud instance that is usually a per-instance setting: AWS exposes it "
+                "as the nested-virtualization CPU option on a stopped instance."
+            )
+        return False, "/dev/kvm is absent. Load KVM or enable virtualization on this host."
+    if not facts["cgroup_v2"]:
+        return False, "cgroup v2 is required and /sys/fs/cgroup/cgroup.controllers is absent."
+    if facts["missing_host_tools"]:
+        return False, "Missing required host commands: " + ", ".join(facts["missing_host_tools"])
+    return True, "This host can run the Model Intake microVM tier."
+
+
+def cmd_status(args, runtime: Path) -> int:
+    facts = host_facts()
+    ok, reason = installability(facts)
+    complete = all(facts["installed"].values())
+    facts["can_install"] = ok
+    facts["reason"] = reason
+    facts["installed_complete"] = complete
+    if args.json:
+        print(json.dumps(facts, indent=2, sort_keys=True))
+        return 0
+
+    print("Model Intake microVM runner")
+    print(f"  host            : {facts['platform']}/{facts['arch']}")
+    print(f"  /dev/kvm        : {'present' if facts['kvm'] else 'absent'}")
+    print(f"  cpu virt ext    : {facts['cpu_virtualization']}")
+    print(f"  components      : " + ", ".join(
+        f"{name}={'yes' if present else 'no'}" for name, present in facts["installed"].items()))
+    print(f"  systemd service : {facts['service_state']}")
+    print()
+    if complete and facts["service_state"] == "active":
+        print("Installed and running.")
+        return 0
+    print(reason)
+    if ok:
+        print()
+        print("Not installed. To install it (this mutates the host, and asks before doing so):")
+        print("  sudo ./scanner.sh model-intake-runner install --signer local-pem")
+    return 0
+
+
+def _write_dotenv(env_path: Path, values: dict[str, str]) -> None:
+    """Upsert keys in the runtime .env without disturbing anything else."""
+    lines = env_path.read_text().splitlines() if env_path.is_file() else []
+    for key, value in values.items():
+        pattern = re.compile(rf"^{re.escape(key)}=")
+        replacement = f"{key}={value}"
+        for index, line in enumerate(lines):
+            if pattern.match(line):
+                lines[index] = replacement
+                break
+        else:
+            lines.append(replacement)
+    env_path.write_text("\n".join(lines) + "\n")
+
+
+def _read_runner_env(key: str) -> str | None:
+    if not RUNNER_ENV_FILE.is_file():
+        return None
+    for line in RUNNER_ENV_FILE.read_text().splitlines():
+        name, sep, value = line.partition("=")
+        if sep and name.strip() == key:
+            return value.strip()
+    return None
+
+
+def cmd_install(args, runtime: Path) -> int:
+    facts = host_facts()
+    ok, reason = installability(facts)
+    if not ok:
+        print(f"Cannot install here: {reason}", file=sys.stderr)
+        return 2
+    if os.geteuid() != 0:
+        print("The microVM tier installs host binaries and a systemd unit, so this needs root:",
+              file=sys.stderr)
+        print(f"  sudo ./scanner.sh model-intake-runner install --signer {args.signer or '<choice>'}",
+              file=sys.stderr)
+        return 2
+
+    signer_env: dict[str, str] = {}
+    if args.signer == "local-pem":
+        # A local PEM proves the receipt path end to end but is explicitly not a
+        # production trust anchor, so it must be asked for by name.
+        signer_env["MODEL_INTAKE_RUNNER_SIGNER_BACKEND"] = "local-pem"
+        signer_env["MODEL_INTAKE_RUNNER_ALLOW_LOCAL_PEM"] = "true"
+    elif args.signer and args.signer.startswith("kms:"):
+        key_id = args.signer.split(":", 1)[1].strip()
+        if not key_id:
+            print("--signer kms:<key-id> requires a key id", file=sys.stderr)
+            return 2
+        signer_env["MODEL_INTAKE_RUNNER_SIGNER_BACKEND"] = "aws-kms"
+        signer_env["MODEL_INTAKE_RUNNER_SIGNER_KEY_ID"] = key_id
+    else:
+        print("Choose a receipt signer: --signer kms:<key-id> (production) or "
+              "--signer local-pem (non-production proof run).", file=sys.stderr)
+        return 2
+
+    print("This will change the host:")
+    for item in HOST_MUTATIONS:
+        print(f"  - {item}")
+    print(f"\nGuest kernel pin:\n  {DEFAULT_KERNEL_URL}\n  sha256:{DEFAULT_KERNEL_SHA256}")
+    print(f"\nThe guest rootfs build pulls CPU PyTorch and transformers; expect a"
+          f" multi-gigabyte image and several minutes.\n")
+    if not args.confirm:
+        print("Re-run with --confirm to proceed.", file=sys.stderr)
+        return 3
+
+    rootfs = Path(args.rootfs) if args.rootfs else runtime / "results/model-intake-runner/rootfs.ext4"
+    if not rootfs.is_file():
+        print(f"==> building guest rootfs -> {rootfs}")
+        built = _run([str(runtime / "scripts/build-model-intake-guest-rootfs.sh"), str(rootfs)])
+        if built.returncode != 0:
+            print("Guest rootfs build failed.", file=sys.stderr)
+            return built.returncode
+    else:
+        print(f"==> reusing existing guest rootfs {rootfs}")
+
+    bind_host = args.bind_host or docker_bridge_address()
+    if not bind_host:
+        print("Could not determine the Docker bridge gateway; pass --bind-host explicitly.",
+              file=sys.stderr)
+        return 2
+
+    print(f"==> provisioning Firecracker (bind {bind_host}:{args.bind_port})")
+    provision_env = {
+        **os.environ,
+        "MODEL_INTAKE_KERNEL_URL": args.kernel_url,
+        "MODEL_INTAKE_KERNEL_SHA256": args.kernel_sha256,
+        "MODEL_INTAKE_ROOTFS_SOURCE": str(rootfs),
+        "MODEL_INTAKE_RUNNER_BIND_HOST": bind_host,
+        "MODEL_INTAKE_RUNNER_BIND_PORT": str(args.bind_port),
+    }
+    provisioned = _run(
+        [str(runtime / "scripts/provision-model-intake-firecracker.sh")], env=provision_env
+    )
+    if provisioned.returncode != 0:
+        print("Provisioning failed.", file=sys.stderr)
+        return provisioned.returncode
+
+    builder_id = args.builder_id or f"shakerscan-runner-{platform.node()}"
+    with RUNNER_ENV_FILE.open("a") as handle:
+        for key, value in {**signer_env, "MODEL_INTAKE_RUNNER_BUILDER_ID": builder_id}.items():
+            handle.write(f"{key}={value}\n")
+
+    token = _read_runner_env("MODEL_INTAKE_RUNNER_INTERNAL_TOKEN")
+    if not token:
+        print(f"No internal token found in {RUNNER_ENV_FILE}.", file=sys.stderr)
+        return 2
+
+    print(f"==> enabling {SERVICE}")
+    enabled = _run(["systemctl", "enable", "--now", SERVICE])
+    if enabled.returncode != 0:
+        print(f"Could not enable {SERVICE}; check journalctl -u {SERVICE}.", file=sys.stderr)
+        return enabled.returncode
+
+    print("==> wiring the API to the runner")
+    _write_dotenv(runtime / ".env", {
+        "MODEL_INTAKE_RUNNER_URL": f"http://{bind_host}:{args.bind_port}",
+        "MODEL_INTAKE_RUNNER_INTERNAL_TOKEN": token,
+        "MODEL_INTAKE_RUNNER_HOST_RESULTS_ROOT": "/var/lib/shakerscan/model-intake-results",
+    })
+    _run(["docker", "compose", "restart", "api"], cwd=str(runtime))
+
+    print("\nInstalled. Verify with:")
+    print("  ./scanner.sh model-intake-runner status")
+    print("  curl -s localhost:8080/model-intake/runners/readiness")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="scanner.sh model-intake-runner")
+    parser.add_argument("--runtime", default=".", help="ShakerScan runtime directory")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    status = sub.add_parser("status", help="Report host capability and install state")
+    status.add_argument("--json", action="store_true")
+    status.set_defaults(func=cmd_status)
+
+    install = sub.add_parser("install", help="Install the microVM tier on this host")
+    install.add_argument("--confirm", action="store_true", help="Apply the host changes")
+    install.add_argument("--signer", help="kms:<key-id> for production, or local-pem")
+    install.add_argument("--builder-id", help="Recorded in signed runner receipts")
+    install.add_argument("--rootfs", help="Reuse a prebuilt guest rootfs.ext4")
+    install.add_argument("--bind-host", help="Address the API container reaches the runner on")
+    install.add_argument("--bind-port", type=int, default=DEFAULT_BIND_PORT)
+    install.add_argument("--kernel-url", default=DEFAULT_KERNEL_URL)
+    install.add_argument("--kernel-sha256", default=DEFAULT_KERNEL_SHA256)
+    install.set_defaults(func=cmd_install)
+
+    args = parser.parse_args(argv)
+    return args.func(args, Path(args.runtime).resolve())
+
+
+if __name__ == "__main__":
+    sys.exit(main())

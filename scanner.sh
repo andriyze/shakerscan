@@ -1583,6 +1583,8 @@ print_help() {
     echo "  fleet reconcile    Reconcile registered workers into local WireGuard state"
     echo "  fleet accept       Run physical multi-node acceptance checks"
     echo "  join <url> [...]   Join this Linux host as a worker-only fleet node"
+    echo "  model-intake-runner status   Report microVM (Firecracker/KVM) host capability"
+    echo "  model-intake-runner install  Opt-in install of the Model Intake microVM tier (root)"
     echo "  build              Build Docker images"
     echo "  rebuild [opts]     Rebuild Docker images (cached by default)"
     echo "                       --no-cache  Full rebuild (slow, 10-20 min)"
@@ -2812,6 +2814,16 @@ case $COMMAND in
             exit 1
         fi
         exec python3 "$SCRIPT_DIR/scripts/shakerscan_mcp.py"
+        ;;
+    model-intake-runner)
+        # Opt-in on purpose: this tier needs root, mutates the host, and costs a
+        # multi-gigabyte guest image that most hosts cannot use at all.
+        if [ ! -f "$SCRIPT_DIR/scripts/model_intake_runner_cli.py" ]; then
+            echo -e "${RED}Error: the Model Intake runner installer is missing from this runtime.${NC}"
+            echo "Re-run the ShakerScan installer to refresh runtime files."
+            exit 1
+        fi
+        exec python3 "$SCRIPT_DIR/scripts/model_intake_runner_cli.py" --runtime "$SCRIPT_DIR" "${ARGS[@]}"
         ;;
     fleet)
         if [ "${ARGS[0]:-}" = "accept" ]; then

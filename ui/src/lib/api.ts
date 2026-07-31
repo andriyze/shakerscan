@@ -4003,6 +4003,25 @@ export async function getModelIntakeOperatorCredential(): Promise<ModelIntakeOpe
   }
 }
 
+export interface ModelIntakeRunnerInstallPlan {
+  supported: boolean
+  reason: string
+  already_configured: boolean
+  host_platform?: string
+  cpu_virtualization?: boolean | null
+  command: string
+  status_command: string
+  signer_choices: { value: string; label: string; production: boolean; detail: string }[]
+  host_mutations: string[]
+  cost: string
+}
+
+export async function getModelIntakeRunnerInstallPlan(): Promise<ModelIntakeRunnerInstallPlan> {
+  const res = await fetch(`${API_URL}/model-intake/runners/install-plan`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load runner install plan'))
+  return res.json()
+}
+
 export async function getModelIntakeRunnerReadiness(): Promise<ModelIntakeRunnerReadiness> {
   const res = await fetch(`${API_URL}/model-intake/runners/readiness`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load Firecracker runner readiness'))

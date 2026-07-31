@@ -29,6 +29,7 @@ import {
   getModelIntakeOperatorCredential,
   getModelIntakeScannerReadiness,
   getModelIntakeRunnerReadiness,
+  getModelIntakeRunnerInstallPlan,
   getPolicyProfiles,
   listRecentModelIntakeScans,
   resolveModelIntakeReference,
@@ -42,6 +43,7 @@ import {
   type ModelIntakeResolveResponse,
   type ModelIntakeScanRequest,
   type ModelIntakeRunnerReadiness,
+  type ModelIntakeRunnerInstallPlan,
   type ModelIntakeScanSummary,
   type ModelIntakeScannerReadiness,
   type ModelIntakeTrustAnchor,
@@ -59,6 +61,7 @@ import {
   IntakeContextBar,
   IntakePhaseTabs,
   PreflightScanTracker,
+  RunnerInstallCard,
   isTerminalScanStatus,
   type IntakePhase,
 } from './IntakeShell'
@@ -455,6 +458,7 @@ function ModelIntakeSettingsContent() {
   const [admissionsError, setAdmissionsError] = useState<string | null>(null)
   const [scannerReadiness, setScannerReadiness] = useState<ModelIntakeScannerReadiness | null>(null)
   const [runnerReadiness, setRunnerReadiness] = useState<ModelIntakeRunnerReadiness | null>(null)
+  const [runnerInstallPlan, setRunnerInstallPlan] = useState<ModelIntakeRunnerInstallPlan | null>(null)
   const [intakeScans, setIntakeScans] = useState<ModelIntakeScanSummary[]>([])
   const [queuedScanIds, setQueuedScanIds] = useState<string[]>([])
   const [staticScanId, setStaticScanId] = useState('')
@@ -541,11 +545,15 @@ function ModelIntakeSettingsContent() {
   }, [])
 
   const loadRunnerReadiness = useCallback(async () => {
-    try {
-      setRunnerReadiness(await getModelIntakeRunnerReadiness())
-    } catch {
-      setRunnerReadiness(null)
-    }
+    // Readiness and the install plan answer different questions — "is it
+    // running" and "can this host run it at all" — and the Status panel needs
+    // both to decide between an install button and an unavailable notice.
+    const [readiness, plan] = await Promise.allSettled([
+      getModelIntakeRunnerReadiness(),
+      getModelIntakeRunnerInstallPlan(),
+    ])
+    setRunnerReadiness(readiness.status === 'fulfilled' ? readiness.value : null)
+    setRunnerInstallPlan(plan.status === 'fulfilled' ? plan.value : null)
   }, [])
 
   const loadIntakeScans = useCallback(async () => {
@@ -2216,6 +2224,15 @@ function ModelIntakeSettingsContent() {
       )}
 
       {phase === 'status' && (
+        <>
+        <Card className="min-w-0 p-4">
+          <RunnerInstallCard
+            readiness={runnerReadiness}
+            plan={runnerInstallPlan}
+            onRecheck={loadRunnerReadiness}
+          />
+        </Card>
+
         <Card className="min-w-0 p-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
@@ -2257,6 +2274,7 @@ function ModelIntakeSettingsContent() {
             <div className="mt-3 text-xs text-gray-500">Checking adapter readiness…</div>
           )}
         </Card>
+        </>
       )}
     </div>
   )

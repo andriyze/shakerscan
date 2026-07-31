@@ -41,6 +41,42 @@ The Firecracker endpoint must return `ready:true` and `status:"READY"` before a 
 reports `NOT_READY`, stop the physical execution path and report `INCOMPLETE` with the failed readiness checks.
 Do not substitute the container sandbox, QEMU, Docker, a host process, or a self-authored receipt.
 
+### The microVM tier is opt-in and usually just not installed
+
+`NOT_READY` on a KVM-capable host almost always means the tier was never installed, not that anything broke.
+It is deliberately excluded from `scanner.sh start`: it needs root, mutates the host (systemd unit, cgroup
+parent, `/srv/jailer`, nftables), and costs a multi-gigabyte guest image that most hosts cannot use.
+
+Distinguish the three states before reporting, and never describe an uninstalled tier as a fault:
+
+| Endpoint says | Meaning | What to tell the user |
+|---|---|---|
+| `UNSUPPORTED_HOST`, `unsupported_reason: host_platform` | macOS/Windows control plane | The tier is unavailable here; every other Model Intake check is unaffected |
+| `UNSUPPORTED_HOST`, `unsupported_reason: no_hardware_virtualization` | No `vmx`/`svm` CPU flag | Usually a per-instance cloud setting, not a hard limit — on AWS, the nested-virtualization CPU option on a stopped instance |
+| `NOT_READY` | Host could run it; prerequisites incomplete | Point at the opt-in installer below |
+
+```bash
+# Does this host support it, and is it installed?
+./scanner.sh model-intake-runner status
+./scanner.sh model-intake-runner status --json
+
+# What the operator must run (host facts + exact command; never executed by the API)
+curl -s "$API_BASE/model-intake/runners/install-plan"
+```
+
+Installation is the operator's action on the host, never yours and never the API's. It requires root and an
+explicit `--confirm`, and it asks for a receipt signer: `--signer kms:<key-id>` is the production trust
+anchor, `--signer local-pem` proves the receipt path but is **not** production trust. Surface the command;
+do not attempt to run it through the API, the Docker socket, or a privileged container.
+
+```bash
+sudo ./scanner.sh model-intake-runner install --signer kms:<key-id> --confirm
+```
+
+Readiness is also measured from inside the API container, which cannot see host `/dev/kvm`, `ip`, or `nft`.
+A correctly installed runner is therefore reported through `MODEL_INTAKE_RUNNER_URL`, which the installer
+wires; do not read the local `checks` map as proof that a provisioned host runner is broken.
+
 Scanner readiness must also show every applicable shipped adapter ready. Semgrep rule and Trivy database
 freshness are server-measured and enforced again immediately before execution. If readiness reports
 `reassessment_required:true`, do not treat a prior clean scan as current: rebuild the scanner material and use

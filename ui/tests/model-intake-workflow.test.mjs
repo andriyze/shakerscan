@@ -273,3 +273,20 @@ test('a Linux host with no CPU virtualization is named precisely, not "n/a on li
   // The page must actually pass the new signal through to the context bar.
   assert.match(page, /runnerUnsupportedReason=\{runnerReadiness\?\.unsupported_reason\}/)
 })
+
+test('the microVM tier is offered as an opt-in install, not executed by the API', () => {
+  // Installing takes root on the host. The API runs in a container and must
+  // not do that on the operator's behalf, so the button hands over an exact
+  // command rather than pretending to run one.
+  assert.match(api, /getModelIntakeRunnerInstallPlan/)
+  assert.match(api, /ModelIntakeRunnerInstallPlan/)
+  assert.match(shell, /Set up microVM runner/)
+  assert.match(shell, /Receipt signer/)
+  assert.match(shell, /navigator\.clipboard\.writeText\(command\)/)
+  // An unsupported host gets the reason, never an install button it cannot use.
+  assert.match(shell, /plan\.supported/)
+  assert.match(shell, /Every other Model Intake check is unaffected/)
+  // The Status phase renders it and can re-check after the operator runs it.
+  assert.match(page, /<RunnerInstallCard/)
+  assert.match(page, /onRecheck=\{loadRunnerReadiness\}/)
+})

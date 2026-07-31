@@ -1,7 +1,12 @@
 'use client'
 
-import { CheckCircle2, Circle, LockKeyhole, PackageCheck, ShieldAlert } from 'lucide-react'
-import type { ModelIntakeScanSummary } from '@/lib/api'
+import { useState } from 'react'
+import { CheckCircle2, Circle, Copy, LockKeyhole, PackageCheck, ShieldAlert, Server } from 'lucide-react'
+import type {
+  ModelIntakeRunnerInstallPlan,
+  ModelIntakeRunnerReadiness,
+  ModelIntakeScanSummary,
+} from '@/lib/api'
 
 // Model Intake is one pipeline: pick a model, produce technical evidence, then
 // take that exact evidence through controlled admission. It used to render as
@@ -142,6 +147,126 @@ export function IntakePhaseTabs({
         )
       })}
     </nav>
+  )
+}
+
+export function RunnerInstallCard({
+  readiness,
+  plan,
+  onRecheck,
+}: {
+  readiness: ModelIntakeRunnerReadiness | null
+  plan: ModelIntakeRunnerInstallPlan | null
+  onRecheck: () => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [signer, setSigner] = useState('kms:<key-id>')
+  const [copied, setCopied] = useState(false)
+  const installed = readiness?.ready === true
+  const command = (plan?.command || '').replace('<choice>', signer)
+
+  async function copyCommand() {
+    try {
+      await navigator.clipboard.writeText(command)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch {
+      setCopied(false)
+    }
+  }
+
+  return (
+    <div className="min-w-0 rounded-lg border border-gray-800 bg-gray-950 p-4">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 text-white">
+            <Server className="h-4 w-4 text-cyan-300" />
+            <h3 className="text-sm font-semibold">microVM runner (Firecracker)</h3>
+          </div>
+          <p className="mt-1 max-w-3xl text-xs text-gray-500">
+            Runs the exact model in a disposable no-egress microVM. Not installed by default: it
+            needs root, changes the host, and costs a multi-gigabyte guest image.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className={`rounded px-2 py-1 text-xs font-semibold ${
+            installed ? 'bg-green-950/50 text-green-300'
+              : readiness?.supported_host === false ? 'bg-gray-800 text-gray-400'
+                : 'bg-yellow-950/50 text-yellow-200'
+          }`}>
+            {installed ? 'READY' : readiness?.supported_host === false ? 'unavailable on this host' : 'not installed'}
+          </span>
+          <button type="button" onClick={onRecheck} className="rounded border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800">
+            Re-check
+          </button>
+        </div>
+      </div>
+
+      {!installed && plan && (
+        plan.supported ? (
+          <div className="mt-3">
+            <button
+              type="button"
+              onClick={() => setOpen((value) => !value)}
+              className="inline-flex items-center gap-2 rounded-lg bg-cyan-700 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-600"
+            >
+              <Server className="h-4 w-4" /> {open ? 'Hide setup' : 'Set up microVM runner'}
+            </button>
+            {open && (
+              <div className="mt-3 grid gap-3 rounded border border-gray-800 bg-gray-900 p-3">
+                {/* Installing takes root on the host. The API runs in a
+                    container and must not do that on the operator's behalf, so
+                    this hands over an exact command instead of pretending. */}
+                <p className="text-xs text-gray-400">
+                  Run this on the ShakerScan host. It asks for confirmation and prints every change
+                  before touching anything.
+                </p>
+                <div>
+                  <div className="text-xs font-medium text-gray-300">Receipt signer</div>
+                  <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                    {plan.signer_choices.map((choice) => (
+                      <button
+                        key={choice.value}
+                        type="button"
+                        onClick={() => setSigner(choice.value)}
+                        className={`min-w-0 rounded border p-2 text-left ${
+                          signer === choice.value ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-950 hover:border-gray-700'
+                        }`}
+                      >
+                        <div className="text-xs font-medium text-white">
+                          {choice.label}{choice.production ? '' : ' (non-production)'}
+                        </div>
+                        <div className="mt-1 break-words text-[11px] text-gray-500">{choice.detail}</div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="flex min-w-0 items-center gap-2 rounded border border-gray-800 bg-black/40 p-2">
+                  <code className="min-w-0 flex-1 break-all font-mono text-[11px] text-cyan-200">{command}</code>
+                  <button type="button" onClick={copyCommand} className="shrink-0 rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
+                    <Copy className="h-3 w-3" /> {copied ? 'Copied' : 'Copy'}
+                  </button>
+                </div>
+                <div className="text-xs text-gray-500">
+                  <div className="font-medium text-gray-400">It will:</div>
+                  <ul className="mt-1 list-disc pl-4">
+                    {plan.host_mutations.map((item) => <li key={item}>{item}</li>)}
+                  </ul>
+                  <p className="mt-2">{plan.cost}</p>
+                </div>
+                <p className="text-xs text-gray-500">
+                  When it finishes, choose <span className="text-gray-300">Re-check</span> above.
+                </p>
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="mt-3 rounded border border-gray-800 bg-gray-900 p-3 text-xs text-gray-400">
+            {plan.reason} Every other Model Intake check is unaffected.
+          </div>
+        )
+      )}
+    </div>
   )
 }
 

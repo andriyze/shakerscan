@@ -103,6 +103,11 @@ requested count as successfully queued when the response is partial.
   approvals, deterministic policy, and isolated signer promotion.
 - Inspect `/model-intake/scanners/readiness` and `/model-intake/runners/readiness` before promising coverage.
   Missing required tools or physical KVM is a non-pass, not a reason to omit the control.
+- The Firecracker microVM tier is **opt-in and not installed by default**, so `NOT_READY` on a KVM-capable
+  host usually means "never installed", not "broken". Check `./scanner.sh model-intake-runner status` or
+  `/model-intake/runners/install-plan`, then hand the operator
+  `sudo ./scanner.sh model-intake-runner install --signer <kms:key-id|local-pem> --confirm`. Installing takes
+  root on the host: never run it yourself, and never route it through the API or the Docker socket.
 - Model names such as CodeRankEmbed and CodeSage are conformance examples, never allowlist branches. Resolve
   any supported Hugging Face/HTTP/cloud/OCI/MLflow source through the same format- and fact-selected controls.
 - After queueing a preflight scan or runner job, report its ID and stop unless the user explicitly asked to
