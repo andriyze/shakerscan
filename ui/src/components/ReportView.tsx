@@ -468,7 +468,7 @@ function ModelIntakeSbomDownload({ scanId }: { scanId: string }) {
     return () => { cancelled = true }
   }, [scanId])
 
-  async function download(format: 'cyclonedx' | 'aibom') {
+  async function download(format: 'cyclonedx' | 'spdx' | 'aibom') {
     setBusy(format)
     setError(null)
     try {
@@ -493,6 +493,15 @@ function ModelIntakeSbomDownload({ scanId }: { scanId: string }) {
         >
           <Download className="h-4 w-4" />
           {busy === 'cyclonedx' ? 'Exporting…' : `SBOM (CycloneDX ${summary.spec_version || '1.5'})`}
+        </button>
+        <button
+          type="button"
+          onClick={() => download('spdx')}
+          disabled={busy === 'spdx'}
+          className="inline-flex items-center gap-2 rounded border border-gray-600 px-3 py-1.5 text-sm text-gray-200 hover:bg-gray-700 disabled:opacity-50"
+        >
+          <Download className="h-4 w-4" />
+          {busy === 'spdx' ? 'Exporting…' : 'SBOM (SPDX 2.3)'}
         </button>
         {summary.aibom_available && (
           <button

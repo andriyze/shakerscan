@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import configparser
 import dataclasses
 import hashlib
 import json
@@ -15,7 +16,10 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 import zipfile
+
+import yaml
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1342,44 +1346,279 @@ def run_builtin_malware_scan(subject_path: Path, subject: dict[str, Any]) -> dic
     )
 
 
-DEPENDENCY_FILES = {"requirements.txt", "requirements-dev.txt", "pyproject.toml", "package-lock.json"}
+DEPENDENCY_FILES = {
+    # Python
+    "pyproject.toml", "poetry.lock", "pipfile.lock", "setup.cfg",
+    "environment.yml", "environment.yaml", "conda.yaml", "conda.yml",
+    # JavaScript
+    "package.json", "package-lock.json", "yarn.lock",
+}
+# requirements.txt, requirements-dev.txt, requirements/train.txt, ...
+DEPENDENCY_FILE_PATTERNS = (re.compile(r"^requirements[\w.-]*\.txt$", re.IGNORECASE),)
+MAX_DEPENDENCY_FILE_BYTES = 4_000_000
+# PEP 508: name, optional extras, then the specifiers we can pin from.
+_PEP508 = re.compile(
+    r"^(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*(?P<spec>.*)$"
+)
+_EXACT_SPEC = re.compile(r"^\s*===?\s*(?P<version>[^\s;,]+)")
+
+
+def _is_dependency_file(name: str) -> bool:
+    lowered = name.lower()
+    return lowered in DEPENDENCY_FILES or any(
+        pattern.match(lowered) for pattern in DEPENDENCY_FILE_PATTERNS
+    )
+
+
+def _component(ecosystem: str, name: str, version: str) -> dict[str, Any]:
+    clean_name = str(name).strip()
+    clean_version = str(version).strip().lstrip("=v")
+    return {
+        "type": "library",
+        "name": clean_name,
+        "version": clean_version,
+        "purl": f"pkg:{ecosystem}/{clean_name}@{clean_version}",
+    }
+
+
+def _pep508(requirement: str, ecosystem: str = "pypi") -> tuple[dict[str, Any] | None, str | None]:
+    """Split one PEP 508 requirement into a pinned component or an unpinned note."""
+    text = requirement.split("#", 1)[0].split(";", 1)[0].strip()
+    if not text or text.startswith("-"):
+        return None, None
+    match = _PEP508.match(text)
+    if not match:
+        return None, text[:300]
+    exact = _EXACT_SPEC.match(match.group("spec") or "")
+    if not exact:
+        return None, text[:300]
+    return _component(ecosystem, match.group("name"), exact.group("version")), None
+
+
+def _parse_requirements(text: str) -> tuple[list[dict[str, Any]], list[str]]:
+    components: list[dict[str, Any]] = []
+    unpinned: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        component, note = _pep508(line)
+        if component:
+            components.append(component)
+        elif note:
+            unpinned.append(note)
+    return components, unpinned
+
+
+def _parse_pyproject(text: str) -> tuple[list[dict[str, Any]], list[str]]:
+    """PEP 621 dependencies plus Poetry's table, without executing anything."""
+    try:
+        data = tomllib.loads(text)
+    except (tomllib.TOMLDecodeError, ValueError):
+        return [], ["pyproject.toml:parse_error"]
+    components: list[dict[str, Any]] = []
+    unpinned: list[str] = []
+    project = data.get("project") if isinstance(data.get("project"), dict) else {}
+    for requirement in project.get("dependencies") or []:
+        component, note = _pep508(str(requirement))
+        if component:
+            components.append(component)
+        elif note:
+            unpinned.append(note)
+    optional = project.get("optional-dependencies")
+    for group in (optional.values() if isinstance(optional, dict) else []):
+        for requirement in group if isinstance(group, list) else []:
+            component, note = _pep508(str(requirement))
+            if component:
+                components.append(component)
+            elif note:
+                unpinned.append(note)
+    poetry = (
+        data.get("tool", {}).get("poetry", {}) if isinstance(data.get("tool"), dict) else {}
+    )
+    for name, constraint in (poetry.get("dependencies") or {}).items():
+        if str(name).lower() == "python":
+            continue
+        # Poetry pins as "1.2.3" or {version = "1.2.3"}; carets and tildes are ranges.
+        raw = constraint.get("version") if isinstance(constraint, dict) else constraint
+        version = str(raw or "").strip()
+        if re.fullmatch(r"={0,2}\s*\d[\w.+-]*", version):
+            components.append(_component("pypi", str(name), version))
+        else:
+            unpinned.append(f"{name} {version or 'unspecified'}"[:300])
+    return components, unpinned
+
+
+def _parse_poetry_lock(text: str) -> tuple[list[dict[str, Any]], list[str]]:
+    try:
+        data = tomllib.loads(text)
+    except (tomllib.TOMLDecodeError, ValueError):
+        return [], ["poetry.lock:parse_error"]
+    packages = data.get("package") if isinstance(data.get("package"), list) else []
+    return [
+        _component("pypi", str(item["name"]), str(item["version"]))
+        for item in packages
+        if isinstance(item, dict) and item.get("name") and item.get("version")
+    ], []
+
+
+def _parse_pipfile_lock(text: str) -> tuple[list[dict[str, Any]], list[str]]:
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return [], ["Pipfile.lock:parse_error"]
+    components: list[dict[str, Any]] = []
+    unpinned: list[str] = []
+    for section in ("default", "develop"):
+        entries = data.get(section) if isinstance(data.get(section), dict) else {}
+        for name, value in entries.items():
+            version = str((value or {}).get("version") or "") if isinstance(value, dict) else ""
+            if version.startswith("=="):
+                components.append(_component("pypi", str(name), version[2:]))
+            else:
+                unpinned.append(f"{name} {version or 'unspecified'}"[:300])
+    return components, unpinned
+
+
+def _parse_setup_cfg(text: str) -> tuple[list[dict[str, Any]], list[str]]:
+    parser = configparser.ConfigParser(strict=False, interpolation=None)
+    try:
+        parser.read_string(text)
+    except configparser.Error:
+        return [], ["setup.cfg:parse_error"]
+    components: list[dict[str, Any]] = []
+    unpinned: list[str] = []
+    if not parser.has_option("options", "install_requires"):
+        return [], []
+    for line in parser.get("options", "install_requires").splitlines():
+        component, note = _pep508(line.strip())
+        if component:
+            components.append(component)
+        elif note:
+            unpinned.append(note)
+    return components, unpinned
+
+
+def _parse_conda_environment(text: str) -> tuple[list[dict[str, Any]], list[str]]:
+    """conda dependencies, including the nested pip: block."""
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return [], ["conda-environment:parse_error"]
+    if not isinstance(data, dict):
+        return [], []
+    components: list[dict[str, Any]] = []
+    unpinned: list[str] = []
+    for entry in data.get("dependencies") or []:
+        if isinstance(entry, dict):
+            for requirement in entry.get("pip") or []:
+                component, note = _pep508(str(requirement))
+                if component:
+                    components.append(component)
+                elif note:
+                    unpinned.append(note)
+            continue
+        # conda pins with a single "=", e.g. numpy=1.26.4
+        match = re.fullmatch(r"([A-Za-z0-9][A-Za-z0-9._-]*)\s*=\s*([\w.+!-]+)", str(entry).strip())
+        if match:
+            components.append(_component("conda", match.group(1), match.group(2)))
+        elif str(entry).strip():
+            unpinned.append(str(entry).strip()[:300])
+    return components, unpinned
+
+
+def _parse_package_json(text: str) -> tuple[list[dict[str, Any]], list[str]]:
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return [], ["package.json:parse_error"]
+    components: list[dict[str, Any]] = []
+    unpinned: list[str] = []
+    for section in ("dependencies", "devDependencies", "peerDependencies"):
+        entries = data.get(section) if isinstance(data.get(section), dict) else {}
+        for name, raw in entries.items():
+            version = str(raw or "").strip()
+            # A manifest range is not a pin; the lockfile is what pins it.
+            if re.fullmatch(r"\d[\w.+-]*", version):
+                components.append(_component("npm", str(name), version))
+            else:
+                unpinned.append(f"{name} {version or 'unspecified'}"[:300])
+    return components, unpinned
+
+
+def _parse_package_lock(text: str) -> tuple[list[dict[str, Any]], list[str]]:
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return [], ["package-lock.json:parse_error"]
+    components: list[dict[str, Any]] = []
+    packages = payload.get("packages") if isinstance(payload, dict) else {}
+    for package_path, value in (packages.items() if isinstance(packages, dict) else []):
+        if not package_path or not isinstance(value, dict):
+            continue
+        name = str(value.get("name") or Path(package_path).name)
+        version = str(value.get("version") or "")
+        if name and version:
+            components.append(_component("npm", name, version))
+    legacy = payload.get("dependencies") if isinstance(payload, dict) else {}
+    for name, value in (legacy.items() if isinstance(legacy, dict) else []):
+        if isinstance(value, dict) and value.get("version"):
+            components.append(_component("npm", str(name), str(value["version"])))
+    return components, []
+
+
+def _parse_yarn_lock(text: str) -> tuple[list[dict[str, Any]], list[str]]:
+    """Yarn v1 lockfiles are not YAML; pair each entry header with its version."""
+    components: list[dict[str, Any]] = []
+    pending: str | None = None
+    for raw_line in text.splitlines():
+        if raw_line.startswith("#") or not raw_line.strip():
+            continue
+        if not raw_line.startswith(" "):
+            header = raw_line.split(",")[0].strip().strip('":').strip()
+            at = header.rfind("@")
+            pending = header[:at] if at > 0 else header or None
+            continue
+        match = re.match(r'\s+version\s+"?([\w.+-]+)"?', raw_line)
+        if match and pending:
+            components.append(_component("npm", pending, match.group(1)))
+            pending = None
+    return components, []
+
+
+_DEPENDENCY_PARSERS: tuple[tuple[Callable[[str], bool], Callable[[str], tuple[list[dict[str, Any]], list[str]]]], ...] = (
+    (lambda name: bool(DEPENDENCY_FILE_PATTERNS[0].match(name)), _parse_requirements),
+    (lambda name: name == "pyproject.toml", _parse_pyproject),
+    (lambda name: name == "poetry.lock", _parse_poetry_lock),
+    (lambda name: name == "pipfile.lock", _parse_pipfile_lock),
+    (lambda name: name == "setup.cfg", _parse_setup_cfg),
+    (lambda name: name in {"environment.yml", "environment.yaml", "conda.yaml", "conda.yml"}, _parse_conda_environment),
+    (lambda name: name == "package-lock.json", _parse_package_lock),
+    (lambda name: name == "package.json", _parse_package_json),
+    (lambda name: name == "yarn.lock", _parse_yarn_lock),
+)
 
 
 def _requirement_components(path: Path) -> tuple[list[dict[str, Any]], list[str]]:
-    components: list[dict[str, Any]] = []
-    unpinned: list[str] = []
-    if path.name.startswith("requirements"):
-        for raw_line in path.read_text("utf-8", errors="replace").splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith(("#", "-")):
-                continue
-            match = re.match(r"([A-Za-z0-9_.-]+)\s*==\s*([^\s;]+)", line)
-            if match:
-                name, version = match.groups()
-                components.append({"type": "library", "name": name, "version": version, "purl": f"pkg:pypi/{name}@{version}"})
-            else:
-                unpinned.append(line[:300])
-    elif path.name == "package-lock.json":
-        try:
-            payload = json.loads(path.read_text("utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return [], ["package-lock.json:parse_error"]
-        packages = payload.get("packages") if isinstance(payload, dict) else {}
-        for package_path, value in (packages.items() if isinstance(packages, dict) else []):
-            if not package_path or not isinstance(value, dict):
-                continue
-            name = str(value.get("name") or Path(package_path).name)
-            version = str(value.get("version") or "")
-            if name and version:
-                components.append({"type": "library", "name": name, "version": version, "purl": f"pkg:npm/{name}@{version}"})
-    return components, unpinned
+    """Read one dependency manifest. Never executes it; oversized files are skipped."""
+    name = path.name.lower()
+    try:
+        if path.stat().st_size > MAX_DEPENDENCY_FILE_BYTES:
+            return [], [f"{path.name}:file_too_large"]
+        text = path.read_text("utf-8", errors="replace")
+    except OSError:
+        return [], [f"{path.name}:unreadable"]
+    for matches, parser in _DEPENDENCY_PARSERS:
+        if matches(name):
+            return parser(text)
+    return [], []
 
 
 def run_builtin_sbom_scan(subject_path: Path, subject: dict[str, Any]) -> dict[str, Any]:
     started_at = _utc_iso()
     root = subject_path if subject_path.is_dir() else subject_path.parent
     files, files_discovered, inventory_truncated = _subject_file_inventory(subject_path)
-    dependency_paths = [path for path in files if path.name.lower() in DEPENDENCY_FILES]
+    dependency_paths = [path for path in files if _is_dependency_file(path.name)]
     components: list[dict[str, Any]] = []
     unpinned: list[dict[str, str]] = []
     for path in dependency_paths:

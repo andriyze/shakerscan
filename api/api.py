@@ -176,11 +176,13 @@ except ModuleNotFoundError:
 try:
     from model_intake_sbom import (
         build_model_intake_cyclonedx as _build_model_intake_cyclonedx,
+        build_model_intake_spdx as _build_model_intake_spdx,
         model_intake_bom_completeness as _model_intake_bom_completeness,
     )
 except ModuleNotFoundError:
     from api.model_intake_sbom import (
         build_model_intake_cyclonedx as _build_model_intake_cyclonedx,
+        build_model_intake_spdx as _build_model_intake_spdx,
         model_intake_bom_completeness as _model_intake_bom_completeness,
     )
 
@@ -14151,7 +14153,7 @@ async def model_intake_runner_stage_status():
 @app.get("/model-intake/scans/{scan_id}/sbom")
 async def download_model_intake_sbom(
     scan_id: str,
-    format: str = Query("cyclonedx", pattern="^(cyclonedx|aibom)$"),
+    format: str = Query("cyclonedx", pattern="^(cyclonedx|spdx|aibom)$"),
     download: bool = Query(True),
 ):
     """Export a completed Model Intake scan as a bill of materials.
@@ -14161,7 +14163,9 @@ async def download_model_intake_sbom(
     """
     scan_uuid = _model_intake_uuid(scan_id, "scan id")
     async with db_pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT status,scan_type,result FROM scans WHERE id=$1", scan_uuid)
+        row = await conn.fetchrow(
+            "SELECT status,scan_type,result,completed_at FROM scans WHERE id=$1", scan_uuid
+        )
     if not row:
         raise HTTPException(status_code=404, detail="Scan not found")
     if str(row["scan_type"]) != "model_intake":
@@ -14177,6 +14181,20 @@ async def download_model_intake_sbom(
         if not isinstance(aibom, dict) or not aibom:
             raise HTTPException(status_code=409, detail="This scan recorded no AIBOM")
         document, filename = aibom, f"shakerscan-aibom-{scan_uuid}.json"
+    elif format == "spdx":
+        # Anchor the SPDX creation timestamp to the scan so the same evidence
+        # always exports byte-identically instead of changing per download.
+        completed = row["completed_at"]
+        created = (
+            completed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            if hasattr(completed, "astimezone")
+            else ""
+        )
+        try:
+            document = _build_model_intake_spdx(result, scan_id=str(scan_uuid), created=created)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        filename = f"shakerscan-sbom-{scan_uuid}.spdx.json"
     else:
         try:
             document = _build_model_intake_cyclonedx(result, scan_id=str(scan_uuid))
@@ -14205,7 +14223,7 @@ async def model_intake_sbom_summary(scan_id: str):
     model_intake = result.get("model_intake") if isinstance(result.get("model_intake"), dict) else {}
     return {
         "available": True,
-        "formats": ["cyclonedx", "aibom"],
+        "formats": ["cyclonedx", "spdx", "aibom"],
         "aibom_available": bool(isinstance(model_intake, dict) and model_intake.get("aibom")),
         "spec_version": document.get("specVersion"),
         **_model_intake_bom_completeness(document),

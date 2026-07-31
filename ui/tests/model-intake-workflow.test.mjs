@@ -426,10 +426,11 @@ test('a completed scan exports a downloadable bill of materials', () => {
   assert.match(api, /downloadModelIntakeSbom/)
   assert.match(api, /getModelIntakeSbomSummary/)
   assert.match(api, /\/model-intake\/scans\/\$\{scanId\}\/sbom/)
-  assert.match(api, /\.cdx\.json/)
+  assert.match(api, /'cdx\.json'/)
 
   assert.match(report, /ModelIntakeSbomDownload/)
   assert.match(report, /CycloneDX \$\{summary\.spec_version/)
+  assert.match(report, /SBOM \(SPDX 2\.3\)/)
   assert.match(report, /AIBOM/)
   // Reachable from the pipeline too, without opening the report.
   assert.match(shell, /downloadModelIntakeSbom\(scan\.id\)/)
@@ -442,4 +443,11 @@ test('a bill of materials states its own coverage', () => {
   assert.match(report, /dependency_inventory !== 'generated'/)
   assert.match(report, /no dependency inventory: re-run at Full scan depth/)
   assert.match(api, /dependency_inventory\?: 'generated' \| 'not_generated'/)
+})
+
+test('both bill-of-materials standards are offered', () => {
+  const report = readFileSync(path.join(root, 'src/components/ReportView.tsx'), 'utf8')
+  assert.match(api, /'cyclonedx' \| 'spdx' \| 'aibom'/)
+  assert.match(api, /spdx\.json/)
+  assert.match(report, /download\('spdx'\)/)
 })

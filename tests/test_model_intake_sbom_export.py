@@ -1,6 +1,7 @@
 """The exportable bill of materials is composed from recorded scan evidence."""
 
 import json
+import re
 from pathlib import Path
 import sys
 
@@ -97,3 +98,48 @@ def test_a_scan_without_model_intake_evidence_is_rejected():
             assert "Model Intake evidence" in str(exc)
         else:
             raise AssertionError(f"{payload} should not produce a bill of materials")
+
+
+def test_spdx_export_describes_the_same_components_as_cyclonedx():
+    from model_intake_sbom import build_model_intake_spdx
+
+    result = _scan_result()
+    cyclonedx = build_model_intake_cyclonedx(result, scan_id="s-1")
+    spdx = build_model_intake_spdx(result, scan_id="s-1", created="2026-07-31T10:00:00Z")
+
+    assert spdx["spdxVersion"] == "SPDX-2.3"
+    assert spdx["dataLicense"] == "CC0-1.0"
+    assert spdx["SPDXID"] == "SPDXRef-DOCUMENT"
+    assert spdx["creationInfo"]["created"] == "2026-07-31T10:00:00Z"
+
+    # The document describes the model, and every component is a package.
+    describes = [rel for rel in spdx["relationships"] if rel["relationshipType"] == "DESCRIBES"]
+    assert len(describes) == 1
+    root_id = describes[0]["relatedSpdxElement"]
+    assert len(spdx["packages"]) == len(cyclonedx["components"]) + 1
+
+    depends = {rel["relatedSpdxElement"] for rel in spdx["relationships"] if rel["relationshipType"] == "DEPENDS_ON"}
+    package_ids = {package["SPDXID"] for package in spdx["packages"]}
+    assert depends == package_ids - {root_id}
+    # Every SPDXID is well formed and unique.
+    assert len(package_ids) == len(spdx["packages"])
+    assert all(re.fullmatch(r"SPDXRef-[A-Za-z0-9.-]+", pid) for pid in package_ids)
+
+    purls = {
+        ref["referenceLocator"]
+        for package in spdx["packages"]
+        for ref in package.get("externalRefs", [])
+    }
+    assert "pkg:pypi/transformers@4.44.0" in purls
+
+
+def test_spdx_export_is_reproducible_and_anchored_to_the_scan():
+    from model_intake_sbom import build_model_intake_spdx
+
+    first = build_model_intake_spdx(_scan_result(), scan_id="s-1", created="2026-07-31T10:00:00Z")
+    second = build_model_intake_spdx(_scan_result(), scan_id="s-1", created="2026-07-31T10:00:00Z")
+    # Deriving `created` from the scan rather than now() keeps downloads identical.
+    assert json.dumps(first, sort_keys=True) == json.dumps(second, sort_keys=True)
+    assert first["documentNamespace"] != build_model_intake_spdx(
+        _scan_result(sha256="b" * 64), scan_id="s-1", created="2026-07-31T10:00:00Z"
+    )["documentNamespace"]

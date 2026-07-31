@@ -475,3 +475,100 @@ def test_a_status_outside_the_normalized_vocabulary_stays_redacted():
     )
 
     assert redacted["statuses"]["shakerscan-secret-rules"] == "***"
+
+
+def test_dependency_inventory_covers_the_manifests_model_repositories_actually_ship():
+    # The inventory read requirements*.txt and package-lock.json only, and
+    # matched pyproject.toml without having a parser for it — so a Poetry or
+    # conda repository produced an empty, clean-looking SBOM.
+    import json as _json
+    import tempfile
+    from pathlib import Path as _Path
+
+    from scanner.scanner_tools.model_intake_scanners import (
+        _is_dependency_file,
+        _requirement_components,
+    )
+
+    root = _Path(tempfile.mkdtemp())
+    cases = {
+        "requirements.txt": ("transformers==4.44.0\ntorch>=2.0\n", {"pkg:pypi/transformers@4.44.0"}),
+        "requirements-train.txt": ("accelerate==0.34.0\n", {"pkg:pypi/accelerate@0.34.0"}),
+        "pyproject.toml": (
+            '[project]\nname="m"\ndependencies=["safetensors==0.4.5"]\n'
+            '[tool.poetry.dependencies]\npython="^3.10"\neinops="0.8.0"\n',
+            {"pkg:pypi/safetensors@0.4.5", "pkg:pypi/einops@0.8.0"},
+        ),
+        "poetry.lock": ('[[package]]\nname="tqdm"\nversion="4.66.5"\n', {"pkg:pypi/tqdm@4.66.5"}),
+        "Pipfile.lock": (
+            _json.dumps({"default": {"sentencepiece": {"version": "==0.2.0"}}}),
+            {"pkg:pypi/sentencepiece@0.2.0"},
+        ),
+        "setup.cfg": ("[options]\ninstall_requires =\n    scipy==1.14.1\n", {"pkg:pypi/scipy@1.14.1"}),
+        "environment.yml": (
+            "dependencies:\n  - numpy=1.26.4\n  - pip:\n    - transformers==4.44.0\n",
+            {"pkg:conda/numpy@1.26.4", "pkg:pypi/transformers@4.44.0"},
+        ),
+        "package.json": (_json.dumps({"dependencies": {"onnxruntime": "1.19.2"}}), {"pkg:npm/onnxruntime@1.19.2"}),
+        "package-lock.json": (
+            _json.dumps({"packages": {"node_modules/ws": {"name": "ws", "version": "8.18.0"}}}),
+            {"pkg:npm/ws@8.18.0"},
+        ),
+        "yarn.lock": ('"lodash@^4.0.0":\n  version "4.17.21"\n', {"pkg:npm/lodash@4.17.21"}),
+    }
+    for name, (body, expected) in cases.items():
+        assert _is_dependency_file(name), f"{name} is not recognized as a dependency manifest"
+        path = root / name
+        path.write_text(body)
+        components, _ = _requirement_components(path)
+        assert expected <= {item["purl"] for item in components}, name
+
+
+def test_version_ranges_are_reported_unpinned_rather_than_invented():
+    import json as _json
+    import tempfile
+    from pathlib import Path as _Path
+
+    from scanner.scanner_tools.model_intake_scanners import _requirement_components
+
+    root = _Path(tempfile.mkdtemp())
+    # A caret/tilde/inequality range is not a pin. Recording one as a concrete
+    # version would put a component in the SBOM that is not what ships.
+    for name, body in (
+        ("requirements.txt", "torch>=2.0\n"),
+        ("package.json", _json.dumps({"dependencies": {"react": "^18.0.0"}})),
+        ("pyproject.toml", '[tool.poetry.dependencies]\nnumpy="^1.26"\n'),
+    ):
+        path = root / name
+        path.write_text(body)
+        components, unpinned = _requirement_components(path)
+        assert components == [], name
+        assert unpinned, name
+
+
+def test_dependency_manifests_are_never_executed_and_stay_bounded():
+    import tempfile
+    from pathlib import Path as _Path
+
+    from scanner.scanner_tools.model_intake_scanners import (
+        MAX_DEPENDENCY_FILE_BYTES,
+        _requirement_components,
+    )
+
+    root = _Path(tempfile.mkdtemp())
+    # setup.py is deliberately not a supported manifest: parsing it safely is
+    # possible but reading it is not, and executing it never is.
+    from scanner.scanner_tools.model_intake_scanners import _is_dependency_file
+    assert not _is_dependency_file("setup.py")
+
+    oversized = root / "requirements.txt"
+    oversized.write_text("a==1\n" * (MAX_DEPENDENCY_FILE_BYTES // 5 + 10))
+    components, notes = _requirement_components(oversized)
+    assert components == []
+    assert notes == ["requirements.txt:file_too_large"]
+
+    malformed = root / "pyproject.toml"
+    malformed.write_text("[project\nbroken")
+    components, notes = _requirement_components(malformed)
+    assert components == []
+    assert notes == ["pyproject.toml:parse_error"]

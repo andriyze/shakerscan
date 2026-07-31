@@ -749,10 +749,13 @@ The disposable microVM tier and corporate deployment-platform enforcement are ex
 not implied by a ShakerScan `ALLOW` alone.
 
 A completed scan exports a bill of materials at
-`GET /model-intake/scans/{scan_id}/sbom?format=cyclonedx|aibom`, downloadable from the scan report and
-the Model Intake pipeline. The CycloneDX 1.5 document is rooted on the scanned model artifact and
-carries the generated dependency inventory plus the AIBOM's base-model, tokenizer, and dataset
-components; `GET .../sbom/summary` reports component count and whether a dependency inventory was
+`GET /model-intake/scans/{scan_id}/sbom?format=cyclonedx|spdx|aibom`, downloadable from the scan report and
+the Model Intake pipeline. The CycloneDX 1.5 and SPDX 2.3 documents describe the same components,
+rooted on the scanned model artifact, carrying the generated dependency inventory plus the AIBOM's
+base-model, tokenizer, and dataset components; SPDX anchors its creation timestamp to the scan so
+exports are reproducible. The dependency inventory reads requirements*.txt, pyproject.toml (PEP 621
+and Poetry), poetry.lock, Pipfile.lock, setup.cfg, conda environment files, package.json,
+package-lock.json, and yarn.lock, recording only exact pins and reporting ranges as unpinned; `GET .../sbom/summary` reports component count and whether a dependency inventory was
 generated at all, since a Quick check never enumerates one.
 
 Model Intake findings use `tool/source=model_intake`, filter with `source_type=model_intake`, and are

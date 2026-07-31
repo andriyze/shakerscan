@@ -11,10 +11,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import Any
 
 
 CYCLONEDX_SPEC_VERSION = "1.5"
+SPDX_VERSION = "SPDX-2.3"
+SPDX_DATA_LICENSE = "CC0-1.0"
 AIBOM_COMPONENT_TYPES = {
     # CycloneDX 1.5 has a first-class "machine-learning-model" type; everything
     # else the AIBOM tracks maps onto an existing type rather than a custom one.
@@ -188,8 +191,115 @@ def model_intake_bom_completeness(document: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _spdx_id(prefix: str, value: str) -> str:
+    """SPDXIDs allow only letters, digits, dot and dash."""
+    safe = re.sub(r"[^A-Za-z0-9.-]", "-", value).strip("-") or "unnamed"
+    return f"SPDXRef-{prefix}-{safe[:80]}"
+
+
+def build_model_intake_spdx(
+    scan_result: Any, *, scan_id: str = "", created: str = ""
+) -> dict[str, Any]:
+    """Render the same evidence as SPDX 2.3 JSON.
+
+    Composed from the CycloneDX document so both exports describe exactly the
+    same components; only the serialization differs.
+    """
+    cyclonedx = build_model_intake_cyclonedx(scan_result, scan_id=scan_id)
+    root = _object(_object(cyclonedx.get("metadata")).get("component"))
+    # SPDX requires a creation timestamp. Deriving it from the scan keeps the
+    # export reproducible instead of changing on every download.
+    created_at = created or "1970-01-01T00:00:00Z"
+
+    def _licenses(component: dict[str, Any]) -> str:
+        for entry in component.get("licenses") or []:
+            license_object = _object(_object(entry).get("license"))
+            declared = license_object.get("id") or license_object.get("name")
+            if declared:
+                return str(declared)
+        return "NOASSERTION"
+
+    root_id = _spdx_id("Package", str(root.get("name") or "model"))
+    packages: list[dict[str, Any]] = []
+    relationships: list[dict[str, Any]] = [
+        {"spdxElementId": "SPDXRef-DOCUMENT", "relationshipType": "DESCRIBES", "relatedSpdxElement": root_id}
+    ]
+
+    root_package: dict[str, Any] = {
+        "SPDXID": root_id,
+        "name": str(root.get("name") or "model"),
+        "downloadLocation": "NOASSERTION",
+        "filesAnalyzed": False,
+        "licenseConcluded": "NOASSERTION",
+        "licenseDeclared": _licenses(root),
+        "copyrightText": "NOASSERTION",
+        "primaryPackagePurpose": "MACHINE_LEARNING_MODEL",
+    }
+    checksums = [
+        {"algorithm": str(entry.get("alg") or "SHA256").replace("-", ""), "checksumValue": str(entry.get("content"))}
+        for entry in root.get("hashes") or []
+        if _object(entry).get("content")
+    ]
+    if checksums:
+        root_package["checksums"] = checksums
+    packages.append(root_package)
+
+    seen_ids: set[str] = {root_id}
+    for component in cyclonedx.get("components") or []:
+        if not isinstance(component, dict):
+            continue
+        name = str(component.get("name") or "")
+        if not name:
+            continue
+        package_id = _spdx_id("Package", str(component.get("bom-ref") or name))
+        if package_id in seen_ids:
+            continue
+        seen_ids.add(package_id)
+        package: dict[str, Any] = {
+            "SPDXID": package_id,
+            "name": name,
+            "downloadLocation": "NOASSERTION",
+            "filesAnalyzed": False,
+            "licenseConcluded": "NOASSERTION",
+            "licenseDeclared": _licenses(component),
+            "copyrightText": "NOASSERTION",
+        }
+        if component.get("version"):
+            package["versionInfo"] = str(component["version"])
+        if component.get("purl"):
+            package["externalRefs"] = [{
+                "referenceCategory": "PACKAGE-MANAGER",
+                "referenceType": "purl",
+                "referenceLocator": str(component["purl"]),
+            }]
+        packages.append(package)
+        relationships.append({
+            "spdxElementId": root_id,
+            "relationshipType": "DEPENDS_ON",
+            "relatedSpdxElement": package_id,
+        })
+
+    document = {
+        "spdxVersion": SPDX_VERSION,
+        "dataLicense": SPDX_DATA_LICENSE,
+        "SPDXID": "SPDXRef-DOCUMENT",
+        "name": f"shakerscan-model-intake-{root.get('name') or 'model'}",
+        "documentNamespace": f"https://shakerscan.invalid/spdx/{_digest(cyclonedx)[:32]}",
+        "creationInfo": {
+            "created": created_at,
+            "creators": ["Tool: ShakerScan-model-intake-1", "Organization: ShakerScan"],
+        },
+        "packages": packages,
+        "relationships": relationships,
+    }
+    return document
+
+
 __all__ = [
     "CYCLONEDX_SPEC_VERSION",
+    "SPDX_DATA_LICENSE",
+    "SPDX_VERSION",
     "build_model_intake_cyclonedx",
+    "build_model_intake_spdx",
     "model_intake_bom_completeness",
 ]

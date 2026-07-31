@@ -3939,7 +3939,7 @@ export const MODEL_INTAKE_OPERATOR_TOKEN_KEY = 'shakerscan:model-intake-operator
 export interface ModelIntakeSbomSummary {
   available: boolean
   reason?: string
-  formats?: Array<'cyclonedx' | 'aibom'>
+  formats?: Array<'cyclonedx' | 'spdx' | 'aibom'>
   aibom_available?: boolean
   spec_version?: string
   component_count?: number
@@ -3958,7 +3958,7 @@ export async function getModelIntakeSbomSummary(scanId: string): Promise<ModelIn
 
 export async function downloadModelIntakeSbom(
   scanId: string,
-  format: 'cyclonedx' | 'aibom' = 'cyclonedx',
+  format: 'cyclonedx' | 'spdx' | 'aibom' = 'cyclonedx',
 ): Promise<void> {
   const res = await fetch(`${API_URL}/model-intake/scans/${scanId}/sbom?format=${format}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to export the bill of materials'))
@@ -3966,9 +3966,10 @@ export async function downloadModelIntakeSbom(
   const url = URL.createObjectURL(blob)
   const link = document.createElement('a')
   link.href = url
+  const extension = format === 'aibom' ? 'json' : format === 'spdx' ? 'spdx.json' : 'cdx.json'
   link.download = format === 'aibom'
     ? `shakerscan-aibom-${scanId}.json`
-    : `shakerscan-sbom-${scanId}.cdx.json`
+    : `shakerscan-sbom-${scanId}.${extension}`
   document.body.appendChild(link)
   link.click()
   link.remove()
