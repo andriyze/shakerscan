@@ -389,3 +389,32 @@ test('re-seeding refreshes digests without discarding declared embedding values'
   assert.match(workflow, /String\(current\.pooling \|\| ''\)/)
   assert.match(workflow, /buildSeededBundle\(detail, latestJob, bundle\)/)
 })
+
+test('the default preflight actually scans the model', () => {
+  // Every deep check used to be opt-in behind an Advanced disclosure, so the
+  // default run acquired the file and checked provenance without ever running
+  // the adapters the page reports as ready.
+  assert.match(page, /const \[completeArtifactDownload, setCompleteArtifactDownload\] = useState\(true\)/)
+  assert.match(page, /const \[completeRepositorySnapshot, setCompleteRepositorySnapshot\] = useState\(true\)/)
+  assert.match(page, /const \[runGeneratedScanners, setRunGeneratedScanners\] = useState\(true\)/)
+  assert.match(page, /useState<ModelIntakeScanDepth>\('full'\)/)
+
+  // Depth is a visible first-class choice, not a set of hidden checkboxes.
+  assert.match(page, /const SCAN_DEPTHS/)
+  assert.match(page, /Scan depth/)
+  assert.match(page, /'Full scan'/)
+  assert.match(page, /'Quick check'/)
+})
+
+test('a full scan only requests a repository snapshot where one exists', () => {
+  // Asking for a snapshot from S3 or OCI reports an UNSUPPORTED gap the
+  // operator never asked for, so gate it on the resolved adapter capability
+  // rather than a hardcoded provider list.
+  assert.match(page, /snapshotSupported/)
+  assert.match(page, /capabilities\?\.repository_snapshot === 'implemented'/)
+  assert.match(page, /setCompleteRepositorySnapshot\(full && snapshotCapable\)/)
+
+  // Resolver payloads and presets carry their own flags; the chosen depth wins.
+  assert.match(page, /applyScanDepth\(scanDepth, result\.capabilities\?\.repository_snapshot === 'implemented'\)/)
+  assert.match(page, /A preset carries its own depth flags/)
+})

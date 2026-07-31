@@ -202,6 +202,25 @@ const TRUST_MODE_OPTIONS: Array<{
 // content-addressed quarantine by the worker, so a multi-gigabyte cap is a
 // disk-bounded operation rather than a memory-bounded one. These presets exist
 // because production models are routinely far larger than the old 100MB wall.
+// What "scan this model" should mean by default. Every deep check used to be
+// opt-in behind an Advanced disclosure, so the default run acquired the file
+// and checked provenance without ever running ModelScan, Semgrep, Fickling, or
+// Trivy — the adapters the page reports as ready.
+export type ModelIntakeScanDepth = 'full' | 'quick'
+
+const SCAN_DEPTHS: Array<{ value: ModelIntakeScanDepth; label: string; helper: string }> = [
+  {
+    value: 'full',
+    label: 'Full scan',
+    helper: 'Acquire and hash the whole model, snapshot the repository, and run every applicable evidence adapter',
+  },
+  {
+    value: 'quick',
+    label: 'Quick check',
+    helper: 'Format, provenance, and governance metadata only. Much faster, far less evidence',
+  },
+]
+
 const ARTIFACT_LIMIT_PRESETS: Array<{ label: string; bytes: number; helper: string }> = [
   { label: '100 MB', bytes: 100_000_000, helper: 'Header and format inspection only' },
   { label: '1 GB', bytes: 1_000_000_000, helper: 'Typical single-file model' },
@@ -407,6 +426,7 @@ function ModelIntakeSettingsContent() {
   const trustSectionRef = useRef<HTMLDivElement | null>(null)
   const [trustRemediationApplied, setTrustRemediationApplied] = useState(false)
   const [phase, setPhase] = useState<IntakePhase>('source')
+  const [scanDepth, setScanDepth] = useState<ModelIntakeScanDepth>('full')
   const [platform, setPlatform] = useState<ModelIntakePlatform>('auto')
   const [environment, setEnvironment] = useState<ModelIntakeEnvironment>('production')
   const [sourceRef, setSourceRef] = useState('')
@@ -438,7 +458,7 @@ function ModelIntakeSettingsContent() {
   const [requireHash, setRequireHash] = useState(true)
   const [requireModelGovernance, setRequireModelGovernance] = useState(true)
   const [maxDownloadBytes, setMaxDownloadBytes] = useState('10000000')
-  const [completeArtifactDownload, setCompleteArtifactDownload] = useState(false)
+  const [completeArtifactDownload, setCompleteArtifactDownload] = useState(true)
   const [maxArtifactBytes, setMaxArtifactBytes] = useState('10000000000')
   const [completeRepositorySnapshot, setCompleteRepositorySnapshot] = useState(true)
   const [maxRepositoryBytes, setMaxRepositoryBytes] = useState('50000000000')
@@ -948,10 +968,20 @@ function ModelIntakeSettingsContent() {
       max_download_bytes: preset.max_download_bytes,
       timeout_seconds: preset.timeout_seconds,
     })
+    // A preset carries its own depth flags; keep the operator's choice.
+    applyScanDepth(scanDepth)
   }
 
   // Raise the acquisition limit toward a floor without ever shrinking a limit
   // the operator (or the resolver) deliberately set higher.
+  function applyScanDepth(depth: ModelIntakeScanDepth, snapshotCapable = snapshotSupported) {
+    setScanDepth(depth)
+    const full = depth === 'full'
+    setCompleteArtifactDownload(full)
+    setRunGeneratedScanners(full)
+    setCompleteRepositorySnapshot(full && snapshotCapable)
+  }
+
   function raiseArtifactLimitFloor(floorBytes: number) {
     setMaxDownloadBytes((current) => {
       const parsed = Number(current)
@@ -1066,6 +1096,9 @@ function ModelIntakeSettingsContent() {
       if (result.revision) setRevision(String(result.revision))
       if (result.selected_file?.path) setFilename(result.selected_file.path)
       else if (!result.scan_payload) setFilename('')
+      // Presets and resolver payloads carry their own flags; re-apply the
+      // selected depth so the request still matches what the operator chose.
+      applyScanDepth(scanDepth, result.capabilities?.repository_snapshot === 'implemented')
       // A 1GB+ model must not silently fall back to a truncated prefix just
       // because the resolver's preset carried a small cap.
       const resolvedSize = Number(result.selected_file?.size_bytes || 0)
@@ -1175,6 +1208,9 @@ function ModelIntakeSettingsContent() {
         option.snapshot === completeRepositorySnapshot &&
         option.sandbox === runDynamicSandbox,
     )?.value ?? null
+  const snapshotSupported = resolverResult
+    ? resolverResult.capabilities?.repository_snapshot === 'implemented'
+    : platform === 'huggingface' || platform === 'auto'
   const resolvedArtifactSize = Number(resolverResult?.selected_file?.size_bytes || 0)
   const artifactLimitCoversArtifact = (Number(maxDownloadBytes) || 0) >= resolvedArtifactSize
   const hasFieldErrors = Object.values(fieldErrors).some(Boolean)
@@ -1549,6 +1585,39 @@ function ModelIntakeSettingsContent() {
             Technical evidence for the model selected in step 1. This never grants deployment
             authority — step 4 does that.
           </p>
+
+          <div className="min-w-0 space-y-3 rounded-lg border border-gray-800 bg-gray-950 p-3">
+            <div className="text-sm font-medium text-gray-200">Scan depth</div>
+            <div className="grid gap-2 sm:grid-cols-2">
+              {SCAN_DEPTHS.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  onClick={() => applyScanDepth(option.value)}
+                  className={`min-w-0 rounded-lg border p-3 text-left ${
+                    scanDepth === option.value ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-900 hover:border-gray-700'
+                  }`}
+                >
+                  <div className="break-words text-sm font-medium text-white">{option.label}</div>
+                  <div className="mt-1 break-words text-xs text-gray-500">{option.helper}</div>
+                </button>
+              ))}
+            </div>
+            <div className="text-xs text-gray-500">
+              {scanDepth === 'full' ? (
+                <>
+                  Runs the {scannerReadiness ? `${scannerReadiness.required_ready}/${scannerReadiness.required_total} ready ` : ''}
+                  evidence adapters over the complete quarantined subject
+                  {snapshotSupported
+                    ? ', including a full repository snapshot.'
+                    : '. This source publishes no repository manifest, so the artifact alone is the subject.'}
+                  {' '}A full-artifact checksum and signature are only verifiable at this depth.
+                </>
+              ) : (
+                <>Acquires a bounded prefix only. Checksum and signature stay unverified, and no evidence adapter runs.</>
+              )}
+            </div>
+          </div>
 
           <div className="grid gap-3 md:grid-cols-[minmax(0,1.3fr)_minmax(0,0.7fr)]">
             <label className={fieldClass}>
