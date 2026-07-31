@@ -344,15 +344,52 @@ def test_macos_host_reports_an_unavailable_runner_tier_not_a_broken_one():
     assert macos["fallback_execution"] is False
 
 
-def test_linux_host_with_incomplete_prerequisites_still_reports_not_ready():
+def _cpuinfo(tmp_path, flags: str):
+    path = tmp_path / "cpuinfo"
+    path.write_text(f"processor\t: 0\nmodel name\t: Test CPU\nflags\t\t: {flags}\n")
+    return path
+
+
+def test_linux_host_with_incomplete_prerequisites_still_reports_not_ready(tmp_path):
     from model_intake_runner_controller import firecracker_readiness
 
-    linux = firecracker_readiness({"SHAKERSCAN_HOST_PLATFORM": "linux"})
+    # Pin the CPU signal so the verdict does not depend on whether the machine
+    # running the suite happens to expose virtualization extensions.
+    capable = _cpuinfo(tmp_path, "fpu vme de pse vmx smep")
+    linux = firecracker_readiness({"SHAKERSCAN_HOST_PLATFORM": "linux"}, cpuinfo_path=capable)
     assert linux["status"] == "NOT_READY"
     assert linux["supported_host"] is True
     assert linux["ready"] is False
 
     # An unrecorded host stays eligible, matching how the fleet feature gates.
-    unknown = firecracker_readiness({})
+    unknown = firecracker_readiness({}, cpuinfo_path=capable)
     assert unknown["status"] == "NOT_READY"
     assert unknown["supported_host"] is True
+
+
+def test_linux_host_without_nested_virtualization_reports_unsupported_host(tmp_path):
+    # A c8i.large-style cloud instance is Linux, but it is a guest with no vmx
+    # or svm flag, so /dev/kvm can never appear. Reporting NOT_READY there sends
+    # the operator to go install Firecracker prerequisites that cannot help.
+    from model_intake_runner_controller import firecracker_readiness
+
+    guest = _cpuinfo(tmp_path, "fpu vme de pse hypervisor lahf_lm smep")
+    result = firecracker_readiness({"SHAKERSCAN_HOST_PLATFORM": "linux"}, cpuinfo_path=guest)
+    assert result["status"] == "UNSUPPORTED_HOST"
+    assert result["supported_host"] is False
+    assert result["checks"]["kvm"] is False
+    assert "nested virtualization" in result["reason"]
+    # Fail-closed behavior is unchanged: no job may be queued, no fallback runs.
+    assert result["ready"] is False
+    assert result["fallback_execution"] is False
+
+
+def test_unreadable_cpuinfo_leaves_a_linux_host_eligible(tmp_path):
+    # Without a positive "this CPU cannot virtualize" signal, stay in the
+    # repairable NOT_READY state rather than declaring the host hopeless.
+    from model_intake_runner_controller import firecracker_readiness
+
+    missing = tmp_path / "absent-cpuinfo"
+    result = firecracker_readiness({"SHAKERSCAN_HOST_PLATFORM": "linux"}, cpuinfo_path=missing)
+    assert result["status"] == "NOT_READY"
+    assert result["supported_host"] is True

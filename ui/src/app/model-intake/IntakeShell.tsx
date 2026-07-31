@@ -44,6 +44,7 @@ export function IntakeContextBar({
   adaptersTotal,
   runnerStatus,
   runnerSupportedHost,
+  runnerUnsupportedReason,
   runnerHostPlatform,
 }: {
   source: string
@@ -54,14 +55,19 @@ export function IntakeContextBar({
   adaptersTotal: number | null
   runnerStatus: string | null
   runnerSupportedHost: boolean | undefined
+  runnerUnsupportedReason: string | undefined
   runnerHostPlatform: string | undefined
 }) {
   // A microVM tier that cannot exist on this host is neutral information, not a
   // warning the operator can act on. Only a supported host that is misconfigured
   // deserves attention.
   const runnerUnsupported = runnerSupportedHost === false
+  // "n/a on linux" would be nonsense — Firecracker is a Linux technology. The
+  // wall on a Linux cloud guest is the missing CPU extension, not the OS.
   const runnerValue = runnerUnsupported
-    ? `n/a on ${runnerHostPlatform || 'this host'}`
+    ? runnerUnsupportedReason === 'no_hardware_virtualization'
+      ? 'no kvm on this host'
+      : `n/a on ${runnerHostPlatform || 'this host'}`
     : (runnerStatus || 'checking').toLowerCase()
   const runnerTone: 'ok' | 'warn' | 'idle' = runnerUnsupported
     ? 'idle'

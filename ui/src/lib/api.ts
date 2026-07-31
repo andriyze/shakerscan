@@ -1377,9 +1377,12 @@ export interface ModelIntakeScannerReadiness {
 
 export interface ModelIntakeRunnerReadiness {
   status: 'READY' | 'NOT_READY' | 'UNSUPPORTED_HOST' | string
-  // False when the host platform cannot run a microVM at all (macOS, Windows),
-  // as opposed to a Linux host whose prerequisites are merely incomplete.
+  // False when this host cannot run a microVM at all, as opposed to a host
+  // whose prerequisites are merely incomplete. `unsupported_reason` says which
+  // wall was hit: the operating system, or a CPU with no virtualization
+  // extension (a cloud guest without nested virtualization).
   supported_host?: boolean
+  unsupported_reason?: 'host_platform' | 'no_hardware_virtualization' | string
   host_platform?: string
   reason?: string
   ready: boolean

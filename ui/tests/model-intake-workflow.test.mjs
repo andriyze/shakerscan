@@ -235,3 +235,41 @@ test('an unavailable microVM tier reads as unavailable, not broken', () => {
   assert.match(workflow, /Every other Model Intake check/)
   assert.match(api, /supported_host\?: boolean/)
 })
+
+test('pasting a model reference produces the complete evidence set by default', () => {
+  // The scanners, repository snapshot, and sandbox used to be unchecked boxes
+  // behind an Advanced disclosure, so the default report read INDETERMINATE on
+  // exactly the controls that matter most.
+  assert.match(page, /const DEFAULT_INTAKE_DEPTH: IntakeDepth = 'full'/)
+  assert.match(page, /useState\(true\)\n?\s*const \[maxRepositoryBytes/)
+  for (const setter of [
+    'const [completeRepositorySnapshot, setCompleteRepositorySnapshot] = useState(true)',
+    'const [runGeneratedScanners, setRunGeneratedScanners] = useState(true)',
+    'const [runDynamicSandbox, setRunDynamicSandbox] = useState(true)',
+  ]) {
+    assert.ok(page.includes(setter), `${setter} is missing`)
+  }
+  // A preset that omits depth must not silently downgrade the scan.
+  assert.match(page, /payload\.run_generated_scanners \?\? true/)
+  assert.match(page, /payload\.complete_repository_snapshot \?\? true/)
+  assert.match(page, /payload\.run_dynamic_sandbox \?\? true/)
+  // Depth is one visible choice, and the tile is derived so a hand-edited
+  // toggle cannot leave a preset highlighted for evidence that will not exist.
+  assert.match(page, /Scan depth/)
+  assert.match(page, /const activeDepth =/)
+  assert.match(page, /activeDepth === null/)
+  assert.match(page, /never as clean/)
+})
+
+test('a Linux host with no CPU virtualization is named precisely, not "n/a on linux"', () => {
+  // A c8i.large-style cloud guest is Linux, so the host-platform wording would
+  // read as a bug. The wall there is the absent vmx/svm flag.
+  assert.match(api, /unsupported_reason\?:/)
+  assert.match(api, /no_hardware_virtualization/)
+  assert.match(shell, /runnerUnsupportedReason === 'no_hardware_virtualization'/)
+  assert.match(shell, /no kvm on this host/)
+  assert.match(workflow, /unsupported_reason === 'no_hardware_virtualization'/)
+  assert.match(workflow, /no KVM on this host/)
+  // The page must actually pass the new signal through to the context bar.
+  assert.match(page, /runnerUnsupportedReason=\{runnerReadiness\?\.unsupported_reason\}/)
+})

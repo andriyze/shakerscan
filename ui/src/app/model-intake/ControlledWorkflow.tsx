@@ -516,6 +516,12 @@ export function ControlledModelIntakeWorkflow({
   }
 
   const runnerUnsupported = runnerReadiness?.supported_host === false
+  // Firecracker is a Linux technology, so "not available on linux" would read as
+  // a bug. On a cloud guest the wall is the absent CPU extension, not the OS.
+  const runnerUnavailableLabel =
+    runnerReadiness?.unsupported_reason === 'no_hardware_virtualization'
+      ? 'unavailable: no KVM on this host'
+      : `not available on ${runnerReadiness?.host_platform || 'this host'}`
   const attachableScans = availableScans.filter((scan) => scan.status === 'completed')
   // A loopback deployment resolves its own credential, so the manual field
   // only appears when the UI server declined to provide one.
@@ -539,7 +545,7 @@ export function ControlledModelIntakeWorkflow({
         </div>
         <div className="flex items-center gap-2">
           <span className={`rounded px-2 py-1 text-xs font-semibold ${runnerUnsupported ? 'bg-gray-800 text-gray-400' : statusClass(runnerReadiness?.status || 'checking')}`}>
-            Firecracker {runnerUnsupported ? `not available on ${runnerReadiness?.host_platform || 'this host'}` : (runnerReadiness?.status || 'checking')}
+            Firecracker {runnerUnsupported ? runnerUnavailableLabel : (runnerReadiness?.status || 'checking')}
           </span>
           <button type="button" className={buttonClass} onClick={() => { void loadReadiness(); void loadSubmissions(); if (selectedId) void loadSelected() }}>
             <RefreshCw className="h-3.5 w-3.5" /> Refresh

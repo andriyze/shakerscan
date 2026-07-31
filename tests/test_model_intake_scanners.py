@@ -431,3 +431,47 @@ def test_materialized_converted_snapshot_rescan_blocks_unchanged_dangerous_code(
         for item in result["results"]
         for finding in item.get("findings") or []
     )
+
+
+def test_secret_scanner_status_survives_redaction():
+    """A scanner's control state must stay readable in the exported summary.
+
+    ``shakerscan-secret-rules`` matches the shared sensitive-key fragment
+    matcher, so the generic redactor masked its ``PASS`` to ``***`` and an
+    operator could not tell whether the secret scan had run at all.
+    """
+    from scanner.scanner_tools.model_intake import redact_generated_evidence
+
+    evidence = {
+        "statuses": {
+            "shakerscan-secret-rules": "PASS",
+            "semgrep": "WARNING",
+            "shakerscan-malware-rules": "PASS",
+        },
+        "results": [
+            {
+                "scanner": {"name": "shakerscan-secret-rules"},
+                "findings": [{"secret": "hunter2", "path": "config.json"}],
+            }
+        ],
+    }
+
+    redacted = redact_generated_evidence(evidence)
+
+    assert redacted["statuses"]["shakerscan-secret-rules"] == "PASS"
+    assert redacted["statuses"]["semgrep"] == "WARNING"
+    assert redacted["statuses"]["shakerscan-malware-rules"] == "PASS"
+    # A matched secret inside a finding is still masked.
+    assert redacted["results"][0]["findings"][0]["secret"] == "***"
+    assert redacted["results"][0]["findings"][0]["path"] == "config.json"
+
+
+def test_a_status_outside_the_normalized_vocabulary_stays_redacted():
+    """Restoring is limited to the closed control-state vocabulary."""
+    from scanner.scanner_tools.model_intake import redact_generated_evidence
+
+    redacted = redact_generated_evidence(
+        {"statuses": {"shakerscan-secret-rules": "sk-live-abcdef0123456789"}}
+    )
+
+    assert redacted["statuses"]["shakerscan-secret-rules"] == "***"

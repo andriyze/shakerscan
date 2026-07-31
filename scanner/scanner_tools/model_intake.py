@@ -206,6 +206,32 @@ def redact_model_intake_value(value: Any) -> Any:
     return redact_sensitive(value, redact_strings=True)
 
 
+def redact_generated_evidence(evidence: Any) -> Any:
+    """Redact scanner evidence without masking a scanner's own control state.
+
+    ``statuses`` is keyed by scanner name, and ``shakerscan-secret-rules``
+    matches the shared sensitive-key fragment matcher, so the generic redactor
+    replaced that scanner's ``PASS`` with ``***`` and left an operator unable to
+    tell whether the secret scan had run. Normalized control states come from a
+    closed vocabulary and cannot carry secret material, so they are restored;
+    anything outside that vocabulary stays redacted, and scanner findings —
+    which genuinely can quote matched secrets — are untouched.
+    """
+    redacted = redact_model_intake_value(evidence)
+    if not isinstance(evidence, dict) or not isinstance(redacted, dict):
+        return redacted
+    statuses = evidence.get("statuses")
+    redacted_statuses = redacted.get("statuses")
+    if isinstance(statuses, dict) and isinstance(redacted_statuses, dict):
+        redacted["statuses"] = {
+            name: status
+            if status in _model_intake_scanners.NORMALIZED_STATUSES
+            else redacted_statuses.get(name)
+            for name, status in statuses.items()
+        }
+    return redacted
+
+
 def _artifact_name(ref: str) -> str:
     parsed = urllib.parse.urlparse(ref)
     path = parsed.path or ref
@@ -4469,7 +4495,7 @@ async def run_model_intake_scan(
             "model_card_fetch": safe_model_card_fetch_meta if model_card_fetch_meta else None,
             "aibom": safe_aibom,
             "repository_snapshot": redact_model_intake_value(repository_snapshot),
-            "generated_evidence": redact_model_intake_value(generated_evidence),
+            "generated_evidence": redact_generated_evidence(generated_evidence),
             "supply_chain": {
                 "registry": safe_registry_reference,
                 "signature": safe_signature_status,

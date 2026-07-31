@@ -46,7 +46,38 @@ def host_supports_firecracker(environment: dict[str, str] | None = None) -> bool
     return host_platform(environment) in {"linux", "unknown"}
 
 
-def firecracker_readiness(environment: dict[str, str] | None = None) -> dict[str, Any]:
+_VIRTUALIZATION_CPU_FLAGS = ("vmx", "svm")
+
+
+def cpu_exposes_virtualization(cpuinfo_path: Path | None = None) -> bool | None:
+    """Whether this CPU offers the hardware extension KVM is built on.
+
+    Returns ``None`` when the answer cannot be established, so an unreadable or
+    unfamiliar ``/proc/cpuinfo`` leaves the host eligible rather than declaring
+    it hopeless. ``/proc/cpuinfo`` is not namespaced, so reading it from inside
+    the API container still reports the real host CPU.
+    """
+    path = cpuinfo_path or Path("/proc/cpuinfo")
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return None
+    saw_flags = False
+    for line in text.splitlines():
+        label, separator, values = line.partition(":")
+        if not separator or label.strip().lower() not in {"flags", "features"}:
+            continue
+        saw_flags = True
+        if any(flag in values.split() for flag in _VIRTUALIZATION_CPU_FLAGS):
+            return True
+    return False if saw_flags else None
+
+
+def firecracker_readiness(
+    environment: dict[str, str] | None = None,
+    *,
+    cpuinfo_path: Path | None = None,
+) -> dict[str, Any]:
     env = environment or os.environ
     signer_backend = env.get("MODEL_INTAKE_RUNNER_SIGNER_BACKEND", "").lower()
     signer_ready = bool(
@@ -91,6 +122,30 @@ def firecracker_readiness(environment: dict[str, str] | None = None) -> dict[str
     # NOT_READY there reads as a broken deployment the operator should go fix.
     # It is an unavailable tier, not a misconfiguration. Fail-closed behavior is
     # unchanged either way: ready stays false and no job can be queued.
+    reason = (
+        "The Firecracker microVM tier requires a Linux host with KVM. "
+        f"This deployment is hosted on {platform_name}, so exact-subject "
+        "runtime execution is unavailable here. Every other Model Intake "
+        "check is unaffected."
+    )
+    reason_code = "host_platform"
+    # A Linux host is only repairable into KVM if the CPU actually offers the
+    # extension. A virtualized cloud instance without nested virtualization
+    # exposes neither /dev/kvm nor vmx/svm, and no amount of operator work will
+    # change that, so it belongs with macOS rather than with a half-provisioned
+    # runner host.
+    if supported_host and not checks["kvm"] and cpu_exposes_virtualization(cpuinfo_path) is False:
+        supported_host = False
+        reason_code = "no_hardware_virtualization"
+        reason = (
+            "The Firecracker microVM tier requires /dev/kvm. This host exposes no "
+            "hardware virtualization extension (no vmx or svm CPU flag), which is "
+            "expected on a virtualized cloud instance without nested virtualization, "
+            "so KVM cannot be enabled here. Use a bare-metal or "
+            "nested-virtualization-capable Linux host, or point "
+            "MODEL_INTAKE_RUNNER_URL at one. Every other Model Intake check is "
+            "unaffected."
+        )
     if not supported_host:
         return {
             "status": "UNSUPPORTED_HOST",
@@ -98,12 +153,8 @@ def firecracker_readiness(environment: dict[str, str] | None = None) -> dict[str
             "supported_host": False,
             "host_platform": platform_name,
             "executor": "firecracker-jailer",
-            "reason": (
-                "The Firecracker microVM tier requires a Linux host with KVM. "
-                f"This deployment is hosted on {platform_name}, so exact-subject "
-                "runtime execution is unavailable here. Every other Model Intake "
-                "check is unaffected."
-            ),
+            "reason": reason,
+            "unsupported_reason": reason_code,
             "checks": checks,
             "verified_component_sha256": identities,
             "fallback_execution": False,

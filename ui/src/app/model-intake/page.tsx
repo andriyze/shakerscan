@@ -213,6 +213,42 @@ const QUEUED_SCANS_KEY = 'shakerscan:model-intake-queued-scans'
 
 const STRICT_ARTIFACT_LIMIT_FLOOR = 1_000_000_000
 
+// Pasting a model reference used to produce a report whose most valuable
+// controls all read INDETERMINATE, because the scanners, the repository
+// snapshot, and the sandbox were each an unchecked box behind an Advanced
+// disclosure. Depth is now one visible choice that defaults to the complete
+// evidence set; the individual toggles remain as overrides.
+const INTAKE_DEPTHS = [
+  {
+    value: 'quick',
+    label: 'Quick',
+    helper: 'Artifact only: acquisition, full SHA-256, format inspection',
+    scanners: false,
+    snapshot: false,
+    sandbox: false,
+  },
+  {
+    value: 'standard',
+    label: 'Standard',
+    helper: 'Adds the pinned repository snapshot and custom-code analysis',
+    scanners: false,
+    snapshot: true,
+    sandbox: false,
+  },
+  {
+    value: 'full',
+    label: 'Full',
+    helper: 'Adds ModelScan, Semgrep, Fickling, Trivy and the no-egress sandbox',
+    scanners: true,
+    snapshot: true,
+    sandbox: true,
+  },
+] as const
+
+type IntakeDepth = (typeof INTAKE_DEPTHS)[number]['value']
+
+const DEFAULT_INTAKE_DEPTH: IntakeDepth = 'full'
+
 // Fetch the whole artifact plus headroom so the full-artifact SHA-256 is
 // observed instead of a truncated prefix.
 function artifactLimitForSize(sizeBytes: number): number {
@@ -401,10 +437,10 @@ function ModelIntakeSettingsContent() {
   const [maxDownloadBytes, setMaxDownloadBytes] = useState('10000000')
   const [completeArtifactDownload, setCompleteArtifactDownload] = useState(false)
   const [maxArtifactBytes, setMaxArtifactBytes] = useState('10000000000')
-  const [completeRepositorySnapshot, setCompleteRepositorySnapshot] = useState(false)
+  const [completeRepositorySnapshot, setCompleteRepositorySnapshot] = useState(true)
   const [maxRepositoryBytes, setMaxRepositoryBytes] = useState('50000000000')
-  const [runGeneratedScanners, setRunGeneratedScanners] = useState(false)
-  const [runDynamicSandbox, setRunDynamicSandbox] = useState(false)
+  const [runGeneratedScanners, setRunGeneratedScanners] = useState(true)
+  const [runDynamicSandbox, setRunDynamicSandbox] = useState(true)
   const [requireDynamicSandbox, setRequireDynamicSandbox] = useState(false)
   const [evaluationSpecJson, setEvaluationSpecJson] = useState('')
   const [runGeneratedEvaluation, setRunGeneratedEvaluation] = useState(false)
@@ -690,10 +726,13 @@ function ModelIntakeSettingsContent() {
     setMaxDownloadBytes(String(payload.max_download_bytes || 10000000))
     setCompleteArtifactDownload(payload.complete_artifact_download ?? false)
     setMaxArtifactBytes(String(payload.max_artifact_bytes || 10000000000))
-    setCompleteRepositorySnapshot(payload.complete_repository_snapshot ?? false)
+    // A preset that says nothing about depth inherits the product default
+    // rather than silently downgrading the scan to artifact-only. An explicit
+    // false in the preset is still respected.
+    setCompleteRepositorySnapshot(payload.complete_repository_snapshot ?? true)
     setMaxRepositoryBytes(String(payload.max_repository_bytes || 50000000000))
-    setRunGeneratedScanners(payload.run_generated_scanners ?? false)
-    setRunDynamicSandbox(payload.run_dynamic_sandbox ?? false)
+    setRunGeneratedScanners(payload.run_generated_scanners ?? true)
+    setRunDynamicSandbox(payload.run_dynamic_sandbox ?? true)
     setRequireDynamicSandbox(payload.require_dynamic_sandbox ?? false)
     setEvaluationSpecJson(payload.evaluation_spec_json ? JSON.stringify(payload.evaluation_spec_json, null, 2) : '')
     setRunGeneratedEvaluation(payload.run_generated_evaluation ?? false)
@@ -920,6 +959,16 @@ function ModelIntakeSettingsContent() {
     if (option && policyProfile !== 'strict') applyPolicyProfile(option.policyProfile)
   }
 
+  function applyDepth(next: IntakeDepth) {
+    const option = INTAKE_DEPTHS.find((item) => item.value === next)
+    if (!option) return
+    setRunGeneratedScanners(option.scanners)
+    setCompleteRepositorySnapshot(option.snapshot)
+    setRunDynamicSandbox(option.sandbox)
+    // "Require sandbox pass" cannot outlive the sandbox that would produce it.
+    if (!option.sandbox) setRequireDynamicSandbox(false)
+  }
+
   function applyMetadataExample(example: 'complete' | 'minimal') {
     setMetadataJson(JSON.stringify(example === 'complete' ? COMPLETE_METADATA_EXAMPLE : MINIMAL_METADATA_EXAMPLE, null, 2))
   }
@@ -1109,6 +1158,15 @@ function ModelIntakeSettingsContent() {
   // scan queues it, and the controlled workflow submits it — no stage asks for
   // the URL a second time.
   const intakeSource = artifactUrl.trim() || resolverResult?.normalized_ref?.trim() || sourceRef.trim()
+  // Derived rather than stored, so hand-editing an Advanced toggle can never
+  // leave a depth tile highlighted for evidence the scan will not produce.
+  const activeDepth =
+    INTAKE_DEPTHS.find(
+      (option) =>
+        option.scanners === runGeneratedScanners &&
+        option.snapshot === completeRepositorySnapshot &&
+        option.sandbox === runDynamicSandbox,
+    )?.value ?? null
   const resolvedArtifactSize = Number(resolverResult?.selected_file?.size_bytes || 0)
   const artifactLimitCoversArtifact = (Number(maxDownloadBytes) || 0) >= resolvedArtifactSize
   const hasFieldErrors = Object.values(fieldErrors).some(Boolean)
@@ -1160,6 +1218,7 @@ function ModelIntakeSettingsContent() {
         adaptersTotal={scannerReadiness?.required_total ?? null}
         runnerStatus={runnerReadiness?.status ?? null}
         runnerSupportedHost={runnerReadiness?.supported_host}
+        runnerUnsupportedReason={runnerReadiness?.unsupported_reason}
         runnerHostPlatform={runnerReadiness?.host_platform}
       />
 
@@ -1292,6 +1351,35 @@ function ModelIntakeSettingsContent() {
                 </button>
               ))}
             </div>
+          </div>
+
+          <div className="mt-4 rounded-lg border border-gray-800 bg-gray-950 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="text-sm font-medium text-gray-200">Scan depth</div>
+              <span className="text-xs text-gray-500">
+                Controls which evidence the preflight scan generates
+              </span>
+            </div>
+            <div className="mt-3 grid gap-2 sm:grid-cols-3">
+              {INTAKE_DEPTHS.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  onClick={() => applyDepth(option.value)}
+                  className={`min-w-0 rounded-lg border p-3 text-left ${
+                    activeDepth === option.value ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-900 hover:border-gray-700'
+                  }`}
+                >
+                  <div className="break-words text-sm font-medium text-white">{option.label}</div>
+                  <div className="mt-1 break-words text-xs text-gray-500">{option.helper}</div>
+                </button>
+              ))}
+            </div>
+            <p className="mt-3 text-xs text-gray-500">
+              {activeDepth === null
+                ? 'Custom: the evidence toggles under Advanced in the preflight step no longer match a preset.'
+                : 'Controls you leave out are reported as not run — never as clean. Fine-tune under Advanced in the preflight step.'}
+            </p>
           </div>
 
           {resolverResult && (
