@@ -515,6 +515,7 @@ export function ControlledModelIntakeWorkflow({
     }
   }
 
+  const runnerUnsupported = runnerReadiness?.supported_host === false
   const attachableScans = availableScans.filter((scan) => scan.status === 'completed')
   // A loopback deployment resolves its own credential, so the manual field
   // only appears when the UI server declined to provide one.
@@ -537,8 +538,8 @@ export function ControlledModelIntakeWorkflow({
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <span className={`rounded px-2 py-1 text-xs font-semibold ${statusClass(runnerReadiness?.status || 'checking')}`}>
-            Firecracker {runnerReadiness?.status || 'checking'}
+          <span className={`rounded px-2 py-1 text-xs font-semibold ${runnerUnsupported ? 'bg-gray-800 text-gray-400' : statusClass(runnerReadiness?.status || 'checking')}`}>
+            Firecracker {runnerUnsupported ? `not available on ${runnerReadiness?.host_platform || 'this host'}` : (runnerReadiness?.status || 'checking')}
           </span>
           <button type="button" className={buttonClass} onClick={() => { void loadReadiness(); void loadSubmissions(); if (selectedId) void loadSelected() }}>
             <RefreshCw className="h-3.5 w-3.5" /> Refresh
@@ -687,7 +688,16 @@ export function ControlledModelIntakeWorkflow({
             <label className="grid gap-1 text-xs text-gray-300">Reviewed known-answer embedding SHA-256 {runnerOperation === 'runtime' ? '(required)' : '(optional)'}<input className={inputClass} value={knownAnswerDigest} onChange={(event) => setKnownAnswerDigest(event.target.value)} /></label>
             <label className="grid gap-1 text-xs text-gray-300">Wall-clock timeout seconds<input className={inputClass} type="number" min={30} max={3600} value={timeoutSeconds} onChange={(event) => setTimeoutSeconds(Number(event.target.value))} /></label>
             <button type="button" className={buttonClass} disabled={busy === 'runner' || !selectedId || !runnerReadiness?.ready} onClick={queueRunnerJob}><Server className="h-3.5 w-3.5" /> Queue exact-subject Firecracker job</button>
-            {!runnerReadiness?.ready && <div className="rounded border border-red-800/60 bg-red-950/20 p-3 text-xs text-red-300">No fallback is used. {runnerReadiness?.error || 'Linux/KVM runner prerequisites are incomplete.'}</div>}
+            {runnerUnsupported ? (
+              <div className="rounded border border-gray-700 bg-gray-950 p-3 text-xs text-gray-400">
+                {runnerReadiness?.reason || 'The Firecracker microVM tier requires a Linux host with KVM.'}
+                {' '}Every other Model Intake check — acquisition, static evidence, policy, approvals,
+                and promotion — works normally on this host. Point the deployment at a Linux runner
+                with <code className="text-gray-300">MODEL_INTAKE_RUNNER_URL</code> to enable this stage.
+              </div>
+            ) : !runnerReadiness?.ready ? (
+              <div className="rounded border border-red-800/60 bg-red-950/20 p-3 text-xs text-red-300">No fallback is used. {runnerReadiness?.error || 'Linux/KVM runner prerequisites are incomplete.'}</div>
+            ) : null}
           </div>
           <div className="min-w-0 space-y-3">
             {jobs.length === 0 ? <div className="rounded border border-gray-800 p-3 text-xs text-gray-500">No runner jobs for this submission.</div> : jobs.map((job) => {

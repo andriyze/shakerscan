@@ -325,3 +325,34 @@ def test_conversion_export_rejects_changed_non_weight_member(tmp_path):
             manifest,
             source_weight_sha,
         )
+
+
+def test_macos_host_reports_an_unavailable_runner_tier_not_a_broken_one():
+    # The API runs in a Linux container even on Docker Desktop, so the host
+    # platform recorded by scanner.sh is the only signal that a microVM can
+    # never run here. Reporting NOT_READY on a Mac reads as a deployment the
+    # operator should go repair, which is wrong and unactionable.
+    from model_intake_runner_controller import firecracker_readiness
+
+    macos = firecracker_readiness({"SHAKERSCAN_HOST_PLATFORM": "macos"})
+    assert macos["status"] == "UNSUPPORTED_HOST"
+    assert macos["supported_host"] is False
+    assert macos["host_platform"] == "macos"
+    assert "Linux host with KVM" in macos["reason"]
+    # Fail-closed behavior is unchanged: no job may be queued, no fallback runs.
+    assert macos["ready"] is False
+    assert macos["fallback_execution"] is False
+
+
+def test_linux_host_with_incomplete_prerequisites_still_reports_not_ready():
+    from model_intake_runner_controller import firecracker_readiness
+
+    linux = firecracker_readiness({"SHAKERSCAN_HOST_PLATFORM": "linux"})
+    assert linux["status"] == "NOT_READY"
+    assert linux["supported_host"] is True
+    assert linux["ready"] is False
+
+    # An unrecorded host stays eligible, matching how the fleet feature gates.
+    unknown = firecracker_readiness({})
+    assert unknown["status"] == "NOT_READY"
+    assert unknown["supported_host"] is True

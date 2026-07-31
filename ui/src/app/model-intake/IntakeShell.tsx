@@ -43,6 +43,8 @@ export function IntakeContextBar({
   adaptersReady,
   adaptersTotal,
   runnerStatus,
+  runnerSupportedHost,
+  runnerHostPlatform,
 }: {
   source: string
   environment: string
@@ -51,7 +53,23 @@ export function IntakeContextBar({
   adaptersReady: number | null
   adaptersTotal: number | null
   runnerStatus: string | null
+  runnerSupportedHost: boolean | undefined
+  runnerHostPlatform: string | undefined
 }) {
+  // A microVM tier that cannot exist on this host is neutral information, not a
+  // warning the operator can act on. Only a supported host that is misconfigured
+  // deserves attention.
+  const runnerUnsupported = runnerSupportedHost === false
+  const runnerValue = runnerUnsupported
+    ? `n/a on ${runnerHostPlatform || 'this host'}`
+    : (runnerStatus || 'checking').toLowerCase()
+  const runnerTone: 'ok' | 'warn' | 'idle' = runnerUnsupported
+    ? 'idle'
+    : runnerStatus === 'READY'
+      ? 'ok'
+      : runnerStatus
+        ? 'warn'
+        : 'idle'
   const adapterValue = adaptersTotal === null ? 'checking' : `${adaptersReady ?? 0}/${adaptersTotal} ready`
   const adapterTone = adaptersTotal === null ? 'idle' : adaptersReady === adaptersTotal ? 'ok' : 'warn'
   return (
@@ -67,11 +85,7 @@ export function IntakeContextBar({
         <Chip label="policy" value={policyProfile} tone="idle" />
         <Chip label="credential" value={operatorReady ? 'deployment' : 'not set'} tone={operatorReady ? 'ok' : 'warn'} />
         <Chip label="adapters" value={adapterValue} tone={adapterTone} />
-        <Chip
-          label="runner"
-          value={(runnerStatus || 'checking').toLowerCase()}
-          tone={runnerStatus === 'READY' ? 'ok' : runnerStatus ? 'warn' : 'idle'}
-        />
+        <Chip label="runner" value={runnerValue} tone={runnerTone} />
       </div>
     </div>
   )

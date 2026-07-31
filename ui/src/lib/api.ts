@@ -1376,7 +1376,12 @@ export interface ModelIntakeScannerReadiness {
 }
 
 export interface ModelIntakeRunnerReadiness {
-  status: 'READY' | 'NOT_READY' | string
+  status: 'READY' | 'NOT_READY' | 'UNSUPPORTED_HOST' | string
+  // False when the host platform cannot run a microVM at all (macOS, Windows),
+  // as opposed to a Linux host whose prerequisites are merely incomplete.
+  supported_host?: boolean
+  host_platform?: string
+  reason?: string
   ready: boolean
   executor?: string
   checks?: Record<string, unknown>

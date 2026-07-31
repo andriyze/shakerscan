@@ -1159,6 +1159,8 @@ function ModelIntakeSettingsContent() {
         adaptersReady={scannerReadiness?.required_ready ?? null}
         adaptersTotal={scannerReadiness?.required_total ?? null}
         runnerStatus={runnerReadiness?.status ?? null}
+        runnerSupportedHost={runnerReadiness?.supported_host}
+        runnerHostPlatform={runnerReadiness?.host_platform}
       />
 
       <IntakePhaseTabs

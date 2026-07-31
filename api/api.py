@@ -13947,6 +13947,10 @@ async def model_intake_runner_readiness():
             return {
                 "status": "NOT_READY",
                 "ready": False,
+                # An explicitly configured remote runner may live on a Linux
+                # host reached from a macOS control plane, so an unreachable
+                # service is a real fault rather than an unsupported tier.
+                "supported_host": True,
                 "executor": "firecracker-jailer",
                 "checks": {"runner_service_reachable": False},
                 "error": f"runner_service_unavailable:{type(exc).__name__}",

@@ -22,6 +22,30 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def host_platform(environment: dict[str, str] | None = None) -> str:
+    """Normalize the platform of the machine hosting the deployment.
+
+    The API runs inside a Linux container even on Docker Desktop, so
+    ``platform.system()`` here says nothing about whether the host can run a
+    microVM. ``scanner.sh`` records the real host, matching how the optional
+    fleet feature gates itself.
+    """
+    env = environment or os.environ
+    raw = env.get("SHAKERSCAN_HOST_PLATFORM", "").strip().lower()
+    if raw in {"darwin", "mac", "macos", "osx"}:
+        return "macos"
+    if raw.startswith("linux"):
+        return "linux"
+    if raw in {"windows", "win32", "wsl"}:
+        return raw
+    return "unknown"
+
+
+def host_supports_firecracker(environment: dict[str, str] | None = None) -> bool:
+    """A microVM tier needs a Linux/KVM host; unknown stays eligible."""
+    return host_platform(environment) in {"linux", "unknown"}
+
+
 def firecracker_readiness(environment: dict[str, str] | None = None) -> dict[str, Any]:
     env = environment or os.environ
     signer_backend = env.get("MODEL_INTAKE_RUNNER_SIGNER_BACKEND", "").lower()
@@ -61,9 +85,34 @@ def firecracker_readiness(environment: dict[str, str] | None = None) -> dict[str
             identities[name] = observed
             checks[name] = observed == expected
     ready = all(checks.values())
+    platform_name = host_platform(env)
+    supported_host = host_supports_firecracker(env)
+    # A macOS or Windows host cannot ever satisfy these checks, so reporting
+    # NOT_READY there reads as a broken deployment the operator should go fix.
+    # It is an unavailable tier, not a misconfiguration. Fail-closed behavior is
+    # unchanged either way: ready stays false and no job can be queued.
+    if not supported_host:
+        return {
+            "status": "UNSUPPORTED_HOST",
+            "ready": False,
+            "supported_host": False,
+            "host_platform": platform_name,
+            "executor": "firecracker-jailer",
+            "reason": (
+                "The Firecracker microVM tier requires a Linux host with KVM. "
+                f"This deployment is hosted on {platform_name}, so exact-subject "
+                "runtime execution is unavailable here. Every other Model Intake "
+                "check is unaffected."
+            ),
+            "checks": checks,
+            "verified_component_sha256": identities,
+            "fallback_execution": False,
+        }
     return {
         "status": "READY" if ready else "NOT_READY",
         "ready": ready,
+        "supported_host": True,
+        "host_platform": platform_name,
         "executor": "firecracker-jailer",
         "checks": checks,
         "verified_component_sha256": identities,

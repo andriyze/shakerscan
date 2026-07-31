@@ -199,3 +199,16 @@ test('operator credential autofill inspects forwarded hops rather than their pre
   // An IPv6 host is "[::1]:3000"; splitting on ':' would mangle it.
   assert.match(route, /replace\(\/:\\d\+\$\/, ''\)/)
 })
+
+test('an unavailable microVM tier reads as unavailable, not broken', () => {
+  // Firecracker cannot run on a macOS or Windows host at all. Showing a yellow
+  // NOT_READY warning there implies a repairable fault and trains the operator
+  // to ignore the readiness chips.
+  assert.match(shell, /runnerUnsupported/)
+  assert.match(shell, /n\/a on \$\{runnerHostPlatform/)
+  assert.match(shell, /runnerUnsupported\n\s*\? 'idle'/)
+  assert.match(workflow, /supported_host === false/)
+  assert.match(workflow, /not available on \$\{runnerReadiness\?\.host_platform/)
+  assert.match(workflow, /Every other Model Intake check/)
+  assert.match(api, /supported_host\?: boolean/)
+})
