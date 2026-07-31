@@ -83,6 +83,13 @@ function embeddingHints(detail: ModelIntakeWorkflowDetail | null): JsonObject {
   return objectValue(objectValue(subject?.metadata_json).embedding_configuration_hints)
 }
 
+// A number input bound to 0 renders "0", which reads as a declared value and
+// hides the placeholder showing what a real one looks like.
+function positiveOrBlank(value: unknown): string {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) && parsed > 0 ? String(parsed) : ''
+}
+
 function suggestIdempotencyKey(submissionId: string): string {
   const suffix = crypto.randomUUID().replace(/-/g, '').slice(0, 12)
   const prefix = submissionId ? submissionId.slice(0, 8) : 'model-intake'
@@ -307,6 +314,7 @@ export function ControlledModelIntakeWorkflow({
   function buildSeededBundle(
     target: ModelIntakeWorkflowDetail,
     job: ModelIntakeRunnerJob | undefined,
+    previous?: ModelIntakeDeploymentBundleRequest | null,
   ): ModelIntakeDeploymentBundleRequest {
     const request = objectValue(job?.request_json)
     const seeded = blankBundle(target.submission.requested_environment)
@@ -317,20 +325,26 @@ export function ControlledModelIntakeWorkflow({
     seeded.configuration_sha256 = subjectDigest(target, 'configuration')
     seeded.runtime_image_digest = typeof request.runtime_image_digest === 'string' ? request.runtime_image_digest : ''
     seeded.loader_profile_sha256 = typeof request.loader_profile_sha256 === 'string' ? request.loader_profile_sha256 : ''
+    // Re-seeding refreshes digests from evidence. It must not wipe embedding
+    // values the operator already declared just because the scanned revision
+    // published nothing for that field.
     const hints = embeddingHints(target)
+    const current = objectValue(previous?.embedding_configuration)
     seeded.embedding_configuration = {
-      dimension: Number(hints.dimension) > 0 ? Number(hints.dimension) : 0,
-      pooling: typeof hints.pooling === 'string' ? hints.pooling : '',
-      normalization: hints.normalization === true,
-      max_sequence_length: Number(hints.max_sequence_length) > 0 ? Number(hints.max_sequence_length) : 0,
-      precision: typeof hints.precision === 'string' ? hints.precision : '',
+      dimension: Number(hints.dimension) > 0 ? Number(hints.dimension) : Number(current.dimension) || 0,
+      pooling: typeof hints.pooling === 'string' && hints.pooling ? hints.pooling : String(current.pooling || ''),
+      normalization: typeof hints.normalization === 'boolean' ? hints.normalization : Boolean(current.normalization),
+      max_sequence_length: Number(hints.max_sequence_length) > 0
+        ? Number(hints.max_sequence_length)
+        : Number(current.max_sequence_length) || 0,
+      precision: typeof hints.precision === 'string' && hints.precision ? hints.precision : String(current.precision || ''),
     }
     return seeded
   }
 
   function seedBundleFromEvidence() {
     if (!detail) return
-    setBundleJson(JSON.stringify(buildSeededBundle(detail, latestJob), null, 2))
+    setBundleJson(JSON.stringify(buildSeededBundle(detail, latestJob, bundle), null, 2))
   }
 
   function updateEmbeddingField(field: string, value: string | number | boolean) {
@@ -601,6 +615,18 @@ export function ControlledModelIntakeWorkflow({
     runnerReadiness?.unsupported_reason === 'no_hardware_virtualization'
       ? 'unavailable: no KVM on this host'
       : `not available on ${runnerReadiness?.host_platform || 'this host'}`
+  const undeclaredEmbeddingFields = new Set<string>(
+    embeddingGaps.map((gap) => {
+      const label = gap.split(' \u2014 ')[0]
+      if (label.includes('dimension')) return 'dimension'
+      if (label.includes('sequence')) return 'max_sequence_length'
+      if (label.includes('pooling')) return 'pooling'
+      return 'precision'
+    })
+  )
+  const embeddingFieldClass = (field: string) =>
+    undeclaredEmbeddingFields.has(field) ? inputClass.replace('border-gray-700', 'border-yellow-600/60') : inputClass
+
   const queueBlockers: Array<{ summary: string; detail?: string }> = []
   if (!selectedId) {
     queueBlockers.push({ summary: 'No submission selected', detail: 'Create or pick one in stage 4.1' })
@@ -810,16 +836,16 @@ export function ControlledModelIntakeWorkflow({
               )}
               <div className="mt-3 grid gap-3 sm:grid-cols-2">
                 <label className="grid gap-1 text-xs text-gray-300">Dimension <span className="text-gray-600">(hidden_size)</span>
-                  <input className={inputClass} type="number" min={1} value={String(embeddingConfiguration.dimension ?? '')} onChange={(event) => updateEmbeddingField('dimension', Number(event.target.value))} placeholder="768" />
+                  <input className={embeddingFieldClass('dimension')} type="number" min={1} value={positiveOrBlank(embeddingConfiguration.dimension)} onChange={(event) => updateEmbeddingField('dimension', Number(event.target.value))} placeholder="768" />
                 </label>
                 <label className="grid gap-1 text-xs text-gray-300">Max sequence length <span className="text-gray-600">(max_position_embeddings)</span>
-                  <input className={inputClass} type="number" min={1} value={String(embeddingConfiguration.max_sequence_length ?? '')} onChange={(event) => updateEmbeddingField('max_sequence_length', Number(event.target.value))} placeholder="8192" />
+                  <input className={embeddingFieldClass('max_sequence_length')} type="number" min={1} value={positiveOrBlank(embeddingConfiguration.max_sequence_length)} onChange={(event) => updateEmbeddingField('max_sequence_length', Number(event.target.value))} placeholder="8192" />
                 </label>
                 <label className="grid gap-1 text-xs text-gray-300">Pooling
-                  <input className={inputClass} value={String(embeddingConfiguration.pooling ?? '')} onChange={(event) => updateEmbeddingField('pooling', event.target.value)} placeholder="mean, cls, or lasttoken" />
+                  <input className={embeddingFieldClass('pooling')} value={String(embeddingConfiguration.pooling ?? '')} onChange={(event) => updateEmbeddingField('pooling', event.target.value)} placeholder="mean, cls, or lasttoken" />
                 </label>
                 <label className="grid gap-1 text-xs text-gray-300">Precision
-                  <input className={inputClass} value={String(embeddingConfiguration.precision ?? '')} onChange={(event) => updateEmbeddingField('precision', event.target.value)} placeholder="float32" />
+                  <input className={embeddingFieldClass('precision')} value={String(embeddingConfiguration.precision ?? '')} onChange={(event) => updateEmbeddingField('precision', event.target.value)} placeholder="float32" />
                 </label>
               </div>
               <label className="mt-3 flex items-center gap-2 text-xs text-gray-300">
@@ -827,9 +853,10 @@ export function ControlledModelIntakeWorkflow({
                 Normalize embeddings
               </label>
               {embeddingGaps.length > 0 && (
-                <ul className="mt-3 list-disc space-y-1 pl-5 text-[11px] text-yellow-200">
-                  {embeddingGaps.map((gap) => <li key={gap}>{gap}</li>)}
-                </ul>
+                <p className="mt-3 text-[11px] text-yellow-200">
+                  The highlighted {embeddingGaps.length === 1 ? 'field is' : `${embeddingGaps.length} fields are`} still
+                  undeclared. Each one is listed with its source next to the queue button below.
+                </p>
               )}
             </div>
             <details>

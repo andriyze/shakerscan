@@ -364,3 +364,28 @@ test('a disabled queue button always states what is blocking it', () => {
   assert.match(workflow, /title=\{queueBlockers\.length \? `Blocked: /)
   assert.match(workflow, /disabled=\{busy === 'runner' \|\| queueBlockers\.length > 0\}/)
 })
+
+test('undeclared embedding fields render empty, highlighted, and listed once', () => {
+  // A number input bound to 0 renders "0", which reads as a declared value and
+  // hides the placeholder showing what a real one looks like.
+  assert.match(workflow, /function positiveOrBlank/)
+  assert.match(workflow, /value=\{positiveOrBlank\(embeddingConfiguration\.dimension\)\}/)
+  assert.match(workflow, /value=\{positiveOrBlank\(embeddingConfiguration\.max_sequence_length\)\}/)
+
+  // The four gaps were printed in full next to the fields and again under the
+  // button. The fields are marked instead, and the list appears once.
+  assert.match(workflow, /undeclaredEmbeddingFields/)
+  assert.match(workflow, /embeddingFieldClass/)
+  assert.match(workflow, /border-yellow-600\/60/)
+  assert.doesNotMatch(workflow, /embeddingGaps\.map\(\(gap\) => <li/)
+})
+
+test('re-seeding refreshes digests without discarding declared embedding values', () => {
+  // Seeding pulls digests from bound evidence. When the scanned revision
+  // published no embedding facts, clobbering the operator's own values with
+  // zeroes would silently undo their work.
+  assert.match(workflow, /previous\?: ModelIntakeDeploymentBundleRequest \| null/)
+  assert.match(workflow, /Number\(current\.dimension\) \|\| 0/)
+  assert.match(workflow, /String\(current\.pooling \|\| ''\)/)
+  assert.match(workflow, /buildSeededBundle\(detail, latestJob, bundle\)/)
+})
