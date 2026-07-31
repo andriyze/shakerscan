@@ -87,10 +87,10 @@ function blankBundle(environment: ModelIntakeWorkflowSubmission['requested_envir
     loader_profile_sha256: '',
     embedding_configuration: {
       dimension: 0,
-      pooling: 'review-required',
+      pooling: '',
       normalization: false,
       max_sequence_length: 0,
-      precision: 'review-required',
+      precision: '',
     },
     retrieval_application_digest: '',
     index_schema_digest: '',
@@ -299,12 +299,51 @@ export function ControlledModelIntakeWorkflow({
     setBundleJson(JSON.stringify(seeded, null, 2))
   }
 
+  function updateEmbeddingField(field: string, value: string | number | boolean) {
+    setBundleJson((current) => {
+      try {
+        const parsed = parseObject(current, 'Deployment bundle')
+        const embedding = { ...objectValue(parsed.embedding_configuration), [field]: value }
+        return JSON.stringify({ ...parsed, embedding_configuration: embedding }, null, 2)
+      } catch {
+        return current
+      }
+    })
+  }
+
+  // These are deployment facts the operator declares; ShakerScan cannot invent
+  // them. Naming the source file is what turns a rejection into an action.
+  function embeddingContractGaps(candidate: ModelIntakeDeploymentBundleRequest | null): string[] {
+    const embedding = objectValue(candidate?.embedding_configuration)
+    const gaps: string[] = []
+    const dimension = Number(embedding.dimension)
+    const sequence = Number(embedding.max_sequence_length)
+    if (!Number.isFinite(dimension) || dimension <= 0) {
+      gaps.push("embedding dimension \u2014 the model's hidden_size in config.json")
+    }
+    if (!Number.isFinite(sequence) || sequence <= 0) {
+      gaps.push('max sequence length \u2014 usually max_position_embeddings in config.json')
+    }
+    const placeholders = new Set(['', 'review-required', 'unknown', 'tbd'])
+    if (placeholders.has(String(embedding.pooling || '').trim().toLowerCase())) {
+      gaps.push('pooling \u2014 the sentence-transformer pooling mode this deployment uses')
+    }
+    if (placeholders.has(String(embedding.precision || '').trim().toLowerCase())) {
+      gaps.push('precision \u2014 the dtype the deployment serves, e.g. float32')
+    }
+    return gaps
+  }
+
   async function queueRunnerJob() {
     setBusy('runner')
     setError(null)
     try {
       const id = requireSelection()
       if (!bundle) throw new Error('Deployment bundle JSON is invalid')
+      const gaps = embeddingContractGaps(bundle)
+      if (gaps.length) {
+        throw new Error(`Declare the embedding configuration before queueing: ${gaps.join('; ')}.`)
+      }
       const parsedInputs = JSON.parse(knownAnswerInputs)
       if (!Array.isArray(parsedInputs) || parsedInputs.some((item) => typeof item !== 'string')) throw new Error('Known-answer inputs must be a JSON string array')
       await createModelIntakeRunnerJob(id, {
@@ -515,6 +554,8 @@ export function ControlledModelIntakeWorkflow({
     }
   }
 
+  const embeddingConfiguration = objectValue(bundle?.embedding_configuration)
+  const embeddingGaps = embeddingContractGaps(bundle)
   const runnerUnsupported = runnerReadiness?.supported_host === false
   // Firecracker is a Linux technology, so "not available on linux" would read as
   // a bug. On a cloud guest the wall is the absent CPU extension, not the OS.
@@ -693,7 +734,41 @@ export function ControlledModelIntakeWorkflow({
         <div className="grid gap-4 border-t border-gray-800 p-4 xl:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)]">
           <div className="grid gap-3">
             <div className="flex flex-wrap items-center justify-between gap-2"><span className="text-xs text-gray-400">Exact deployment bundle</span><button type="button" className={buttonClass} onClick={seedBundleFromEvidence}>Seed authoritative digests</button></div>
-            <textarea className={textareaClass} rows={18} value={bundleJson} onChange={(event) => setBundleJson(event.target.value)} />
+            <div className="rounded border border-gray-800 bg-gray-900 p-3">
+              <div className="text-xs font-medium text-gray-300">Embedding configuration</div>
+              <p className="mt-1 text-[11px] text-gray-500">
+                Deployment facts ShakerScan cannot infer. For a Hugging Face model these come from the
+                repository&apos;s <code className="text-gray-400">config.json</code> and its
+                sentence-transformer pooling config.
+              </p>
+              <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                <label className="grid gap-1 text-xs text-gray-300">Dimension <span className="text-gray-600">(hidden_size)</span>
+                  <input className={inputClass} type="number" min={1} value={String(embeddingConfiguration.dimension ?? '')} onChange={(event) => updateEmbeddingField('dimension', Number(event.target.value))} placeholder="768" />
+                </label>
+                <label className="grid gap-1 text-xs text-gray-300">Max sequence length <span className="text-gray-600">(max_position_embeddings)</span>
+                  <input className={inputClass} type="number" min={1} value={String(embeddingConfiguration.max_sequence_length ?? '')} onChange={(event) => updateEmbeddingField('max_sequence_length', Number(event.target.value))} placeholder="8192" />
+                </label>
+                <label className="grid gap-1 text-xs text-gray-300">Pooling
+                  <input className={inputClass} value={String(embeddingConfiguration.pooling ?? '')} onChange={(event) => updateEmbeddingField('pooling', event.target.value)} placeholder="mean, cls, or lasttoken" />
+                </label>
+                <label className="grid gap-1 text-xs text-gray-300">Precision
+                  <input className={inputClass} value={String(embeddingConfiguration.precision ?? '')} onChange={(event) => updateEmbeddingField('precision', event.target.value)} placeholder="float32" />
+                </label>
+              </div>
+              <label className="mt-3 flex items-center gap-2 text-xs text-gray-300">
+                <input type="checkbox" className="h-4 w-4 rounded border-gray-700 bg-gray-800" checked={Boolean(embeddingConfiguration.normalization)} onChange={(event) => updateEmbeddingField('normalization', event.target.checked)} />
+                Normalize embeddings
+              </label>
+              {embeddingGaps.length > 0 && (
+                <ul className="mt-3 list-disc space-y-1 pl-5 text-[11px] text-yellow-200">
+                  {embeddingGaps.map((gap) => <li key={gap}>{gap}</li>)}
+                </ul>
+              )}
+            </div>
+            <details>
+              <summary className="cursor-pointer text-xs text-gray-500">Raw deployment bundle JSON</summary>
+              <textarea className={`${textareaClass} mt-2`} rows={18} value={bundleJson} onChange={(event) => setBundleJson(event.target.value)} />
+            </details>
             <div className="grid gap-3 sm:grid-cols-3">
               <label className="grid gap-1 text-xs text-gray-300">Operation<select className={inputClass} value={runnerOperation} onChange={(event) => setRunnerOperation(event.target.value as typeof runnerOperation)}><option value="calibration">calibration</option><option value="runtime">runtime</option><option value="conversion">conversion</option></select></label>
               <label className="grid gap-1 text-xs text-gray-300">vCPU<input className={inputClass} type="number" min={1} max={32} value={vcpuCount} onChange={(event) => setVcpuCount(Number(event.target.value))} /></label>
@@ -702,7 +777,7 @@ export function ControlledModelIntakeWorkflow({
             <label className="grid gap-1 text-xs text-gray-300">Known-answer inputs (bounded JSON string array)<textarea className={textareaClass} rows={3} value={knownAnswerInputs} onChange={(event) => setKnownAnswerInputs(event.target.value)} /></label>
             <label className="grid gap-1 text-xs text-gray-300">Reviewed known-answer embedding SHA-256 {runnerOperation === 'runtime' ? '(required)' : '(optional)'}<input className={inputClass} value={knownAnswerDigest} onChange={(event) => setKnownAnswerDigest(event.target.value)} /></label>
             <label className="grid gap-1 text-xs text-gray-300">Wall-clock timeout seconds<input className={inputClass} type="number" min={30} max={3600} value={timeoutSeconds} onChange={(event) => setTimeoutSeconds(Number(event.target.value))} /></label>
-            <button type="button" className={buttonClass} disabled={busy === 'runner' || !selectedId || !runnerReadiness?.ready} onClick={queueRunnerJob}><Server className="h-3.5 w-3.5" /> Queue exact-subject Firecracker job</button>
+            <button type="button" className={buttonClass} disabled={busy === 'runner' || !selectedId || !runnerReadiness?.ready || embeddingGaps.length > 0} onClick={queueRunnerJob}><Server className="h-3.5 w-3.5" /> Queue exact-subject Firecracker job</button>
             {runnerUnsupported ? (
               <div className="rounded border border-gray-700 bg-gray-950 p-3 text-xs text-gray-400">
                 {runnerReadiness?.reason || 'The Firecracker microVM tier requires a Linux host with KVM.'}

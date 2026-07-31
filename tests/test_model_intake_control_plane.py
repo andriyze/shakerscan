@@ -335,3 +335,91 @@ def test_mutable_runtime_reference_is_rejected():
 
     with pytest.raises(AdmissionContractError, match="immutable"):
         build_deployment_bundle(data)
+
+
+def test_embedding_contract_errors_name_the_field_bound_and_value():
+    # The UI's own bundle template seeds zeros, so the first thing an operator
+    # does in the runner stage used to fail with "embedding dimensions are
+    # outside bounded limits" — one message covering four distinct failures,
+    # naming neither the field nor what a valid value looks like.
+    from model_intake_control_plane import (
+        AdmissionContractError,
+        build_deployment_bundle,
+    )
+
+    base = {
+        "model_artifact_sha256": "a" * 64,
+        "repository_snapshot_sha256": "b" * 64,
+        "custom_code_sha256": None,
+        "tokenizer_sha256": "c" * 64,
+        "configuration_sha256": "d" * 64,
+        "runtime_image_digest": "sha256:" + "e" * 64,
+        "loader_profile_sha256": "f" * 64,
+        "retrieval_application_digest": "1" * 64,
+        "index_schema_digest": "2" * 64,
+        "target_environment": "production",
+    }
+
+    def bundle(**overrides):
+        embedding = {
+            "dimension": 768,
+            "pooling": "mean",
+            "normalization": True,
+            "max_sequence_length": 8192,
+            "precision": "float32",
+        }
+        embedding.update(overrides)
+        return {**base, "embedding_configuration": embedding}
+
+    # A complete declaration is accepted and digested.
+    accepted = build_deployment_bundle(bundle())
+    assert accepted["embedding_configuration"]["dimension"] == 768
+    assert accepted["bundle_sha256"]
+
+    for overrides, expected in (
+        ({"dimension": 0}, "embedding_configuration.dimension"),
+        ({"dimension": 2_000_000}, "embedding_configuration.dimension"),
+        ({"max_sequence_length": 0}, "embedding_configuration.max_sequence_length"),
+        ({"pooling": "review-required"}, "embedding_configuration.pooling"),
+        ({"precision": "unknown"}, "embedding_configuration.precision"),
+    ):
+        try:
+            build_deployment_bundle(bundle(**overrides))
+        except AdmissionContractError as exc:
+            assert expected in str(exc), (overrides, str(exc))
+            # The received value is echoed so the operator can see what was sent.
+            assert "received" in str(exc)
+        else:
+            raise AssertionError(f"{overrides} should have been rejected")
+
+
+def test_dimension_and_sequence_length_are_reported_separately():
+    from model_intake_control_plane import AdmissionContractError, build_deployment_bundle
+
+    base = {
+        "model_artifact_sha256": "a" * 64,
+        "repository_snapshot_sha256": "b" * 64,
+        "custom_code_sha256": None,
+        "tokenizer_sha256": "c" * 64,
+        "configuration_sha256": "d" * 64,
+        "runtime_image_digest": "sha256:" + "e" * 64,
+        "loader_profile_sha256": "f" * 64,
+        "retrieval_application_digest": "1" * 64,
+        "index_schema_digest": "2" * 64,
+        "target_environment": "production",
+        "embedding_configuration": {
+            "dimension": 768,
+            "pooling": "mean",
+            "normalization": True,
+            "max_sequence_length": 0,
+            "precision": "float32",
+        },
+    }
+    try:
+        build_deployment_bundle(base)
+    except AdmissionContractError as exc:
+        # A valid dimension must not be implicated by a bad sequence length.
+        assert "max_sequence_length" in str(exc)
+        assert "dimension must be" not in str(exc)
+    else:
+        raise AssertionError("a zero max_sequence_length should be rejected")

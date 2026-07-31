@@ -142,6 +142,10 @@ def _timestamp(value: Any, field: str) -> datetime:
     return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
 
 
+MAX_EMBEDDING_DIMENSION = 1_000_000
+MAX_EMBEDDING_SEQUENCE_LENGTH = 10_000_000
+
+
 def build_deployment_bundle(data: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise AdmissionContractError("deployment bundle must be an object")
@@ -156,8 +160,22 @@ def build_deployment_bundle(data: dict[str, Any]) -> dict[str, Any]:
         max_sequence_length = int(embedding.get("max_sequence_length"))
     except (TypeError, ValueError) as exc:
         raise AdmissionContractError("embedding dimension and max_sequence_length are required integers") from exc
-    if dimension <= 0 or dimension > 1_000_000 or max_sequence_length <= 0 or max_sequence_length > 10_000_000:
-        raise AdmissionContractError("embedding dimensions are outside bounded limits")
+    # Name the field, the bound, and what was actually submitted. The previous
+    # message covered four different failures at once, so an operator who left
+    # the template's placeholder zero in place had no way to tell which value
+    # was wrong or what a valid one looks like.
+    if dimension <= 0 or dimension > MAX_EMBEDDING_DIMENSION:
+        raise AdmissionContractError(
+            f"embedding_configuration.dimension must be between 1 and {MAX_EMBEDDING_DIMENSION} "
+            f"(received {dimension}). This is the model's embedding width, published as "
+            "hidden_size in its config.json."
+        )
+    if max_sequence_length <= 0 or max_sequence_length > MAX_EMBEDDING_SEQUENCE_LENGTH:
+        raise AdmissionContractError(
+            f"embedding_configuration.max_sequence_length must be between 1 and "
+            f"{MAX_EMBEDDING_SEQUENCE_LENGTH} (received {max_sequence_length}). This is the token "
+            "limit the deployment will enforce, usually max_position_embeddings in config.json."
+        )
     bundle = {
         "schema_version": DEPLOYMENT_BUNDLE_SCHEMA,
         "model_artifact_sha256": _sha256(data.get("model_artifact_sha256"), "model_artifact_sha256"),
@@ -180,8 +198,13 @@ def build_deployment_bundle(data: dict[str, Any]) -> dict[str, Any]:
         "index_schema_digest": _sha256(data.get("index_schema_digest"), "index_schema_digest"),
         "target_environment": environment,
     }
-    if not bundle["embedding_configuration"]["pooling"] or not bundle["embedding_configuration"]["precision"]:
-        raise AdmissionContractError("embedding pooling and precision are required")
+    placeholders = {"", "review-required", "unknown", "tbd"}
+    for field in ("pooling", "precision"):
+        if bundle["embedding_configuration"][field].strip().lower() in placeholders:
+            raise AdmissionContractError(
+                f"embedding_configuration.{field} must be a declared deployment fact, not a "
+                f"placeholder (received {bundle['embedding_configuration'][field]!r})."
+            )
     bundle["bundle_sha256"] = digest_json(bundle)
     return bundle
 

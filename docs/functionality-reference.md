@@ -1209,14 +1209,14 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 289 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 244 | `api/api.py` |
+| Public REST operations | 292 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 246 | `api/api.py` |
 | Check families | 14 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 13 | `api/command_arsenal.py` |
 | Local-agent adapters | 4 | `api/command_arsenal.py` |
 | Scanner CLI flags | 158 | `scanner/scanner.py` |
-| Scanner wrapper commands | 26 | `scanner.sh` |
+| Scanner wrapper commands | 27 | `scanner.sh` |
 | Make targets | 11 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
 | Runtime environment keys | 309 | Python sources + Compose manifests |
@@ -1393,7 +1393,10 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `POST` | `/model-intake/reassessment/events` | `create_model_intake_reassessment_event` |
 | `POST` | `/model-intake/resolve` | `resolve_model_intake` |
 | `POST` | `/model-intake/retention/cleanup` | `cleanup_model_intake_quarantine` |
+| `GET` | `/model-intake/runners/install-plan` | `model_intake_runner_install_plan` |
 | `GET` | `/model-intake/runners/readiness` | `model_intake_runner_readiness` |
+| `GET` | `/model-intake/runners/stage` | `model_intake_runner_stage_status` |
+| `POST` | `/model-intake/runners/stage` | `model_intake_runner_stage` |
 | `POST` | `/model-intake/scan` | `scan_model_intake` |
 | `GET` | `/model-intake/scanners/readiness` | `model_intake_scanner_readiness` |
 | `GET` | `/model-intake/scans/{scan_id}/evidence-export` | `get_model_intake_evidence_export` |
@@ -1819,7 +1822,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Names |
 |---|---|
-| `scanner.sh` commands | `agent`, `ai`, `backup`, `build`, `doctor`, `env`, `fleet`, `gungnir`, `help`, `install-deps`, `join`, `logs`, `mcp`, `rebuild`, `reload`, `research`, `reset`, `restart`, `scale`, `scan`, `scan-full`, `scan-smart`, `shell`, `start`, `status`, `stop` |
+| `scanner.sh` commands | `agent`, `ai`, `backup`, `build`, `doctor`, `env`, `fleet`, `gungnir`, `help`, `install-deps`, `join`, `logs`, `mcp`, `model-intake-runner`, `rebuild`, `reload`, `research`, `reset`, `restart`, `scale`, `scan`, `scan-full`, `scan-smart`, `shell`, `start`, `status`, `stop` |
 | Make targets | `dependency-audit`, `dependency-lock`, `e2e`, `e2e-ai-gate`, `e2e-dast`, `e2e-model-intake`, `e2e-model-intake-fixture`, `fleet-acceptance`, `release-gates`, `test`, `upgrade-smoke` |
 | Release gates | `test:evidence-provenance`, `test:fleet-current`, `test:hypothesis-proof-promotion`, `test:mcp-read-only`, `test:no-ai-verified`, `test:no-benchmark-fitting`, `test:no-phantom-tools`, `test:planner-no-shell`, `test:planner-risk`, `test:planner-scope`, `test:scanner-auth-quality`, `test:scanner-bounds`, `test:scanner-proof-truth`, `test:scanner-registry-coverage` |
 

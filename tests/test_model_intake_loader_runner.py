@@ -107,9 +107,27 @@ def test_firecracker_contract_has_no_network_and_read_only_subject_drives():
 
 def test_firecracker_readiness_has_no_local_container_fallback(tmp_path, monkeypatch):
     monkeypatch.setattr("model_intake_runner_controller.platform.system", lambda: "Linux")
-    readiness = firecracker_readiness({})
-    assert readiness["status"] == "NOT_READY"
-    assert readiness["fallback_execution"] is False
+    # Pin the CPU probe. Left to the ambient /proc/cpuinfo this asserted
+    # NOT_READY on a host with vmx/svm and UNSUPPORTED_HOST on one without,
+    # so the result depended on which machine ran the suite.
+    virt_capable = tmp_path / "cpuinfo-virt"
+    virt_capable.write_text("processor\t: 0\nflags\t\t: fpu vme de vmx lm\n")
+    no_virt = tmp_path / "cpuinfo-plain"
+    no_virt.write_text("processor\t: 0\nflags\t\t: fpu vme de lm\n")
+
+    # A Linux host whose prerequisites are incomplete is a fixable deployment.
+    incomplete = firecracker_readiness({}, cpuinfo_path=virt_capable)
+    assert incomplete["status"] == "NOT_READY"
+
+    # A host with no virtualization extension is an unavailable tier instead.
+    unsupported = firecracker_readiness({}, cpuinfo_path=no_virt)
+    assert unsupported["status"] == "UNSUPPORTED_HOST"
+    assert unsupported["unsupported_reason"] == "no_hardware_virtualization"
+
+    # Neither branch may ever admit a local fallback executor.
+    for readiness in (incomplete, unsupported):
+        assert readiness["ready"] is False
+        assert readiness["fallback_execution"] is False
 
 
 def test_network_trace_parser_records_attempt_phase_destination_and_overflow_state(tmp_path):

@@ -300,3 +300,24 @@ test('the runner chip is the way to reach the runner setup', () => {
   assert.match(page, /onOpenRunnerStatus=\{\(\) => \{/)
   assert.match(page, /setPhase\('status'\)/)
 })
+
+test('the runner stage never ships a deployment bundle that cannot validate', () => {
+  // blankBundle() seeded dimension 0 and the literal string "review-required",
+  // so clicking through the provided template was guaranteed to be rejected by
+  // the admission contract with a message that named no field.
+  assert.doesNotMatch(workflow, /pooling: 'review-required'/)
+  assert.doesNotMatch(workflow, /precision: 'review-required'/)
+
+  // The gap is caught before the round trip, and each gap names its source.
+  assert.match(workflow, /embeddingContractGaps/)
+  assert.match(workflow, /hidden_size in config\.json/)
+  assert.match(workflow, /max_position_embeddings in config\.json/)
+  assert.match(workflow, /Declare the embedding configuration before queueing/)
+
+  // Those four values get real fields instead of hiding in a JSON blob, and
+  // the queue button stays disabled until they are declared.
+  assert.match(workflow, /Embedding configuration/)
+  assert.match(workflow, /updateEmbeddingField/)
+  assert.match(workflow, /Raw deployment bundle JSON/)
+  assert.match(workflow, /embeddingGaps\.length > 0/)
+})
