@@ -129,22 +129,24 @@ def firecracker_readiness(
         "check is unaffected."
     )
     reason_code = "host_platform"
-    # A Linux host is only repairable into KVM if the CPU actually offers the
-    # extension. A virtualized cloud instance without nested virtualization
-    # exposes neither /dev/kvm nor vmx/svm, and no amount of operator work will
-    # change that, so it belongs with macOS rather than with a half-provisioned
-    # runner host.
+    # A Linux host is only usable as a microVM tier if the CPU actually offers
+    # the extension. Without it there is nothing on the host to provision, so
+    # this belongs with macOS rather than with a half-provisioned runner host.
+    # The remedy is real but lives outside the host: most clouds now expose
+    # nested virtualization as a per-instance setting, so the reason must not
+    # tell the operator the machine is hopeless.
     if supported_host and not checks["kvm"] and cpu_exposes_virtualization(cpuinfo_path) is False:
         supported_host = False
         reason_code = "no_hardware_virtualization"
         reason = (
             "The Firecracker microVM tier requires /dev/kvm. This host exposes no "
-            "hardware virtualization extension (no vmx or svm CPU flag), which is "
-            "expected on a virtualized cloud instance without nested virtualization, "
-            "so KVM cannot be enabled here. Use a bare-metal or "
-            "nested-virtualization-capable Linux host, or point "
-            "MODEL_INTAKE_RUNNER_URL at one. Every other Model Intake check is "
-            "unaffected."
+            "hardware virtualization extension (no vmx or svm CPU flag), so KVM "
+            "cannot start here. On a virtualized cloud instance that is usually a "
+            "per-instance setting rather than a hard limit: AWS exposes it as the "
+            "nested-virtualization CPU option on a stopped instance, and other "
+            "providers have an equivalent. Enable it and restart the host, use a "
+            "bare-metal host, or point MODEL_INTAKE_RUNNER_URL at a Linux/KVM "
+            "host. Every other Model Intake check is unaffected."
         )
     if not supported_host:
         return {

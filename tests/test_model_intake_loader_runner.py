@@ -368,9 +368,10 @@ def test_linux_host_with_incomplete_prerequisites_still_reports_not_ready(tmp_pa
 
 
 def test_linux_host_without_nested_virtualization_reports_unsupported_host(tmp_path):
-    # A c8i.large-style cloud instance is Linux, but it is a guest with no vmx
-    # or svm flag, so /dev/kvm can never appear. Reporting NOT_READY there sends
-    # the operator to go install Firecracker prerequisites that cannot help.
+    # A c8i-style cloud instance is Linux, but with nested virtualization off it
+    # is a guest with no vmx or svm flag, so /dev/kvm cannot appear. Reporting
+    # NOT_READY there sends the operator to install Firecracker prerequisites
+    # that cannot help, because nothing on the host is the problem.
     from model_intake_runner_controller import firecracker_readiness
 
     guest = _cpuinfo(tmp_path, "fpu vme de pse hypervisor lahf_lm smep")
@@ -378,7 +379,11 @@ def test_linux_host_without_nested_virtualization_reports_unsupported_host(tmp_p
     assert result["status"] == "UNSUPPORTED_HOST"
     assert result["supported_host"] is False
     assert result["checks"]["kvm"] is False
-    assert "nested virtualization" in result["reason"]
+    assert result["unsupported_reason"] == "no_hardware_virtualization"
+    # The remedy is off-host but real, so the reason must point at it rather
+    # than claiming the machine can never run a microVM.
+    assert "nested-virtualization CPU option" in result["reason"]
+    assert "cannot be enabled here" not in result["reason"]
     # Fail-closed behavior is unchanged: no job may be queued, no fallback runs.
     assert result["ready"] is False
     assert result["fallback_execution"] is False
