@@ -83,7 +83,13 @@ export function IntakeContextBar({
       <div className="mt-3 flex flex-wrap gap-2">
         <Chip label="target" value={environment} tone="idle" />
         <Chip label="policy" value={policyProfile} tone="idle" />
-        <Chip label="credential" value={operatorReady ? 'deployment' : 'not set'} tone={operatorReady ? 'ok' : 'warn'} />
+        {/* Not a warning: a preflight scan needs no credential, so an absent one
+            is only relevant once the operator reaches the admission phase. */}
+        <Chip
+          label="credential"
+          value={operatorReady ? 'deployment' : 'needed for admission'}
+          tone={operatorReady ? 'ok' : 'idle'}
+        />
         <Chip label="adapters" value={adapterValue} tone={adapterTone} />
         <Chip label="runner" value={runnerValue} tone={runnerTone} />
       </div>

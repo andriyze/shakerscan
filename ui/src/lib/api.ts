@@ -3974,7 +3974,10 @@ export interface ModelIntakeOperatorCredential {
   available: boolean
   reason: 'local_deployment' | 'remote_deployment' | 'not_configured' | 'disabled' | 'unavailable'
   token?: string
+  // `detail` says what is affected in product terms; `hint` carries the
+  // operations instruction and stays behind a disclosure in the UI.
   detail?: string
+  hint?: string
 }
 
 // On a loopback-bound install the UI server owns the same operator credential

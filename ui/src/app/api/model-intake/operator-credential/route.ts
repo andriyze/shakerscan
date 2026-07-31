@@ -20,58 +20,57 @@ function autofillDisabled(): boolean {
   return flag === '0' || flag === 'false' || flag === 'no'
 }
 
+// The authoritative gate. Compose publishes the UI port on SHAKERSCAN_BIND_HOST
+// (defaulting to 127.0.0.1), so a loopback value means the only machine that can
+// open this page at all is the one running the deployment.
 function deploymentIsLoopbackBound(): boolean {
   const bind = (process.env.SHAKERSCAN_BIND_HOST || '').trim().toLowerCase()
   return LOOPBACK_HOSTS.has(bind)
 }
 
-function normalizeHop(value: string): string {
-  // IPv4-mapped IPv6 (::ffff:127.0.0.1) still denotes the local machine.
-  return value.trim().toLowerCase().replace(/^::ffff:/, '')
+function requestLooksLocal(request: Request): boolean {
+  // Deliberately only the Host header. The UI runs inside a container, so the
+  // peer address of a published-port request is Docker's bridge gateway
+  // (172.x.x.x) and x-forwarded-for never contains a loopback hop — requiring
+  // one disabled autofill on every containerized deployment, which is all of
+  // them. The port binding above is what actually constrains who can connect;
+  // this check only catches a reverse proxy serving the UI under a public name.
+  const host = (request.headers.get('host') || '').replace(/:\d+$/, '').toLowerCase()
+  return LOOPBACK_HOSTS.has(host)
 }
 
-function requestIsLoopback(request: Request): boolean {
-  // A cross-origin page cannot read this response, but a reverse proxy in front
-  // of the UI could still forward a remote browser here. Require the request to
-  // look like it came from the local machine as well.
-  const host = (request.headers.get('host') || '').replace(/:\d+$/, '').toLowerCase()
-  if (!LOOPBACK_HOSTS.has(host)) return false
-  // Next populates x-forwarded-for on every request, so its presence proves
-  // nothing. What matters is that no hop in the chain is remote.
-  const forwarded = request.headers.get('x-forwarded-for')
-  if (!forwarded) return true
-  return forwarded.split(',').every((hop) => LOOPBACK_HOSTS.has(normalizeHop(hop)))
+function decline(reason: string, detail: string, hint: string) {
+  return NextResponse.json(
+    { available: false, reason, detail, hint },
+    { headers: { 'Cache-Control': 'no-store' } }
+  )
 }
 
 export async function GET(request: Request) {
   const token = (process.env.MODEL_INTAKE_OPERATOR_TOKEN || '').trim()
 
+  // `detail` states what is affected in product terms; `hint` carries the
+  // operations instruction. Leading with an environment variable name is the
+  // wrong altitude for someone who just wants to scan a model.
   if (autofillDisabled()) {
-    return NextResponse.json(
-      { available: false, reason: 'disabled', detail: 'Operator credential autofill is disabled for this deployment.' },
-      { headers: { 'Cache-Control': 'no-store' } }
+    return decline(
+      'disabled',
+      'This deployment requires an operator credential to be entered by hand.',
+      'Unset SHAKERSCAN_UI_OPERATOR_AUTOFILL on the UI service to let the deployment supply it.'
     )
   }
-  if (!deploymentIsLoopbackBound() || !requestIsLoopback(request)) {
-    return NextResponse.json(
-      {
-        available: false,
-        reason: 'remote_deployment',
-        detail:
-          'This deployment is not bound to loopback. Paste the MODEL_INTAKE_OPERATOR_TOKEN value from the server .env, or configure MODEL_INTAKE_OPERATOR_CREDENTIALS_JSON for per-reviewer identities.',
-      },
-      { headers: { 'Cache-Control': 'no-store' } }
+  if (!deploymentIsLoopbackBound() || !requestLooksLocal(request)) {
+    return decline(
+      'remote_deployment',
+      'This deployment is reachable beyond the local machine, so corporate admission actions need an operator credential.',
+      'Paste the MODEL_INTAKE_OPERATOR_TOKEN value from the server .env, or configure MODEL_INTAKE_OPERATOR_CREDENTIALS_JSON for per-reviewer identities.'
     )
   }
   if (token.length < 32) {
-    return NextResponse.json(
-      {
-        available: false,
-        reason: 'not_configured',
-        detail:
-          'No Model Intake operator credential is configured. Run ./scanner.sh start to generate one, then restart the UI container.',
-      },
-      { headers: { 'Cache-Control': 'no-store' } }
+    return decline(
+      'not_configured',
+      'No operator credential is configured for this deployment yet.',
+      'Run ./scanner.sh start to generate one, then recreate the UI container so it picks the value up.'
     )
   }
 

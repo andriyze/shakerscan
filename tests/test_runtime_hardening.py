@@ -523,6 +523,10 @@ def test_ui_receives_the_operator_credential_and_bind_host_for_local_autofill():
 
     route = (ROOT / "ui" / "src" / "app" / "api" / "model-intake" / "operator-credential" / "route.ts").read_text()
     assert "deploymentIsLoopbackBound" in route
-    assert "requestIsLoopback" in route
+    assert "requestLooksLocal" in route
+    # The UI runs in a container, so the peer address of a published-port
+    # request is Docker's bridge gateway. Gating on it disabled autofill on
+    # every real deployment; the port binding is the actual constraint.
+    assert "headers.get('x-forwarded-for')" not in route
     # A remote deployment must fall back to explicit operator entry.
     assert "remote_deployment" in route

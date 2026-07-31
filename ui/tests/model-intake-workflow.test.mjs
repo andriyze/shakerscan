@@ -118,7 +118,7 @@ test('a local deployment resolves its own operator credential instead of asking 
 
   const route = readFileSync(path.join(root, 'src/app/api/model-intake/operator-credential/route.ts'), 'utf8')
   assert.match(route, /deploymentIsLoopbackBound/)
-  assert.match(route, /requestIsLoopback/)
+  assert.match(route, /requestLooksLocal/)
   assert.match(route, /SHAKERSCAN_UI_OPERATOR_AUTOFILL/)
   assert.match(route, /remote_deployment/)
 })
@@ -190,14 +190,37 @@ test('cross-phase navigation targets the phase that renders the control', () => 
   assert.match(page, /setPhase\('preflight'\)\n    setPolicyProfile\('strict'\)/)
 })
 
-test('operator credential autofill inspects forwarded hops rather than their presence', () => {
+test('operator credential autofill does not depend on the request peer address', () => {
   const route = readFileSync(path.join(root, 'src/app/api/model-intake/operator-credential/route.ts'), 'utf8')
-  // Next populates x-forwarded-for on every request, so treating the header's
-  // presence as proof of a proxy silently disabled autofill everywhere.
-  assert.match(route, /forwarded\.split\(','\)\.every/)
-  assert.match(route, /::ffff:/)
-  // An IPv6 host is "[::1]:3000"; splitting on ':' would mangle it.
+  // The UI runs in a container, so a published-port request arrives from
+  // Docker's bridge gateway and x-forwarded-for never holds a loopback hop.
+  // Requiring one disabled autofill on every real deployment.
+  assert.doesNotMatch(route, /headers\.get\('x-forwarded-for'\)/)
+  // The port binding is the real constraint on who can connect.
+  assert.match(route, /deploymentIsLoopbackBound/)
+  assert.match(route, /SHAKERSCAN_BIND_HOST/)
+  // The Host check only catches a reverse proxy serving a public name, and an
+  // IPv6 host is "[::1]:3000" — splitting on ':' would mangle it.
   assert.match(route, /replace\(\/:\\d\+\$\/, ''\)/)
+})
+
+test('credential messaging leads with impact and keeps ops detail behind a disclosure', () => {
+  const route = readFileSync(path.join(root, 'src/app/api/model-intake/operator-credential/route.ts'), 'utf8')
+  // Someone pasting a Hugging Face URL to run a preflight scan should never be
+  // told to go paste an environment variable: the scan needs no credential.
+  assert.match(route, /hint/)
+  for (const detail of [
+    'This deployment is reachable beyond the local machine',
+    'No operator credential is configured for this deployment yet',
+  ]) {
+    assert.ok(route.includes(detail), `${detail} is missing`)
+    assert.ok(!detail.includes('MODEL_INTAKE_OPERATOR_TOKEN'))
+  }
+  assert.match(workflow, /Where do I get one\?/)
+  assert.match(workflow, /Everything before it/)
+  // The context chip is neutral, not a warning, because preflight is unaffected.
+  assert.match(shell, /needed for admission/)
+  assert.doesNotMatch(shell, /operatorReady \? 'ok' : 'warn'/)
 })
 
 test('an unavailable microVM tier reads as unavailable, not broken', () => {

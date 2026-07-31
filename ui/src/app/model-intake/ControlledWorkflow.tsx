@@ -557,12 +557,13 @@ export function ControlledModelIntakeWorkflow({
           </span>
         </div>
       ) : (
-        <div className="mt-4 grid gap-2 rounded border border-yellow-700/50 bg-yellow-950/20 p-3 text-xs text-yellow-200">
+        <div className="mt-4 grid gap-2 rounded border border-gray-700 bg-gray-950 p-3 text-xs text-gray-400">
           <div className="flex gap-2">
-            <ShieldAlert className="h-4 w-4 shrink-0" />
+            <ShieldAlert className="h-4 w-4 shrink-0 text-gray-500" />
             <span>
-              {operatorCredential?.detail
-                || 'An operator credential is required for submissions, evidence, runner jobs, approvals, and promotion.'}
+              Corporate approval actions are signed by a named reviewer, so this stage needs an
+              operator credential. Everything before it — resolving a model and running the preflight
+              evidence scan — needs nothing.
             </span>
           </div>
           <label className="mt-1 grid max-w-2xl gap-1 text-gray-300">
@@ -573,10 +574,18 @@ export function ControlledModelIntakeWorkflow({
               autoComplete="off"
               value={operatorToken}
               onChange={(event) => onOperatorTokenChange(event.target.value)}
-              placeholder="MODEL_INTAKE_OPERATOR_TOKEN, or a configured reviewer credential"
+              placeholder="Reviewer credential for this deployment"
             />
             <span className="text-[11px] text-gray-500">Stored only in this browser session and never rendered in workflow evidence.</span>
           </label>
+          {(operatorCredential?.detail || operatorCredential?.hint) && (
+            <details>
+              <summary className="cursor-pointer text-[11px] text-gray-500">Where do I get one?</summary>
+              <div className="mt-1 text-[11px] text-gray-500">
+                {operatorCredential?.detail}{' '}<span className="text-gray-400">{operatorCredential?.hint}</span>
+              </div>
+            </details>
+          )}
         </div>
       )}
       {error && <div role="alert" className="mt-4 break-words rounded border border-red-700/50 bg-red-950/20 p-3 text-xs text-red-300">{error}</div>}
