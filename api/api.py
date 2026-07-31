@@ -12555,6 +12555,14 @@ async def create_model_intake_runner_job(
             """,
             submission_uuid,
         )
+        # Read the registered subjects in the same acquisition. Without this the
+        # exact-subject check below referenced an undefined name and every
+        # attempt to queue a Firecracker job raised NameError, so the microVM
+        # tier could never be exercised through its own API at all.
+        registered_subjects = await conn.fetch(
+            "SELECT subject_kind,sha256 FROM model_intake_subjects WHERE submission_id=$1",
+            submission_uuid,
+        )
     if not row:
         raise HTTPException(status_code=404, detail="Model submission not found")
     if bundle["target_environment"] != row["requested_environment"]:
