@@ -21,6 +21,8 @@ import random
 import re
 import secrets
 import shutil
+import subprocess
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -13957,6 +13959,141 @@ async def model_intake_runner_readiness():
                 "fallback_execution": False,
             }
     return await asyncio.to_thread(_model_firecracker_readiness)
+
+
+_MODEL_INTAKE_STAGE_LOCK = threading.Lock()
+_MODEL_INTAKE_STAGE_STATE: dict[str, Any] = {"status": "idle"}
+_MODEL_INTAKE_STAGE_LOG_LINES = 200
+
+# Server-owned. The caller supplies no URL, digest, or path, so staging cannot be
+# pointed at another host or made to write outside the results volume.
+MODEL_INTAKE_GUEST_KERNEL_URL = (
+    "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.12/x86_64/vmlinux-6.1.128"
+)
+MODEL_INTAKE_GUEST_KERNEL_SHA256 = (
+    "27a8310b9a727517e9eb02044524b6ceb77de5728e3491b6974d5c846227ecc8"
+)
+
+
+def _model_intake_stage_dir() -> Path:
+    return Path(os.getenv("RESULTS_DIR", "/results")) / "model-intake-runner"
+
+
+def _model_intake_stage_set(**fields: Any) -> None:
+    with _MODEL_INTAKE_STAGE_LOCK:
+        _MODEL_INTAKE_STAGE_STATE.update(fields)
+
+
+def _model_intake_stage_log(line: str) -> None:
+    with _MODEL_INTAKE_STAGE_LOCK:
+        log = _MODEL_INTAKE_STAGE_STATE.setdefault("log", [])
+        log.append(line[:500])
+        del log[:-_MODEL_INTAKE_STAGE_LOG_LINES]
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _model_intake_stage_run() -> None:
+    """Produce the two large runner inputs so the root step stays seconds long.
+
+    Everything here is unprivileged relative to the host: fetching a pinned
+    kernel and building a container image. The privileged install -- systemd
+    unit, cgroup parent, /srv/jailer -- stays an explicit operator action.
+    """
+    stage_dir = _model_intake_stage_dir()
+    try:
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        kernel_path = stage_dir / "vmlinux"
+        _model_intake_stage_set(status="running", phase="kernel", error=None)
+        if kernel_path.is_file() and _sha256_file(kernel_path) == MODEL_INTAKE_GUEST_KERNEL_SHA256:
+            _model_intake_stage_log("kernel already staged and verified")
+        else:
+            _model_intake_stage_log(f"fetching {MODEL_INTAKE_GUEST_KERNEL_URL}")
+            temporary = kernel_path.with_suffix(".partial")
+            with urllib.request.urlopen(MODEL_INTAKE_GUEST_KERNEL_URL, timeout=120) as response:
+                with temporary.open("wb") as handle:
+                    shutil.copyfileobj(response, handle, 1024 * 1024)
+            observed = _sha256_file(temporary)
+            if observed != MODEL_INTAKE_GUEST_KERNEL_SHA256:
+                temporary.unlink(missing_ok=True)
+                raise RuntimeError(
+                    f"kernel digest mismatch: expected {MODEL_INTAKE_GUEST_KERNEL_SHA256}, got {observed}"
+                )
+            temporary.replace(kernel_path)
+            _model_intake_stage_log("kernel verified against its pinned digest")
+
+        _model_intake_stage_set(phase="guest_rootfs")
+        rootfs_path = stage_dir / "rootfs.ext4"
+        script = Path("/workspace/scripts/build-model-intake-guest-rootfs.sh")
+        if not script.is_file():
+            raise RuntimeError("guest rootfs builder is unavailable in this runtime")
+        _model_intake_stage_log("building the guest image (this pulls CPU PyTorch; expect minutes)")
+        process = subprocess.Popen(
+            ["bash", str(script), str(rootfs_path)],
+            cwd="/workspace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        assert process.stdout is not None
+        for line in process.stdout:
+            _model_intake_stage_log(line.rstrip())
+        if process.wait() != 0:
+            raise RuntimeError("guest rootfs build failed; see the staging log")
+
+        _model_intake_stage_set(
+            status="ready",
+            phase="complete",
+            artifacts={
+                "kernel": {"path": str(kernel_path), "sha256": _sha256_file(kernel_path)},
+                "rootfs": {"path": str(rootfs_path), "sha256": _sha256_file(rootfs_path),
+                           "bytes": rootfs_path.stat().st_size},
+            },
+        )
+        _model_intake_stage_log("staging complete")
+    except Exception as exc:  # noqa: BLE001 - surfaced to the operator as failed state
+        _model_intake_stage_set(status="failed", phase="failed", error=f"{type(exc).__name__}: {exc}")
+        _model_intake_stage_log(f"staging failed: {type(exc).__name__}: {exc}")
+
+
+@app.post("/model-intake/runners/stage")
+async def model_intake_runner_stage(http_request: Request):
+    """Stage the guest kernel and image so the root install step stays short."""
+    _require_model_intake_operator(http_request)
+    from model_intake_runner_controller import cpu_exposes_virtualization, host_platform
+
+    if host_platform() not in {"linux", "unknown"} or cpu_exposes_virtualization() is False:
+        raise HTTPException(
+            status_code=409,
+            detail="This host cannot run the microVM tier, so staging its inputs would be useless.",
+        )
+    if shutil.which("docker") is None:
+        raise HTTPException(
+            status_code=503,
+            detail="The API image has no Docker client; rebuild it to stage the guest image.",
+        )
+    with _MODEL_INTAKE_STAGE_LOCK:
+        if _MODEL_INTAKE_STAGE_STATE.get("status") == "running":
+            raise HTTPException(status_code=409, detail="Staging is already running.")
+        _MODEL_INTAKE_STAGE_STATE.clear()
+        _MODEL_INTAKE_STAGE_STATE.update({"status": "running", "phase": "starting", "log": []})
+    threading.Thread(target=_model_intake_stage_run, daemon=True).start()
+    return {"status": "running"}
+
+
+@app.get("/model-intake/runners/stage")
+async def model_intake_runner_stage_status():
+    """Staging progress. Content-free: digests and phases, never model bytes."""
+    with _MODEL_INTAKE_STAGE_LOCK:
+        state = json.loads(json.dumps(_MODEL_INTAKE_STAGE_STATE, default=str))
+    state.setdefault("status", "idle")
+    return state
 
 
 @app.get("/model-intake/runners/install-plan")

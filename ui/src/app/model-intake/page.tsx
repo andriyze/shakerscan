@@ -2233,6 +2233,7 @@ function ModelIntakeSettingsContent() {
           <RunnerInstallCard
             readiness={runnerReadiness}
             plan={runnerInstallPlan}
+            operatorToken={operatorToken}
             onRecheck={loadRunnerReadiness}
           />
         </Card>

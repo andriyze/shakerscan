@@ -1,11 +1,14 @@
 'use client'
 
-import { useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { CheckCircle2, Circle, Copy, LockKeyhole, PackageCheck, ShieldAlert, Server } from 'lucide-react'
-import type {
-  ModelIntakeRunnerInstallPlan,
-  ModelIntakeRunnerReadiness,
-  ModelIntakeScanSummary,
+import {
+  getModelIntakeRunnerStage,
+  startModelIntakeRunnerStage,
+  type ModelIntakeRunnerInstallPlan,
+  type ModelIntakeRunnerReadiness,
+  type ModelIntakeRunnerStageState,
+  type ModelIntakeScanSummary,
 } from '@/lib/api'
 
 // Model Intake is one pipeline: pick a model, produce technical evidence, then
@@ -181,17 +184,49 @@ export function IntakePhaseTabs({
 export function RunnerInstallCard({
   readiness,
   plan,
+  operatorToken,
   onRecheck,
 }: {
   readiness: ModelIntakeRunnerReadiness | null
   plan: ModelIntakeRunnerInstallPlan | null
+  operatorToken: string
   onRecheck: () => void
 }) {
   const [open, setOpen] = useState(false)
   const [signer, setSigner] = useState('kms:<key-id>')
   const [copied, setCopied] = useState(false)
+  const [stage, setStage] = useState<ModelIntakeRunnerStageState | null>(null)
+  const [stageError, setStageError] = useState<string | null>(null)
   const installed = readiness?.ready === true
   const command = (plan?.command || '').replace('<choice>', signer)
+  const staging = stage?.status === 'running'
+  const staged = stage?.status === 'ready'
+
+  const refreshStage = useCallback(async () => {
+    try {
+      setStage(await getModelIntakeRunnerStage())
+    } catch {
+      /* staging state is advisory; the install command works regardless */
+    }
+  }, [])
+
+  useEffect(() => { void refreshStage() }, [refreshStage])
+  useEffect(() => {
+    // Only poll while there is something to watch, so an idle Status tab does
+    // not sit in a request loop.
+    if (!staging) return
+    const timer = setInterval(() => { void refreshStage() }, 3000)
+    return () => clearInterval(timer)
+  }, [staging, refreshStage])
+
+  async function beginStaging() {
+    setStageError(null)
+    try {
+      setStage(await startModelIntakeRunnerStage(operatorToken))
+    } catch (err) {
+      setStageError(err instanceof Error ? err.message : 'Failed to start staging')
+    }
+  }
 
   async function copyCommand() {
     try {
@@ -268,6 +303,55 @@ export function RunnerInstallCard({
                       </button>
                     ))}
                   </div>
+                </div>
+                {/* The slow half of the install needs no privilege the API
+                    lacks, so the button does it and leaves only the fast root
+                    step to the operator. */}
+                <div className="rounded border border-gray-800 bg-gray-950 p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="text-xs font-medium text-gray-300">
+                      Step 1 — stage the guest image and kernel
+                    </div>
+                    <span className={`rounded px-2 py-0.5 text-[10px] font-semibold ${
+                      staged ? 'bg-green-950/60 text-green-300'
+                        : staging ? 'bg-yellow-950/60 text-yellow-200'
+                          : stage?.status === 'failed' ? 'bg-red-950/60 text-red-300'
+                            : 'bg-gray-800 text-gray-400'
+                    }`}>
+                      {staged ? 'staged' : staging ? (stage?.phase || 'running') : stage?.status === 'failed' ? 'failed' : 'not staged'}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-[11px] text-gray-500">
+                    Builds the multi-gigabyte guest and fetches the digest-pinned kernel. This is the
+                    slow part, and it needs no host privileges.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={beginStaging}
+                    disabled={staging || !operatorToken.trim()}
+                    className="mt-2 inline-flex items-center gap-2 rounded border border-cyan-700 bg-cyan-950/40 px-3 py-1.5 text-xs text-cyan-100 hover:bg-cyan-900/40 disabled:cursor-not-allowed disabled:border-gray-700 disabled:bg-transparent disabled:text-gray-600"
+                  >
+                    {staging ? 'Staging…' : staged ? 'Re-stage' : 'Stage guest image'}
+                  </button>
+                  {!operatorToken.trim() && (
+                    <span className="ml-2 text-[11px] text-gray-500">Needs the operator credential.</span>
+                  )}
+                  {stageError && <div className="mt-2 text-[11px] text-red-300">{stageError}</div>}
+                  {stage?.error && <div className="mt-2 break-words text-[11px] text-red-300">{stage.error}</div>}
+                  {stage?.artifacts?.rootfs && (
+                    <div className="mt-2 break-all font-mono text-[10px] text-gray-500">
+                      rootfs sha256:{stage.artifacts.rootfs.sha256?.slice(0, 32)}… ({Math.round(stage.artifacts.rootfs.bytes / 1048576)} MB)
+                    </div>
+                  )}
+                  {stage?.log && stage.log.length > 0 && (staging || stage.status === 'failed') && (
+                    <pre className="mt-2 max-h-40 overflow-auto rounded bg-black/50 p-2 font-mono text-[10px] text-gray-400">
+                      {stage.log.slice(-12).join('\n')}
+                    </pre>
+                  )}
+                </div>
+
+                <div className="text-xs font-medium text-gray-300">
+                  Step 2 — install on the host (root, seconds){staged ? '' : ' — runs faster after staging'}
                 </div>
                 <div className="flex min-w-0 items-center gap-2 rounded border border-gray-800 bg-black/40 p-2">
                   <code className="min-w-0 flex-1 break-all font-mono text-[11px] text-cyan-200">{command}</code>

@@ -93,7 +93,48 @@ def docker_bridge_address() -> str | None:
     return gateway if result.returncode == 0 and gateway else None
 
 
-def host_facts() -> dict:
+# A clean Ubuntu image ships iproute2 and e2fsprogs but not nftables, and the
+# provisioner hard-fails without nft. Name the package rather than the binary so
+# the fix is one apt-get away instead of a puzzle.
+HOST_TOOL_PACKAGES = {
+    "nft": "nftables",
+    "mkfs.ext4": "e2fsprogs",
+    "debugfs": "e2fsprogs",
+    "ip": "iproute2",
+    "curl": "curl",
+    "tar": "tar",
+    "sha256sum": "coreutils",
+}
+
+
+def _sha256_path(path: Path) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _staged_inputs(runtime: Path) -> dict:
+    """What the UI's staging step already produced, if anything.
+
+    Staging is unprivileged and slow; the install is privileged and fast. Being
+    able to see the staged inputs is what keeps those two apart.
+    """
+    stage_dir = runtime / "results/model-intake-runner"
+    kernel = stage_dir / "vmlinux"
+    rootfs = stage_dir / "rootfs.ext4"
+    result: dict = {"dir": str(stage_dir), "kernel": None, "rootfs": None}
+    if kernel.is_file():
+        result["kernel"] = {"path": str(kernel), "sha256": _sha256_path(kernel)}
+    if rootfs.is_file():
+        result["rootfs"] = {"path": str(rootfs), "bytes": rootfs.stat().st_size}
+    return result
+
+
+def host_facts(runtime: Path) -> dict:
     kvm = Path("/dev/kvm").exists()
     virt = cpu_virtualization()
     installed = {
@@ -107,6 +148,7 @@ def host_facts() -> dict:
     tools = {name: shutil.which(name) is not None for name in
              ("docker", "ip", "nft", "mkfs.ext4", "debugfs", "curl", "tar", "sha256sum")}
     return {
+        "staged": _staged_inputs(runtime),
         "platform": platform.system().lower(),
         "arch": platform.machine(),
         "kvm": kvm,
@@ -135,12 +177,16 @@ def installability(facts: dict) -> tuple[bool, str]:
     if not facts["cgroup_v2"]:
         return False, "cgroup v2 is required and /sys/fs/cgroup/cgroup.controllers is absent."
     if facts["missing_host_tools"]:
-        return False, "Missing required host commands: " + ", ".join(facts["missing_host_tools"])
+        packages = sorted({HOST_TOOL_PACKAGES.get(name, name) for name in facts["missing_host_tools"]})
+        return False, (
+            "Missing required host commands: " + ", ".join(facts["missing_host_tools"])
+            + ". Install them with: sudo apt-get install -y " + " ".join(packages)
+        )
     return True, "This host can run the Model Intake microVM tier."
 
 
 def cmd_status(args, runtime: Path) -> int:
-    facts = host_facts()
+    facts = host_facts(runtime)
     ok, reason = installability(facts)
     complete = all(facts["installed"].values())
     facts["can_install"] = ok
@@ -195,7 +241,7 @@ def _read_runner_env(key: str) -> str | None:
 
 
 def cmd_install(args, runtime: Path) -> int:
-    facts = host_facts()
+    facts = host_facts(runtime)
     ok, reason = installability(facts)
     if not ok:
         print(f"Cannot install here: {reason}", file=sys.stderr)
@@ -251,10 +297,18 @@ def cmd_install(args, runtime: Path) -> int:
               file=sys.stderr)
         return 2
 
+    # A staged kernel is only reused when it still matches the pinned digest;
+    # a stale or tampered file falls back to a fresh verified download.
+    kernel_url = args.kernel_url
+    staged_kernel = facts["staged"].get("kernel")
+    if staged_kernel and staged_kernel["sha256"] == args.kernel_sha256:
+        kernel_url = f"file://{staged_kernel['path']}"
+        print(f"==> reusing staged kernel {staged_kernel['path']}")
+
     print(f"==> provisioning Firecracker (bind {bind_host}:{args.bind_port})")
     provision_env = {
         **os.environ,
-        "MODEL_INTAKE_KERNEL_URL": args.kernel_url,
+        "MODEL_INTAKE_KERNEL_URL": kernel_url,
         "MODEL_INTAKE_KERNEL_SHA256": args.kernel_sha256,
         "MODEL_INTAKE_ROOTFS_SOURCE": str(rootfs),
         "MODEL_INTAKE_RUNNER_BIND_HOST": bind_host,
