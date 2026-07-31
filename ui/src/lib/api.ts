@@ -3936,6 +3936,45 @@ function modelIntakeWorkflowHeaders(operatorToken: string, json = false): Header
 
 export const MODEL_INTAKE_OPERATOR_TOKEN_KEY = 'shakerscan:model-intake-operator-token'
 
+export interface ModelIntakeSbomSummary {
+  available: boolean
+  reason?: string
+  formats?: Array<'cyclonedx' | 'aibom'>
+  aibom_available?: boolean
+  spec_version?: string
+  component_count?: number
+  // "not_generated" means the scan ran at a depth that never enumerated
+  // dependencies, so a small component count is a coverage fact, not a clean bill.
+  dependency_inventory?: 'generated' | 'not_generated'
+  acquisition_complete?: boolean
+  checksum_status?: string
+}
+
+export async function getModelIntakeSbomSummary(scanId: string): Promise<ModelIntakeSbomSummary> {
+  const res = await fetch(`${API_URL}/model-intake/scans/${scanId}/sbom/summary`)
+  if (!res.ok) return { available: false, reason: 'unavailable' }
+  return res.json()
+}
+
+export async function downloadModelIntakeSbom(
+  scanId: string,
+  format: 'cyclonedx' | 'aibom' = 'cyclonedx',
+): Promise<void> {
+  const res = await fetch(`${API_URL}/model-intake/scans/${scanId}/sbom?format=${format}`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to export the bill of materials'))
+  const blob = await res.blob()
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = format === 'aibom'
+    ? `shakerscan-aibom-${scanId}.json`
+    : `shakerscan-sbom-${scanId}.cdx.json`
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(url)
+}
+
 export interface ModelIntakeScanSummary {
   id: string
   status: Scan['status']

@@ -174,6 +174,17 @@ except ModuleNotFoundError:
     from api.model_intake_components import component_identities as _model_intake_component_identities
 
 try:
+    from model_intake_sbom import (
+        build_model_intake_cyclonedx as _build_model_intake_cyclonedx,
+        model_intake_bom_completeness as _model_intake_bom_completeness,
+    )
+except ModuleNotFoundError:
+    from api.model_intake_sbom import (
+        build_model_intake_cyclonedx as _build_model_intake_cyclonedx,
+        model_intake_bom_completeness as _model_intake_bom_completeness,
+    )
+
+try:
     from model_intake_reporting import (
         build_model_intake_report as _build_model_intake_report,
         model_intake_report_to_sarif as _model_intake_report_to_sarif,
@@ -14135,6 +14146,70 @@ async def model_intake_runner_stage_status():
                     },
                 })
     return state
+
+
+@app.get("/model-intake/scans/{scan_id}/sbom")
+async def download_model_intake_sbom(
+    scan_id: str,
+    format: str = Query("cyclonedx", pattern="^(cyclonedx|aibom)$"),
+    download: bool = Query(True),
+):
+    """Export a completed Model Intake scan as a bill of materials.
+
+    Everything here was produced by the scan itself. Nothing is re-inspected,
+    so this stays a read of recorded evidence rather than a second opinion.
+    """
+    scan_uuid = _model_intake_uuid(scan_id, "scan id")
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT status,scan_type,result FROM scans WHERE id=$1", scan_uuid)
+    if not row:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    if str(row["scan_type"]) != "model_intake":
+        raise HTTPException(status_code=409, detail="Scan is not a Model Intake scan")
+    if str(row["status"]) != "completed":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Scan is {row['status']}; a bill of materials is only exported from a completed scan",
+        )
+    result = _model_intake_json_object(row["result"])
+    if format == "aibom":
+        aibom = result.get("model_intake", {}).get("aibom") if isinstance(result.get("model_intake"), dict) else None
+        if not isinstance(aibom, dict) or not aibom:
+            raise HTTPException(status_code=409, detail="This scan recorded no AIBOM")
+        document, filename = aibom, f"shakerscan-aibom-{scan_uuid}.json"
+    else:
+        try:
+            document = _build_model_intake_cyclonedx(result, scan_id=str(scan_uuid))
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        filename = f"shakerscan-sbom-{scan_uuid}.cdx.json"
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'} if download else {}
+    return JSONResponse(content=document, headers=headers, media_type="application/json")
+
+
+@app.get("/model-intake/scans/{scan_id}/sbom/summary")
+async def model_intake_sbom_summary(scan_id: str):
+    """Describe the exportable bill of materials without transferring it."""
+    scan_uuid = _model_intake_uuid(scan_id, "scan id")
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT status,scan_type,result FROM scans WHERE id=$1", scan_uuid)
+    if not row or str(row["scan_type"]) != "model_intake":
+        raise HTTPException(status_code=404, detail="Model Intake scan not found")
+    if str(row["status"]) != "completed":
+        return {"available": False, "reason": f"scan_{row['status']}"}
+    result = _model_intake_json_object(row["result"])
+    try:
+        document = _build_model_intake_cyclonedx(result, scan_id=str(scan_uuid))
+    except ValueError:
+        return {"available": False, "reason": "no_model_intake_evidence"}
+    model_intake = result.get("model_intake") if isinstance(result.get("model_intake"), dict) else {}
+    return {
+        "available": True,
+        "formats": ["cyclonedx", "aibom"],
+        "aibom_available": bool(isinstance(model_intake, dict) and model_intake.get("aibom")),
+        "spec_version": document.get("specVersion"),
+        **_model_intake_bom_completeness(document),
+    }
 
 
 @app.get("/model-intake/runners/install-plan")

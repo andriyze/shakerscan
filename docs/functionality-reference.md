@@ -1209,8 +1209,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 292 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 246 | `api/api.py` |
+| Public REST operations | 294 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 248 | `api/api.py` |
 | Check families | 14 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 13 | `api/command_arsenal.py` |
@@ -1400,6 +1400,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `POST` | `/model-intake/scan` | `scan_model_intake` |
 | `GET` | `/model-intake/scanners/readiness` | `model_intake_scanner_readiness` |
 | `GET` | `/model-intake/scans/{scan_id}/evidence-export` | `get_model_intake_evidence_export` |
+| `GET` | `/model-intake/scans/{scan_id}/sbom` | `download_model_intake_sbom` |
+| `GET` | `/model-intake/scans/{scan_id}/sbom/summary` | `model_intake_sbom_summary` |
 | `GET` | `/model-intake/submissions` | `list_model_intake_submissions` |
 | `POST` | `/model-intake/submissions` | `create_model_intake_submission` |
 | `GET` | `/model-intake/submissions/{submission_id}` | `get_model_intake_submission` |

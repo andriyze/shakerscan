@@ -6,10 +6,15 @@ import ComplianceSection from '@/components/ComplianceSection'
 import RemediationSummary from '@/components/RemediationSummary'
 import FindingActions from '@/components/FindingActions'
 import FindingCard from '@/components/FindingCard'
-import { getApiUrl } from '@/lib/api'
+import {
+  getApiUrl,
+  getModelIntakeSbomSummary,
+  downloadModelIntakeSbom,
+  type ModelIntakeSbomSummary,
+} from '@/lib/api'
 import { gradeTextColor } from '@/components/ui'
 import { SEVERITY_BADGE_STYLES, type SeverityLevel } from '@/lib/constants'
-import { AlertTriangle, CheckCircle2 } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, Download } from 'lucide-react'
 import { normalizeSkipReasons } from '@/lib/deferredWorkContracts'
 
 type RemediationStatus = 'open' | 'in_progress' | 'remediated' | 'false_positive' | 'accepted_risk'
@@ -446,6 +451,68 @@ function findingTrackingKeys(finding: any): string[] {
 
 function hasPersistedFindingRecord(finding: any, persistedKeys: Set<string>): boolean {
   return findingTrackingKeys(finding).some(key => persistedKeys.has(key))
+}
+
+// The scan already produces a CycloneDX dependency inventory and an AIBOM;
+// before this there was no way to get either out of ShakerScan.
+function ModelIntakeSbomDownload({ scanId }: { scanId: string }) {
+  const [summary, setSummary] = useState<ModelIntakeSbomSummary | null>(null)
+  const [busy, setBusy] = useState('')
+  const [error, setError] = useState<string | null>(null)
+
+  React.useEffect(() => {
+    let cancelled = false
+    getModelIntakeSbomSummary(scanId).then((next) => {
+      if (!cancelled) setSummary(next)
+    })
+    return () => { cancelled = true }
+  }, [scanId])
+
+  async function download(format: 'cyclonedx' | 'aibom') {
+    setBusy(format)
+    setError(null)
+    try {
+      await downloadModelIntakeSbom(scanId, format)
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Export failed')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  if (!summary?.available) return null
+  const thin = summary.dependency_inventory !== 'generated'
+  return (
+    <div className="text-right">
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        <button
+          type="button"
+          onClick={() => download('cyclonedx')}
+          disabled={busy === 'cyclonedx'}
+          className="inline-flex items-center gap-2 rounded border border-gray-600 px-3 py-1.5 text-sm text-gray-200 hover:bg-gray-700 disabled:opacity-50"
+        >
+          <Download className="h-4 w-4" />
+          {busy === 'cyclonedx' ? 'Exporting…' : `SBOM (CycloneDX ${summary.spec_version || '1.5'})`}
+        </button>
+        {summary.aibom_available && (
+          <button
+            type="button"
+            onClick={() => download('aibom')}
+            disabled={busy === 'aibom'}
+            className="inline-flex items-center gap-2 rounded border border-gray-600 px-3 py-1.5 text-sm text-gray-200 hover:bg-gray-700 disabled:opacity-50"
+          >
+            <Download className="h-4 w-4" />
+            {busy === 'aibom' ? 'Exporting…' : 'AIBOM'}
+          </button>
+        )}
+      </div>
+      <div className={`mt-1 text-xs ${thin ? 'text-yellow-300' : 'text-gray-500'}`}>
+        {summary.component_count ?? 0} component{summary.component_count === 1 ? '' : 's'}
+        {thin ? ' · no dependency inventory: re-run at Full scan depth' : ''}
+      </div>
+      {error && <div className="mt-1 text-xs text-red-300">{error}</div>}
+    </div>
+  )
 }
 
 export default function ReportView({ scan, shareControls, isAuthenticated, remediations = [], enableRemediationTracking = false }: Props) {
@@ -1481,11 +1548,14 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                 {modelIntakeSummary?.artifact_ref || scan.target_url}
               </p>
             </div>
-            {modelIntakeDisplayFormatPosture && (
-              <span className="rounded bg-gray-700 px-3 py-1 text-sm text-gray-200">
-                {String(modelIntakeDisplayFormatPosture).replace(/_/g, ' ')}
-              </span>
-            )}
+            <div className="flex flex-wrap items-center gap-2">
+              {modelIntakeDisplayFormatPosture && (
+                <span className="rounded bg-gray-700 px-3 py-1 text-sm text-gray-200">
+                  {String(modelIntakeDisplayFormatPosture).replace(/_/g, ' ')}
+                </span>
+              )}
+              <ModelIntakeSbomDownload scanId={scan.id} />
+            </div>
           </div>
 
           {modelIntakeCorporateUse && (

@@ -748,6 +748,13 @@ malicious fixtures with all four tools. Applicability is based on file/repositor
 The disposable microVM tier and corporate deployment-platform enforcement are explicit external integrations,
 not implied by a ShakerScan `ALLOW` alone.
 
+A completed scan exports a bill of materials at
+`GET /model-intake/scans/{scan_id}/sbom?format=cyclonedx|aibom`, downloadable from the scan report and
+the Model Intake pipeline. The CycloneDX 1.5 document is rooted on the scanned model artifact and
+carries the generated dependency inventory plus the AIBOM's base-model, tokenizer, and dataset
+components; `GET .../sbom/summary` reports component count and whether a dependency inventory was
+generated at all, since a Quick check never enumerates one.
+
 Model Intake findings use `tool/source=model_intake`, filter with `source_type=model_intake`, and are
 excluded from `source_type=dast`.
 

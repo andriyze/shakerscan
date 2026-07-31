@@ -418,3 +418,28 @@ test('a full scan only requests a repository snapshot where one exists', () => {
   assert.match(page, /applyScanDepth\(scanDepth, result\.capabilities\?\.repository_snapshot === 'implemented'\)/)
   assert.match(page, /A preset carries its own depth flags/)
 })
+
+test('a completed scan exports a downloadable bill of materials', () => {
+  const report = readFileSync(path.join(root, 'src/components/ReportView.tsx'), 'utf8')
+  // The scan already produced a CycloneDX inventory and an AIBOM; neither had
+  // any way out of ShakerScan.
+  assert.match(api, /downloadModelIntakeSbom/)
+  assert.match(api, /getModelIntakeSbomSummary/)
+  assert.match(api, /\/model-intake\/scans\/\$\{scanId\}\/sbom/)
+  assert.match(api, /\.cdx\.json/)
+
+  assert.match(report, /ModelIntakeSbomDownload/)
+  assert.match(report, /CycloneDX \$\{summary\.spec_version/)
+  assert.match(report, /AIBOM/)
+  // Reachable from the pipeline too, without opening the report.
+  assert.match(shell, /downloadModelIntakeSbom\(scan\.id\)/)
+})
+
+test('a bill of materials states its own coverage', () => {
+  const report = readFileSync(path.join(root, 'src/components/ReportView.tsx'), 'utf8')
+  // A Quick check never enumerates dependencies, so a small component count is
+  // a coverage fact rather than a clean bill.
+  assert.match(report, /dependency_inventory !== 'generated'/)
+  assert.match(report, /no dependency inventory: re-run at Full scan depth/)
+  assert.match(api, /dependency_inventory\?: 'generated' \| 'not_generated'/)
+})
