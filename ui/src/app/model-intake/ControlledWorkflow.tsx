@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { Activity, Bot, CheckCircle2, Clipboard, Download, FileText, LockKeyhole, RefreshCw, Server, ShieldAlert } from 'lucide-react'
 import { Card, useToast } from '@/components/ui'
@@ -74,6 +74,19 @@ function runnerObservations(job: ModelIntakeRunnerJob): JsonObject {
 function subjectDigest(detail: ModelIntakeWorkflowDetail | null, kind: string): string {
   const subject = detail?.subjects.filter((item) => item.subject_kind === kind).at(-1)
   return typeof subject?.sha256 === 'string' ? subject.sha256 : ''
+}
+
+// The scan reads these from the exact revision it snapshotted, so the operator
+// confirms published facts instead of hunting through config.json by hand.
+function embeddingHints(detail: ModelIntakeWorkflowDetail | null): JsonObject {
+  const subject = detail?.subjects.filter((item) => item.subject_kind === 'configuration').at(-1)
+  return objectValue(objectValue(subject?.metadata_json).embedding_configuration_hints)
+}
+
+function suggestIdempotencyKey(submissionId: string): string {
+  const suffix = crypto.randomUUID().replace(/-/g, '').slice(0, 12)
+  const prefix = submissionId ? submissionId.slice(0, 8) : 'model-intake'
+  return `${prefix}-promote-${suffix}`
 }
 
 function blankBundle(environment: ModelIntakeWorkflowSubmission['requested_environment'] = 'production'): ModelIntakeDeploymentBundleRequest {
@@ -152,6 +165,8 @@ export function ControlledModelIntakeWorkflow({
   const [plannerObservation, setPlannerObservation] = useState('')
   const [plannerReply, setPlannerReply] = useState('')
 
+  // Seed each submission once, so a later reload never discards operator edits.
+  const seededSubmissions = useRef<Set<string>>(new Set())
   const [manifestId, setManifestId] = useState('')
   const [approvalType, setApprovalType] = useState('model_security_reviewer')
   const [approvalDecision, setApprovalDecision] = useState<'approve' | 'reject'>('approve')
@@ -216,6 +231,10 @@ export function ControlledModelIntakeWorkflow({
       const latestDecision = nextDetail.policy_decisions.at(-1)
       if (typeof latestManifest?.id === 'string') setManifestId(latestManifest.id)
       if (typeof latestDecision?.id === 'string') setPolicyDecisionId(latestDecision.id)
+      if (!seededSubmissions.current.has(id)) {
+        seededSubmissions.current.add(id)
+        setBundleJson(JSON.stringify(buildSeededBundle(nextDetail, nextJobs.jobs[0]), null, 2))
+      }
       setError(null)
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Failed to load submission evidence')
@@ -285,18 +304,33 @@ export function ControlledModelIntakeWorkflow({
     }
   }
 
-  function seedBundleFromEvidence() {
-    if (!detail) return
-    const request = objectValue(latestJob?.request_json)
-    const seeded = blankBundle(detail.submission.requested_environment)
-    seeded.model_artifact_sha256 = subjectDigest(detail, 'artifact')
-    seeded.repository_snapshot_sha256 = subjectDigest(detail, 'repository_snapshot')
-    seeded.custom_code_sha256 = subjectDigest(detail, 'custom_code') || null
-    seeded.tokenizer_sha256 = subjectDigest(detail, 'tokenizer')
-    seeded.configuration_sha256 = subjectDigest(detail, 'configuration')
+  function buildSeededBundle(
+    target: ModelIntakeWorkflowDetail,
+    job: ModelIntakeRunnerJob | undefined,
+  ): ModelIntakeDeploymentBundleRequest {
+    const request = objectValue(job?.request_json)
+    const seeded = blankBundle(target.submission.requested_environment)
+    seeded.model_artifact_sha256 = subjectDigest(target, 'artifact')
+    seeded.repository_snapshot_sha256 = subjectDigest(target, 'repository_snapshot')
+    seeded.custom_code_sha256 = subjectDigest(target, 'custom_code') || null
+    seeded.tokenizer_sha256 = subjectDigest(target, 'tokenizer')
+    seeded.configuration_sha256 = subjectDigest(target, 'configuration')
     seeded.runtime_image_digest = typeof request.runtime_image_digest === 'string' ? request.runtime_image_digest : ''
     seeded.loader_profile_sha256 = typeof request.loader_profile_sha256 === 'string' ? request.loader_profile_sha256 : ''
-    setBundleJson(JSON.stringify(seeded, null, 2))
+    const hints = embeddingHints(target)
+    seeded.embedding_configuration = {
+      dimension: Number(hints.dimension) > 0 ? Number(hints.dimension) : 0,
+      pooling: typeof hints.pooling === 'string' ? hints.pooling : '',
+      normalization: hints.normalization === true,
+      max_sequence_length: Number(hints.max_sequence_length) > 0 ? Number(hints.max_sequence_length) : 0,
+      precision: typeof hints.precision === 'string' ? hints.precision : '',
+    }
+    return seeded
+  }
+
+  function seedBundleFromEvidence() {
+    if (!detail) return
+    setBundleJson(JSON.stringify(buildSeededBundle(detail, latestJob), null, 2))
   }
 
   function updateEmbeddingField(field: string, value: string | number | boolean) {
@@ -554,6 +588,10 @@ export function ControlledModelIntakeWorkflow({
     }
   }
 
+  const hintSources = (() => {
+    const sources = embeddingHints(detail).sources
+    return Array.isArray(sources) ? sources.filter((item): item is string => typeof item === 'string') : []
+  })()
   const embeddingConfiguration = objectValue(bundle?.embedding_configuration)
   const embeddingGaps = embeddingContractGaps(bundle)
   const runnerUnsupported = runnerReadiness?.supported_host === false
@@ -736,11 +774,20 @@ export function ControlledModelIntakeWorkflow({
             <div className="flex flex-wrap items-center justify-between gap-2"><span className="text-xs text-gray-400">Exact deployment bundle</span><button type="button" className={buttonClass} onClick={seedBundleFromEvidence}>Seed authoritative digests</button></div>
             <div className="rounded border border-gray-800 bg-gray-900 p-3">
               <div className="text-xs font-medium text-gray-300">Embedding configuration</div>
-              <p className="mt-1 text-[11px] text-gray-500">
-                Deployment facts ShakerScan cannot infer. For a Hugging Face model these come from the
-                repository&apos;s <code className="text-gray-400">config.json</code> and its
-                sentence-transformer pooling config.
-              </p>
+              {hintSources.length > 0 ? (
+                <p className="mt-1 text-[11px] text-gray-500">
+                  Prefilled from the scanned revision&apos;s own{' '}
+                  <span className="text-gray-400">{hintSources.join(', ')}</span>. Confirm these are
+                  the values this deployment will actually serve — they become part of the signed
+                  bundle.
+                </p>
+              ) : (
+                <p className="mt-1 text-[11px] text-gray-500">
+                  Deployment facts ShakerScan cannot infer. For a Hugging Face model these come from
+                  the repository&apos;s <code className="text-gray-400">config.json</code> and its
+                  sentence-transformer pooling config.
+                </p>
+              )}
               <div className="mt-3 grid gap-3 sm:grid-cols-2">
                 <label className="grid gap-1 text-xs text-gray-300">Dimension <span className="text-gray-600">(hidden_size)</span>
                   <input className={inputClass} type="number" min={1} value={String(embeddingConfiguration.dimension ?? '')} onChange={(event) => updateEmbeddingField('dimension', Number(event.target.value))} placeholder="768" />
@@ -851,7 +898,13 @@ export function ControlledModelIntakeWorkflow({
           <div className="grid content-start gap-3">
             <button type="button" className={buttonClass} disabled={!manifestId || busy === 'policy'} onClick={evaluatePolicy}>Evaluate deterministic admission policy</button>
             <label className="grid gap-1 text-xs text-gray-300">Stored policy decision ID<input className={inputClass} value={policyDecisionId} onChange={(event) => setPolicyDecisionId(event.target.value)} /></label>
-            <label className="grid gap-1 text-xs text-gray-300">Promotion idempotency key<input className={inputClass} value={idempotencyKey} onChange={(event) => setIdempotencyKey(event.target.value)} placeholder="release-ticket-and-random-suffix (16+ chars)" /></label>
+            <label className="grid gap-1 text-xs text-gray-300">Promotion idempotency key
+              <div className="flex gap-2">
+                <input className={inputClass} value={idempotencyKey} onChange={(event) => setIdempotencyKey(event.target.value)} placeholder="release-ticket-and-random-suffix (16+ chars)" />
+                <button type="button" className={buttonClass} onClick={() => setIdempotencyKey(suggestIdempotencyKey(selectedId))}>Generate</button>
+              </div>
+              <span className="text-[11px] text-gray-500">Replace the suggestion with your release ticket when you have one; the key only has to be unique per promotion.</span>
+            </label>
             <button type="button" className={buttonClass} disabled={!policyDecisionId || idempotencyKey.length < 16 || busy === 'promote'} onClick={promote}>Invoke isolated signer and promote</button>
             {detail && <div className="rounded border border-gray-800 p-3 text-xs"><div className="mb-2 text-gray-300">Submission event timeline</div><div className="max-h-64 space-y-2 overflow-auto">{detail.events.slice().reverse().slice(0, 30).map((event) => <div key={event.id} className="border-l border-gray-700 pl-3"><div className="text-gray-300">{String(event.event_type || 'event').replace(/_/g, ' ')}</div><div className="text-[10px] text-gray-600">{String(event.created_at || '')} · {String(event.actor || 'system')}</div>{typeof event.reason === 'string' && event.reason && <div className="mt-0.5 text-[11px] text-gray-500">{event.reason}</div>}</div>)}</div></div>}
             <Link href="/settings/policy-profiles" className={`${buttonClass} text-center`}>Review deployment policy profiles</Link>

@@ -321,3 +321,28 @@ test('the runner stage never ships a deployment bundle that cannot validate', ()
   assert.match(workflow, /Raw deployment bundle JSON/)
   assert.match(workflow, /embeddingGaps\.length > 0/)
 })
+
+test('the deployment bundle arrives prefilled from the scanned revision', () => {
+  // The operator used to face an all-zero template and had to look up
+  // hidden_size, pooling mode, and dtype by hand — for facts the model
+  // publishes and the scan already read.
+  assert.match(workflow, /function embeddingHints/)
+  assert.match(workflow, /embedding_configuration_hints/)
+  assert.match(workflow, /buildSeededBundle/)
+  // Seeded on load, not only when the operator finds the seed button.
+  assert.match(workflow, /seededSubmissions\.current\.has\(id\)/)
+  // Seeded once, so a later refresh never discards operator edits.
+  assert.match(workflow, /seededSubmissions\.current\.add\(id\)/)
+  // Provenance is shown, because these values enter the signed bundle.
+  assert.match(workflow, /Prefilled from the scanned revision/)
+  assert.match(workflow, /hintSources/)
+})
+
+test('fields the operator should not have to invent are offered, not demanded', () => {
+  assert.match(workflow, /suggestIdempotencyKey/)
+  assert.match(workflow, /crypto\.randomUUID/)
+  assert.match(workflow, /Replace the suggestion with your release ticket/)
+  // Manifest and policy-decision IDs come back from the workflow itself.
+  assert.match(workflow, /setManifestId\(latestManifest\.id\)/)
+  assert.match(workflow, /setPolicyDecisionId\(latestDecision\.id\)/)
+})

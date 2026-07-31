@@ -1158,6 +1158,7 @@ async def _acquire_huggingface_repository_snapshot(
     acquired: list[dict[str, Any]] = []
     total_bytes = 0
     failures: list[dict[str, Any]] = []
+    embedding_hints: dict[str, Any] = {}
 
     for item in files:
         if not isinstance(item, dict):
@@ -1186,7 +1187,7 @@ async def _acquire_huggingface_repository_snapshot(
                 f"{urllib.parse.quote(revision, safe='')}/{urllib.parse.quote(path, safe='/')}"
             )
             try:
-                _prefix, observed = await asyncio.to_thread(
+                prefix, observed = await asyncio.to_thread(
                     _safe_download_http_to_quarantine,
                     resolve_url,
                     min(1_048_576, remaining),
@@ -1199,6 +1200,9 @@ async def _acquire_huggingface_repository_snapshot(
             except Exception as exc:
                 failures.append({"path": path, "error": f"{type(exc).__name__}: {exc}"})
                 break
+            embedding_hints = merge_embedding_configuration_hints(
+                embedding_hints, collect_embedding_configuration_hints(path, prefix)
+            )
         observed_sha = str(observed.get("sha256") or "").lower()
         expected_sha = str(item.get("sha256") or "").lower()
         if expected_sha and observed_sha != expected_sha:
@@ -1255,6 +1259,7 @@ async def _acquire_huggingface_repository_snapshot(
         "authenticated": bool(token),
         "failures": failures[:20],
         "files": acquired,
+        "embedding_configuration_hints": embedding_hints,
     }
 
 
@@ -1673,6 +1678,104 @@ def _pickle_detection(data: bytes, ext: str = "") -> tuple[bool, str | None]:
 
 def _looks_like_pickle(data: bytes, ext: str = "") -> bool:
     return _pickle_detection(data, ext)[0]
+
+
+# Embedding facts the controlled deployment bundle requires an operator to
+# declare. They are published by the model itself, and the snapshot loop already
+# holds these small config files in memory, so reading them here binds the
+# suggestion to the exact revision that was scanned. They remain suggestions:
+# the operator still confirms the deployment contract.
+EMBEDDING_HINT_FILES = {
+    "config.json",
+    "sentence_bert_config.json",
+    "modules.json",
+}
+MAX_EMBEDDING_HINT_BYTES = 262_144
+_POOLING_MODES = (
+    ("pooling_mode_cls_token", "cls"),
+    ("pooling_mode_mean_tokens", "mean"),
+    ("pooling_mode_max_tokens", "max"),
+    ("pooling_mode_lasttoken", "lasttoken"),
+    ("pooling_mode_mean_sqrt_len_tokens", "mean_sqrt_len"),
+)
+
+
+def _positive_int(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def collect_embedding_configuration_hints(path: str, data: bytes) -> dict[str, Any]:
+    """Read embedding facts from one snapshot file, or return {} when it has none."""
+    posix = str(path).replace("\\", "/")
+    name = posix.rsplit("/", 1)[-1].lower()
+    is_pooling_config = name == "config.json" and "_pooling/" in posix.lower()
+    if name not in EMBEDDING_HINT_FILES and not is_pooling_config:
+        return {}
+    if not data or len(data) > MAX_EMBEDDING_HINT_BYTES:
+        return {}
+    try:
+        parsed = json.loads(data.decode("utf-8", "replace"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return {}
+
+    hints: dict[str, Any] = {}
+    if is_pooling_config and isinstance(parsed, dict):
+        # The pooling module is authoritative for both the served width and mode.
+        dimension = _positive_int(parsed.get("word_embedding_dimension"))
+        if dimension:
+            hints["dimension"] = dimension
+        for flag, mode in _POOLING_MODES:
+            if parsed.get(flag) is True:
+                hints["pooling"] = mode
+                break
+        return {**hints, "source": posix} if hints else {}
+    if name == "config.json" and isinstance(parsed, dict):
+        for key in ("hidden_size", "d_model", "n_embd", "dim"):
+            dimension = _positive_int(parsed.get(key))
+            if dimension:
+                hints["dimension"] = dimension
+                break
+        sequence = _positive_int(parsed.get("max_position_embeddings"))
+        if sequence:
+            hints["max_sequence_length"] = sequence
+        dtype = str(parsed.get("torch_dtype") or "").strip().lower()
+        if dtype:
+            hints["precision"] = dtype
+        return {**hints, "source": posix} if hints else {}
+    if name == "sentence_bert_config.json" and isinstance(parsed, dict):
+        # The serving limit, which may be lower than the architectural maximum.
+        sequence = _positive_int(parsed.get("max_seq_length"))
+        if sequence:
+            hints["max_sequence_length"] = sequence
+        return {**hints, "source": posix} if hints else {}
+    if name == "modules.json" and isinstance(parsed, list):
+        types = {str(item.get("type") or "").lower() for item in parsed if isinstance(item, dict)}
+        hints["normalization"] = any(entry.endswith(".normalize") for entry in types)
+        return {**hints, "source": posix}
+    return {}
+
+
+def merge_embedding_configuration_hints(
+    collected: dict[str, Any], addition: dict[str, Any]
+) -> dict[str, Any]:
+    """Merge one file's hints. A pooling module wins over the base config.json."""
+    if not addition:
+        return collected
+    source = str(addition.get("source") or "")
+    authoritative = "_pooling/" in source.lower() or source.endswith("sentence_bert_config.json")
+    for key, value in addition.items():
+        if key == "source":
+            continue
+        if key not in collected or authoritative:
+            collected[key] = value
+    sources = collected.setdefault("sources", [])
+    if source and source not in sources:
+        sources.append(source)
+    return collected
 
 
 def _inspect_zip_path(path: str | Path) -> dict[str, Any]:

@@ -2052,3 +2052,87 @@ def test_download_cap_within_the_memory_prefix_still_reports_truncation_honestly
         finding["id"] == "model_intake:checksum_not_fully_verified"
         for finding in result["findings"]
     )
+
+
+def test_embedding_hints_come_from_the_scanned_revision_own_config():
+    # The controlled deployment bundle makes the operator declare the embedding
+    # contract. The model publishes every one of those facts, and the snapshot
+    # loop already holds these files in memory, so nothing extra is fetched.
+    from scanner.scanner_tools.model_intake import (
+        collect_embedding_configuration_hints,
+        merge_embedding_configuration_hints,
+    )
+
+    collected: dict = {}
+    for path, body in (
+        ("config.json", {"hidden_size": 768, "max_position_embeddings": 2048, "torch_dtype": "float32"}),
+        ("sentence_bert_config.json", {"max_seq_length": 8192}),
+        ("1_Pooling/config.json", {
+            "word_embedding_dimension": 768,
+            "pooling_mode_cls_token": False,
+            "pooling_mode_mean_tokens": True,
+        }),
+        ("modules.json", [
+            {"type": "sentence_transformers.models.Transformer"},
+            {"type": "sentence_transformers.models.Normalize"},
+        ]),
+        ("README.md", {"irrelevant": True}),
+    ):
+        collected = merge_embedding_configuration_hints(
+            collected, collect_embedding_configuration_hints(path, json.dumps(body).encode())
+        )
+
+    assert collected["dimension"] == 768
+    assert collected["pooling"] == "mean"
+    assert collected["normalization"] is True
+    assert collected["precision"] == "float32"
+    # The serving limit wins over the architectural maximum in config.json.
+    assert collected["max_sequence_length"] == 8192
+    assert "README.md" not in collected["sources"]
+
+
+def test_embedding_hint_reader_ignores_unrelated_and_unparsable_files():
+    from scanner.scanner_tools.model_intake import collect_embedding_configuration_hints
+
+    assert collect_embedding_configuration_hints("weights.safetensors", b"\x00\x01") == {}
+    assert collect_embedding_configuration_hints("config.json", b"not json") == {}
+    assert collect_embedding_configuration_hints("config.json", b"") == {}
+    # A zero or negative published value is not a usable suggestion.
+    assert "dimension" not in collect_embedding_configuration_hints(
+        "config.json", json.dumps({"hidden_size": 0}).encode()
+    )
+    # Oversized files are skipped rather than parsed.
+    assert collect_embedding_configuration_hints("config.json", b"{}" + b" " * 300_000) == {}
+
+
+def test_hints_are_suggestions_and_never_relax_the_admission_contract():
+    # A model that publishes nothing useful must still be rejected until the
+    # operator declares the contract; prefill is convenience, not authority.
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
+    from model_intake_control_plane import AdmissionContractError, build_deployment_bundle
+
+    from scanner.scanner_tools.model_intake import collect_embedding_configuration_hints
+
+    assert collect_embedding_configuration_hints("config.json", json.dumps({"model_type": "bert"}).encode()) == {}
+    try:
+        build_deployment_bundle({
+            "model_artifact_sha256": "a" * 64,
+            "repository_snapshot_sha256": "b" * 64,
+            "custom_code_sha256": None,
+            "tokenizer_sha256": "c" * 64,
+            "configuration_sha256": "d" * 64,
+            "runtime_image_digest": "sha256:" + "e" * 64,
+            "loader_profile_sha256": "f" * 64,
+            "retrieval_application_digest": "1" * 64,
+            "index_schema_digest": "2" * 64,
+            "target_environment": "production",
+            "embedding_configuration": {
+                "dimension": 0, "pooling": "", "normalization": False,
+                "max_sequence_length": 0, "precision": "",
+            },
+        })
+    except AdmissionContractError as exc:
+        assert "embedding_configuration.dimension" in str(exc)
+    else:
+        raise AssertionError("an undeclared embedding contract must still be rejected")

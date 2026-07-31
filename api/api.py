@@ -11745,6 +11745,11 @@ async def attach_model_intake_static_run(
             components = _model_intake_component_identities(snapshot.get("files") or [])
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        embedding_hints = (
+            snapshot.get("embedding_configuration_hints")
+            if isinstance(snapshot.get("embedding_configuration_hints"), dict)
+            else {}
+        )
         artifact_sha = str(summary.get("sha256") or "").lower()
         snapshot_sha = str(summary.get("repository_snapshot_sha256") or "").lower()
         if not re.fullmatch(r"[0-9a-f]{64}", artifact_sha):
@@ -11861,6 +11866,15 @@ async def attach_model_intake_static_run(
                     "registered_by": actor,
                     "source": "authoritative_snapshot",
                     "file_count": components[count_key],
+                    # Embedding facts the model publishes about itself, read from
+                    # the exact scanned revision. The deployment bundle still
+                    # requires the operator to confirm them; this only removes
+                    # the manual lookup.
+                    **(
+                        {"embedding_configuration_hints": embedding_hints}
+                        if subject_kind == "configuration" and embedding_hints
+                        else {}
+                    ),
                 }),
             )
         evidence = await conn.fetchrow(
