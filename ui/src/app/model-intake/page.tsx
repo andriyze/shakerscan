@@ -1228,6 +1228,10 @@ function ModelIntakeSettingsContent() {
         runnerSupportedHost={runnerReadiness?.supported_host}
         runnerUnsupportedReason={runnerReadiness?.unsupported_reason}
         runnerHostPlatform={runnerReadiness?.host_platform}
+        onOpenRunnerStatus={() => {
+          setPhase('status')
+          window.scrollTo({ top: 0, behavior: 'smooth' })
+        }}
       />
 
       <IntakePhaseTabs

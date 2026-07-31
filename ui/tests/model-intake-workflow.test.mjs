@@ -290,3 +290,13 @@ test('the microVM tier is offered as an opt-in install, not executed by the API'
   assert.match(page, /<RunnerInstallCard/)
   assert.match(page, /onRecheck=\{loadRunnerReadiness\}/)
 })
+
+test('the runner chip is the way to reach the runner setup', () => {
+  // The setup lived only on the fourth tab, so the chip that reports the
+  // problem was a dead end. It now opens the phase that renders the fix.
+  assert.match(shell, /onOpenRunnerStatus\?: \(\) => void/)
+  assert.match(shell, /onClick=\{onOpenRunnerStatus\}/)
+  assert.match(shell, /if \(!onClick\) return <span/)
+  assert.match(page, /onOpenRunnerStatus=\{\(\) => \{/)
+  assert.match(page, /setPhase\('status'\)/)
+})

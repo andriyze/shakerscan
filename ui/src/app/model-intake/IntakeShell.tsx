@@ -31,12 +31,32 @@ function chipClass(tone: 'ok' | 'warn' | 'idle'): string {
   return 'bg-gray-800 text-gray-400'
 }
 
-function Chip({ label, value, tone }: { label: string; value: string; tone: 'ok' | 'warn' | 'idle' }) {
-  return (
-    <span className={`inline-flex min-w-0 items-center gap-1.5 rounded px-2 py-1 text-xs ${chipClass(tone)}`}>
+function Chip({
+  label,
+  value,
+  tone,
+  onClick,
+  title,
+}: {
+  label: string
+  value: string
+  tone: 'ok' | 'warn' | 'idle'
+  onClick?: () => void
+  title?: string
+}) {
+  const content = (
+    <>
       <span className="shrink-0 opacity-70">{label}</span>
       <span className="min-w-0 truncate font-medium">{value}</span>
-    </span>
+    </>
+  )
+  const base = `inline-flex min-w-0 items-center gap-1.5 rounded px-2 py-1 text-xs ${chipClass(tone)}`
+  // A chip that reports a problem should also be the way to reach the fix.
+  if (!onClick) return <span className={base}>{content}</span>
+  return (
+    <button type="button" onClick={onClick} title={title} className={`${base} hover:brightness-125 focus:outline-none focus:ring-1 focus:ring-cyan-500`}>
+      {content}
+    </button>
   )
 }
 
@@ -51,6 +71,7 @@ export function IntakeContextBar({
   runnerSupportedHost,
   runnerUnsupportedReason,
   runnerHostPlatform,
+  onOpenRunnerStatus,
 }: {
   source: string
   environment: string
@@ -62,6 +83,7 @@ export function IntakeContextBar({
   runnerSupportedHost: boolean | undefined
   runnerUnsupportedReason: string | undefined
   runnerHostPlatform: string | undefined
+  onOpenRunnerStatus?: () => void
 }) {
   // A microVM tier that cannot exist on this host is neutral information, not a
   // warning the operator can act on. Only a supported host that is misconfigured
@@ -102,7 +124,13 @@ export function IntakeContextBar({
           tone={operatorReady ? 'ok' : 'idle'}
         />
         <Chip label="adapters" value={adapterValue} tone={adapterTone} />
-        <Chip label="runner" value={runnerValue} tone={runnerTone} />
+        <Chip
+          label="runner"
+          value={runnerValue}
+          tone={runnerTone}
+          onClick={onOpenRunnerStatus}
+          title="Open the microVM runner status and setup"
+        />
       </div>
     </div>
   )
