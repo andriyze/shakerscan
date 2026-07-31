@@ -110,6 +110,27 @@ HOST_TOOL_PACKAGES = {
 }
 
 
+def python_venv_package() -> str | None:
+    """The python3-venv package name when venv creation would fail, else None.
+
+    Debian and Ubuntu ship python3 without ensurepip, so `python3 -m venv` fails
+    on a clean image even though python3 itself is present. A binary-presence
+    check cannot see that, and the provisioner needs a working venv.
+    """
+    probe = _run(
+        [sys.executable or "python3", "-c", "import ensurepip, venv"], capture_output=True
+    )
+    if probe.returncode == 0:
+        return None
+    version = _run(
+        [sys.executable or "python3", "-c",
+         "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
+        capture_output=True,
+    )
+    suffix = (version.stdout or "").strip()
+    return f"python{suffix}-venv" if suffix else "python3-venv"
+
+
 def _sha256_path(path: Path) -> str:
     import hashlib
 
@@ -161,6 +182,7 @@ def host_facts(runtime: Path) -> dict:
         "service_state": (unit.stdout or "unknown").strip(),
         "host_tools": tools,
         "missing_host_tools": sorted(name for name, present in tools.items() if not present),
+        "missing_python_venv_package": python_venv_package(),
     }
 
 
@@ -179,11 +201,16 @@ def installability(facts: dict) -> tuple[bool, str]:
         return False, "/dev/kvm is absent. Load KVM or enable virtualization on this host."
     if not facts["cgroup_v2"]:
         return False, "cgroup v2 is required and /sys/fs/cgroup/cgroup.controllers is absent."
-    if facts["missing_host_tools"]:
-        packages = sorted({HOST_TOOL_PACKAGES.get(name, name) for name in facts["missing_host_tools"]})
+    packages = sorted({HOST_TOOL_PACKAGES.get(name, name) for name in facts["missing_host_tools"]})
+    if facts.get("missing_python_venv_package"):
+        packages.append(facts["missing_python_venv_package"])
+    if packages:
+        missing = list(facts["missing_host_tools"])
+        if facts.get("missing_python_venv_package"):
+            missing.append("python3 -m venv")
         return False, (
-            "Missing required host commands: " + ", ".join(facts["missing_host_tools"])
-            + ". Install them with: sudo apt-get install -y " + " ".join(packages)
+            "Missing host prerequisites: " + ", ".join(missing)
+            + ". Install them with: sudo apt-get install -y " + " ".join(sorted(set(packages)))
         )
     return True, "This host can run the Model Intake microVM tier."
 
