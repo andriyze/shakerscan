@@ -1455,16 +1455,36 @@ resolve_start_workers() {
     auto_workers_for_memory_gb "$memory_gb"
 }
 
+# Set a directory's mode, tolerating one a container already owns.
+# A mode we cannot set is only fatal if the directory is also unusable, and that
+# surfaces as a real error where it is used rather than as a dead CLI.
+ensure_directory_mode() {
+    local path="$1"
+    local mode="$2"
+    [ -d "$path" ] || return 0
+    if ! chmod "$mode" "$path" 2>/dev/null; then
+        if [ ! -w "$path" ] && [ ! -O "$path" ]; then
+            echo -e "${YELLOW}Note: $path is owned by another user (usually the container runtime); leaving its permissions unchanged.${NC}" >&2
+        fi
+    fi
+    return 0
+}
+
 prepare_runtime_files() {
     detect_platform
     export SHAKERSCAN_HOST_PLATFORM="$PLATFORM"
     write_dotenv_value SHAKERSCAN_HOST_PLATFORM "$SHAKERSCAN_HOST_PLATFORM"
     mkdir -p results
     mkdir -p results/model-intake-quarantine results/model-intake-sandbox
-    chmod 755 results/model-intake-quarantine
-    chmod 777 results/model-intake-sandbox
+    # These directories only need their mode set when this user created them.
+    # The Model Intake worker runs as root and takes ownership of the quarantine
+    # tree as soon as it stores its first artifact, after which chmod from the
+    # host user fails -- and an unguarded failure here aborted every later
+    # scanner.sh invocation, including start, restart, and rebuild.
+    ensure_directory_mode results/model-intake-quarantine 755
+    ensure_directory_mode results/model-intake-sandbox 777
     mkdir -p .shakerscan-fleet
-    chmod 700 .shakerscan-fleet
+    ensure_directory_mode .shakerscan-fleet 700
     ensure_runtime_datastore_credentials
     ensure_model_intake_operator_credential
     ensure_model_intake_signer_credentials
