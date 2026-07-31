@@ -276,6 +276,13 @@ ARG DOCKER_CLI_VERSION=27.5.1
 # builds the measured guest image would itself be unverified.
 ARG DOCKER_CLI_SHA256_X86_64=4f798b3ee1e0140eab5bf30b0edc4e84f4cdb53255a429dc3bbae9524845d640
 ARG DOCKER_CLI_SHA256_AARCH64=e6b53725a73763ab3f988c73f8772eaed429754c1a579db5ff11f21990fd1817
+# The guest builder uses buildx, which is a CLI plugin rather than part of the
+# static client tarball. Pinning it keeps one deterministic build path instead
+# of falling back to the classic builder, which would make the measured guest
+# image depend on which builder happened to be present.
+ARG BUILDX_VERSION=v0.19.3
+ARG BUILDX_SHA256_AMD64=32ed111e941e385c2fb8261eba06a4056915718fd606f8278834ac1931d261a2
+ARG BUILDX_SHA256_ARM64=138b587399b27bb61945a36d67866177b85dea1155101a2be63c7ab715f18a2e
 RUN if [ "$INSTALL_DOCKER_CLI" = "1" ]; then \
         set -eux; \
         case "$(dpkg --print-architecture)" in \
@@ -289,7 +296,18 @@ RUN if [ "$INSTALL_DOCKER_CLI" = "1" ]; then \
         tar -xzf /tmp/docker.tgz -C /tmp docker/docker; \
         install -m 0755 /tmp/docker/docker /usr/local/bin/docker; \
         rm -rf /tmp/docker.tgz /tmp/docker; \
+        case "$docker_arch" in \
+            x86_64) buildx_arch=amd64; buildx_expected="$BUILDX_SHA256_AMD64" ;; \
+            aarch64) buildx_arch=arm64; buildx_expected="$BUILDX_SHA256_ARM64" ;; \
+        esac; \
+        mkdir -p /usr/local/lib/docker/cli-plugins; \
+        curl -fsSLo /tmp/docker-buildx \
+            "https://github.com/docker/buildx/releases/download/${BUILDX_VERSION}/buildx-${BUILDX_VERSION}.linux-${buildx_arch}"; \
+        echo "${buildx_expected}  /tmp/docker-buildx" | sha256sum -c -; \
+        install -m 0755 /tmp/docker-buildx /usr/local/lib/docker/cli-plugins/docker-buildx; \
+        rm -f /tmp/docker-buildx; \
         docker --version; \
+        docker buildx version; \
     fi
 
 # Entry point
