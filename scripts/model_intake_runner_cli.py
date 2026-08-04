@@ -219,6 +219,18 @@ def _runtime_runner_url(runtime: Path) -> bool:
     return False
 
 
+def _shared_results_root(runtime: Path) -> Path:
+    """Return the exact host directory bind-mounted into containers as /results."""
+    candidate = runtime / "results"
+    if candidate.is_symlink():
+        raise ValueError("the ShakerScan results directory must not be a symlink")
+    if not candidate.is_dir():
+        raise ValueError(
+            "the ShakerScan results directory is missing; start ShakerScan before installing the runner"
+        )
+    return candidate.resolve(strict=True)
+
+
 def install_is_complete(facts: dict) -> bool:
     """Installed unless a component is definitely missing.
 
@@ -619,6 +631,11 @@ def cmd_install(args, runtime: Path) -> int:
     if not 1 <= args.bind_port <= 65535:
         print("--bind-port must be between 1 and 65535.", file=sys.stderr)
         return 2
+    try:
+        shared_results_root = _shared_results_root(runtime)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
 
     # A staged kernel is only reused when it still matches the pinned digest;
     # a stale or tampered file falls back to a fresh verified download.
@@ -637,6 +654,9 @@ def cmd_install(args, runtime: Path) -> int:
         "MODEL_INTAKE_ROOTFS_SHA256": rootfs_sha256,
         "MODEL_INTAKE_RUNNER_BIND_HOST": bind_host,
         "MODEL_INTAKE_RUNNER_BIND_PORT": str(args.bind_port),
+        # Compose bind-mounts <runtime>/results at /results. Firecracker runs
+        # on the host, so both sides must name that same physical directory.
+        "MODEL_INTAKE_RUNNER_SHARED_RESULTS_ROOT": str(shared_results_root),
     }
     provisioned = _run(
         [str(runtime / "scripts/provision-model-intake-firecracker.sh")], env=provision_env
@@ -676,7 +696,7 @@ def cmd_install(args, runtime: Path) -> int:
     _write_dotenv(runtime / ".env", {
         "MODEL_INTAKE_RUNNER_URL": f"http://{bind_host}:{args.bind_port}",
         "MODEL_INTAKE_RUNNER_INTERNAL_TOKEN": token,
-        "MODEL_INTAKE_RUNNER_HOST_RESULTS_ROOT": "/var/lib/shakerscan/model-intake-results",
+        "MODEL_INTAKE_RUNNER_HOST_RESULTS_ROOT": str(shared_results_root),
     })
     # `docker compose restart` reuses the existing container and never re-reads
     # .env, so the API would keep an empty MODEL_INTAKE_RUNNER_URL and go on

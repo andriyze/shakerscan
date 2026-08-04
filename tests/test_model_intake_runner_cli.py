@@ -89,6 +89,23 @@ def test_dotenv_upsert_rejects_symlink_targets(tmp_path):
     assert target.read_text() == "SAFE=1\n"
 
 
+def test_runner_shares_the_exact_compose_results_directory(tmp_path):
+    results = tmp_path / "results"
+    results.mkdir()
+    assert cli._shared_results_root(tmp_path) == results.resolve()
+
+    results.rmdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    results.symlink_to(outside, target_is_directory=True)
+    try:
+        cli._shared_results_root(tmp_path)
+    except ValueError as exc:
+        assert "must not be a symlink" in str(exc)
+    else:
+        raise AssertionError("symlinked results directory was accepted")
+
+
 def test_unreadable_paths_report_unknown_rather_than_absent(tmp_path, monkeypatch):
     present = tmp_path / "present.env"
     present.write_text("x")
