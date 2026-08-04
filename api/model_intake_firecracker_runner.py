@@ -54,6 +54,17 @@ PORT = re.compile(r"(?:sin_port=htons\((\d+)\)|port=(\d+))")
 ADDRESS = re.compile(r'(?:inet_addr\("([^"]+)"\)|sin6_addr=inet_pton\([^,]+, "([^"]+)"\))')
 FAMILY = re.compile(r"\b(AF_[A-Z0-9_]+)\b")
 RESULT = re.compile(r"\)\s+=\s+([^\s]+)(?:\s+([A-Z][A-Z0-9_]+))?")
+DENY_ALL_NFT_RULES = """table inet shakerscan {
+ chain input {
+  type filter hook input priority 0; policy drop;
+  counter
+ }
+ chain output {
+  type filter hook output priority 0; policy drop;
+  counter
+ }
+}
+"""
 
 
 def _sha256(path: Path) -> str:
@@ -318,12 +329,13 @@ class FirecrackerRunner:
 
     def _namespace_setup(self, name: str) -> None:
         _require_ok(_run(["ip", "netns", "add", name]), "network namespace creation")
-        rules = """table inet shakerscan {
- chain input { type filter hook input priority 0; policy drop; counter }
- chain output { type filter hook output priority 0; policy drop; counter }
-}
-"""
-        _require_ok(_run(["ip", "netns", "exec", name, "nft", "-f", "-"], input_text=rules), "deny-all firewall setup")
+        _require_ok(
+            _run(
+                ["ip", "netns", "exec", name, "nft", "-f", "-"],
+                input_text=DENY_ALL_NFT_RULES,
+            ),
+            "deny-all firewall setup",
+        )
 
     def _namespace_state(self, name: str) -> dict[str, Any]:
         links = _run(["ip", "netns", "exec", name, "ip", "-j", "link", "show"])

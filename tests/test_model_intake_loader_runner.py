@@ -6,7 +6,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
 from model_intake_loader_profiles import resolve_conversion_profile, resolve_loader_profile  # noqa: E402
 from model_intake_control_plane import canonical_bytes  # noqa: E402
 from model_intake_runner_controller import build_firecracker_config, firecracker_readiness  # noqa: E402
-from model_intake_firecracker_runner import FirecrackerRunner, parse_network_telemetry  # noqa: E402
+from model_intake_firecracker_runner import DENY_ALL_NFT_RULES, FirecrackerRunner, parse_network_telemetry  # noqa: E402
 from model_intake_components import component_identities  # noqa: E402
 
 
@@ -117,6 +117,12 @@ def test_firecracker_contract_has_no_network_and_read_only_subject_drives():
     assert config["drives"][1]["is_read_only"] is True
     assert config["metadata"]["seccomp_level"] == 2
     assert config["metadata"]["receipt_required"] is True
+
+
+def test_deny_all_firewall_uses_explicit_counter_rules():
+    assert "policy drop;" in DENY_ALL_NFT_RULES
+    assert "policy drop; counter" not in DENY_ALL_NFT_RULES
+    assert DENY_ALL_NFT_RULES.count("\n  counter\n") == 2
 
 
 def test_firecracker_readiness_has_no_local_container_fallback(tmp_path, monkeypatch):
