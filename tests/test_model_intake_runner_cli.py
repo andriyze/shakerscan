@@ -1,6 +1,7 @@
 """`status` must not report a completed install as missing."""
 
 from pathlib import Path
+import stat
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -57,6 +58,35 @@ def test_api_wiring_is_read_from_the_runtime_env(tmp_path):
 
     (tmp_path / ".env").write_text("MODEL_INTAKE_RUNNER_URL=http://127.0.0.1:9099\n")
     assert cli._runtime_runner_url(tmp_path) is True
+
+
+def test_dotenv_upsert_preserves_existing_runtime_owner_and_mode(tmp_path):
+    env_path = tmp_path / ".env"
+    env_path.write_text("POSTGRES_PASSWORD=x\n")
+    env_path.chmod(0o640)
+    before = env_path.stat()
+
+    cli._write_dotenv(env_path, {"MODEL_INTAKE_RUNNER_URL": "http://127.0.0.1:8092"})
+
+    after = env_path.stat()
+    assert (after.st_uid, after.st_gid) == (before.st_uid, before.st_gid)
+    assert stat.S_IMODE(after.st_mode) == 0o640
+    assert cli._runtime_runner_url(tmp_path) is True
+
+
+def test_dotenv_upsert_rejects_symlink_targets(tmp_path):
+    target = tmp_path / "target.env"
+    target.write_text("SAFE=1\n")
+    link = tmp_path / ".env"
+    link.symlink_to(target)
+
+    try:
+        cli._write_dotenv(link, {"MODEL_INTAKE_RUNNER_URL": "http://127.0.0.1:8092"})
+    except ValueError as exc:
+        assert "symlinked environment file" in str(exc)
+    else:
+        raise AssertionError("symlinked runtime environment was accepted")
+    assert target.read_text() == "SAFE=1\n"
 
 
 def test_unreadable_paths_report_unknown_rather_than_absent(tmp_path, monkeypatch):

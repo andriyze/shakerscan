@@ -25,6 +25,7 @@ from pathlib import Path
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -241,6 +242,9 @@ def _validated_text(value: str, label: str, *, max_length: int = 300) -> str:
 
 
 def _upsert_env_file(path: Path, values: dict[str, str | None]) -> None:
+    if path.is_symlink():
+        raise ValueError(f"Refusing to replace symlinked environment file: {path}")
+    existing_stat = path.stat() if path.exists() else None
     lines = path.read_text().splitlines() if path.is_file() else []
     for key, raw_value in values.items():
         pattern = re.compile(rf"^{re.escape(key)}=")
@@ -257,7 +261,16 @@ def _upsert_env_file(path: Path, values: dict[str, str | None]) -> None:
             lines.append(replacement)
     temporary = path.with_name(f".{path.name}.partial")
     temporary.write_text("\n".join(lines) + "\n")
-    temporary.chmod(0o600)
+    if existing_stat is None:
+        temporary.chmod(0o600)
+    else:
+        # The installer runs as root, while the source checkout and its .env
+        # normally belong to the invoking operator. Atomic replacement with a
+        # root-created temporary file must not lock that operator out of the
+        # runtime after a successful install. Root-only runner files retain
+        # their existing root ownership and mode through the same path.
+        os.chown(temporary, existing_stat.st_uid, existing_stat.st_gid)
+        temporary.chmod(stat.S_IMODE(existing_stat.st_mode))
     temporary.replace(path)
 
 
