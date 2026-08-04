@@ -54,6 +54,20 @@ def test_custom_code_and_pickle_require_review_or_conversion():
     assert pickle["conversion_target"] == "safetensors"
 
 
+def test_reviewed_sentence_transformers_custom_code_uses_fixed_safe_loader():
+    result = resolve_loader_profile(
+        {"library_name": "sentence-transformers", "custom_code_required": True},
+        artifact_path="model.safetensors",
+        runtime_image_digest="sha256:" + "a" * 64,
+        reviewed_custom_code_sha256="b" * 64,
+    )
+    assert result["status"] == "READY"
+    assert result["profile"]["entrypoint"] == "transformers.AutoModel.from_pretrained"
+    assert result["profile"]["trust_remote_code"] is True
+    assert result["profile"]["allow_pickle"] is False
+    assert result["profile"]["network"] == "none"
+
+
 def test_conversion_profile_is_narrow_digest_bound_and_model_agnostic():
     blocked = resolve_conversion_profile(
         {"library_name": "transformers", "custom_code_required": True},

@@ -21,7 +21,12 @@ PROFILE_TEMPLATES = {
     },
     "transformers-embedding-reviewed-custom-code": {
         "artifact_extensions": [".safetensors"],
-        "libraries": ["transformers"],
+        # Hugging Face repositories commonly declare sentence-transformers at
+        # the model-card level while their reviewed custom implementation is
+        # still loaded through transformers.AutoModel. Treat both canonical
+        # library labels consistently; the format, reviewed-code digest, fixed
+        # entrypoint, and no-network requirements remain unchanged.
+        "libraries": ["transformers", "sentence-transformers"],
         "entrypoint": "transformers.AutoModel.from_pretrained",
         "trust_remote_code": True,
         "allow_pickle": False,
