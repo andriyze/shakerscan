@@ -212,6 +212,7 @@ export interface ApprovalReceiptResponse {
 
 export interface OperationPlanAction {
   command: string
+  production_command?: string
   parameters?: Record<string, unknown>
   risk_tier?: string
   scope_receipt_id?: string
@@ -1475,6 +1476,10 @@ export interface ModelIntakeTrustAnchor {
   public_key_pem?: string | null
   public_key_sha256?: string | null
   policy_profile?: string | null
+  purpose?: 'publisher_signature' | 'upstream_attestation' | 'runtime_runner' | 'evaluation_runner' | 'data_plane_runner' | 'approval_signer' | 'admission_signer'
+  environment?: 'development' | 'test' | 'staging' | 'production'
+  builder_id_constraint?: string | null
+  source?: string
   owner?: string | null
   is_active: boolean
   created_at?: string
@@ -4015,7 +4020,7 @@ export async function listRecentModelIntakeScans(limit = 25): Promise<ModelIntak
 
 export interface ModelIntakeOperatorCredential {
   available: boolean
-  reason: 'local_deployment' | 'remote_deployment' | 'not_configured' | 'disabled' | 'unavailable'
+  reason: 'stored_session' | 'manual_required' | 'not_configured' | 'disabled' | 'unavailable'
   token?: string
   // `detail` says what is affected in product terms; `hint` carries the
   // operations instruction and stays behind a disclosure in the UI.
@@ -4023,10 +4028,8 @@ export interface ModelIntakeOperatorCredential {
   hint?: string
 }
 
-// On a loopback-bound install the UI server owns the same operator credential
-// the API was started with, so the page can use it directly instead of asking
-// the human to copy MODEL_INTAKE_OPERATOR_TOKEN out of .env. Remote deployments
-// answer `available: false` and the manual field stays authoritative.
+// This route reports credential availability only. It never transports an
+// operator bearer secret from the UI server into browser JavaScript.
 export async function getModelIntakeOperatorCredential(): Promise<ModelIntakeOperatorCredential> {
   try {
     const res = await fetch('/api/model-intake/operator-credential', { cache: 'no-store' })
@@ -4061,6 +4064,7 @@ export interface ModelIntakeRunnerStageState {
   phase?: string
   error?: string | null
   log?: string[]
+  integrity_verified?: boolean
   artifacts?: {
     kernel?: { path: string; sha256: string }
     rootfs?: { path: string; sha256: string; bytes: number }
@@ -4323,6 +4327,10 @@ export async function createModelIntakeTrustAnchor(data: {
   public_key_pem?: string
   public_key_sha256?: string
   policy_profile?: string
+  purpose?: ModelIntakeTrustAnchor['purpose']
+  environment?: ModelIntakeTrustAnchor['environment']
+  builder_id_constraint?: string
+  source?: string
   owner?: string
   is_active?: boolean
 }, operatorToken?: string): Promise<ModelIntakeTrustAnchor> {

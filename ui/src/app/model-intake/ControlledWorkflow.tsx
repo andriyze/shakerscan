@@ -647,7 +647,9 @@ export function ControlledModelIntakeWorkflow({
     queueBlockers.push({ summary: `Undeclared ${summary}`, detail })
   }
 
-  const attachableScans = availableScans.filter((scan) => scan.status === 'completed')
+  const attachableScans = availableScans.filter(
+    (scan) => scan.status === 'completed' && scan.target_url.trim() === source.trim(),
+  )
   // A loopback deployment resolves its own credential, so the manual field
   // only appears when the UI server declined to provide one.
   const operatorCredentialAutofilled = Boolean(operatorToken.trim()) && operatorCredential?.available === true

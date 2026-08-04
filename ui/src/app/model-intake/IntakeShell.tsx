@@ -186,20 +186,25 @@ export function RunnerInstallCard({
   readiness,
   plan,
   operatorToken,
+  environment,
   onRecheck,
 }: {
   readiness: ModelIntakeRunnerReadiness | null
   plan: ModelIntakeRunnerInstallPlan | null
   operatorToken: string
+  environment: string
   onRecheck: () => void
 }) {
   const [open, setOpen] = useState(false)
-  const [signer, setSigner] = useState('local-pem')
+  const [signer, setSigner] = useState(environment === 'production' ? 'kms:<key-id>' : 'local-pem')
+  const [kmsKeyId, setKmsKeyId] = useState('')
   const [copied, setCopied] = useState(false)
   const [stage, setStage] = useState<ModelIntakeRunnerStageState | null>(null)
   const [stageError, setStageError] = useState<string | null>(null)
   const installed = readiness?.ready === true
-  const command = (plan?.command || '').replace('<choice>', signer)
+  const signerArgument = signer.startsWith('kms:') ? `kms:${kmsKeyId.trim() || '<key-id>'}` : signer
+  const command = (plan?.command || '').replace('<choice>', signerArgument)
+  const commandReady = !signer.startsWith('kms:') || Boolean(kmsKeyId.trim())
   const staging = stage?.status === 'running'
   const staged = stage?.status === 'ready'
 
@@ -304,6 +309,20 @@ export function RunnerInstallCard({
                       </button>
                     ))}
                   </div>
+                  {signer.startsWith('kms:') && (
+                    <label className="mt-3 grid gap-1 text-xs text-gray-300">
+                      AWS KMS signing key ID or ARN
+                      <input
+                        value={kmsKeyId}
+                        onChange={(event) => setKmsKeyId(event.target.value)}
+                        className="w-full rounded border border-gray-700 bg-gray-950 px-3 py-2 font-mono text-xs text-white focus:border-cyan-500 focus:outline-none"
+                        placeholder="arn:aws:kms:region:account:key/…"
+                      />
+                      <span className="text-[11px] text-gray-500">
+                        Production receipts require KMS. The installer exports and registers its public key automatically.
+                      </span>
+                    </label>
+                  )}
                 </div>
                 {/* The slow half of the install needs no privilege the API
                     lacks, so the button does it and leaves only the fast root
@@ -356,7 +375,7 @@ export function RunnerInstallCard({
                 </div>
                 <div className="flex min-w-0 items-center gap-2 rounded border border-gray-800 bg-black/40 p-2">
                   <code className="min-w-0 flex-1 break-all font-mono text-[11px] text-cyan-200">{command}</code>
-                  <button type="button" onClick={copyCommand} className="shrink-0 rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
+                  <button type="button" onClick={copyCommand} disabled={!commandReady} className="shrink-0 rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-40">
                     <Copy className="h-3 w-3" /> {copied ? 'Copied' : 'Copy'}
                   </button>
                 </div>
@@ -368,7 +387,9 @@ export function RunnerInstallCard({
                   <p className="mt-2">{plan.cost}</p>
                 </div>
                 <p className="text-xs text-gray-500">
-                  When it finishes, choose <span className="text-gray-300">Re-check</span> above.
+                  This one host command verifies the staged kernel and rootfs, installs or refreshes the
+                  service, restarts the API, and registers the purpose-scoped runner trust anchor. When it
+                  finishes, choose <span className="text-gray-300">Re-check</span> above.
                 </p>
               </div>
             )}

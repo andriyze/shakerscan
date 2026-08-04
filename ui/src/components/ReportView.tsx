@@ -649,6 +649,15 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   const modelIntakeScannerResults = Array.isArray(model_intake?.generated_evidence?.results)
     ? model_intake.generated_evidence.results
     : []
+  const modelIntakeSbomResult = modelIntakeScannerResults.find(
+    (item: any) => item?.scanner?.name === 'shakerscan-sbom',
+  )
+  const modelIntakeSbom = modelIntakeSbomResult?.summary?.sbom || null
+  const modelIntakeSbomSummary = modelIntakeSbomResult?.summary?.sbom_summary || {
+    component_count: Array.isArray(modelIntakeSbom?.components) ? modelIntakeSbom.components.length : 0,
+    dependency_files: modelIntakeSbomResult?.coverage?.dependency_files_discovered ?? 0,
+    unpinned_dependencies: Array.isArray(modelIntakeSbomResult?.findings) ? modelIntakeSbomResult.findings.length : 0,
+  }
   const modelIntakeExecutionControls = [
     ...modelIntakeScannerResults.map((item: any) => ({
       name: item?.scanner?.name || 'scanner',
@@ -683,6 +692,23 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       detail: model_intake?.admission?.error || null,
     },
   ]
+  const modelIntakeControlGroups = modelIntakeExecutionControls.reduce(
+    (groups: Record<string, any[]>, control: any) => {
+      const status = String(control.status || 'NOT_RUN').toUpperCase()
+      const bucket = status === 'PASS' || status === 'SIGNED'
+        ? 'passed'
+        : status === 'FAIL' || status === 'ERROR'
+          ? 'failed'
+          : status === 'WARNING' || status === 'REVIEW_REQUIRED'
+            ? 'review'
+            : status === 'NOT_APPLICABLE'
+              ? 'notApplicable'
+              : 'notTested'
+      groups[bucket].push(control)
+      return groups
+    },
+    { passed: [], failed: [], review: [], notTested: [], notApplicable: [] },
+  )
   const ai_gate = scanData.ai_gate || null
   const aiGateControlEvidence = ai_gate?.control_evidence || null
   const aiGateDecision = ai_gate?.decision || {}
@@ -844,6 +870,19 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
     document.body.appendChild(a)
     a.click()
     document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  }
+
+  const handleDownloadModelIntakeSbom = () => {
+    if (!modelIntakeSbom) return
+    const blob = new Blob([JSON.stringify(modelIntakeSbom, null, 2)], { type: 'application/vnd.cyclonedx+json' })
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = `model-intake-${scan.id}-sbom.cdx.json`
+    document.body.appendChild(anchor)
+    anchor.click()
+    document.body.removeChild(anchor)
     URL.revokeObjectURL(url)
   }
 
@@ -1632,6 +1671,57 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
             </div>
           )}
 
+          <div className="mb-5 rounded-lg border border-gray-700 bg-gray-900 p-4">
+            <div className="text-sm font-semibold text-white">What the review established</div>
+            <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <div><div className="text-xs text-gray-500">Passed</div><div className="text-2xl font-semibold text-green-300">{modelIntakeControlGroups.passed.length}</div></div>
+              <div><div className="text-xs text-gray-500">Failed</div><div className="text-2xl font-semibold text-red-300">{modelIntakeControlGroups.failed.length}</div></div>
+              <div><div className="text-xs text-gray-500">Needs review</div><div className="text-2xl font-semibold text-yellow-300">{modelIntakeControlGroups.review.length}</div></div>
+              <div><div className="text-xs text-gray-500">Not tested / incomplete</div><div className="text-2xl font-semibold text-orange-300">{modelIntakeControlGroups.notTested.length}</div></div>
+            </div>
+            {(modelIntakeControlGroups.failed.length > 0 || modelIntakeControlGroups.notTested.length > 0) && (
+              <div className="mt-4 grid gap-3 lg:grid-cols-2">
+                {modelIntakeControlGroups.failed.length > 0 && (
+                  <div className="rounded border border-red-800/50 bg-red-950/20 p-3">
+                    <div className="text-xs font-semibold uppercase tracking-wide text-red-200">Failed</div>
+                    <ul className="mt-2 space-y-1 text-sm text-red-100/90">
+                      {modelIntakeControlGroups.failed.slice(0, 6).map((control: any) => (
+                        <li key={`failed-${control.name}`}>• {String(control.name).replace(/_/g, ' ')}{control.detail ? ` — ${control.detail}` : ''}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {modelIntakeControlGroups.notTested.length > 0 && (
+                  <div className="rounded border border-orange-800/50 bg-orange-950/20 p-3">
+                    <div className="text-xs font-semibold uppercase tracking-wide text-orange-200">Not tested or incomplete</div>
+                    <ul className="mt-2 space-y-1 text-sm text-orange-100/90">
+                      {modelIntakeControlGroups.notTested.slice(0, 6).map((control: any) => (
+                        <li key={`missing-${control.name}`}>• {String(control.name).replace(/_/g, ' ')}{control.detail ? ` — ${control.detail}` : ''}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {modelIntakeRequiredActions.length > 0 && (
+            <div className="mb-5 rounded border border-yellow-600/40 bg-yellow-950/20 p-4">
+              <div className="text-sm font-semibold text-yellow-100">What to do next</div>
+              <ol className="mt-2 list-decimal space-y-1 pl-5 text-sm text-yellow-50/90">
+                {modelIntakeRequiredActions.slice(0, 8).map((action, index) => (
+                  <li key={`${action}-${index}`}>{action}</li>
+                ))}
+              </ol>
+            </div>
+          )}
+
+          <details className="rounded-lg border border-gray-700 bg-gray-950/40">
+            <summary className="cursor-pointer px-4 py-3 text-sm font-semibold text-gray-200 hover:text-white">
+              Detailed technical evidence, SBOM, hashes and phase logs
+            </summary>
+            <div className="border-t border-gray-800 p-4">
+
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4 mb-5">
             <div className="bg-gray-700/40 rounded-lg p-3">
               <div className="text-xs text-gray-400">Artifact</div>
@@ -1717,8 +1807,8 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
             </div>
           )}
 
-          {(modelIntakeAibom || modelIntakeSupplyChain) && (
-            <div className="mt-5 grid grid-cols-1 gap-3 lg:grid-cols-3">
+          {(modelIntakeAibom || modelIntakeSupplyChain || modelIntakeSbom) && (
+            <div className="mt-5 grid grid-cols-1 gap-3 lg:grid-cols-4">
               <div className="rounded border border-gray-700 bg-gray-900 p-3">
                 <div className="text-xs text-gray-400">AIBOM completeness</div>
                 <div className="mt-1 text-lg font-semibold text-cyan-300">
@@ -1739,6 +1829,22 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                 <div className="mt-1 text-sm font-semibold text-white">
                   {modelIntakeSupplyChain?.license_policy?.status || modelIntakeSummary?.license_policy_status || 'unknown'}
                 </div>
+              </div>
+              <div className="rounded border border-gray-700 bg-gray-900 p-3">
+                <div className="text-xs text-gray-400">CycloneDX SBOM</div>
+                <div className="mt-1 text-lg font-semibold text-cyan-300">
+                  {modelIntakeSbom ? `${modelIntakeSbomSummary.component_count || 0} components` : 'not generated'}
+                </div>
+                {modelIntakeSbom && (
+                  <>
+                    <div className="mt-1 text-xs text-gray-500">
+                      {modelIntakeSbomSummary.dependency_files || 0} dependency files · {modelIntakeSbomSummary.unpinned_dependencies || 0} unpinned
+                    </div>
+                    <button type="button" onClick={handleDownloadModelIntakeSbom} className="mt-2 rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
+                      Download SBOM
+                    </button>
+                  </>
+                )}
               </div>
             </div>
           )}
@@ -1807,20 +1913,6 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                   ))}
                 </div>
               )}
-            </div>
-          )}
-
-          {modelIntakeRequiredActions.length > 0 && (
-            <div className="mt-5 rounded border border-yellow-600/40 bg-yellow-950/20 p-3">
-              <div className="text-sm font-semibold text-yellow-100">Evidence needed before approval</div>
-              <p className="mt-1 text-xs text-yellow-100/75">
-                Scanner observations help fill the intake record, but trusted approval evidence must come from the release, registry, CI/CD, or governance process.
-              </p>
-              <ol className="mt-2 list-decimal space-y-1 pl-5 text-sm text-yellow-50/90">
-                {modelIntakeRequiredActions.slice(0, 10).map((action, index) => (
-                  <li key={`${action}-${index}`}>{action}</li>
-                ))}
-              </ol>
             </div>
           )}
 
@@ -1915,11 +2007,13 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
           <div className="mt-5 rounded border border-gray-700 bg-gray-900 p-3">
             <div className="text-xs text-gray-400">Verification scope</div>
             <div className="mt-2 grid gap-2 text-sm text-gray-300 md:grid-cols-3">
-              <div>No model code imported or executed.</div>
-              <div>Integrity is checked only when an expected checksum is supplied.</div>
-              <div>SBOM, malware, eval, and approval checks require attached evidence.</div>
+              <div>Runtime execution: {String(model_intake?.dynamic_sandbox?.status || 'NOT_RUN').replace(/_/g, ' ')}</div>
+              <div>Integrity: {modelIntakeFetch?.truncated ? 'partial artifact only' : modelIntakeSummary?.sha256 ? 'complete observed digest' : 'not established'}</div>
+              <div>Corporate admission: {String(model_intake?.admission?.status || 'NOT_RUN').replace(/_/g, ' ')}</div>
             </div>
           </div>
+            </div>
+          </details>
         </div>
       )}
 

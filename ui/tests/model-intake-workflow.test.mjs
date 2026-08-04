@@ -107,7 +107,7 @@ test('page stages are numbered in the order they are rendered', () => {
   }
 })
 
-test('a local deployment resolves its own operator credential instead of asking for it', () => {
+test('the browser credential status route never serializes an operator secret', () => {
   assert.match(api, /getModelIntakeOperatorCredential/)
   assert.match(api, /\/api\/model-intake\/operator-credential/)
   assert.match(page, /loadOperatorCredential/)
@@ -117,10 +117,10 @@ test('a local deployment resolves its own operator credential instead of asking 
   assert.match(workflow, /onOperatorTokenChange\(event\.target\.value\)/)
 
   const route = readFileSync(path.join(root, 'src/app/api/model-intake/operator-credential/route.ts'), 'utf8')
-  assert.match(route, /deploymentIsLoopbackBound/)
-  assert.match(route, /requestLooksLocal/)
-  assert.match(route, /SHAKERSCAN_UI_OPERATOR_AUTOFILL/)
-  assert.match(route, /remote_deployment/)
+  assert.match(route, /manual_required/)
+  assert.match(route, /Never serialize/)
+  assert.doesNotMatch(route, /process\.env\.MODEL_INTAKE_OPERATOR_TOKEN/)
+  assert.doesNotMatch(route, /headers\.get\('host'\)/)
 })
 
 test('artifact acquisition is presented in model-sized units, not a 100MB prefix', () => {
@@ -190,18 +190,12 @@ test('cross-phase navigation targets the phase that renders the control', () => 
   assert.match(page, /setPhase\('preflight'\)\n    setPolicyProfile\('strict'\)/)
 })
 
-test('operator credential autofill does not depend on the request peer address', () => {
+test('operator credential delivery cannot be enabled by spoofed deployment headers', () => {
   const route = readFileSync(path.join(root, 'src/app/api/model-intake/operator-credential/route.ts'), 'utf8')
-  // The UI runs in a container, so a published-port request arrives from
-  // Docker's bridge gateway and x-forwarded-for never holds a loopback hop.
-  // Requiring one disabled autofill on every real deployment.
   assert.doesNotMatch(route, /headers\.get\('x-forwarded-for'\)/)
-  // The port binding is the real constraint on who can connect.
-  assert.match(route, /deploymentIsLoopbackBound/)
-  assert.match(route, /SHAKERSCAN_BIND_HOST/)
-  // The Host check only catches a reverse proxy serving a public name, and an
-  // IPv6 host is "[::1]:3000" — splitting on ':' would mangle it.
-  assert.match(route, /replace\(\/:\\d\+\$\/, ''\)/)
+  assert.doesNotMatch(route, /headers\.get\('host'\)/)
+  assert.doesNotMatch(route, /SHAKERSCAN_BIND_HOST/)
+  assert.doesNotMatch(route, /MODEL_INTAKE_OPERATOR_TOKEN/)
 })
 
 test('credential messaging leads with impact and keeps ops detail behind a disclosure', () => {
@@ -209,13 +203,8 @@ test('credential messaging leads with impact and keeps ops detail behind a discl
   // Someone pasting a Hugging Face URL to run a preflight scan should never be
   // told to go paste an environment variable: the scan needs no credential.
   assert.match(route, /hint/)
-  for (const detail of [
-    'This deployment is reachable beyond the local machine',
-    'No operator credential is configured for this deployment yet',
-  ]) {
-    assert.ok(route.includes(detail), `${detail} is missing`)
-    assert.ok(!detail.includes('MODEL_INTAKE_OPERATOR_TOKEN'))
-  }
+  assert.match(route, /Corporate admission actions require an operator credential/)
+  assert.match(route, /approved secret channel/)
   assert.match(workflow, /Where do I get one\?/)
   assert.match(workflow, /Everything before it/)
   // The context chip is neutral, not a warning, because preflight is unaffected.
@@ -259,6 +248,26 @@ test('pasting a model reference produces the complete evidence set by default', 
   assert.match(page, /const activeDepth =/)
   assert.match(page, /activeDepth === null/)
   assert.match(page, /never as clean/)
+})
+
+test('one pasted Hugging Face link queues the complete technical review', () => {
+  assert.match(page, /Test a model end to end/)
+  assert.match(page, /Run complete review/)
+  assert.match(page, /runCompleteReview/)
+  assert.match(page, /complete_artifact_download: true/)
+  assert.match(page, /complete_repository_snapshot: true/)
+  assert.match(page, /run_generated_scanners: true/)
+  assert.match(page, /run_dynamic_sandbox: true/)
+  assert.match(page, /Anything\s+unavailable is reported as not tested/)
+})
+
+test('model intake reports lead with outcomes and collapse technical bulk', () => {
+  const report = readFileSync(path.join(root, 'src/components/ReportView.tsx'), 'utf8')
+  assert.match(report, /What the review established/)
+  assert.match(report, /Not tested \/ incomplete/)
+  assert.match(report, /What to do next/)
+  assert.match(report, /Detailed technical evidence, SBOM, hashes and phase logs/)
+  assert.match(report, /Download SBOM/)
 })
 
 test('a Linux host with no CPU virtualization is named precisely, not "n/a on linux"', () => {

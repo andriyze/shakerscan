@@ -1655,7 +1655,20 @@ def run_builtin_sbom_scan(subject_path: Path, subject: dict[str, Any]) -> dict[s
             "components_generated": len(normalized_components),
         },
         execution={"required": True},
-        summary={"sbom": sbom, "sbom_sha256": _sha256_json(sbom)},
+        summary={
+            # The full CycloneDX document remains downloadable evidence.  The
+            # compact summary is what reports should render by default.
+            "sbom": sbom,
+            "sbom_sha256": _sha256_json(sbom),
+            "sbom_summary": {
+                "format": "CycloneDX 1.5",
+                "component_count": len(normalized_components),
+                "dependency_files": len(dependency_paths),
+                "unpinned_dependencies": len(unpinned),
+                "inventory_complete": not inventory_truncated,
+                "subject_digest": subject.get("digest"),
+            },
+        },
     )
 
 

@@ -116,7 +116,7 @@ export default function PolicyProfilesPage() {
     const stored = sessionStorage.getItem(MODEL_INTAKE_OPERATOR_TOKEN_KEY) || ''
     if (stored) {
       setOperatorToken(stored)
-      setOperatorCredential({ available: true, reason: 'local_deployment' })
+      setOperatorCredential({ available: true, reason: 'stored_session' })
       return
     }
     getModelIntakeOperatorCredential().then((credential) => {

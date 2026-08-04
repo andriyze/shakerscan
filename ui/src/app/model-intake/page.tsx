@@ -494,6 +494,7 @@ function ModelIntakeSettingsContent() {
   const [operatorCredential, setOperatorCredential] = useState<ModelIntakeOperatorCredential | null>(null)
   const [savingAnchor, setSavingAnchor] = useState(false)
   const [submitting, setSubmitting] = useState(false)
+  const [quickSubmitting, setQuickSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [fieldErrors, setFieldErrors] = useState<IntakeFormErrors>({})
   const [scenario, setScenario] = useState<AITestScenario | null>(null)
@@ -591,7 +592,7 @@ function ModelIntakeSettingsContent() {
     const stored = sessionStorage.getItem(MODEL_INTAKE_OPERATOR_TOKEN_KEY) || ''
     if (stored) {
       setOperatorToken(stored)
-      setOperatorCredential({ available: true, reason: 'local_deployment' })
+      setOperatorCredential({ available: true, reason: 'stored_session' })
       return
     }
     const credential = await getModelIntakeOperatorCredential()
@@ -1118,6 +1119,60 @@ function ModelIntakeSettingsContent() {
     }
   }
 
+  async function runCompleteReview() {
+    if (!sourceRef.trim()) {
+      setError('Paste a Hugging Face model link or model reference first.')
+      return
+    }
+    setQuickSubmitting(true)
+    setError(null)
+    try {
+      const resolved = await resolveModelIntakeReference({
+        platform: 'auto',
+        ref: sourceRef.trim(),
+        revision: optionalText(revision),
+        metadata_json: {},
+        timeout_seconds: 20,
+      })
+      if (!resolved.scan_payload?.artifact_url) {
+        throw new Error('This reference did not resolve to a testable model artifact.')
+      }
+      const environmentOption = ENVIRONMENT_OPTIONS.find((item) => item.value === environment)
+      const payload: ModelIntakeScanRequest = {
+        ...resolved.scan_payload,
+        intake_mode: 'preflight',
+        policy_profile: environmentOption?.policyProfile || 'production',
+        complete_artifact_download: true,
+        complete_repository_snapshot: true,
+        run_generated_scanners: true,
+        run_dynamic_sandbox: true,
+        require_dynamic_sandbox: environment === 'production' || environment === 'staging',
+      }
+      setResolverResult(resolved)
+      setPlatform(
+        ['auto', 'huggingface', 'http', 's3', 'gcs', 'azure', 'oci', 'mlflow'].includes(resolved.platform)
+          ? resolved.platform as ModelIntakePlatform
+          : 'auto',
+      )
+      if (resolved.revision) setRevision(String(resolved.revision))
+      if (resolved.selected_file?.path) setFilename(resolved.selected_file.path)
+      applyScanPayload(payload)
+      const queued = await submitModelIntakeScan(payload)
+      trackQueuedScan(queued.scan_id)
+      setPhase('preflight')
+      await loadIntakeScans()
+      toast.success('Complete model review queued', {
+        link: { href: `/scans/${queued.scan_id}`, label: 'Open report' },
+      })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to queue the complete model review'
+      setError(message)
+      toast.error(message)
+    } finally {
+      setQuickSubmitting(false)
+    }
+  }
+
   async function copyPayload() {
     try {
       await navigator.clipboard.writeText(JSON.stringify(buildPayload(), null, 2))
@@ -1252,6 +1307,60 @@ function ModelIntakeSettingsContent() {
           </p>
         </div>
       </div>
+
+      <Card className="border-cyan-500/30 bg-gradient-to-br from-cyan-950/40 to-gray-950 p-5">
+        <div className="max-w-3xl">
+          <div className="flex items-center gap-2 text-lg font-semibold text-white">
+            <PackageCheck className="h-5 w-5 text-cyan-300" />
+            Test a model end to end
+          </div>
+          <p className="mt-1 text-sm text-gray-400">
+            Paste one Hugging Face link. ShakerScan resolves the pinned files, requests complete acquisition,
+            hashes every acquired byte, scans code and dependencies, and requests isolated runtime evidence. Anything
+            unavailable is reported as not tested — never as a pass.
+          </p>
+        </div>
+        <div className="mt-4 grid gap-3 lg:grid-cols-[minmax(0,1fr)_12rem_auto]">
+          <label className={fieldClass}>
+            Hugging Face model link
+            <input
+              value={sourceRef}
+              onChange={(event) => {
+                setSourceRef(event.target.value)
+                setResolverResult(null)
+              }}
+              className={inputClass}
+              placeholder="https://huggingface.co/nomic-ai/CodeRankEmbed"
+            />
+          </label>
+          <label className={fieldClass}>
+            Intended use
+            <select
+              value={environment}
+              onChange={(event) => applyEnvironment(event.target.value as ModelIntakeEnvironment)}
+              className={inputClass}
+            >
+              {ENVIRONMENT_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </label>
+          <button
+            type="button"
+            onClick={runCompleteReview}
+            disabled={quickSubmitting || !sourceRef.trim()}
+            className="inline-flex items-center justify-center gap-2 self-end rounded-lg bg-cyan-600 px-5 py-2 text-sm font-semibold text-white hover:bg-cyan-500 disabled:opacity-50"
+          >
+            {quickSubmitting ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+            {quickSubmitting ? 'Resolving and queueing…' : 'Run complete review'}
+          </button>
+        </div>
+        <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-xs text-gray-500">
+          <span>Complete artifact + repository</span>
+          <span>ModelScan, Fickling, Semgrep, Trivy</span>
+          <span>Isolated load/inference when the microVM runner is ready</span>
+        </div>
+      </Card>
 
       <IntakeContextBar
         source={intakeSource}
@@ -2303,6 +2412,7 @@ function ModelIntakeSettingsContent() {
             readiness={runnerReadiness}
             plan={runnerInstallPlan}
             operatorToken={operatorToken}
+            environment={environment}
             onRecheck={loadRunnerReadiness}
           />
         </Card>
