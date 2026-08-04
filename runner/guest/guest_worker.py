@@ -74,6 +74,12 @@ def _install_transformers_compatibility() -> None:
 
 def _mean_embeddings(model_path: Path, texts: list[str], *, trust: bool, safe: bool):
     import torch
+    # Compare the two serializers under one deterministic CPU execution
+    # contract. Parallel reduction order can otherwise introduce small output
+    # drift even when every source and target tensor is byte-equivalent.
+    torch.set_num_threads(1)
+    torch.manual_seed(0)
+    torch.use_deterministic_algorithms(True)
     _install_transformers_compatibility()
     from transformers import AutoModel, AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True, trust_remote_code=trust)

@@ -223,6 +223,16 @@ def test_guest_installs_only_the_canonical_legacy_conv1d_alias(monkeypatch):
     assert modeling_utils.Conv1D is canonical
 
 
+def test_guest_embedding_equivalence_uses_deterministic_cpu_execution():
+    source = (
+        Path(__file__).resolve().parents[1] / "runner" / "guest" / "guest_worker.py"
+    ).read_text()
+
+    assert "torch.set_num_threads(1)" in source
+    assert "torch.manual_seed(0)" in source
+    assert "torch.use_deterministic_algorithms(True)" in source
+
+
 def test_firecracker_readiness_has_no_local_container_fallback(tmp_path, monkeypatch):
     monkeypatch.setattr("model_intake_runner_controller.platform.system", lambda: "Linux")
     # Pin the CPU probe. Left to the ambient /proc/cpuinfo this asserted
