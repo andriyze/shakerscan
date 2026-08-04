@@ -696,9 +696,7 @@ def cmd_install(args, runtime: Path) -> int:
     _write_dotenv(runtime / ".env", {
         "MODEL_INTAKE_RUNNER_URL": f"http://{bind_host}:{args.bind_port}",
         "MODEL_INTAKE_RUNNER_INTERNAL_TOKEN": token,
-        # The runner's hardened systemd mount namespace exposes the source
-        # checkout results through this stable, non-home alias.
-        "MODEL_INTAKE_RUNNER_HOST_RESULTS_ROOT": "/var/lib/shakerscan/model-intake-results",
+        "MODEL_INTAKE_RUNNER_HOST_RESULTS_ROOT": str(shared_results_root),
     })
     # `docker compose restart` reuses the existing container and never re-reads
     # .env, so the API would keep an empty MODEL_INTAKE_RUNNER_URL and go on
