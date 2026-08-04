@@ -162,6 +162,9 @@ def test_scanner_wrapper_submits_unified_full_coverage_payload(tmp_path):
         **os.environ,
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
         "SHAKERSCAN_TEST_CAPTURE": str(capture),
+        # Do not inherit a remote host cached in the developer runtime .env;
+        # this wrapper test asserts the portable default link.
+        "SHAKERSCAN_PUBLIC_HOST": "localhost",
     }
     result = subprocess.run(
         [

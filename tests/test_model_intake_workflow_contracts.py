@@ -80,7 +80,10 @@ def test_invalid_model_intake_operator_credential_map_fails_closed(monkeypatch):
     assert caught.value.status_code == 503
 
 
-def test_submission_listing_and_detail_require_operator_authentication():
+def test_submission_listing_and_detail_require_operator_authentication(monkeypatch):
+    # Make the service configuration explicit so this test cannot depend on a
+    # developer .env loaded by an earlier test or by python-dotenv discovery.
+    monkeypatch.setenv("MODEL_INTAKE_OPERATOR_TOKEN", "configured-model-intake-token-that-is-long-enough")
     unauthenticated = api.Request({
         "type": "http",
         "method": "GET",
@@ -99,9 +102,9 @@ def test_submission_listing_and_detail_require_operator_authentication():
     with pytest.raises(api.HTTPException) as reported:
         asyncio.run(api.get_model_intake_submission_report(str(uuid.uuid4()), unauthenticated))
 
-    assert listed.value.status_code == 401
-    assert detailed.value.status_code == 401
-    assert reported.value.status_code == 401
+    assert listed.value.status_code == 403
+    assert detailed.value.status_code == 403
+    assert reported.value.status_code == 403
 
 
 def test_normalized_report_route_reads_authoritative_records_only(monkeypatch):
