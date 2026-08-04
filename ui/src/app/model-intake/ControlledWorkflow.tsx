@@ -14,6 +14,7 @@ import {
   createModelIntakeSubmission,
   downloadModelIntakeSubmissionReport,
   freezeModelIntakeEvidence,
+  getScan,
   getModelIntakeAgentSession,
   getModelIntakeRunnerReadiness,
   getModelIntakeSubmission,
@@ -24,6 +25,7 @@ import {
   promoteModelIntakeSubmission,
   refreshModelIntakeRunnerJob,
   replyModelIntakeAgentSession,
+  resolveModelIntakeRunnerProfile,
   type ModelIntakeDeploymentBundleRequest,
   type ModelIntakeAgentSession,
   type ModelIntakeCorporateReport,
@@ -44,6 +46,17 @@ type JsonObject = Record<string, unknown>
 
 function objectValue(value: unknown): JsonObject {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : {}
+}
+
+function storedObjectValue(value: unknown): JsonObject {
+  if (typeof value === 'string') {
+    try {
+      return objectValue(JSON.parse(value))
+    } catch {
+      return {}
+    }
+  }
+  return objectValue(value)
 }
 
 function parseObject(raw: string, label: string): JsonObject {
@@ -80,7 +93,7 @@ function subjectDigest(detail: ModelIntakeWorkflowDetail | null, kind: string): 
 // confirms published facts instead of hunting through config.json by hand.
 function embeddingHints(detail: ModelIntakeWorkflowDetail | null): JsonObject {
   const subject = detail?.subjects.filter((item) => item.subject_kind === 'configuration').at(-1)
-  return objectValue(objectValue(subject?.metadata_json).embedding_configuration_hints)
+  return objectValue(storedObjectValue(subject?.metadata_json).embedding_configuration_hints)
 }
 
 // A number input bound to 0 renders "0", which reads as a declared value and
@@ -342,9 +355,51 @@ export function ControlledModelIntakeWorkflow({
     return seeded
   }
 
-  function seedBundleFromEvidence() {
+  async function seedBundleFromEvidence() {
     if (!detail) return
-    setBundleJson(JSON.stringify(buildSeededBundle(detail, latestJob, bundle), null, 2))
+    setBusy('seed-runner')
+    setError(null)
+    try {
+      const seeded = buildSeededBundle(detail, latestJob, bundle)
+      const rootfsSha = runnerReadiness?.verified_component_sha256?.rootfs
+      if (!rootfsSha) throw new Error('Runner readiness does not include a verified guest rootfs digest')
+      const scanId = detail.submission.scan_id
+      if (!scanId) throw new Error('Attach a completed preflight scan before resolving the runner profile')
+      const scan = await getScan(scanId)
+      const intake = objectValue(objectValue(scan.result).model_intake)
+      const snapshot = objectValue(intake.repository_snapshot)
+      const repositoryManifest = objectValue(snapshot.repository_manifest)
+      const metadata = objectValue(intake.metadata)
+      const files = Array.isArray(snapshot.files) ? snapshot.files.map(objectValue) : []
+      const artifactPath = files.find((item) => item.sha256 === seeded.model_artifact_sha256)?.path
+      if (typeof artifactPath !== 'string' || !artifactPath) {
+        throw new Error('The attached snapshot does not contain the registered model artifact')
+      }
+      const runtimeImageDigest = `sha256:${rootfsSha}`
+      const resolved = await resolveModelIntakeRunnerProfile({
+        repository_manifest: {
+          ...repositoryManifest,
+          library_name: typeof metadata.library_name === 'string' ? metadata.library_name : 'transformers',
+          custom_code_required: Boolean(seeded.custom_code_sha256),
+          architectures: Array.isArray(metadata.architectures) ? metadata.architectures : [],
+        },
+        artifact_path: artifactPath,
+        runtime_image_digest: runtimeImageDigest,
+        ...(seeded.custom_code_sha256 ? { reviewed_custom_code_sha256: seeded.custom_code_sha256 } : {}),
+      }, runnerOperation)
+      const profileSha = objectValue(resolved.profile).profile_sha256
+      if (resolved.status !== 'READY' || typeof profileSha !== 'string') {
+        throw new Error(`Runner profile is ${resolved.status.toLowerCase()}: ${resolved.reason || 'no applicable fixed profile'}`)
+      }
+      seeded.runtime_image_digest = runtimeImageDigest
+      seeded.loader_profile_sha256 = profileSha
+      setBundleJson(JSON.stringify(seeded, null, 2))
+      toast.success('Authoritative subjects and fixed runner profile seeded')
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Failed to seed the runner bundle')
+    } finally {
+      setBusy('')
+    }
   }
 
   function updateEmbeddingField(field: string, value: string | number | boolean) {
@@ -353,6 +408,16 @@ export function ControlledModelIntakeWorkflow({
         const parsed = parseObject(current, 'Deployment bundle')
         const embedding = { ...objectValue(parsed.embedding_configuration), [field]: value }
         return JSON.stringify({ ...parsed, embedding_configuration: embedding }, null, 2)
+      } catch {
+        return current
+      }
+    })
+  }
+
+  function updateBundleField(field: string, value: string) {
+    setBundleJson((current) => {
+      try {
+        return JSON.stringify({ ...parseObject(current, 'Deployment bundle'), [field]: value.trim() }, null, 2)
       } catch {
         return current
       }
@@ -642,6 +707,22 @@ export function ControlledModelIntakeWorkflow({
   if (!runnerReadiness) {
     queueBlockers.push({ summary: 'Runner readiness is still being checked' })
   }
+  const digestPattern = /^[0-9a-f]{64}$/i
+  if (!/^sha256:[0-9a-f]{64}$/i.test(String(bundle?.runtime_image_digest || ''))) {
+    queueBlockers.push({ summary: 'Runner image is not resolved', detail: 'Use Seed authoritative runner bundle' })
+  }
+  if (!digestPattern.test(String(bundle?.loader_profile_sha256 || ''))) {
+    queueBlockers.push({ summary: 'Fixed loader profile is not resolved', detail: 'Use Seed authoritative runner bundle' })
+  }
+  if (!digestPattern.test(String(bundle?.retrieval_application_digest || ''))) {
+    queueBlockers.push({ summary: 'Retrieval application digest is missing', detail: 'Hash the exact serving/retrieval application build' })
+  }
+  if (!digestPattern.test(String(bundle?.index_schema_digest || ''))) {
+    queueBlockers.push({ summary: 'Index schema digest is missing', detail: 'Hash the exact vector index schema/configuration' })
+  }
+  if (runnerOperation === 'runtime' && !digestPattern.test(knownAnswerDigest.trim())) {
+    queueBlockers.push({ summary: 'Reviewed known-answer digest is missing', detail: 'Run calibration first, review its output, then bind that digest' })
+  }
   for (const gap of embeddingGaps) {
     const [summary, detail] = gap.split(' \u2014 ')
     queueBlockers.push({ summary: `Undeclared ${summary}`, detail })
@@ -819,7 +900,7 @@ export function ControlledModelIntakeWorkflow({
         <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-white">4.3 Firecracker calibration, runtime, conversion, and telemetry</summary>
         <div className="grid gap-4 border-t border-gray-800 p-4 xl:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)]">
           <div className="grid gap-3">
-            <div className="flex flex-wrap items-center justify-between gap-2"><span className="text-xs text-gray-400">Exact deployment bundle</span><button type="button" className={buttonClass} onClick={seedBundleFromEvidence}>Seed authoritative digests</button></div>
+            <div className="flex flex-wrap items-center justify-between gap-2"><span className="text-xs text-gray-400">Exact deployment bundle</span><button type="button" className={buttonClass} disabled={busy === 'seed-runner' || !detail} onClick={() => void seedBundleFromEvidence()}>{busy === 'seed-runner' ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : null} Seed authoritative runner bundle</button></div>
             <div className="rounded border border-gray-800 bg-gray-900 p-3">
               <div className="text-xs font-medium text-gray-300">Embedding configuration</div>
               {hintSources.length > 0 ? (
@@ -860,6 +941,18 @@ export function ControlledModelIntakeWorkflow({
                   undeclared. Each one is listed with its source next to the queue button below.
                 </p>
               )}
+            </div>
+            <div className="rounded border border-gray-800 bg-gray-900 p-3">
+              <div className="text-xs font-medium text-gray-300">Corporate deployment bindings</div>
+              <p className="mt-1 text-[11px] text-gray-500">These identify the exact application and vector-index contract that will consume the model. ShakerScan cannot invent them.</p>
+              <div className="mt-3 grid gap-3">
+                <label className="grid gap-1 text-xs text-gray-300">Retrieval application SHA-256
+                  <input className={inputClass} value={String(bundle?.retrieval_application_digest || '')} onChange={(event) => updateBundleField('retrieval_application_digest', event.target.value)} placeholder="64-character SHA-256 of the serving build" />
+                </label>
+                <label className="grid gap-1 text-xs text-gray-300">Index schema SHA-256
+                  <input className={inputClass} value={String(bundle?.index_schema_digest || '')} onChange={(event) => updateBundleField('index_schema_digest', event.target.value)} placeholder="64-character SHA-256 of the index schema/config" />
+                </label>
+              </div>
             </div>
             <details>
               <summary className="cursor-pointer text-xs text-gray-500">Raw deployment bundle JSON</summary>

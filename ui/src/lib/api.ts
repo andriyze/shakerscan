@@ -4180,6 +4180,26 @@ export async function listModelIntakeRunnerJobs(id: string, operatorToken: strin
   return res.json()
 }
 
+export async function resolveModelIntakeRunnerProfile(data: {
+  repository_manifest: Record<string, unknown>
+  artifact_path: string
+  runtime_image_digest: string
+  reviewed_custom_code_sha256?: string
+}, operation: 'calibration' | 'runtime' | 'conversion'): Promise<{
+  status: string
+  reason?: string | null
+  profile?: Record<string, unknown> | null
+}> {
+  const endpoint = operation === 'conversion' ? 'conversion-profiles' : 'loader-profiles'
+  const res = await fetch(`${API_URL}/model-intake/${endpoint}/resolve`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to resolve the server-owned runner profile'))
+  return res.json()
+}
+
 export async function createModelIntakeRunnerJob(id: string, data: {
   operation: 'calibration' | 'runtime' | 'conversion'
   deployment_bundle: ModelIntakeDeploymentBundleRequest

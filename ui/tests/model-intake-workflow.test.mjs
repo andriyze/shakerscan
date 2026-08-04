@@ -343,7 +343,13 @@ test('the deployment bundle arrives prefilled from the scanned revision', () => 
   // publishes and the scan already read.
   assert.match(workflow, /function embeddingHints/)
   assert.match(workflow, /embedding_configuration_hints/)
+  assert.match(workflow, /storedObjectValue/)
   assert.match(workflow, /buildSeededBundle/)
+  assert.match(workflow, /Seed authoritative runner bundle/)
+  assert.match(workflow, /resolveModelIntakeRunnerProfile/)
+  assert.match(workflow, /Corporate deployment bindings/)
+  assert.match(workflow, /Retrieval application SHA-256/)
+  assert.match(workflow, /Index schema SHA-256/)
   // Seeded on load, not only when the operator finds the seed button.
   assert.match(workflow, /seededSubmissions\.current\.has\(id\)/)
   // Seeded once, so a later refresh never discards operator edits.
