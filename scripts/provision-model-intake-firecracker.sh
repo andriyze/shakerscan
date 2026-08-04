@@ -57,8 +57,14 @@ curl -fsSLo "$TEMP_DIR/$archive.sha256.txt" "$release/$archive.sha256.txt"
 tar -C "$TEMP_DIR" -xzf "$TEMP_DIR/$archive"
 
 mkdir -p "$INSTALL_ROOT/bin" "$INSTALL_ROOT/kernel" "$INSTALL_ROOT/rootfs" "$INSTALL_ROOT/app" /srv/jailer
-install -m 0755 "$(find "$TEMP_DIR/release-${FIRECRACKER_VERSION}-${arch}" -maxdepth 1 -type f -name 'firecracker-*' | head -1)" "$INSTALL_ROOT/bin/firecracker"
-install -m 0755 "$(find "$TEMP_DIR/release-${FIRECRACKER_VERSION}-${arch}" -maxdepth 1 -type f -name 'jailer-*' | head -1)" "$INSTALL_ROOT/bin/jailer"
+release_dir="$TEMP_DIR/release-${FIRECRACKER_VERSION}-${arch}"
+# The official archive contains runnable binaries and same-prefix `.debug`
+# shared objects. Select the exact release names; `find | head` can choose the
+# debug artifact, which segfaults even for `--version`.
+install -m 0755 "$release_dir/firecracker-${FIRECRACKER_VERSION}-${arch}" "$INSTALL_ROOT/bin/firecracker"
+install -m 0755 "$release_dir/jailer-${FIRECRACKER_VERSION}-${arch}" "$INSTALL_ROOT/bin/jailer"
+"$INSTALL_ROOT/bin/firecracker" --version
+"$INSTALL_ROOT/bin/jailer" --version
 curl -fsSLo "$TEMP_DIR/vmlinux" "$KERNEL_URL"
 echo "$KERNEL_SHA256  $TEMP_DIR/vmlinux" | sha256sum -c -
 install -m 0644 "$TEMP_DIR/vmlinux" "$INSTALL_ROOT/kernel/vmlinux"

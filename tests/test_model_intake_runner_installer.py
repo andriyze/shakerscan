@@ -89,6 +89,16 @@ def test_hardened_service_mounts_only_results_and_conversion_output():
     assert "RestrictAddressFamilies=AF_UNIX AF_INET AF_NETLINK" in provisioner
 
 
+def test_installer_selects_runnable_release_binaries_not_debug_objects():
+    provisioner = (ROOT / "scripts" / "provision-model-intake-firecracker.sh").read_text()
+    assert 'firecracker-${FIRECRACKER_VERSION}-${arch}"' in provisioner
+    assert 'jailer-${FIRECRACKER_VERSION}-${arch}"' in provisioner
+    assert "-name 'firecracker-*'" not in provisioner
+    assert "-name 'jailer-*'" not in provisioner
+    assert '"$INSTALL_ROOT/bin/firecracker" --version' in provisioner
+    assert '"$INSTALL_ROOT/bin/jailer" --version' in provisioner
+
+
 def test_installer_registers_purpose_scoped_environment_anchors(tmp_path, monkeypatch):
     (tmp_path / ".env").write_text(
         "MODEL_INTAKE_OPERATOR_TOKEN=" + "t" * 48 + "\n"
