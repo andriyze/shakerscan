@@ -796,6 +796,14 @@ class FirecrackerRunner:
         status = str(observations.get("status") or "INCOMPLETE")
         if status == "PASS" and not observations.get("network_egress_blocked"):
             status = "FAIL"
+        conversion_succeeded = request.get("mode") == "conversion" and all(
+            observations.get(field) for field in (
+                "target_artifact_sha256",
+                "target_repository_snapshot_sha256",
+                "target_tokenizer_sha256",
+                "target_configuration_sha256",
+            )
+        )
         payload = {
             "schema_version": SCHEMA,
             "receipt_id": str(uuid.uuid4()),
@@ -805,27 +813,27 @@ class FirecrackerRunner:
             "deployment_bundle_sha256": str(request["deployment_bundle_sha256"]).lower(),
             "model_artifact_sha256": (
                 str(observations["target_artifact_sha256"]).lower()
-                if request.get("mode") == "conversion"
+                if conversion_succeeded
                 else str(request["model_artifact_sha256"]).lower()
             ),
             "repository_snapshot_sha256": (
                 str(observations["target_repository_snapshot_sha256"]).lower()
-                if request.get("mode") == "conversion"
+                if conversion_succeeded
                 else str(request["repository_snapshot_sha256"]).lower()
             ),
             "custom_code_sha256": (
                 observations.get("target_custom_code_sha256")
-                if request.get("mode") == "conversion"
+                if conversion_succeeded
                 else request.get("reviewed_custom_code_sha256")
             ),
             "tokenizer_sha256": (
                 str(observations["target_tokenizer_sha256"]).lower()
-                if request.get("mode") == "conversion"
+                if conversion_succeeded
                 else str(request["tokenizer_sha256"]).lower()
             ),
             "configuration_sha256": (
                 str(observations["target_configuration_sha256"]).lower()
-                if request.get("mode") == "conversion"
+                if conversion_succeeded
                 else str(request["configuration_sha256"]).lower()
             ),
             "runtime_image_digest": str(request["runtime_image_digest"]).lower(),
