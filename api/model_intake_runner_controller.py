@@ -30,7 +30,7 @@ def host_platform(environment: dict[str, str] | None = None) -> str:
     microVM. ``scanner.sh`` records the real host, matching how the optional
     fleet feature gates itself.
     """
-    env = environment or os.environ
+    env = os.environ if environment is None else environment
     raw = env.get("SHAKERSCAN_HOST_PLATFORM", "").strip().lower()
     if raw in {"darwin", "mac", "macos", "osx"}:
         return "macos"
@@ -78,7 +78,7 @@ def firecracker_readiness(
     *,
     cpuinfo_path: Path | None = None,
 ) -> dict[str, Any]:
-    env = environment or os.environ
+    env = os.environ if environment is None else environment
     signer_backend = env.get("MODEL_INTAKE_RUNNER_SIGNER_BACKEND", "").lower()
     # A PEM in the environment is readable through /proc/PID/environ by anything
     # sharing the namespace, and systemd EnvironmentFile cannot hold a multi-line

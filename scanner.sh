@@ -1476,6 +1476,7 @@ prepare_runtime_files() {
     write_dotenv_value SHAKERSCAN_HOST_PLATFORM "$SHAKERSCAN_HOST_PLATFORM"
     mkdir -p results
     mkdir -p results/model-intake-quarantine results/model-intake-sandbox
+    mkdir -p .shakerscan-model-intake-runner-stage
     # These directories only need their mode set when this user created them.
     # The Model Intake worker runs as root and takes ownership of the quarantine
     # tree as soon as it stores its first artifact, after which chmod from the
@@ -1483,6 +1484,9 @@ prepare_runtime_files() {
     # scanner.sh invocation, including start, restart, and rebuild.
     ensure_directory_mode results/model-intake-quarantine 755
     ensure_directory_mode results/model-intake-sandbox 777
+    # Only the API stages trusted runner inputs here. Workers never mount this
+    # directory, so model-controlled scan output cannot replace a staged guest.
+    ensure_directory_mode .shakerscan-model-intake-runner-stage 700
     mkdir -p .shakerscan-fleet
     ensure_directory_mode .shakerscan-fleet 700
     ensure_runtime_datastore_credentials

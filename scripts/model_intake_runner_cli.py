@@ -17,6 +17,8 @@ with a pinned kernel and an explicit confirmation.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -25,6 +27,9 @@ import re
 import shutil
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.request
 
 # Pinned Firecracker CI guest kernel. Verified against the published artifact:
 # a bare URL with no digest would defeat the point of a measured runner.
@@ -107,6 +112,7 @@ HOST_TOOL_PACKAGES = {
     "curl": "curl",
     "tar": "tar",
     "sha256sum": "coreutils",
+    "openssl": "openssl",
 }
 
 
@@ -152,8 +158,6 @@ def _path_exists(path: Path) -> bool | None:
 
 
 def _sha256_path(path: Path) -> str:
-    import hashlib
-
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
@@ -167,14 +171,38 @@ def _staged_inputs(runtime: Path) -> dict:
     Staging is unprivileged and slow; the install is privileged and fast. Being
     able to see the staged inputs is what keeps those two apart.
     """
-    stage_dir = runtime / "results/model-intake-runner"
+    stage_dir = runtime / ".shakerscan-model-intake-runner-stage"
     kernel = stage_dir / "vmlinux"
     rootfs = stage_dir / "rootfs.ext4"
-    result: dict = {"dir": str(stage_dir), "kernel": None, "rootfs": None}
-    if kernel.is_file():
-        result["kernel"] = {"path": str(kernel), "sha256": _sha256_path(kernel)}
-    if rootfs.is_file():
-        result["rootfs"] = {"path": str(rootfs), "bytes": rootfs.stat().st_size}
+    manifest_path = stage_dir / "stage-manifest.json"
+    result: dict = {
+        "dir": str(stage_dir), "kernel": None, "rootfs": None,
+        "integrity_verified": False,
+    }
+    try:
+        if any(path.is_symlink() for path in (stage_dir, manifest_path, kernel, rootfs)):
+            result["error"] = "symlink_rejected"
+            return result
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("schema_version") != "model-intake-runner-stage/v1":
+            result["error"] = "invalid_manifest_schema"
+            return result
+        artifacts = manifest.get("artifacts", {})
+        for name, path in (("kernel", kernel), ("rootfs", rootfs)):
+            expected = artifacts.get(name, {})
+            observed = {"path": str(path), "bytes": path.stat().st_size,
+                        "sha256": _sha256_path(path)}
+            result[name] = observed
+            if (observed["bytes"] != int(expected.get("bytes", -1))
+                    or observed["sha256"] != expected.get("sha256")):
+                result["error"] = f"{name}_digest_mismatch"
+                return result
+        if result["kernel"]["sha256"] != DEFAULT_KERNEL_SHA256:
+            result["error"] = "kernel_not_pinned"
+            return result
+        result["integrity_verified"] = True
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        result["error"] = f"manifest_unavailable:{type(exc).__name__}"
     return result
 
 
@@ -205,6 +233,34 @@ def install_is_complete(facts: dict) -> bool:
     return facts["service_state"] == "active" or bool(facts.get("api_wired_to_runner"))
 
 
+def _validated_text(value: str, label: str, *, max_length: int = 300) -> str:
+    cleaned = value.strip()
+    if not cleaned or len(cleaned) > max_length or any(ord(char) < 32 for char in cleaned):
+        raise ValueError(f"{label} contains an empty, oversized, or control-character value")
+    return cleaned
+
+
+def _upsert_env_file(path: Path, values: dict[str, str | None]) -> None:
+    lines = path.read_text().splitlines() if path.is_file() else []
+    for key, raw_value in values.items():
+        pattern = re.compile(rf"^{re.escape(key)}=")
+        if raw_value is None:
+            lines = [line for line in lines if not pattern.match(line)]
+            continue
+        value = _validated_text(raw_value, key, max_length=2000)
+        replacement = f"{key}={value}"
+        for index, line in enumerate(lines):
+            if pattern.match(line):
+                lines[index] = replacement
+                break
+        else:
+            lines.append(replacement)
+    temporary = path.with_name(f".{path.name}.partial")
+    temporary.write_text("\n".join(lines) + "\n")
+    temporary.chmod(0o600)
+    temporary.replace(path)
+
+
 def host_facts(runtime: Path) -> dict:
     kvm = Path("/dev/kvm").exists()
     virt = cpu_virtualization()
@@ -219,7 +275,7 @@ def host_facts(runtime: Path) -> dict:
     }
     unit = _run(["systemctl", "is-active", SERVICE], capture_output=True)
     tools = {name: shutil.which(name) is not None for name in
-             ("docker", "ip", "nft", "mkfs.ext4", "debugfs", "curl", "tar", "sha256sum")}
+             ("docker", "ip", "nft", "mkfs.ext4", "debugfs", "curl", "tar", "sha256sum", "openssl")}
     return {
         "staged": _staged_inputs(runtime),
         "platform": platform.system().lower(),
@@ -311,17 +367,7 @@ def cmd_status(args, runtime: Path) -> int:
 
 def _write_dotenv(env_path: Path, values: dict[str, str]) -> None:
     """Upsert keys in the runtime .env without disturbing anything else."""
-    lines = env_path.read_text().splitlines() if env_path.is_file() else []
-    for key, value in values.items():
-        pattern = re.compile(rf"^{re.escape(key)}=")
-        replacement = f"{key}={value}"
-        for index, line in enumerate(lines):
-            if pattern.match(line):
-                lines[index] = replacement
-                break
-        else:
-            lines.append(replacement)
-    env_path.write_text("\n".join(lines) + "\n")
+    _upsert_env_file(env_path, values)
 
 
 def _read_runner_env(key: str) -> str | None:
@@ -332,6 +378,129 @@ def _read_runner_env(key: str) -> str | None:
         if sep and name.strip() == key:
             return value.strip()
     return None
+
+
+def _read_dotenv_values(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not path.is_file():
+        return values
+    for line in path.read_text().splitlines():
+        key, sep, value = line.partition("=")
+        if sep and key.strip() and not key.lstrip().startswith("#"):
+            values[key.strip()] = value.strip()
+    return values
+
+
+def _runner_public_key_pem(signer: str) -> str:
+    if signer == "local-pem":
+        exported = _run(
+            ["openssl", "pkey", "-in", str(SIGNING_KEY_FILE), "-pubout"],
+            capture_output=True,
+        )
+    else:
+        key_id = signer.split(":", 1)[1]
+        script = (
+            "import boto3,sys;"
+            "from cryptography.hazmat.primitives.serialization import "
+            "load_der_public_key,Encoding,PublicFormat;"
+            "der=boto3.client('kms').get_public_key(KeyId=sys.argv[1])['PublicKey'];"
+            "sys.stdout.buffer.write(load_der_public_key(der).public_bytes(Encoding.PEM,PublicFormat.SubjectPublicKeyInfo))"
+        )
+        exported = _run(
+            [str(INSTALL_ROOT / "venv/bin/python"), "-c", script, key_id],
+            capture_output=True,
+        )
+    if exported.returncode != 0 or "BEGIN PUBLIC KEY" not in (exported.stdout or ""):
+        raise RuntimeError("could not export the runner signing public key")
+    return exported.stdout.strip() + "\n"
+
+
+def _api_request(url: str, token: str, method: str = "GET",
+                 payload: dict | None = None) -> dict:
+    body = json.dumps(payload).encode() if payload is not None else None
+    request = urllib.request.Request(
+        url,
+        data=body,
+        method=method,
+        headers={
+            "Accept": "application/json",
+            "Authorization": f"Bearer {token}",
+            **({"Content-Type": "application/json"} if body is not None else {}),
+        },
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        decoded = json.loads(response.read().decode("utf-8"))
+    if not isinstance(decoded, dict):
+        raise RuntimeError("ShakerScan API returned a non-object response")
+    return decoded
+
+
+def _register_runner_trust_anchors(runtime: Path, signer: str, builder_id: str) -> None:
+    dotenv = _read_dotenv_values(runtime / ".env")
+    token = dotenv.get("MODEL_INTAKE_OPERATOR_TOKEN", "")
+    if len(token) < 32:
+        raise RuntimeError("MODEL_INTAKE_OPERATOR_TOKEN is unavailable in the runtime .env")
+    public_api = dotenv.get("SHAKERSCAN_PUBLIC_API_URL", "").rstrip("/")
+    if public_api.startswith("https://"):
+        base = public_api
+    else:
+        bind_host = dotenv.get("SHAKERSCAN_BIND_HOST", "127.0.0.1")
+        if bind_host in {"0.0.0.0", "::", ""}:
+            bind_host = "127.0.0.1"
+        if ":" in bind_host and not bind_host.startswith("["):
+            bind_host = f"[{bind_host}]"
+        api_port = dotenv.get("SHAKERSCAN_API_PORT", "8080")
+        base = f"http://{bind_host}:{api_port}"
+    last_error: Exception | None = None
+    for _ in range(30):
+        try:
+            _api_request(f"{base}/health", token)
+            break
+        except Exception as exc:  # API recreation is briefly unavailable.
+            last_error = exc
+            time.sleep(1)
+    else:
+        raise RuntimeError(f"ShakerScan API did not become ready: {type(last_error).__name__}")
+
+    public_key_pem = _runner_public_key_pem(signer)
+    fingerprint = hashlib.sha256(public_key_pem.encode()).hexdigest()
+    existing = _api_request(f"{base}/model-intake/trust-anchors?active_only=true", token)
+    anchors = existing.get("trust_anchors") if isinstance(existing.get("trust_anchors"), list) else []
+    environments = ["production"] if signer.startswith("kms:") else [
+        "development", "test", "staging"
+    ]
+    for environment in environments:
+        if any(
+            item.get("purpose") == "runtime_runner"
+            and item.get("environment") == environment
+            and item.get("builder_id_constraint") == builder_id
+            and (item.get("public_key_sha256") == fingerprint
+                 or item.get("public_key_pem") == public_key_pem)
+            for item in anchors if isinstance(item, dict)
+        ):
+            continue
+        name = f"microvm-{builder_id}-{environment}-{fingerprint[:12]}"
+        _api_request(
+            f"{base}/model-intake/trust-anchors",
+            token,
+            "POST",
+            {
+                "name": name[:240],
+                "description": "Installed Model Intake microVM receipt signer",
+                "public_key_pem": public_key_pem,
+                "public_key_sha256": fingerprint,
+                "policy_profile": "production" if environment == "production" else environment,
+                "purpose": "runtime_runner",
+                "environment": environment,
+                "builder_id_constraint": builder_id,
+                "source": "model-intake-runner-installer",
+                "owner": "ShakerScan operator",
+                "is_active": True,
+            },
+        )
+    readiness = _api_request(f"{base}/model-intake/runners/readiness", token)
+    if readiness.get("ready") is not True or readiness.get("status") != "READY":
+        raise RuntimeError("runner service did not report READY after installation")
 
 
 def cmd_install(args, runtime: Path) -> int:
@@ -347,7 +516,7 @@ def cmd_install(args, runtime: Path) -> int:
               file=sys.stderr)
         return 2
 
-    signer_env: dict[str, str] = {}
+    signer_env: dict[str, str | None] = {}
     signer = args.signer or DEFAULT_SIGNER
     if signer == "local-pem":
         # Proves the receipt path end to end, but the receipts it signs are not
@@ -370,13 +539,17 @@ def cmd_install(args, runtime: Path) -> int:
         signer_env["MODEL_INTAKE_RUNNER_SIGNER_BACKEND"] = "local-pem"
         signer_env["MODEL_INTAKE_RUNNER_ALLOW_LOCAL_PEM"] = "true"
         signer_env["MODEL_INTAKE_RUNNER_SIGNING_KEY_PEM_FILE"] = str(SIGNING_KEY_FILE)
+        signer_env["MODEL_INTAKE_RUNNER_SIGNER_KEY_ID"] = None
     elif signer.startswith("kms:"):
-        key_id = signer.split(":", 1)[1].strip()
-        if not key_id:
+        try:
+            key_id = _validated_text(signer.split(":", 1)[1], "KMS key id")
+        except ValueError:
             print("--signer kms:<key-id> requires a key id", file=sys.stderr)
             return 2
         signer_env["MODEL_INTAKE_RUNNER_SIGNER_BACKEND"] = "aws-kms"
         signer_env["MODEL_INTAKE_RUNNER_SIGNER_KEY_ID"] = key_id
+        signer_env["MODEL_INTAKE_RUNNER_ALLOW_LOCAL_PEM"] = "false"
+        signer_env["MODEL_INTAKE_RUNNER_SIGNING_KEY_PEM_FILE"] = None
     else:
         print(f"Unknown signer {signer!r}. Use kms:<key-id> or local-pem.", file=sys.stderr)
         return 2
@@ -390,27 +563,54 @@ def cmd_install(args, runtime: Path) -> int:
     if not args.confirm:
         print("Re-run with --confirm to proceed.", file=sys.stderr)
         return 3
+    if not re.fullmatch(r"[0-9a-f]{64}", args.kernel_sha256):
+        print("--kernel-sha256 must be a lowercase SHA-256 digest.", file=sys.stderr)
+        return 2
 
-    rootfs = Path(args.rootfs) if args.rootfs else runtime / "results/model-intake-runner/rootfs.ext4"
-    if not rootfs.is_file():
+    staged = facts["staged"]
+    if args.rootfs:
+        rootfs = Path(args.rootfs).resolve()
+        if not args.rootfs_sha256:
+            print("--rootfs requires --rootfs-sha256 so custom images are integrity-bound.", file=sys.stderr)
+            return 2
+        rootfs_sha256 = args.rootfs_sha256.lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", rootfs_sha256):
+            print("--rootfs-sha256 must be a lowercase SHA-256 digest.", file=sys.stderr)
+            return 2
+        if not rootfs.is_file() or rootfs.is_symlink() or _sha256_path(rootfs) != rootfs_sha256:
+            print("Custom rootfs is missing, symlinked, or does not match --rootfs-sha256.", file=sys.stderr)
+            return 2
+    elif staged.get("integrity_verified"):
+        rootfs = Path(staged["rootfs"]["path"])
+        rootfs_sha256 = staged["rootfs"]["sha256"]
+        print(f"==> reusing integrity-verified staged rootfs {rootfs}")
+    else:
+        rootfs = runtime / ".shakerscan-model-intake-runner-stage/rootfs.ext4"
         print(f"==> building guest rootfs -> {rootfs}")
         built = _run([str(runtime / "scripts/build-model-intake-guest-rootfs.sh"), str(rootfs)])
         if built.returncode != 0:
             print("Guest rootfs build failed.", file=sys.stderr)
             return built.returncode
-    else:
-        print(f"==> reusing existing guest rootfs {rootfs}")
+        rootfs_sha256 = _sha256_path(rootfs)
 
     bind_host = args.bind_host or docker_bridge_address()
     if not bind_host:
         print("Could not determine the Docker bridge gateway; pass --bind-host explicitly.",
               file=sys.stderr)
         return 2
+    try:
+        ipaddress.ip_address(bind_host)
+    except ValueError:
+        print("--bind-host must be a literal IPv4 or IPv6 address.", file=sys.stderr)
+        return 2
+    if not 1 <= args.bind_port <= 65535:
+        print("--bind-port must be between 1 and 65535.", file=sys.stderr)
+        return 2
 
     # A staged kernel is only reused when it still matches the pinned digest;
     # a stale or tampered file falls back to a fresh verified download.
     kernel_url = args.kernel_url
-    staged_kernel = facts["staged"].get("kernel")
+    staged_kernel = staged.get("kernel") if staged.get("integrity_verified") else None
     if staged_kernel and staged_kernel["sha256"] == args.kernel_sha256:
         kernel_url = f"file://{staged_kernel['path']}"
         print(f"==> reusing staged kernel {staged_kernel['path']}")
@@ -421,6 +621,7 @@ def cmd_install(args, runtime: Path) -> int:
         "MODEL_INTAKE_KERNEL_URL": kernel_url,
         "MODEL_INTAKE_KERNEL_SHA256": args.kernel_sha256,
         "MODEL_INTAKE_ROOTFS_SOURCE": str(rootfs),
+        "MODEL_INTAKE_ROOTFS_SHA256": rootfs_sha256,
         "MODEL_INTAKE_RUNNER_BIND_HOST": bind_host,
         "MODEL_INTAKE_RUNNER_BIND_PORT": str(args.bind_port),
     }
@@ -431,10 +632,17 @@ def cmd_install(args, runtime: Path) -> int:
         print("Provisioning failed.", file=sys.stderr)
         return provisioned.returncode
 
-    builder_id = args.builder_id or f"shakerscan-runner-{platform.node()}"
-    with RUNNER_ENV_FILE.open("a") as handle:
-        for key, value in {**signer_env, "MODEL_INTAKE_RUNNER_BUILDER_ID": builder_id}.items():
-            handle.write(f"{key}={value}\n")
+    try:
+        builder_id = _validated_text(
+            args.builder_id or f"shakerscan-runner-{platform.node()}", "builder id"
+        )
+        _upsert_env_file(
+            RUNNER_ENV_FILE,
+            {**signer_env, "MODEL_INTAKE_RUNNER_BUILDER_ID": builder_id},
+        )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
 
     token = _read_runner_env("MODEL_INTAKE_RUNNER_INTERNAL_TOKEN")
     if not token:
@@ -442,10 +650,14 @@ def cmd_install(args, runtime: Path) -> int:
         return 2
 
     print(f"==> enabling {SERVICE}")
-    enabled = _run(["systemctl", "enable", "--now", SERVICE])
+    enabled = _run(["systemctl", "enable", SERVICE])
     if enabled.returncode != 0:
         print(f"Could not enable {SERVICE}; check journalctl -u {SERVICE}.", file=sys.stderr)
         return enabled.returncode
+    restarted = _run(["systemctl", "restart", SERVICE])
+    if restarted.returncode != 0:
+        print(f"Could not restart {SERVICE}; check journalctl -u {SERVICE}.", file=sys.stderr)
+        return restarted.returncode
 
     print("==> wiring the API to the runner")
     _write_dotenv(runtime / ".env", {
@@ -460,6 +672,14 @@ def cmd_install(args, runtime: Path) -> int:
     if recreated.returncode != 0:
         print("Could not recreate the api container; run 'docker compose up -d api' by hand.",
               file=sys.stderr)
+        return recreated.returncode
+
+    print("==> registering the runner public key as a purpose-scoped trust anchor")
+    try:
+        _register_runner_trust_anchors(runtime, signer, builder_id)
+    except (RuntimeError, OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
+        print(f"Trust-anchor registration failed: {exc}", file=sys.stderr)
+        return 2
 
     print("\nInstalled. Verify with:")
     print("  ./scanner.sh model-intake-runner status")
@@ -485,6 +705,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     install.add_argument("--builder-id", help="Recorded in signed runner receipts")
     install.add_argument("--rootfs", help="Reuse a prebuilt guest rootfs.ext4")
+    install.add_argument("--rootfs-sha256", help="Required SHA-256 when --rootfs is supplied")
     install.add_argument("--bind-host", help="Address the API container reaches the runner on")
     install.add_argument("--bind-port", type=int, default=DEFAULT_BIND_PORT)
     install.add_argument("--kernel-url", default=DEFAULT_KERNEL_URL)

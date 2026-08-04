@@ -8,6 +8,7 @@ SHARED_RESULTS_ROOT="${MODEL_INTAKE_RUNNER_SHARED_RESULTS_ROOT:-/var/lib/shakers
 KERNEL_URL="${MODEL_INTAKE_KERNEL_URL:-}"
 KERNEL_SHA256="${MODEL_INTAKE_KERNEL_SHA256:-}"
 ROOTFS_SOURCE="${MODEL_INTAKE_ROOTFS_SOURCE:-}"
+ROOTFS_SHA256="${MODEL_INTAKE_ROOTFS_SHA256:-}"
 # The API reaches the runner over HTTP. It runs in a container, so a loopback
 # bind is unreachable from it; the installer passes the Docker bridge address.
 # The deny-all egress policy and the internal token are what keep that safe.
@@ -30,8 +31,12 @@ if [[ -z "$KERNEL_URL" || ! "$KERNEL_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
     echo "MODEL_INTAKE_KERNEL_URL and its pinned MODEL_INTAKE_KERNEL_SHA256 are required" >&2
     exit 1
 fi
-if [[ -z "$ROOTFS_SOURCE" || ! -f "$ROOTFS_SOURCE" ]]; then
-    echo "MODEL_INTAKE_ROOTFS_SOURCE must name a locally built guest rootfs" >&2
+if [[ -z "$ROOTFS_SOURCE" || ! -f "$ROOTFS_SOURCE" || -L "$ROOTFS_SOURCE" ]]; then
+    echo "MODEL_INTAKE_ROOTFS_SOURCE must name a regular, non-symlink guest rootfs" >&2
+    exit 1
+fi
+if [[ ! "$ROOTFS_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "MODEL_INTAKE_ROOTFS_SHA256 must integrity-bind the guest rootfs" >&2
     exit 1
 fi
 if [[ "$SHARED_RESULTS_ROOT" != /* ]]; then
@@ -57,7 +62,9 @@ install -m 0755 "$(find "$TEMP_DIR/release-${FIRECRACKER_VERSION}-${arch}" -maxd
 curl -fsSLo "$TEMP_DIR/vmlinux" "$KERNEL_URL"
 echo "$KERNEL_SHA256  $TEMP_DIR/vmlinux" | sha256sum -c -
 install -m 0644 "$TEMP_DIR/vmlinux" "$INSTALL_ROOT/kernel/vmlinux"
+echo "$ROOTFS_SHA256  $ROOTFS_SOURCE" | sha256sum -c -
 install -m 0644 "$ROOTFS_SOURCE" "$INSTALL_ROOT/rootfs/rootfs.ext4"
+echo "$ROOTFS_SHA256  $INSTALL_ROOT/rootfs/rootfs.ext4" | sha256sum -c -
 install -m 0644 \
     "$ROOT_DIR/api/model_intake_control_plane.py" \
     "$ROOT_DIR/api/model_intake_components.py" \
@@ -82,9 +89,24 @@ echo '+cpu +memory +pids' > /sys/fs/cgroup/cgroup.subtree_control || true
 echo '+cpu +memory +pids' > /sys/fs/cgroup/shakerscan-model-intake/cgroup.subtree_control || true
 
 install -d -m 0700 /etc/shakerscan
-if [[ ! -f /etc/shakerscan/model-intake-runner.env ]]; then
+RUNNER_ENV=/etc/shakerscan/model-intake-runner.env
+read_runner_env() {
+    local key="$1"
+    if [[ -f "$RUNNER_ENV" ]]; then
+        sed -n "s/^${key}=//p" "$RUNNER_ENV" | tail -1
+    fi
+}
+runner_token="$(read_runner_env MODEL_INTAKE_RUNNER_INTERNAL_TOKEN)"
+if [[ -z "$runner_token" ]]; then
     runner_token="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
-    cat > /etc/shakerscan/model-intake-runner.env <<EOF
+fi
+signer_backend="$(read_runner_env MODEL_INTAKE_RUNNER_SIGNER_BACKEND)"
+allow_local_pem="$(read_runner_env MODEL_INTAKE_RUNNER_ALLOW_LOCAL_PEM)"
+signing_key_file="$(read_runner_env MODEL_INTAKE_RUNNER_SIGNING_KEY_PEM_FILE)"
+signer_key_id="$(read_runner_env MODEL_INTAKE_RUNNER_SIGNER_KEY_ID)"
+builder_id="$(read_runner_env MODEL_INTAKE_RUNNER_BUILDER_ID)"
+RUNNER_ENV_TEMP="${RUNNER_ENV}.partial"
+cat > "$RUNNER_ENV_TEMP" <<EOF
 MODEL_INTAKE_RUNNER_INTERNAL_TOKEN=$runner_token
 MODEL_INTAKE_RUNNER_JOB_ROOT=/var/lib/shakerscan/model-intake-runner/jobs
 MODEL_INTAKE_RUNNER_QUARANTINE_ROOT=$SHARED_RESULTS_ROOT
@@ -101,8 +123,16 @@ MODEL_INTAKE_ROOTFS_IMAGE=$INSTALL_ROOT/rootfs/rootfs.ext4
 MODEL_INTAKE_ROOTFS_SHA256=$(sha256sum "$INSTALL_ROOT/rootfs/rootfs.ext4" | awk '{print $1}')
 MODEL_INTAKE_RUNNER_EGRESS_POLICY=deny-all
 EOF
-    chmod 0600 /etc/shakerscan/model-intake-runner.env
-fi
+for preserved in \
+    "MODEL_INTAKE_RUNNER_SIGNER_BACKEND=$signer_backend" \
+    "MODEL_INTAKE_RUNNER_ALLOW_LOCAL_PEM=$allow_local_pem" \
+    "MODEL_INTAKE_RUNNER_SIGNING_KEY_PEM_FILE=$signing_key_file" \
+    "MODEL_INTAKE_RUNNER_SIGNER_KEY_ID=$signer_key_id" \
+    "MODEL_INTAKE_RUNNER_BUILDER_ID=$builder_id"; do
+    [[ "$preserved" == *= ]] || printf '%s\n' "$preserved" >> "$RUNNER_ENV_TEMP"
+done
+chmod 0600 "$RUNNER_ENV_TEMP"
+mv -f "$RUNNER_ENV_TEMP" "$RUNNER_ENV"
 install -d -m 0700 \
     /var/lib/shakerscan/model-intake-runner/jobs \
     /var/lib/shakerscan/model-intake-runner/work \

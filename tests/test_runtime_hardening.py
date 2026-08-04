@@ -510,23 +510,17 @@ def test_existing_datastore_passwords_are_preserved(tmp_path):
     assert values["REDIS_PASSWORD"] == "r" * 40
 
 
-def test_ui_receives_the_operator_credential_and_bind_host_for_local_autofill():
-    # The Model Intake page used to make a human copy MODEL_INTAKE_OPERATOR_TOKEN
-    # out of .env. The UI server now serves it to its own same-origin page, but
-    # only when the deployment is loopback-bound, so it needs both values.
+def test_ui_never_receives_the_model_intake_operator_secret():
+    # Host and forwarding headers are caller-controlled across reverse proxies,
+    # so the UI service is never a bearer-secret distribution endpoint.
     for compose_name in ("docker-compose.yml", "docker-compose.release.yml"):
         compose = (ROOT / compose_name).read_text()
         ui_block = re.split(r"\n  [a-z]", compose.split("\n  ui:\n", 1)[1], maxsplit=1)[0]
-        assert "MODEL_INTAKE_OPERATOR_TOKEN=${MODEL_INTAKE_OPERATOR_TOKEN:-}" in ui_block
-        assert "SHAKERSCAN_BIND_HOST=${SHAKERSCAN_BIND_HOST:-}" in ui_block
-        assert "SHAKERSCAN_UI_OPERATOR_AUTOFILL=${SHAKERSCAN_UI_OPERATOR_AUTOFILL:-1}" in ui_block
+        assert "MODEL_INTAKE_OPERATOR_TOKEN=" not in ui_block
+        assert "SHAKERSCAN_UI_OPERATOR_AUTOFILL=" not in ui_block
 
     route = (ROOT / "ui" / "src" / "app" / "api" / "model-intake" / "operator-credential" / "route.ts").read_text()
-    assert "deploymentIsLoopbackBound" in route
-    assert "requestLooksLocal" in route
-    # The UI runs in a container, so the peer address of a published-port
-    # request is Docker's bridge gateway. Gating on it disabled autofill on
-    # every real deployment; the port binding is the actual constraint.
+    assert "process.env.MODEL_INTAKE_OPERATOR_TOKEN" not in route
     assert "headers.get('x-forwarded-for')" not in route
-    # A remote deployment must fall back to explicit operator entry.
-    assert "remote_deployment" in route
+    assert "headers.get('host')" not in route
+    assert "manual_required" in route

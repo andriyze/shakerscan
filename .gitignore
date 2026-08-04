@@ -15,6 +15,7 @@ results/benchmark-runs/*
 .env.*
 backups/
 .shakerscan-fleet/
+.shakerscan-model-intake-runner-stage/
 
 # Claude Code local settings
 .claude/settings.local.json

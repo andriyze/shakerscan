@@ -2973,7 +2973,7 @@ async def run_model_intake_scan(
     # An explicit complete-download request is capped by max_artifact_bytes; an
     # implicit escalation is capped by exactly what the caller asked to fetch.
     effective_artifact_bytes = (
-        max(max_artifact_bytes, max_download_bytes)
+        max_artifact_bytes
         if complete_artifact_download
         else max_download_bytes
     )

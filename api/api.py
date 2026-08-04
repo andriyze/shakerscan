@@ -41,7 +41,7 @@ import redis
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 try:
     from scanner_tools.build_fingerprint import hash_source_files, runtime_file_map, source_file_map
@@ -3880,6 +3880,15 @@ class ModelIntakeScanRequest(BaseModel):
         description="Additional acquisition ports; HTTPS/443 is always allowed and HTTP/80 requires allow_insecure_http.",
     )
     max_acquisition_redirects: int = Field(default=5, ge=0, le=5)
+
+    @model_validator(mode="after")
+    def validate_artifact_acquisition_limits(self):
+        if self.complete_artifact_download and self.max_artifact_bytes < self.max_download_bytes:
+            raise ValueError(
+                "max_artifact_bytes must be greater than or equal to max_download_bytes "
+                "when complete_artifact_download is enabled"
+            )
+        return self
     approval_receipt_id: Optional[str] = Field(
         default=None,
         description="Optional durable approval receipt to validate and stamp on the queued Model Intake scan.",
@@ -11744,10 +11753,13 @@ async def attach_model_intake_static_run(
             "SELECT subject_kind,sha256 FROM model_intake_subjects WHERE submission_id=$1",
             submission_uuid,
         )
-        scan = await conn.fetchrow("SELECT id,status,result FROM scans WHERE id=$1", scan_uuid)
+        scan = await conn.fetchrow(
+            "SELECT id,status,result,target_url,scan_type FROM scans WHERE id=$1",
+            scan_uuid,
+        )
         if not submission:
             raise HTTPException(status_code=404, detail="Model submission not found")
-        if not scan or scan["status"] != "completed":
+        if not scan or scan["status"] != "completed" or scan["scan_type"] != "model_intake":
             raise HTTPException(status_code=409, detail="A completed Model Intake scan is required")
         result = _model_intake_json_object(scan["result"])
         model_intake = result.get("model_intake") if isinstance(result.get("model_intake"), dict) else {}
@@ -11770,6 +11782,18 @@ async def attach_model_intake_static_run(
         expected = str(submission["expected_artifact_sha256"] or "").lower()
         if expected and expected != artifact_sha:
             raise HTTPException(status_code=409, detail="Scan artifact does not match submission expectation")
+        scan_source_hash = hashlib.sha256(str(scan["target_url"] or "").strip().encode()).hexdigest()
+        if scan_source_hash != str(submission["source_reference_hash"]):
+            # Provider normalization can legitimately change an hf:// reference
+            # into its immutable HTTPS resolve URL. In that case the exact
+            # expected digest is the stronger binding. Without either binding,
+            # attaching another model's completed scan would corrupt the
+            # submission's provenance record.
+            if not expected or expected != artifact_sha:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Static scan source does not match the controlled submission",
+                )
         findings = result.get("findings") if isinstance(result.get("findings"), list) else []
         required_static_checks = _model_intake_required_static_checks(summary)
         static_status = _model_intake_static_evidence_status(
@@ -13865,6 +13889,11 @@ def _resolve_huggingface_model_intake(request: ModelIntakeResolveRequest) -> dic
         })
     artifact_url = str(hf_ref.get("resolve_url") or request.ref).strip()
     model_card_url = str(metadata_out.get("model_card_url") or "") or None
+    selected_size = int(selected.get("size_bytes") or 0) if selected else 0
+    acquisition_limit = min(
+        100_000_000_000,
+        max(10_000_000, math.ceil(selected_size * 1.05)),
+    )
     scan_payload = {
         "artifact_url": artifact_url,
         "name": f"Hugging Face: {repo_id}",
@@ -13875,7 +13904,11 @@ def _resolve_huggingface_model_intake(request: ModelIntakeResolveRequest) -> dic
         "require_signature": True,
         "require_hash": True,
         "require_model_governance": True,
-        "max_download_bytes": 10_000_000,
+        "max_download_bytes": acquisition_limit,
+        "max_artifact_bytes": max(10_000_000_000, acquisition_limit),
+        "complete_repository_snapshot": True,
+        "run_generated_scanners": True,
+        "run_dynamic_sandbox": True,
         "timeout_seconds": 20,
     }
     return {
@@ -14011,7 +14044,7 @@ MODEL_INTAKE_GUEST_KERNEL_SHA256 = (
 
 
 def _model_intake_stage_dir() -> Path:
-    return Path(os.getenv("RESULTS_DIR", "/results")) / "model-intake-runner"
+    return Path(os.getenv("MODEL_INTAKE_RUNNER_STAGE_DIR", "/runner-stage"))
 
 
 def _model_intake_stage_set(**fields: Any) -> None:
@@ -14034,6 +14067,54 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _model_intake_stage_manifest(stage_dir: Path) -> dict[str, Any] | None:
+    """Verify both staged inputs against the server-written manifest.
+
+    A file merely existing is not trusted evidence.  This also rejects symlink
+    substitution before the privileged host installer consumes the paths.
+    """
+    manifest_path = stage_dir / "stage-manifest.json"
+    kernel = stage_dir / "vmlinux"
+    rootfs = stage_dir / "rootfs.ext4"
+    try:
+        if any(path.is_symlink() for path in (stage_dir, manifest_path, kernel, rootfs)):
+            return None
+        raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if raw.get("schema_version") != "model-intake-runner-stage/v1":
+            return None
+        artifacts = raw.get("artifacts") if isinstance(raw.get("artifacts"), dict) else {}
+        for name, path in (("kernel", kernel), ("rootfs", rootfs)):
+            expected = artifacts.get(name) if isinstance(artifacts.get(name), dict) else {}
+            if not path.is_file() or path.stat().st_size != int(expected.get("bytes") or -1):
+                return None
+            if _sha256_file(path) != str(expected.get("sha256") or ""):
+                return None
+        if artifacts["kernel"]["sha256"] != MODEL_INTAKE_GUEST_KERNEL_SHA256:
+            return None
+        return raw
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
+def _write_model_intake_stage_manifest(stage_dir: Path, artifacts: dict[str, Any]) -> None:
+    manifest = {
+        "schema_version": "model-intake-runner-stage/v1",
+        "artifacts": artifacts,
+        "kernel_source": {
+            "url": MODEL_INTAKE_GUEST_KERNEL_URL,
+            "sha256": MODEL_INTAKE_GUEST_KERNEL_SHA256,
+        },
+        "rootfs_builder": "scripts/build-model-intake-guest-rootfs.sh",
+    }
+    temporary = stage_dir / "stage-manifest.json.partial"
+    temporary.write_text(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    temporary.chmod(0o600)
+    temporary.replace(stage_dir / "stage-manifest.json")
+
+
 def _model_intake_stage_run() -> None:
     """Produce the two large runner inputs so the root step stays seconds long.
 
@@ -14044,6 +14125,8 @@ def _model_intake_stage_run() -> None:
     stage_dir = _model_intake_stage_dir()
     try:
         stage_dir.mkdir(parents=True, exist_ok=True)
+        stage_dir.chmod(0o700)
+        (stage_dir / "stage-manifest.json").unlink(missing_ok=True)
         kernel_path = stage_dir / "vmlinux"
         _model_intake_stage_set(status="running", phase="kernel", error=None)
         if kernel_path.is_file() and _sha256_file(kernel_path) == MODEL_INTAKE_GUEST_KERNEL_SHA256:
@@ -14082,14 +14165,24 @@ def _model_intake_stage_run() -> None:
         if process.wait() != 0:
             raise RuntimeError("guest rootfs build failed; see the staging log")
 
+        artifacts = {
+            "kernel": {
+                "path": str(kernel_path),
+                "sha256": _sha256_file(kernel_path),
+                "bytes": kernel_path.stat().st_size,
+            },
+            "rootfs": {
+                "path": str(rootfs_path),
+                "sha256": _sha256_file(rootfs_path),
+                "bytes": rootfs_path.stat().st_size,
+            },
+        }
+        _write_model_intake_stage_manifest(stage_dir, artifacts)
         _model_intake_stage_set(
             status="ready",
             phase="complete",
-            artifacts={
-                "kernel": {"path": str(kernel_path), "sha256": _sha256_file(kernel_path)},
-                "rootfs": {"path": str(rootfs_path), "sha256": _sha256_file(rootfs_path),
-                           "bytes": rootfs_path.stat().st_size},
-            },
+            artifacts=artifacts,
+            integrity_verified=True,
         )
         _model_intake_stage_log("staging complete")
     except Exception as exc:  # noqa: BLE001 - surfaced to the operator as failed state
@@ -14133,20 +14226,15 @@ async def model_intake_runner_stage_status():
     # and verified on disk, which is a multi-gigabyte rebuild for nothing.
     if state["status"] == "idle":
         stage_dir = _model_intake_stage_dir()
-        kernel = stage_dir / "vmlinux"
-        rootfs = stage_dir / "rootfs.ext4"
-        if kernel.is_file() and rootfs.is_file():
-            kernel_digest = await asyncio.to_thread(_sha256_file, kernel)
-            if kernel_digest == MODEL_INTAKE_GUEST_KERNEL_SHA256:
-                state.update({
-                    "status": "ready",
-                    "phase": "complete",
-                    "recovered_from_disk": True,
-                    "artifacts": {
-                        "kernel": {"path": str(kernel), "sha256": kernel_digest},
-                        "rootfs": {"path": str(rootfs), "bytes": rootfs.stat().st_size},
-                    },
-                })
+        manifest = await asyncio.to_thread(_model_intake_stage_manifest, stage_dir)
+        if manifest:
+            state.update({
+                "status": "ready",
+                "phase": "complete",
+                "recovered_from_disk": True,
+                "integrity_verified": True,
+                "artifacts": manifest["artifacts"],
+            })
     return state
 
 
@@ -14270,6 +14358,7 @@ async def model_intake_runner_install_plan():
             "executed_by": "operator_on_host",
             "command": "sudo ./scanner.sh model-intake-runner install --signer <choice> --confirm",
             "default_command": "sudo ./scanner.sh model-intake-runner install --confirm",
+            "production_command": "sudo ./scanner.sh model-intake-runner install --signer kms:<key-id> --confirm",
             "status_command": "./scanner.sh model-intake-runner status",
             # local-pem is the default because it is the only option that works
             # without external setup. It is listed first for that reason, and

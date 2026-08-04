@@ -8,10 +8,14 @@ PLATFORM="${MODEL_INTAKE_GUEST_PLATFORM:-linux/amd64}"
 ROOTFS_MAX_BYTES="${MODEL_INTAKE_GUEST_ROOTFS_MAX_BYTES:-8589934592}"
 TEMP_DIR="$(mktemp -d)"
 CONTAINER_ID=""
+PARTIAL_OUTPUT=""
 
 cleanup() {
     if [[ -n "$CONTAINER_ID" ]]; then
         docker rm -f "$CONTAINER_ID" >/dev/null 2>&1 || true
+    fi
+    if [[ -n "$PARTIAL_OUTPUT" ]]; then
+        rm -f "$PARTIAL_OUTPUT"
     fi
     rm -rf "$TEMP_DIR"
 }
@@ -20,6 +24,7 @@ trap cleanup EXIT
 command -v docker >/dev/null
 command -v mkfs.ext4 >/dev/null
 mkdir -p "$(dirname "$OUTPUT")"
+PARTIAL_OUTPUT="${OUTPUT}.partial.$$"
 
 docker buildx build --platform "$PLATFORM" --load -f "$ROOT_DIR/runner/guest/Dockerfile" -t "$IMAGE" "$ROOT_DIR"
 CONTAINER_ID="$(docker create --platform "$PLATFORM" "$IMAGE")"
@@ -33,6 +38,8 @@ if (( image_bytes > ROOTFS_MAX_BYTES )); then
     echo "Guest rootfs exceeds MODEL_INTAKE_GUEST_ROOTFS_MAX_BYTES" >&2
     exit 1
 fi
-truncate -s "$image_bytes" "$OUTPUT"
-mkfs.ext4 -q -F -d "$TEMP_DIR/rootfs" "$OUTPUT"
-sha256sum "$OUTPUT"
+truncate -s "$image_bytes" "$PARTIAL_OUTPUT"
+mkfs.ext4 -q -F -d "$TEMP_DIR/rootfs" "$PARTIAL_OUTPUT"
+sha256sum "$PARTIAL_OUTPUT"
+mv -f "$PARTIAL_OUTPUT" "$OUTPUT"
+PARTIAL_OUTPUT=""

@@ -2867,6 +2867,79 @@ def test_model_intake_policy_profile_requirements_ignore_non_strict_or_other_pro
     assert non_strict.trust_anchor_ids is None
 
 
+def test_model_intake_complete_acquisition_rejects_conflicting_byte_limits():
+    with pytest.raises(ValueError, match="max_artifact_bytes must be greater"):
+        api_module.ModelIntakeScanRequest(
+            artifact_url="https://models.example/model.safetensors",
+            complete_artifact_download=True,
+            max_download_bytes=20_000,
+            max_artifact_bytes=10_000,
+        )
+
+    request = api_module.ModelIntakeScanRequest(
+        artifact_url="https://models.example/model.safetensors",
+        complete_artifact_download=True,
+        max_download_bytes=20_000,
+        max_artifact_bytes=20_000,
+    )
+    assert request.max_artifact_bytes == request.max_download_bytes
+
+
+def test_static_scan_attachment_rejects_a_different_model_source(monkeypatch):
+    scan_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
+    submission_id = uuid.UUID("22222222-2222-4222-8222-222222222222")
+    submission_source = "https://huggingface.co/acme/expected/resolve/main/model.safetensors"
+
+    class Context:
+        async def __aenter__(self):
+            return conn
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Conn:
+        def transaction(self):
+            return Context()
+
+        async def fetchrow(self, query, *_args):
+            if "model_intake_submissions" in query:
+                return {
+                    "id": submission_id,
+                    "expected_artifact_sha256": None,
+                    "source_reference_hash": hashlib.sha256(submission_source.encode()).hexdigest(),
+                }
+            if "FROM scans" in query:
+                return {
+                    "id": scan_id,
+                    "status": "completed",
+                    "scan_type": "model_intake",
+                    "target_url": "https://huggingface.co/acme/other/resolve/main/model.safetensors",
+                    "result": {"model_intake": {"summary": {"sha256": "a" * 64}}},
+                }
+            raise AssertionError(query)
+
+        async def fetch(self, *_args):
+            return []
+
+    conn = Conn()
+
+    class Pool:
+        def acquire(self):
+            return Context()
+
+    monkeypatch.setattr(api_module, "db_pool", Pool())
+    monkeypatch.setattr(api_module, "_model_intake_authenticated_subject", lambda _request: "operator:test")
+
+    with pytest.raises(api_module.HTTPException, match="source does not match") as exc:
+        asyncio.run(api_module.attach_model_intake_static_run(
+            str(submission_id),
+            api_module.ModelSubmissionStaticRunRequest(scan_id=str(scan_id)),
+            _fleet_request(host="127.0.0.1", scheme="http"),
+        ))
+
+    assert exc.value.status_code == 409
+
+
 def test_custom_named_strict_model_intake_profile_enables_strict_governance_without_anchors():
     request = api_module.ModelIntakeScanRequest(
         artifact_url="https://models.example/model.safetensors",
