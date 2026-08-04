@@ -46,4 +46,4 @@ done
 /opt/venv/bin/python /opt/shakerscan/guest_worker.py --finalize "$status"
 sync
 umount /output
-/bin/busybox poweroff -f
+/bin/busybox reboot -f

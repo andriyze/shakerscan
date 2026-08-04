@@ -14,4 +14,5 @@ def test_guest_init_mounts_are_idempotent_and_verified() -> None:
     assert "mount -t devtmpfs devtmpfs /dev" not in script
     assert "mount -t tmpfs -o size=256m,nosuid,nodev,noexec tmpfs /tmp" in script
     assert "chmod 1777 /tmp" in script
-    assert "sync\numount /output\n/bin/busybox poweroff -f" in script
+    assert "sync\numount /output\n/bin/busybox reboot -f" in script
+    assert "poweroff" not in script
