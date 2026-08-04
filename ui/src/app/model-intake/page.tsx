@@ -2447,7 +2447,9 @@ function ModelIntakeSettingsContent() {
                     </span>
                   </div>
                   <div className="mt-2 text-xs text-gray-500">{adapter.applicability.replace(/_/g, ' ')}</div>
-                  <div className="mt-1 truncate font-mono text-[10px] text-gray-600">{adapter.version || 'not installed'}</div>
+                  <div className="mt-1 truncate font-mono text-[10px] text-gray-600">
+                    {adapter.version || (adapter.installed ? 'installed · version unavailable' : 'not installed')}
+                  </div>
                   {adapter.rules && <div className={`mt-2 text-[10px] ${adapter.rules.fresh ? 'text-green-400' : 'text-red-400'}`}>rules {adapter.rules.status?.toLowerCase()} · {adapter.rules.age_days ?? '?'}d / {adapter.rules.max_age_days ?? '?'}d</div>}
                   {adapter.database && <div className={`mt-1 text-[10px] ${adapter.database.fresh ? 'text-green-400' : 'text-red-400'}`}>database {adapter.database.status?.toLowerCase()} · {adapter.database.age_days ?? '?'}d / {adapter.database.max_age_days ?? '?'}d</div>}
                 </div>

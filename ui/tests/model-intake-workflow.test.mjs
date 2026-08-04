@@ -17,6 +17,10 @@ test('scanner readiness surfaces enforceable material freshness and reassessment
   assert.match(api, /reassessment_required/)
 })
 
+test('adapter readiness never mislabels an installed scanner when its version is unavailable', () => {
+  assert.match(page, /adapter\.installed \? 'installed · version unavailable' : 'not installed'/)
+})
+
 test('controlled Model Intake UI exposes every authoritative workflow stage', () => {
   for (const fragment of [
     '/model-intake/submissions',
