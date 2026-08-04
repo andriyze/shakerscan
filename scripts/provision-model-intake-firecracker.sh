@@ -162,7 +162,9 @@ BindPaths="$SHARED_RESULTS_ROOT/model-intake-conversions"
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=false
-RestrictAddressFamilies=AF_UNIX AF_INET
+# ip/netns and nft telemetry require netlink control sockets. This does not add
+# a guest network device; the created namespace still has a deny-all policy.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_NETLINK
 LockPersonality=true
 
 [Install]

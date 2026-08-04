@@ -86,6 +86,7 @@ def test_hardened_service_mounts_only_results_and_conversion_output():
     assert 'BindReadOnlyPaths="$SHARED_RESULTS_ROOT"' in provisioner
     assert 'BindPaths="$SHARED_RESULTS_ROOT/model-intake-conversions"' in provisioner
     assert "MODEL_INTAKE_RUNNER_QUARANTINE_ROOT=$SHARED_RESULTS_ROOT" in provisioner
+    assert "RestrictAddressFamilies=AF_UNIX AF_INET AF_NETLINK" in provisioner
 
 
 def test_installer_registers_purpose_scoped_environment_anchors(tmp_path, monkeypatch):
