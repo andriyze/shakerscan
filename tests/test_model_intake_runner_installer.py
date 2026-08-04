@@ -80,6 +80,14 @@ def test_upsert_runner_env_replaces_values_without_duplicates(tmp_path):
     assert "MODEL_INTAKE_RUNNER_SIGNER_BACKEND=aws-kms" in lines
 
 
+def test_hardened_service_mounts_only_results_and_conversion_output():
+    provisioner = (ROOT / "scripts" / "provision-model-intake-firecracker.sh").read_text()
+    assert "ProtectHome=true" in provisioner
+    assert 'BindReadOnlyPaths="$SHARED_RESULTS_ROOT:$RUNNER_RESULTS_ROOT"' in provisioner
+    assert 'BindPaths="$SHARED_RESULTS_ROOT/model-intake-conversions:$RUNNER_RESULTS_ROOT/model-intake-conversions"' in provisioner
+    assert "MODEL_INTAKE_RUNNER_QUARANTINE_ROOT=$RUNNER_RESULTS_ROOT" in provisioner
+
+
 def test_installer_registers_purpose_scoped_environment_anchors(tmp_path, monkeypatch):
     (tmp_path / ".env").write_text(
         "MODEL_INTAKE_OPERATOR_TOKEN=" + "t" * 48 + "\n"
