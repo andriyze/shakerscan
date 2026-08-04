@@ -272,6 +272,9 @@ test('model intake reports lead with outcomes and collapse technical bulk', () =
   assert.match(report, /Checks not run \/ incomplete/)
   assert.match(report, /What to do next/)
   assert.match(report, /Detailed technical evidence, SBOM, hashes and phase logs/)
+  assert.match(report, /Remediation tracking \(\{findings\.length\} raw finding/)
+  assert.match(report, /Raw findings and remediation detail \(\{findings\.length\}\)/)
+  assert.match(report, /open=\{!isModelIntakeScan\}/)
   assert.match(report, /Download SBOM/)
 })
 

@@ -2078,9 +2078,14 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       {result?.compliance && <ComplianceSection compliance={result.compliance} />}
 
       {/* Remediation Summary */}
-      {enableRemediationTracking && findings.length > 0 && (
-        <RemediationSummary remediations={remediationData} totalFindings={findings.length} />
-      )}
+      <details open={!isModelIntakeScan} className={isModelIntakeScan ? 'mb-4 rounded-lg border border-gray-700 bg-gray-800/50' : 'contents'}>
+        <summary className={isModelIntakeScan ? 'cursor-pointer px-5 py-4 text-sm font-semibold text-gray-200' : 'hidden'}>
+          Remediation tracking ({findings.length} raw finding{findings.length === 1 ? '' : 's'})
+        </summary>
+        {enableRemediationTracking && findings.length > 0 && (
+          <RemediationSummary remediations={remediationData} totalFindings={findings.length} />
+        )}
+      </details>
 
       {/* WAF Detection */}
       {discovery.waf_detection?.detected && (
@@ -3169,6 +3174,10 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       )}
 
       {/* Findings */}
+      <details open={!isModelIntakeScan} className={isModelIntakeScan ? 'mb-8 rounded-lg border border-gray-700 bg-gray-800/50' : 'contents'}>
+        <summary className={isModelIntakeScan ? 'cursor-pointer px-5 py-4 text-sm font-semibold text-gray-200' : 'hidden'}>
+          Raw findings and remediation detail ({findings.length})
+        </summary>
       {Array.isArray(findings) && findings.length > 0 && (
         <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
           <div className="mb-4">
@@ -3231,6 +3240,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
           </div>
         </div>
       )}
+      </details>
 
       {/* Client-Side Vulnerabilities */}
       {client_side_vulns.vulnerable && client_side_vulns.findings?.length > 0 && (
