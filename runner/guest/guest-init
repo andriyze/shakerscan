@@ -35,9 +35,9 @@ chown 65532:65532 /output/work
 status=0
 mode="$(/opt/venv/bin/python -c 'import json; print(json.load(open("/input/job.json"))["mode"])')"
 if [ "$mode" = "runtime" ]; then
-  phases="import tokenizer model_load warmup inference teardown"
+  phases="import tokenizer model_load warmup inference"
 elif [ "$mode" = "conversion" ]; then
-  phases="import deserialize_convert tensor_equivalence embedding_equivalence teardown"
+  phases="import deserialize_convert tensor_equivalence embedding_equivalence"
 else
   phases="invalid"
   status=64
@@ -51,6 +51,17 @@ for phase in $phases; do
     /opt/venv/bin/python /opt/shakerscan/guest_worker.py --phase "$phase" || status=$?
   [ "$status" -eq 0 ] || break
 done
+# Teardown is evidence too. Run it even when an earlier phase fails, while
+# preserving the first non-zero phase status for the final verdict.
+teardown_status=0
+/usr/bin/strace -ff -tt -T -s 256 -yy \
+  -e trace=%network,execve,openat,clone,fork,vfork \
+  -o "/output/traces/trace.teardown" \
+  /usr/bin/setpriv --reuid=65532 --regid=65532 --clear-groups \
+  /opt/venv/bin/python /opt/shakerscan/guest_worker.py --phase teardown || teardown_status=$?
+if [ "$status" -eq 0 ] && [ "$teardown_status" -ne 0 ]; then
+  status="$teardown_status"
+fi
 /opt/venv/bin/python /opt/shakerscan/guest_worker.py --finalize "$status"
 sync
 umount /output

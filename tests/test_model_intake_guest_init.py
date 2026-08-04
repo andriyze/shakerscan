@@ -20,5 +20,8 @@ def test_guest_init_mounts_are_idempotent_and_verified() -> None:
     assert "export HF_MODULES_CACHE=/tmp/modelrunner/huggingface/modules" in script
     assert "export HF_HUB_OFFLINE=1" in script
     assert "export TRANSFORMERS_OFFLINE=1" in script
+    assert 'phases="import tokenizer model_load warmup inference"' in script
+    assert 'phases="import deserialize_convert tensor_equivalence embedding_equivalence"' in script
+    assert 'guest_worker.py --phase teardown || teardown_status=$?' in script
     assert "sync\numount /output\n/bin/busybox reboot -f" in script
     assert "poweroff" not in script
