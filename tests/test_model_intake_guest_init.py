@@ -14,5 +14,11 @@ def test_guest_init_mounts_are_idempotent_and_verified() -> None:
     assert "mount -t devtmpfs devtmpfs /dev" not in script
     assert "mount -t tmpfs -o size=256m,nosuid,nodev,noexec tmpfs /tmp" in script
     assert "chmod 1777 /tmp" in script
+    assert "mkdir -p /tmp/modelrunner/huggingface/modules" in script
+    assert "chown -R 65532:65532 /tmp/modelrunner" in script
+    assert "export HOME=/tmp/modelrunner" in script
+    assert "export HF_MODULES_CACHE=/tmp/modelrunner/huggingface/modules" in script
+    assert "export HF_HUB_OFFLINE=1" in script
+    assert "export TRANSFORMERS_OFFLINE=1" in script
     assert "sync\numount /output\n/bin/busybox reboot -f" in script
     assert "poweroff" not in script

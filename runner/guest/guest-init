@@ -17,6 +17,14 @@ ensure_mounted /sys sysfs sysfs
 ensure_mounted /dev devtmpfs devtmpfs
 mount -t tmpfs -o size=256m,nosuid,nodev,noexec tmpfs /tmp
 chmod 1777 /tmp
+mkdir -p /tmp/modelrunner/huggingface/modules
+chown -R 65532:65532 /tmp/modelrunner
+export HOME=/tmp/modelrunner
+export XDG_CACHE_HOME=/tmp/modelrunner/cache
+export HF_HOME=/tmp/modelrunner/huggingface
+export HF_MODULES_CACHE=/tmp/modelrunner/huggingface/modules
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
 mount -o ro /dev/vdb /input
 mount /dev/vdc /output
 mkdir -p /output/traces /output/work
