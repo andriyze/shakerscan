@@ -25,3 +25,11 @@ def test_guest_init_mounts_are_idempotent_and_verified() -> None:
     assert 'guest_worker.py --phase teardown || teardown_status=$?' in script
     assert "sync\numount /output\n/bin/busybox reboot -f" in script
     assert "poweroff" not in script
+
+
+def test_guest_selftest_cleans_container_owned_bind_mounts() -> None:
+    script = (ROOT / "scripts" / "selftest-model-intake-guest.sh").read_text()
+
+    assert "trap cleanup EXIT" in script
+    assert '--entrypoint /bin/rm "$IMAGE" -rf /cleanup/input /cleanup/output' in script
+    assert 'trap \'rm -rf "$TEMP_DIR"\' EXIT' not in script

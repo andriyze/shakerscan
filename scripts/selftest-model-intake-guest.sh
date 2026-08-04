@@ -5,7 +5,18 @@ IMAGE="${MODEL_INTAKE_GUEST_IMAGE:-shakerscan-model-intake-guest:selftest}"
 PLATFORM="${MODEL_INTAKE_GUEST_PLATFORM:-linux/amd64}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEMP_DIR="$(mktemp -d)"
-trap 'rm -rf "$TEMP_DIR"' EXIT
+cleanup() {
+    # The container deliberately writes as a different uid during this
+    # boundary test. Remove its bind-mounted children as container root first,
+    # then let the invoking user remove the now-empty private temp directory.
+    if docker image inspect "$IMAGE" >/dev/null 2>&1; then
+        docker run --rm --network none -v "$TEMP_DIR:/cleanup" \
+            --entrypoint /bin/rm "$IMAGE" -rf /cleanup/input /cleanup/output \
+            >/dev/null 2>&1 || true
+    fi
+    rm -rf "$TEMP_DIR"
+}
+trap cleanup EXIT
 
 mkdir -p "$TEMP_DIR/input/model" "$TEMP_DIR/output/work"
 chmod -R 0777 "$TEMP_DIR"
