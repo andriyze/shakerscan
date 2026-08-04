@@ -102,9 +102,9 @@ def test_submission_listing_and_detail_require_operator_authentication(monkeypat
     with pytest.raises(api.HTTPException) as reported:
         asyncio.run(api.get_model_intake_submission_report(str(uuid.uuid4()), unauthenticated))
 
-    assert listed.value.status_code == 403
-    assert detailed.value.status_code == 403
-    assert reported.value.status_code == 403
+    assert listed.value.status_code == 401
+    assert detailed.value.status_code == 401
+    assert reported.value.status_code == 401
 
 
 def test_normalized_report_route_reads_authoritative_records_only(monkeypatch):
