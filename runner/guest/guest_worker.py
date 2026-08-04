@@ -57,8 +57,24 @@ def _state_dict(value):
     return normalized
 
 
+def _install_transformers_compatibility() -> None:
+    """Install only identity-preserving aliases required by reviewed legacy code.
+
+    Some older Hugging Face repositories import ``Conv1D`` from
+    ``transformers.modeling_utils``.  Current Transformers exposes the same
+    class from ``transformers.pytorch_utils``.  Binding that exact class under
+    its former public location lets the digest-pinned runtime assess the
+    repository without editing model-controlled source or relaxing the loader.
+    """
+    import transformers.modeling_utils as modeling_utils
+    if not hasattr(modeling_utils, "Conv1D"):
+        from transformers.pytorch_utils import Conv1D
+        modeling_utils.Conv1D = Conv1D
+
+
 def _mean_embeddings(model_path: Path, texts: list[str], *, trust: bool, safe: bool):
     import torch
+    _install_transformers_compatibility()
     from transformers import AutoModel, AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True, trust_remote_code=trust)
     model = AutoModel.from_pretrained(
@@ -85,14 +101,17 @@ def run_phase(phase: str) -> None:
         if phase == "import":
             import torch  # noqa: F401
             import transformers  # noqa: F401
+            _install_transformers_compatibility()
             state["phases"][phase] = "PASS"
         elif phase == "tokenizer":
+            _install_transformers_compatibility()
             from transformers import AutoTokenizer
             trust = bool(job.get("trust_remote_code"))
             tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True, trust_remote_code=trust)
             state["tokenizer_class"] = f"{tokenizer.__class__.__module__}.{tokenizer.__class__.__name__}"
             state["phases"][phase] = "PASS"
         elif phase == "model_load":
+            _install_transformers_compatibility()
             from transformers import AutoModel
             trust = bool(job.get("trust_remote_code"))
             model = AutoModel.from_pretrained(
@@ -103,6 +122,7 @@ def run_phase(phase: str) -> None:
             state["phases"][phase] = "PASS"
         elif phase == "warmup":
             import torch
+            _install_transformers_compatibility()
             from transformers import AutoModel, AutoTokenizer
             trust = bool(job.get("trust_remote_code"))
             tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True, trust_remote_code=trust)
@@ -116,6 +136,7 @@ def run_phase(phase: str) -> None:
             state["phases"][phase] = "PASS"
         elif phase == "inference":
             import torch
+            _install_transformers_compatibility()
             from transformers import AutoModel, AutoTokenizer
             trust = bool(job.get("trust_remote_code"))
             tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True, trust_remote_code=trust)

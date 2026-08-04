@@ -1,6 +1,7 @@
 from pathlib import Path
 import os
 import sys
+import types
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
 
@@ -195,6 +196,26 @@ def test_runner_subject_root_is_traversable_despite_service_umask(tmp_path):
 
     assert destination.stat().st_mode & 0o777 == 0o755
     assert (destination / "config.json").stat().st_mode & 0o777 == 0o644
+
+
+def test_guest_installs_only_the_canonical_legacy_conv1d_alias(monkeypatch):
+    guest_root = Path(__file__).resolve().parents[1] / "runner" / "guest"
+    monkeypatch.syspath_prepend(str(guest_root))
+    import guest_worker
+
+    canonical = object()
+    package = types.ModuleType("transformers")
+    package.__path__ = []
+    modeling_utils = types.ModuleType("transformers.modeling_utils")
+    pytorch_utils = types.ModuleType("transformers.pytorch_utils")
+    pytorch_utils.Conv1D = canonical
+    monkeypatch.setitem(sys.modules, "transformers", package)
+    monkeypatch.setitem(sys.modules, "transformers.modeling_utils", modeling_utils)
+    monkeypatch.setitem(sys.modules, "transformers.pytorch_utils", pytorch_utils)
+
+    guest_worker._install_transformers_compatibility()
+
+    assert modeling_utils.Conv1D is canonical
 
 
 def test_firecracker_readiness_has_no_local_container_fallback(tmp_path, monkeypatch):
