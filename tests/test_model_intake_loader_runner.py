@@ -4,9 +4,10 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
 
 from model_intake_loader_profiles import resolve_conversion_profile, resolve_loader_profile  # noqa: E402
+import model_intake_firecracker_runner as firecracker_runner_module  # noqa: E402
 from model_intake_control_plane import canonical_bytes  # noqa: E402
 from model_intake_runner_controller import build_firecracker_config, firecracker_readiness  # noqa: E402
-from model_intake_firecracker_runner import DENY_ALL_NFT_RULES, FirecrackerRunner, parse_network_telemetry  # noqa: E402
+from model_intake_firecracker_runner import DENY_ALL_NFT_RULES, FirecrackerRunner, _unix_http, parse_network_telemetry  # noqa: E402
 from model_intake_components import component_identities  # noqa: E402
 
 
@@ -123,6 +124,37 @@ def test_deny_all_firewall_uses_explicit_counter_rules():
     assert "policy drop;" in DENY_ALL_NFT_RULES
     assert "policy drop; counter" not in DENY_ALL_NFT_RULES
     assert DENY_ALL_NFT_RULES.count("\n  counter\n") == 2
+
+
+def test_firecracker_api_client_does_not_wait_for_keep_alive_close(monkeypatch):
+    class KeepAliveSocket:
+        recv_calls = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def settimeout(self, _timeout):
+            pass
+
+        def connect(self, _path):
+            pass
+
+        def sendall(self, _request):
+            pass
+
+        def recv(self, _size):
+            self.recv_calls += 1
+            if self.recv_calls == 1:
+                return b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"
+            raise TimeoutError("client incorrectly waited for connection close")
+
+    client = KeepAliveSocket()
+    monkeypatch.setattr(firecracker_runner_module.socket, "socket", lambda *_args: client)
+    _unix_http(Path("/run/firecracker.socket"), "PUT", "/boot-source", {"kernel_image_path": "/kernel"})
+    assert client.recv_calls == 1
 
 
 def test_firecracker_readiness_has_no_local_container_fallback(tmp_path, monkeypatch):

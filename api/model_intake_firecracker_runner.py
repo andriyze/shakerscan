@@ -152,11 +152,31 @@ def _unix_http(socket_path: Path, method: str, path: str, payload: dict[str, Any
         client.connect(str(socket_path))
         client.sendall(request)
         response = b""
-        while len(response) <= 1_000_000:
+        while b"\r\n\r\n" not in response and len(response) <= 64 * 1024:
             chunk = client.recv(65536)
             if not chunk:
                 break
             response += chunk
+        if b"\r\n\r\n" not in response:
+            raise FirecrackerExecutionError(f"Firecracker API returned incomplete headers for {path}")
+        raw_headers, response_body = response.split(b"\r\n\r\n", 1)
+        header_lines = raw_headers.split(b"\r\n")
+        content_length = 0
+        for line in header_lines[1:]:
+            name, separator, value = line.partition(b":")
+            if separator and name.strip().lower() == b"content-length":
+                try:
+                    content_length = int(value.strip())
+                except ValueError as exc:
+                    raise FirecrackerExecutionError("Firecracker API returned an invalid Content-Length") from exc
+        if content_length < 0 or content_length > 1_000_000:
+            raise FirecrackerExecutionError("Firecracker API response body exceeds its bound")
+        while len(response_body) < content_length:
+            chunk = client.recv(min(65536, content_length - len(response_body)))
+            if not chunk:
+                break
+            response_body += chunk
+        response = raw_headers + b"\r\n\r\n" + response_body
     status_line = response.split(b"\r\n", 1)[0]
     if not re.match(rb"HTTP/1\.[01] 2\d\d\b", status_line):
         raise FirecrackerExecutionError(f"Firecracker API rejected {path}: {response[-2000:]!r}")
