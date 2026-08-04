@@ -7,7 +7,14 @@ from model_intake_loader_profiles import resolve_conversion_profile, resolve_loa
 import model_intake_firecracker_runner as firecracker_runner_module  # noqa: E402
 from model_intake_control_plane import canonical_bytes  # noqa: E402
 from model_intake_runner_controller import build_firecracker_config, firecracker_readiness  # noqa: E402
-from model_intake_firecracker_runner import DENY_ALL_NFT_RULES, FirecrackerRunner, _unix_http, parse_network_telemetry  # noqa: E402
+from model_intake_firecracker_runner import (  # noqa: E402
+    DENY_ALL_NFT_RULES,
+    FirecrackerExecutionError,
+    FirecrackerRunner,
+    _unix_http,
+    _wait_for_jailed_pid,
+    parse_network_telemetry,
+)
 from model_intake_components import component_identities  # noqa: E402
 
 
@@ -155,6 +162,22 @@ def test_firecracker_api_client_does_not_wait_for_keep_alive_close(monkeypatch):
     monkeypatch.setattr(firecracker_runner_module.socket, "socket", lambda *_args: client)
     _unix_http(Path("/run/firecracker.socket"), "PUT", "/boot-source", {"kernel_image_path": "/kernel"})
     assert client.recv_calls == 1
+
+
+def test_runner_waits_for_pid_namespace_child_not_jailer_wrapper(monkeypatch):
+    observations = iter([("R", "42"), ("S", "42"), ("Z", "42")])
+    monkeypatch.setattr(firecracker_runner_module, "_process_identity", lambda _pid: next(observations))
+    monkeypatch.setattr(firecracker_runner_module.time, "sleep", lambda _seconds: None)
+
+    assert _wait_for_jailed_pid(1234, "42", 1) is True
+
+
+def test_runner_rejects_pid_reuse_while_waiting(monkeypatch):
+    monkeypatch.setattr(firecracker_runner_module, "_process_identity", lambda _pid: ("R", "reused"))
+    import pytest
+
+    with pytest.raises(FirecrackerExecutionError, match="identity changed"):
+        _wait_for_jailed_pid(1234, "original", 1)
 
 
 def test_firecracker_readiness_has_no_local_container_fallback(tmp_path, monkeypatch):

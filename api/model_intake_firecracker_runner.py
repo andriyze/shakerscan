@@ -141,6 +141,61 @@ def _require_ok(completed: subprocess.CompletedProcess[str], action: str) -> Non
         raise FirecrackerExecutionError(f"{action} failed: {detail}")
 
 
+def _process_identity(pid: int) -> tuple[str, str] | None:
+    """Return Linux process state and start time without accepting PID reuse."""
+    try:
+        fields = (Path("/proc") / str(pid) / "stat").read_text().rsplit(")", 1)[1].split()
+    except (OSError, IndexError):
+        return None
+    if len(fields) < 20:
+        return None
+    return fields[0], fields[19]
+
+
+def _validated_jailed_pid(jail: Path, vm_id: str, jail_uid: int, deadline: float) -> tuple[int, str]:
+    pid_file = jail / "firecracker.pid"
+    while time.monotonic() < deadline and not pid_file.is_file():
+        time.sleep(0.05)
+    try:
+        raw_pid = pid_file.read_text().strip()
+        pid = int(raw_pid)
+    except (OSError, ValueError) as exc:
+        raise FirecrackerExecutionError("jailer did not publish a valid Firecracker pid") from exc
+    if pid <= 1:
+        raise FirecrackerExecutionError("jailer published an unsafe Firecracker pid")
+    identity = _process_identity(pid)
+    if identity is None or identity[0] == "Z":
+        raise FirecrackerExecutionError("jailed Firecracker process is not running")
+    try:
+        command = (Path("/proc") / str(pid) / "cmdline").read_bytes().split(b"\0")
+        status = (Path("/proc") / str(pid) / "status").read_text()
+    except OSError as exc:
+        raise FirecrackerExecutionError("jailed Firecracker identity is unreadable") from exc
+    expected = vm_id.encode()
+    if expected not in command or not any(part.endswith(b"firecracker") for part in command if part):
+        raise FirecrackerExecutionError("jailer pid does not identify the requested Firecracker VM")
+    uid_line = next((line for line in status.splitlines() if line.startswith("Uid:")), "")
+    real_uid = uid_line.split()[1] if len(uid_line.split()) >= 2 else ""
+    if real_uid != str(jail_uid):
+        raise FirecrackerExecutionError("jailed Firecracker uid does not match the configured runner uid")
+    return pid, identity[1]
+
+
+def _wait_for_jailed_pid(pid: int, start_time: str, timeout: int) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        identity = _process_identity(pid)
+        if identity is None:
+            return True
+        state, observed_start_time = identity
+        if observed_start_time != start_time:
+            raise FirecrackerExecutionError("Firecracker pid identity changed while waiting")
+        if state == "Z":
+            return True
+        time.sleep(0.05)
+    return False
+
+
 def _unix_http(socket_path: Path, method: str, path: str, payload: dict[str, Any]) -> None:
     body = canonical_bytes(payload)
     request = (
@@ -555,6 +610,8 @@ class FirecrackerRunner:
         jail_uid = int(self.env.get("MODEL_INTAKE_JAILER_UID", "65532"))
         jail_gid = int(self.env.get("MODEL_INTAKE_JAILER_GID", "65532"))
         process: subprocess.Popen[bytes] | None = None
+        firecracker_pid: int | None = None
+        firecracker_start_time: str | None = None
         log_handle = None
         jail: Path | None = None
         started = time.monotonic()
@@ -578,10 +635,13 @@ class FirecrackerRunner:
             jail = self.jailer_root / firecracker.name / vm_id / "root"
             api_socket = jail / "run" / "firecracker.socket"
             deadline = time.monotonic() + 15
-            while not api_socket.exists() and process.poll() is None and time.monotonic() < deadline:
+            while not api_socket.exists() and time.monotonic() < deadline:
                 time.sleep(0.05)
             if not api_socket.exists():
                 raise FirecrackerExecutionError("Firecracker API socket did not become ready")
+            firecracker_pid, firecracker_start_time = _validated_jailed_pid(
+                jail, vm_id, jail_uid, deadline,
+            )
             resources = {
                 "kernel": Path(config["boot-source"]["kernel_image_path"]),
                 "rootfs.ext4": Path(config["drives"][0]["path_on_host"]),
@@ -606,12 +666,19 @@ class FirecrackerRunner:
             _unix_http(api_socket, "PUT", "/machine-config", config["machine-config"])
             _unix_http(api_socket, "PUT", "/actions", {"action_type": "InstanceStart"})
             timeout = min(int(request.get("timeout_seconds") or 600), 3600)
+            if not _wait_for_jailed_pid(firecracker_pid, firecracker_start_time, timeout):
+                try:
+                    os.kill(firecracker_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                _wait_for_jailed_pid(firecracker_pid, firecracker_start_time, 10)
+                raise FirecrackerExecutionError("microVM execution timed out")
             try:
-                process.wait(timeout=timeout)
-            except subprocess.TimeoutExpired as exc:
-                os.killpg(process.pid, signal.SIGKILL)
                 process.wait(timeout=10)
-                raise FirecrackerExecutionError("microVM execution timed out") from exc
+            except subprocess.TimeoutExpired:
+                # With --new-pid-ns the jailer wrapper and VM PID have distinct
+                # lifetimes. The validated VM is already terminal at this point.
+                pass
             jailed_output = jail / "output.ext4"
             shutil.copyfile(jailed_output, output_drive)
             extracted = work / "output"
@@ -695,6 +762,13 @@ class FirecrackerRunner:
                     pass
             return result
         finally:
+            if firecracker_pid is not None and firecracker_start_time is not None:
+                identity = _process_identity(firecracker_pid)
+                if identity is not None and identity[1] == firecracker_start_time and identity[0] != "Z":
+                    try:
+                        os.kill(firecracker_pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
             if process is not None and process.poll() is None:
                 os.killpg(process.pid, signal.SIGKILL)
                 try:
