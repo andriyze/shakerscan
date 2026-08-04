@@ -301,6 +301,11 @@ test('the microVM tier is offered as an opt-in install, not executed by the API'
   assert.match(page, /onRecheck=\{loadRunnerReadiness\}/)
 })
 
+test('local PEM is the default runner signer and KMS remains opt-in', () => {
+  assert.match(shell, /useState\('local-pem'\)/)
+  assert.doesNotMatch(shell, /useState\(environment === 'production' \? 'kms:<key-id>'/)
+})
+
 test('the runner chip is the way to reach the runner setup', () => {
   // The setup lived only on the fourth tab, so the chip that reports the
   // problem was a dead end. It now opens the phase that renders the fix.
