@@ -631,7 +631,12 @@ class FirecrackerRunner:
                 "--cgroup", f"memory.max={int(request.get('memory_mib', 4096)) * 1024 * 1024}",
                 "--cgroup", "pids.max=64",
                 "--cgroup", f"cpu.max={int(request.get('vcpu_count', 2)) * 100000} 100000",
-                "--resource-limit", "no-file=1024", "--resource-limit", "fsize=1073741824",
+                "--resource-limit", "no-file=1024",
+                # RLIMIT_FSIZE applies to Firecracker's writes to the existing
+                # output block image. Bind it to this job's already-capped
+                # drive size; a fixed 1 GiB value terminated valid larger
+                # conversions with SIGXFSZ before evidence could be finalized.
+                "--resource-limit", f"fsize={output_drive.stat().st_size}",
                 "--", "--api-sock", "/run/firecracker.socket",
             ]
             log_handle = (work / "jailer.log").open("wb")

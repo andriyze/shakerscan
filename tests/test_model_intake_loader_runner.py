@@ -130,6 +130,13 @@ def test_firecracker_contract_has_no_network_and_read_only_subject_drives():
     assert config["metadata"]["receipt_required"] is True
 
 
+def test_jailer_file_limit_tracks_the_bounded_output_drive():
+    source = (Path(__file__).resolve().parents[1] / "api" / "model_intake_firecracker_runner.py").read_text()
+
+    assert 'f"fsize={output_drive.stat().st_size}"' in source
+    assert '"fsize=1073741824"' not in source
+
+
 def test_deny_all_firewall_uses_explicit_counter_rules():
     assert "policy drop;" in DENY_ALL_NFT_RULES
     assert "policy drop; counter" not in DENY_ALL_NFT_RULES
