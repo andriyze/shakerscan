@@ -1194,7 +1194,11 @@ class _ActionCenterConn:
         return []
 
 
-def test_dashboard_action_center_prioritizes_server_derived_items():
+def test_dashboard_action_center_prioritizes_server_derived_items(monkeypatch):
+    # This unit test supplies every server-derived input through its fake
+    # connection. Tracked benchmark scorecards in results/ must not make the
+    # expectation depend on checkout mtimes or unrelated local artifacts.
+    monkeypatch.setattr(api_module, "_load_benchmark_scorecard_artifacts", lambda **_kwargs: [])
     conn = _ActionCenterConn()
     snapshot = {
         "available": True,
@@ -1355,7 +1359,11 @@ def test_dashboard_action_center_does_not_flag_recovered_schedule():
     assert "schedule-health-attention" not in by_id
 
 
-def test_dashboard_action_center_surfaces_refuter_integrity_spike():
+def test_dashboard_action_center_surfaces_refuter_integrity_spike(monkeypatch):
+    # Isolate the database finding-delta signal under test from tracked
+    # benchmark scorecards. A fresh clone gives those files identical mtimes,
+    # which previously changed the number of reported integrity signals.
+    monkeypatch.setattr(api_module, "_load_benchmark_scorecard_artifacts", lambda **_kwargs: [])
     # A target whose latest scan spiked from a ~4-finding baseline to 30.
     spike_scans = [
         {"target_id": "t1", "target_url": "https://app.example.test", "scan_id": "s4", "findings_count": 30},
