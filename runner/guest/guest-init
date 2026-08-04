@@ -1,9 +1,20 @@
 #!/bin/sh
 set -eu
 
-mount -t proc proc /proc
-mount -t sysfs sysfs /sys
-mount -t devtmpfs devtmpfs /dev
+ensure_mounted() {
+  target="$1"
+  filesystem="$2"
+  source="$3"
+  if findmnt -rn -T "$target" -o FSTYPE | grep -qx "$filesystem"; then
+    return 0
+  fi
+  mount -t "$filesystem" "$source" "$target"
+  findmnt -rn -T "$target" -o FSTYPE | grep -qx "$filesystem"
+}
+
+ensure_mounted /proc proc proc
+ensure_mounted /sys sysfs sysfs
+ensure_mounted /dev devtmpfs devtmpfs
 mount -o ro /dev/vdb /input
 mount /dev/vdc /output
 mkdir -p /output/traces /output/work
