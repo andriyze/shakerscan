@@ -264,8 +264,8 @@ test('one pasted Hugging Face link queues the complete technical review', () => 
 
 test('model intake reports lead with outcomes and collapse technical bulk', () => {
   const report = readFileSync(path.join(root, 'src/components/ReportView.tsx'), 'utf8')
-  assert.match(report, /What the review established/)
-  assert.match(report, /Not tested \/ incomplete/)
+  assert.match(report, /Technical evidence coverage/)
+  assert.match(report, /Checks not run \/ incomplete/)
   assert.match(report, /What to do next/)
   assert.match(report, /Detailed technical evidence, SBOM, hashes and phase logs/)
   assert.match(report, /Download SBOM/)
@@ -475,5 +475,7 @@ test('a Model Intake scan opens on the executive report, not generic scan chrome
   assert.match(scanDetail, /Model Intake execution log \(\{logs\.length\} lines\)/)
   assert.match(report, /!isModelIntakeScan && <div className="bg-gray-800\/50/)
   assert.match(report, /order-first bg-gray-800\/50/)
-  assert.match(report, /What the review established/)
+  assert.match(report, /Technical evidence coverage/)
+  assert.match(report, /These counts are not the corporate policy decision shown above/)
+  assert.doesNotMatch(report, /What the review established/)
 })

@@ -1685,12 +1685,15 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
           )}
 
           <div className="mb-5 rounded-lg border border-gray-700 bg-gray-900 p-4">
-            <div className="text-sm font-semibold text-white">What the review established</div>
+            <div className="text-sm font-semibold text-white">Technical evidence coverage</div>
+            <p className="mt-1 text-xs text-gray-400">
+              Execution status for scanners and evidence-producing controls. These counts are not the corporate policy decision shown above.
+            </p>
             <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              <div><div className="text-xs text-gray-500">Passed</div><div className="text-2xl font-semibold text-green-300">{modelIntakeControlGroups.passed.length}</div></div>
-              <div><div className="text-xs text-gray-500">Failed</div><div className="text-2xl font-semibold text-red-300">{modelIntakeControlGroups.failed.length}</div></div>
-              <div><div className="text-xs text-gray-500">Needs review</div><div className="text-2xl font-semibold text-yellow-300">{modelIntakeControlGroups.review.length}</div></div>
-              <div><div className="text-xs text-gray-500">Not tested / incomplete</div><div className="text-2xl font-semibold text-orange-300">{modelIntakeControlGroups.notTested.length}</div></div>
+              <div><div className="text-xs text-gray-500">Checks passed</div><div className="text-2xl font-semibold text-green-300">{modelIntakeControlGroups.passed.length}</div></div>
+              <div><div className="text-xs text-gray-500">Checks failed</div><div className="text-2xl font-semibold text-red-300">{modelIntakeControlGroups.failed.length}</div></div>
+              <div><div className="text-xs text-gray-500">Checks needing review</div><div className="text-2xl font-semibold text-yellow-300">{modelIntakeControlGroups.review.length}</div></div>
+              <div><div className="text-xs text-gray-500">Checks not run / incomplete</div><div className="text-2xl font-semibold text-orange-300">{modelIntakeControlGroups.notTested.length}</div></div>
             </div>
             {(modelIntakeControlGroups.failed.length > 0 || modelIntakeControlGroups.notTested.length > 0) && (
               <div className="mt-4 grid gap-3 lg:grid-cols-2">
