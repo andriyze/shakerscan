@@ -118,6 +118,7 @@ def _copy_tree(source: Path, destination: Path) -> None:
             raise FirecrackerExecutionError("symbolic links are prohibited in runner subjects")
         if item.is_dir():
             target.mkdir(mode=0o755)
+            target.chmod(0o755)
         elif item.is_file():
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(item, target)

@@ -187,6 +187,9 @@ def test_runner_subject_root_is_traversable_despite_service_umask(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
     (source / "config.json").write_text('{"model_type":"example"}')
+    nested = source / "1_Pooling"
+    nested.mkdir()
+    (nested / "config.json").write_text('{"pooling_mode_mean_tokens":true}')
     destination = tmp_path / "input-tree" / "model"
     previous = os.umask(0o077)
     try:
@@ -196,6 +199,8 @@ def test_runner_subject_root_is_traversable_despite_service_umask(tmp_path):
 
     assert destination.stat().st_mode & 0o777 == 0o755
     assert (destination / "config.json").stat().st_mode & 0o777 == 0o644
+    assert (destination / "1_Pooling").stat().st_mode & 0o777 == 0o755
+    assert (destination / "1_Pooling" / "config.json").stat().st_mode & 0o777 == 0o644
 
 
 def test_guest_installs_only_the_canonical_legacy_conv1d_alias(monkeypatch):
