@@ -4,7 +4,10 @@
 official safetensors inspection, signed runner-receipt contracts, signer boundary, OCI layout, and deployment
 verifiers, physical-runner service/orchestration, and bounded keyless planner are implemented. Model Intake scans remain non-deployable technical evidence; only the controlled
 submission/freeze/approval/policy/signing/promotion workflow may authorize deployment. Product implementation
-inside the frozen scope is complete. Remaining acceptance requires a physical KVM host plus organization-operated
+inside the frozen scope is complete. Physical KVM acceptance of the three reference model paths was completed
+on a nested-virtualization EC2 host on 2026-08-04; every functional runtime/conversion phase passed, while the
+strict zero-network-attempt policy correctly kept all three signed receipts non-pass because the libraries
+attempted local/IPv6 socket operations. Remaining production acceptance requires organization-operated
 trust/KMS, registry, benchmark, and data-plane systems. Kubernetes acceptance applies only when the organization
 chooses the already implemented webhook; Kubernetes is not required by ShakerScan or Firecracker.
 
@@ -76,7 +79,8 @@ Implement and harden:
    pickle, Python AST, secret/malware-rule, SBOM, dependency, native-binary, safetensors, ONNX, and GGUF checks.
 3. One production execution backend: Firecracker with KVM and jailer. There is no production fallback. The
    executable host controller, fixed guest, provisioning/build scripts, and signed measured-telemetry path
-   are implemented; release acceptance still requires a host that actually exposes `/dev/kvm`.
+   are implemented and physically exercised on KVM. Production still needs an organization-operated runner
+   and trust anchor; no model receives a pass when runtime network attempts are present.
 4. Controlled CodeSage `.bin` to safetensors conversion inside Firecracker, followed by tensor and embedding
    equivalence evidence and a complete rescan of the new artifact identity.
 5. The existing Python policy engine, approval model, signer service, OCI promotion path, CI verifier,
@@ -170,14 +174,18 @@ The completed implementation and remaining validation order is:
 1. **Implemented:** remove ambiguity between non-deployable technical scans and the authoritative controlled
    admission workflow; enforce legal state transitions, latest-manifest authority, transactional mutation,
    durable workflow events, idempotent evidence replay, and downstream admission/deployment invalidation.
-2. **Implemented; physical acceptance pending:** deploy one disposable no-egress Firecracker/KVM loader for
+2. **Implemented and physically exercised:** deploy one disposable no-egress Firecracker/KVM loader for
    custom code, model construction, inference, known-answer embeddings, telemetry, and signed exact-bundle
-   receipts. No alternate runner is in scope.
-3. **Implemented; physical model run pending:** use that same Firecracker path to convert CodeSage Base v2 to
+   receipts. The final CodeRankEmbed run passed every functional phase and exact known-answer replay; strict
+   policy then blocked the receipt on measured socket attempts. No alternate runner is in scope.
+3. **Implemented and physically exercised:** use that same Firecracker path to convert CodeSage Base v2 to
    safetensors, prove tensor/embedding equivalence, register and rescan the new identity, then require a separate
-   safe-loader runtime job. Do not admit the upstream pickle-capable artifact directly.
-4. Qualify CodeSage Large v2 only if it fits the approved Firecracker resource envelope and Base cannot meet
-   the versioned retrieval requirement. Otherwise report it `INCOMPLETE`; do not add a GPU runner.
+   safe-loader runtime job. Base conversion achieved exact tensor/numeric/embedding equivalence, but its target
+   was deliberately not registered because the strict network-attempt gate made the signed receipt non-pass.
+   Do not admit the upstream pickle-capable artifact directly.
+4. CodeSage Large v2 also completed exact conversion/equivalence inside a 12 GiB envelope, peaking at
+   12,391,227,392 bytes. It remains a conditional higher-resource candidate and is not justified unless Base
+   cannot meet the versioned retrieval requirement. Do not add a GPU runner.
 5. **Implemented; corporate acceptance pending:** harden policy, approvals, signer, OCI promotion, deployment
    verification, reporting, reassessment, storage, and failure recovery, then prove configured external paths.
 6. **Implemented:** the bounded keyless Codex planner is aligned across API, UI, and shipped skill without
@@ -264,8 +272,9 @@ deployment-approval declarations; Section 2.6 supersedes any earlier claim that 
 boundary is server-owned. Preflight remains non-admissible.
 Active strict saved profiles impose non-weakenable minimum acquisition, full Hugging Face snapshot, scanner,
 sandbox, evaluation, signed-admission, hash, governance, and deployment-approval requirements.
-Likewise, the CodeRankEmbed and CodeSage model-specific runbooks are not marked complete until real controlled
-runs produce the required evidence. These are operational admission inputs, not missing model-specific code.
+Real controlled CodeRankEmbed and CodeSage runs now produce the required physical evidence. Their runbooks
+remain incomplete for corporate approval because strict runtime policy and organization-owned controls are
+still non-pass or external; these are admission inputs, not missing model-specific code.
 
 ### 2.2 Automation boundary and product position
 
@@ -448,8 +457,8 @@ and production information, not as a statement that an artifact is legally or op
 | Isolated semantic sandbox | Implemented container boundary | Request/subject/evidence binding, isolation/seccomp gating, broker-worker service, and per-job limits are present | Treat it as bounded staging evidence, not a substitute for host-independent execution isolation |
 | Built-in safetensors weights adapter | Official parser plus fail-closed defense-in-depth inspector implemented and enabled by format | A hash-locked safetensors 0.8.0 Rust binding is authoritative for format acceptance; ShakerScan independently checks shape/range/coverage, re-hashes the exact artifact, and vector-scans every F16/F32/F64/BF16 value through bounded NumPy memmap chunks. The release image runs non-skippable valid, hostile-metadata, non-finite, and truncated self-tests. Parser identity and full-value counts survive into evidence. | It still does not instantiate the model graph, tokenize, or generate embeddings; those belong to a loader profile in the disposable runner tier. |
 | Operator runtime adapter | Implemented integration contract | Can prove exact-digest model load and known-answer tests in the hardened container when an operator image/argv adapter is installed | Treat as staging evidence, not a substitute for the microVM tier |
-| Actual tokenizer/model load and inference in disposable microVM | Executable Firecracker/jailer host controller and fixed guest implemented | The controller verifies pinned binaries/kernel/rootfs, authoritative manifest members, loader profile, reviewed custom code, and runtime digest; creates immutable input and bounded output ext4 drives; starts one jailed no-NIC microVM with cgroup-v2 limits; executes fixed import/load/inference phases; hard-kills on timeout; and signs an exact-subject receipt. It has no container fallback or arbitrary guest command. Physical release proof remains pending because the designated VPS does not expose `/dev/kvm`. | Run physical acceptance on a nested-virtualization or bare-metal KVM host; `NOT_READY` remains the only valid result on the current VPS |
-| Runtime behavior telemetry | Measured guest/host producer and strict receipt verifier implemented | Root-owned `strace` streams capture network/process/file syscalls by fixed phase; destination addresses are privacy-safe digests with ports/DNS flags; guest and host interface inventories, deny-all nft counter deltas, raw-trace digest, canonical telemetry digest, overflow/loss/completeness, cgroup limits/peaks, and no-NIC configuration digest are bound into the receipt. Any attempt, loss, overflow, contradiction, missing trace, extra interface, or digest mutation makes PASS impossible. | Prove the measurements against benign and deliberate-connect physical fixtures on a KVM host |
+| Actual tokenizer/model load and inference in disposable microVM | Executable Firecracker/jailer host controller and fixed guest implemented | The controller verifies pinned binaries/kernel/rootfs, authoritative manifest members, loader profile, reviewed custom code, and runtime digest; creates immutable input and bounded output ext4 drives; starts one jailed no-NIC microVM with cgroup-v2 limits; executes fixed import/load/inference phases; hard-kills on timeout; and signs an exact-subject receipt. It has no container fallback or arbitrary guest command. CodeRankEmbed and both CodeSage conversion paths were physically exercised on nested-virtualization KVM. | Operate the same digest-pinned runner with a production trust anchor; the older VPS remains a valid `NOT_READY` no-KVM deployment |
+| Runtime behavior telemetry | Measured guest/host producer and strict receipt verifier implemented | Root-owned `strace` streams capture network/process/file syscalls by fixed phase; destination addresses are privacy-safe digests with ports/DNS flags; guest and host interface inventories, deny-all nft counter deltas, raw-trace digest, canonical telemetry digest, overflow/loss/completeness, cgroup limits/peaks, and no-NIC configuration digest are bound into the receipt. Any attempt, loss, overflow, contradiction, missing trace, extra interface, or digest mutation makes PASS impossible. Physical reference-model runs recorded complete telemetry and blocked on 58/44/44 attempted socket operations despite no NIC and zero firewall egress. | Retain deliberate-connect, timeout, crash, telemetry-loss, and signature-negative fixtures as recurring release tests |
 | Provider-neutral evaluation contract | Deterministic scorer plus automatic runner-derived embedding evaluation implemented | Public caller observations are `DECLARED` and fail closed. Every verified runtime receipt now automatically creates durable `GENERATED_EVALUATION` evidence from signed known-answer, output-shape, resource, and network measurements, without retaining vectors. Corporate retrieval/vector-store observations remain separately required `GENERATED_DATA_PLANE` evidence with connector/index/run identity. | Operate the corporate data-plane connector against the intended vector store; never infer that result from the model microVM |
 | Corporate benchmark and thresholds | Integration point implemented | No universal corpus can ship | Organization supplies/version-controls corpus; ShakerScan automates execution and scoring |
 | Typed non-scanner providers | Implemented and boundary-frozen | Sandbox execution, runner-derived embedding evaluation, source-bound embedded policy, and normalized report/signed-admission export are separate classes | OPA and additional provider frameworks are out of scope and are not advertised as product capabilities |
@@ -515,9 +524,9 @@ between schemas and working capabilities. These corrections are authoritative fo
 
 | Verified condition at current HEAD | Consequence | Required scoped repair |
 |---|---|---|
-| Earlier `model_intake_runner_controller.py` only checked files and built a dictionary | Replaced by an executable `model_intake_firecracker_runner.py`, fixed read-only guest protocol, hash-locked CPU runtime, ext4 drive builder, jailer/KVM lifecycle, timeout/process-group kill, cgroup-v2 enforcement, output quotas, cleanup, and signed receipt issuer | Physical E2E remains a release blocker and must run on a host with `/dev/kvm`; the designated VPS currently proves the intended fail-closed `NOT_READY` path |
+| Earlier `model_intake_runner_controller.py` only checked files and built a dictionary | Replaced by an executable `model_intake_firecracker_runner.py`, fixed read-only guest protocol, hash-locked CPU runtime, ext4 drive builder, jailer/KVM lifecycle, timeout/process-group kill, cgroup-v2 enforcement, output quotas, cleanup, and signed receipt issuer | Physical model-path E2E is complete on KVM; the designated older VPS still proves the intended fail-closed `NOT_READY` path |
 | Loader profiles contain entrypoint strings, while the shipped images do not contain the corresponding Transformers/ONNX runtimes | A profile marked `READY` means schema resolution, not executable readiness | Make readiness contingent on a digest-pinned runner image that actually executes the selected entrypoint; otherwise return `INCOMPLETE` |
-| Earlier signed runner receipts accepted isolation booleans without a producer | Receipt v2 now requires canonical measured telemetry: raw trace and telemetry digests, operation/phase/destination evidence, guest/host interfaces, nft counter deltas, no-device proof, loss/overflow flags, and cgroup evidence. The issuer itself refuses an incomplete PASS before signing. | Operate the purpose-scoped KMS key on the runner host and complete deliberate-network-attempt physical acceptance |
+| Earlier signed runner receipts accepted isolation booleans without a producer | Receipt v2 now requires canonical measured telemetry: raw trace and telemetry digests, operation/phase/destination evidence, guest/host interfaces, nft counter deltas, no-device proof, loss/overflow flags, and cgroup evidence. The issuer itself refuses an incomplete PASS before signing. Physical reference-model runs proved that observed attempts override otherwise passing functional phases. | Operate the purpose-scoped KMS key and retain the negative fixture matrix on the production runner |
 | Promotion previously created only a local OCI image layout | **Implemented mechanism:** `model_intake_push_oci.py` accepts only one configured non-local repository, copies the exact `admitted` layout through fixed `oras` argv, fetches the remote descriptor, rejects digest drift, and emits a content-bound receipt | A live corporate registry credential/retention/immutability acceptance run remains operator-owned |
 | The Kubernetes webhook previously mutated deployment bindings while declaring `sideEffects: None`, was cluster-wide, and lacked certificate/install wiring | **Implemented mechanism:** verification is now pure; observation is a separate explicit endpoint; the fail-closed webhook is restricted to labeled namespaces and model objects; cert-manager CA injection, immutable image digest validation, secret creation, and rollout verification are scripted | Run outage/revocation/recovery tests in the target cluster and choose namespaces deliberately to avoid control-plane self-deadlock |
 | The local operator guard trusts loopback, target rescan replays stored acquisition authority without revalidating it, and several resolver/readiness endpoints have no explicit operator boundary | Local network placement is being treated as identity and expired authority can be replayed | Require authenticated operator/deployment identity for mutations and authority-bearing replay; revalidate scope/approval receipts and strip stale acquisition grants |
@@ -1001,8 +1010,8 @@ incomplete, stale, bypassed, or governed by a different policy.
 
 ### 7.9 P1 — Execute in a hardened sandbox
 
-**Delivery status: container staging tier and disposable Firecracker/KVM production tier implemented;
-physical KVM/model acceptance pending.** The container service re-binds exact subjects and requests, gates
+**Delivery status: container staging tier and disposable Firecracker/KVM production tier implemented and
+physically exercised against all three reference models.** The container service re-binds exact subjects and requests, gates
 PASS on isolation, applies per-job kill/resource limits, and refuses to promote header parsing to dynamic
 success. For safetensors, the built-in adapter re-hashes and memory-maps the exact file, validates tensor
 inventory/ranges, scans numeric finiteness, and reports `load_level=weights`. It explicitly reports
@@ -1014,9 +1023,9 @@ binds the artifact, repository, custom code, tokenizer, configuration, runtime i
 benchmark digests; executes fixed import/tokenizer/load/warmup/inference/teardown or conversion phases; has no
 virtual NIC and no production fallback; applies cgroup-v2 and wall-time enforcement; measures guest syscalls,
 host firewall counters/interfaces, and resource peaks; and emits a signed exact-subject receipt. The current
-VPS correctly reports `NOT_READY` because it has no `/dev/kvm`. A physical nested-virtualization or bare-metal
-KVM host must still prove benign and deliberate-network/process/file/resource negative fixtures and the three
-real model paths.
+VPS correctly reports `NOT_READY` because it has no `/dev/kvm`. A nested-virtualization EC2 host subsequently
+proved all three real model paths, signed telemetry, cgroup accounting, and strict blocking on observed socket
+attempts. Organization-operated KMS and recurring negative fixtures remain production requirements.
 
 Static checks cannot prove how custom model code behaves when imported or invoked. A deterministic dynamic
 stage is required.
@@ -1500,9 +1509,11 @@ start rollback/reindex procedures according to incident severity.
 custom-code inventory/AST/Semgrep checks, built-in SBOM/secret/malware/license evidence, adapter orchestration,
 policy, and admission report. The built-in no-egress safetensors adapter proves exact-digest weight
 readability, tensor inventory/ranges, and sampled numeric finiteness. It does **not** import CodeRank's custom
-code, instantiate the model graph, or generate an embedding. The operator runtime-adapter contract can do
-those later phases when the corporation supplies a pinned runtime image and argv contract. A disposable
-microVM with independent telemetry remains required for the highest-risk custom-code tier. The corporation
+code, instantiate the model graph, or generate an embedding. The Firecracker tier now physically proved the
+exact import, tokenizer, model load, warmup, inference, known-answer replay, and teardown path for the pinned
+revision. Its signed receipt remained non-pass because 58 socket-related attempts were observed under the
+strict zero-attempt rule; no egress succeeded. A disposable microVM with independent telemetry remains
+required for the highest-risk custom-code tier. The corporation
 must provide the exact runtime dependency inventory, manual code approval, representative corpus/thresholds,
 legal/privacy decisions, and deployment enforcement.
 
@@ -1537,7 +1548,10 @@ sandbox deliberately blocks `.bin` loading. The fixed Firecracker guest now impl
 equivalence; the ordinary runtime path still prohibits pickle. A verified conversion now creates separate
 source/target receipt bindings, registers and fully rescans the target snapshot, and returns the exact safe
 runtime bundle. The designated VPS lacks `/dev/kvm`, so the real CodeSage conversion/runtime run remains
-pending physical infrastructure. The corporation owns manual approval, benchmark fitness, and production promotion.
+unavailable there. A nested-virtualization KVM run subsequently proved exact 292-tensor, numeric, and embedding
+equivalence and produced target artifact digest `8ec9c4a138b2959d507303952c1c1fe04ef38cb31869f4d4efe90b7910958e24`.
+The target was not registered because 44 measured socket attempts made the strict signed receipt non-pass.
+The corporation owns manual approval, benchmark fitness, and production promotion.
 
 Required evidence before a controlled pilot:
 
@@ -1566,7 +1580,9 @@ loaded or prove that conversion was isolated.
 acquisition fits the product ceilings, but the ordinary PR path should not spend the storage/memory budget.
 Phase 3/4 may run this profile only after Base passes and only when the same Firecracker runner has an
 approved resource envelope large enough for it. Otherwise the result remains `INCOMPLETE`; a GPU-specific
-runner is outside this roadmap. The corporation must justify the larger model against its own quality,
+runner is outside this roadmap. The physical acceptance run completed exact conversion/equivalence in
+351.222 seconds and peaked at 12,391,227,392 of 12,884,901,888 allowed bytes, with no cgroup OOM event. Its
+44 observed socket attempts still made the signed receipt non-pass. The corporation must justify the larger model against its own quality,
 capacity, cost, and data requirements.
 
 Perform every Base v2 step against revision `6e5d6dc15db3e310c37c6dbac072409f95ffa5c5` and digest
@@ -1648,14 +1664,14 @@ Each increment must be independently committed and leave required controls fail 
 2. **Existing evidence hardening — implemented:** enforce ModelScan/Fickling/Semgrep/Trivy applicability and freshness,
    improve Semgrep rules and safe fixtures, remove optional-tool claims, and make all unexpected worker/tool
    failures durable terminal non-pass states.
-3. **Physical Firecracker runner — implementation complete, physical acceptance pending:** the controller uses Linux/KVM with jailer,
+3. **Physical Firecracker runner — implemented and model-path acceptance complete:** the controller uses Linux/KVM with jailer,
    exact read-only subjects, no egress/credentials, approved runtime/loader digests, resource limits,
    phase telemetry, known-answer embeddings, signed receipts, teardown, and no fallback.
-4. **CodeSage conversion — implemented; physical model run pending:** the narrowly scoped `.bin` to safetensors
+4. **CodeSage conversion — implemented and physically exercised:** the narrowly scoped `.bin` to safetensors
    profile uses `torch.load(weights_only=True)` only inside Firecracker, proves exact tensor inventory/dtype/
    shape/value equality plus source/target embedding equivalence, and exports a new content-addressed artifact
    and complete manifest. Verified output is registered and strictly rescanned under its target identity;
-   physical CodeSage execution remains the release gate.
+   both CodeSage sizes completed these phases on KVM. Strict network-attempt evidence still blocks promotion.
 5. **Control-plane and deployment hardening — implemented; external acceptance pending:** strengthen embedded policy tests, role separation, signer/KMS
    isolation, OCI push verification, CI/Kubernetes denial paths, revocation/cache behavior, storage quotas,
    restart/replay recovery, and first-screen reporting.
@@ -1663,8 +1679,8 @@ Each increment must be independently committed and leave required controls fail 
    Intake action catalog, durable transcripts, strict iteration/action budgets, authenticated resume/cancel,
    and matching API/UI/shipped-skill semantics while keeping all AI output advisory.
 
-Release acceptance requires a physical Firecracker run and controlled deployment test. Mocked or
-caller-signed receipts prove contract handling only and cannot close those gates.
+Physical model-path acceptance is complete. Release acceptance still requires the controlled deployment,
+production trust, and recurring negative-fixture tests; mocked or caller-signed receipts cannot close those gates.
 
 Release acceptance also requires surface parity. The controlled workflow must be usable through the API,
 the web UI, and the shipped `shakerscan` agent skill without changing its security meaning. Every surface
@@ -1805,7 +1821,7 @@ Implemented hardening:
 Operator/corporate work: approve the four scanner versions and licenses, update the existing vulnerability
 and rule data, supply organization Semgrep rules where needed, and define severity/freshness/exception policy.
 
-### Phase 3 — Disposable model execution and runtime telemetry — **executable implementation complete; physical KVM acceptance pending**
+### Phase 3 — Disposable model execution and runtime telemetry — **implementation and reference-model KVM acceptance complete**
 
 The semantic container now includes a built-in exact-digest safetensors weights adapter and supports an
 operator runtime adapter. The built-in adapter only returns PASS after official Rust parser acceptance,
@@ -1845,15 +1861,14 @@ incomplete or internally inconsistent PASS claims before signing, kills the whol
 and tears down the network namespace, cgroup, and jail. No local-container fallback or arbitrary guest
 command exists.
 
-Physical validation is not complete. The designated rebuild VPS is x86_64 with cgroup v2 but does not expose
-`/dev/kvm` or nested-virtualization flags. ShakerScan therefore reports `NOT_READY` there, as required. A
-bare-metal or nested-virtualization KVM runner is required to check the physical-run boxes; QEMU emulation or
-a Docker fallback will not be added to hide that infrastructure limitation.
+The designated rebuild VPS is x86_64 with cgroup v2 but does not expose `/dev/kvm` or nested-virtualization
+flags, so ShakerScan correctly reports `NOT_READY` there. Physical reference-model validation was instead
+completed on a nested-virtualization KVM host without QEMU emulation or a Docker fallback.
 
-Remaining physical acceptance and infrastructure work:
+Remaining production infrastructure and recurring acceptance work:
 
-- Deploy at least one Linux host that exposes `/dev/kvm` and run the physical benign, deliberate-connect,
-  timeout, crash, manifest-mismatch, telemetry-truncation, and signature-negative acceptance fixtures.
+- Operate at least one Linux host that exposes `/dev/kvm` and keep the benign, deliberate-connect, timeout,
+  crash, manifest-mismatch, telemetry-truncation, and signature-negative acceptance fixtures in the release gate.
 - Verify that physical interface/firewall/cgroup observations agree with the implemented guest trace and
   no-device evidence for both quiet and deliberate-network-attempt fixtures.
 - Add only loader profiles needed by formats already supported by the current product and executable in the
@@ -1864,13 +1879,14 @@ Remaining physical acceptance and infrastructure work:
   converter image, tensor inventory, exact numeric equivalence, embedding equivalence, resource evidence,
   and complete network telemetry into the signed receipt. Unsafe source serialization never executes in the
   API/static worker. Target registration and strict full rescan are automatic after verified refresh;
-  only the physical runner-fleet execution remains acceptance work.
+  physical Base and Large conversion execution is now recorded below; production fleet operation remains external.
 - Prove the purpose-scoped KMS signer and trust-anchor rotation path on the physical runner host.
 
-Exit criteria: CodeRankEmbed and CodeSage Base can be loaded and exercised without corp network, credentials,
-or host access; prohibited behavior and resource breaches reliably block. CodeSage Large runs only if the
-same Firecracker implementation can satisfy its approved CPU/memory envelope; otherwise it remains
-`INCOMPLETE` and no GPU-specific backend is added.
+Reference-model exit evidence: CodeRankEmbed and CodeSage Base were exercised without corporate network,
+credentials, or guest host access; prohibited socket attempts reliably blocked. CodeSage Large completed in
+the same Firecracker implementation within a 12 GiB cgroup, so no GPU-specific backend was added. Production
+admission remains blocked until an approved runtime produces zero prohibited attempts or policy explicitly
+disposes them without weakening evidence integrity.
 
 ### Phase 3.1 — Measured network isolation acceptance contract
 
@@ -2162,6 +2178,40 @@ That distinction is intentional: “the scanner worked” does not mean “the m
 validation at checkout `2612f05` reported **2,862 passed, 0 failed** for the complete Python suite; the final
 report repairs added **106 passing focused Model Intake tests** before the final remote rebuild and rerun.
 
+#### 14.5.2 Physical Firecracker/KVM acceptance — 2026-08-04
+
+The branch was rebuilt from source on an AWS `m8i.xlarge` host with 4 vCPU, 16 GiB RAM, nested virtualization
+enabled, CPU VMX visible, and `/dev/kvm` available. The final model runs used Firecracker 1.16.1 and these
+integrity-bound components:
+
+- Firecracker: `2fd0171309af7e24cf8dafc8a6f921c1434c49b5f9349bb996b7ed0a4deb8aa7`
+- Jailer: `1f3a0c1fe86212d0001819bfe0819071c01208b3ccc9398c3b3bc1b84cf21edd`
+- Kernel: `27a8310b9a727517e9eb02044524b6ceb77de5728e3491b6974d5c846227ecc8`
+- Guest rootfs: `a6a52886252b8e1d70958165fc295813df21ebd7626a0eb7d4b69c223ff8943e`
+
+The acceptance environment intentionally used the installer's default local PEM signer for
+development/test/staging. This proves signing and verification but is not a production trust anchor. KMS
+remains an explicit non-default production configuration and was not impersonated in this run.
+
+| Exact subject/path | Controlled submission and runner job | Functional result inside guest | Isolation/resource result | Signed admission evidence result |
+|---|---|---|---|---|
+| CodeRankEmbed runtime | submission `51cd2947-855b-4a44-8984-68b679d79725`; job `a2cd05d8-0635-4af3-91c6-22e68ee3c505` | Import, tokenizer, model load, warmup, inference, exact known-answer replay, and teardown all `PASS`. Embedding digest `a33dac258af0413e460b4d282de6f265dd51746385df3ac0251819b09535b728`; duration 75.806 s. | Peak memory 1,905,639,424/8,589,934,592 bytes; peak pids 6/64. Complete telemetry recorded 58 attempts. Guest and host interfaces were only `lo`; no NIC/tap existed; no egress succeeded. | `FAIL`, correctly: the zero-attempt control treats the measured AF_UNIX socket/connect activity and failed AF_INET6 socket/bind activity as prohibited attempts even though prevention worked. |
+| CodeSage Base conversion | submission `c3509007-7cea-45b8-ab19-4ee02c2c3551`; job `07898a04-2e2b-4ca8-99b6-4e360478580d` | Import, restricted deserialization/conversion, tensor equivalence, embedding equivalence, and teardown all `PASS`. All 292 tensors matched with zero numeric and embedding drift. Target artifact `8ec9c4a138b2959d507303952c1c1fe04ef38cb31869f4d4efe90b7910958e24`; target snapshot `d2721b3c5994e577b78295a63c4089d94c25706e844b019ea4be9eec7d7d6268`; duration 109.281 s. | Peak memory 4,114,026,496/8,589,934,592 bytes; peak pids 6/64. Complete telemetry recorded 44 attempts with no NIC/tap or successful egress. | `FAIL`, correctly under the zero-attempt rule. Because the signed conversion receipt was non-pass, ShakerScan did not register or promote the otherwise equivalent target. |
+| CodeSage Large conversion | submission `b6f0a2cb-f42f-4231-820f-533608e1afcb`; job `f58b9941-9933-4469-b587-76ab6136a47e` | The same five phases all `PASS`; 292 tensors matched with zero numeric and embedding drift. Target artifact `d7cf192c14e0301ad9003efc7f2e40a6dfb0b3065b6be99f4b201af7c31c2f41`; target snapshot `48286dc1b725c398b4cbfef6503a69046ee91249a3158450b593a1add7f983e5`; duration 351.222 s. | Peak memory 12,391,227,392/12,884,901,888 bytes; peak pids 6/64; no cgroup OOM event. Complete telemetry recorded 44 attempts with no NIC/tap or successful egress. | `FAIL`, correctly under the same zero-attempt rule. This proves technical fit only narrowly inside the 12 GiB envelope; it does not justify choosing Large over Base. |
+
+The physical runs exposed defects that mocked tests did not: duplicate guest mounts, missing guest scratch
+space, shutdown semantics, jailer/VM PID lifetime, cache placement, non-traversable subject roots, missing
+legacy Transformers import compatibility, missing teardown evidence after failure, a failed-conversion
+receipt key error, restrictive nested-directory permissions, nondeterministic parallel inference comparison,
+and a fixed 1 GiB jailer file-size limit that killed valid large conversions. These were fixed as small,
+separate commits and then retested against the exact public artifacts. No security gate was weakened to make
+the models pass; the final receipts remain non-pass on the policy-relevant network attempts.
+
+This closes the physical implementation/model-path proof. It does **not** close production KMS operation,
+corporate retrieval/authorization benchmarks, legal/privacy approval, registry immutability, deployment
+enforcement, exception authority, or continuous reassessment. Those remain the external corporate controls
+listed in Sections 3.2 and 19.3.
+
 ### 14.6 Application-control tests
 
 - User A cannot retrieve User B-only vectors or graph facts.
@@ -2295,10 +2345,11 @@ Owners must decide and record:
   contracts do not count as installed coverage and are not future implementation work.
 - [x] The disposable Firecracker/KVM+jailer implementation executes fixed import/tokenizer/load/warmup/
   inference/teardown and conversion/equivalence phases and produces signed runtime telemetry, with no
-  production fallback. Physical acceptance remains separately unchecked below because the VPS lacks KVM.
+  production fallback. All three reference-model paths were physically exercised on nested-virtualization KVM.
 - [x] Receipt v2 requires independently measured, complete guest/host network-attempt telemetry; any
   prohibited attempt, telemetry loss, overflow, contradiction, missing no-device proof, or digest mutation
-  is non-pass. Deliberate-attempt physical validation remains part of the final VPS/KVM release gate.
+  is non-pass. The physical reference-model receipts proved that attempted operations override otherwise
+  passing functional phases; explicit negative fixtures remain part of every release gate.
 - [x] A verified exact-subject runtime receipt automatically produces separate durable embedding-evaluation
   evidence from its signed known-answer digest, output shape, resource limits, and network telemetry. Raw
   vectors are not retained, and this does not impersonate the separately required corporate data-plane run.
@@ -2318,8 +2369,10 @@ Owners must decide and record:
   Physical and UI cross-surface acceptance remains part of the release run below.
 - [x] The exact release branch is rebuilt on the designated VPS and complete public preflight runs for
   CodeRankEmbed, CodeSage Base v2, and CodeSage Large v2 retain accurate API/UI evidence and outcomes.
-- [ ] Physical Firecracker import/load/inference/conversion runs for those exact subjects pass on a designated
-  Linux/KVM runner. The current VPS is not a KVM runner and correctly reports `NOT_READY` without fallback.
+- [x] Physical Firecracker import/load/inference/conversion runs completed for those exact subjects on a
+  designated Linux/KVM runner. Every functional phase passed; each signed outer receipt correctly remained
+  non-pass because strict policy recorded prohibited socket attempts. The older VPS still correctly reports
+  `NOT_READY` without fallback.
 
 ### 19.2 Per-model admission-run checklist
 
