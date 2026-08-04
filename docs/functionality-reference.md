@@ -1995,6 +1995,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `MODEL_INTAKE_RUNNER_JOB_ROOT` | `api/model_intake_runner_service.py` |
 | `MODEL_INTAKE_RUNNER_MAX_INPUT_BYTES` | `api/api.py` |
 | `MODEL_INTAKE_RUNNER_QUEUE_LIMIT` | `api/model_intake_runner_service.py` |
+| `MODEL_INTAKE_RUNNER_STAGE_DIR` | `api/api.py` |
 | `MODEL_INTAKE_RUNNER_URL` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_SANDBOX_IMAGE` | `docker-compose.yml` |
 | `MODEL_INTAKE_SANDBOX_NETWORK_MODE` | `scanner/scanner_tools/model_intake_sandbox.py` |
@@ -2126,7 +2127,6 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_STALE_FAIL_AFTER_SECONDS` | `api/worker.py` |
 | `SHAKERSCAN_STREAM_SCANNER_LOGS` | `api/worker.py` |
 | `SHAKERSCAN_TRUSTED_REMOTE_TRANSPORT` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
-| `SHAKERSCAN_UI_OPERATOR_AUTOFILL` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_UI_PORT` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_WORKER_FAIL_CLOSED` | `api/worker.py` |
 | `SHAKERSCAN_WORKER_IMAGE_DIGEST` | `scanner/scanner_tools/model_intake_scanners.py` |

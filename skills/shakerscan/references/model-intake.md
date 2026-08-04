@@ -24,10 +24,11 @@ UI_BASE=http://localhost:3000   # replace with ./scanner.sh status output on a r
 OPERATOR_TOKEN=...              # obtain through the approved secret channel
 ```
 
-`scanner.sh start` generates `MODEL_INTAKE_OPERATOR_TOKEN` into the runtime `.env` on every install, so a
-local operator already has a working credential and the web UI resolves it from the deployment instead of
-asking a human to paste it. A remote or reverse-proxied deployment still requires explicit entry, and
-`MODEL_INTAKE_OPERATOR_CREDENTIALS_JSON` remains the way to configure per-reviewer identities and roles.
+`scanner.sh start` generates `MODEL_INTAKE_OPERATOR_TOKEN` into the runtime `.env`, but the UI server never
+serializes that bearer secret to browser JavaScript. Host and forwarding headers are caller-controlled and
+are not proof that secret delivery is local. Obtain the operator credential through the approved secret
+channel and enter it only for the browser session. `MODEL_INTAKE_OPERATOR_CREDENTIALS_JSON` remains the way
+to configure per-reviewer identities and roles.
 
 ## 1. Inspect capability state
 
@@ -73,6 +74,13 @@ do not attempt to run it through the API, the Docker socket, or a privileged con
 sudo ./scanner.sh model-intake-runner install --signer kms:<key-id> --confirm
 ```
 
+The UI can stage the large guest image and pinned kernel first. Staging uses an API-only directory that scan
+workers do not mount. The installer verifies the canonical manifest, kernel and rootfs byte counts and
+SHA-256 digests, rejects symlinks, installs or refreshes the service, recreates the API, exports the signer
+public key, and registers it as an environment- and builder-constrained `runtime_runner` trust anchor. It
+returns nonzero if any of those steps fails. Local PEM anchors are registered only for development, test,
+and staging; production registration requires KMS.
+
 Readiness is also measured from inside the API container, which cannot see host `/dev/kvm`, `ip`, or `nft`.
 A correctly installed runner is therefore reported through `MODEL_INTAKE_RUNNER_URL`, which the installer
 wires; do not read the local `checks` map as proof that a provisioned host runner is broken.
@@ -83,6 +91,20 @@ freshness are server-measured and enforced again immediately before execution. I
 the controlled `scanner_data_stale` reassessment event for affected admissions.
 
 ## 2. Resolve and run technical preflight
+
+For the normal request—one pasted Hugging Face link—use the same path as the UI's **Run complete review**
+button:
+
+1. POST the link to `/model-intake/resolve` with `platform:"auto"`.
+2. Use the returned `scan_payload`; do not reconstruct provider authority from caller metadata.
+3. Set `complete_artifact_download`, `complete_repository_snapshot`, `run_generated_scanners`, and
+   `run_dynamic_sandbox` to `true`. For production/staging, require the dynamic sandbox so unavailable
+   execution is explicit.
+4. POST that payload to `/model-intake/scan`, report the scan ID and UI link, and stop unless monitoring was
+   explicitly requested.
+
+This queues the useful technical review in one operation. It does not fabricate trust evidence or turn the
+preflight into corporate approval.
 
 Resolve the source first. Hugging Face must resolve to an immutable commit for complete admission evidence.
 Other adapters may be usable for preflight while complete snapshot support remains explicitly unsupported.
@@ -99,7 +121,9 @@ ModelScan, Fickling, Semgrep, and Trivy adapters. A capped partial download is
 `known_unverified_truncated`/`INCOMPLETE`, never a false hash mismatch and never clean coverage.
 
 `max_download_bytes` is the artifact acquisition ceiling, not a memory budget, and accepts up to 100 GB.
-Production models are routinely 1 GB or larger, so set it to cover the whole file: anything above the bounded
+Production models are routinely 1 GB or larger. Hugging Face resolution sizes the returned acquisition
+budget to the selected artifact plus bounded headroom. For other sources whose size is unknown, set an
+explicit reviewed limit that covers the whole file: anything above the bounded
 in-memory inspection prefix is streamed into content-addressed quarantine automatically, which is what makes a
 full-artifact SHA-256 — and therefore checksum and signature verification — reachable. Leaving it at the
 10 MB default for a multi-gigabyte model yields `known_unverified_truncated`, not a verified subject.

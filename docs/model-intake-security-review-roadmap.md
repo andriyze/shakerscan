@@ -20,6 +20,49 @@ chooses the already implemented webhook; Kubernetes is not required by ShakerSca
 
 **Audience:** Security engineering, ML platform, application security, infrastructure, legal/privacy, model owners, and release approvers
 
+## 0.1 August 2026 usability and trust-boundary hardening
+
+The primary user journey is now deliberately simple: paste one Hugging Face model link, choose the intended
+environment, and select **Run complete review**. The resolver pins the provider revision and artifact, sizes
+the acquisition budget to the selected model, and queues complete artifact acquisition, the authoritative
+repository snapshot, the existing scanner bundle, and isolated-runtime evidence. Missing signing,
+Firecracker, evaluation, or approval evidence remains visible as `NOT_RUN`/`INCOMPLETE`; the quick path does
+not turn unavailable evidence into a pass and does not grant deployment authority.
+
+The advanced phased workflow remains available for custom sources, explicit trust material, controlled
+conversion, generated evaluation, identity-separated approvals, deterministic policy, signing, and
+promotion. It is no longer necessary to understand those controls before obtaining the first useful
+technical review.
+
+The following implementation defects found in the branch audit are closed:
+
+- The UI server never returns `MODEL_INTAKE_OPERATOR_TOKEN` to browser JavaScript. Host and forwarding
+  headers are not treated as proof that a request is local. An operator may retain an explicitly entered
+  credential in that browser session, but credentials are distributed through an approved secret channel.
+- A completed static run can be attached only when its scan type is Model Intake and its source is the
+  controlled submission source (or the submission carries the exact expected artifact digest).
+- Complete acquisition no longer silently widens a caller's total artifact budget. Contradictory byte
+  limits are rejected at request validation, and Hugging Face resolution returns a model-sized complete
+  acquisition payload through API, UI, and agent surfaces.
+- Firecracker staging uses a dedicated API-only host directory that workers do not mount. A canonical
+  manifest binds kernel and rootfs byte counts and SHA-256 digests; recovery and the privileged installer
+  verify both artifacts and reject symlink substitution. A custom rootfs requires an explicit SHA-256.
+- The rootfs builder publishes atomically. Reinstallation refreshes component identities and service
+  configuration without duplicate environment keys, restarts the service, fails if API recreation fails,
+  and automatically registers the exported runner public key as a `runtime_runner` trust anchor constrained
+  to the builder and environment. Local keys are registered only for development/test/staging; production
+  requires AWS KMS.
+- Reports now lead with one decision, passed/failed/review/not-tested counts, concrete failed and incomplete
+  checks, and numbered next actions. Technical matrices, phase logs, hashes, platform metadata, AIBOM, and
+  SBOM detail are collapsed by default. The generated CycloneDX SBOM has a compact summary and remains
+  separately downloadable as raw evidence.
+
+The web application cannot and must not silently install a root system service. On a supported Linux/KVM
+host, the Status page stages the large verified inputs and copies one explicit host command. That command
+is the single privileged consent boundary: it installs or refreshes Firecracker, wires the API, registers
+the trust anchor, and returns nonzero unless the complete setup succeeds. Coding agents may present or copy
+this command, but must not execute it without the operator's explicit host-level authorization.
+
 ## 0. Scope freeze — harden, do not expand
 
 This section is authoritative for future implementation. When an older section describes an optional tool,

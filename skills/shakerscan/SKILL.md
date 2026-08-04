@@ -98,6 +98,10 @@ requested count as successfully queued when the response is partial.
 
 - “Inspect/scan this model” means provider-neutral technical preflight unless the user explicitly asks for
   corporate admission or deployment approval.
+- For the ordinary one-link request, call `/model-intake/resolve` with the pasted reference, take the
+  server-returned `scan_payload`, and queue it with complete artifact acquisition, complete repository
+  snapshot, generated scanners, and dynamic sandbox enabled. Do not ask the user to choose an artifact file
+  when the resolver already selected one. Report unavailable runtime/signing/evaluation controls as gaps.
 - “Can we use/admit/approve/deploy this model?” means the authenticated controlled workflow: submission,
   completed static scan binding, exact-subject Firecracker evidence, frozen evidence, separated human
   approvals, deterministic policy, and isolated signer promotion.
@@ -105,9 +109,11 @@ requested count as successfully queued when the response is partial.
   Missing required tools or physical KVM is a non-pass, not a reason to omit the control.
 - The Firecracker microVM tier is **opt-in and not installed by default**, so `NOT_READY` on a KVM-capable
   host usually means "never installed", not "broken". Check `./scanner.sh model-intake-runner status` or
-  `/model-intake/runners/install-plan`, then hand the operator
-  `sudo ./scanner.sh model-intake-runner install --signer <kms:key-id|local-pem> --confirm`. Installing takes
-  root on the host: never run it yourself, and never route it through the API or the Docker socket.
+  `/model-intake/runners/install-plan`, then hand the operator the exact returned command. Production uses
+  `sudo ./scanner.sh model-intake-runner install --signer kms:<key-id> --confirm`; local PEM is limited to
+  development/test/staging. The command verifies the staged kernel/rootfs, refreshes the service and API,
+  and registers the purpose-scoped runner trust anchor. Installing takes root on the host: never run it
+  yourself, and never route it through the API or the Docker socket.
 - Model names such as CodeRankEmbed and CodeSage are conformance examples, never allowlist branches. Resolve
   any supported Hugging Face/HTTP/cloud/OCI/MLflow source through the same format- and fact-selected controls.
 - After queueing a preflight scan or runner job, report its ID and stop unless the user explicitly asked to
