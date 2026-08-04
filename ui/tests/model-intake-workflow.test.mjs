@@ -8,6 +8,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const api = readFileSync(path.join(root, 'src/lib/api.ts'), 'utf8')
 const workflow = readFileSync(path.join(root, 'src/app/model-intake/ControlledWorkflow.tsx'), 'utf8')
 const page = readFileSync(path.join(root, 'src/app/model-intake/page.tsx'), 'utf8')
+const scanDetail = readFileSync(path.join(root, 'src/app/scans/[id]/page.tsx'), 'utf8')
 
 test('scanner readiness surfaces enforceable material freshness and reassessment', () => {
   assert.match(page, /scanner rules or vulnerability data are stale/)
@@ -459,4 +460,15 @@ test('both bill-of-materials standards are offered', () => {
   assert.match(api, /'cyclonedx' \| 'spdx' \| 'aibom'/)
   assert.match(api, /spdx\.json/)
   assert.match(report, /download\('spdx'\)/)
+})
+
+test('a Model Intake scan opens on the executive report, not generic scan chrome', () => {
+  const report = readFileSync(path.join(root, 'src/components/ReportView.tsx'), 'utf8')
+  assert.match(scanDetail, /if \(isModelIntake\)/)
+  assert.match(scanDetail, /PageHeader title="Model Intake report"/)
+  assert.match(scanDetail, /Corporate policy decision and exception details/)
+  assert.match(scanDetail, /Model Intake execution log \(\{logs\.length\} lines\)/)
+  assert.match(report, /!isModelIntakeScan && <div className="bg-gray-800\/50/)
+  assert.match(report, /order-first bg-gray-800\/50/)
+  assert.match(report, /What the review established/)
 })

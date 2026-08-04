@@ -1266,6 +1266,8 @@ function ScanDetailContent() {
     )
   }
 
+  const isModelIntake = scan.run_kind === 'model_intake' || scan.scan_type === 'model_intake'
+
   // Show progress bar while running
   if (scan.status === 'running' || scan.status === 'pending') {
     return (
@@ -1350,6 +1352,39 @@ function ScanDetailContent() {
   }
 
   // Show full report for completed scans
+  if (isModelIntake) {
+    return (
+      <div>
+        <PageHeader title="Model Intake report" backHref={backUrl} backLabel="Back to scans" />
+        <ReportView
+          scan={scan}
+          isAuthenticated={true}
+          enableRemediationTracking={true}
+        />
+        <div className="mt-6 space-y-3">
+          <details className="rounded-lg border border-gray-800 bg-gray-900/50">
+            <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-gray-300 hover:text-white">
+              Corporate policy decision and exception details
+            </summary>
+            <div className="px-4 pb-4">
+              <DeploymentDecisionCard
+                decision={deploymentDecision}
+                loading={deploymentDecisionLoading}
+                onRefresh={refreshDeploymentDecision}
+              />
+            </div>
+          </details>
+          <details className="rounded-lg border border-gray-800 bg-gray-900/50">
+            <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-gray-300 hover:text-white">
+              Model Intake execution log ({logs.length} lines)
+            </summary>
+            <div className="px-4 pb-4">{renderScanActivityLogs(false)}</div>
+          </details>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div>
       <PageHeader title={scan.target_url} backHref={backUrl} backLabel="Back to scans" />

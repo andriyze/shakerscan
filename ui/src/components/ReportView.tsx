@@ -927,9 +927,9 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   })()
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <div className="max-w-7xl mx-auto flex flex-col px-4 sm:px-6 lg:px-8 py-8">
       {/* Scan Summary */}
-      <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
+      {!isModelIntakeScan && <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
         <div className="mb-4 flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div className="min-w-0">
             {isModelIntakeScan ? (
@@ -1039,7 +1039,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
             <p className="text-lg font-semibold">{Array.isArray(findings) ? findings.length : 0}</p>
           </div>
         </div>
-      </div>
+      </div>}
 
       {isAsmRecon && (
         <div className="mb-8 rounded-lg border border-blue-500/40 bg-blue-950/20 p-4">
@@ -1588,13 +1588,18 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
 
       {/* Model Intake */}
       {model_intake && (
-        <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
+        <div className="order-first bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
           <div className="flex flex-wrap items-start justify-between gap-4 mb-5">
             <div>
-              <h2 className="text-2xl font-bold">Model Intake</h2>
-              <p className="text-sm text-gray-400 mt-1 break-all">
-                {modelIntakeSummary?.artifact_ref || scan.target_url}
-              </p>
+              <div className="text-xs font-semibold uppercase tracking-wide text-cyan-300">Model Intake report</div>
+              <h2 className="mt-1 text-2xl font-bold break-words">{modelIntakeArtifactLabel}</h2>
+              <p className="mt-1 text-sm text-gray-400">Reviewed {new Date(scan.created_at).toLocaleString()}</p>
+              {fullArtifactUrl && (
+                <details className="mt-2">
+                  <summary className="cursor-pointer select-none text-xs text-blue-400 hover:text-blue-300">Show full artifact URL</summary>
+                  <p className="mt-1 break-all font-mono text-xs text-gray-400">{fullArtifactUrl}</p>
+                </details>
+              )}
             </div>
             <div className="flex flex-wrap items-center gap-2">
               {modelIntakeDisplayFormatPosture && (
@@ -1603,6 +1608,14 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                 </span>
               )}
               <ModelIntakeSbomDownload scanId={scan.id} />
+              <div className="no-print flex flex-wrap items-center gap-2">
+                <ExportPDFButton />
+                {isAuthenticated && (
+                  <button type="button" onClick={handleDownloadJson} className="px-3 py-2 rounded border border-blue-500/60 text-blue-300 text-sm hover:bg-blue-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500">
+                    Download JSON
+                  </button>
+                )}
+              </div>
             </div>
           </div>
 
