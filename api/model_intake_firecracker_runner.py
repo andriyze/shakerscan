@@ -102,7 +102,10 @@ def _custom_code_sha256(subject: Path) -> str | None:
 
 
 def _copy_tree(source: Path, destination: Path) -> None:
-    destination.mkdir(parents=True, exist_ok=False)
+    destination.mkdir(parents=True, mode=0o755, exist_ok=False)
+    # The systemd service intentionally runs with a restrictive umask. The
+    # ext4 image still needs a traversable read-only subject root for uid 65532.
+    destination.chmod(0o755)
     if source.is_file():
         target = destination / source.name
         shutil.copyfile(source, target)

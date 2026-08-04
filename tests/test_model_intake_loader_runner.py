@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
@@ -12,6 +13,7 @@ from model_intake_firecracker_runner import (  # noqa: E402
     FirecrackerExecutionError,
     FirecrackerRunner,
     _unix_http,
+    _copy_tree,
     _wait_for_jailed_pid,
     parse_network_telemetry,
 )
@@ -178,6 +180,21 @@ def test_runner_rejects_pid_reuse_while_waiting(monkeypatch):
 
     with pytest.raises(FirecrackerExecutionError, match="identity changed"):
         _wait_for_jailed_pid(1234, "original", 1)
+
+
+def test_runner_subject_root_is_traversable_despite_service_umask(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "config.json").write_text('{"model_type":"example"}')
+    destination = tmp_path / "input-tree" / "model"
+    previous = os.umask(0o077)
+    try:
+        _copy_tree(source, destination)
+    finally:
+        os.umask(previous)
+
+    assert destination.stat().st_mode & 0o777 == 0o755
+    assert (destination / "config.json").stat().st_mode & 0o777 == 0o644
 
 
 def test_firecracker_readiness_has_no_local_container_fallback(tmp_path, monkeypatch):
