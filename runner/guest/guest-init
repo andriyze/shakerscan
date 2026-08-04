@@ -15,6 +15,8 @@ ensure_mounted() {
 ensure_mounted /proc proc proc
 ensure_mounted /sys sysfs sysfs
 ensure_mounted /dev devtmpfs devtmpfs
+mount -t tmpfs -o size=256m,nosuid,nodev,noexec tmpfs /tmp
+chmod 1777 /tmp
 mount -o ro /dev/vdb /input
 mount /dev/vdc /output
 mkdir -p /output/traces /output/work
@@ -43,4 +45,5 @@ for phase in $phases; do
 done
 /opt/venv/bin/python /opt/shakerscan/guest_worker.py --finalize "$status"
 sync
+umount /output
 /bin/busybox poweroff -f
