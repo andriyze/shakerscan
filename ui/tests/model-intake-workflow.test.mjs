@@ -301,6 +301,7 @@ test('the microVM tier is offered as an opt-in install, not executed by the API'
   assert.match(shell, /Linux host requirements/)
   assert.match(shell, /x86_64 Linux with KVM/)
   assert.match(shell, /nested virtualization/)
+  assert.match(shell, /python3\.12-venv/)
   assert.match(shell, /Installation, recovery, and upgrade details/)
   // Installation guidance remains discoverable after readiness turns green.
   assert.match(shell, /\{plan && \(/)

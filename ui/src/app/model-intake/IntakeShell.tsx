@@ -277,6 +277,9 @@ export function RunnerInstallCard({
           <li>x86_64 Linux with KVM available at <code>/dev/kvm</code></li>
           <li>CPU virtualization exposed to the host; cloud VMs usually require nested virtualization</li>
           <li>cgroup v2, systemd, nftables, root for the one-time host installation, and several GB of disk</li>
+          <li>
+            Python 3 with the venv module (for example <code>python3.12-venv</code> on Ubuntu 24.04)
+          </li>
         </ul>
         <p className="mt-2 text-[11px] text-gray-500">
           ShakerScan never installs this privileged tier silently. The UI can stage the pinned guest,
