@@ -1394,6 +1394,28 @@ export interface ModelIntakeRunnerReadiness {
   fallback_execution?: boolean
 }
 
+export interface ModelIntakeAutomaticReview {
+  id: string
+  scan_id: string
+  submission_id?: string | null
+  calibration_job_id?: string | null
+  runtime_job_id?: string | null
+  source_kind: ModelIntakePlatform
+  requested_environment: 'development' | 'test' | 'staging' | 'production'
+  state: string
+  current_step: string
+  progress: number
+  technical_outcome?: string | null
+  pending_controls?: Array<{ control: string; status: string; action: string }>
+  timeline_json?: Array<{ event: string; state: string; at: string }>
+  error_json?: { code?: string; message?: string } | null
+  scan_report_url?: string | null
+  technical_report_urls?: Partial<Record<'json' | 'html' | 'sarif', string>>
+  created_at: string
+  updated_at: string
+  completed_at?: string | null
+}
+
 export interface ModelIntakeWorkflowSubmission {
   id: string
   requested_by?: string
@@ -4143,6 +4165,48 @@ export async function getModelIntakeRunnerReadiness(): Promise<ModelIntakeRunner
   const res = await fetch(`${API_URL}/model-intake/runners/readiness`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load Firecracker runner readiness'))
   return res.json()
+}
+
+export async function createModelIntakeAutomaticReview(data: {
+  source: string
+  intended_environment: 'development' | 'test' | 'staging' | 'production'
+  revision?: string
+}): Promise<{
+  review: ModelIntakeAutomaticReview
+  scan_id: string
+  ui_url: string
+  scan_report_url: string
+  authority: 'technical_evidence_only'
+}> {
+  const res = await fetch(`${API_URL}/model-intake/automatic-reviews`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to start automatic Model Intake review'))
+  return res.json()
+}
+
+export async function listModelIntakeAutomaticReviews(limit: number = 10): Promise<{ reviews: ModelIntakeAutomaticReview[] }> {
+  const res = await fetch(`${API_URL}/model-intake/automatic-reviews?limit=${limit}`, { cache: 'no-store' })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load automatic Model Intake reviews'))
+  return res.json()
+}
+
+export async function getModelIntakeAutomaticReview(id: string): Promise<ModelIntakeAutomaticReview> {
+  const res = await fetch(`${API_URL}/model-intake/automatic-reviews/${id}`, { cache: 'no-store' })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load automatic Model Intake review'))
+  return res.json()
+}
+
+export async function downloadModelIntakeAutomaticReport(
+  id: string,
+  format: 'json' | 'html' | 'sarif',
+): Promise<{ blob: Blob; filename: string }> {
+  const res = await fetch(`${API_URL}/model-intake/automatic-reviews/${id}/report?format=${format}`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, `Failed to export automatic Model Intake ${format.toUpperCase()} report`))
+  const suffix = format === 'sarif' ? 'sarif.json' : format
+  return { blob: await res.blob(), filename: `model-intake-automatic-${id}.${suffix}` }
 }
 
 export async function listModelIntakeSubmissions(

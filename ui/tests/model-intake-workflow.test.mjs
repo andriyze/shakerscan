@@ -192,7 +192,7 @@ test('cross-phase navigation targets the phase that renders the control', () => 
   assert.match(workflow, /onEditContext: \(\) => void/)
   assert.doesNotMatch(workflow, /href="#model-intake-source"/)
   assert.match(page, /setPhase\('source'\)/)
-  assert.match(page, /setPhase\('preflight'\)\n    setPolicyProfile\('strict'\)/)
+  assert.match(page, /setPhase\('preflight'\)\n    setWorkflowMode\('advanced'\)\n    setPolicyProfile\('strict'\)/)
 })
 
 test('operator credential delivery cannot be enabled by spoofed deployment headers', () => {
@@ -257,13 +257,15 @@ test('pasting a model reference produces the complete evidence set by default', 
 
 test('one pasted Hugging Face link queues the complete technical review', () => {
   assert.match(page, /Test a model end to end/)
-  assert.match(page, /Run complete review/)
+  assert.match(page, /Start review/)
   assert.match(page, /runCompleteReview/)
-  assert.match(page, /complete_artifact_download: true/)
-  assert.match(page, /complete_repository_snapshot: true/)
-  assert.match(page, /run_generated_scanners: true/)
-  assert.match(page, /run_dynamic_sandbox: true/)
-  assert.match(page, /Anything\s+unavailable is reported as not tested/)
+  assert.match(page, /createModelIntakeAutomaticReview/)
+  assert.match(page, /Advanced \/ manual/)
+  assert.match(page, /Firecracker load \+ repeat inference/)
+  assert.match(page, /SBOM, AIBOM, JSON, HTML, SARIF/)
+  assert.match(page, /The controller keeps working if this page is closed or the API restarts/)
+  assert.match(api, /model-intake\/automatic-reviews/)
+  assert.match(api, /downloadModelIntakeAutomaticReport/)
 })
 
 test('model intake reports lead with outcomes and collapse technical bulk', () => {

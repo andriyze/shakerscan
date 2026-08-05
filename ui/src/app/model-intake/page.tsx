@@ -30,6 +30,9 @@ import {
   getModelIntakeScannerReadiness,
   getModelIntakeRunnerReadiness,
   getModelIntakeRunnerInstallPlan,
+  createModelIntakeAutomaticReview,
+  listModelIntakeAutomaticReviews,
+  downloadModelIntakeAutomaticReport,
   getPolicyProfiles,
   listRecentModelIntakeScans,
   resolveModelIntakeReference,
@@ -48,6 +51,7 @@ import {
   type ModelIntakeScannerReadiness,
   type ModelIntakeTrustAnchor,
   type ModelIntakeAdmission,
+  type ModelIntakeAutomaticReview,
   type PolicyProfile as SavedPolicyProfile,
 } from '@/lib/api'
 import {
@@ -426,6 +430,10 @@ function ModelIntakeSettingsContent() {
   const trustSectionRef = useRef<HTMLDivElement | null>(null)
   const [trustRemediationApplied, setTrustRemediationApplied] = useState(false)
   const [phase, setPhase] = useState<IntakePhase>('source')
+  const [workflowMode, setWorkflowMode] = useState<'automatic' | 'advanced'>('automatic')
+  const [automaticReviews, setAutomaticReviews] = useState<ModelIntakeAutomaticReview[]>([])
+  const [automaticReviewsError, setAutomaticReviewsError] = useState<string | null>(null)
+  const [automaticDownload, setAutomaticDownload] = useState('')
   const [scanDepth, setScanDepth] = useState<ModelIntakeScanDepth>('full')
   const [platform, setPlatform] = useState<ModelIntakePlatform>('auto')
   const [environment, setEnvironment] = useState<ModelIntakeEnvironment>('production')
@@ -585,6 +593,16 @@ function ModelIntakeSettingsContent() {
     }
   }, [])
 
+  const loadAutomaticReviews = useCallback(async () => {
+    try {
+      const payload = await listModelIntakeAutomaticReviews(10)
+      setAutomaticReviews(payload.reviews || [])
+      setAutomaticReviewsError(null)
+    } catch (err) {
+      setAutomaticReviewsError(err instanceof Error ? err.message : 'Failed to load automatic reviews')
+    }
+  }, [])
+
   // A local install already owns its operator credential; asking the human to
   // find it in .env was pure friction. Fall back to the manual field only when
   // the UI server declines (remote bind, autofill disabled, or unconfigured).
@@ -613,6 +631,7 @@ function ModelIntakeSettingsContent() {
     loadScannerReadiness()
     loadRunnerReadiness()
     loadIntakeScans()
+    loadAutomaticReviews()
   }, [
     loadOperatorCredential,
     loadScenario,
@@ -622,7 +641,18 @@ function ModelIntakeSettingsContent() {
     loadScannerReadiness,
     loadRunnerReadiness,
     loadIntakeScans,
+    loadAutomaticReviews,
   ])
+
+  const automaticReviewRunning = automaticReviews.some((review) =>
+    !['technical_review_complete', 'attention_required', 'failed', 'cancelled'].includes(review.state)
+  )
+
+  useEffect(() => {
+    if (!automaticReviewRunning) return
+    const timer = setInterval(loadAutomaticReviews, 5_000)
+    return () => clearInterval(timer)
+  }, [automaticReviewRunning, loadAutomaticReviews])
 
   const queuedScans = useMemo(
     () => queuedScanIds
@@ -668,6 +698,7 @@ function ModelIntakeSettingsContent() {
     // The trust controls live in the preflight phase, so a remediation deep
     // link has to open that phase before scrolling to them.
     setPhase('preflight')
+    setWorkflowMode('advanced')
     setPolicyProfile('strict')
     setRequireHash(true)
     setRequireSignature(true)
@@ -1127,42 +1158,15 @@ function ModelIntakeSettingsContent() {
     setQuickSubmitting(true)
     setError(null)
     try {
-      const resolved = await resolveModelIntakeReference({
-        platform: 'auto',
-        ref: sourceRef.trim(),
+      const queued = await createModelIntakeAutomaticReview({
+        source: sourceRef.trim(),
+        intended_environment: environment,
         revision: optionalText(revision),
-        metadata_json: {},
-        timeout_seconds: 20,
       })
-      if (!resolved.scan_payload?.artifact_url) {
-        throw new Error('This reference did not resolve to a testable model artifact.')
-      }
-      const environmentOption = ENVIRONMENT_OPTIONS.find((item) => item.value === environment)
-      const payload: ModelIntakeScanRequest = {
-        ...resolved.scan_payload,
-        intake_mode: 'preflight',
-        policy_profile: environmentOption?.policyProfile || 'production',
-        complete_artifact_download: true,
-        complete_repository_snapshot: true,
-        run_generated_scanners: true,
-        run_dynamic_sandbox: true,
-        require_dynamic_sandbox: environment === 'production' || environment === 'staging',
-      }
-      setResolverResult(resolved)
-      setPlatform(
-        ['auto', 'huggingface', 'http', 's3', 'gcs', 'azure', 'oci', 'mlflow'].includes(resolved.platform)
-          ? resolved.platform as ModelIntakePlatform
-          : 'auto',
-      )
-      if (resolved.revision) setRevision(String(resolved.revision))
-      if (resolved.selected_file?.path) setFilename(resolved.selected_file.path)
-      applyScanPayload(payload)
-      const queued = await submitModelIntakeScan(payload)
       trackQueuedScan(queued.scan_id)
-      setPhase('preflight')
-      await loadIntakeScans()
-      toast.success('Complete model review queued', {
-        link: { href: `/scans/${queued.scan_id}`, label: 'Open report' },
+      await Promise.all([loadAutomaticReviews(), loadIntakeScans()])
+      toast.success('Automatic end-to-end review started', {
+        link: { href: queued.scan_report_url, label: 'Open live scan' },
       })
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to queue the complete model review'
@@ -1170,6 +1174,24 @@ function ModelIntakeSettingsContent() {
       toast.error(message)
     } finally {
       setQuickSubmitting(false)
+    }
+  }
+
+  async function exportAutomaticReport(reviewId: string, format: 'json' | 'html' | 'sarif') {
+    const key = `${reviewId}:${format}`
+    setAutomaticDownload(key)
+    try {
+      const exported = await downloadModelIntakeAutomaticReport(reviewId, format)
+      const url = URL.createObjectURL(exported.blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = exported.filename
+      anchor.click()
+      URL.revokeObjectURL(url)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to download automatic review report')
+    } finally {
+      setAutomaticDownload('')
     }
   }
 
@@ -1308,6 +1330,25 @@ function ModelIntakeSettingsContent() {
         </div>
       </div>
 
+      <div className="inline-flex rounded-lg border border-gray-800 bg-gray-950 p-1" aria-label="Model Intake workflow mode">
+        <button
+          type="button"
+          onClick={() => setWorkflowMode('automatic')}
+          className={`rounded-md px-4 py-2 text-sm font-medium ${workflowMode === 'automatic' ? 'bg-cyan-700 text-white' : 'text-gray-400 hover:text-white'}`}
+        >
+          Automatic review
+        </button>
+        <button
+          type="button"
+          onClick={() => setWorkflowMode('advanced')}
+          className={`rounded-md px-4 py-2 text-sm font-medium ${workflowMode === 'advanced' ? 'bg-cyan-700 text-white' : 'text-gray-400 hover:text-white'}`}
+        >
+          Advanced / manual
+        </button>
+      </div>
+
+      {workflowMode === 'automatic' && (
+      <>
       <Card className="border-cyan-500/30 bg-gradient-to-br from-cyan-950/40 to-gray-950 p-5">
         <div className="max-w-3xl">
           <div className="flex items-center gap-2 text-lg font-semibold text-white">
@@ -1315,9 +1356,10 @@ function ModelIntakeSettingsContent() {
             Test a model end to end
           </div>
           <p className="mt-1 text-sm text-gray-400">
-            Paste one Hugging Face link. ShakerScan resolves the pinned files, requests complete acquisition,
-            hashes every acquired byte, scans code and dependencies, and requests isolated runtime evidence. Anything
-            unavailable is reported as not tested — never as a pass.
+            Paste one Hugging Face link and click Start. ShakerScan pins the revision, acquires and hashes the complete
+            model repository, runs every applicable built-in scanner, creates SBOM/AIBOM outputs, performs Firecracker
+            calibration and repeat inference, freezes the evidence, and prepares one technical report. Human and legal
+            approvals remain clearly pending; they are never guessed.
           </p>
         </div>
         <div className="mt-4 grid gap-3 lg:grid-cols-[minmax(0,1fr)_12rem_auto]">
@@ -1352,15 +1394,107 @@ function ModelIntakeSettingsContent() {
             className="inline-flex items-center justify-center gap-2 self-end rounded-lg bg-cyan-600 px-5 py-2 text-sm font-semibold text-white hover:bg-cyan-500 disabled:opacity-50"
           >
             {quickSubmitting ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-            {quickSubmitting ? 'Resolving and queueing…' : 'Run complete review'}
+            {quickSubmitting ? 'Starting review…' : 'Start review'}
           </button>
         </div>
         <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-xs text-gray-500">
           <span>Complete artifact + repository</span>
           <span>ModelScan, Fickling, Semgrep, Trivy</span>
-          <span>Isolated load/inference when the microVM runner is ready</span>
+          <span>Firecracker load + repeat inference</span>
+          <span>SBOM, AIBOM, JSON, HTML, SARIF</span>
         </div>
+        {runnerReadiness?.status !== 'READY' && (
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-yellow-700/50 bg-yellow-950/20 p-3 text-sm text-yellow-100">
+            <span>
+              The static review can run now, but isolated model loading will be marked not tested until the microVM runner is ready.
+            </span>
+            <button
+              type="button"
+              onClick={() => { setWorkflowMode('advanced'); setPhase('status') }}
+              className="rounded border border-yellow-600/50 px-3 py-1.5 text-xs font-medium hover:bg-yellow-900/40"
+            >
+              Set up Firecracker
+            </button>
+          </div>
+        )}
       </Card>
+
+      <Card className="min-w-0 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 className="text-sm font-semibold text-white">Automatic reviews</h2>
+            <p className="mt-1 text-xs text-gray-500">The controller keeps working if this page is closed or the API restarts.</p>
+          </div>
+          <button type="button" onClick={loadAutomaticReviews} className="rounded border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800">Refresh</button>
+        </div>
+        {automaticReviewsError && <div role="alert" className="mt-3 text-xs text-red-300">{automaticReviewsError}</div>}
+        {!automaticReviewsError && automaticReviews.length === 0 ? (
+          <div className="mt-4 rounded-lg border border-gray-800 bg-gray-950 p-4 text-sm text-gray-500">
+            No automatic review has been started yet.
+          </div>
+        ) : (
+          <div className="mt-4 grid gap-3">
+            {automaticReviews.map((review) => {
+              const terminal = ['technical_review_complete', 'attention_required', 'failed', 'cancelled'].includes(review.state)
+              const successful = review.state === 'technical_review_complete'
+              return (
+                <div key={review.id} className="rounded-lg border border-gray-800 bg-gray-950 p-4">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className={`rounded px-2 py-1 text-xs font-semibold ${successful ? 'bg-green-950/60 text-green-300' : terminal ? 'bg-yellow-950/60 text-yellow-300' : 'bg-cyan-950/60 text-cyan-300'}`}>
+                          {review.state.replace(/_/g, ' ')}
+                        </span>
+                        <span className="text-xs text-gray-500">{review.requested_environment}</span>
+                      </div>
+                      <div className="mt-2 text-sm font-medium text-white">{review.current_step.replace(/_/g, ' ')}</div>
+                      <div className="mt-1 font-mono text-[11px] text-gray-600">review {review.id} · scan {review.scan_id}</div>
+                    </div>
+                    <div className="text-right text-sm font-semibold text-white">{review.progress}%</div>
+                  </div>
+                  <div className="mt-3 h-2 overflow-hidden rounded-full bg-gray-800">
+                    <div className={`h-full ${terminal && !successful ? 'bg-yellow-500' : 'bg-cyan-500'}`} style={{ width: `${review.progress}%` }} />
+                  </div>
+                  {review.error_json?.message && (
+                    <div role="alert" className="mt-3 rounded border border-yellow-800/60 bg-yellow-950/20 p-3 text-xs text-yellow-200">
+                      {review.error_json.message}
+                    </div>
+                  )}
+                  {(review.pending_controls || []).length > 0 && (
+                    <div className="mt-3 grid gap-2 md:grid-cols-2">
+                      {(review.pending_controls || []).map((control) => (
+                        <div key={control.control} className="rounded border border-gray-800 bg-gray-900 p-2 text-xs">
+                          <div className="font-medium text-gray-200">{control.control.replace(/_/g, ' ')} · {control.status}</div>
+                          <div className="mt-1 text-gray-500">{control.action}</div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <Link href={`/scans/${review.scan_id}`} className="rounded border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800">Technical scan</Link>
+                    {review.submission_id && (['json', 'html', 'sarif'] as const).map((format) => (
+                      <button
+                        key={format}
+                        type="button"
+                        onClick={() => exportAutomaticReport(review.id, format)}
+                        disabled={automaticDownload === `${review.id}:${format}`}
+                        className="rounded border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50"
+                      >
+                        {automaticDownload === `${review.id}:${format}` ? 'Preparing…' : `${format.toUpperCase()} report`}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </Card>
+      </>
+      )}
+
+      {workflowMode === 'advanced' && (
+      <>
 
       <IntakeContextBar
         source={intakeSource}
@@ -2461,6 +2595,8 @@ function ModelIntakeSettingsContent() {
           )}
         </Card>
         </>
+      )}
+      </>
       )}
     </div>
   )
