@@ -138,6 +138,40 @@ def python_venv_package() -> str | None:
     return f"python{suffix}-venv" if suffix else "python3-venv"
 
 
+def host_packages(runtime: Path, facts: dict) -> list[str]:
+    """Return the release-owned OS package set plus any version-specific venv fix."""
+    manifest = runtime / "runner/host/system-requirements.ubuntu.txt"
+    packages: list[str] = []
+    try:
+        for line in manifest.read_text().splitlines():
+            value = line.strip()
+            if value and not value.startswith("#"):
+                if not re.fullmatch(r"[a-z0-9][a-z0-9+.-]*", value):
+                    raise ValueError(f"invalid package name in {manifest}: {value!r}")
+                packages.append(value)
+    except OSError as exc:
+        raise ValueError(f"runner system requirements are missing: {manifest}") from exc
+    if facts.get("missing_python_venv_package"):
+        packages.append(str(facts["missing_python_venv_package"]))
+    return sorted(set(packages))
+
+
+def install_host_packages(runtime: Path, facts: dict) -> bool:
+    if not Path("/etc/debian_version").is_file() or shutil.which("apt-get") is None:
+        return False
+    try:
+        packages = host_packages(runtime, facts)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return False
+    print("==> installing release-owned Firecracker host prerequisites")
+    refreshed = _run(["apt-get", "update"])
+    if refreshed.returncode != 0:
+        return False
+    installed = _run(["apt-get", "install", "-y", "--no-install-recommends", *packages])
+    return installed.returncode == 0
+
+
 def _path_exists(path: Path) -> bool | None:
     """Existence without asserting readability. None means "cannot tell".
 
@@ -539,15 +573,37 @@ def _register_runner_trust_anchors(runtime: Path, signer: str, builder_id: str) 
 def cmd_install(args, runtime: Path) -> int:
     facts = host_facts(runtime)
     ok, reason = installability(facts)
-    if not ok:
-        print(f"Cannot install here: {reason}", file=sys.stderr)
-        return 2
     if os.geteuid() != 0:
         print("The microVM tier installs host binaries and a systemd unit, so this needs root:",
               file=sys.stderr)
         print(f"  sudo ./scanner.sh model-intake-runner install --signer {args.signer or DEFAULT_SIGNER} --confirm",
               file=sys.stderr)
         return 2
+    if not ok:
+        missing_packages = bool(
+            facts.get("missing_host_tools") or facts.get("missing_python_venv_package")
+        )
+        structurally_supported = (
+            facts.get("platform") == "linux"
+            and facts.get("arch") == "x86_64"
+            and facts.get("kvm") is True
+            and facts.get("cgroup_v2") is True
+        )
+        if not (args.confirm and missing_packages and structurally_supported):
+            print(f"Cannot install here: {reason}", file=sys.stderr)
+            return 2
+        if not install_host_packages(runtime, facts):
+            print(
+                "Could not install the host prerequisites automatically. "
+                f"The exact missing-prerequisite report was: {reason}",
+                file=sys.stderr,
+            )
+            return 2
+        facts = host_facts(runtime)
+        ok, reason = installability(facts)
+        if not ok:
+            print(f"Host prerequisites remain incomplete: {reason}", file=sys.stderr)
+            return 2
 
     signer_env: dict[str, str | None] = {}
     signer = args.signer or DEFAULT_SIGNER

@@ -125,3 +125,32 @@ def test_unreadable_paths_report_unknown_rather_than_absent(tmp_path, monkeypatc
         lambda argv, **kwargs: type("R", (), {"returncode": 1, "stderr": "sudo: a password is required"})(),
     )
     assert cli._path_exists(Path("/etc/shakerscan/model-intake-runner.env")) is None
+
+
+def test_release_owns_the_complete_ubuntu_host_package_manifest(tmp_path):
+    manifest = tmp_path / "runner/host/system-requirements.ubuntu.txt"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("""
+# comment
+e2fsprogs
+iproute2
+nftables
+python3-venv
+""")
+
+    assert cli.host_packages(tmp_path, {"missing_python_venv_package": "python3.12-venv"}) == [
+        "e2fsprogs", "iproute2", "nftables", "python3-venv", "python3.12-venv",
+    ]
+
+
+def test_host_package_manifest_rejects_shell_syntax(tmp_path):
+    manifest = tmp_path / "runner/host/system-requirements.ubuntu.txt"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("nftables;touch-pwned\n")
+
+    try:
+        cli.host_packages(tmp_path, {})
+    except ValueError as exc:
+        assert "invalid package name" in str(exc)
+    else:
+        raise AssertionError("unsafe package manifest value was accepted")
