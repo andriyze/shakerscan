@@ -3357,6 +3357,7 @@ async def lifespan(app: FastAPI):
             asyncio.create_task(asm_dispatcher(db_pool)),
             asyncio.create_task(research_autopilot_runner(db_pool)),
             asyncio.create_task(scan_artifact_retention_runner(db_pool)),
+            asyncio.create_task(model_intake_automatic_review_runner(db_pool)),
         ]
 
     yield
@@ -3902,6 +3903,24 @@ class ModelIntakeResolveRequest(BaseModel):
     filename: Optional[str] = None
     metadata_json: dict[str, Any] = Field(default_factory=dict)
     timeout_seconds: int = Field(default=15, ge=1, le=60)
+
+
+class ModelIntakeAutomaticReviewRequest(BaseModel):
+    """Minimal-input technical review request.
+
+    The automatic workflow may generate and bind technical evidence, but it is
+    deliberately unable to create approvals, policy exceptions, or an
+    admission. Those remain identity-bound operator actions.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: str = Field(min_length=1, max_length=4000)
+    intended_environment: str = Field(
+        default="production",
+        pattern="^(development|test|staging|production)$",
+    )
+    revision: Optional[str] = Field(default=None, max_length=400)
 
 
 class ModelIntakeAdmissionVerifyRequest(BaseModel):
@@ -5264,6 +5283,13 @@ def _require_fleet_operator(request: Request) -> None:
 
 def _require_model_intake_operator(request: Request) -> None:
     """Authorize deployment verification and Model Intake trust mutations."""
+    # Requests created by the durable automatic-review controller carry a
+    # server-only ASGI scope value. HTTP clients cannot set ASGI scope keys.
+    # This principal is used only to call the existing evidence-generation
+    # functions; the controller has no path to approvals, exceptions, policy
+    # decisions, promotion, or signer issuance.
+    if request.scope.get("shakerscan.model_intake_system_actor") == "system:model-intake-auto":
+        return
     peer = getattr(getattr(request, "client", None), "host", None)
     try:
         peer_is_loopback = bool(peer) and ipaddress.ip_address(peer).is_loopback
@@ -5361,6 +5387,9 @@ def _model_intake_operator_credential(request: Request) -> dict[str, Any] | None
 
 def _model_intake_authenticated_subject(request: Request) -> str:
     """Return a server-derived identity; never accept approver identity in JSON."""
+    system_actor = request.scope.get("shakerscan.model_intake_system_actor")
+    if system_actor == "system:model-intake-auto":
+        return system_actor
     _require_model_intake_operator(request)
     configured = _model_intake_operator_credential(request)
     if configured:
@@ -5393,6 +5422,23 @@ def _model_intake_submission_subject(request: Request) -> str:
     submitter/approver separation.
     """
     return _model_intake_authenticated_subject(request)
+
+
+def _model_intake_automatic_system_request() -> Request:
+    """Create an internal principal without persisting or replaying a bearer token."""
+    return Request({
+        "type": "http",
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/internal/model-intake/automatic-review",
+        "raw_path": b"/internal/model-intake/automatic-review",
+        "query_string": b"",
+        "headers": [],
+        "client": ("127.0.0.1", 0),
+        "server": ("127.0.0.1", 8080),
+        "shakerscan.model_intake_system_actor": "system:model-intake-auto",
+    })
 
 
 def _fleet_connection_bundle() -> dict[str, Any]:
@@ -15406,6 +15452,429 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
     if command_result:
         response["operation_id"] = command_result["id"]
     return response
+
+
+_MODEL_INTAKE_AUTO_TERMINAL_STATES = {
+    "technical_review_complete", "attention_required", "failed", "cancelled",
+}
+
+
+def _model_intake_auto_timeline(value: Any) -> list[dict[str, Any]]:
+    decoded = _decode_json_value(value)
+    return [item for item in decoded if isinstance(item, dict)] if isinstance(decoded, list) else []
+
+
+async def _update_model_intake_automatic_review(
+    conn: Any,
+    review: Any,
+    *,
+    state: str,
+    current_step: str,
+    progress: int,
+    event: str,
+    technical_outcome: str | None = None,
+    error: dict[str, Any] | None = None,
+    pending_controls: list[dict[str, Any]] | None = None,
+    fields: dict[str, Any] | None = None,
+) -> None:
+    timeline = _model_intake_auto_timeline(review["timeline_json"])
+    timeline.append({
+        "event": event,
+        "state": state,
+        "at": utc_now_iso(),
+    })
+    allowed = {
+        "submission_id", "calibration_job_id", "runtime_job_id",
+        "deployment_bundle_json", "known_answer_embedding_sha256",
+    }
+    updates = {key: value for key, value in (fields or {}).items() if key in allowed}
+    assignments = [
+        "state=$2", "current_step=$3", "progress=$4", "technical_outcome=$5",
+        "timeline_json=$6::jsonb", "error_json=$7::jsonb", "pending_controls=$8::jsonb",
+        "updated_at=NOW()",
+    ]
+    args: list[Any] = [
+        review["id"], state, current_step, max(0, min(progress, 100)), technical_outcome,
+        json.dumps(timeline), json.dumps(error) if error else None,
+        json.dumps(pending_controls or []),
+    ]
+    for key, value in updates.items():
+        args.append(json.dumps(value) if key == "deployment_bundle_json" else value)
+        cast = "::jsonb" if key == "deployment_bundle_json" else ""
+        assignments.append(f"{key}=${len(args)}{cast}")
+    if state in _MODEL_INTAKE_AUTO_TERMINAL_STATES:
+        assignments.append("completed_at=COALESCE(completed_at,NOW())")
+    await conn.execute(
+        f"UPDATE model_intake_automatic_reviews SET {','.join(assignments)} WHERE id=$1",
+        *args,
+    )
+
+
+def _model_intake_auto_embedding_bundle(
+    authoritative: dict[str, Any],
+    published: dict[str, Any],
+) -> dict[str, Any]:
+    bundle = dict(authoritative.get("deployment_bundle") or {})
+    dimension = int(published.get("dimension") or 0)
+    max_sequence_length = int(published.get("max_sequence_length") or 0)
+    if dimension <= 0 or max_sequence_length <= 0:
+        missing = []
+        if dimension <= 0:
+            missing.append("embedding dimension")
+        if max_sequence_length <= 0:
+            missing.append("maximum sequence length")
+        raise ValueError("The pinned model revision does not publish " + " and ".join(missing))
+    # These values describe the fixed ShakerScan guest harness, not a claimed
+    # corporate serving configuration: the guest performs attention-mask mean
+    # pooling, emits float32 vectors, and does not normalize them.
+    bundle["embedding_configuration"] = {
+        "dimension": dimension,
+        "pooling": "attention-mask-mean",
+        "normalization": False,
+        "max_sequence_length": max_sequence_length,
+        "precision": "float32",
+    }
+    bundle["retrieval_application_digest"] = None
+    bundle["index_schema_digest"] = None
+    return bundle
+
+
+def _model_intake_auto_observed_embedding(job: dict[str, Any]) -> str | None:
+    result = _model_intake_json_object(job.get("result_json"))
+    payload = result.get("payload") if isinstance(result.get("payload"), dict) else {}
+    observations = payload.get("observations") if isinstance(payload.get("observations"), dict) else {}
+    digest = str(observations.get("embedding_output_sha256") or "").lower()
+    return digest if re.fullmatch(r"[0-9a-f]{64}", digest) else None
+
+
+async def _advance_model_intake_automatic_review(conn: Any, review: Any) -> None:
+    """Advance exactly one durable step; every action is replay-safe at its state boundary."""
+    state = str(review["state"])
+    system_request = _model_intake_automatic_system_request()
+    scan_id = review["scan_id"]
+    if state == "static_scan_pending":
+        scan = await conn.fetchrow(
+            "SELECT id,status,target_url,result,error_message FROM scans WHERE id=$1",
+            scan_id,
+        )
+        if not scan:
+            raise RuntimeError("automatic review scan record disappeared")
+        scan_status = str(scan["status"])
+        if scan_status in {"pending", "queued", "running"}:
+            return
+        if scan_status != "completed":
+            await _update_model_intake_automatic_review(
+                conn, review, state="failed", current_step="static_scan", progress=100,
+                event="static_scan_failed", technical_outcome="INCOMPLETE",
+                error={"code": "static_scan_failed", "message": str(scan["error_message"] or scan_status)},
+            )
+            return
+        result = _model_intake_json_object(scan["result"])
+        intake = result.get("model_intake") if isinstance(result.get("model_intake"), dict) else {}
+        summary = intake.get("summary") if isinstance(intake.get("summary"), dict) else {}
+        artifact_sha = str(summary.get("sha256") or "").lower()
+        submission_response = await create_model_intake_submission(
+            ModelSubmissionRequest(
+                source=str(scan["target_url"]),
+                source_kind=str(review["source_kind"]),
+                intended_environment=str(review["requested_environment"]),
+                intended_use={
+                    "workflow": "automatic_technical_review",
+                    "runtime_contract": "shakerscan-fixed-embedding-harness/v1",
+                },
+                expected_artifact_sha256=artifact_sha if re.fullmatch(r"[0-9a-f]{64}", artifact_sha) else None,
+                declared_metadata={"automatic_review_id": str(review["id"])},
+            ),
+            system_request,
+        )
+        submission_id = submission_response["submission"]["id"]
+        await _update_model_intake_automatic_review(
+            conn, review, state="static_evidence_pending", current_step="bind_static_evidence",
+            progress=45, event="controlled_submission_created",
+            fields={"submission_id": uuid.UUID(str(submission_id))},
+        )
+        return
+
+    submission_id = str(review["submission_id"] or "")
+    if not submission_id:
+        raise RuntimeError("automatic review lost its controlled submission")
+    if state == "static_evidence_pending":
+        await attach_model_intake_static_run(
+            submission_id,
+            ModelSubmissionStaticRunRequest(scan_id=str(scan_id)),
+            system_request,
+        )
+        await _update_model_intake_automatic_review(
+            conn, review, state="runner_prepare", current_step="prepare_isolated_runtime",
+            progress=55, event="static_evidence_bound",
+        )
+        return
+
+    if state == "runner_prepare":
+        readiness = await asyncio.to_thread(_model_intake_runner_readiness_snapshot)
+        if readiness.get("ready") is not True or readiness.get("status") != "READY":
+            await _update_model_intake_automatic_review(
+                conn, review, state="attention_required", current_step="microvm_unavailable",
+                progress=100, event="microvm_unavailable", technical_outcome="INCOMPLETE",
+                pending_controls=[{
+                    "control": "isolated_runtime",
+                    "status": "NOT_RUN",
+                    "action": "Install or repair the Model Intake microVM runner, then start a new automatic review.",
+                }],
+            )
+            return
+        authoritative = await model_intake_runner_bundle(
+            submission_id, system_request, operation="calibration"
+        )
+        published = await model_intake_embedding_configuration(submission_id, system_request)
+        if not published.get("available"):
+            raise ValueError("The pinned model revision does not publish a usable embedding contract")
+        bundle = _model_intake_auto_embedding_bundle(authoritative, published)
+        response = await create_model_intake_runner_job(
+            submission_id,
+            ModelRunnerJobCreateRequest(
+                operation="calibration", deployment_bundle=bundle,
+                known_answer_inputs=[], vcpu_count=2, memory_mib=4096, timeout_seconds=900,
+            ),
+            system_request,
+        )
+        await _update_model_intake_automatic_review(
+            conn, review, state="calibration_running", current_step="calibrate_known_answers",
+            progress=65, event="calibration_queued",
+            fields={
+                "calibration_job_id": uuid.UUID(str(response["job"]["id"])),
+                "deployment_bundle_json": bundle,
+            },
+        )
+        return
+
+    if state == "calibration_running":
+        response = await refresh_model_intake_runner_job(
+            submission_id, str(review["calibration_job_id"]), system_request
+        )
+        job = response["job"]
+        if str(job.get("state")) in {"pending", "running"}:
+            return
+        if str(job.get("state")) != "completed":
+            raise RuntimeError(str(_model_intake_json_object(job.get("error_json")).get("message") or "calibration failed"))
+        digest = _model_intake_auto_observed_embedding(job)
+        if not digest:
+            raise RuntimeError("calibration completed without a bounded embedding digest")
+        await _update_model_intake_automatic_review(
+            conn, review, state="runtime_pending", current_step="verify_known_answers",
+            progress=75, event="calibration_digest_recorded",
+            fields={"known_answer_embedding_sha256": digest},
+        )
+        return
+
+    bundle = _model_intake_json_object(review["deployment_bundle_json"])
+    if state == "runtime_pending":
+        response = await create_model_intake_runner_job(
+            submission_id,
+            ModelRunnerJobCreateRequest(
+                operation="runtime", deployment_bundle=bundle, known_answer_inputs=[],
+                known_answer_embedding_sha256=str(review["known_answer_embedding_sha256"]),
+                vcpu_count=2, memory_mib=4096, timeout_seconds=900,
+            ),
+            system_request,
+        )
+        await _update_model_intake_automatic_review(
+            conn, review, state="runtime_running", current_step="isolated_load_and_inference",
+            progress=82, event="runtime_verification_queued",
+            fields={"runtime_job_id": uuid.UUID(str(response["job"]["id"]))},
+        )
+        return
+
+    if state == "runtime_running":
+        response = await refresh_model_intake_runner_job(
+            submission_id, str(review["runtime_job_id"]), system_request
+        )
+        job = response["job"]
+        if str(job.get("state")) in {"pending", "running"}:
+            return
+        if str(job.get("state")) != "completed":
+            raise RuntimeError(str(_model_intake_json_object(job.get("error_json")).get("message") or "runtime verification failed"))
+        await _update_model_intake_automatic_review(
+            conn, review, state="freeze_pending", current_step="freeze_technical_evidence",
+            progress=92, event="runtime_verification_completed",
+        )
+        return
+
+    if state == "freeze_pending":
+        await freeze_model_intake_evidence(
+            submission_id, ModelEvidenceFreezeRequest(deployment_bundle=bundle), system_request
+        )
+        pending = [
+            {"control": "publisher_trust", "status": "PENDING", "action": "Verify publisher signature or attestation against an approved trust anchor."},
+            {"control": "human_approvals", "status": "PENDING", "action": "Complete the required security, ML platform, legal, privacy, and risk reviews."},
+            {"control": "production_signer", "status": "PENDING", "action": "Use KMS-backed runner and admission signers before production promotion."},
+            {"control": "deployed_data_plane", "status": "EXTERNAL_REQUIRED", "action": "Validate the retrieval application, index schema, authorization, deletion, and monitoring in the target environment."},
+        ]
+        await _update_model_intake_automatic_review(
+            conn, review, state="technical_review_complete", current_step="review_results",
+            progress=100, event="technical_evidence_frozen",
+            technical_outcome="TECHNICAL_REVIEW_COMPLETE", pending_controls=pending,
+        )
+
+
+async def advance_model_intake_automatic_reviews(pool: asyncpg.Pool) -> None:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT * FROM model_intake_automatic_reviews
+            WHERE state <> ALL($1::text[])
+            ORDER BY updated_at ASC LIMIT 8
+            """,
+            sorted(_MODEL_INTAKE_AUTO_TERMINAL_STATES),
+        )
+    for candidate in rows:
+        async with pool.acquire() as conn, conn.transaction():
+            locked = await conn.fetchval(
+                "SELECT pg_try_advisory_xact_lock(hashtextextended($1::text,0))",
+                str(candidate["id"]),
+            )
+            if not locked:
+                continue
+            review = await conn.fetchrow(
+                "SELECT * FROM model_intake_automatic_reviews WHERE id=$1",
+                candidate["id"],
+            )
+            if not review or str(review["state"]) in _MODEL_INTAKE_AUTO_TERMINAL_STATES:
+                continue
+            try:
+                await _advance_model_intake_automatic_review(conn, review)
+            except Exception as exc:
+                logger.exception("Automatic Model Intake review %s failed", review["id"])
+                await _update_model_intake_automatic_review(
+                    conn, review, state="attention_required", current_step=str(review["current_step"]),
+                    progress=100, event="automatic_step_failed", technical_outcome="INCOMPLETE",
+                    error={"code": type(exc).__name__, "message": str(exc)[:2000]},
+                    pending_controls=[{
+                        "control": str(review["current_step"]), "status": "INCOMPLETE",
+                        "action": "Review the recorded error, repair the prerequisite, and start a new automatic review.",
+                    }],
+                )
+
+
+async def model_intake_automatic_review_runner(pool: asyncpg.Pool) -> None:
+    print("[model-intake-auto] Automatic review controller started", flush=True)
+    while True:
+        try:
+            await advance_model_intake_automatic_reviews(pool)
+            await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            print("[model-intake-auto] Automatic review controller stopped", flush=True)
+            break
+        except Exception as exc:
+            logger.exception("Automatic Model Intake controller error: %s", exc)
+            await asyncio.sleep(5)
+
+
+@app.post("/model-intake/automatic-reviews")
+async def create_model_intake_automatic_review(request: ModelIntakeAutomaticReviewRequest):
+    """Resolve and queue a one-link, durable technical review.
+
+    This endpoint cannot approve or admit a model. It produces technical
+    evidence and a frozen manifest, then names the human/external controls that
+    remain.
+    """
+    source = request.source.strip()
+    resolved = await resolve_model_intake(ModelIntakeResolveRequest(
+        platform="auto", ref=source, revision=request.revision,
+        metadata_json={}, timeout_seconds=20,
+    ))
+    scan_payload = resolved.get("scan_payload") if isinstance(resolved.get("scan_payload"), dict) else {}
+    if not scan_payload.get("artifact_url"):
+        raise HTTPException(status_code=422, detail="The model reference did not resolve to a testable artifact")
+    policy_profile = {
+        "production": "production", "staging": "staging",
+        "test": "research", "development": "research",
+    }[request.intended_environment]
+    scan_request = ModelIntakeScanRequest(**{
+        **scan_payload,
+        "intake_mode": "preflight",
+        "policy_profile": policy_profile,
+        "complete_artifact_download": True,
+        "complete_repository_snapshot": resolved.get("capabilities", {}).get("repository_snapshot") == "implemented",
+        "run_generated_scanners": True,
+        "run_dynamic_sandbox": True,
+        "require_dynamic_sandbox": request.intended_environment in {"staging", "production"},
+    })
+    queued = await scan_model_intake(scan_request)
+    review_id = uuid.uuid4()
+    timeline = [{"event": "static_scan_queued", "state": "static_scan_pending", "at": utc_now_iso()}]
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO model_intake_automatic_reviews
+                (id,scan_id,source_kind,source_reference_hash,requested_environment,
+                 state,current_step,progress,timeline_json)
+            VALUES ($1,$2,$3,$4,$5,'static_scan_pending','static_scan',5,$6::jsonb)
+            RETURNING *
+            """,
+            review_id,
+            uuid.UUID(str(queued["scan_id"])),
+            str(resolved.get("platform") or "auto"),
+            hashlib.sha256(source.encode()).hexdigest(),
+            request.intended_environment,
+            json.dumps(timeline),
+        )
+    return {
+        "review": row_to_dict(row),
+        "scan_id": queued["scan_id"],
+        "ui_url": f"/model-intake?automatic_review={review_id}",
+        "scan_report_url": f"/scans/{queued['scan_id']}",
+        "authority": "technical_evidence_only",
+    }
+
+
+@app.get("/model-intake/automatic-reviews")
+async def list_model_intake_automatic_reviews(limit: int = Query(10, ge=1, le=100)):
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM model_intake_automatic_reviews ORDER BY created_at DESC LIMIT $1",
+            limit,
+        )
+    return {"reviews": [row_to_dict(row) for row in rows]}
+
+
+@app.get("/model-intake/automatic-reviews/{review_id}")
+async def get_model_intake_automatic_review(review_id: str):
+    review_uuid = _model_intake_uuid(review_id, "automatic review id")
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM model_intake_automatic_reviews WHERE id=$1", review_uuid
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="Automatic Model Intake review not found")
+    payload = row_to_dict(row)
+    payload["scan_report_url"] = f"/scans/{row['scan_id']}" if row["scan_id"] else None
+    payload["technical_report_urls"] = (
+        {
+            "json": f"/model-intake/automatic-reviews/{review_uuid}/report?format=json",
+            "html": f"/model-intake/automatic-reviews/{review_uuid}/report?format=html",
+            "sarif": f"/model-intake/automatic-reviews/{review_uuid}/report?format=sarif",
+        }
+        if row["submission_id"] else {}
+    )
+    return payload
+
+
+@app.get("/model-intake/automatic-reviews/{review_id}/report")
+async def get_model_intake_automatic_review_report(
+    review_id: str,
+    format: str = Query("json", pattern="^(json|html|sarif)$"),
+):
+    review_uuid = _model_intake_uuid(review_id, "automatic review id")
+    async with db_pool.acquire() as conn:
+        submission_id = await conn.fetchval(
+            "SELECT submission_id FROM model_intake_automatic_reviews WHERE id=$1", review_uuid
+        )
+    if not submission_id:
+        raise HTTPException(status_code=409, detail="The automatic technical report is not ready")
+    return await get_model_intake_submission_report(
+        str(submission_id), _model_intake_automatic_system_request(), format=format
+    )
 
 
 def _content_free_hash(value: Any) -> str:

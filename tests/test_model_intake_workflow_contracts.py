@@ -755,6 +755,55 @@ def test_static_report_coverage_is_content_free():
     }
 
 
+def test_automatic_review_system_principal_is_server_scoped_and_not_a_bearer_shortcut():
+    request = api._model_intake_automatic_system_request()
+
+    assert request.headers.get("authorization") is None
+    assert api._model_intake_authenticated_subject(request) == "system:model-intake-auto"
+    assert request.scope["shakerscan.model_intake_system_actor"] == "system:model-intake-auto"
+
+    ordinary = api.Request({
+        "type": "http", "method": "POST", "path": "/", "headers": [],
+        "client": ("127.0.0.1", 1), "server": ("127.0.0.1", 8080),
+        "scheme": "http", "query_string": b"",
+    })
+    with pytest.raises(api.HTTPException):
+        api._model_intake_authenticated_subject(ordinary)
+
+
+def test_automatic_review_bundle_records_the_fixed_guest_embedding_contract():
+    authoritative = {"deployment_bundle": {
+        "model_artifact_sha256": "a" * 64,
+        "repository_snapshot_sha256": "b" * 64,
+        "tokenizer_sha256": "c" * 64,
+        "configuration_sha256": "d" * 64,
+        "runtime_image_digest": "sha256:" + "e" * 64,
+        "loader_profile_sha256": "f" * 64,
+        "target_environment": "production",
+    }}
+    bundle = api._model_intake_auto_embedding_bundle(
+        authoritative,
+        {"dimension": 768, "max_sequence_length": 8192, "pooling": "cls"},
+    )
+
+    assert bundle["embedding_configuration"] == {
+        "dimension": 768,
+        "pooling": "attention-mask-mean",
+        "normalization": False,
+        "max_sequence_length": 8192,
+        "precision": "float32",
+    }
+    assert bundle["retrieval_application_digest"] is None
+    assert bundle["index_schema_digest"] is None
+
+
+def test_automatic_review_never_guesses_missing_embedding_dimensions():
+    with pytest.raises(ValueError, match="embedding dimension"):
+        api._model_intake_auto_embedding_bundle(
+            {"deployment_bundle": {}}, {"max_sequence_length": 512}
+        )
+
+
 def test_converted_snapshot_materialization_rehashes_every_member_and_derives_components(monkeypatch, tmp_path):
     monkeypatch.setattr(api, "RESULTS_DIR", tmp_path)
     monkeypatch.setenv("MODEL_INTAKE_RUNNER_HOST_RESULTS_ROOT", "/host/results")
