@@ -492,3 +492,20 @@ test('a Model Intake scan opens on the executive report, not generic scan chrome
   assert.match(report, /These counts are not the corporate policy decision shown above/)
   assert.doesNotMatch(report, /What the review established/)
 })
+
+test('a first Firecracker run is reachable without inventing anything', () => {
+  // Three blockers made end-to-end impossible: a runtime job needs a digest
+  // only calibration produces, and two digests describe a serving deployment
+  // that need not exist when the model is being qualified.
+  assert.match(workflow, /useState<'calibration' \| 'runtime' \| 'conversion'>\('calibration'\)/)
+  assert.match(workflow, /calibratedDigest/)
+  assert.match(workflow, /embedding_output_sha256/)
+  assert.match(workflow, /Review and bind for runtime/)
+  assert.match(workflow, /Switch Operation to calibration and run that first/)
+
+  // The data-plane digests are optional, and validated only when supplied.
+  assert.match(workflow, /Deliberately not blockers/)
+  assert.doesNotMatch(workflow, /summary: 'Retrieval application digest is missing'/)
+  assert.doesNotMatch(workflow, /summary: 'Index schema digest is missing'/)
+  assert.match(workflow, /is not a SHA-256 digest/)
+})

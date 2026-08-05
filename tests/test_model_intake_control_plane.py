@@ -423,3 +423,55 @@ def test_dimension_and_sequence_length_are_reported_separately():
         assert "dimension must be" not in str(exc)
     else:
         raise AssertionError("a zero max_sequence_length should be rejected")
+
+
+def test_a_runner_job_does_not_require_a_deployment_that_does_not_exist_yet():
+    # retrieval_application_digest and index_schema_digest describe the serving
+    # application and vector index. Only data_plane_evaluation consumes them —
+    # the signed receipt verifier binds them for that evidence class alone — yet
+    # the bundle demanded them for every job, so a Firecracker runtime or
+    # calibration run could never be queued at all.
+    from model_intake_control_plane import (
+        EVIDENCE_BINDING_KEYS,
+        AdmissionContractError,
+        build_deployment_bundle,
+    )
+
+    assert "retrieval_application_digest" not in EVIDENCE_BINDING_KEYS["runtime_execution"]
+    assert "index_schema_digest" in EVIDENCE_BINDING_KEYS["data_plane_evaluation"]
+
+    data = {
+        "model_artifact_sha256": "a" * 64,
+        "repository_snapshot_sha256": "b" * 64,
+        "custom_code_sha256": None,
+        "tokenizer_sha256": "c" * 64,
+        "configuration_sha256": "d" * 64,
+        "runtime_image_digest": "sha256:" + "e" * 64,
+        "loader_profile_sha256": "f" * 64,
+        "target_environment": "production",
+        "embedding_configuration": {
+            "dimension": 768, "pooling": "mean", "normalization": True,
+            "max_sequence_length": 8192, "precision": "float32",
+        },
+    }
+
+    bundle = build_deployment_bundle(dict(data), require_data_plane=False)
+    assert bundle["retrieval_application_digest"] is None
+    assert bundle["index_schema_digest"] is None
+    assert bundle["bundle_sha256"]
+
+    # A supplied value is still validated rather than waved through.
+    try:
+        build_deployment_bundle({**data, "index_schema_digest": "not-a-digest"}, require_data_plane=False)
+    except AdmissionContractError as exc:
+        assert "index_schema_digest" in str(exc)
+    else:
+        raise AssertionError("a malformed data-plane digest must still be rejected")
+
+    # The data-plane path keeps demanding them.
+    try:
+        build_deployment_bundle(dict(data))
+    except AdmissionContractError as exc:
+        assert "retrieval_application_digest" in str(exc)
+    else:
+        raise AssertionError("data-plane evaluation still requires its own subjects")

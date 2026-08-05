@@ -173,7 +173,7 @@ export function ControlledModelIntakeWorkflow({
 
   const [intendedUse, setIntendedUse] = useState('{"purpose":"knowledge-graph vector embeddings","data_classification":"internal"}')
   const [bundleJson, setBundleJson] = useState(JSON.stringify(blankBundle(environment), null, 2))
-  const [runnerOperation, setRunnerOperation] = useState<'calibration' | 'runtime' | 'conversion'>('runtime')
+  const [runnerOperation, setRunnerOperation] = useState<'calibration' | 'runtime' | 'conversion'>('calibration')
   const [knownAnswerInputs, setKnownAnswerInputs] = useState('["corporate security review","knowledge graph entity retrieval"]')
   const [knownAnswerDigest, setKnownAnswerDigest] = useState('')
   const [memoryMib, setMemoryMib] = useState(4096)
@@ -692,6 +692,17 @@ export function ControlledModelIntakeWorkflow({
   const embeddingFieldClass = (field: string) =>
     undeclaredEmbeddingFields.has(field) ? inputClass.replace('border-gray-700', 'border-yellow-600/60') : inputClass
 
+  // What a completed calibration observed. Binding it is the review act, so it
+  // is offered rather than filled in silently.
+  const calibratedDigest = (() => {
+    for (const job of jobs) {
+      if (job.operation !== 'calibration' || job.state !== 'completed') continue
+      const observed = runnerObservations(job).embedding_output_sha256
+      if (typeof observed === 'string' && /^[0-9a-f]{64}$/i.test(observed)) return observed
+    }
+    return ''
+  })()
+
   const queueBlockers: Array<{ summary: string; detail?: string }> = []
   if (!selectedId) {
     queueBlockers.push({ summary: 'No submission selected', detail: 'Create or pick one in stage 4.1' })
@@ -714,14 +725,26 @@ export function ControlledModelIntakeWorkflow({
   if (!digestPattern.test(String(bundle?.loader_profile_sha256 || ''))) {
     queueBlockers.push({ summary: 'Fixed loader profile is not resolved', detail: 'Use Seed authoritative runner bundle' })
   }
-  if (!digestPattern.test(String(bundle?.retrieval_application_digest || ''))) {
-    queueBlockers.push({ summary: 'Retrieval application digest is missing', detail: 'Hash the exact serving/retrieval application build' })
-  }
-  if (!digestPattern.test(String(bundle?.index_schema_digest || ''))) {
-    queueBlockers.push({ summary: 'Index schema digest is missing', detail: 'Hash the exact vector index schema/configuration' })
+  // Deliberately not blockers. These identify the serving application and
+  // vector index that will consume the model — a deployment that need not exist
+  // when the model is being qualified. Only data-plane evaluation consumes
+  // them, and the signed receipt binds them for that evidence class alone.
+  for (const [field, label] of [
+    ['retrieval_application_digest', 'Retrieval application digest'],
+    ['index_schema_digest', 'Index schema digest'],
+  ] as const) {
+    const value = String(bundle?.[field] || '')
+    if (value && !digestPattern.test(value)) {
+      queueBlockers.push({ summary: `${label} is not a SHA-256 digest`, detail: 'Clear it or supply 64 hex characters' })
+    }
   }
   if (runnerOperation === 'runtime' && !digestPattern.test(knownAnswerDigest.trim())) {
-    queueBlockers.push({ summary: 'Reviewed known-answer digest is missing', detail: 'Run calibration first, review its output, then bind that digest' })
+    queueBlockers.push({
+      summary: 'Reviewed known-answer digest is missing',
+      detail: calibratedDigest
+        ? 'Calibration observed one — review and bind it below'
+        : 'Switch Operation to calibration and run that first; it produces the digest',
+    })
   }
   for (const gap of embeddingGaps) {
     const [summary, detail] = gap.split(' \u2014 ')
@@ -944,7 +967,12 @@ export function ControlledModelIntakeWorkflow({
             </div>
             <div className="rounded border border-gray-800 bg-gray-900 p-3">
               <div className="text-xs font-medium text-gray-300">Corporate deployment bindings</div>
-              <p className="mt-1 text-[11px] text-gray-500">These identify the exact application and vector-index contract that will consume the model. ShakerScan cannot invent them.</p>
+              <p className="mt-1 text-[11px] text-gray-500">
+                Optional. These identify the serving application and vector-index contract that will
+                consume the model, so they only apply once that deployment exists. Leave them empty
+                to qualify the model on its own; data-plane evaluation is then reported as not
+                performed rather than blocking the run.
+              </p>
               <div className="mt-3 grid gap-3">
                 <label className="grid gap-1 text-xs text-gray-300">Retrieval application SHA-256
                   <input className={inputClass} value={String(bundle?.retrieval_application_digest || '')} onChange={(event) => updateBundleField('retrieval_application_digest', event.target.value)} placeholder="64-character SHA-256 of the serving build" />
@@ -964,7 +992,21 @@ export function ControlledModelIntakeWorkflow({
               <label className="grid gap-1 text-xs text-gray-300">Memory MiB<input className={inputClass} type="number" min={256} value={memoryMib} onChange={(event) => setMemoryMib(Number(event.target.value))} /></label>
             </div>
             <label className="grid gap-1 text-xs text-gray-300">Known-answer inputs (bounded JSON string array)<textarea className={textareaClass} rows={3} value={knownAnswerInputs} onChange={(event) => setKnownAnswerInputs(event.target.value)} /></label>
-            <label className="grid gap-1 text-xs text-gray-300">Reviewed known-answer embedding SHA-256 {runnerOperation === 'runtime' ? '(required)' : '(optional)'}<input className={inputClass} value={knownAnswerDigest} onChange={(event) => setKnownAnswerDigest(event.target.value)} /></label>
+            <label className="grid gap-1 text-xs text-gray-300">Reviewed known-answer embedding SHA-256 {runnerOperation === 'runtime' ? '(required)' : '(not used by this operation)'}
+              <input className={inputClass} value={knownAnswerDigest} onChange={(event) => setKnownAnswerDigest(event.target.value)} placeholder={runnerOperation === 'calibration' ? 'Produced by this run' : ''} />
+              {calibratedDigest && calibratedDigest !== knownAnswerDigest.trim() && (
+                <span className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-cyan-200">
+                  Calibration observed <code className="break-all font-mono">{calibratedDigest.slice(0, 16)}…</code>
+                  <button
+                    type="button"
+                    className={buttonClass}
+                    onClick={() => { setKnownAnswerDigest(calibratedDigest); setRunnerOperation('runtime') }}
+                  >
+                    Review and bind for runtime
+                  </button>
+                </span>
+              )}
+            </label>
             <label className="grid gap-1 text-xs text-gray-300">Wall-clock timeout seconds<input className={inputClass} type="number" min={30} max={3600} value={timeoutSeconds} onChange={(event) => setTimeoutSeconds(Number(event.target.value))} /></label>
             <button
               type="button"

@@ -12595,7 +12595,9 @@ async def create_model_intake_runner_job(
     actor = _model_intake_authenticated_subject(http_request)
     submission_uuid = _model_intake_uuid(submission_id, "submission id")
     try:
-        bundle = _build_model_deployment_bundle(request.deployment_bundle)
+        bundle = _build_model_deployment_bundle(
+            request.deployment_bundle, require_data_plane=False
+        )
     except _ModelAdmissionContractError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     async with db_pool.acquire() as conn:
@@ -12903,7 +12905,9 @@ async def _execute_model_intake_agent_action(
         if operation not in {"calibration", "runtime", "conversion"}:
             raise ValueError("runner operation is unsupported")
         try:
-            bundle = _build_model_deployment_bundle(arguments.get("deployment_bundle"))
+            bundle = _build_model_deployment_bundle(
+                arguments.get("deployment_bundle"), require_data_plane=False
+            )
         except _ModelAdmissionContractError as exc:
             return {"status": "BLOCKED", "reason": str(exc), "deployable": False}
         submission = await conn.fetchrow(
@@ -13223,7 +13227,13 @@ async def freeze_model_intake_evidence(
     actor = _model_intake_authenticated_subject(http_request)
     submission_uuid = _model_intake_uuid(submission_id, "submission id")
     try:
-        bundle = _build_model_deployment_bundle(request.deployment_bundle)
+        # Data-plane digests describe a serving application and vector index
+        # that may not exist. MI-16 applies only when that integration does, so
+        # their absence must surface as an unperformed control in the report
+        # rather than blocking the operator from freezing evidence at all.
+        bundle = _build_model_deployment_bundle(
+            request.deployment_bundle, require_data_plane=False
+        )
     except _ModelAdmissionContractError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     async with db_pool.acquire() as conn, conn.transaction():

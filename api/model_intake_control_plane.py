@@ -146,7 +146,20 @@ MAX_EMBEDDING_DIMENSION = 1_000_000
 MAX_EMBEDDING_SEQUENCE_LENGTH = 10_000_000
 
 
-def build_deployment_bundle(data: dict[str, Any]) -> dict[str, Any]:
+def build_deployment_bundle(
+    data: dict[str, Any], *, require_data_plane: bool = True
+) -> dict[str, Any]:
+    """Build the exact-subject bundle.
+
+    ``retrieval_application_digest`` and ``index_schema_digest`` describe the
+    organization's serving application and vector index. Only the
+    ``data_plane_evaluation`` evidence class consumes them — the signed receipt
+    verifier binds them for that class alone, and MI-16 applies only when the
+    intended corporate integration exists. Requiring them for every runner job
+    made a Firecracker runtime or calibration run impossible to queue, because
+    neither the model nor ShakerScan can produce a digest of a deployment that
+    has not been built yet.
+    """
     if not isinstance(data, dict):
         raise AdmissionContractError("deployment bundle must be an object")
     environment = str(data.get("target_environment") or "").strip().lower()
@@ -193,9 +206,13 @@ def build_deployment_bundle(data: dict[str, Any]) -> dict[str, Any]:
             "precision": str(embedding.get("precision") or "").strip().lower(),
         },
         "retrieval_application_digest": _sha256(
-            data.get("retrieval_application_digest"), "retrieval_application_digest"
+            data.get("retrieval_application_digest"),
+            "retrieval_application_digest",
+            optional=not require_data_plane,
         ),
-        "index_schema_digest": _sha256(data.get("index_schema_digest"), "index_schema_digest"),
+        "index_schema_digest": _sha256(
+            data.get("index_schema_digest"), "index_schema_digest", optional=not require_data_plane
+        ),
         "target_environment": environment,
     }
     placeholders = {"", "review-required", "unknown", "tbd"}
