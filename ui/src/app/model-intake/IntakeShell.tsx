@@ -271,15 +271,36 @@ export function RunnerInstallCard({
         </div>
       </div>
 
-      {!installed && plan && (
+      <div className="mt-3 rounded border border-gray-800 bg-gray-900/70 p-3 text-xs text-gray-400">
+        <div className="font-medium text-gray-300">Linux host requirements</div>
+        <ul className="mt-1 list-disc space-y-1 pl-4">
+          <li>x86_64 Linux with KVM available at <code>/dev/kvm</code></li>
+          <li>CPU virtualization exposed to the host; cloud VMs usually require nested virtualization</li>
+          <li>cgroup v2, systemd, nftables, root for the one-time host installation, and several GB of disk</li>
+        </ul>
+        <p className="mt-2 text-[11px] text-gray-500">
+          ShakerScan never installs this privileged tier silently. The UI can stage the pinned guest,
+          then gives the operator one reviewable host command.
+        </p>
+      </div>
+
+      {plan && (
         plan.supported ? (
           <div className="mt-3">
             <button
               type="button"
               onClick={() => setOpen((value) => !value)}
-              className="inline-flex items-center gap-2 rounded-lg bg-cyan-700 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-600"
+              className={`inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-white ${
+                installed ? 'border border-gray-700 bg-gray-800 hover:bg-gray-700' : 'bg-cyan-700 hover:bg-cyan-600'
+              }`}
             >
-              <Server className="h-4 w-4" /> {open ? 'Hide setup' : 'Set up microVM runner'}
+              <Server className="h-4 w-4" />{
+                open
+                  ? 'Hide installation details'
+                  : installed
+                    ? 'Installation, recovery, and upgrade details'
+                    : 'Set up microVM runner'
+              }
             </button>
             {open && (
               <div className="mt-3 grid gap-3 rounded border border-gray-800 bg-gray-900 p-3">
@@ -287,8 +308,9 @@ export function RunnerInstallCard({
                     container and must not do that on the operator's behalf, so
                     this hands over an exact command instead of pretending. */}
                 <p className="text-xs text-gray-400">
-                  Run this on the ShakerScan host. It asks for confirmation and prints every change
-                  before touching anything.
+                  {installed
+                    ? 'This runner is installed. The same reviewed procedure installs it on another compatible host or refreshes its pinned components here.'
+                    : 'Run this on the ShakerScan host. It asks for confirmation and prints every change before touching anything.'}
                 </p>
                 <div>
                   <div className="text-xs font-medium text-gray-300">Receipt signer</div>

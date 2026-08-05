@@ -298,6 +298,13 @@ test('the microVM tier is offered as an opt-in install, not executed by the API'
   assert.match(api, /getModelIntakeRunnerInstallPlan/)
   assert.match(api, /ModelIntakeRunnerInstallPlan/)
   assert.match(shell, /Set up microVM runner/)
+  assert.match(shell, /Linux host requirements/)
+  assert.match(shell, /x86_64 Linux with KVM/)
+  assert.match(shell, /nested virtualization/)
+  assert.match(shell, /Installation, recovery, and upgrade details/)
+  // Installation guidance remains discoverable after readiness turns green.
+  assert.match(shell, /\{plan && \(/)
+  assert.doesNotMatch(shell, /\{!installed && plan && \(/)
   assert.match(shell, /Receipt signer/)
   assert.match(shell, /navigator\.clipboard\.writeText\(command\)/)
   // An unsupported host gets the reason, never an install button it cannot use.
