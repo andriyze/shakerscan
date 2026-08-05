@@ -509,3 +509,22 @@ test('a first Firecracker run is reachable without inventing anything', () => {
   assert.doesNotMatch(workflow, /summary: 'Index schema digest is missing'/)
   assert.match(workflow, /is not a SHA-256 digest/)
 })
+
+test('the embedding contract is recovered for scans that predate its extraction', () => {
+  // The hints ride on the configuration subject, written when a scan is
+  // attached. A submission from before that change had no hints and no way to
+  // get them short of re-scanning, so the four fields stayed empty forever.
+  assert.match(api, /getModelIntakeEmbeddingConfiguration/)
+  assert.match(api, /\/embedding-configuration/)
+  assert.match(workflow, /getModelIntakeEmbeddingConfiguration\(detail\.submission\.id/)
+  assert.match(workflow, /published\.available/)
+  // Recorded evidence wins; quarantine is the fallback.
+  assert.match(workflow, /recorded\.length \? recorded : publishedHintSources/)
+})
+
+test('a failed seed says so instead of leaving the blocker list lying', () => {
+  // The blockers told the operator to use the seed. If the seed itself failed,
+  // the list still said "use the seed" while nothing ever changed.
+  assert.match(workflow, /setSeedFailure/)
+  assert.match(workflow, /Seeding the runner bundle failed/)
+})

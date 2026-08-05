@@ -14248,6 +14248,95 @@ async def model_intake_runner_stage_status():
     return state
 
 
+def _import_embedding_hint_readers():
+    try:
+        from scanner_tools.model_intake import (
+            collect_embedding_configuration_hints,
+            merge_embedding_configuration_hints,
+        )
+    except ModuleNotFoundError as exc:
+        if exc.name != "scanner_tools":
+            raise
+        from scanner.scanner_tools.model_intake import (
+            collect_embedding_configuration_hints,
+            merge_embedding_configuration_hints,
+        )
+    return collect_embedding_configuration_hints, merge_embedding_configuration_hints
+
+
+@app.get("/model-intake/submissions/{submission_id}/embedding-configuration")
+async def model_intake_embedding_configuration(submission_id: str, http_request: Request):
+    """Read the embedding facts the scanned revision publishes about itself.
+
+    The deployment bundle makes the operator declare this contract, and the
+    model states every value in its own config files. Reading them from the
+    already-quarantined snapshot means a submission whose scan predates the
+    scanner-side extraction still prefills, with no re-scan.
+    """
+    _model_intake_authenticated_subject(http_request)
+    submission_uuid = _model_intake_uuid(submission_id, "submission id")
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT s.id,sc.result FROM model_intake_submissions s
+            LEFT JOIN scans sc ON sc.id=s.scan_id WHERE s.id=$1
+            """,
+            submission_uuid,
+        )
+        subjects = await conn.fetch(
+            "SELECT subject_kind,sha256,metadata_json FROM model_intake_subjects WHERE submission_id=$1",
+            submission_uuid,
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="Model submission not found")
+
+    # A scan run after the scanner-side extraction already recorded them.
+    for subject in subjects:
+        if str(subject["subject_kind"]) != "configuration":
+            continue
+        recorded = _model_intake_json_object(subject["metadata_json"]).get(
+            "embedding_configuration_hints"
+        )
+        if isinstance(recorded, dict) and recorded:
+            return {"available": True, "source": "recorded_evidence", **recorded}
+
+    digests = {str(item["subject_kind"]): str(item["sha256"]) for item in subjects}
+    artifact_sha = digests.get("artifact", "")
+    snapshot_sha = digests.get("repository_snapshot", "")
+    if not artifact_sha or not snapshot_sha:
+        return {"available": False, "reason": "no_registered_snapshot"}
+    try:
+        materialized = await asyncio.to_thread(
+            _model_intake_snapshot_materialization,
+            _model_intake_json_object(row["result"]),
+            artifact_sha256=artifact_sha,
+            repository_snapshot_sha256=snapshot_sha,
+        )
+    except HTTPException:
+        return {"available": False, "reason": "snapshot_unavailable"}
+
+    collect, merge = _import_embedding_hint_readers()
+
+    def _read() -> dict[str, Any]:
+        # subject_path is the host path handed to the runner; the API can only
+        # read the container-visible copy.
+        root = Path(materialized["container_subject_path"])
+        hints: dict[str, Any] = {}
+        for candidate in sorted(root.rglob("*.json")) + sorted(root.rglob("*.JSON")):
+            relative = candidate.relative_to(root).as_posix()
+            try:
+                data = candidate.read_bytes()
+            except OSError:
+                continue
+            hints = merge(hints, collect(relative, data))
+        return hints
+
+    hints = await asyncio.to_thread(_read)
+    if not hints:
+        return {"available": False, "reason": "model_publishes_no_embedding_facts"}
+    return {"available": True, "source": "quarantined_snapshot", **hints}
+
+
 @app.get("/model-intake/scans/{scan_id}/sbom")
 async def download_model_intake_sbom(
     scan_id: str,

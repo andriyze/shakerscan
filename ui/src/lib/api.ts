@@ -3941,6 +3941,32 @@ function modelIntakeWorkflowHeaders(operatorToken: string, json = false): Header
 
 export const MODEL_INTAKE_OPERATOR_TOKEN_KEY = 'shakerscan:model-intake-operator-token'
 
+export interface ModelIntakeEmbeddingHints {
+  available: boolean
+  reason?: string
+  source?: 'recorded_evidence' | 'quarantined_snapshot'
+  dimension?: number
+  max_sequence_length?: number
+  pooling?: string
+  precision?: string
+  normalization?: boolean
+  sources?: string[]
+}
+
+// Reads the embedding facts the scanned revision publishes about itself, from
+// the already-quarantined snapshot, so a submission whose scan predates the
+// scanner-side extraction still prefills without a re-scan.
+export async function getModelIntakeEmbeddingConfiguration(
+  submissionId: string,
+  operatorToken: string,
+): Promise<ModelIntakeEmbeddingHints> {
+  const res = await fetch(`${API_URL}/model-intake/submissions/${submissionId}/embedding-configuration`, {
+    headers: modelIntakeWorkflowHeaders(operatorToken),
+  })
+  if (!res.ok) return { available: false, reason: 'unavailable' }
+  return res.json()
+}
+
 export interface ModelIntakeSbomSummary {
   available: boolean
   reason?: string

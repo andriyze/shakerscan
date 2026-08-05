@@ -1209,8 +1209,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 294 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 248 | `api/api.py` |
+| Public REST operations | 295 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 249 | `api/api.py` |
 | Check families | 14 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 13 | `api/command_arsenal.py` |
@@ -1408,6 +1408,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `POST` | `/model-intake/submissions/{submission_id}/agent/session` | `create_model_intake_agent_session` |
 | `GET` | `/model-intake/submissions/{submission_id}/agent/sessions` | `list_model_intake_agent_sessions` |
 | `POST` | `/model-intake/submissions/{submission_id}/approvals` | `create_model_intake_approval` |
+| `GET` | `/model-intake/submissions/{submission_id}/embedding-configuration` | `model_intake_embedding_configuration` |
 | `POST` | `/model-intake/submissions/{submission_id}/evidence-receipts` | `attach_model_intake_runner_evidence` |
 | `POST` | `/model-intake/submissions/{submission_id}/freeze-evidence` | `freeze_model_intake_evidence` |
 | `POST` | `/model-intake/submissions/{submission_id}/policy-decisions` | `create_model_intake_policy_decision` |

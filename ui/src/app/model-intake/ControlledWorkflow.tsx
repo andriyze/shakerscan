@@ -12,6 +12,7 @@ import {
   createModelIntakePolicyDecision,
   createModelIntakeRunnerJob,
   createModelIntakeSubmission,
+  getModelIntakeEmbeddingConfiguration,
   downloadModelIntakeSubmissionReport,
   freezeModelIntakeEvidence,
   getScan,
@@ -187,6 +188,8 @@ export function ControlledModelIntakeWorkflow({
 
   // Seed each submission once, so a later reload never discards operator edits.
   const seededSubmissions = useRef<Set<string>>(new Set())
+  const [seedFailure, setSeedFailure] = useState<string | null>(null)
+  const [publishedHintSources, setPublishedHintSources] = useState<string[]>([])
   const [manifestId, setManifestId] = useState('')
   const [approvalType, setApprovalType] = useState('model_security_reviewer')
   const [approvalDecision, setApprovalDecision] = useState<'approve' | 'reject'>('approve')
@@ -361,6 +364,25 @@ export function ControlledModelIntakeWorkflow({
     setError(null)
     try {
       const seeded = buildSeededBundle(detail, latestJob, bundle)
+      // Recover the published embedding contract from the quarantined snapshot
+      // when the scan itself did not record it.
+      const published = await getModelIntakeEmbeddingConfiguration(detail.submission.id, operatorToken)
+      if (published.available) {
+        seeded.embedding_configuration = {
+          dimension: Number(published.dimension) > 0
+            ? Number(published.dimension)
+            : seeded.embedding_configuration.dimension,
+          max_sequence_length: Number(published.max_sequence_length) > 0
+            ? Number(published.max_sequence_length)
+            : seeded.embedding_configuration.max_sequence_length,
+          pooling: published.pooling || seeded.embedding_configuration.pooling,
+          precision: published.precision || seeded.embedding_configuration.precision,
+          normalization: typeof published.normalization === 'boolean'
+            ? published.normalization
+            : seeded.embedding_configuration.normalization,
+        }
+        setPublishedHintSources(published.sources || [])
+      }
       const rootfsSha = runnerReadiness?.verified_component_sha256?.rootfs
       if (!rootfsSha) throw new Error('Runner readiness does not include a verified guest rootfs digest')
       const scanId = detail.submission.scan_id
@@ -395,8 +417,11 @@ export function ControlledModelIntakeWorkflow({
       seeded.loader_profile_sha256 = profileSha
       setBundleJson(JSON.stringify(seeded, null, 2))
       toast.success('Authoritative subjects and fixed runner profile seeded')
+      setSeedFailure(null)
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Failed to seed the runner bundle')
+      const message = caught instanceof Error ? caught.message : 'Failed to seed the runner bundle'
+      setSeedFailure(message)
+      setError(message)
     } finally {
       setBusy('')
     }
@@ -669,7 +694,11 @@ export function ControlledModelIntakeWorkflow({
 
   const hintSources = (() => {
     const sources = embeddingHints(detail).sources
-    return Array.isArray(sources) ? sources.filter((item): item is string => typeof item === 'string') : []
+    const recorded = Array.isArray(sources)
+      ? sources.filter((item): item is string => typeof item === 'string')
+      : []
+    // Either the scan recorded them, or seeding recovered them from quarantine.
+    return recorded.length ? recorded : publishedHintSources
   })()
   const embeddingConfiguration = objectValue(bundle?.embedding_configuration)
   const embeddingGaps = embeddingContractGaps(bundle)
@@ -704,6 +733,9 @@ export function ControlledModelIntakeWorkflow({
   })()
 
   const queueBlockers: Array<{ summary: string; detail?: string }> = []
+  if (seedFailure) {
+    queueBlockers.push({ summary: 'Seeding the runner bundle failed', detail: seedFailure })
+  }
   if (!selectedId) {
     queueBlockers.push({ summary: 'No submission selected', detail: 'Create or pick one in stage 4.1' })
   }
