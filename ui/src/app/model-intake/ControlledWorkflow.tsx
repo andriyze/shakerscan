@@ -13,9 +13,9 @@ import {
   createModelIntakeRunnerJob,
   createModelIntakeSubmission,
   getModelIntakeEmbeddingConfiguration,
+  getModelIntakeRunnerBundle,
   downloadModelIntakeSubmissionReport,
   freezeModelIntakeEvidence,
-  getScan,
   getModelIntakeAgentSession,
   getModelIntakeRunnerReadiness,
   getModelIntakeSubmission,
@@ -26,7 +26,6 @@ import {
   promoteModelIntakeSubmission,
   refreshModelIntakeRunnerJob,
   replyModelIntakeAgentSession,
-  resolveModelIntakeRunnerProfile,
   type ModelIntakeDeploymentBundleRequest,
   type ModelIntakeAgentSession,
   type ModelIntakeCorporateReport,
@@ -364,6 +363,10 @@ export function ControlledModelIntakeWorkflow({
     setError(null)
     try {
       const seeded = buildSeededBundle(detail, latestJob, bundle)
+      // Ask the server what bundle it will accept. Recomputing the loader
+      // profile locally cannot be kept in step with the authoritative manifest.
+      const authoritative = await getModelIntakeRunnerBundle(detail.submission.id, runnerOperation, operatorToken)
+      Object.assign(seeded, authoritative.deployment_bundle)
       // Recover the published embedding contract from the quarantined snapshot
       // when the scan itself did not record it.
       const published = await getModelIntakeEmbeddingConfiguration(detail.submission.id, operatorToken)
@@ -383,38 +386,6 @@ export function ControlledModelIntakeWorkflow({
         }
         setPublishedHintSources(published.sources || [])
       }
-      const rootfsSha = runnerReadiness?.verified_component_sha256?.rootfs
-      if (!rootfsSha) throw new Error('Runner readiness does not include a verified guest rootfs digest')
-      const scanId = detail.submission.scan_id
-      if (!scanId) throw new Error('Attach a completed preflight scan before resolving the runner profile')
-      const scan = await getScan(scanId)
-      const intake = objectValue(objectValue(scan.result).model_intake)
-      const snapshot = objectValue(intake.repository_snapshot)
-      const repositoryManifest = objectValue(snapshot.repository_manifest)
-      const metadata = objectValue(intake.metadata)
-      const files = Array.isArray(snapshot.files) ? snapshot.files.map(objectValue) : []
-      const artifactPath = files.find((item) => item.sha256 === seeded.model_artifact_sha256)?.path
-      if (typeof artifactPath !== 'string' || !artifactPath) {
-        throw new Error('The attached snapshot does not contain the registered model artifact')
-      }
-      const runtimeImageDigest = `sha256:${rootfsSha}`
-      const resolved = await resolveModelIntakeRunnerProfile({
-        repository_manifest: {
-          ...repositoryManifest,
-          library_name: typeof metadata.library_name === 'string' ? metadata.library_name : 'transformers',
-          custom_code_required: Boolean(seeded.custom_code_sha256),
-          architectures: Array.isArray(metadata.architectures) ? metadata.architectures : [],
-        },
-        artifact_path: artifactPath,
-        runtime_image_digest: runtimeImageDigest,
-        ...(seeded.custom_code_sha256 ? { reviewed_custom_code_sha256: seeded.custom_code_sha256 } : {}),
-      }, runnerOperation)
-      const profileSha = objectValue(resolved.profile).profile_sha256
-      if (resolved.status !== 'READY' || typeof profileSha !== 'string') {
-        throw new Error(`Runner profile is ${resolved.status.toLowerCase()}: ${resolved.reason || 'no applicable fixed profile'}`)
-      }
-      seeded.runtime_image_digest = runtimeImageDigest
-      seeded.loader_profile_sha256 = profileSha
       setBundleJson(JSON.stringify(seeded, null, 2))
       toast.success('Authoritative subjects and fixed runner profile seeded')
       setSeedFailure(null)

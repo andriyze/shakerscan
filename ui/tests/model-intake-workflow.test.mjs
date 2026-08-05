@@ -353,7 +353,8 @@ test('the deployment bundle arrives prefilled from the scanned revision', () => 
   assert.match(workflow, /storedObjectValue/)
   assert.match(workflow, /buildSeededBundle/)
   assert.match(workflow, /Seed authoritative runner bundle/)
-  assert.match(workflow, /resolveModelIntakeRunnerProfile/)
+  // The profile is resolved by the server now, not recomputed here.
+  assert.match(workflow, /getModelIntakeRunnerBundle/)
   assert.match(workflow, /Corporate deployment bindings/)
   assert.match(workflow, /Retrieval application SHA-256/)
   assert.match(workflow, /Index schema SHA-256/)
@@ -527,4 +528,16 @@ test('a failed seed says so instead of leaving the blocker list lying', () => {
   // the list still said "use the seed" while nothing ever changed.
   assert.match(workflow, /setSeedFailure/)
   assert.match(workflow, /Seeding the runner bundle failed/)
+})
+
+test('only the server derives the runner bundle it will accept', () => {
+  // profile_sha256 hashes selection facts the authoritative manifest hardcodes,
+  // so a locally recomputed loader profile diverges for any model that declares
+  // architectures — the queue then rejected the job the UI had just enabled.
+  assert.match(api, /getModelIntakeRunnerBundle/)
+  assert.match(api, /\/runner-bundle\?operation=/)
+  assert.match(workflow, /getModelIntakeRunnerBundle\(detail\.submission\.id, runnerOperation/)
+  assert.match(workflow, /Object\.assign\(seeded, authoritative\.deployment_bundle\)/)
+  // The UI no longer resolves a loader profile itself.
+  assert.doesNotMatch(workflow, /resolveModelIntakeRunnerProfile/)
 })

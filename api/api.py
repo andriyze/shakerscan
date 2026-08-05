@@ -14017,6 +14017,16 @@ async def model_intake_provider_readiness():
     return await asyncio.to_thread(_model_provider_readiness)
 
 
+def _model_intake_runner_readiness_snapshot() -> dict[str, Any]:
+    """Readiness from the configured runner, or this host when none is set."""
+    if os.getenv("MODEL_INTAKE_RUNNER_URL", "").strip():
+        try:
+            return _model_intake_runner_http("GET", "/health", None)
+        except Exception:
+            return {"status": "NOT_READY", "ready": False, "verified_component_sha256": {}}
+    return _model_firecracker_readiness()
+
+
 @app.get("/model-intake/runners/readiness")
 async def model_intake_runner_readiness():
     """Fail-closed readiness for the external Linux/KVM execution tier."""
@@ -14262,6 +14272,88 @@ def _import_embedding_hint_readers():
             merge_embedding_configuration_hints,
         )
     return collect_embedding_configuration_hints, merge_embedding_configuration_hints
+
+
+@app.get("/model-intake/submissions/{submission_id}/runner-bundle")
+async def model_intake_runner_bundle(
+    submission_id: str,
+    http_request: Request,
+    operation: str = Query("calibration", pattern="^(calibration|runtime|conversion)$"),
+):
+    """Return the deployment bundle this server would accept for a runner job.
+
+    The UI previously rebuilt the loader-profile inputs itself, but
+    ``profile_sha256`` hashes selection_facts, and the authoritative manifest
+    hardcodes library_name and an empty architectures list. Any model whose
+    metadata declares architectures produced a different digest, so the queue
+    rejected the job it had just enabled. Deriving it here through the same code
+    path the queue uses removes the possibility of divergence.
+    """
+    _model_intake_authenticated_subject(http_request)
+    submission_uuid = _model_intake_uuid(submission_id, "submission id")
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT s.requested_environment,sc.result FROM model_intake_submissions s
+            LEFT JOIN scans sc ON sc.id=s.scan_id WHERE s.id=$1
+            """,
+            submission_uuid,
+        )
+        subjects = await conn.fetch(
+            "SELECT subject_kind,sha256 FROM model_intake_subjects WHERE submission_id=$1",
+            submission_uuid,
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="Model submission not found")
+    digests = {str(item["subject_kind"]): str(item["sha256"]) for item in subjects}
+    artifact_sha = digests.get("artifact", "")
+    snapshot_sha = digests.get("repository_snapshot", "")
+    if not artifact_sha or not snapshot_sha:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "No registered artifact and repository-snapshot subjects. Attach a completed "
+                "Full-depth Model Intake scan; a bounded-prefix scan records no snapshot."
+            ),
+        )
+    readiness = await asyncio.to_thread(_model_intake_runner_readiness_snapshot)
+    rootfs = str((readiness.get("verified_component_sha256") or {}).get("rootfs") or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", rootfs):
+        raise HTTPException(
+            status_code=409,
+            detail="Runner readiness reports no verified guest rootfs digest; install or repair the microVM runner",
+        )
+    materialized = await asyncio.to_thread(
+        _model_intake_snapshot_materialization,
+        _model_intake_json_object(row["result"]),
+        artifact_sha256=artifact_sha,
+        repository_snapshot_sha256=snapshot_sha,
+    )
+    runtime_image_digest = f"sha256:{rootfs}"
+    resolver = _resolve_model_conversion_profile if operation == "conversion" else _resolve_model_loader_profile
+    resolution = resolver(
+        materialized["profile_manifest"],
+        artifact_path=materialized["artifact_path"],
+        runtime_image_digest=runtime_image_digest,
+        reviewed_custom_code_sha256=materialized["custom_code_sha256"],
+    )
+    if resolution.get("status") != "READY" or not isinstance(resolution.get("profile"), dict):
+        raise HTTPException(status_code=409, detail={"code": "runner_loader_profile_not_ready", **resolution})
+    return {
+        "operation": operation,
+        "deployment_bundle": {
+            "model_artifact_sha256": artifact_sha,
+            "repository_snapshot_sha256": snapshot_sha,
+            "custom_code_sha256": materialized["custom_code_sha256"],
+            "tokenizer_sha256": materialized["tokenizer_sha256"],
+            "configuration_sha256": materialized["configuration_sha256"],
+            "runtime_image_digest": runtime_image_digest,
+            "loader_profile_sha256": resolution["profile"]["profile_sha256"],
+            "target_environment": str(row["requested_environment"]),
+        },
+        "profile_id": resolution["profile"].get("profile_id"),
+        "artifact_path": materialized["artifact_path"],
+    }
 
 
 @app.get("/model-intake/submissions/{submission_id}/embedding-configuration")

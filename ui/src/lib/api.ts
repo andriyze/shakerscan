@@ -3941,6 +3941,27 @@ function modelIntakeWorkflowHeaders(operatorToken: string, json = false): Header
 
 export const MODEL_INTAKE_OPERATOR_TOKEN_KEY = 'shakerscan:model-intake-operator-token'
 
+// The bundle this server will accept, derived through the same code path the
+// queue validates against. The UI must not recompute it: profile_sha256 hashes
+// selection facts the server hardcodes, so any local derivation can diverge.
+export async function getModelIntakeRunnerBundle(
+  submissionId: string,
+  operation: 'calibration' | 'runtime' | 'conversion',
+  operatorToken: string,
+): Promise<{
+  operation: string
+  deployment_bundle: Partial<ModelIntakeDeploymentBundleRequest>
+  profile_id?: string
+  artifact_path?: string
+}> {
+  const res = await fetch(
+    `${API_URL}/model-intake/submissions/${submissionId}/runner-bundle?operation=${operation}`,
+    { headers: modelIntakeWorkflowHeaders(operatorToken) },
+  )
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to resolve the authoritative runner bundle'))
+  return res.json()
+}
+
 export interface ModelIntakeEmbeddingHints {
   available: boolean
   reason?: string

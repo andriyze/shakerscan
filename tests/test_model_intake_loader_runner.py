@@ -551,3 +551,45 @@ def test_unreadable_cpuinfo_leaves_a_linux_host_eligible(tmp_path):
     result = firecracker_readiness({"SHAKERSCAN_HOST_PLATFORM": "linux"}, cpuinfo_path=missing)
     assert result["status"] == "NOT_READY"
     assert result["supported_host"] is True
+
+
+def test_locally_derived_loader_profiles_diverge_from_the_authoritative_one():
+    """Why the UI must not recompute the runner bundle.
+
+    profile_sha256 hashes selection_facts, and the authoritative manifest the
+    queue validates against hardcodes library_name and an empty architectures
+    list. A caller that passes the model's declared architectures — which most
+    Hugging Face repositories publish — computes a different digest, so the
+    queue rejected the job the UI had just enabled.
+    """
+    import sys
+    from pathlib import Path as _Path
+
+    sys.path.insert(0, str(_Path(__file__).resolve().parents[1] / "api"))
+    from model_intake_loader_profiles import resolve_loader_profile
+
+    authoritative_manifest = {
+        "library_name": "transformers",
+        "custom_code_required": False,
+        "architectures": [],
+    }
+    ui_style_manifest = {
+        "library_name": "transformers",
+        "custom_code_required": False,
+        # What a Hugging Face model actually declares.
+        "architectures": ["NomicBertModel"],
+    }
+    common = {
+        "artifact_path": "model.safetensors",
+        "runtime_image_digest": "sha256:" + "e" * 64,
+        "reviewed_custom_code_sha256": None,
+    }
+
+    authoritative = resolve_loader_profile(authoritative_manifest, **common)
+    diverged = resolve_loader_profile(ui_style_manifest, **common)
+
+    assert authoritative["status"] == "READY"
+    assert diverged["status"] == "READY"
+    assert (
+        authoritative["profile"]["profile_sha256"] != diverged["profile"]["profile_sha256"]
+    ), "declared architectures must change the digest, which is why only the server may derive it"
