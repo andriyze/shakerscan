@@ -865,7 +865,7 @@ class FirecrackerRunner:
                 self.env.get("MODEL_INTAKE_RUNNER_SIGNER_KEY_ID", ""),
                 region=self.env.get("MODEL_INTAKE_RUNNER_AWS_REGION") or None,
             )
-        elif backend == "local-pem" and request.get("environment") != "production" and self.env.get("MODEL_INTAKE_RUNNER_ALLOW_LOCAL_PEM") == "true":
+        elif backend == "local-pem" and self.env.get("MODEL_INTAKE_RUNNER_ALLOW_LOCAL_PEM") == "true":
             # Prefer a key file: systemd EnvironmentFile cannot carry a
             # multi-line PEM, and an inline one is exposed through
             # /proc/PID/environ to anything sharing the namespace.
@@ -880,6 +880,19 @@ class FirecrackerRunner:
             else:
                 key_material = self.env.get("MODEL_INTAKE_RUNNER_SIGNING_KEY_PEM", "")
             signer = LocalPemSigner(key_material)
+            payload["receipt_signer_trust"] = "non_production_local_pem"
+            payload["observations"] = {
+                **payload["observations"],
+                "receipt_signer_trust": "non_production_local_pem",
+            }
+            # A local key is useful for producing cryptographically bound
+            # runtime evidence on a fresh installation, including when the
+            # requested deployment target is production. It is deliberately
+            # insufficient for a production admission: preserve failures, and
+            # downgrade an otherwise clean receipt to INCOMPLETE so the later
+            # deterministic policy can never mistake it for production trust.
+            if request.get("environment") == "production" and payload["status"] == "PASS":
+                payload["status"] = "INCOMPLETE"
         else:
             raise FirecrackerExecutionError("no permitted runner receipt signer is configured")
         return {"receipt": issue_runner_envelope(payload, signer), "payload": payload}

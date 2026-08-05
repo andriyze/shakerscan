@@ -119,9 +119,11 @@ def test_installer_registers_purpose_scoped_environment_anchors(tmp_path, monkey
 
     runner_cli._register_runner_trust_anchors(tmp_path, "local-pem", "builder-1")
     posts = [payload for _, method, payload in calls if method == "POST"]
-    assert {item["environment"] for item in posts} == {"development", "test", "staging"}
+    assert {item["environment"] for item in posts} == {"development", "test", "staging", "production"}
     assert all(item["purpose"] == "runtime_runner" for item in posts)
     assert all(item["builder_id_constraint"] == "builder-1" for item in posts)
+    assert all(item["policy_profile"] == "local-pem-evidence" for item in posts)
+    assert all("not valid for production admission" in item["description"] for item in posts)
 
     calls.clear()
     runner_cli._register_runner_trust_anchors(tmp_path, "kms:key-1", "builder-1")

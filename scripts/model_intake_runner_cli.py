@@ -492,7 +492,7 @@ def _register_runner_trust_anchors(runtime: Path, signer: str, builder_id: str) 
     existing = _api_request(f"{base}/model-intake/trust-anchors?active_only=true", token)
     anchors = existing.get("trust_anchors") if isinstance(existing.get("trust_anchors"), list) else []
     environments = ["production"] if signer.startswith("kms:") else [
-        "development", "test", "staging"
+        "development", "test", "staging", "production"
     ]
     for environment in environments:
         if any(
@@ -511,10 +511,18 @@ def _register_runner_trust_anchors(runtime: Path, signer: str, builder_id: str) 
             "POST",
             {
                 "name": name[:240],
-                "description": "Installed Model Intake microVM receipt signer",
+                "description": (
+                    "Installed Model Intake microVM production receipt signer"
+                    if signer.startswith("kms:")
+                    else "Installed Model Intake microVM local evidence signer; not valid for production admission"
+                ),
                 "public_key_pem": public_key_pem,
                 "public_key_sha256": fingerprint,
-                "policy_profile": "production" if environment == "production" else environment,
+                "policy_profile": (
+                    "production"
+                    if signer.startswith("kms:")
+                    else "local-pem-evidence"
+                ),
                 "purpose": "runtime_runner",
                 "environment": environment,
                 "builder_id_constraint": builder_id,
