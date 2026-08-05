@@ -3,8 +3,9 @@
 **Status:** The admission-v2 control plane, authoritative Hugging Face acquisition, existing scanner bundle,
 official safetensors inspection, signed runner-receipt contracts, signer boundary, OCI layout, and deployment
 verifiers, physical-runner service/orchestration, and bounded keyless planner are implemented. Model Intake scans remain non-deployable technical evidence; only the controlled
-submission/freeze/approval/policy/signing/promotion workflow may authorize deployment. Product implementation
-inside the frozen scope is complete. Physical KVM acceptance of the three reference model paths was completed
+submission/freeze/approval/policy/signing/promotion workflow may authorize deployment. The default UI path is
+now a durable one-link automatic technical review; the existing phased workflow remains available as
+Advanced/manual mode. Physical KVM acceptance of the three reference model paths was completed
 on a nested-virtualization EC2 host on 2026-08-04; every functional runtime/conversion phase passed, while the
 strict zero-network-attempt policy correctly kept all three signed receipts non-pass because the libraries
 attempted local/IPv6 socket operations. Remaining production acceptance requires organization-operated
@@ -26,11 +27,15 @@ chooses the already implemented webhook; Kubernetes is not required by ShakerSca
 ## 0.1 August 2026 usability and trust-boundary hardening
 
 The primary user journey is now deliberately simple: paste one Hugging Face model link, choose the intended
-environment, and select **Run complete review**. The resolver pins the provider revision and artifact, sizes
-the acquisition budget to the selected model, and queues complete artifact acquisition, the authoritative
-repository snapshot, the existing scanner bundle, and isolated-runtime evidence. Missing signing,
-Firecracker, evaluation, or approval evidence remains visible as `NOT_RUN`/`INCOMPLETE`; the quick path does
-not turn unavailable evidence into a pass and does not grant deployment authority.
+environment, and select **Start review**. A database-backed controller then resolves and pins the provider
+revision, sizes and queues complete acquisition, binds the completed static evidence to a controlled
+submission, derives the exact loader and fixed embedding-test contract, runs a Firecracker calibration,
+re-runs the same known-answer suite against the observed digest, and freezes the resulting evidence. The
+controller continues when the browser closes or the API restarts. It publishes the scan report, SBOM, AIBOM,
+and normalized JSON/HTML/SARIF corporate report without asking the user to copy scan IDs or deployment-bundle
+fields. Missing signing, Firecracker, evaluation, or approval evidence remains visible as
+`NOT_RUN`/`INCOMPLETE`; automatic mode does not turn unavailable evidence into a pass and cannot create an
+approval, policy exception, policy decision, admission, or promotion.
 
 The advanced phased workflow remains available for custom sources, explicit trust material, controlled
 conversion, generated evaluation, identity-separated approvals, deterministic policy, signing, and
@@ -53,8 +58,9 @@ The following implementation defects found in the branch audit are closed:
 - The rootfs builder publishes atomically. Reinstallation refreshes component identities and service
   configuration without duplicate environment keys, restarts the service, fails if API recreation fails,
   and automatically registers the exported runner public key as a `runtime_runner` trust anchor constrained
-  to the builder and environment. Local keys are registered only for development/test/staging; production
-  requires AWS KMS.
+  to the builder and environment. Local PEM is the install default and may sign production-targeted technical
+  evidence, but the receipt is labeled `non_production_local_pem` and forced to `INCOMPLETE`; only an
+  organization-approved KMS key may satisfy the production signer control.
 - Reports now lead with one decision, passed/failed/review/not-tested counts, concrete failed and incomplete
   checks, and numbered next actions. Technical matrices, phase logs, hashes, platform metadata, AIBOM, and
   SBOM detail are collapsed by default. The generated CycloneDX SBOM has a compact summary and remains
@@ -62,9 +68,17 @@ The following implementation defects found in the branch audit are closed:
 
 The web application cannot and must not silently install a root system service. On a supported Linux/KVM
 host, the Status page stages the large verified inputs and copies one explicit host command. That command
-is the single privileged consent boundary: it installs or refreshes Firecracker, wires the API, registers
+is the single privileged consent boundary: it installs the release-owned Ubuntu/Debian package manifest
+(including `python3-venv`, `nftables`, `iproute2`, and `e2fsprogs`) when needed, installs or refreshes
+Firecracker, wires the API, registers
 the trust anchor, and returns nonzero unless the complete setup succeeds. Coding agents may present or copy
 this command, but must not execute it without the operator's explicit host-level authorization.
+
+Release packaging has two explicit dependency layers. `runner/host/system-requirements.ubuntu.txt` owns the
+host packages needed for KVM orchestration and telemetry; `runner/host/requirements.lock` owns the hash-locked
+Python service environment. The guest remains separately pinned by the kernel/rootfs manifest. A future binary
+or package release must ship all three files unchanged, verify their digests, and run the same install/readiness
+self-test used by a source checkout.
 
 ## 0. Scope freeze — harden, do not expand
 
@@ -448,6 +462,7 @@ and production information, not as a statement that an artifact is legally or op
 
 | Capability | Product mechanism | Installed/operational by default | Remaining action |
 |---|---:|---:|---|
+| One-link automatic technical review | Durable API controller plus default UI mode | **Yes.** One Hugging Face link queues the complete scan, controlled static-evidence binding, Firecracker calibration/runtime verification when ready, evidence freeze, and JSON/HTML/SARIF plus scan/SBOM/AIBOM outputs. Browser presence and operator bearer-token storage are not required. | Human approvals, publisher trust, KMS production signing, policy decision, promotion, and corporate data-plane evidence intentionally remain explicit controls. |
 | Provider-neutral source adapters and pinned identities | Implemented | Hugging Face/HTTPS paths usable; cloud/OCI/MLflow contracts are tested and need credentials/configuration | Maintain provider contract tests; unsupported repository-snapshot semantics remain explicit |
 | SSRF-resistant acquisition and complete quarantine | Implemented | Available when complete acquisition is enabled and storage is configured; strict saved profiles force it | Maintain provider/redirect contract tests and controlled egress |
 | Repository manifests, archives, custom code, safe-format checks | Implemented mechanism | Provider-authoritative pinned HF inventory, containment, recursive archive/config inspection, and explicit truncation are enforced | Other providers remain artifact-only unless they later supply an equivalent authoritative snapshot API |
@@ -2339,6 +2354,10 @@ Owners must decide and record:
   identities; fleet-wide actions require separate authorization.
 - [x] All signature, signed-admission, and DSSE tests execute in mandatory CI without module-level skips.
 - [x] Durable UI/API activity and deployment decisions exist.
+- [x] The default UI mode accepts one Hugging Face link and a deployment target, then a durable controller
+  performs every technically automatable step through evidence freeze. Advanced/manual mode retains every
+  source, trust, conversion, approval, policy, and promotion control. Automatic mode has no authority to
+  approve, except, sign an admission, or promote a model.
 - [x] The core ModelScan/Semgrep/Fickling/Trivy adapters are pinned, isolated, packaged, functionally
   self-tested, and expose rule/database/readiness identity.
 - [x] The external scanner set is frozen to ModelScan/Semgrep/Fickling/Trivy; unsupported optional adapter
@@ -2364,6 +2383,10 @@ Owners must decide and record:
   scoped/certified webhook mechanisms are implemented and unit-tested.
 - [x] API, UI, and the shipped `shakerscan` agent skill expose the same controlled Model Intake workflow,
   authorization requirements, evidence, state transitions, and fail-closed decision semantics.
+- [x] Firecracker release prerequisites are explicit and machine-readable: a source-owned Ubuntu/Debian host
+  package manifest, a hash-locked host Python environment, and a pinned guest kernel/rootfs manifest. The
+  confirmed installer repairs missing host packages before provisioning and then requires READY from the
+  service/API/trust-anchor chain.
 - [x] The optional keyless Codex planner exposes only five typed bounded advisory actions, has no admission,
   promotion, evidence-writing, or arbitrary-execution authority, and durably enforces iteration/action budgets.
   Physical and UI cross-surface acceptance remains part of the release run below.

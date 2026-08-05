@@ -13,8 +13,9 @@ supported model source; named public models are conformance fixtures, not a hard
 - Production reviewer identity and roles come from the server-owned hashed credential map. The submitter may
   not approve the same submission. Production security, ML-platform, and release-manager approvals must be
   issued by distinct configured subjects.
-- The coding agent is a planner. It cannot create authoritative evidence, approve, freeze evidence, decide
-  policy, sign, promote, verify, revoke, or make a non-pass into a pass.
+- The coding agent is a planner. It cannot approve, decide policy, create an exception, sign an admission,
+  promote, revoke, or make a non-pass into a pass. The deterministic automatic-review controller may bind
+  generated evidence and freeze a technical manifest; that is evidence bookkeeping, not approval authority.
 
 Set these shell variables without echoing their contents:
 
@@ -78,8 +79,9 @@ The UI can stage the large guest image and pinned kernel first. Staging uses an 
 workers do not mount. The installer verifies the canonical manifest, kernel and rootfs byte counts and
 SHA-256 digests, rejects symlinks, installs or refreshes the service, recreates the API, exports the signer
 public key, and registers it as an environment- and builder-constrained `runtime_runner` trust anchor. It
-returns nonzero if any of those steps fails. Local PEM anchors are registered only for development, test,
-and staging; production registration requires KMS.
+returns nonzero if any of those steps fails. Local PEM anchors may verify production-targeted technical
+receipts, but those receipts are labeled `non_production_local_pem` and forced to `INCOMPLETE`. Production
+admission requires an organization-approved KMS signer.
 
 Readiness is also measured from inside the API container, which cannot see host `/dev/kvm`, `ip`, or `nft`.
 A correctly installed runner is therefore reported through `MODEL_INTAKE_RUNNER_URL`, which the installer
@@ -90,21 +92,32 @@ freshness are server-measured and enforced again immediately before execution. I
 `reassessment_required:true`, do not treat a prior clean scan as current: rebuild the scanner material and use
 the controlled `scanner_data_stale` reassessment event for affected admissions.
 
-## 2. Resolve and run technical preflight
+## 2. Default: one-link automatic technical review
 
-For the normal request—one pasted Hugging Face link—use the same path as the UI's **Run complete review**
+For the normal request—one pasted Hugging Face link—use the same durable path as the UI's **Start review**
 button:
 
-1. POST the link to `/model-intake/resolve` with `platform:"auto"`.
-2. Use the returned `scan_payload`; do not reconstruct provider authority from caller metadata.
-3. Set `complete_artifact_download`, `complete_repository_snapshot`, `run_generated_scanners`, and
-   `run_dynamic_sandbox` to `true`. For production/staging, require the dynamic sandbox so unavailable
-   execution is explicit.
-4. POST that payload to `/model-intake/scan`, report the scan ID and UI link, and stop unless monitoring was
-   explicitly requested.
+```bash
+curl -s -X POST "$API_BASE/model-intake/automatic-reviews" \
+  -H 'Content-Type: application/json' \
+  -d '{"source":"https://huggingface.co/org/model","intended_environment":"production"}'
+```
 
-This queues the useful technical review in one operation. It does not fabricate trust evidence or turn the
-preflight into corporate approval.
+This queues complete acquisition, repository snapshot, the existing scanner bundle, SBOM/AIBOM generation,
+controlled static-evidence binding, Firecracker calibration and repeat inference when the runner is READY,
+and evidence freeze. It is database-backed and continues if the UI closes or the API restarts. Inspect it at
+`GET /model-intake/automatic-reviews/{id}`; the response names the scan report and JSON/HTML/SARIF technical
+report URLs. Human approvals, publisher trust, production KMS, policy decision, promotion, and corporate
+data-plane validation remain explicit pending controls.
+
+After queueing, report the automatic review ID, scan ID, and `${UI_BASE}/model-intake?automatic_review={id}`,
+then stop unless the user explicitly asked to monitor the end-to-end run.
+
+## 2.1 Advanced/manual technical preflight
+
+Use the resolver plus `/model-intake/scan` only when the user asks for custom source, trust, limits, scanner
+selection, or another advanced control. Resolve the source first and use the returned `scan_payload`; do not
+reconstruct provider authority from caller metadata.
 
 Resolve the source first. Hugging Face must resolve to an immutable commit for complete admission evidence.
 Other adapters may be usable for preflight while complete snapshot support remains explicitly unsupported.

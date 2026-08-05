@@ -1209,8 +1209,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 296 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 250 | `api/api.py` |
+| Public REST operations | 300 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 253 | `api/api.py` |
 | Check families | 14 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 13 | `api/command_arsenal.py` |
@@ -1225,7 +1225,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Skills | 6 | `skills/` |
 | Slash commands | 15 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
-| Durable tables | 66 | `db/init.sql` + migrations |
+| Durable tables | 67 | `db/init.sql` + migrations |
 
 ### Public REST Operations
 
@@ -1386,6 +1386,10 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `GET` | `/model-intake/agent/session/{session_id}` | `get_model_intake_agent_session` |
 | `POST` | `/model-intake/agent/session/{session_id}/cancel` | `cancel_model_intake_agent_session` |
 | `POST` | `/model-intake/agent/session/{session_id}/reply` | `reply_model_intake_agent_session` |
+| `GET` | `/model-intake/automatic-reviews` | `list_model_intake_automatic_reviews` |
+| `POST` | `/model-intake/automatic-reviews` | `create_model_intake_automatic_review` |
+| `GET` | `/model-intake/automatic-reviews/{review_id}` | `get_model_intake_automatic_review` |
+| `GET` | `/model-intake/automatic-reviews/{review_id}/report` | `get_model_intake_automatic_review_report` |
 | `GET` | `/model-intake/capabilities` | `model_intake_capabilities` |
 | `POST` | `/model-intake/conversion-profiles/resolve` | `resolve_model_intake_conversion_profile` |
 | `POST` | `/model-intake/loader-profiles/resolve` | `resolve_model_intake_loader_profile` |
@@ -2259,6 +2263,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `model_intake_agent_actions` | `db/init.sql` |
 | `model_intake_agent_sessions` | `db/init.sql` |
 | `model_intake_approval_receipts` | `db/init.sql` |
+| `model_intake_automatic_reviews` | `api/retest_contract.py` |
 | `model_intake_deployment_bindings` | `db/init.sql` |
 | `model_intake_evidence_manifests` | `db/init.sql` |
 | `model_intake_evidence_records` | `db/init.sql` |
