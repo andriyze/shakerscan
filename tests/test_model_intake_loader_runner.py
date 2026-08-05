@@ -593,3 +593,65 @@ def test_locally_derived_loader_profiles_diverge_from_the_authoritative_one():
     assert (
         authoritative["profile"]["profile_sha256"] != diverged["profile"]["profile_sha256"]
     ), "declared architectures must change the digest, which is why only the server may derive it"
+
+
+def test_a_custom_code_embedding_model_resolves_a_runnable_profile():
+    """The nomic-bert / CodeRankEmbed shape: safetensors plus reviewed custom code.
+
+    This is the decisive question for whether a Firecracker run is possible at
+    all, so pin it: the profile must resolve READY, permit the remote code the
+    architecture requires, and still give the guest no network.
+    """
+    import sys
+    from pathlib import Path as _Path
+
+    sys.path.insert(0, str(_Path(__file__).resolve().parents[1] / "api"))
+    from model_intake_loader_profiles import resolve_conversion_profile, resolve_loader_profile
+
+    def manifest(python_files):
+        # Exactly what the server materializes: library fixed, architectures empty.
+        return {
+            "library_name": "transformers",
+            "custom_code_required": bool(python_files),
+            "python_files": python_files,
+            "architectures": [],
+        }
+
+    image = "sha256:" + "e" * 64
+    reviewed = "a" * 64
+
+    ready = resolve_loader_profile(
+        manifest(["modeling_hf_nomic_bert.py"]),
+        artifact_path="model.safetensors",
+        runtime_image_digest=image,
+        reviewed_custom_code_sha256=reviewed,
+    )
+    assert ready["status"] == "READY"
+    assert ready["profile"]["profile_id"] == "transformers-embedding-reviewed-custom-code"
+    assert ready["profile"]["trust_remote_code"] is True
+    assert ready["profile"]["network"] == "none"
+
+    # A plain safetensors model needs no remote code at all.
+    plain = resolve_loader_profile(
+        manifest([]), artifact_path="model.safetensors", runtime_image_digest=image
+    )
+    assert plain["profile"]["trust_remote_code"] is False
+
+    # A pickle-serialized artifact cannot be loaded directly; conversion first.
+    blocked = resolve_loader_profile(
+        manifest(["m.py"]),
+        artifact_path="pytorch_model.bin",
+        runtime_image_digest=image,
+        reviewed_custom_code_sha256=reviewed,
+    )
+    assert blocked["status"] == "BLOCKED"
+    assert blocked["reason"] == "executable_serialization_requires_controlled_conversion"
+    # And that conversion is itself a supported operation, so the path is not a
+    # dead end for a .bin-only repository.
+    conversion = resolve_conversion_profile(
+        manifest(["m.py"]),
+        artifact_path="pytorch_model.bin",
+        runtime_image_digest=image,
+        reviewed_custom_code_sha256=reviewed,
+    )
+    assert conversion["status"] == "READY"

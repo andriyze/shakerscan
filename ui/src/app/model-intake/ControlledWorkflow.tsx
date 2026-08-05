@@ -192,6 +192,7 @@ export function ControlledModelIntakeWorkflow({
   const autoResolved = useRef<string>('')
   const boundCalibration = useRef<string>('')
   const [seedFailure, setSeedFailure] = useState<string | null>(null)
+  const [resolvedProfile, setResolvedProfile] = useState<{ profile_id?: string; artifact_path?: string } | null>(null)
   const [publishedHintSources, setPublishedHintSources] = useState<string[]>([])
   const [manifestId, setManifestId] = useState('')
   const [approvalType, setApprovalType] = useState('model_security_reviewer')
@@ -716,9 +717,13 @@ export function ControlledModelIntakeWorkflow({
             return current
           }
         })
+        setResolvedProfile({ profile_id: authoritative.profile_id, artifact_path: authoritative.artifact_path })
         setSeedFailure(null)
       } catch (caught) {
-        if (!cancelled) setSeedFailure(caught instanceof Error ? caught.message : 'Could not resolve the runner bundle')
+        if (!cancelled) {
+          setResolvedProfile(null)
+          setSeedFailure(caught instanceof Error ? caught.message : 'Could not resolve the runner bundle')
+        }
       }
     })()
     return () => { cancelled = true }
@@ -970,6 +975,13 @@ export function ControlledModelIntakeWorkflow({
         <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-white">4.3 Firecracker calibration, runtime, conversion, and telemetry</summary>
         <div className="grid gap-4 border-t border-gray-800 p-4 xl:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)]">
           <div className="grid gap-3">
+            {resolvedProfile?.profile_id && (
+              <div className="rounded border border-green-800/50 bg-green-950/20 p-3 text-[11px] text-green-200">
+                Runner resolved <code className="font-mono">{resolvedProfile.profile_id}</code> for{' '}
+                <code className="break-all font-mono">{resolvedProfile.artifact_path}</code>. The guest
+                loads this exact subject with no network interface.
+              </div>
+            )}
             <div className="flex flex-wrap items-center justify-between gap-2"><span className="text-xs text-gray-400">Exact deployment bundle</span><button type="button" className={buttonClass} disabled={busy === 'seed-runner' || !detail} onClick={() => void seedBundleFromEvidence()}>{busy === 'seed-runner' ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : null} Seed authoritative runner bundle</button></div>
             <div className="rounded border border-gray-800 bg-gray-900 p-3">
               <div className="text-xs font-medium text-gray-300">Embedding configuration</div>
