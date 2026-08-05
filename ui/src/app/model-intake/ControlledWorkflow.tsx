@@ -187,6 +187,10 @@ export function ControlledModelIntakeWorkflow({
 
   // Seed each submission once, so a later reload never discards operator edits.
   const seededSubmissions = useRef<Set<string>>(new Set())
+  // Keyed by submission and operation, because the loader profile differs
+  // between a runtime load and a conversion.
+  const autoResolved = useRef<string>('')
+  const boundCalibration = useRef<string>('')
   const [seedFailure, setSeedFailure] = useState<string | null>(null)
   const [publishedHintSources, setPublishedHintSources] = useState<string[]>([])
   const [manifestId, setManifestId] = useState('')
@@ -694,14 +698,54 @@ export function ControlledModelIntakeWorkflow({
 
   // What a completed calibration observed. Binding it is the review act, so it
   // is offered rather than filled in silently.
-  const calibratedDigest = (() => {
+  useEffect(() => {
+    if (!selectedId || !operatorToken.trim()) return
+    const key = `${selectedId}:${runnerOperation}`
+    if (autoResolved.current === key) return
+    autoResolved.current = key
+    let cancelled = false
+    void (async () => {
+      try {
+        const authoritative = await getModelIntakeRunnerBundle(selectedId, runnerOperation, operatorToken)
+        if (cancelled) return
+        setBundleJson((current) => {
+          try {
+            const parsed = parseObject(current, 'Deployment bundle')
+            return JSON.stringify({ ...parsed, ...authoritative.deployment_bundle }, null, 2)
+          } catch {
+            return current
+          }
+        })
+        setSeedFailure(null)
+      } catch (caught) {
+        if (!cancelled) setSeedFailure(caught instanceof Error ? caught.message : 'Could not resolve the runner bundle')
+      }
+    })()
+    return () => { cancelled = true }
+  }, [selectedId, runnerOperation, operatorToken])
+
+  const calibration = (() => {
     for (const job of jobs) {
       if (job.operation !== 'calibration' || job.state !== 'completed') continue
       const observed = runnerObservations(job).embedding_output_sha256
-      if (typeof observed === 'string' && /^[0-9a-f]{64}$/i.test(observed)) return observed
+      if (typeof observed === 'string' && /^[0-9a-f]{64}$/i.test(observed)) {
+        return { digest: observed, jobId: String(job.id) }
+      }
     }
-    return ''
+    return null
   })()
+  const calibratedDigest = calibration?.digest || ''
+
+  // The digest a calibration observed is a hash from a previous step, so carry
+  // it forward rather than making the operator copy it. Queueing stays the
+  // deliberate act: the value is visible, attributed, and editable first.
+  useEffect(() => {
+    if (!calibration) return
+    if (boundCalibration.current === calibration.jobId) return
+    boundCalibration.current = calibration.jobId
+    setKnownAnswerDigest((current) => (current.trim() ? current : calibration.digest))
+    setRunnerOperation((current) => (current === 'calibration' ? 'runtime' : current))
+  }, [calibration])
 
   const queueBlockers: Array<{ summary: string; detail?: string }> = []
   if (seedFailure) {
@@ -997,17 +1041,20 @@ export function ControlledModelIntakeWorkflow({
             <label className="grid gap-1 text-xs text-gray-300">Known-answer inputs (bounded JSON string array)<textarea className={textareaClass} rows={3} value={knownAnswerInputs} onChange={(event) => setKnownAnswerInputs(event.target.value)} /></label>
             <label className="grid gap-1 text-xs text-gray-300">Reviewed known-answer embedding SHA-256 {runnerOperation === 'runtime' ? '(required)' : '(not used by this operation)'}
               <input className={inputClass} value={knownAnswerDigest} onChange={(event) => setKnownAnswerDigest(event.target.value)} placeholder={runnerOperation === 'calibration' ? 'Produced by this run' : ''} />
-              {calibratedDigest && calibratedDigest !== knownAnswerDigest.trim() && (
-                <span className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-cyan-200">
-                  Calibration observed <code className="break-all font-mono">{calibratedDigest.slice(0, 16)}…</code>
-                  <button
-                    type="button"
-                    className={buttonClass}
-                    onClick={() => { setKnownAnswerDigest(calibratedDigest); setRunnerOperation('runtime') }}
-                  >
-                    Review and bind for runtime
-                  </button>
-                </span>
+              {calibration && (
+                calibratedDigest === knownAnswerDigest.trim() ? (
+                  <span className="mt-1 block text-[11px] text-cyan-200">
+                    Observed by calibration job <code className="font-mono">{calibration.jobId.slice(0, 8)}</code>.
+                    Confirm it is the embedding this deployment should reproduce, then queue.
+                  </span>
+                ) : (
+                  <span className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-cyan-200">
+                    Calibration observed <code className="break-all font-mono">{calibratedDigest.slice(0, 16)}…</code>
+                    <button type="button" className={buttonClass} onClick={() => { setKnownAnswerDigest(calibratedDigest); setRunnerOperation('runtime') }}>
+                      Use that digest
+                    </button>
+                  </span>
+                )
               )}
             </label>
             <label className="grid gap-1 text-xs text-gray-300">Wall-clock timeout seconds<input className={inputClass} type="number" min={30} max={3600} value={timeoutSeconds} onChange={(event) => setTimeoutSeconds(Number(event.target.value))} /></label>

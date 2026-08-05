@@ -501,7 +501,7 @@ test('a first Firecracker run is reachable without inventing anything', () => {
   assert.match(workflow, /useState<'calibration' \| 'runtime' \| 'conversion'>\('calibration'\)/)
   assert.match(workflow, /calibratedDigest/)
   assert.match(workflow, /embedding_output_sha256/)
-  assert.match(workflow, /Review and bind for runtime/)
+  assert.match(workflow, /Use that digest/)
   assert.match(workflow, /Switch Operation to calibration and run that first/)
 
   // The data-plane digests are optional, and validated only when supplied.
@@ -540,4 +540,21 @@ test('only the server derives the runner bundle it will accept', () => {
   assert.match(workflow, /Object\.assign\(seeded, authoritative\.deployment_bundle\)/)
   // The UI no longer resolves a loader profile itself.
   assert.doesNotMatch(workflow, /resolveModelIntakeRunnerProfile/)
+})
+
+test('every runner input is carried from a previous step without operator action', () => {
+  // Digests resolve on selection, not on discovering a button, and re-resolve
+  // when the operation changes because the loader profile differs per mode.
+  assert.match(workflow, /autoResolved\.current === key/)
+  assert.match(workflow, /\[selectedId, runnerOperation, operatorToken\]/)
+  assert.match(workflow, /getModelIntakeRunnerBundle\(selectedId, runnerOperation, operatorToken\)/)
+
+  // The digest calibration observed is a hash from a previous step, so it is
+  // carried forward rather than copied by hand.
+  assert.match(workflow, /boundCalibration\.current === calibration\.jobId/)
+  assert.match(workflow, /current\.trim\(\) \? current : calibration\.digest/)
+  assert.match(workflow, /current === 'calibration' \? 'runtime' : current/)
+  // Queueing stays the deliberate act: the value is attributed and editable.
+  assert.match(workflow, /Observed by calibration job/)
+  assert.match(workflow, /Confirm it is the embedding this deployment should reproduce/)
 })
