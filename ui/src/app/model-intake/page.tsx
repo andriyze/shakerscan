@@ -1629,7 +1629,9 @@ function ModelIntakeSettingsContent() {
                               ))}
                             </ul>
                           )}
-                          {(control.items || []).length === 0 && <div className="mt-1 text-gray-500">{control.action}</div>}
+                          {(control.items || []).length === 0 && control.action && control.action !== (control.summary || control.action) && (
+                            <div className="mt-1 text-gray-500">{control.action}</div>
+                          )}
                         </div>
                       ))}
                     </div>
