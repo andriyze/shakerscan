@@ -9,12 +9,50 @@ import re
 import subprocess
 import sys
 import uuid
+from datetime import datetime, timezone
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "api"))
 import api  # noqa: E402
+
+
+def test_automatic_review_payload_decodes_jsonb_for_browser_contract():
+    review_id = uuid.uuid4()
+    scan_id = uuid.uuid4()
+    created_at = datetime.now(timezone.utc)
+    payload = api._model_intake_automatic_review_payload({
+        "id": review_id,
+        "scan_id": scan_id,
+        "timeline_json": json.dumps([{"event": "static_scan_queued", "state": "static_scan_pending"}]),
+        "pending_controls": json.dumps([{"control": "publisher_trust", "status": "PENDING"}]),
+        "error_json": json.dumps({"code": "runner_not_ready"}),
+        "deployment_bundle_json": json.dumps({"model_artifact_sha256": "a" * 64}),
+        "created_at": created_at,
+    })
+
+    assert payload["id"] == str(review_id)
+    assert payload["scan_id"] == str(scan_id)
+    assert payload["created_at"] == created_at.isoformat()
+    assert payload["timeline_json"] == [{"event": "static_scan_queued", "state": "static_scan_pending"}]
+    assert payload["pending_controls"] == [{"control": "publisher_trust", "status": "PENDING"}]
+    assert payload["error_json"] == {"code": "runner_not_ready"}
+    assert payload["deployment_bundle_json"] == {"model_artifact_sha256": "a" * 64}
+
+
+def test_automatic_review_payload_fails_safe_for_malformed_jsonb():
+    payload = api._model_intake_automatic_review_payload({
+        "timeline_json": '{not-json',
+        "pending_controls": '{"not":"a-list"}',
+        "error_json": '[]',
+        "deployment_bundle_json": '[]',
+    })
+
+    assert payload["timeline_json"] == []
+    assert payload["pending_controls"] == []
+    assert payload["error_json"] is None
+    assert payload["deployment_bundle_json"] is None
 
 
 def _operator_request(token: str):

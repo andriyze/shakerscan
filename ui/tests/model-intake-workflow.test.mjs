@@ -275,6 +275,13 @@ test('one pasted Hugging Face link queues the complete technical review', () => 
   assert.match(api, /downloadModelIntakeAutomaticReport/)
 })
 
+test('automatic review JSONB values cannot crash the Model Intake route', () => {
+  assert.match(api, /normalizeModelIntakeAutomaticReview/)
+  assert.match(api, /decodedAutomaticReviewArray/)
+  assert.match(api, /Array\.isArray\(payload\?\.reviews\)/)
+  assert.match(api, /throw new Error\('Model Intake returned an invalid automatic review'\)/)
+})
+
 test('model intake reports lead with outcomes and collapse technical bulk', () => {
   const report = readFileSync(path.join(root, 'src/components/ReportView.tsx'), 'utf8')
   assert.match(report, /Technical evidence coverage/)

@@ -15653,6 +15653,37 @@ def _model_intake_auto_timeline(value: Any) -> list[dict[str, Any]]:
     return [item for item in decoded if isinstance(item, dict)] if isinstance(decoded, list) else []
 
 
+def _model_intake_automatic_review_payload(row: Any) -> dict[str, Any]:
+    """Return the public automatic-review shape with decoded JSONB fields.
+
+    asyncpg intentionally returns JSON/JSONB values as JSON strings in this
+    service.  Most Model Intake internals decode those values before use, but
+    the automatic-review endpoints previously passed the raw row straight to
+    the browser.  A completed review therefore changed ``timeline_json`` and
+    ``pending_controls`` from the documented arrays into strings and crashed
+    the whole Model Intake page when React called ``.map`` on them.
+
+    Keep the decoding local to this resource instead of changing
+    :func:`row_to_dict`, whose raw-JSON behavior is relied on by older API
+    surfaces.
+    """
+    payload = row_to_dict(row)
+    payload["timeline_json"] = _model_intake_auto_timeline(payload.get("timeline_json"))
+    pending = _decode_json_value(payload.get("pending_controls"))
+    payload["pending_controls"] = (
+        [item for item in pending if isinstance(item, dict)]
+        if isinstance(pending, list)
+        else []
+    )
+    error = _decode_json_value(payload.get("error_json"))
+    payload["error_json"] = dict(error) if isinstance(error, Mapping) else None
+    bundle = _decode_json_value(payload.get("deployment_bundle_json"))
+    payload["deployment_bundle_json"] = (
+        dict(bundle) if isinstance(bundle, Mapping) else None
+    )
+    return payload
+
+
 async def _update_model_intake_automatic_review(
     conn: Any,
     review: Any,
@@ -16176,7 +16207,7 @@ async def create_model_intake_automatic_review(request: ModelIntakeAutomaticRevi
             json.dumps(timeline),
         )
     return {
-        "review": row_to_dict(row),
+        "review": _model_intake_automatic_review_payload(row),
         "scan_id": queued["scan_id"],
         "ui_url": f"/model-intake?automatic_review={review_id}",
         "scan_report_url": f"/scans/{queued['scan_id']}",
@@ -16191,7 +16222,7 @@ async def list_model_intake_automatic_reviews(limit: int = Query(10, ge=1, le=10
             "SELECT * FROM model_intake_automatic_reviews ORDER BY created_at DESC LIMIT $1",
             limit,
         )
-    return {"reviews": [row_to_dict(row) for row in rows]}
+    return {"reviews": [_model_intake_automatic_review_payload(row) for row in rows]}
 
 
 @app.get("/model-intake/automatic-reviews/{review_id}")
@@ -16203,7 +16234,7 @@ async def get_model_intake_automatic_review(review_id: str):
         )
     if not row:
         raise HTTPException(status_code=404, detail="Automatic Model Intake review not found")
-    payload = row_to_dict(row)
+    payload = _model_intake_automatic_review_payload(row)
     payload["scan_report_url"] = f"/scans/{row['scan_id']}" if row["scan_id"] else None
     payload["technical_report_urls"] = (
         {

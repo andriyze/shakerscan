@@ -1418,6 +1418,46 @@ export interface ModelIntakeAutomaticReview {
   completed_at?: string | null
 }
 
+function decodedAutomaticReviewArray<T>(value: unknown): T[] {
+  if (Array.isArray(value)) return value as T[]
+  if (typeof value !== 'string') return []
+  try {
+    const parsed: unknown = JSON.parse(value)
+    return Array.isArray(parsed) ? parsed as T[] : []
+  } catch {
+    return []
+  }
+}
+
+function decodedAutomaticReviewObject(value: unknown): Record<string, unknown> | null {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return value as Record<string, unknown>
+  }
+  if (typeof value !== 'string') return null
+  try {
+    const parsed: unknown = JSON.parse(value)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null
+  } catch {
+    return null
+  }
+}
+
+// Decode older servers defensively as well as trusting the current typed API.
+// One stale JSONB string must never crash the entire Model Intake route.
+function normalizeModelIntakeAutomaticReview(value: unknown): ModelIntakeAutomaticReview | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const review = value as Record<string, unknown>
+  if (typeof review.id !== 'string' || typeof review.scan_id !== 'string') return null
+  return {
+    ...review,
+    pending_controls: decodedAutomaticReviewArray<{ control: string; status: string; action: string }>(review.pending_controls),
+    timeline_json: decodedAutomaticReviewArray<{ event: string; state: string; at: string }>(review.timeline_json),
+    error_json: decodedAutomaticReviewObject(review.error_json) as ModelIntakeAutomaticReview['error_json'],
+  } as ModelIntakeAutomaticReview
+}
+
 export interface ModelIntakeWorkflowSubmission {
   id: string
   requested_by?: string
@@ -4186,19 +4226,28 @@ export async function createModelIntakeAutomaticReview(data: {
     body: JSON.stringify(data),
   })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to start automatic Model Intake review'))
-  return res.json()
+  const payload = await res.json()
+  const review = normalizeModelIntakeAutomaticReview(payload?.review)
+  if (!review) throw new Error('Model Intake returned an invalid automatic review')
+  return { ...payload, review }
 }
 
 export async function listModelIntakeAutomaticReviews(limit: number = 10): Promise<{ reviews: ModelIntakeAutomaticReview[] }> {
   const res = await fetch(`${API_URL}/model-intake/automatic-reviews?limit=${limit}`, { cache: 'no-store' })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load automatic Model Intake reviews'))
-  return res.json()
+  const payload = await res.json()
+  const reviews = Array.isArray(payload?.reviews)
+    ? payload.reviews.map(normalizeModelIntakeAutomaticReview).filter((review: ModelIntakeAutomaticReview | null): review is ModelIntakeAutomaticReview => review !== null)
+    : []
+  return { reviews }
 }
 
 export async function getModelIntakeAutomaticReview(id: string): Promise<ModelIntakeAutomaticReview> {
   const res = await fetch(`${API_URL}/model-intake/automatic-reviews/${id}`, { cache: 'no-store' })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load automatic Model Intake review'))
-  return res.json()
+  const review = normalizeModelIntakeAutomaticReview(await res.json())
+  if (!review) throw new Error('Model Intake returned an invalid automatic review')
+  return review
 }
 
 export async function downloadModelIntakeAutomaticReport(
