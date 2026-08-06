@@ -86,6 +86,35 @@ def test_automatic_review_payload_distinguishes_pending_runner_work():
     assert payload["effective_current_step"] == "calibrate_known_answer_queued"
 
 
+def test_automatic_review_payload_separates_license_from_static_findings():
+    payload = api._model_intake_automatic_review_payload({
+        "pending_controls": [{
+            "control": "static_analysis",
+            "status": "WARNING",
+            "summary": "Static analysis found items that need review.",
+            "items": [
+                {
+                    "title": "Unsafe deserialization call",
+                    "scanners": ["semgrep"],
+                    "path": "model.py",
+                    "line": 10,
+                },
+                {
+                    "title": "Repository has no license source file",
+                    "scanners": ["shakerscan-license-inventory"],
+                },
+            ],
+        }],
+        "timeline_json": [],
+    })
+
+    assert [item["control"] for item in payload["pending_controls"]] == [
+        "static_analysis", "license_compliance",
+    ]
+    assert payload["pending_controls"][0]["items"][0]["title"] == "Unsafe deserialization call"
+    assert payload["pending_controls"][1]["summary"] == "License evidence needs review."
+
+
 def test_automatic_review_payload_fails_safe_for_malformed_jsonb():
     payload = api._model_intake_automatic_review_payload({
         "timeline_json": '{not-json',

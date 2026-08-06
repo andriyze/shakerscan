@@ -15954,6 +15954,49 @@ def _model_intake_auto_timeline(value: Any) -> list[dict[str, Any]]:
     return [item for item in decoded if isinstance(item, dict)] if isinstance(decoded, list) else []
 
 
+def _model_intake_present_pending_controls(value: Any) -> list[dict[str, Any]]:
+    """Keep security findings and license follow-up distinct in review cards.
+
+    Static evidence carries both scanner findings and the native license
+    inventory.  Treating a missing LICENSE/NOTICE file as a generic static-code
+    warning made the automatic card disagree with the normalized report and
+    obscured the actionable Semgrep/AST results.  This presentation transform
+    preserves the underlying evidence and status while giving license evidence
+    its own concise follow-up.  It also repairs already-completed reviews when
+    they are read, without rewriting their frozen records.
+    """
+    decoded = _decode_json_value(value)
+    controls = [dict(item) for item in decoded if isinstance(item, Mapping)] if isinstance(decoded, list) else []
+    presented: list[dict[str, Any]] = []
+    for control in controls:
+        if str(control.get("control") or "") != "static_analysis":
+            presented.append(control)
+            continue
+        items = [dict(item) for item in control.get("items") or [] if isinstance(item, Mapping)]
+        license_items: list[dict[str, Any]] = []
+        security_items: list[dict[str, Any]] = []
+        for item in items:
+            scanners = {str(name) for name in item.get("scanners") or []}
+            if "shakerscan-license-inventory" in scanners:
+                license_items.append(item)
+            else:
+                security_items.append(item)
+        if security_items or not license_items:
+            static_control = dict(control)
+            if items:
+                static_control["items"] = security_items
+            presented.append(static_control)
+        if license_items:
+            presented.append({
+                "control": "license_compliance",
+                "status": "REVIEW",
+                "summary": "License evidence needs review.",
+                "action": "Open the License BOM for detected terms, missing source text, obligations, and evidence.",
+                "items": license_items,
+            })
+    return presented
+
+
 def _model_intake_automatic_review_payload(row: Any) -> dict[str, Any]:
     """Return the public automatic-review shape with decoded JSONB fields.
 
@@ -15970,11 +16013,8 @@ def _model_intake_automatic_review_payload(row: Any) -> dict[str, Any]:
     """
     payload = row_to_dict(row)
     payload["timeline_json"] = _model_intake_auto_timeline(payload.get("timeline_json"))
-    pending = _decode_json_value(payload.get("pending_controls"))
-    payload["pending_controls"] = (
-        [item for item in pending if isinstance(item, dict)]
-        if isinstance(pending, list)
-        else []
+    payload["pending_controls"] = _model_intake_present_pending_controls(
+        payload.get("pending_controls")
     )
     error = _decode_json_value(payload.get("error_json"))
     payload["error_json"] = dict(error) if isinstance(error, Mapping) else None
@@ -16394,7 +16434,7 @@ async def _advance_model_intake_automatic_review(conn: Any, review: Any) -> None
             technical_outcome = "REVIEW_REQUIRED"
         else:
             technical_outcome = "PASS"
-        pending = [
+        pending = _model_intake_present_pending_controls([
             {
                 "control": evidence_type,
                 "status": status,
@@ -16426,7 +16466,7 @@ async def _advance_model_intake_automatic_review(conn: Any, review: Any) -> None
                     "controls, and any organization-required approvals."
                 ),
             },
-        ]
+        ])
         await _update_model_intake_automatic_review(
             conn, review, state="technical_review_complete", current_step="review_results",
             progress=100, event="technical_evidence_frozen",

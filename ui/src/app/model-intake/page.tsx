@@ -1566,6 +1566,7 @@ function ModelIntakeSettingsContent() {
               const outcome = (review.technical_outcome || '').toUpperCase()
               const passed = workflowComplete && outcome === 'PASS'
               const blocked = workflowComplete && outcome === 'BLOCK'
+              const incomplete = workflowComplete && outcome === 'INCOMPLETE'
               const queuedForRunner = review.active_runner_job_state === 'pending'
               const pendingControls = review.pending_controls || []
               const legacyDeploymentControls = new Set(['publisher_trust', 'human_approvals', 'production_signer', 'deployed_data_plane'])
@@ -1600,8 +1601,8 @@ function ModelIntakeSettingsContent() {
                   </div>
                   {workflowComplete && (
                     <div className={`mt-3 rounded border p-3 text-xs ${blocked ? 'border-red-800/60 bg-red-950/20 text-red-200' : passed ? 'border-green-800/60 bg-green-950/20 text-green-200' : 'border-yellow-800/60 bg-yellow-950/20 text-yellow-200'}`}>
-                      <div className="font-semibold">{blocked ? 'Do not use this revision yet' : passed ? 'Technical checks passed' : 'Review needs attention'}</div>
-                      <div className="mt-1 opacity-80">{blocked ? 'One or more required technical checks failed. Open the report for evidence and next steps.' : passed ? 'All technical checks selected for this review completed successfully.' : 'Some checks need review or could not complete.'}</div>
+                      <div className="font-semibold">{blocked ? 'Do not use this revision yet' : passed ? 'Technical checks passed' : incomplete ? 'Review incomplete' : 'Review needs attention'}</div>
+                      <div className="mt-1 opacity-80">{blocked ? 'One or more required technical checks failed. Open the report for evidence and next steps.' : passed ? 'All technical checks selected for this review completed successfully.' : incomplete ? 'One or more technical checks could not complete. Open the report for the exact prerequisite or retry.' : `${technicalFollowUp.length || 'Some'} check${technicalFollowUp.length === 1 ? '' : 's'} need review. Open the report for evidence and next steps.`}</div>
                     </div>
                   )}
                   <div className="mt-3 h-2 overflow-hidden rounded-full bg-gray-800">
