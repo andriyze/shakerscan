@@ -11404,6 +11404,33 @@ def _model_intake_finding_summary(value: Any) -> list[dict[str, Any]]:
     return summaries
 
 
+def _model_intake_scanner_result_summaries(generated_evidence: Any) -> list[dict[str, Any]]:
+    """Normalize generated scanner output for both source and conversion scans."""
+    generated = _model_intake_json_object(generated_evidence)
+    return [
+        {
+            "name": str((item.get("scanner") or {}).get("name") or "unknown"),
+            "version": (item.get("scanner") or {}).get("version"),
+            "status": (item.get("execution") or {}).get("status"),
+            "required": bool((item.get("execution") or {}).get("required")),
+            "applicability": (item.get("execution") or {}).get("applicability"),
+            "finding_count": len(item.get("findings") or []),
+            "coverage": _model_intake_content_free_coverage(item.get("coverage")),
+            "findings": _model_intake_finding_summary(item.get("findings")),
+            "rules_sha256": (
+                (item.get("scanner") or {}).get("rules_sha256")
+                or (item.get("execution") or {}).get("rules_sha256")
+            ),
+            "database_sha256": (
+                (item.get("scanner") or {}).get("database_sha256")
+                or (item.get("execution") or {}).get("database_sha256")
+            ),
+        }
+        for item in generated.get("results") or []
+        if isinstance(item, dict)
+    ]
+
+
 def _model_intake_attention_items(static_payload: Any) -> list[dict[str, Any]]:
     """Merge duplicate AST/Semgrep observations into useful review items."""
     payload = _model_intake_json_object(static_payload)
@@ -12003,22 +12030,7 @@ async def attach_model_intake_static_run(
                 if isinstance(model_intake.get("checks"), dict)
                 else {}
             ),
-            "scanner_results": [
-                {
-                    "name": str((item.get("scanner") or {}).get("name") or "unknown"),
-                    "version": (item.get("scanner") or {}).get("version"),
-                    "status": (item.get("execution") or {}).get("status"),
-                    "required": bool((item.get("execution") or {}).get("required")),
-                    "applicability": (item.get("execution") or {}).get("applicability"),
-                    "finding_count": len(item.get("findings") or []),
-                    "coverage": _model_intake_content_free_coverage(item.get("coverage")),
-                    "findings": _model_intake_finding_summary(item.get("findings")),
-                    "rules_sha256": (item.get("scanner") or {}).get("rules_sha256") or (item.get("execution") or {}).get("rules_sha256"),
-                    "database_sha256": (item.get("scanner") or {}).get("database_sha256") or (item.get("execution") or {}).get("database_sha256"),
-                }
-                for item in generated_evidence.get("results") or []
-                if isinstance(item, dict)
-            ],
+            "scanner_results": _model_intake_scanner_result_summaries(generated_evidence),
             "license_compliance": {
                 "outcome": license_compliance.get("outcome"),
                 "policy_status": license_compliance.get("policy_status"),
@@ -12504,7 +12516,7 @@ async def _register_and_rescan_converted_snapshot(
     )
     if runtime_resolution.get("status") != "READY" or not isinstance(runtime_resolution.get("profile"), dict):
         static_status = "INCOMPLETE"
-    report = {
+    report_base = {
         "schema_version": "model-intake-conversion-static-rescan/v1",
         "source_conversion_receipt_sha256": hashlib.sha256(
             json.dumps(receipt_payload, sort_keys=True, separators=(",", ":")).encode()
@@ -12517,7 +12529,6 @@ async def _register_and_rescan_converted_snapshot(
         "generated_evidence": generated,
         "status": static_status,
     }
-    report_sha = hashlib.sha256(json.dumps(report, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     invocation = f"{receipt_payload['invocation_id']}:converted-static-rescan"
     bindings = {
         "model_artifact_sha256": artifact_sha,
@@ -12538,6 +12549,44 @@ async def _register_and_rescan_converted_snapshot(
         )
         if not verified_conversion:
             raise HTTPException(status_code=409, detail="Verified conversion evidence is unavailable")
+        previous_static = await conn.fetchrow(
+            """
+            SELECT id,payload_json FROM model_intake_evidence_records
+            WHERE submission_id=$1 AND evidence_type='static_analysis'
+            ORDER BY created_at DESC LIMIT 1
+            """,
+            submission_uuid,
+        )
+        previous_payload = _model_intake_json_object(
+            previous_static["payload_json"] if previous_static else {}
+        )
+        report = {
+            **report_base,
+            # The converted target is rescanned as a complete exact snapshot.
+            # Keep the same normalized report surface as the source scan so a
+            # latest-record query cannot erase scanner findings, licenses, or
+            # rule/database identities after conversion.
+            "required_static_checks": {
+                "acquisition_complete": True,
+                "inspection_complete": static_status in {"PASS", "WARNING"},
+                "repository_manifest_complete": True,
+                "repository_snapshot_complete": True,
+                "generated_evidence_pass": generated_status == "PASS",
+                "checksum_verified": True,
+            },
+            "checks": generated.get("statuses") or {},
+            "scanner_results": _model_intake_scanner_result_summaries(generated),
+            # Conversion changes the weight serialization, not the repository
+            # terms. Preserve the source policy result while the converted
+            # snapshot's native license scanner still contributes findings.
+            "license_compliance": _model_intake_json_object(
+                previous_payload.get("license_compliance")
+            ),
+            "source_static_evidence_id": str(previous_static["id"]) if previous_static else None,
+        }
+        report_sha = hashlib.sha256(
+            json.dumps(report, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
         for subject_kind, digest, size, manifest_sha, metadata in (
             ("artifact", artifact_sha, materialized["artifact_size_bytes"], snapshot_sha, {"converted": True}),
             ("repository_snapshot", snapshot_sha, materialized["repository_size_bytes"], snapshot_sha, {"converted": True}),

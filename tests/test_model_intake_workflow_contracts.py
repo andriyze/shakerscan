@@ -955,6 +955,37 @@ def test_static_finding_summary_is_bounded_and_merges_duplicate_scanners():
     assert "publisher declaration" in next(item for item in items if not item.get("path"))["title"]
 
 
+def test_conversion_rescan_uses_same_actionable_scanner_summary_shape():
+    summaries = api._model_intake_scanner_result_summaries({"results": [{
+        "scanner": {
+            "name": "semgrep", "version": "1.2.3", "rules_sha256": "a" * 64,
+        },
+        "execution": {"status": "WARNING", "required": True, "applicability": "repository_code"},
+        "findings": [{
+            "rule_id": "unsafe-load", "path": "modeling.py", "line": 12,
+            "severity": "medium", "message": "Set weights_only=True",
+            "matched_source": "must not be copied",
+        }],
+        "coverage": {"files_scanned": 4, "sample_path": "must not be copied"},
+    }]})
+
+    assert summaries == [{
+        "name": "semgrep",
+        "version": "1.2.3",
+        "status": "WARNING",
+        "required": True,
+        "applicability": "repository_code",
+        "finding_count": 1,
+        "coverage": {"files_scanned": 4},
+        "findings": [{
+            "rule_id": "unsafe-load", "severity": "medium", "path": "modeling.py",
+            "line": 12, "message": "Set weights_only=True",
+        }],
+        "rules_sha256": "a" * 64,
+        "database_sha256": None,
+    }]
+
+
 def test_automatic_review_system_principal_is_server_scoped_and_not_a_bearer_shortcut():
     request = api._model_intake_automatic_system_request()
 
