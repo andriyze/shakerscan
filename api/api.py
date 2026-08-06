@@ -15831,9 +15831,6 @@ async def _advance_model_intake_automatic_review(conn: Any, review: Any) -> None
                 }],
             )
             return
-        published = await model_intake_embedding_configuration(submission_id, system_request)
-        if not published.get("available"):
-            raise ValueError("The pinned model revision does not publish a usable embedding contract")
         try:
             authoritative = await model_intake_runner_bundle(
                 submission_id, system_request, operation="calibration"
@@ -15844,7 +15841,30 @@ async def _advance_model_intake_automatic_review(conn: Any, review: Any) -> None
                     submission_id, system_request, operation="conversion"
                 )
             except HTTPException:
-                raise runtime_error
+                detail = runtime_error.detail
+                message = (
+                    str(detail.get("message") or detail.get("error") or detail)
+                    if isinstance(detail, dict) else str(detail)
+                )
+                await _update_model_intake_automatic_review(
+                    conn, review, state="attention_required",
+                    current_step="runtime_profile_unavailable", progress=100,
+                    event="runtime_profile_unavailable", technical_outcome="INCOMPLETE",
+                    pending_controls=[{
+                        "control": "isolated_runtime",
+                        "status": "UNSUPPORTED",
+                        "action": (
+                            "ShakerScan has no fixed Firecracker loader/conversion profile for this exact "
+                            "format and repository. Static reports and bills of materials remain useful, "
+                            "but the model cannot pass runtime qualification in this release."
+                        ),
+                        "detail": message[:500],
+                    }],
+                )
+                return
+            published = await model_intake_embedding_configuration(submission_id, system_request)
+            if not published.get("available"):
+                raise ValueError("The pinned model revision does not publish a usable embedding contract")
             conversion_bundle = _model_intake_auto_embedding_bundle(conversion, published)
             memory_mib = await _model_intake_auto_memory_mib(conn, submission_id, conversion_bundle)
             response = await create_model_intake_runner_job(
@@ -15865,6 +15885,9 @@ async def _advance_model_intake_automatic_review(conn: Any, review: Any) -> None
                 },
             )
             return
+        published = await model_intake_embedding_configuration(submission_id, system_request)
+        if not published.get("available"):
+            raise ValueError("The pinned model revision does not publish a usable embedding contract")
         bundle = _model_intake_auto_embedding_bundle(authoritative, published)
         await _update_model_intake_automatic_review(
             conn, review, state="calibration_pending", current_step="calibrate_known_answers",

@@ -785,6 +785,14 @@ def test_automatic_review_requires_fingerprint_current_workers():
     assert fields["require_current_workers"].default is False
 
 
+def test_automatic_review_reports_unsupported_runtime_as_expected_incomplete():
+    source = inspect.getsource(api._advance_model_intake_automatic_review)
+
+    assert 'event="runtime_profile_unavailable"' in source
+    assert '"status": "UNSUPPORTED"' in source
+    assert "Static reports and bills of materials remain useful" in source
+
+
 def test_model_intake_scan_fails_closed_on_stale_workers_before_database_access(monkeypatch):
     monkeypatch.setattr(api, "_worker_freshness_snapshot", lambda: {
         "available": True,
