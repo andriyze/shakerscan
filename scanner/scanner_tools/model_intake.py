@@ -2549,8 +2549,20 @@ def _approval_policy(metadata: dict[str, Any], *, deployment_approved: bool, str
     }
 
 
-def _scan_suspicious_loader_markers(data: bytes, zip_info: dict[str, Any]) -> list[dict[str, str]]:
-    sample = data[:1_000_000].lower()
+def _scan_suspicious_loader_markers(
+    data: bytes,
+    zip_info: dict[str, Any],
+    *,
+    extension: str = "",
+) -> list[dict[str, str]]:
+    # Do not substring-scan opaque tensor payloads. Arbitrary tensor bytes can
+    # spell words such as ``powershell`` by chance, while the structured GGUF,
+    # ONNX, and safetensors inspectors already parse the fields that can affect
+    # loading. Code, configuration, archives, and executable-serialization
+    # formats remain covered by AST/Semgrep, archive inspection, pickle
+    # analysis, ModelScan/Fickling, and this bounded fallback heuristic.
+    structured_weight_formats = {".gguf", ".onnx", ".safetensors"}
+    sample = b"" if extension.lower() in structured_weight_formats else data[:1_000_000].lower()
     hits = [
         {"marker": label, "source": "artifact_bytes"}
         for marker, label in SUSPICIOUS_LOADER_MARKERS.items()
@@ -3535,7 +3547,11 @@ async def run_model_intake_scan(
         artifact_size=artifact_size,
         artifact_size_source=artifact_size_source,
     )
-    suspicious_loader_markers = _scan_suspicious_loader_markers(artifact_bytes, zip_info)
+    suspicious_loader_markers = _scan_suspicious_loader_markers(
+        artifact_bytes,
+        zip_info,
+        extension=ext,
+    )
     # An AIBOM hash is generated evidence only when it covers the complete
     # observed artifact. Keep publisher/caller claims in a distinct field.
     aibom_hash = str(sha256 or "").strip() if sha256 and not artifact_truncated else None

