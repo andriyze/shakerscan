@@ -147,6 +147,31 @@ def _evidence(bundle):
     )
 
 
+def test_freeze_manifest_normalizes_json_subject_bindings_from_database_rows():
+    bindings = {"model_artifact_sha256": "a" * 64}
+    manifest = freeze_evidence_manifest(
+        submission_id="00000000-0000-4000-8000-000000000010",
+        subject_bundle_sha256="b" * 64,
+        version=1,
+        evidence_records=[{
+            "id": "00000000-0000-4000-8000-000000000011",
+            "evidence_type": "static_analysis",
+            "schema_version": "static-analysis/v1",
+            "provenance_class": "GENERATED_STATIC",
+            "producer_id": "scanner",
+            "producer_version": "1",
+            "builder_id": "worker",
+            "invocation_id": "scan-1",
+            "subject_bindings": json.dumps(bindings),
+            "payload_sha256": "c" * 64,
+            "status": "PASS",
+        }],
+        frozen_by="control-plane:test",
+    )
+
+    assert manifest["evidence"][0]["subject_bindings"] == bindings
+
+
 def test_policy_rejects_valid_evidence_bound_to_a_different_runtime_or_index():
     bundle = _bundle()
     evidence = _evidence(bundle)

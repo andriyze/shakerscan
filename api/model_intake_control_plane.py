@@ -257,6 +257,11 @@ def freeze_evidence_manifest(
         if status not in {"PASS", "FAIL", "WARNING", "INCOMPLETE", "UNSUPPORTED", "TIMEOUT", "CRASHED"}:
             raise AdmissionContractError("unsupported evidence status")
         bindings = record.get("subject_bindings")
+        if isinstance(bindings, str):
+            try:
+                bindings = json.loads(bindings)
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise AdmissionContractError("evidence subject bindings must be valid JSON") from exc
         if not isinstance(bindings, dict) or not bindings:
             raise AdmissionContractError("evidence subject bindings are required")
         normalized_records.append({

@@ -13316,6 +13316,13 @@ async def freeze_model_intake_evidence(
         )]
         for record in records:
             bindings = _model_intake_json_object(record.get("subject_bindings"))
+            # asyncpg returns json/jsonb as text unless a codec is installed on
+            # the connection.  The matching checks below already normalize
+            # that representation, but the manifest builder receives the
+            # record itself and requires a structured, non-empty mapping.
+            # Persist the normalized value into the record so a real database
+            # row cannot fail after passing the exact-subject checks.
+            record["subject_bindings"] = bindings
             if record.get("evidence_type") == "static_analysis":
                 matches = (
                     bindings.get("model_artifact_sha256") == bundle["model_artifact_sha256"]
