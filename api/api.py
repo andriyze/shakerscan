@@ -16290,7 +16290,7 @@ async def _advance_model_intake_automatic_review(conn: Any, review: Any) -> None
             submission_id,
             ModelRunnerJobCreateRequest(
                 operation="calibration", deployment_bundle=bundle,
-                known_answer_inputs=[], vcpu_count=2, memory_mib=memory_mib, timeout_seconds=900,
+                known_answer_inputs=[], vcpu_count=1, memory_mib=memory_mib, timeout_seconds=900,
             ),
             system_request,
         )
@@ -16330,7 +16330,7 @@ async def _advance_model_intake_automatic_review(conn: Any, review: Any) -> None
             ModelRunnerJobCreateRequest(
                 operation="runtime", deployment_bundle=bundle, known_answer_inputs=[],
                 known_answer_embedding_sha256=str(review["known_answer_embedding_sha256"]),
-                vcpu_count=2, memory_mib=memory_mib, timeout_seconds=900,
+                vcpu_count=1, memory_mib=memory_mib, timeout_seconds=900,
             ),
             system_request,
         )

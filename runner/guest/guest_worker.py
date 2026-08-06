@@ -16,6 +16,12 @@ OUTPUT = Path("/output")
 WORK = OUTPUT / "work"
 STATE = WORK / "state.json"
 
+# A known-answer digest is byte-exact evidence. Keep all CPU reduction
+# libraries single-threaded before PyTorch imports so large embedding models
+# cannot change floating-point reduction order between microVM executions.
+for _thread_env in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
+    os.environ[_thread_env] = "1"
+
 
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -72,15 +78,20 @@ def _install_transformers_compatibility() -> None:
         modeling_utils.Conv1D = Conv1D
 
 
+def _configure_deterministic_torch(torch) -> None:
+    torch.set_num_threads(1)
+    torch.set_num_interop_threads(1)
+    torch.manual_seed(0)
+    torch.use_deterministic_algorithms(True)
+
+
 def _mean_embeddings(model_path: Path, texts: list[str], *, trust: bool, safe: bool):
     import gc
     import torch
     # Compare the two serializers under one deterministic CPU execution
     # contract. Parallel reduction order can otherwise introduce small output
     # drift even when every source and target tensor is byte-equivalent.
-    torch.set_num_threads(1)
-    torch.manual_seed(0)
-    torch.use_deterministic_algorithms(True)
+    _configure_deterministic_torch(torch)
     _install_transformers_compatibility()
     from transformers import AutoModel, AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True, trust_remote_code=trust)
@@ -198,6 +209,7 @@ def run_phase(phase: str) -> None:
                 _onnx_embeddings(model_path, ["bounded warmup"], job)
             else:
                 import torch
+                _configure_deterministic_torch(torch)
                 _install_transformers_compatibility()
                 from transformers import AutoModel, AutoTokenizer
                 trust = bool(job.get("trust_remote_code"))
@@ -218,6 +230,7 @@ def run_phase(phase: str) -> None:
                 shape = list(vectors.shape)
             else:
                 import torch
+                _configure_deterministic_torch(torch)
                 _install_transformers_compatibility()
                 from transformers import AutoModel, AutoTokenizer
                 trust = bool(job.get("trust_remote_code"))

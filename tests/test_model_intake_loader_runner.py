@@ -266,6 +266,8 @@ def test_guest_embedding_equivalence_uses_deterministic_cpu_execution():
     assert "torch.set_num_threads(1)" in source
     assert "torch.manual_seed(0)" in source
     assert "torch.use_deterministic_algorithms(True)" in source
+    assert 'os.environ[_thread_env] = "1"' in source
+    assert source.count("_configure_deterministic_torch(torch)") >= 3
 
 
 def test_firecracker_readiness_has_no_local_container_fallback(tmp_path, monkeypatch):

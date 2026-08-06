@@ -1004,11 +1004,13 @@ def test_automatic_review_system_principal_is_server_scoped_and_not_a_bearer_sho
 
 def test_automatic_review_requires_fingerprint_current_workers():
     source = inspect.getsource(api.create_model_intake_automatic_review)
+    advance_source = inspect.getsource(api._advance_model_intake_automatic_review)
     schema = (ROOT / "api" / "retest_contract.py").read_text()
 
     assert '"require_current_workers": True' in source
     assert 'policy_profile = "research"' in source
     assert '"require_dynamic_sandbox": request.intended_environment' not in source
+    assert advance_source.count("vcpu_count=1") >= 2
     assert "source_label" in source
     assert "source_label TEXT NOT NULL DEFAULT 'Model review'" in schema
     fields = api.ModelIntakeScanRequest.model_fields
