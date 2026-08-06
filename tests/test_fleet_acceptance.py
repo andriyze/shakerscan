@@ -7,6 +7,18 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 import fleet_acceptance  # noqa: E402
 sys.path.pop(0)
 
+
+def test_default_api_url_uses_persisted_remote_bind(tmp_path, monkeypatch):
+    fake_script = tmp_path / "scripts" / "fleet_acceptance.py"
+    fake_script.parent.mkdir()
+    fake_script.write_text("", encoding="utf-8")
+    (tmp_path / ".env").write_text(
+        "SHAKERSCAN_BIND_HOST=100.121.87.22\nSHAKERSCAN_API_PORT=9080\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(fleet_acceptance, "__file__", str(fake_script))
+    assert fleet_acceptance._local_api_url() == "http://100.121.87.22:9080"
+
 def test_safe_parallel_endpoints_remain_same_origin_and_bounded():
     endpoints = fleet_acceptance._safe_parallel_endpoints("https://lab.example.test/app", 8)
     assert len(endpoints) == 8

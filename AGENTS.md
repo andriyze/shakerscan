@@ -99,7 +99,11 @@ When users ask about security scanning, you should:
 - **Model Intake validation:** use `make e2e-model-intake` for the real public-model path. It enables the bounded Nex-N2-mini Hugging Face shard check and verifies that a capped partial download is reported as `known_unverified_truncated`, never as a false hash mismatch. Use `make e2e-model-intake-fixture` only when external network access is intentionally unavailable.
 - **ASM gaps** (`GET /targets/{id}/asm/gaps`) returns `family_coverage` (completed vs attempts) and `recommended_campaigns` (recon / add_credentials / sqli_wave / xss_wave / bola_wave / retest_stale). Reports carry `verification_summary` (verified vs suspected, unproven crit/high).
 
-For commands you run on the same machine as ShakerScan, use `http://localhost:8080` for the API. For browser-facing links on a remote VPS, use the UI URL printed by `./scanner.sh status` or `./scanner.sh start --remote` instead of hardcoding `localhost:3000`.
+For a loopback-bound install, use `http://localhost:8080` for the API. A remote-mode VPS may publish
+the API only on its Tailscale or configured bind address, including for commands run on that host;
+use the API URL printed by `./scanner.sh status`. For browser-facing links, use the printed UI URL
+instead of hardcoding `localhost:3000`. Host-side `shakerscan fleet` commands resolve the persisted
+API bind automatically.
 
 1. **Check if scanner is running** first:
    ```bash

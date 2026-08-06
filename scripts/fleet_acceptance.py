@@ -16,6 +16,7 @@ import hashlib
 import ipaddress
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -48,6 +49,39 @@ def _local_operator_token() -> str:
     except OSError:
         pass
     return ""
+
+
+def _local_api_url() -> str:
+    """Resolve the host-published API used by the default acceptance command."""
+    dotenv = Path(__file__).resolve().parents[1] / ".env"
+    values: dict[str, str] = {}
+    try:
+        for line in dotenv.read_text(encoding="utf-8").splitlines():
+            if "=" not in line or line.lstrip().startswith("#"):
+                continue
+            key, value = line.split("=", 1)
+            values[key.strip()] = value.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    host = str(values.get("SHAKERSCAN_BIND_HOST") or "").strip()
+    if host in {"", "0.0.0.0", "::"}:
+        host = "127.0.0.1"
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?", host):
+            raise AcceptanceError("SHAKERSCAN_BIND_HOST is not a safe IP address or hostname")
+        formatted_host = host
+    else:
+        formatted_host = f"[{address}]" if address.version == 6 else str(address)
+    raw_port = str(values.get("SHAKERSCAN_API_PORT") or "8080").strip()
+    try:
+        port = int(raw_port)
+    except ValueError as exc:
+        raise AcceptanceError("SHAKERSCAN_API_PORT must be an integer") from exc
+    if not 1 <= port <= 65535:
+        raise AcceptanceError("SHAKERSCAN_API_PORT must be between 1 and 65535")
+    return f"http://{formatted_host}:{port}"
 
 
 class ApiClient:
@@ -444,7 +478,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Validate a physical ShakerScan multi-node fleet")
-    parser.add_argument("--api-url", default="http://127.0.0.1:8080")
+    parser.add_argument("--api-url", default=_local_api_url())
     parser.add_argument("--operator-token", default="")
     parser.add_argument("--node-id", action="append", default=[], help="limit acceptance to this node UUID (repeatable)")
     parser.add_argument("--public-host", help="public control-plane host from which 6379/5432 must be closed")

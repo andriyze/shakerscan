@@ -11,7 +11,9 @@ target binding, approvals, budgets, evidence, and finding proof.
 ## Establish Context
 
 1. Run from the ShakerScan runtime or source checkout.
-2. Use `http://localhost:8080` for API calls executed on the ShakerScan host.
+2. Use `http://localhost:8080` for a loopback-bound install. If `./scanner.sh status` reports a
+   Tailscale or other host-published API URL, use that URL even for commands executed on the host;
+   remote mode may not publish the API on `127.0.0.1`.
 3. Set `UI_BASE` to the UI URL printed by `./scanner.sh status` and use it for user-facing links. Do
    not hardcode localhost links for a remote VPS.
 4. Check health before an operation:
@@ -148,6 +150,9 @@ preflight first. Treat the fleet operator token, join tokens, node credentials, 
 and private CA material as secrets. Join tokens are single-use by default; when the operator needs
 one command for several machines, mint a short-lived bounded `--max-uses N` token for the exact host
 count, distribute it through an approved secret channel, and revoke unused capacity immediately.
+Host-side `shakerscan fleet` commands resolve the API bind persisted by `scanner.sh`; do not force
+loopback after a Tailscale-only `--remote` start unless the operator explicitly overrides
+`--local-api`.
 
 Use node-level placement, not a worker-container identity. `node_id=local` selects control-plane
 workers; a Fleet UUID selects any healthy replica on that remote node. Keep automatic placement as

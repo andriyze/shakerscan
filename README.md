@@ -387,6 +387,10 @@ Every enrolled worker still receives its own node identity and durable credentia
 [multi-node guide](docs/multi-node-guide.md#enroll-several-workers-with-one-bounded-token) for the
 security and concurrency model.
 
+Host-side `shakerscan fleet` commands automatically use the API bind and port persisted by
+`scanner.sh`, including a verified Tailscale-only `--remote` bind. `--local-api` is an explicit
+override, not a requirement for remote-mode control planes.
+
 For source-checkout testing on a broker worker, append `--local-build`. This builds the worker image
 on that host and skips pulling the fleet image; production joins remain digest-pinned registry pulls.
 

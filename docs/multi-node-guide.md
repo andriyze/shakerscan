@@ -234,6 +234,11 @@ The command prints the worker-side join command. Treat the token as a short-live
 it in tickets, shell tracing, logs, or shared chat. If it expires or a join fails before state is
 durable, create a fresh token.
 
+Control-plane Fleet commands automatically use the host-published API address recorded by
+`scanner.sh`. This matters after `./scanner.sh start --remote`, where Docker may publish the API only
+on the host's Tailscale address rather than `127.0.0.1`. Use `--local-api` only to override that
+persisted address intentionally.
+
 ### Enroll several workers with one bounded token
 
 For a controlled rollout, the control plane can print one command that may be run on several worker
@@ -542,6 +547,9 @@ shakerscan fleet accept \
   --preflight-only \
   --public-host scanner.example.com
 ```
+
+The acceptance command also resolves the persisted host-published API address automatically. An
+explicit `--api-url` remains available when the runner is launched from a different machine.
 
 Then run the passive cross-node test against a target you control:
 

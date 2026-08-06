@@ -341,6 +341,38 @@ def load_dotenv(path: Path) -> dict[str, str]:
     return values
 
 
+def local_api_url(paths: RuntimePaths, explicit: str | None = None) -> str:
+    """Resolve the host-published API origin for control-plane CLI commands.
+
+    Remote mode intentionally binds Docker to the host's Tailscale address, so
+    loopback is not always reachable even when the CLI runs on that same host.
+    An explicit ``--local-api`` remains authoritative; otherwise use the
+    persisted bind address and API port written by ``scanner.sh``.
+    """
+    if explicit:
+        return str(explicit).strip().rstrip("/")
+    env = load_dotenv(paths.dotenv)
+    host = str(env.get("SHAKERSCAN_BIND_HOST") or "").strip()
+    if host in {"", "0.0.0.0", "::"}:
+        host = "127.0.0.1"
+    try:
+        address = ip_address(host)
+    except ValueError:
+        if host != "localhost" and not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?", host):
+            raise FleetCLIError("SHAKERSCAN_BIND_HOST is not a safe IP address or hostname")
+        formatted_host = host
+    else:
+        formatted_host = f"[{address}]" if address.version == 6 else str(address)
+    raw_port = str(env.get("SHAKERSCAN_API_PORT") or "8080").strip()
+    try:
+        port = int(raw_port)
+    except ValueError as exc:
+        raise FleetCLIError("SHAKERSCAN_API_PORT must be an integer") from exc
+    if not 1 <= port <= 65535:
+        raise FleetCLIError("SHAKERSCAN_API_PORT must be between 1 and 65535")
+    return f"http://{formatted_host}:{port}"
+
+
 def update_dotenv(path: Path, updates: dict[str, str]) -> None:
     for key, value in updates.items():
         if not ENV_KEY_RE.fullmatch(key) or "\n" in value or "\r" in value:
@@ -1516,7 +1548,7 @@ def command_join_token(paths: RuntimePaths, args: argparse.Namespace) -> None:
     env = load_dotenv(paths.dotenv)
     public_url = validate_https_url(args.public_url or env.get("FLEET_PUBLIC_URL", ""))
     result = api_json(
-        args.local_api.rstrip("/"),
+        local_api_url(paths, getattr(args, "local_api", None)),
         "POST",
         "/fleet/join-tokens",
         payload={
@@ -1568,7 +1600,7 @@ def command_revoke_join_token(paths: RuntimePaths, args: argparse.Namespace) -> 
     except ValueError as exc:
         raise FleetCLIError("join token ID must be a UUID") from exc
     result = api_json(
-        args.local_api.rstrip("/"),
+        local_api_url(paths, getattr(args, "local_api", None)),
         "DELETE",
         f"/fleet/join-tokens/{token_id}",
         bearer=env.get("FLEET_OPERATOR_TOKEN"),
@@ -2130,7 +2162,7 @@ def command_reconcile(paths: RuntimePaths, args: argparse.Namespace) -> None:
     config = _control_config(paths)
     env = load_dotenv(paths.dotenv)
     result = api_json(
-        args.local_api.rstrip("/"),
+        local_api_url(paths, getattr(args, "local_api", None)),
         "GET",
         "/fleet/nodes",
         bearer=env.get("FLEET_OPERATOR_TOKEN"),
@@ -2242,14 +2274,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="maximum workers that may enroll with this token (default: 1)",
     )
     token.add_argument("--public-url")
-    token.add_argument("--local-api", default="http://127.0.0.1:8080")
+    token.add_argument("--local-api", help="override the host-published control-plane API origin")
 
     revoke_token = subparsers.add_parser(
         "revoke-join-token",
         help="revoke the remaining uses of a join token",
     )
     revoke_token.add_argument("token_id")
-    revoke_token.add_argument("--local-api", default="http://127.0.0.1:8080")
+    revoke_token.add_argument("--local-api", help="override the host-published control-plane API origin")
 
     join = subparsers.add_parser("join", help="join this Linux host as a worker node")
     join.add_argument("control_plane_url")
@@ -2280,7 +2312,7 @@ def build_parser() -> argparse.ArgumentParser:
     join.add_argument("--overlay-timeout", type=int, default=90)
 
     reconcile = subparsers.add_parser("reconcile", help="apply registered WireGuard peers locally")
-    reconcile.add_argument("--local-api", default="http://127.0.0.1:8080")
+    reconcile.add_argument("--local-api", help="override the host-published control-plane API origin")
     reconcile.add_argument("--quiet", action="store_true")
     return parser
 

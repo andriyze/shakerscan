@@ -264,6 +264,42 @@ def test_join_token_command_prints_one_shareable_bounded_command(tmp_path, monke
     assert f"shakerscan fleet revoke-join-token {NODE_ID}" in output
 
 
+def test_control_plane_commands_resolve_remote_bind_when_local_api_is_omitted(tmp_path, monkeypatch):
+    paths = fleet_cli.RuntimePaths(tmp_path)
+    paths.dotenv.write_text(
+        "SHAKERSCAN_BIND_HOST=100.121.87.22\n"
+        "SHAKERSCAN_API_PORT=9080\n"
+        "FLEET_PUBLIC_URL=https://fleet.example.test\n"
+        "FLEET_OPERATOR_TOKEN=operator-secret\n",
+        encoding="utf-8",
+    )
+    calls = []
+
+    def fake_api(base, method, path, **kwargs):
+        calls.append((base, method, path, kwargs))
+        return {
+            "token": "ssj_" + "x" * 40,
+            "token_id": NODE_ID,
+            "expires_at": "2026-07-26T10:00:00Z",
+            "max_uses": 1,
+        }
+
+    monkeypatch.setattr(fleet_cli, "api_json", fake_api)
+    fleet_cli.command_join_token(
+        paths,
+        types.SimpleNamespace(
+            ttl="1h",
+            role="worker",
+            max_uses=1,
+            public_url=None,
+            local_api=None,
+            transport="broker",
+        ),
+    )
+
+    assert calls[0][0] == "http://100.121.87.22:9080"
+
+
 def test_revoke_join_token_command_uses_identifier_not_secret(tmp_path, monkeypatch, capsys):
     paths = fleet_cli.RuntimePaths(tmp_path)
     paths.dotenv.write_text("FLEET_OPERATOR_TOKEN=operator-secret\n", encoding="utf-8")
