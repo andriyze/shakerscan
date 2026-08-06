@@ -308,13 +308,30 @@ def _network_summary(network: dict[str, Any]) -> dict[str, Any]:
     corporate report needs the decision-driving counts and a small sample, not
     hundreds of repetitive AF_UNIX probes emitted by framework libraries.
     """
-    attempts = network.get("attempted_operations")
-    attempts = attempts if isinstance(attempts, list) else []
+    observed = network.get("observed_operations")
+    if not isinstance(observed, list):
+        # Compatibility with v1 receipts, where attempted_operations contained
+        # every traced socket syscall rather than only outbound attempts.
+        observed = network.get("attempted_operations")
+    observed = observed if isinstance(observed, list) else []
+    attempts = [
+        raw for raw in observed
+        if isinstance(raw, dict)
+        and (
+            raw.get("outbound_attempt") is True
+            or (
+                str(raw.get("address_family") or "") in {"AF_INET", "AF_INET6"}
+                and str(raw.get("operation") or "") in {"connect", "sendto", "sendmsg"}
+            )
+        )
+    ]
     by_family: dict[str, int] = {}
     by_operation: dict[str, int] = {}
     local_ipc_count = 0
     ip_network_count = 0
-    for raw in attempts:
+    successful_outbound_count = 0
+    dns_attempt_count = 0
+    for raw in observed:
         item = raw if isinstance(raw, dict) else {}
         family = str(item.get("address_family") or "UNKNOWN")
         operation = str(item.get("operation") or "unknown")
@@ -324,11 +341,20 @@ def _network_summary(network: dict[str, Any]) -> dict[str, Any]:
             local_ipc_count += 1
         elif family in {"AF_INET", "AF_INET6"}:
             ip_network_count += 1
+    for raw in attempts:
+        item = raw if isinstance(raw, dict) else {}
+        if item.get("succeeded") is True:
+            successful_outbound_count += 1
+        if item.get("dns_related") is True or item.get("destination_port") == 53:
+            dns_attempt_count += 1
     return {
         "complete": network.get("complete"),
-        "attempt_count": network.get("attempt_count"),
-        "local_ipc_attempt_count": local_ipc_count,
-        "ip_network_attempt_count": ip_network_count,
+        "event_count": network.get("event_count", len(observed)),
+        "outbound_attempt_count": len(attempts),
+        "successful_outbound_count": network.get("successful_outbound_count", successful_outbound_count),
+        "dns_attempt_count": network.get("dns_attempt_count", dns_attempt_count),
+        "local_ipc_event_count": network.get("local_ipc_event_count", local_ipc_count),
+        "ip_socket_event_count": network.get("ip_socket_event_count", ip_network_count),
         "attempts_by_family": dict(sorted(by_family.items())),
         "attempts_by_operation": dict(sorted(by_operation.items())),
         "attempts_by_phase": network.get("attempts_by_phase"),
@@ -426,14 +452,18 @@ def _runner_controls(
             "evidence_refs": ref,
         }
         network = runtime.get("network") or {}
-        attempt_count = _integer(network.get("attempt_count"))
-        lost_events = _integer(network.get("lost_events"))
-        firewall_drops = _integer(network.get("host_firewall_drop_count"))
+        network_summary = (
+            network if "outbound_attempt_count" in network
+            else _network_summary(network)
+        )
+        attempt_count = _integer(network_summary.get("outbound_attempt_count"))
+        lost_events = _integer(network_summary.get("lost_events"))
+        firewall_drops = _integer(network_summary.get("host_firewall_drop_count"))
         network_status = (
             "PASS"
-            if network.get("complete") is True
+            if network_summary.get("complete") is True
             and attempt_count == 0
-            and network.get("overflowed") is False
+            and network_summary.get("overflowed") is False
             and lost_events == 0
             and firewall_drops == 0
             else "FAIL"
@@ -446,7 +476,7 @@ def _runner_controls(
             "label": "Independent network-attempt telemetry",
             "status": network_status,
             "detail": "No network attempt or telemetry loss was observed." if network_status == "PASS" else "Network attempts or incomplete/lost telemetry require blocking review.",
-            "coverage": network,
+            "coverage": network_summary,
             "evidence_refs": ref,
         }
         resources = runtime.get("resources") or {}

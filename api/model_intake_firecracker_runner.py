@@ -272,28 +272,62 @@ def parse_network_telemetry(
                 result_match = RESULT.search(line)
                 address = next((item for item in (address_match.groups() if address_match else ()) if item), None)
                 port = next((int(item) for item in (port_match.groups() if port_match else ()) if item), None)
-                destination = f"{address or 'unresolved'}:{port if port is not None else 'unknown'}"
+                operation = match.group(1)
+                family = family_match.group(1) if family_match else None
+                result = " ".join(item for item in (result_match.groups() if result_match else ()) if item) or None
+                # Creating a socket, opening a Unix-domain IPC channel, or
+                # binding a local address is observable runtime behavior, but
+                # none of those is an outbound connection attempt.  Only
+                # destination-bearing IP connect/send calls are classified as
+                # egress attempts.  Keep every event in the signed evidence so
+                # an auditor can still inspect the runtime baseline.
+                outbound_attempt = bool(
+                    family in {"AF_INET", "AF_INET6"}
+                    and operation in {"connect", "sendto", "sendmsg"}
+                )
+                destination = f"{address}:{port if port is not None else 'unknown'}" if address else None
                 events.append({
-                    "operation": match.group(1),
+                    "operation": operation,
                     "phase": phase,
-                    "address_family": family_match.group(1) if family_match else None,
-                    "destination_digest": hmac.new(salt, destination.encode(), hashlib.sha256).hexdigest(),
+                    "address_family": family,
+                    "classification": (
+                        "outbound_ip_attempt" if outbound_attempt
+                        else "local_ipc" if family == "AF_UNIX"
+                        else "ip_socket_activity" if family in {"AF_INET", "AF_INET6"}
+                        else "other_socket_activity"
+                    ),
+                    "outbound_attempt": outbound_attempt,
+                    "destination_address": address if outbound_attempt else None,
+                    "destination_digest": (
+                        hmac.new(salt, destination.encode(), hashlib.sha256).hexdigest()
+                        if destination and outbound_attempt else None
+                    ),
                     "destination_port": port,
-                    "dns_related": port == 53,
-                    "result": " ".join(item for item in (result_match.groups() if result_match else ()) if item) or None,
+                    "dns_related": outbound_attempt and port == 53,
+                    "succeeded": bool(result and not result.startswith("-1")),
+                    "result": result,
                 })
     phases: dict[str, int] = {}
     for event in events:
         phases[event["phase"]] = phases.get(event["phase"], 0) + 1
+    outbound_events = [event for event in events if event.get("outbound_attempt") is True]
+    local_ipc_events = [event for event in events if event.get("address_family") == "AF_UNIX"]
+    ip_socket_events = [event for event in events if event.get("address_family") in {"AF_INET", "AF_INET6"}]
     telemetry = {
-        "schema_version": "model-intake-network-telemetry/v1",
+        "schema_version": "model-intake-network-telemetry/v2",
         "no_network_device": host_state.get("no_network_device") is True,
         "network_interface_config_count": int(host_state.get("network_interface_config_count") or 0),
         "tap_device_count": int(host_state.get("tap_device_count") or 0),
         "guest_interfaces": sorted(set(guest_interfaces)),
         "host_interfaces": sorted(set(host_state.get("interfaces") or [])),
-        "attempted_operations": events,
-        "attempt_count": len(events),
+        "observed_operations": events,
+        "attempted_operations": outbound_events,
+        "event_count": len(events),
+        "attempt_count": len(outbound_events),
+        "successful_outbound_count": sum(1 for event in outbound_events if event.get("succeeded") is True),
+        "dns_attempt_count": sum(1 for event in outbound_events if event.get("dns_related") is True),
+        "local_ipc_event_count": len(local_ipc_events),
+        "ip_socket_event_count": len(ip_socket_events),
         "attempts_by_phase": phases,
         "host_firewall_before": int(host_state.get("drop_count_before") or 0),
         "host_firewall_after": int(host_state.get("drop_count_after") or 0),

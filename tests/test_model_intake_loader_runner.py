@@ -309,9 +309,11 @@ def test_network_trace_parser_records_attempt_phase_destination_and_overflow_sta
             "no_network_device": True, "network_interface_config_count": 0, "tap_device_count": 0,
         },
     )
-    assert telemetry["attempt_count"] == 2
+    assert telemetry["event_count"] == 2
+    assert telemetry["attempt_count"] == 1
     assert telemetry["attempts_by_phase"] == {"load": 2}
     assert telemetry["attempted_operations"][0]["destination_port"] == 443
+    assert telemetry["attempted_operations"][0]["destination_address"] == "203.0.113.5"
     assert telemetry["attempted_operations"][0]["address_family"] == "AF_INET"
     assert telemetry["attempted_operations"][0]["result"] == "-1 ENETUNREACH"
     assert telemetry["attempted_operations"][0]["destination_digest"] != "203.0.113.5"
@@ -319,6 +321,31 @@ def test_network_trace_parser_records_attempt_phase_destination_and_overflow_sta
     assert telemetry["complete"] is True
     assert telemetry["overflowed"] is False
     assert len(telemetry["telemetry_sha256"]) == 64
+
+
+def test_network_trace_parser_does_not_call_local_ipc_or_socket_creation_egress(tmp_path):
+    traces = tmp_path / "traces"
+    traces.mkdir()
+    (traces / "trace.import.42").write_text(
+        'socket(AF_UNIX, SOCK_STREAM, 0) = 3<UNIX-STREAM:[1154]>\n'
+        'connect(3<UNIX-STREAM:[1154]>, {sa_family=AF_UNIX, sun_path="/tmp/torch"}, 110) = -1 ENOENT\n'
+        'socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP) = 3<TCPv6:[1160]>\n'
+        'bind(3<TCPv6:[1160]>, {sa_family=AF_INET6, sin6_port=htons(0)}, 28) = -1 EADDRNOTAVAIL\n'
+    )
+    telemetry = parse_network_telemetry(
+        traces, ["lo"], {
+            "complete": True, "interfaces": ["lo"], "drop_count_before": 0,
+            "drop_count_after": 0, "no_network_device": True,
+            "network_interface_config_count": 0, "tap_device_count": 0,
+        },
+    )
+
+    assert telemetry["event_count"] == 4
+    assert telemetry["attempt_count"] == 0
+    assert telemetry["attempted_operations"] == []
+    assert telemetry["local_ipc_event_count"] == 2
+    assert telemetry["ip_socket_event_count"] == 2
+    assert all(item["destination_digest"] is None for item in telemetry["observed_operations"])
 
 
 def test_real_input_drive_builder_copies_bounded_subject_and_fixed_job(tmp_path):

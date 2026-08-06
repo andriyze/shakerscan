@@ -269,7 +269,9 @@ def test_network_attempt_is_a_blocking_control_failure():
     telemetry["attempt_count"] = 1
     telemetry["attempted_operations"] = [{
         "operation": "connect", "phase": "model_load", "address_family": "AF_INET",
+        "outbound_attempt": True,
     }]
+    telemetry["observed_operations"] = list(telemetry["attempted_operations"])
     report = _report(rows)
 
     assert report["outcome"] == "BLOCK"
@@ -278,7 +280,7 @@ def test_network_attempt_is_a_blocking_control_failure():
     assert _control(report, "network_isolation")["status"] == "FAIL"
     network = report["runner_timelines"][0]["network"]
     assert network["attempt_sample"][0]["operation"] == "connect"
-    assert network["ip_network_attempt_count"] == 1
+    assert network["outbound_attempt_count"] == 1
     assert network["attempts_by_operation"] == {"connect": 1}
     assert "attempted_operations" not in network
 
@@ -294,10 +296,12 @@ def test_network_report_bounds_repetitive_syscall_evidence():
     report = _report(rows)
     network = report["runner_timelines"][0]["network"]
 
-    assert network["local_ipc_attempt_count"] == 20
-    assert network["ip_network_attempt_count"] == 0
-    assert len(network["attempt_sample"]) == 12
-    assert network["attempt_sample_truncated"] is True
+    assert network["local_ipc_event_count"] == 20
+    assert network["ip_socket_event_count"] == 0
+    assert network["outbound_attempt_count"] == 0
+    assert network["attempt_sample"] == []
+    assert network["attempt_sample_truncated"] is False
+    assert _control(report, "network_isolation")["status"] == "PASS"
 
 
 def test_embedding_control_distinguishes_behavior_from_runtime_containment():
