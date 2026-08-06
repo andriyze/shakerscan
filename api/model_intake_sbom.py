@@ -114,7 +114,7 @@ def model_intake_license_display(compliance: dict[str, Any]) -> dict[str, Any]:
 
 
 def _cyclonedx_license(value: Any) -> dict[str, Any] | None:
-    text = str(value or "").strip()
+    text = _display_license_term(value)
     if not text:
         return None
     if re.fullmatch(r"[A-Za-z0-9.+-]+", text):
@@ -155,9 +155,11 @@ def _aibom_components(aibom: dict[str, Any]) -> list[dict[str, Any]]:
         if hashes:
             component["hashes"] = hashes
         licenses = [
-            {"license": {"id" if str(entry).count(" ") == 0 else "name": str(entry)}}
+            normalized
             for entry in (item.get("licenses") if isinstance(item.get("licenses"), list) else [])
             if entry
+            for normalized in [_cyclonedx_license(entry)]
+            if normalized
         ]
         if licenses:
             component["licenses"] = licenses

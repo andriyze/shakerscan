@@ -82,6 +82,7 @@ def test_export_is_conformant_cyclonedx_rooted_on_the_scanned_model():
     root = document["metadata"]["component"]
     assert root["type"] == "machine-learning-model"
     assert root["hashes"] == [{"alg": "SHA-256", "content": "a" * 64}]
+    assert root["licenses"] == [{"license": {"id": "Apache-2.0"}}]
 
     names = {component["name"] for component in document["components"]}
     # Dependencies from the generated adapter and model facts from the AIBOM.

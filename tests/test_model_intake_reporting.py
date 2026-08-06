@@ -360,8 +360,78 @@ def test_static_report_names_safe_finding_location_and_remediation():
 
     static_control = _control(report, "static_analysis")
     assert "torch.load should use weights_only=True (modeling.py:42)" in static_control["detail"]
+    assert "Resolve torch.load should use weights_only=True at modeling.py:42" in static_control["remediation"]
+    assert "modeling.py:42" in next(
+        item["action"] for item in report["executive_summary"]["required_actions"]
+        if item["control_id"] == "static_analysis"
+    )
     scanner = report["detailed_review"]["static_analysis_detail"]["scanner_results"][0]
     assert scanner["findings"][0]["path"] == "modeling.py"
+
+
+def test_presentation_does_not_tell_engineers_to_repeat_passing_or_inapplicable_work():
+    report = _report(_rows(active_admission=False))
+
+    verified = report["presentation"]["groups"]["verified"]
+    not_applicable = report["presentation"]["groups"]["not_applicable"]
+    assert verified
+    assert all(item["next_step"].startswith("Completed;") for item in verified)
+    assert all(item["next_step"] == "No action is required for this revision." for item in not_applicable)
+
+
+def test_calibration_digest_capture_is_not_presented_as_failed_inference():
+    rows = _rows(active_admission=False)
+    rows["runner_jobs"].insert(0, {
+        "id": "calibration-1",
+        "operation": "calibration",
+        "state": "completed",
+        "request_sha256": DIGESTS["b"],
+        "result_json": {
+            "payload": {
+                "observations": {
+                    "phases": {
+                        "import": "PASS", "tokenizer": "PASS", "model_load": "PASS",
+                        "warmup": "PASS", "inference": "FAIL", "teardown": "PASS",
+                    },
+                    "embedding_known_answers_status": "NOT_CONFIGURED",
+                    "embedding_output_sha256": DIGESTS["c"],
+                },
+            },
+        },
+    })
+
+    report = _report(rows)
+    calibration = next(item for item in report["runner_timelines"] if item["operation"] == "calibration")
+    inference = next(item for item in calibration["phases"] if item["phase"] == "inference")
+    assert inference["status"] == "CALIBRATED"
+    assert inference["raw_status"] == "FAIL"
+    assert "repeat verification" in inference["detail"]
+    assert "<td>CALIBRATED</td>" in render_model_intake_html(report)
+
+
+def test_check_catalog_uses_direct_per_check_evidence_instead_of_aggregate_static_status():
+    rows = _rows(active_admission=False)
+    static = next(item for item in rows["evidence"] if item["evidence_type"] == "static_analysis")
+    static["status"] = "WARNING"
+    static["payload_json"]["checks"].update({
+        "format_specific_inspection": True,
+        "signature_verification": None,
+        "sbom_dependencies": False,
+    })
+    static["payload_json"]["scanner_results"].extend([
+        {"name": "python-pickletools", "status": "NOT_APPLICABLE", "finding_count": 0},
+        {"name": "python-ast-security", "status": "REVIEW", "finding_count": 1},
+        {"name": "shakerscan-sbom", "status": "PASS", "finding_count": 0},
+    ])
+
+    report = _report(rows)
+    catalog = {item["id"]: item for item in report["detailed_review"]["shakerscan_check_catalog"]}
+    assert catalog["MI-05"]["execution_status"] == "PASS"
+    assert catalog["MI-06"]["execution_status"] == "PASS"
+    assert catalog["MI-07"]["execution_status"] == "NOT_APPLICABLE"
+    assert catalog["MI-13"]["execution_status"] == "REVIEW"
+    assert catalog["MI-15"]["execution_status"] == "PASS"
+    assert catalog["MI-17"]["execution_status"] == "NOT_RUN"
 
 
 def test_network_attempt_is_a_blocking_control_failure():

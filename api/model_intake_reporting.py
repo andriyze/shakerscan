@@ -114,19 +114,19 @@ SHAKERSCAN_CHECK_CATALOG: list[dict[str, Any]] = [
     {"id": "MI-02", "category": "Acquisition", "check": "Complete acquisition", "description": "Acquire the complete artifact within byte limits and detect truncation or oversize files.", "implementation": "native streaming acquisition", "applies_when": "full review", "evidence_controls": ["immutable_subjects"]},
     {"id": "MI-03", "category": "Integrity", "check": "SHA-256 integrity", "description": "Hash the acquired artifact and compare registry or supplied digests.", "implementation": "native", "applies_when": "all artifacts", "evidence_controls": ["immutable_subjects"]},
     {"id": "MI-04", "category": "Repository", "check": "Repository completeness", "description": "Verify expected repository members with safe paths, sizes, and hashes.", "implementation": "native provider manifest", "applies_when": "provider supports authoritative snapshots", "evidence_controls": ["immutable_subjects"]},
-    {"id": "MI-05", "category": "Format", "check": "Format identification", "description": "Recognize safetensors, PyTorch/pickle, ONNX, GGUF, archives, and supported formats.", "implementation": "native", "applies_when": "all artifacts", "evidence_controls": ["static_analysis"]},
-    {"id": "MI-06", "category": "Format", "check": "Safetensors validation", "description": "Validate headers, tensor metadata, offsets, bounds, overlap, and structure.", "implementation": "native + official parser", "applies_when": "safetensors is present", "evidence_controls": ["static_analysis"]},
-    {"id": "MI-07", "category": "Serialization", "check": "Pickle analysis", "description": "Inspect pickle opcodes and dangerous callable references without loading the model.", "implementation": "native bounded parser", "applies_when": "pickle-capable serialization is present", "evidence_controls": ["static_analysis"]},
-    {"id": "MI-08", "category": "Archive", "check": "Archive safety", "description": "Recursively inspect ZIP/TAR paths, nesting, expansion limits, and archive bombs.", "implementation": "native bounded parser", "applies_when": "archives are present", "evidence_controls": ["static_analysis"]},
+    {"id": "MI-05", "category": "Format", "check": "Format identification", "description": "Recognize safetensors, PyTorch/pickle, ONNX, GGUF, archives, and supported formats.", "implementation": "native", "applies_when": "all artifacts", "evidence_controls": ["static_analysis"], "reported_check": "format_specific_inspection"},
+    {"id": "MI-06", "category": "Format", "check": "Safetensors validation", "description": "Validate headers, tensor metadata, offsets, bounds, overlap, and structure.", "implementation": "native + official parser", "applies_when": "safetensors is present", "evidence_controls": ["static_analysis"], "reported_check": "format_specific_inspection"},
+    {"id": "MI-07", "category": "Serialization", "check": "Pickle analysis", "description": "Inspect pickle opcodes and dangerous callable references without loading the model.", "implementation": "native bounded parser", "applies_when": "pickle-capable serialization is present", "evidence_controls": ["static_analysis"], "scanner_name": "python-pickletools"},
+    {"id": "MI-08", "category": "Archive", "check": "Archive safety", "description": "Recursively inspect ZIP/TAR paths, nesting, expansion limits, and archive bombs.", "implementation": "native bounded parser", "applies_when": "archives are present", "evidence_controls": ["static_analysis"], "reported_check": "format_specific_inspection"},
     {"id": "MI-09", "category": "Scanner", "check": "ModelScan", "description": "Detect known unsafe or malicious model serialization patterns.", "implementation": "ModelScan adapter", "applies_when": "adapter declares applicability", "evidence_controls": ["static_analysis"], "scanner_name": "modelscan"},
     {"id": "MI-10", "category": "Scanner", "check": "Fickling", "description": "Perform semantic analysis of applicable pickle artifacts.", "implementation": "Fickling adapter", "applies_when": "Fickling supports the pickle artifact", "evidence_controls": ["static_analysis"], "scanner_name": "fickling"},
     {"id": "MI-11", "category": "Scanner", "check": "Semgrep", "description": "Review repository code for deserialization, execution, network, imports, and risky file access.", "implementation": "versioned Semgrep rules", "applies_when": "repository code is present", "evidence_controls": ["static_analysis"], "scanner_name": "semgrep"},
     {"id": "MI-12", "category": "Scanner", "check": "Trivy", "description": "Check dependencies and repository content with the packaged offline vulnerability and license data.", "implementation": "offline Trivy adapter", "applies_when": "complete repository or dependency manifests are present", "evidence_controls": ["static_analysis", "license_compliance"], "scanner_name": "trivy"},
-    {"id": "MI-13", "category": "Source", "check": "Native Python AST analysis", "description": "Identify executable custom code, suspicious imports, calls, templates, and load-time behavior.", "implementation": "native AST parser", "applies_when": "Python code is present", "evidence_controls": ["static_analysis"]},
-    {"id": "MI-14", "category": "Dependencies", "check": "Dependency inventory", "description": "Discover declared runtime packages and assess reproducible custom-code dependency coverage.", "implementation": "native manifest reconciliation", "applies_when": "dependency declarations or custom code are present", "evidence_controls": ["static_analysis"]},
-    {"id": "MI-15", "category": "Inventory", "check": "SBOM and AIBOM generation", "description": "Produce CycloneDX, SPDX, and AI inventories with explicit completeness.", "implementation": "native evidence composer", "applies_when": "scan evidence exists", "evidence_controls": ["static_analysis"]},
+    {"id": "MI-13", "category": "Source", "check": "Native Python AST analysis", "description": "Identify executable custom code, suspicious imports, calls, templates, and load-time behavior.", "implementation": "native AST parser", "applies_when": "Python code is present", "evidence_controls": ["static_analysis"], "scanner_name": "python-ast-security"},
+    {"id": "MI-14", "category": "Dependencies", "check": "Dependency inventory", "description": "Discover declared runtime packages and assess reproducible custom-code dependency coverage.", "implementation": "native manifest reconciliation", "applies_when": "dependency declarations or custom code are present", "evidence_controls": ["static_analysis"], "reported_check": "sbom_dependencies"},
+    {"id": "MI-15", "category": "Inventory", "check": "SBOM and AIBOM generation", "description": "Produce CycloneDX, SPDX, and AI inventories with explicit completeness.", "implementation": "native evidence composer", "applies_when": "scan evidence exists", "evidence_controls": ["static_analysis"], "scanner_name": "shakerscan-sbom"},
     {"id": "MI-16", "category": "Governance", "check": "License and governance metadata", "description": "Reconcile licenses, intended use, restrictions, lineage, monitoring, and review evidence.", "implementation": "native policy + Trivy license evidence", "applies_when": "full review", "evidence_controls": ["license_compliance"]},
-    {"id": "MI-17", "category": "Trust", "check": "Signature and attestation verification", "description": "Validate signatures, trust anchors, subject digests, DSSE/in-toto attestations, and bindings.", "implementation": "native cryptographic verifier", "applies_when": "configured or required by policy", "evidence_controls": ["static_analysis", "frozen_evidence"]},
+    {"id": "MI-17", "category": "Trust", "check": "Signature and attestation verification", "description": "Validate signatures, trust anchors, subject digests, DSSE/in-toto attestations, and bindings.", "implementation": "native cryptographic verifier", "applies_when": "configured or required by policy", "evidence_controls": ["static_analysis"], "reported_check": "signature_verification"},
     {"id": "MI-18", "category": "Conversion", "check": "Unsafe-format conversion", "description": "Convert eligible pickle weights to safetensors in Firecracker.", "implementation": "fixed Firecracker converter", "applies_when": "unsafe eligible weights are present", "evidence_controls": ["conversion_equivalence"]},
     {"id": "MI-19", "category": "Conversion", "check": "Conversion equivalence", "description": "Compare tensor inventory, shapes, dtypes, values, and embeddings.", "implementation": "fixed Firecracker evaluator", "applies_when": "conversion runs", "evidence_controls": ["conversion_equivalence"]},
     {"id": "MI-20", "category": "Runtime", "check": "Isolated model loading", "description": "Import the fixed loader, tokenizer, and model inside a no-NIC Firecracker microVM.", "implementation": "Firecracker/KVM", "applies_when": "runtime qualification is required", "evidence_controls": ["runtime_execution", "firecracker_runtime"]},
@@ -134,9 +134,9 @@ SHAKERSCAN_CHECK_CATALOG: list[dict[str, Any]] = [
     {"id": "MI-22", "category": "Evaluation", "check": "Known-answer repeatability", "description": "Calibrate an embedding digest and verify it in a separate Firecracker execution.", "implementation": "deterministic evaluator", "applies_when": "runtime qualification runs", "evidence_controls": ["embedding_evaluation"]},
     {"id": "MI-23", "category": "Containment", "check": "Network monitoring", "description": "Block egress and classify local IPC, socket activity, DNS, and outbound destination attempts.", "implementation": "guest syscall + host namespace/firewall telemetry", "applies_when": "Firecracker executes", "evidence_controls": ["network_isolation"]},
     {"id": "MI-24", "category": "Containment", "check": "Resource enforcement", "description": "Enforce and measure CPU, memory, processes, file size, and execution time.", "implementation": "host cgroup + jailer limits", "applies_when": "Firecracker executes", "evidence_controls": ["resource_envelope"]},
-    {"id": "MI-25", "category": "Evidence", "check": "Evidence integrity", "description": "Bind scanner, snapshot, runtime, and component hashes into signed receipts.", "implementation": "native evidence control plane", "applies_when": "controlled review", "evidence_controls": ["frozen_evidence", "signed_admission"]},
+    {"id": "MI-25", "category": "Evidence", "check": "Evidence integrity", "description": "Bind scanner, snapshot, runtime, and component hashes into signed receipts.", "implementation": "native evidence control plane", "applies_when": "controlled review", "evidence_controls": ["frozen_evidence"]},
     {"id": "MI-26", "category": "Decision", "check": "Deterministic policy decision", "description": "Return ALLOW, BLOCK, INCOMPLETE, or REVIEW without caller or AI override.", "implementation": "server-owned policy", "applies_when": "controlled admission", "evidence_controls": ["deterministic_policy"]},
-    {"id": "MI-27", "category": "Corporate readiness", "check": "Corporate-approval gap analysis", "description": "List human, legal, privacy, publisher, production-signing, and deployed-system checks outside Model Intake.", "implementation": "native report catalog", "applies_when": "every corporate report", "evidence_controls": []},
+    {"id": "MI-27", "category": "Deployment follow-up", "check": "Corporate-approval gap analysis", "description": "List human, legal, privacy, publisher, production-signing, and deployed-system checks outside Model Intake.", "implementation": "native report catalog", "applies_when": "every complete report", "evidence_controls": []},
 ]
 
 
@@ -385,23 +385,39 @@ def _network_summary(network: dict[str, Any]) -> dict[str, Any]:
 def _runner_timelines(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     output: list[dict[str, Any]] = []
     for job in jobs:
+        operation = str(job.get("operation") or "")
         observations = _runner_observations(job)
         phases = _json(observations.get("phases"), {})
         phase_rows = []
         for name, raw in phases.items():
             value = raw if isinstance(raw, dict) else {"status": raw}
+            normalized = _normalize_status(value.get("status"))
+            detail = value.get("error") or value.get("detail")
+            # Calibration intentionally runs inference without a pre-existing
+            # digest. The guest preserves that as a raw FAIL/NOT_CONFIGURED so
+            # it can never be mistaken for repeat verification. In the human
+            # timeline, describe the successful digest capture accurately;
+            # the subsequent runtime job remains the pass/fail assertion.
+            if (
+                operation == "calibration"
+                and str(name) == "inference"
+                and observations.get("embedding_known_answers_status") == "NOT_CONFIGURED"
+                and observations.get("embedding_output_sha256")
+            ):
+                normalized = "CALIBRATED"
+                detail = "Embedding digest recorded; repeat verification is reported by the separate runtime job."
             phase_rows.append({
                 "phase": str(name),
-                "status": _normalize_status(value.get("status")),
+                "status": normalized,
                 "raw_status": value.get("status"),
                 "duration_ms": value.get("duration_ms"),
-                "detail": value.get("error") or value.get("detail"),
+                "detail": detail,
             })
         network = _json(observations.get("network_telemetry"), {})
         resources = _json(observations.get("resource_telemetry"), {})
         output.append({
             "job_id": str(job.get("id") or ""),
-            "operation": job.get("operation"),
+            "operation": operation,
             "state": job.get("state"),
             "request_sha256": job.get("request_sha256"),
             "started_at": _iso(job.get("started_at")),
@@ -603,6 +619,11 @@ def _check_catalog_with_evidence(
     static_detail: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     by_id = {str(item.get("id") or ""): item for item in controls}
+    reported_checks = {
+        str(item.get("id") or ""): item
+        for item in _json(static_detail or {}, {}).get("reported_checks") or []
+        if isinstance(item, dict)
+    }
     scanner_results = {
         str(item.get("name") or "").strip().casefold(): item
         for item in _json(static_detail or {}, {}).get("scanner_results") or []
@@ -616,6 +637,7 @@ def _check_catalog_with_evidence(
     for catalog_item in SHAKERSCAN_CHECK_CATALOG:
         related = [by_id[item] for item in catalog_item["evidence_controls"] if item in by_id]
         scanner = scanner_results.get(str(catalog_item.get("scanner_name") or "").casefold())
+        reported = reported_checks.get(str(catalog_item.get("reported_check") or ""))
         if scanner:
             status = _normalize_status(scanner.get("status"))
             result_summary = (
@@ -628,6 +650,16 @@ def _check_catalog_with_evidence(
                     "name", "version", "rules_sha256", "database_sha256",
                     "finding_count", "applicability", "coverage",
                 )
+            }
+        elif reported:
+            status = _normalize_status(reported.get("status"))
+            result_summary = (
+                f"{catalog_item.get('check')} reported {status} in the generated static evidence."
+            )
+            evidence_basis = "reported_static_check"
+            execution_evidence = {
+                "check_id": reported.get("id"),
+                "status": reported.get("status"),
             }
         elif related:
             status = min(
@@ -689,6 +721,7 @@ def _presentation_summary(
     outcome: str,
     license_compliance: dict[str, Any],
     external_requirement_count: int,
+    license_source_missing: bool = False,
 ) -> dict[str, Any]:
     """Build the human-facing summary without weakening machine policy semantics."""
     technical = [
@@ -717,6 +750,11 @@ def _presentation_summary(
         license_note = (
             "One or more license terms need specialist review. See the License BOM for the exact "
             "components, evidence, and reason codes."
+        )
+    elif license_source_missing:
+        license_note = (
+            "The publisher declared permissive terms, but the pinned repository did not include the "
+            "license or NOTICE source text. Obtain and preserve the authoritative text before distribution."
         )
     elif license_compliance.get("policy_status") == "PASS":
         license_note = (
@@ -765,13 +803,20 @@ def _license_control_detail(license_compliance: dict[str, Any]) -> str:
 
 
 def _presentation_control(item: dict[str, Any]) -> dict[str, Any]:
+    status = str(item.get("status") or "")
+    if status == "PASS":
+        follow_up = "Completed; exact evidence and hashes are available in the detailed matrix."
+    elif status == "NOT_APPLICABLE":
+        follow_up = "No action is required for this revision."
+    else:
+        follow_up = item.get("remediation")
     return {
         "id": item.get("id"),
         "label": item.get("label"),
         "category": item.get("category"),
         "status": item.get("status"),
         "result": item.get("detail"),
-        "next_step": item.get("remediation"),
+        "next_step": follow_up,
     }
 
 
@@ -1053,6 +1098,7 @@ def build_model_intake_report(
     static_control = next((item for item in controls if item.get("id") == "static_analysis"), None)
     if static_control and attention_findings:
         labels: list[str] = []
+        remediation_steps: list[str] = []
         seen_locations: set[str] = set()
         for finding in attention_findings:
             path = str(finding.get("path") or "")
@@ -1063,15 +1109,26 @@ def build_model_intake_report(
             seen_locations.add(location)
             if finding.get("id") == "license_file_missing":
                 label = "repository license/NOTICE source file is missing"
+                action = (
+                    "Obtain the publisher's authoritative license/NOTICE text and preserve it with the "
+                    "pinned revision and any distribution."
+                )
             else:
                 label = str(finding.get("message") or finding.get("call") or finding.get("id") or "scanner finding")
                 if path:
                     label += f" ({path}{f':{line}' if line else ''})"
+                location_label = f" at {path}{f':{line}' if line else ''}" if path else ""
+                action = f"Resolve {str(finding.get('message') or finding.get('call') or finding.get('id') or 'the scanner finding')}{location_label}, then rescan the new pinned revision."
             labels.append(label)
+            remediation_steps.append(action)
         static_control["detail"] = (
             f"{len(labels)} review item(s): " + "; ".join(labels[:5])
             + (f"; and {len(labels) - 5} more" if len(labels) > 5 else "")
         )
+        static_control["remediation"] = " ".join(remediation_steps[:5])
+        actions = _required_actions(controls)
+        if outcome == "ALLOW":
+            actions = [item for item in actions if item["status"] != "REVIEW"]
         key_results = [
             {
                 "control_id": item["id"], "label": item["label"],
@@ -1085,6 +1142,9 @@ def build_model_intake_report(
         outcome=outcome,
         license_compliance=license_compliance,
         external_requirement_count=len(external_requirements),
+        license_source_missing=any(
+            finding.get("id") == "license_file_missing" for finding in attention_findings
+        ),
     )
     report = {
         "schema_version": REPORT_SCHEMA,
@@ -1358,6 +1418,13 @@ def apply_automatic_review_context(
         outcome=automatic_outcome or normalized_outcome,
         license_compliance=_json(detail.get("license_compliance"), {}),
         external_requirement_count=len(_json(detail.get("external_approval_requirements"), [])),
+        license_source_missing=any(
+            finding.get("id") == "license_file_missing"
+            for scanner in _json(detail.get("static_analysis_detail"), {}).get("scanner_results") or []
+            if isinstance(scanner, dict)
+            for finding in scanner.get("findings") or []
+            if isinstance(finding, dict)
+        ),
     )
     report.pop("report_sha256", None)
     digest_input = {key: value for key, value in report.items() if key != "generated_at"}
