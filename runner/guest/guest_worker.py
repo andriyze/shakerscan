@@ -73,6 +73,7 @@ def _install_transformers_compatibility() -> None:
 
 
 def _mean_embeddings(model_path: Path, texts: list[str], *, trust: bool, safe: bool):
+    import gc
     import torch
     # Compare the two serializers under one deterministic CPU execution
     # contract. Parallel reduction order can otherwise introduce small output
@@ -91,7 +92,13 @@ def _mean_embeddings(model_path: Path, texts: list[str], *, trust: bool, safe: b
         output = model(**encoded)
     hidden = output.last_hidden_state
     mask = encoded.get("attention_mask", torch.ones(hidden.shape[:2], dtype=hidden.dtype)).unsqueeze(-1)
-    return ((hidden * mask).sum(1) / mask.sum(1).clamp(min=1)).detach().to(torch.float32).cpu()
+    vectors = ((hidden * mask).sum(1) / mask.sum(1).clamp(min=1)).detach().to(torch.float32).cpu().clone()
+    # Source and converted serializers are evaluated sequentially in one
+    # phase. Drop every model-owned object before loading the second copy so a
+    # large model cannot retain both parameter sets through Python cycles.
+    del output, hidden, mask, encoded, model, tokenizer
+    gc.collect()
+    return vectors
 
 
 def _job_artifact(model_path: Path, job: dict) -> Path:

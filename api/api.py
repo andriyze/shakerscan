@@ -15956,9 +15956,13 @@ async def _model_intake_auto_memory_mib(
         artifact_sha,
     )
     artifact_mib = max(0, math.ceil(int(size or 0) / (1024 * 1024)))
-    # PyTorch loading and conversion need working memory in addition to the
-    # mapped weights. Round to a stable 512 MiB boundary and retain a hard cap.
-    requested = max(4096, 2048 + artifact_mib * 3)
+    # Conversion and embedding equivalence transiently materialize a state
+    # dictionary, model parameters, and inference buffers.  Three artifact
+    # sizes proved insufficient for a 2.63 GB CodeSage model under the real
+    # cgroup: Firecracker was OOM-killed before it could finalize evidence.
+    # Four artifact sizes plus a fixed 3 GiB envelope remains deterministic,
+    # rounds to 512 MiB, and retains the 12 GiB hard ceiling for a 16 GiB host.
+    requested = max(4096, 3072 + artifact_mib * 4)
     return min(12288, int(math.ceil(requested / 512) * 512))
 
 

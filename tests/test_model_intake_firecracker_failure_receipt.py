@@ -6,7 +6,15 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
 
 import model_intake_firecracker_runner as firecracker_runner_module  # noqa: E402
-from model_intake_firecracker_runner import FirecrackerRunner  # noqa: E402
+from model_intake_firecracker_runner import FirecrackerRunner, _cgroup_counter  # noqa: E402
+
+
+def test_cgroup_oom_counter_is_extracted_for_explicit_runner_failure():
+    events = "low 0\nhigh 0\nmax 317\noom 2\noom_kill 1\noom_group_kill 0\n"
+
+    assert _cgroup_counter(events, "oom_kill") == 1
+    assert _cgroup_counter(events, "oom") == 2
+    assert _cgroup_counter(events, "missing") == 0
 
 
 def test_failed_conversion_receipt_binds_source_without_target_key_error(tmp_path, monkeypatch):

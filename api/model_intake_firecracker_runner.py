@@ -46,6 +46,17 @@ class FirecrackerExecutionError(RuntimeError):
     pass
 
 
+def _cgroup_counter(text: Any, name: str) -> int:
+    for line in str(text or "").splitlines():
+        key, _, raw = line.partition(" ")
+        if key == name:
+            try:
+                return max(0, int(raw.strip()))
+            except ValueError:
+                return 0
+    return 0
+
+
 NETWORK_CALL = re.compile(
     r"\b(socket|socketpair|connect|bind|listen|accept|accept4|sendto|sendmsg|recvfrom|recvmsg|"
     r"getsockname|getpeername|setsockopt|getsockopt|shutdown)\("
@@ -488,7 +499,7 @@ class FirecrackerRunner:
                 value = None
             observed[name] = value
             complete = complete and value == wanted
-        for name in ("memory.peak", "pids.peak", "cpu.stat"):
+        for name in ("memory.peak", "memory.events", "pids.peak", "cpu.stat"):
             try:
                 observed[name] = (root / name).read_text().strip()[:20_000]
             except OSError:
@@ -732,8 +743,22 @@ class FirecrackerRunner:
             dump = _run(["debugfs", "-R", f"rdump / {extracted}", str(output_drive)], timeout=120)
             _require_ok(dump, "output evidence extraction")
             result_path = extracted / "result.json"
-            if not result_path.is_file() or result_path.stat().st_size > 2_000_000:
-                raise FirecrackerExecutionError("guest result is missing or oversized")
+            cgroup = self._cgroup_state(
+                vm_id,
+                int(request.get("memory_mib", 4096)),
+                int(request.get("vcpu_count", 2)),
+            )
+            if not result_path.is_file():
+                oom_kills = _cgroup_counter(cgroup.get("memory.events"), "oom_kill")
+                if oom_kills:
+                    raise FirecrackerExecutionError(
+                        "microVM exceeded its enforced memory limit "
+                        f"({int(request.get('memory_mib', 4096))} MiB; "
+                        f"cgroup oom_kill={oom_kills}) before producing final evidence"
+                    )
+                raise FirecrackerExecutionError("guest result is missing")
+            if result_path.stat().st_size > 2_000_000:
+                raise FirecrackerExecutionError("guest result exceeds the 2000000-byte evidence limit")
             result = json.loads(result_path.read_text())
             guest_interfaces = result.get("guest_interfaces") if isinstance(result.get("guest_interfaces"), list) else []
             firewall_after = self._namespace_state(namespace)
@@ -766,7 +791,6 @@ class FirecrackerRunner:
                 and network["guest_interfaces"] == ["lo"] and network["host_interfaces"] == ["lo"]
             )
             result["syscall_telemetry_complete"] = network["complete"] and not network["overflowed"]
-            cgroup = self._cgroup_state(vm_id, int(request.get("memory_mib", 4096)), int(request.get("vcpu_count", 2)))
             result["resource_telemetry"] = cgroup
             result["resource_limits_enforced"] = cgroup["complete"]
             result["reviewed_custom_code_sha256"] = request.get("observed_custom_code_sha256")
