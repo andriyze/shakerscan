@@ -922,6 +922,10 @@ shakerscan fleet accept \
 
 The acceptance scan is passive `standard` work. `--request-budget-mode enforce` is the default;
 operators retain `--request-budget-mode off` for intentionally unrestricted local labs. The
+production gate requires every node to run its desired digest-pinned image. A source-checkout test
+may explicitly pass `--allow-local-build`; the runner then requires one uniform safe local image and
+marks the receipt `local-build-development`, which cannot substitute for production release
+evidence. The
 authenticated control-plane lease probe uses its own random Stream and deletes it afterward; it
 never leases production work and requires no host-side Redis client package. The
 physical fault gate waits for an attributed shard, drains that node, kills only the exact Docker

@@ -42,6 +42,32 @@ def test_node_selection_is_explicit_and_rejects_missing_identity():
         raise AssertionError("missing selected node was accepted")
 
 
+def test_local_build_acceptance_requires_acknowledgement_and_one_uniform_safe_image():
+    nodes = [
+        {
+            "local_build_active": True,
+            "image_current": False,
+            "active_worker_image_digest": "shakerscan-fleet-local:abc123",
+        },
+        {
+            "local_build_active": True,
+            "image_current": False,
+            "active_worker_image_digest": "shakerscan-fleet-local:abc123",
+        },
+    ]
+    assert fleet_acceptance._selected_worker_build_mode(
+        nodes, allow_local_build=False
+    ) == (False, "local-build-development", ["shakerscan-fleet-local:abc123"])
+    assert fleet_acceptance._selected_worker_build_mode(
+        nodes, allow_local_build=True
+    ) == (True, "local-build-development", ["shakerscan-fleet-local:abc123"])
+
+    nodes[1]["active_worker_image_digest"] = "shakerscan-fleet-local:different"
+    assert fleet_acceptance._selected_worker_build_mode(
+        nodes, allow_local_build=True
+    )[0] is False
+
+
 def test_full_acceptance_routes_scan_to_shared_remote_transport(monkeypatch):
     submitted = []
 
@@ -107,6 +133,7 @@ def test_full_acceptance_routes_scan_to_shared_remote_transport(monkeypatch):
         request_budget_mode="default",
         fault_node_ssh=None,
         fault_node_id=None,
+        allow_local_build=False,
         timeout=60,
         poll_seconds=1,
     )

@@ -30,6 +30,7 @@ from typing import Any
 
 
 TERMINAL_SCAN_STATUSES = {"completed", "failed", "cancelled"}
+LOCAL_WORKER_IMAGE_RE = re.compile(r"^shakerscan-fleet-local:[a-z0-9][a-z0-9_.-]{0,127}$")
 
 
 class AcceptanceError(RuntimeError):
@@ -267,6 +268,27 @@ def _all_shards(client: ApiClient, parent_scan_id: str) -> list[dict[str, Any]]:
     ]
 
 
+def _selected_worker_build_mode(
+    nodes: list[dict[str, Any]], *, allow_local_build: bool
+) -> tuple[bool, str, list[str]]:
+    """Validate one unambiguous worker-image mode for an acceptance receipt."""
+    local_nodes = [node for node in nodes if bool(node.get("local_build_active"))]
+    active_images = sorted({
+        str(node.get("active_worker_image_digest") or "").strip()
+        for node in nodes
+        if node.get("active_worker_image_digest")
+    })
+    if local_nodes:
+        valid = (
+            allow_local_build
+            and len(local_nodes) == len(nodes)
+            and len(active_images) == 1
+            and bool(LOCAL_WORKER_IMAGE_RE.fullmatch(active_images[0]))
+        )
+        return valid, "local-build-development", active_images
+    return all(bool(node.get("image_current")) for node in nodes), "digest-pinned", active_images
+
+
 def _evaluate_scan(
     client: ApiClient,
     scan_id: str,
@@ -362,11 +384,27 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         for node in healthy
     )
     _check(checks, "heartbeat_and_capacity", heartbeat_ok, "selected nodes report heartbeat and CPU capacity")
-    uniform = len(healthy) >= 2 and all(
-        node.get("state_current") and node.get("image_current") and int(node.get("active_worker_count") or 0) > 0
+    build_mode_ok, build_mode, active_images = _selected_worker_build_mode(
+        healthy,
+        allow_local_build=bool(getattr(args, "allow_local_build", False)),
+    )
+    uniform = len(healthy) >= 2 and build_mode_ok and all(
+        node.get("state_current") and int(node.get("active_worker_count") or 0) > 0
         for node in healthy
     )
     _check(checks, "current_worker_fleet", uniform, "selected nodes are current and have active workers")
+    _check(
+        checks,
+        "uniform_worker_build_mode",
+        build_mode_ok,
+        (
+            "selected nodes use one acknowledged local development image"
+            if build_mode == "local-build-development"
+            else "selected nodes use their desired digest-pinned images"
+        ),
+        build_mode=build_mode,
+        active_worker_images=active_images,
+    )
     worker_only = all(str((node.get("labels") or {}).get("transport") or "") in {"overlay", "broker"} for node in healthy)
     _check(checks, "worker_transport_labeled", bool(healthy) and worker_only, "nodes identify overlay or broker transport")
     selected_transports = {
@@ -483,6 +521,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "target_sha256": _target_hash(args.target) if args.target else None,
         "physical_fault": physical_fault,
         "preflight_only": bool(args.preflight_only),
+        "build_mode": build_mode,
+        "allow_local_build": bool(getattr(args, "allow_local_build", False)),
         "checks": checks,
         "passed": all(item["pass"] for item in checks),
     }
@@ -509,6 +549,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout", type=int, default=3600)
     parser.add_argument("--poll-seconds", type=float, default=5.0)
     parser.add_argument("--preflight-only", action="store_true")
+    parser.add_argument(
+        "--allow-local-build",
+        action="store_true",
+        help=(
+            "allow one uniform shakerscan-fleet-local image for development acceptance; "
+            "the receipt is not production release evidence"
+        ),
+    )
     parser.add_argument("--output", type=Path, default=Path("results/fleet-acceptance.json"))
     return parser
 

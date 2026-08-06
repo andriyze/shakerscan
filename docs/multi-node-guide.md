@@ -560,6 +560,13 @@ shakerscan fleet accept \
   --authorized
 ```
 
+Source-checkout fleets intentionally report image drift because their local worker image is not the
+fleet's pinned production digest. To validate physical behavior without weakening that production
+signal, add `--allow-local-build`. The command then requires every selected node to run the same
+safe `shakerscan-fleet-local:*` image and labels the receipt `local-build-development`; that receipt
+is development evidence, not a production release gate. Without the flag, acceptance remains
+fail-closed on any image drift.
+
 The acceptance runner verifies node/image health, heartbeats, artifact storage, public data-store
 isolation, lease loss/reclaim/ack behavior, cross-node shard execution, execution attribution,
 finding deduplication, and central result manifests. It writes a content-free receipt to
