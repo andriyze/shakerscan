@@ -1431,6 +1431,7 @@ export interface ModelIntakeAutomaticReview {
   progress: number
   effective_current_step?: string
   effective_progress?: number
+  active_runner_job_state?: string | null
   static_scan_status?: string | null
   static_scan_progress?: number | null
   static_scan_phase?: string | null

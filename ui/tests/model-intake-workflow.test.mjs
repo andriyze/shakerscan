@@ -543,6 +543,12 @@ test('automatic review history stays compact and names the static stage accurate
   assert.match(page, /Static scan details/)
 })
 
+test('serialized Firecracker work is labeled queued until the runner starts it', () => {
+  assert.match(page, /active_runner_job_state === 'pending'/)
+  assert.match(page, /replace\(\/_running\$\/, '_queued'\)/)
+  assert.match(api, /active_runner_job_state\?: string \| null/)
+})
+
 test('a first Firecracker run is reachable without inventing anything', () => {
   // Three blockers made end-to-end impossible: a runtime job needs a digest
   // only calibration produces, and two digests describe a serving deployment

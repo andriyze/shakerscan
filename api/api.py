@@ -15994,6 +15994,17 @@ def _model_intake_automatic_review_payload(row: Any) -> dict[str, Any]:
         scan_phase = str(payload.get("static_scan_phase") or "").strip()
         if scan_phase:
             effective_step = scan_phase
+    runner_state_field = {
+        "conversion_running": "conversion_job_state",
+        "calibration_running": "calibration_job_state",
+        "runtime_running": "runtime_job_state",
+    }.get(str(payload.get("state") or ""))
+    active_runner_job_state = (
+        str(payload.get(runner_state_field) or "") if runner_state_field else ""
+    )
+    payload["active_runner_job_state"] = active_runner_job_state or None
+    if active_runner_job_state == "pending":
+        effective_step = f"{effective_step}_queued"
     payload["effective_progress"] = effective_progress
     payload["effective_current_step"] = effective_step
     return payload
@@ -16556,9 +16567,15 @@ async def list_model_intake_automatic_reviews(limit: int = Query(10, ge=1, le=10
         rows = await conn.fetch(
             """
             SELECT r.*,s.status AS static_scan_status,s.progress AS static_scan_progress,
-                   s.current_phase AS static_scan_phase
+                   s.current_phase AS static_scan_phase,
+                   cj.state AS conversion_job_state,
+                   kj.state AS calibration_job_state,
+                   rj.state AS runtime_job_state
             FROM model_intake_automatic_reviews r
             LEFT JOIN scans s ON s.id=r.scan_id
+            LEFT JOIN model_intake_runner_jobs cj ON cj.id=r.conversion_job_id
+            LEFT JOIN model_intake_runner_jobs kj ON kj.id=r.calibration_job_id
+            LEFT JOIN model_intake_runner_jobs rj ON rj.id=r.runtime_job_id
             ORDER BY r.created_at DESC LIMIT $1
             """,
             limit,
@@ -16573,9 +16590,16 @@ async def get_model_intake_automatic_review(review_id: str):
         row = await conn.fetchrow(
             """
             SELECT r.*,s.status AS static_scan_status,s.progress AS static_scan_progress,
-                   s.current_phase AS static_scan_phase
+                   s.current_phase AS static_scan_phase,
+                   cj.state AS conversion_job_state,
+                   kj.state AS calibration_job_state,
+                   rj.state AS runtime_job_state
             FROM model_intake_automatic_reviews r
-            LEFT JOIN scans s ON s.id=r.scan_id WHERE r.id=$1
+            LEFT JOIN scans s ON s.id=r.scan_id
+            LEFT JOIN model_intake_runner_jobs cj ON cj.id=r.conversion_job_id
+            LEFT JOIN model_intake_runner_jobs kj ON kj.id=r.calibration_job_id
+            LEFT JOIN model_intake_runner_jobs rj ON rj.id=r.runtime_job_id
+            WHERE r.id=$1
             """,
             review_uuid,
         )

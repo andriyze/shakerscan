@@ -71,6 +71,21 @@ def test_automatic_review_payload_tracks_live_static_scan_progress():
     assert payload["effective_current_step"] == "artifact_acquisition"
 
 
+def test_automatic_review_payload_distinguishes_pending_runner_work():
+    payload = api._model_intake_automatic_review_payload({
+        "id": "review-1",
+        "state": "calibration_running",
+        "current_step": "calibrate_known_answer",
+        "progress": 70,
+        "calibration_job_state": "pending",
+        "timeline_json": [],
+        "pending_controls": [],
+    })
+
+    assert payload["active_runner_job_state"] == "pending"
+    assert payload["effective_current_step"] == "calibrate_known_answer_queued"
+
+
 def test_automatic_review_payload_fails_safe_for_malformed_jsonb():
     payload = api._model_intake_automatic_review_payload({
         "timeline_json": '{not-json',

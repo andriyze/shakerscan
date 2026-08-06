@@ -1566,13 +1566,14 @@ function ModelIntakeSettingsContent() {
               const outcome = (review.technical_outcome || '').toUpperCase()
               const passed = workflowComplete && outcome === 'PASS'
               const blocked = workflowComplete && outcome === 'BLOCK'
+              const queuedForRunner = review.active_runner_job_state === 'pending'
               const pendingControls = review.pending_controls || []
               const legacyDeploymentControls = new Set(['publisher_trust', 'human_approvals', 'production_signer', 'deployed_data_plane'])
               const technicalFollowUp = pendingControls.filter((control) => !legacyDeploymentControls.has(control.control) && control.control !== 'deployment_follow_up')
               const deploymentFollowUp = pendingControls.filter((control) => legacyDeploymentControls.has(control.control) || control.control === 'deployment_follow_up')
               const outcomeLabel = workflowComplete
                 ? `Review finished · ${outcome === 'BLOCK' ? 'blocked' : outcome === 'PASS' ? 'technical checks passed' : outcome.toLowerCase().replace(/_/g, ' ') || 'results ready'}`
-                : review.state.replace(/_/g, ' ')
+                : (queuedForRunner ? review.state.replace(/_running$/, '_queued') : review.state).replace(/_/g, ' ')
               return (
                 <div key={review.id} className="rounded-lg border border-gray-800 bg-gray-950 p-4">
                   <div className="flex flex-wrap items-start justify-between gap-3">
