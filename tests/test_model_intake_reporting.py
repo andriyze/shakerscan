@@ -6,12 +6,28 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
 
 from model_intake_reporting import (  # noqa: E402
+    SHAKERSCAN_CHECK_CATALOG,
     CONTROL_STATUSES,
     apply_automatic_review_context,
     build_model_intake_report,
     model_intake_report_to_sarif,
     render_model_intake_html,
 )
+
+
+def test_authoritative_catalog_names_every_promised_model_intake_check():
+    names = [item["check"] for item in SHAKERSCAN_CHECK_CATALOG]
+    assert names == [
+        "Source resolution and revision pinning", "Complete acquisition", "SHA-256 integrity",
+        "Repository completeness", "Format identification", "Safetensors validation",
+        "Pickle analysis", "Archive safety", "ModelScan", "Fickling", "Semgrep", "Trivy",
+        "Native Python AST analysis", "Dependency inventory", "SBOM and AIBOM generation",
+        "License and governance metadata", "Signature and attestation verification",
+        "Unsafe-format conversion", "Conversion equivalence", "Isolated model loading",
+        "Warmup and inference", "Known-answer repeatability", "Network monitoring",
+        "Resource enforcement", "Evidence integrity", "Deterministic policy decision",
+        "Corporate-approval gap analysis",
+    ]
 
 
 NOW = datetime(2026, 7, 30, tzinfo=timezone.utc)
@@ -175,7 +191,13 @@ def test_complete_exact_subject_report_allows_only_with_matching_active_admissio
     assert report["executive_summary"]["license_outcome"] == "NO LEGAL BLOCKER DETECTED"
     assert report["executive_summary"]["coverage"]["external_corporate_requirements"] >= 10
     assert report["detailed_review"]["static_analysis_detail"]["scanner_results"][0]["name"] == "semgrep"
-    assert len(report["detailed_review"]["shakerscan_check_catalog"]) >= 15
+    catalog = report["detailed_review"]["shakerscan_check_catalog"]
+    assert len(catalog) == 27
+    assert all(item.get("execution_status") in {
+        "PASS", "FAIL", "REVIEW", "INCOMPLETE", "ERROR", "NOT_RUN", "NOT_APPLICABLE",
+    } for item in catalog)
+    assert all(item.get("result_summary") for item in catalog)
+    assert next(item for item in catalog if item["check"] == "Semgrep")["evidence_basis"] == "scanner_result"
     assert len(report["detailed_review"]["external_approval_requirements"]) >= 10
     assert _control(report, "firecracker_runtime")["status"] == "PASS"
     assert _control(report, "network_isolation")["status"] == "PASS"

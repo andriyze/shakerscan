@@ -192,6 +192,8 @@ except ModuleNotFoundError:
 
 try:
     from model_intake_reporting import (
+        EXTERNAL_APPROVAL_REQUIREMENTS as _MODEL_INTAKE_EXTERNAL_REQUIREMENTS,
+        SHAKERSCAN_CHECK_CATALOG as _MODEL_INTAKE_CHECK_CATALOG,
         apply_automatic_review_context as _apply_model_intake_automatic_review_context,
         build_model_intake_report as _build_model_intake_report,
         model_intake_report_to_sarif as _model_intake_report_to_sarif,
@@ -199,6 +201,8 @@ try:
     )
 except ModuleNotFoundError:
     from api.model_intake_reporting import (
+        EXTERNAL_APPROVAL_REQUIREMENTS as _MODEL_INTAKE_EXTERNAL_REQUIREMENTS,
+        SHAKERSCAN_CHECK_CATALOG as _MODEL_INTAKE_CHECK_CATALOG,
         apply_automatic_review_context as _apply_model_intake_automatic_review_context,
         build_model_intake_report as _build_model_intake_report,
         model_intake_report_to_sarif as _model_intake_report_to_sarif,
@@ -14288,6 +14292,20 @@ async def model_intake_capabilities():
     return {
         "schema_version": "model-intake-source-adapters/v1",
         "adapters": _model_adapter_catalog(),
+    }
+
+
+@app.get("/model-intake/checks")
+async def model_intake_check_catalog():
+    """One authoritative control catalog for UI, agents, docs, and reports."""
+    return {
+        "schema_version": "model-intake-check-catalog/v1",
+        "checks": _MODEL_INTAKE_CHECK_CATALOG,
+        "external_approval_requirements": _MODEL_INTAKE_EXTERNAL_REQUIREMENTS,
+        "status_note": (
+            "Catalog membership describes capability only. Per-scan reports state what ran, "
+            "what evidence was produced, and whether it passed, failed, was incomplete, or needs review."
+        ),
     }
 
 

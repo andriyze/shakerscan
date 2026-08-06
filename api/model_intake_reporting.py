@@ -107,23 +107,33 @@ CONTROL_DETAILS: dict[str, dict[str, str]] = {
 
 
 SHAKERSCAN_CHECK_CATALOG: list[dict[str, Any]] = [
-    {"id": "MI-01", "category": "Acquisition", "check": "Safe source resolution and complete acquisition", "implementation": "native", "applies_when": "all intake sources", "evidence_controls": ["immutable_subjects", "static_analysis"]},
-    {"id": "MI-02", "category": "Integrity", "check": "Full SHA-256, expected-digest comparison, immutable quarantine identity", "implementation": "native", "applies_when": "all artifacts", "evidence_controls": ["immutable_subjects"]},
-    {"id": "MI-03", "category": "Repository", "check": "Authoritative pinned repository manifest, complete snapshot, custom code and auto_map inventory", "implementation": "native", "applies_when": "the provider supports authoritative snapshots", "evidence_controls": ["immutable_subjects", "static_analysis"]},
-    {"id": "MI-04", "category": "Artifact safety", "check": "Recursive archive, traversal, collision, symlink/device, bomb, truncation, and format-specific inspection", "implementation": "native", "applies_when": "archives or supported model formats are present", "evidence_controls": ["static_analysis"]},
-    {"id": "MI-05", "category": "Serialization", "check": "Pickle opcode/callable analysis plus ModelScan and applicable Fickling", "implementation": "native + existing adapters", "applies_when": "serialized or pickle-capable artifacts are present", "evidence_controls": ["static_analysis"]},
-    {"id": "MI-06", "category": "Source security", "check": "Python AST and Semgrep review of repository code and configuration", "implementation": "native + existing adapter", "applies_when": "code or configuration is present", "evidence_controls": ["static_analysis"]},
-    {"id": "MI-07", "category": "Content safety", "check": "Secret rules, malware rules, and native-binary inventory", "implementation": "native", "applies_when": "complete subject material is available", "evidence_controls": ["static_analysis"]},
-    {"id": "MI-08", "category": "Dependencies", "check": "CycloneDX SBOM, dependency inventory, and applicable offline Trivy SCA/misconfiguration scan", "implementation": "native + existing adapter", "applies_when": "dependency manifests or runtime components are present", "evidence_controls": ["static_analysis"]},
-    {"id": "MI-09", "category": "Licensing", "check": "Full Trivy license evidence, native reconciliation, deterministic corporate policy, SPDX enrichment, License BOM, and Third-Party Notices draft", "implementation": "native + existing Trivy adapter", "applies_when": "complete repository evidence is available", "evidence_controls": ["license_compliance"]},
-    {"id": "MI-10", "category": "Provenance", "check": "Signature, signer trust, exact-subject attestation, lineage, and AIBOM evidence", "implementation": "native", "applies_when": "the policy requires or the source supplies this evidence", "evidence_controls": ["static_analysis", "frozen_evidence"]},
-    {"id": "MI-11", "category": "Runtime", "check": "Firecracker import, tokenizer, load, warmup, inference, and teardown", "implementation": "Firecracker/KVM", "applies_when": "controlled admission requires runtime qualification", "evidence_controls": ["runtime_execution", "firecracker_runtime"]},
-    {"id": "MI-12", "category": "Runtime", "check": "No-NIC egress prevention plus guest/host network-attempt telemetry", "implementation": "Firecracker/KVM", "applies_when": "runtime qualification runs", "evidence_controls": ["network_isolation"]},
-    {"id": "MI-13", "category": "Runtime", "check": "Host-enforced resource limits and peak measurements", "implementation": "Firecracker/KVM", "applies_when": "runtime qualification runs", "evidence_controls": ["resource_envelope"]},
-    {"id": "MI-14", "category": "Conversion", "check": "Controlled unsafe-format conversion, equivalence, new identity, and rescan", "implementation": "Firecracker/KVM", "applies_when": "policy prohibits the source serialization format", "evidence_controls": ["conversion_equivalence"]},
-    {"id": "MI-15", "category": "Evaluation", "check": "Known-answer embeddings, output shape, stability, robustness, and approved quality thresholds", "implementation": "deterministic evaluator", "applies_when": "an approved benchmark is configured", "evidence_controls": ["embedding_evaluation"]},
-    {"id": "MI-16", "category": "Data plane", "check": "Vector/graph ACL, tenant, cache, deletion, poisoning, and index/model compatibility observations", "implementation": "deterministic evaluator over trusted observations", "applies_when": "the intended corporate integration is available", "evidence_controls": ["data_plane_evaluation"]},
-    {"id": "MI-17", "category": "Admission", "check": "Evidence freeze, separated approvals, deterministic policy, signed exact-subject admission, and lifecycle parity", "implementation": "native control plane", "applies_when": "controlled admission is requested", "evidence_controls": ["frozen_evidence", "human_approvals", "deterministic_policy", "signed_admission"]},
+    {"id": "MI-01", "category": "Source", "check": "Source resolution and revision pinning", "description": "Resolve the model repository and bind the review to an immutable revision.", "implementation": "native provider adapter", "applies_when": "all sources", "evidence_controls": ["immutable_subjects"]},
+    {"id": "MI-02", "category": "Acquisition", "check": "Complete acquisition", "description": "Acquire the complete artifact within byte limits and detect truncation or oversize files.", "implementation": "native streaming acquisition", "applies_when": "full review", "evidence_controls": ["immutable_subjects"]},
+    {"id": "MI-03", "category": "Integrity", "check": "SHA-256 integrity", "description": "Hash the acquired artifact and compare registry or supplied digests.", "implementation": "native", "applies_when": "all artifacts", "evidence_controls": ["immutable_subjects"]},
+    {"id": "MI-04", "category": "Repository", "check": "Repository completeness", "description": "Verify expected repository members with safe paths, sizes, and hashes.", "implementation": "native provider manifest", "applies_when": "provider supports authoritative snapshots", "evidence_controls": ["immutable_subjects"]},
+    {"id": "MI-05", "category": "Format", "check": "Format identification", "description": "Recognize safetensors, PyTorch/pickle, ONNX, GGUF, archives, and supported formats.", "implementation": "native", "applies_when": "all artifacts", "evidence_controls": ["static_analysis"]},
+    {"id": "MI-06", "category": "Format", "check": "Safetensors validation", "description": "Validate headers, tensor metadata, offsets, bounds, overlap, and structure.", "implementation": "native + official parser", "applies_when": "safetensors is present", "evidence_controls": ["static_analysis"]},
+    {"id": "MI-07", "category": "Serialization", "check": "Pickle analysis", "description": "Inspect pickle opcodes and dangerous callable references without loading the model.", "implementation": "native bounded parser", "applies_when": "pickle-capable serialization is present", "evidence_controls": ["static_analysis"]},
+    {"id": "MI-08", "category": "Archive", "check": "Archive safety", "description": "Recursively inspect ZIP/TAR paths, nesting, expansion limits, and archive bombs.", "implementation": "native bounded parser", "applies_when": "archives are present", "evidence_controls": ["static_analysis"]},
+    {"id": "MI-09", "category": "Scanner", "check": "ModelScan", "description": "Detect known unsafe or malicious model serialization patterns.", "implementation": "ModelScan adapter", "applies_when": "adapter declares applicability", "evidence_controls": ["static_analysis"], "scanner_name": "modelscan"},
+    {"id": "MI-10", "category": "Scanner", "check": "Fickling", "description": "Perform semantic analysis of applicable pickle artifacts.", "implementation": "Fickling adapter", "applies_when": "Fickling supports the pickle artifact", "evidence_controls": ["static_analysis"], "scanner_name": "fickling"},
+    {"id": "MI-11", "category": "Scanner", "check": "Semgrep", "description": "Review repository code for deserialization, execution, network, imports, and risky file access.", "implementation": "versioned Semgrep rules", "applies_when": "repository code is present", "evidence_controls": ["static_analysis"], "scanner_name": "semgrep"},
+    {"id": "MI-12", "category": "Scanner", "check": "Trivy", "description": "Check dependencies and repository content with the packaged offline vulnerability and license data.", "implementation": "offline Trivy adapter", "applies_when": "complete repository or dependency manifests are present", "evidence_controls": ["static_analysis", "license_compliance"], "scanner_name": "trivy"},
+    {"id": "MI-13", "category": "Source", "check": "Native Python AST analysis", "description": "Identify executable custom code, suspicious imports, calls, templates, and load-time behavior.", "implementation": "native AST parser", "applies_when": "Python code is present", "evidence_controls": ["static_analysis"]},
+    {"id": "MI-14", "category": "Dependencies", "check": "Dependency inventory", "description": "Discover declared runtime packages and assess reproducible custom-code dependency coverage.", "implementation": "native manifest reconciliation", "applies_when": "dependency declarations or custom code are present", "evidence_controls": ["static_analysis"]},
+    {"id": "MI-15", "category": "Inventory", "check": "SBOM and AIBOM generation", "description": "Produce CycloneDX, SPDX, and AI inventories with explicit completeness.", "implementation": "native evidence composer", "applies_when": "scan evidence exists", "evidence_controls": ["static_analysis"]},
+    {"id": "MI-16", "category": "Governance", "check": "License and governance metadata", "description": "Reconcile licenses, intended use, restrictions, lineage, monitoring, and review evidence.", "implementation": "native policy + Trivy license evidence", "applies_when": "full review", "evidence_controls": ["license_compliance"]},
+    {"id": "MI-17", "category": "Trust", "check": "Signature and attestation verification", "description": "Validate signatures, trust anchors, subject digests, DSSE/in-toto attestations, and bindings.", "implementation": "native cryptographic verifier", "applies_when": "configured or required by policy", "evidence_controls": ["static_analysis", "frozen_evidence"]},
+    {"id": "MI-18", "category": "Conversion", "check": "Unsafe-format conversion", "description": "Convert eligible pickle weights to safetensors in Firecracker.", "implementation": "fixed Firecracker converter", "applies_when": "unsafe eligible weights are present", "evidence_controls": ["conversion_equivalence"]},
+    {"id": "MI-19", "category": "Conversion", "check": "Conversion equivalence", "description": "Compare tensor inventory, shapes, dtypes, values, and embeddings.", "implementation": "fixed Firecracker evaluator", "applies_when": "conversion runs", "evidence_controls": ["conversion_equivalence"]},
+    {"id": "MI-20", "category": "Runtime", "check": "Isolated model loading", "description": "Import the fixed loader, tokenizer, and model inside a no-NIC Firecracker microVM.", "implementation": "Firecracker/KVM", "applies_when": "runtime qualification is required", "evidence_controls": ["runtime_execution", "firecracker_runtime"]},
+    {"id": "MI-21", "category": "Runtime", "check": "Warmup and inference", "description": "Perform bounded inference with ShakerScan's fixed embedding harness.", "implementation": "Firecracker/KVM", "applies_when": "runtime qualification runs", "evidence_controls": ["firecracker_runtime"]},
+    {"id": "MI-22", "category": "Evaluation", "check": "Known-answer repeatability", "description": "Calibrate an embedding digest and verify it in a separate Firecracker execution.", "implementation": "deterministic evaluator", "applies_when": "runtime qualification runs", "evidence_controls": ["embedding_evaluation"]},
+    {"id": "MI-23", "category": "Containment", "check": "Network monitoring", "description": "Block egress and classify local IPC, socket activity, DNS, and outbound destination attempts.", "implementation": "guest syscall + host namespace/firewall telemetry", "applies_when": "Firecracker executes", "evidence_controls": ["network_isolation"]},
+    {"id": "MI-24", "category": "Containment", "check": "Resource enforcement", "description": "Enforce and measure CPU, memory, processes, file size, and execution time.", "implementation": "host cgroup + jailer limits", "applies_when": "Firecracker executes", "evidence_controls": ["resource_envelope"]},
+    {"id": "MI-25", "category": "Evidence", "check": "Evidence integrity", "description": "Bind scanner, snapshot, runtime, and component hashes into signed receipts.", "implementation": "native evidence control plane", "applies_when": "controlled review", "evidence_controls": ["frozen_evidence", "signed_admission"]},
+    {"id": "MI-26", "category": "Decision", "check": "Deterministic policy decision", "description": "Return ALLOW, BLOCK, INCOMPLETE, or REVIEW without caller or AI override.", "implementation": "server-owned policy", "applies_when": "controlled admission", "evidence_controls": ["deterministic_policy"]},
+    {"id": "MI-27", "category": "Corporate readiness", "check": "Corporate-approval gap analysis", "description": "List human, legal, privacy, publisher, production-signing, and deployed-system checks outside Model Intake.", "implementation": "native report catalog", "applies_when": "every corporate report", "evidence_controls": []},
 ]
 
 
@@ -573,19 +583,72 @@ def _static_check_detail(evidence: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _check_catalog_with_evidence(controls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _check_catalog_with_evidence(
+    controls: list[dict[str, Any]],
+    static_detail: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     by_id = {str(item.get("id") or ""): item for item in controls}
+    scanner_results = {
+        str(item.get("name") or "").strip().casefold(): item
+        for item in _json(static_detail or {}, {}).get("scanner_results") or []
+        if isinstance(item, dict)
+    }
+    priority = {
+        "FAIL": 0, "ERROR": 1, "INCOMPLETE": 2, "NOT_RUN": 3,
+        "REVIEW": 4, "PASS": 5, "NOT_APPLICABLE": 6,
+    }
     rows: list[dict[str, Any]] = []
     for catalog_item in SHAKERSCAN_CHECK_CATALOG:
         related = [by_id[item] for item in catalog_item["evidence_controls"] if item in by_id]
+        scanner = scanner_results.get(str(catalog_item.get("scanner_name") or "").casefold())
+        if scanner:
+            status = _normalize_status(scanner.get("status"))
+            result_summary = (
+                f"{scanner.get('name')} reported {status}; "
+                f"{scanner.get('finding_count') if scanner.get('finding_count') is not None else 'unknown'} finding(s)."
+            )
+            evidence_basis = "scanner_result"
+            execution_evidence = {
+                key: scanner.get(key) for key in (
+                    "name", "version", "rules_sha256", "database_sha256",
+                    "finding_count", "applicability", "coverage",
+                )
+            }
+        elif related:
+            status = min(
+                (str(item.get("status") or "NOT_RUN") for item in related),
+                key=lambda value: priority.get(value, 2),
+            )
+            result_summary = " ".join(
+                f"{item.get('label')}: {item.get('status')} — {item.get('detail')}"
+                for item in related
+            )
+            evidence_basis = "control_evidence"
+            execution_evidence = {
+                "control_ids": [item.get("id") for item in related],
+                "evidence_refs": [
+                    ref for item in related for ref in item.get("evidence_refs") or []
+                ],
+            }
+        else:
+            status = "PASS"
+            result_summary = (
+                f"The report includes {len(EXTERNAL_APPROVAL_REQUIREMENTS)} explicit external corporate requirements."
+            )
+            evidence_basis = "report_generation"
+            execution_evidence = {"external_requirement_count": len(EXTERNAL_APPROVAL_REQUIREMENTS)}
         rows.append({
             **catalog_item,
+            "execution_status": status,
+            "result_summary": result_summary,
+            "evidence_basis": evidence_basis,
+            "execution_evidence": execution_evidence,
             "evidence_statuses": [
                 {"control_id": item.get("id"), "status": item.get("status")}
                 for item in related
             ],
             "execution_note": (
-                "Catalog applicability describes product capability. Only the detailed control and scanner evidence proves what ran for this submission."
+                "This row reports submission evidence; applicability alone is never treated as proof of execution."
             ),
         })
     return rows
@@ -872,6 +935,7 @@ def build_model_intake_report(
         {**item, "status": "EXTERNAL_REQUIRED"}
         for item in EXTERNAL_APPROVAL_REQUIREMENTS
     ]
+    static_detail = _static_check_detail(evidence)
     report = {
         "schema_version": REPORT_SCHEMA,
         "generated_at": _iso(now),
@@ -931,9 +995,9 @@ def build_model_intake_report(
         "control_counts": control_counts,
         "detailed_review": {
             "control_matrix": controls,
-            "static_analysis_detail": _static_check_detail(evidence),
+            "static_analysis_detail": static_detail,
             "license_compliance": license_compliance,
-            "shakerscan_check_catalog": _check_catalog_with_evidence(controls),
+            "shakerscan_check_catalog": _check_catalog_with_evidence(controls, static_detail),
             "external_approval_requirements": external_requirements,
             "required_actions": actions,
         },
@@ -1103,7 +1167,9 @@ def apply_automatic_review_context(
     detail = _json(report.get("detailed_review"), {})
     detail.update({
         "control_matrix": controls,
-        "shakerscan_check_catalog": _check_catalog_with_evidence(controls),
+        "shakerscan_check_catalog": _check_catalog_with_evidence(
+            controls, _json(detail.get("static_analysis_detail"), {}),
+        ),
         "required_actions": actions,
     })
     report["detailed_review"] = detail
@@ -1161,7 +1227,8 @@ def render_model_intake_html(report: dict[str, Any]) -> str:
     catalog_rows = "".join(
         "<tr>"
         f"<td>{esc(item.get('id'))}</td><td>{esc(item.get('category'))}</td><td>{esc(item.get('check'))}</td>"
-        f"<td>{esc(item.get('implementation'))}</td><td>{esc(item.get('applies_when'))}</td>"
+        f"<td class='status {esc(str(item.get('execution_status') or '').lower())}'>{esc(item.get('execution_status'))}</td>"
+        f"<td>{esc(item.get('result_summary'))}</td><td>{esc(item.get('implementation'))}</td><td>{esc(item.get('applies_when'))}</td>"
         "</tr>"
         for item in detail.get("shakerscan_check_catalog") or []
     )
@@ -1193,7 +1260,7 @@ th,td{{border:1px solid #ccd2dc;padding:8px;vertical-align:top;text-align:left}}
 <h2 class="page-break">Detailed technical review</h2>
 <h3>Control evidence matrix</h3><table><thead><tr><th>Category</th><th>Question</th><th>Status</th><th>Answer</th><th>Method</th><th>Coverage/evidence</th></tr></thead><tbody>{rows}</tbody></table>
 <h2>Firecracker phase timeline</h2><table><thead><tr><th>Operation</th><th>Phase</th><th>Status</th><th>Duration ms</th><th>Detail</th></tr></thead><tbody>{phases}</tbody></table>
-<h2>ShakerScan check catalog</h2><p>This is the implemented capability catalog. The control and scanner evidence above—not catalog membership—proves what ran for this submission.</p><table><thead><tr><th>ID</th><th>Category</th><th>Check</th><th>Implementation</th><th>Applicability</th></tr></thead><tbody>{catalog_rows}</tbody></table>
+<h2>ShakerScan check catalog</h2><p>Each row states what happened for this submission. Applicability alone is never treated as proof that a check ran.</p><table><thead><tr><th>ID</th><th>Category</th><th>Check</th><th>Result</th><th>Evidence summary</th><th>Implementation</th><th>Applicability</th></tr></thead><tbody>{catalog_rows}</tbody></table>
 <h2>Authority bindings</h2><pre>{esc(json.dumps(report.get('authority_bindings') or {}, indent=2, sort_keys=True, default=str))}</pre>
 <h2>Limitations</h2><ul>{''.join(f'<li>{esc(item)}</li>' for item in report.get('limitations', []))}</ul>
 </body></html>"""
