@@ -1100,7 +1100,14 @@ def build_model_intake_report(
         labels: list[str] = []
         remediation_steps: list[str] = []
         seen_locations: set[str] = set()
-        for finding in attention_findings:
+        for finding in sorted(
+            attention_findings,
+            key=lambda item: (
+                bool(str(item.get("message") or "").strip()),
+                len(str(item.get("message") or item.get("call") or item.get("id") or "")),
+            ),
+            reverse=True,
+        ):
             path = str(finding.get("path") or "")
             line = finding.get("line")
             location = f"{path}:{line}" if path and line else str(finding.get("id") or finding.get("rule_id") or "")

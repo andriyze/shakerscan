@@ -341,14 +341,21 @@ def test_static_report_names_safe_finding_location_and_remediation():
     rows = _rows(active_admission=False)
     static = next(item for item in rows["evidence"] if item["evidence_type"] == "static_analysis")
     static["status"] = "WARNING"
-    static["payload_json"]["scanner_results"] = [{
-        "name": "semgrep", "status": "WARNING", "required": True,
-        "finding_count": 1, "coverage": {"files_analyzed": 2},
-        "findings": [{
-            "rule_id": "torch-load-version-dependent", "path": "modeling.py", "line": 42,
-            "message": "torch.load should use weights_only=True", "severity": "medium",
-        }],
-    }]
+    static["payload_json"]["scanner_results"] = [
+        {
+            "name": "python-ast-security", "status": "WARNING", "required": True,
+            "finding_count": 1, "coverage": {"files_analyzed": 2},
+            "findings": [{"id": "unsafe_torch_load", "call": "torch.load", "path": "modeling.py", "line": 42}],
+        },
+        {
+            "name": "semgrep", "status": "WARNING", "required": True,
+            "finding_count": 1, "coverage": {"files_analyzed": 2},
+            "findings": [{
+                "rule_id": "torch-load-version-dependent", "path": "modeling.py", "line": 42,
+                "message": "torch.load should use weights_only=True", "severity": "medium",
+            }],
+        },
+    ]
     report = apply_automatic_review_context(
         _report(rows),
         {
