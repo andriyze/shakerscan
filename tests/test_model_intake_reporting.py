@@ -205,6 +205,7 @@ def test_complete_exact_subject_report_allows_only_with_matching_active_admissio
     assert len(report["detailed_review"]["external_approval_requirements"]) >= 10
     assert _control(report, "firecracker_runtime")["status"] == "PASS"
     assert _control(report, "network_isolation")["status"] == "PASS"
+    assert "No outbound or DNS connection attempt" in _control(report, "network_isolation")["detail"]
     assert _control(report, "conversion_equivalence")["status"] == "NOT_APPLICABLE"
     assert all(report["authority_bindings"]["admission_statement_parity"].values())
 

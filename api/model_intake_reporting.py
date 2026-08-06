@@ -504,7 +504,14 @@ def _runner_controls(
             "id": "network_isolation",
             "label": "Independent network-attempt telemetry",
             "status": network_status,
-            "detail": "No network attempt or telemetry loss was observed." if network_status == "PASS" else "Network attempts or incomplete/lost telemetry require blocking review.",
+            "detail": (
+                "No outbound or DNS connection attempt was observed; "
+                f"{_integer(network_summary.get('local_ipc_event_count')) or 0} local IPC event(s) and "
+                f"{_integer(network_summary.get('ip_socket_event_count')) or 0} IP socket-setup event(s) "
+                "were classified with no telemetry loss."
+                if network_status == "PASS"
+                else "Outbound attempts or incomplete/lost telemetry require blocking review."
+            ),
             "coverage": network_summary,
             "evidence_refs": ref,
         }
