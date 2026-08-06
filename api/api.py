@@ -3553,7 +3553,7 @@ class ScanOptions(BaseModel):
     zero_rediscovery: bool = False
     placement: Optional[dict[str, Any]] = Field(
         default=None,
-        description="Execution placement constraints: use node_id='local' for control-plane workers, a fleet node UUID for one remote node, or region/egress/network/tool constraints.",
+        description="Execution placement constraints: use node_scope='remote' for any fleet node, node_id='local' for control-plane workers, a fleet node UUID for one remote node, or region/egress/network/tool constraints.",
     )
 
     @field_validator("placement", mode="before")
@@ -3565,11 +3565,13 @@ class ScanOptions(BaseModel):
             raise ValueError("placement must be an object")
         unknown = set(value) - {
             "region", "egress_group", "network", "scan_tier", "tier",
-            "data_residency", "node_id", "requires",
+            "data_residency", "node_id", "node_scope", "requires",
         }
         if unknown:
             raise ValueError(f"unsupported placement keys: {', '.join(sorted(unknown))}")
         normalized = normalize_placement(value)
+        if normalized.get("node_scope") not in {None, "local", "remote"}:
+            raise ValueError("placement node_scope must be local or remote")
         if value and not normalized:
             raise ValueError("placement must contain at least one non-empty constraint")
         return normalized
@@ -8684,6 +8686,7 @@ def _broker_node_labels(node: dict[str, Any]) -> dict[str, Any]:
     # canonical identity/capability labels used by overlay workers and
     # placement admission, including the node UUID selected by the user.
     labels["node_id"] = str(node.get("id") or "").strip().lower()
+    labels["node_scope"] = "remote"
     if node.get("region"):
         labels["region"] = str(node.get("region"))
     if "tools" not in labels and "capabilities" not in labels:
@@ -20304,6 +20307,7 @@ def _fleet_node_placement_labels(row: Any, _placement: dict[str, Any]) -> dict[s
             raw_labels = {}
     labels = dict(raw_labels) if isinstance(raw_labels, dict) else {}
     labels["node_id"] = str(row.get("id") or "").lower()
+    labels["node_scope"] = "remote"
     if row.get("region"):
         labels["region"] = str(row.get("region"))
     # The standard image guarantees this baseline. Custom images must advertise
@@ -20319,6 +20323,7 @@ def _local_worker_placement_labels() -> dict[str, Any]:
     """Placement identity guaranteed by the bundled control-plane worker image."""
     return {
         "node_id": "local",
+        "node_scope": "local",
         "transport": "local",
         "tools": sorted(DEFAULT_WORKER_TOOL_COMMANDS),
         "scan_tiers": sorted(VALID_DAST_SCAN_TYPES),

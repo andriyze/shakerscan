@@ -529,8 +529,9 @@ curl -sS -X POST http://127.0.0.1:8080/scans \
   }'
 ```
 
-Placement can use `node_id`, `region`, `network`, `egress_group`, `data_residency`, `scan_tier`, and
-`requires`. `node_id=local` is the reserved control-plane location; every other `node_id` is an
+Placement can use `node_scope`, `node_id`, `region`, `network`, `egress_group`, `data_residency`,
+`scan_tier`, and `requires`. `node_scope=remote` selects any eligible joined node,
+`node_id=local` is the reserved control-plane location, and every other `node_id` is an
 enrolled remote-node UUID. HTTPS broker leasing and WireGuard workers use the same canonical node
 identity, so node selection behaves consistently across transports. Placement restricts execution
 location; it does not grant authorization to scan a target. A node with no `--scan-tier` flags supports every built-in scan tier. The standard worker

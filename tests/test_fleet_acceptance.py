@@ -141,7 +141,7 @@ def test_full_acceptance_routes_scan_to_shared_remote_transport(monkeypatch):
 
     fleet_acceptance.run(args)
 
-    assert submitted[0]["options"]["placement"] == {"transport": "broker"}
+    assert submitted[0]["options"]["placement"] == {"node_scope": "remote"}
     assert submitted[0]["options"]["scan_type"] == "quick"
 
 

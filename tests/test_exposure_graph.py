@@ -25,10 +25,11 @@ if "fastapi" not in sys.modules:
         get = post = patch = put = delete = on_event = _decorator
 
     class _FakeHTTPException(Exception):
-        def __init__(self, status_code: int = 500, detail=None):
+        def __init__(self, status_code: int = 500, detail=None, headers=None):
             super().__init__(detail)
             self.status_code = status_code
             self.detail = detail
+            self.headers = headers
 
     def _fake_query(default=None, **kwargs):
         return default

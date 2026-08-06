@@ -246,9 +246,10 @@ export default function NewScanPage() {
           ])
           .filter(([, value]) => Array.isArray(value) ? value.length > 0 : value !== '')
       )
-      const selectedNodeId = executionTarget === 'auto' ? '' : executionTarget
+      const selectedNodeId = executionTarget === 'auto' || executionTarget === 'remote' ? '' : executionTarget
       const resolvedPlacementPayload = {
         ...(showAdvanced && placementEnabled ? placementPayload : {}),
+        ...(executionTarget === 'remote' ? { node_scope: 'remote' } : {}),
         ...(selectedNodeId ? { node_id: selectedNodeId } : {})
       }
       const scanOptions: Record<string, unknown> = {
@@ -464,7 +465,7 @@ export default function NewScanPage() {
           <label className="block text-sm font-medium text-gray-400 mb-3">
             Execution location
           </label>
-          <div className="grid gap-3 sm:grid-cols-2">
+          <div className="grid gap-3 sm:grid-cols-3">
             <button
               type="button"
               onClick={() => setExecutionTarget('auto')}
@@ -486,11 +487,22 @@ export default function NewScanPage() {
                 {workerStats?.execution_capacity?.local_available ?? workerStats?.count ?? '—'} local workers available
               </div>
             </button>
+            <button
+              type="button"
+              onClick={() => setExecutionTarget('remote')}
+              disabled={(workerStats?.execution_capacity?.remote_available ?? 0) < 1}
+              className={`rounded-lg border p-3 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${executionTarget === 'remote' ? 'border-blue-500 bg-blue-500/10' : 'border-gray-700 bg-gray-800 hover:border-gray-600'}`}
+            >
+              <div className="font-medium text-white">Remote fleet</div>
+              <div className="mt-1 text-xs text-gray-500">
+                {workerStats?.execution_capacity?.remote_available ?? '—'} remote workers available
+              </div>
+            </button>
           </div>
           <label className="mt-3 block space-y-1">
             <span className="block text-xs text-gray-500">Specific remote node</span>
             <select
-              value={executionTarget !== 'auto' && executionTarget !== 'local' ? executionTarget : ''}
+              value={!['auto', 'local', 'remote'].includes(executionTarget) ? executionTarget : ''}
               onChange={(event) => setExecutionTarget(event.target.value || 'auto')}
               className="w-full rounded border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
             >
@@ -511,7 +523,7 @@ export default function NewScanPage() {
             </p>
           )}
           <p className="mt-3 text-xs text-gray-500">
-            Automatic preserves failover. Selecting a location keeps the scan on local workers or on any healthy worker replica within the chosen remote node.
+            Automatic uses all capacity. Remote fleet preserves failover across joined nodes; selecting one node pins execution to that node's healthy worker replicas.
           </p>
         </Card>}
 

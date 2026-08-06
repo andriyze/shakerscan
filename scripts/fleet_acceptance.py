@@ -477,7 +477,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     # Keep the physical proof on the selected fleet transport. Without
                     # this constraint a control-plane-local worker could execute a
                     # shard and make a nominal cross-node result misleading.
-                    "placement": {"transport": shared_transport},
+                    "placement": {"node_scope": "remote"},
                 },
             },
             timeout=60,

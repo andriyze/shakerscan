@@ -29,6 +29,7 @@ PLACEMENT_SCALAR_KEYS = {
     "tier",
     "data_residency",
     "node_id",
+    "node_scope",
 }
 DEFAULT_WORKER_TOOL_COMMANDS = {
     "nuclei": "nuclei",

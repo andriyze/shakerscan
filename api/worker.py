@@ -10949,6 +10949,7 @@ def _worker_placement_labels() -> dict[str, Any]:
     # failover between all local worker replicas.
     labels["node_id"] = node_id or "local"
     labels.setdefault("transport", "fleet" if node_id else "local")
+    labels.setdefault("node_scope", "remote" if node_id else "local")
     detected_tools = {
         tool for tool, command in DEFAULT_WORKER_TOOL_COMMANDS.items() if shutil.which(command)
     }
