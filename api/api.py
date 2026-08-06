@@ -16101,10 +16101,15 @@ async def create_model_intake_automatic_review(request: ModelIntakeAutomaticRevi
     scan_payload = resolved.get("scan_payload") if isinstance(resolved.get("scan_payload"), dict) else {}
     if not scan_payload.get("artifact_url"):
         raise HTTPException(status_code=422, detail="The model reference did not resolve to a testable artifact")
-    policy_profile = {
-        "production": "production", "staging": "staging",
-        "test": "research", "development": "research",
-    }[request.intended_environment]
+    # This scan is technical evidence for the controlled submission below,
+    # not the admission decision itself.  Expanding the production admission
+    # profile here duplicates missing signer/approval/evaluation controls as
+    # static-scan failures and requires the container staging adapter even
+    # though this controller subsequently runs the stronger exact-subject
+    # Firecracker job.  Force complete acquisition/scanners/current workers
+    # explicitly, and let the controlled production submission own its real
+    # environment, runtime, trust, approval, and policy controls.
+    policy_profile = "research"
     scan_request = ModelIntakeScanRequest(**{
         **scan_payload,
         "intake_mode": "preflight",
@@ -16112,8 +16117,12 @@ async def create_model_intake_automatic_review(request: ModelIntakeAutomaticRevi
         "complete_artifact_download": True,
         "complete_repository_snapshot": resolved.get("capabilities", {}).get("repository_snapshot") == "implemented",
         "run_generated_scanners": True,
-        "run_dynamic_sandbox": True,
-        "require_dynamic_sandbox": request.intended_environment in {"staging", "production"},
+        # Runtime qualification is performed later by the exact-subject
+        # Firecracker controller. The container adapter is an Advanced/manual
+        # staging option and must not create a duplicate unsupported runtime
+        # failure in the one-link result.
+        "run_dynamic_sandbox": False,
+        "require_dynamic_sandbox": False,
         "require_current_workers": True,
     })
     queued = await scan_model_intake(scan_request)

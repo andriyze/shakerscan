@@ -38,6 +38,13 @@ fields. Missing signing, Firecracker, evaluation, or approval evidence remains v
 `NOT_RUN`/`INCOMPLETE`; automatic mode does not turn unavailable evidence into a pass and cannot create an
 approval, policy exception, policy decision, admission, or promotion.
 
+The internal static scan deliberately uses the non-admission technical profile while explicitly forcing
+complete acquisition, the authoritative repository snapshot, every applicable existing scanner, and a
+current uniform worker fleet. The selected production/staging environment belongs to the controlled
+submission and its Firecracker/trust/approval/policy controls. This prevents missing production signatures,
+human approvals, or the optional container staging adapter from being mislabeled as static-analysis defects;
+those controls remain separate and fail closed in the final review.
+
 Finishing the workflow is not displayed as passing the model. Automatic review has a separate technical
 outcome: `PASS`, `REVIEW_REQUIRED`, `INCOMPLETE`, or `BLOCK`. Every non-pass generated evidence record is
 named beside its next action, followed by the remaining publisher, human, production-signer, and deployed

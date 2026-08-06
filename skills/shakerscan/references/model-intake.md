@@ -116,6 +116,12 @@ separate from `technical_outcome`: `PASS`, `REVIEW_REQUIRED`,
 approvals, publisher trust, production KMS, policy decision, promotion, and corporate
 data-plane validation remain explicit pending controls.
 
+The automatic controller's internal preflight is intentionally technical-only: it forces complete acquisition
+and scanners but does not duplicate production signer, human approval, generated evaluation, or container
+sandbox requirements as static findings. The requested environment is applied to the controlled submission,
+Firecracker evidence, and remaining admission controls. Advanced/manual mode remains the place to request the
+separate container staging adapter.
+
 After queueing, report the automatic review ID, scan ID, and `${UI_BASE}/model-intake?automatic_review={id}`,
 then stop unless the user explicitly asked to monitor the end-to-end run.
 

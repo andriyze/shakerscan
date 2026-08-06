@@ -2763,9 +2763,13 @@ def _inspect_onnx(data: bytes) -> dict[str, Any]:
     lowered_strings = [item.lower() for item in strings]
     external_locations = [
         item for item in strings
-        if item.startswith(("/", "file:", "http://", "https://", "s3://", "gs://", "../"))
-        or "external_data" in item.lower()
-        or item.lower().endswith((".bin", ".data"))
+        # ONNX graph/node/tensor names commonly begin with "/" (for example
+        # "/Cast_output_0").  They are not filesystem locations.  The worker
+        # deliberately does not parse untrusted protobuf, so this bounded hint
+        # must require a path/URI-shaped value; the isolated official ONNX
+        # parser remains authoritative for external_data key/value fields.
+        if item.startswith(("file:", "http://", "https://", "s3://", "gs://", "../", "..\\"))
+        or item.lower().endswith((".bin", ".data", ".weights", ".raw"))
     ][:25]
     custom_domains = [
         item for item in strings
@@ -2777,11 +2781,7 @@ def _inspect_onnx(data: bytes) -> dict[str, Any]:
         "parser_status": "not_executed_in_worker",
         "parser_reason": "untrusted_protobuf_requires_generated_scanner_or_sandbox",
         "graph_name": None,
-        "external_data_hint": (
-            b"external_data" in sample.lower()
-            or b"location" in sample.lower()
-            or bool(external_locations)
-        ),
+        "external_data_hint": bool(external_locations),
         "external_data_locations": sorted(set(external_locations))[:25],
         "custom_operator_hint": any(
             marker in " ".join(lowered_strings)

@@ -777,6 +777,8 @@ def test_automatic_review_requires_fingerprint_current_workers():
     schema = (ROOT / "api" / "retest_contract.py").read_text()
 
     assert '"require_current_workers": True' in source
+    assert 'policy_profile = "research"' in source
+    assert '"require_dynamic_sandbox": request.intended_environment' not in source
     assert "source_label" in source
     assert "source_label TEXT NOT NULL DEFAULT 'Model review'" in schema
     fields = api.ModelIntakeScanRequest.model_fields

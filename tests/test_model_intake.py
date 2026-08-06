@@ -663,7 +663,7 @@ def test_model_intake_flags_archive_traversal_nested_archive_and_risky_config(tm
 
 def test_model_intake_flags_onnx_external_data_and_custom_operator(tmp_path):
     artifact = tmp_path / "model.onnx"
-    artifact.write_bytes(b"external_data location customop ai.onnx.contrib")
+    artifact.write_bytes(b"../weights.bin customop ai.onnx.contrib")
 
     result = asyncio.run(
         run_model_intake_scan(
@@ -679,6 +679,15 @@ def test_model_intake_flags_onnx_external_data_and_custom_operator(tmp_path):
     finding_ids = {finding["id"] for finding in result["findings"]}
     assert "model_intake:onnx_external_data_reference" in finding_ids
     assert "model_intake:onnx_custom_operator" in finding_ids
+
+
+def test_model_intake_does_not_treat_onnx_node_names_as_external_files():
+    inspection = model_intake._inspect_onnx(
+        b'/Cast /Cast_output_0 /Constant_output_0 location external_data'
+    )
+
+    assert inspection["external_data_hint"] is False
+    assert inspection["external_data_locations"] == []
 
 
 def test_model_intake_onnx_inspection_does_not_parse_untrusted_protobuf_in_worker():
