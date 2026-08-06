@@ -270,6 +270,38 @@ def test_guest_embedding_equivalence_uses_deterministic_cpu_execution():
     assert source.count("_configure_deterministic_torch(torch)") >= 3
 
 
+def test_guest_deterministic_torch_thread_setup_is_process_idempotent(monkeypatch):
+    guest_root = Path(__file__).resolve().parents[1] / "runner" / "guest"
+    monkeypatch.syspath_prepend(str(guest_root))
+    import guest_worker
+
+    calls = {"threads": 0, "interop": 0, "seed": 0, "deterministic": 0}
+
+    class FakeTorch:
+        def set_num_threads(self, value):
+            assert value == 1
+            calls["threads"] += 1
+
+        def set_num_interop_threads(self, value):
+            assert value == 1
+            calls["interop"] += 1
+
+        def manual_seed(self, value):
+            assert value == 0
+            calls["seed"] += 1
+
+        def use_deterministic_algorithms(self, value):
+            assert value is True
+            calls["deterministic"] += 1
+
+    monkeypatch.setattr(guest_worker, "_TORCH_THREAD_LIMITS_CONFIGURED", False)
+    fake = FakeTorch()
+    guest_worker._configure_deterministic_torch(fake)
+    guest_worker._configure_deterministic_torch(fake)
+
+    assert calls == {"threads": 1, "interop": 1, "seed": 2, "deterministic": 2}
+
+
 def test_firecracker_readiness_has_no_local_container_fallback(tmp_path, monkeypatch):
     monkeypatch.setattr("model_intake_runner_controller.platform.system", lambda: "Linux")
     # Pin the CPU probe. Left to the ambient /proc/cpuinfo this asserted

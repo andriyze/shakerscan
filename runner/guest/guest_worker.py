@@ -22,6 +22,8 @@ STATE = WORK / "state.json"
 for _thread_env in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
     os.environ[_thread_env] = "1"
 
+_TORCH_THREAD_LIMITS_CONFIGURED = False
+
 
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -79,8 +81,15 @@ def _install_transformers_compatibility() -> None:
 
 
 def _configure_deterministic_torch(torch) -> None:
-    torch.set_num_threads(1)
-    torch.set_num_interop_threads(1)
+    global _TORCH_THREAD_LIMITS_CONFIGURED
+    # PyTorch only permits set_num_interop_threads before parallel work starts
+    # and at most once per process. Conversion equivalence deliberately loads
+    # the source and converted model in the same bounded phase, so make the
+    # process-wide thread setup idempotent while reseeding each evaluation.
+    if not _TORCH_THREAD_LIMITS_CONFIGURED:
+        torch.set_num_threads(1)
+        torch.set_num_interop_threads(1)
+        _TORCH_THREAD_LIMITS_CONFIGURED = True
     torch.manual_seed(0)
     torch.use_deterministic_algorithms(True)
 

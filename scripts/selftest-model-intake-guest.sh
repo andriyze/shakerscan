@@ -25,12 +25,18 @@ docker build --platform "$PLATFORM" -f "$ROOT_DIR/runner/guest/Dockerfile" -t "$
 DOCKER=(docker run --rm --platform "$PLATFORM" --network none --entrypoint /opt/venv/bin/python)
 "${DOCKER[@]}" -v "$TEMP_DIR/input:/input" "$IMAGE" -c '
 from pathlib import Path
+import torch
 from transformers import BertConfig, BertModel, BertTokenizer
 p = Path("/input/model")
 v = p / "vocab.txt"
 v.write_text("[PAD]\n[UNK]\n[CLS]\n[SEP]\n[MASK]\nsecurity\nreview\nknowledge\ngraph\nembedding\nbounded\nwarmup\n")
 BertTokenizer(str(v)).save_pretrained(p)
-BertModel(BertConfig(vocab_size=12, hidden_size=16, num_hidden_layers=1, num_attention_heads=2, intermediate_size=32)).save_pretrained(p, safe_serialization=False)
+model = BertModel(BertConfig(vocab_size=12, hidden_size=16, num_hidden_layers=1, num_attention_heads=2, intermediate_size=32))
+model.config.save_pretrained(p)
+# Build the risky source format explicitly. Transformers 5 writes safetensors
+# even when older callers request unsafe serialization, which would silently
+# turn this conversion acceptance test into a no-op.
+torch.save(model.state_dict(), p / "pytorch_model.bin")
 (Path("/input") / "job.json").write_text("{\"mode\":\"conversion\",\"trust_remote_code\":false,\"allow_pickle\":true,\"known_answer_inputs\":[\"security review\",\"knowledge graph embedding\"]}")
 '
 
