@@ -56653,7 +56653,7 @@ async def queue_stats():
         },
     }
     try:
-        r.setex("queue:stats_cache", 5, json.dumps(result))
+        r.set("queue:stats_cache", json.dumps(result), ex=5)
     except Exception:
         pass
     return result
@@ -56724,7 +56724,10 @@ async def list_results(limit: int = Query(50, ge=1, le=500)):
                 except Exception:
                     pass
 
-    results.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
+    # Historical and partially written result files may have a null or
+    # non-string timestamp. Normalize the key so one malformed legacy record
+    # cannot take down the complete compatibility listing.
+    results.sort(key=lambda item: str(item.get('timestamp') or ''), reverse=True)
     return {'results': results[:limit], 'count': len(results)}
 
 

@@ -56,6 +56,33 @@ def test_latest_result_rejects_traversal_and_symlink_escape(tmp_path, monkeypatc
         assert exc.value.status_code == 404
 
 
+def test_list_results_tolerates_null_and_mixed_legacy_timestamps(tmp_path, monkeypatch):
+    results = tmp_path / "results"
+    results.mkdir()
+    fixtures = {
+        "current.test": "2026-08-06T01:02:03Z",
+        "legacy-null.test": None,
+        "legacy-numeric.test": 123,
+    }
+    for folder, timestamp in fixtures.items():
+        target = results / folder
+        target.mkdir()
+        (target / "latest.json").write_text(
+            json.dumps({
+                "input": {"target": f"https://{folder}"},
+                "result": {"score": 90, "grade": "A"},
+                "timestamp_utc": timestamp,
+            })
+        )
+    monkeypatch.setattr(api_module, "RESULTS_DIR", results)
+
+    response = asyncio.run(api_module.list_results(limit=50))
+
+    assert response["count"] == 3
+    assert {item["folder"] for item in response["results"]} == set(fixtures)
+    assert response["results"][0]["folder"] == "current.test"
+
+
 def test_model_intake_platform_detection_requires_exact_provider_hosts():
     assert api_module._detect_model_intake_platform("https://acct.blob.core.windows.net/c/m") == "azure"
     assert api_module._detect_model_intake_platform("https://acct.blob.core.windows.net.evil.test/c/m") == "http"
