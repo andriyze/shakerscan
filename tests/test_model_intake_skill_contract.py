@@ -59,3 +59,6 @@ def test_model_intake_skill_preserves_fail_closed_firecracker_and_report_semanti
     assert "cryptographically reverifies an active DSSE admission" in reference
     assert "current-record mismatch is `BLOCK`" in reference
     assert "printable/PDF source" in reference
+    assert "report's `presentation` object" in reference
+    assert "Do not mix later admission stages into the technical failure count" in reference
+    assert "single **deployment follow-up** appendix" in reference

@@ -1,6 +1,6 @@
 # Model Intake controlled workflow
 
-Use this reference when the user asks whether a model may enter a corporate supply chain. It applies to any
+Use this reference when the user asks whether a model is ready for a controlled software or ML supply chain. It applies to any
 supported model source; named public models are conformance fixtures, not a hard-coded allowlist.
 
 ## Authority and terminology
@@ -114,8 +114,8 @@ report URLs. The UI also links the exact scan's CycloneDX, SPDX, AIBOM, License 
 draft downloads. Workflow completion is
 separate from `technical_outcome`: `PASS`, `REVIEW_REQUIRED`,
 `INCOMPLETE`, or `BLOCK`. Never describe `technical_review_complete` by itself as a model pass. Human
-approvals, publisher trust, production KMS, policy decision, promotion, and corporate
-data-plane validation remain explicit pending controls.
+approvals, publisher trust, production KMS, policy decision, promotion, and application
+data-plane validation remain a consolidated deployment follow-up group.
 
 Complete reviews run Trivy's full repository license mode in addition to its offline vulnerability, secret,
 and misconfiguration checks. ShakerScan reconciles Trivy evidence with publisher declarations, native
@@ -400,6 +400,11 @@ cryptographically reverifies an active DSSE admission against current server-own
 report can say `ALLOW`. Any signature, statement, or current-record mismatch is `BLOCK`; expired evidence or
 admission material cannot become `PASS`.
 
+Lead with the report's `presentation` object: one headline and result, then **verified**, **needs attention**,
+and **not applicable**. Do not mix later admission stages into the technical failure count. Mention the review
+boundary once and keep publisher trust, signing, application integration, and organization-owned decisions in
+the single **deployment follow-up** appendix. Summarize licensing once and point to the License BOM for detail.
+
 The report summarizes networking by phase, operation, and address family. It distinguishes local Unix IPC,
 socket creation, local bind/listen activity, DNS, and actual IP connect/send attempts; a local socket or failed
 bind is not mislabeled as egress. Outbound samples include destination address/port when observed, result,
@@ -407,7 +412,7 @@ success, and phase. The complete syscall stream stays in the signed receipt by d
 conversion/model-load/known-answer correctness and network/resource containment as
 separate controls: one can pass while containment correctly blocks the overall review.
 
-Export the exact scan's legal-triage artifacts without re-inspecting the model:
+Export the exact scan's license-evidence artifacts without re-inspecting the model:
 
 ```bash
 curl -s "$API_BASE/model-intake/scans/$SCAN_ID/license-bom" > shakerscan-license-bom.json
@@ -417,9 +422,9 @@ curl -s "$API_BASE/model-intake/scans/$SCAN_ID/third-party-notices" > THIRD-PART
 The License BOM contains normalized terms, classifications, policy reasons, obligations, evidence paths/digests,
 the exact evidence sources searched, discovered copyright/attribution lines, missing evidence, and unresolved
 items. The notices file is labeled **INCOMPLETE DRAFT** whenever required evidence is absent. It includes detected
-attribution lines and a search/missing-evidence section rather than padding an empty file with boilerplate. Legal
-must verify and complete it before distribution. SPDX records discovered declarations but leaves
-`LicenseConcluded` as `NOASSERTION` because an automated scanner is not the legal authority.
+attribution lines and a search/missing-evidence section rather than padding an empty file with boilerplate. A
+designated licensing or open-source owner completes unresolved terms before distribution. SPDX records
+discovered declarations but leaves `LicenseConcluded` as `NOASSERTION` when evidence is not conclusive.
 
 Read the implemented catalog from `GET /model-intake/checks` or the UI's **What ShakerScan checks** dialog.
 Catalog membership is capability documentation, not execution proof; the exact scan report must supply the
@@ -432,9 +437,9 @@ Always report one final outcome: `ALLOW`, `BLOCK`, `INCOMPLETE`, or `REVIEW`. Fo
 - what was not run, unsupported, timed out, crashed, truncated, or stale;
 - whether the complete artifact and repository were acquired within explicit byte/file/time budgets;
 - every Firecracker phase and the network/resource telemetry completeness state;
-- the reconciled license outcome, legal disposition, License BOM, SPDX declarations, and notices-draft gaps;
+- the reconciled license outcome, License BOM, SPDX declarations, and notices-draft gaps;
 - conversion/equivalence results when applicable;
-- corporate evaluation and vector-store/knowledge-graph controls that remain external;
+- application evaluation and vector-store/knowledge-graph controls that remain outside this run;
 - required human roles, exceptions, restrictions, and reassessment triggers;
 - the submission, scan, runner-job, manifest, policy-decision, and admission IDs.
 
