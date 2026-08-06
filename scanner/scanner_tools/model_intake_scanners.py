@@ -1837,12 +1837,18 @@ def run_builtin_license_inventory(subject_path: Path, subject: dict[str, Any]) -
     ]
     inventory: list[dict[str, Any]] = []
     for path in candidates:
-        text = path.read_text("utf-8", errors="replace")[:1_000_000].lower()
-        matches = _identify_license_text(text)
+        raw_text = path.read_text("utf-8", errors="replace")[:1_000_000]
+        matches = _identify_license_text(raw_text.lower())
+        copyright_notices = list(dict.fromkeys(
+            line.strip()[:500]
+            for line in raw_text.splitlines()
+            if ("copyright" in line.casefold() or "©" in line) and line.strip()
+        ))[:50]
         inventory.append({
             "path": path.relative_to(subject_path).as_posix(),
             "sha256": _hash_path(path),
             "spdx_candidates": matches,
+            "copyright_notices": copyright_notices,
             "requires_legal_review": len(matches) != 1,
         })
     findings = [

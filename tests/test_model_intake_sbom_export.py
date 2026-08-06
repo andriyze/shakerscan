@@ -46,8 +46,14 @@ def _scan_result(*, with_generated_sbom=True, sha256="a" * 64):
                 "classification_counts": {"permissive": 2, "unknown": 1},
                 "reasons": [{"code": "dataset_terms_require_review", "summary": "Dataset terms require review."}],
                 "obligations": ["Preserve applicable license and NOTICE material."],
+                "evidence_sources": [
+                    {"source": "publisher_declaration", "status": "PRESENT", "items_found": 1},
+                    {"source": "native_license_files", "status": "PASS", "files_discovered": 1, "files_analyzed": 1},
+                    {"source": "trivy_full_license_scan", "status": "PASS", "mode": "full_repository", "items_found": 1},
+                ],
+                "missing_evidence": ["dataset_license_and_rights_disposition"],
                 "terms": [
-                    {"scope": "model", "source": "publisher_declaration", "declared": "Apache-2.0", "classification": "permissive", "tokens": ["apache-2.0"]},
+                    {"scope": "model", "source": "publisher_declaration", "declared": "Apache-2.0", "classification": "permissive", "tokens": ["apache-2.0"], "copyright_notices": ["Copyright 2026 Example Corp"]},
                     {"scope": "dependency", "source": "trivy", "component": "transformers", "declared": "Apache-2.0", "classification": "permissive", "tokens": ["apache-2.0"], "evidence_sha256": "c" * 64},
                     {"scope": "dataset", "source": "publisher_declaration", "component": "internal-approved:v1", "declared": None, "classification": "unknown", "tokens": []},
                 ],
@@ -82,6 +88,9 @@ def test_export_is_conformant_cyclonedx_rooted_on_the_scanned_model():
     assert {"transformers", "torch", "nomic-ai/nomic-bert-2048", "tokenizer.json"} <= names
     # Every component carries a bom-ref, which CycloneDX consumers rely on.
     assert all(component.get("bom-ref") for component in document["components"])
+    assert document["dependencies"][0]["ref"] == root["bom-ref"]
+    assert set(document["dependencies"][0]["dependsOn"]) == {component["bom-ref"] for component in document["components"]}
+    assert document["compositions"][0]["aggregate"] == "incomplete_first_party_only"
     # The subject itself is the root, never duplicated into the component list.
     assert root["bom-ref"] not in {component["bom-ref"] for component in document["components"]}
 
@@ -107,6 +116,9 @@ def test_a_quick_scan_says_it_has_no_dependency_inventory():
     full = model_intake_bom_completeness(build_model_intake_cyclonedx(_scan_result(), scan_id="s-1"))
     assert full["dependency_inventory"] == "generated"
     assert full["component_count"] > completeness["component_count"]
+    assert full["dependency_component_count"] == 2
+    assert full["ai_component_count"] >= 4
+    assert "not an inventory of an installed serving image" in full["inventory_note"]
 
 
 def test_a_scan_without_model_intake_evidence_is_rejected():
@@ -184,19 +196,25 @@ def test_spdx_export_is_reproducible_and_anchored_to_the_scan():
 def test_license_bom_is_concise_deduplicated_and_evidence_bound():
     document = build_model_intake_license_bom(_scan_result(), scan_id="s-1")
 
-    assert document["schema_version"] == "shakerscan-license-bom/v1"
+    assert document["schema_version"] == "shakerscan-license-bom/v2"
     assert document["decision"]["outcome"] == "LEGAL REVIEW REQUIRED"
     assert document["decision"]["legal_review_required"] is True
     assert {item["name"] for item in document["components"]} >= {"model.safetensors", "transformers"}
     assert len(document["document_sha256"]) == 64
+    assert document["engineering_summary"]["license_or_notice_files_found"] == 1
+    assert document["engineering_summary"]["trivy_license_items_found"] == 1
+    assert document["missing_evidence"] == ["dataset_license_and_rights_disposition"]
     assert any("not legal advice" in item.lower() for item in document["limitations"])
 
 
 def test_third_party_notices_draft_is_clear_about_missing_legal_completion():
     notice = render_third_party_notices_draft(_scan_result(), scan_id="s-1")
 
-    assert notice.startswith("THIRD-PARTY NOTICES — DRAFT")
+    assert notice.startswith("THIRD-PARTY NOTICES — INCOMPLETE DRAFT")
     assert "License review status: LEGAL REVIEW REQUIRED" in notice
     assert "transformers — Apache-2.0" in notice
     assert "Dataset terms require review." in notice
     assert "not legal advice or a release-ready notice file" in notice
+    assert "EVIDENCE SEARCH PERFORMED" in notice
+    assert "MISSING BEFORE RELEASE" in notice
+    assert "Attribution: Copyright 2026 Example Corp" in notice

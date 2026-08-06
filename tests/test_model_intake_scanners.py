@@ -415,7 +415,7 @@ def test_builtin_license_inventory_identifies_license_and_binds_file_digest(tmp_
     snapshot = tmp_path / "snapshot"
     snapshot.mkdir()
     (snapshot / "LICENSE").write_text(
-        "MIT License\nPermission is hereby granted, free of charge, to any person obtaining a copy",
+        "MIT License\nCopyright 2026 Example Corp\nPermission is hereby granted, free of charge, to any person obtaining a copy",
         encoding="utf-8",
     )
 
@@ -424,6 +424,7 @@ def test_builtin_license_inventory_identifies_license_and_binds_file_digest(tmp_
     assert result["execution"]["status"] == "PASS"
     assert result["summary"]["licenses"][0]["spdx_candidates"] == ["MIT"]
     assert len(result["summary"]["licenses"][0]["sha256"]) == 64
+    assert result["summary"]["licenses"][0]["copyright_notices"] == ["Copyright 2026 Example Corp"]
 
 
 def test_builtin_license_inventory_distinguishes_bsd_and_reciprocal_families(tmp_path):

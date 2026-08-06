@@ -2945,6 +2945,8 @@ def _generate_aibom(
         "signature_verification": signature_status.get("verified") is True,
     }
     score = round(sum(1 for present in fields.values() if present) / len(fields), 3)
+    repository_manifest = metadata.get("repository_manifest") if isinstance(metadata.get("repository_manifest"), dict) else {}
+    repository_files = repository_manifest.get("files") if isinstance(repository_manifest.get("files"), list) else []
     return {
         "bom_format": "ShakerScan AIBOM",
         "schema_version": "2026-05-19.aibom.v1",
@@ -2958,10 +2960,24 @@ def _generate_aibom(
             "signature": signature_status,
         },
         "format_inspection": format_inspection,
+        "repository": {
+            "provider": repository_manifest.get("provider"),
+            "repository": repository_manifest.get("repository"),
+            "revision": repository_manifest.get("revision"),
+            "manifest_sha256": repository_manifest.get("manifest_sha256"),
+            "file_count": len(repository_files),
+            "declared_bytes": sum(
+                int(item.get("size_bytes") or 0)
+                for item in repository_files if isinstance(item, dict)
+            ),
+        },
         "completeness": {
             "score": score,
             "fields": fields,
             "missing": [key for key, present in fields.items() if not present],
+            "meaning": (
+                "Presence of inventory facts only; it does not assert publisher truth, legal approval, or serving-image completeness."
+            ),
         },
     }
 

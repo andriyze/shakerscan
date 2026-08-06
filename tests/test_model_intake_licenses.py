@@ -33,6 +33,10 @@ def test_permissive_reconciled_terms_have_no_detected_legal_blocker():
     assert assessment["policy_status"] == "PASS"
     assert assessment["legal_review_required"] is False
     assert assessment["component_count"] == 1
+    assert {item["source"] for item in assessment["evidence_sources"]} == {
+        "publisher_declaration", "native_license_files", "trivy_full_license_scan",
+    }
+    assert assessment["missing_evidence"] == []
     assert len(assessment["evidence_sha256"]) == 64
 
 
@@ -49,6 +53,9 @@ def test_unknown_custom_reciprocal_dataset_or_use_terms_require_legal_review():
         assert assessment["outcome"] == "LEGAL REVIEW REQUIRED"
         assert assessment["policy_status"] == "REVIEW_REQUIRED"
         assert assessment["legal_review_required"] is True
+    assert "publisher_model_license" in build_corporate_license_assessment(
+        declared_license=None, generated_results=[],
+    )["missing_evidence"]
 
 
 def test_restricted_or_forbidden_terms_block_policy():

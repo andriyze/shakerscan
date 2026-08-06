@@ -4101,6 +4101,10 @@ export interface ModelIntakeSbomSummary {
   legal_review_required?: boolean
   spec_version?: string
   component_count?: number
+  dependency_component_count?: number
+  ai_component_count?: number
+  composition_aggregate?: string
+  inventory_note?: string
   // "not_generated" means the scan ran at a depth that never enumerated
   // dependencies, so a small component count is a coverage fact, not a clean bill.
   dependency_inventory?: 'generated' | 'not_generated'

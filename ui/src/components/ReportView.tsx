@@ -547,9 +547,11 @@ function ModelIntakeSbomDownload({ scanId }: { scanId: string }) {
         </button>
       </div>
       <div className={`mt-1 text-xs ${thin ? 'text-yellow-300' : 'text-gray-500'}`}>
-        {summary.component_count ?? 0} component{summary.component_count === 1 ? '' : 's'}
-        {thin ? ' · no dependency inventory: re-run at Full scan depth' : ''}
+        {summary.ai_component_count ?? 1} model-system component{summary.ai_component_count === 1 ? '' : 's'} · {' '}
+        {summary.dependency_component_count ?? 0} pinned dependenc{summary.dependency_component_count === 1 ? 'y' : 'ies'}
+        {thin ? ' · no dependency manifest inventory: re-run at Full scan depth' : ''}
       </div>
+      {summary.inventory_note && <div className="mt-1 max-w-xl text-xs text-gray-500">{summary.inventory_note}</div>}
       {summary.license_outcome && (
         <div className={`mt-1 text-xs ${summary.legal_review_required ? 'text-yellow-300' : 'text-gray-500'}`}>
           License outcome: {summary.license_outcome}

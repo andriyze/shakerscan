@@ -243,6 +243,17 @@ def build_model_intake_cyclonedx(scan_result: Any, *, scan_id: str = "") -> dict
             ],
         },
         "components": components,
+        "dependencies": [{
+            "ref": root["bom-ref"],
+            "dependsOn": [str(component["bom-ref"]) for component in components],
+        }],
+        "compositions": [{
+            "aggregate": (
+                "incomplete" if not generated or not bool(summary.get("acquisition_complete"))
+                else "incomplete_first_party_only"
+            ),
+            "assemblies": [root["bom-ref"]],
+        }],
     }
     document["serialNumber"] = f"urn:uuid:{_digest(document)[:32]}"
     return document
@@ -257,11 +268,27 @@ def model_intake_bom_completeness(document: dict[str, Any]) -> dict[str, Any]:
         for item in _object(document.get("metadata")).get("properties") or []
         if isinstance(item, dict)
     }
+    dependency_components = [item for item in components if isinstance(item, dict) and item.get("purl")]
+    ai_components = [
+        item for item in components
+        if isinstance(item, dict) and _component_property(item, "shakerscan:aibom_type")
+    ]
+    composition = next(
+        (item for item in document.get("compositions") or [] if isinstance(item, dict)), {}
+    )
     return {
         "component_count": len(components),
+        "dependency_component_count": len(dependency_components),
+        "ai_component_count": len(ai_components) + 1,
         "dependency_inventory": properties.get("shakerscan:dependency_inventory", "not_generated"),
         "acquisition_complete": properties.get("shakerscan:acquisition_complete") == "true",
         "checksum_status": properties.get("shakerscan:checksum_status", "unknown"),
+        "composition_aggregate": composition.get("aggregate") or "unknown",
+        "inventory_note": (
+            "Declared dependency manifests were inventoried; this is not an inventory of an installed serving image."
+            if properties.get("shakerscan:dependency_inventory") == "generated"
+            else "No dependency manifest inventory was generated; the BOM contains only model-system facts discovered elsewhere."
+        ),
     }
 
 
@@ -420,9 +447,18 @@ def build_model_intake_license_bom(scan_result: Any, *, scan_id: str = "") -> di
             "source": key[3],
             "path": item.get("path"),
             "evidence_sha256": item.get("evidence_sha256") or item.get("sha256"),
+            "copyright_notices": item.get("copyright_notices") or [],
         })
+    unresolved = [
+        {
+            "code": str(item.get("code") or "review_required"),
+            "summary": str(item.get("summary") or "Review is required."),
+            "owner": "Legal / open-source program office",
+        }
+        for item in compliance.get("reasons") or [] if isinstance(item, dict)
+    ]
     document = {
-        "schema_version": "shakerscan-license-bom/v1",
+        "schema_version": "shakerscan-license-bom/v2",
         "scan_id": str(scan_id),
         "subject": {
             "name": summary.get("artifact_name"),
@@ -439,6 +475,23 @@ def build_model_intake_license_bom(scan_result: Any, *, scan_id: str = "") -> di
         "components": components,
         "classification_counts": compliance.get("classification_counts") or {},
         "obligations": compliance.get("obligations") or [],
+        "evidence_search": compliance.get("evidence_sources") or [],
+        "missing_evidence": compliance.get("missing_evidence") or [],
+        "unresolved_items": unresolved,
+        "engineering_summary": {
+            "component_terms_identified": len(components),
+            "license_or_notice_files_found": sum(
+                int(item.get("files_discovered") or 0)
+                for item in compliance.get("evidence_sources") or []
+                if isinstance(item, dict) and item.get("source") == "native_license_files"
+            ),
+            "trivy_license_items_found": sum(
+                int(item.get("items_found") or 0)
+                for item in compliance.get("evidence_sources") or []
+                if isinstance(item, dict) and item.get("source") == "trivy_full_license_scan"
+            ),
+            "ready_for_notice_drafting": bool(components) and not bool(compliance.get("missing_evidence")),
+        },
         "limitations": [
             "LicenseConcluded is not asserted; automated classification is not legal advice.",
             "Exact license and NOTICE text must be taken from the immutable evidence identified by path and digest.",
@@ -460,12 +513,11 @@ def render_third_party_notices_draft(scan_result: Any, *, scan_id: str = "") -> 
     subject = _object(bom.get("subject"))
     decision = _object(bom.get("decision"))
     output = [
-        "THIRD-PARTY NOTICES — DRAFT",
+        "THIRD-PARTY NOTICES — INCOMPLETE DRAFT" if bom.get("missing_evidence") else "THIRD-PARTY NOTICES — DRAFT",
         "",
         f"Model: {line(subject.get('name')) or 'unknown'}",
         f"Reference: {line(subject.get('reference')) or 'unknown'}",
         f"SHA-256: {line(subject.get('sha256')) or 'not available'}",
-        f"Scan: {line(scan_id) or 'not available'}",
         f"License review status: {line(decision.get('outcome')) or 'not assessed'}",
         "",
         "IMPORTANT",
@@ -484,6 +536,8 @@ def render_third_party_notices_draft(scan_result: Any, *, scan_id: str = "") -> 
                 output.append(
                     f"  Evidence: {line(item.get('path')) or 'no path'}; SHA-256 {line(item.get('evidence_sha256')) or 'not available'}"
                 )
+            for notice in item.get("copyright_notices") or []:
+                output.append(f"  Attribution: {line(notice)}")
     else:
         output.append("- No component license evidence was recorded. Legal review is required before release.")
     output.extend(["", "OBLIGATIONS TO VERIFY"])
@@ -496,7 +550,17 @@ def render_third_party_notices_draft(scan_result: Any, *, scan_id: str = "") -> 
     output.extend(f"- {line(item.get('summary'))}" for item in reasons if isinstance(item, dict))
     if not reasons:
         output.append("- No automated legal-review trigger was detected. Corporate release approval is still separate.")
-    output.extend(["", "END OF AUTOMATED DRAFT", ""])
+    output.extend(["", "EVIDENCE SEARCH PERFORMED"])
+    for item in bom.get("evidence_search") or []:
+        output.append(
+            f"- {line(item.get('source'))}: {line(item.get('status'))}; "
+            f"items/files found: {line(item.get('items_found') if item.get('items_found') is not None else item.get('files_discovered')) or '0'}"
+        )
+    missing = bom.get("missing_evidence") if isinstance(bom.get("missing_evidence"), list) else []
+    if missing:
+        output.extend(["", "MISSING BEFORE RELEASE"])
+        output.extend(f"- {line(item).replace('_', ' ')}" for item in missing)
+    output.extend(["", f"Evidence receipt: scan {line(scan_id) or 'not available'}; document SHA-256 {line(bom.get('document_sha256'))}", "", "END OF AUTOMATED DRAFT", ""])
     return "\n".join(output)
 
 

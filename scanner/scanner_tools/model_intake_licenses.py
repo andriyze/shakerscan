@@ -128,6 +128,7 @@ def build_corporate_license_assessment(
             "source": "shakerscan_native",
             "path": str(item.get("path") or "")[:500] or None,
             "sha256": item.get("sha256"),
+            "copyright_notices": item.get("copyright_notices") or [],
             **classified,
         })
 
@@ -210,6 +211,36 @@ def build_corporate_license_assessment(
         classification: sum(1 for item in terms if item.get("classification") == classification)
         for classification in sorted(classifications)
     }
+    native_coverage = native.get("coverage") if isinstance(native.get("coverage"), dict) else {}
+    trivy_coverage = trivy.get("coverage") if isinstance(trivy.get("coverage"), dict) else {}
+    evidence_sources = [
+        {
+            "source": "publisher_declaration",
+            "status": "PRESENT" if declared_license not in (None, "") else "MISSING",
+            "items_found": 1 if declared_license not in (None, "") else 0,
+        },
+        {
+            "source": "native_license_files",
+            "status": str((native.get("execution") or {}).get("status") or "NOT_RUN"),
+            "files_discovered": int(native_coverage.get("license_files_discovered") or 0),
+            "files_analyzed": int(native_coverage.get("license_files_analyzed") or 0),
+            "inventory_complete": native_coverage.get("inventory_truncated") is False,
+        },
+        {
+            "source": "trivy_full_license_scan",
+            "status": str((trivy.get("execution") or {}).get("status") or "NOT_RUN"),
+            "mode": (trivy.get("execution") or {}).get("license_scan_mode"),
+            "items_found": len(trivy_inventory) if isinstance(trivy_inventory, list) else 0,
+            "coverage": trivy_coverage,
+        },
+    ]
+    missing_evidence: list[str] = []
+    if declared_license in (None, ""):
+        missing_evidence.append("publisher_model_license")
+    if not native_inventory:
+        missing_evidence.append("repository_license_or_notice_file")
+    if training_data_ref not in (None, "", [], {}):
+        missing_evidence.append("dataset_license_and_rights_disposition")
     result = {
         "schema_version": "model-intake-license-compliance/v1",
         "policy_version": POLICY_VERSION,
@@ -220,6 +251,8 @@ def build_corporate_license_assessment(
         "classification_counts": counts,
         "reasons": reasons,
         "obligations": obligations,
+        "evidence_sources": evidence_sources,
+        "missing_evidence": missing_evidence,
         "component_count": sum(1 for item in terms if item.get("component")),
         "dataset_terms_present": training_data_ref not in (None, "", [], {}),
         "use_restrictions_present": deployment_restrictions not in (None, "", [], {}),
