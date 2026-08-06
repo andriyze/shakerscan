@@ -131,6 +131,10 @@ sandbox requirements as static findings. The requested environment is applied to
 Firecracker evidence, and remaining admission controls. Advanced/manual mode remains the place to request the
 separate container staging adapter.
 
+The start response wraps the durable review as `.review`: use `.review.id` for the review ID. The scan ID and
+browser-ready links are also returned at top level as `.scan_id`, `.ui_url`, and `.scan_report_url`. Do not
+mistake the response envelope itself for the review record.
+
 After queueing, report the automatic review ID, scan ID, and `${UI_BASE}/model-intake?automatic_review={id}`,
 then stop unless the user explicitly asked to monitor the end-to-end run.
 
