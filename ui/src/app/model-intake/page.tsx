@@ -1558,7 +1558,7 @@ function ModelIntakeSettingsContent() {
           </div>
         ) : (
           <div className="mt-4 grid gap-3">
-            {automaticReviews.slice(0, showAllAutomaticReviews ? automaticReviews.length : 5).map((review) => {
+            {automaticReviews.slice(0, showAllAutomaticReviews ? automaticReviews.length : 5).map((review, reviewIndex) => {
               const terminal = ['technical_review_complete', 'attention_required', 'failed', 'cancelled'].includes(review.state)
               const displayedProgress = review.effective_progress ?? review.progress
               const displayedStep = review.effective_current_step || review.current_step
@@ -1568,6 +1568,9 @@ function ModelIntakeSettingsContent() {
               const blocked = workflowComplete && outcome === 'BLOCK'
               const incomplete = workflowComplete && outcome === 'INCOMPLETE'
               const queuedForRunner = review.active_runner_job_state === 'pending'
+              const supersededByNewerReview = automaticReviews.slice(0, reviewIndex).some(
+                (newerReview) => newerReview.source_label === review.source_label,
+              )
               const pendingControls = review.pending_controls || []
               const legacyDeploymentControls = new Set(['publisher_trust', 'human_approvals', 'production_signer', 'deployed_data_plane'])
               const technicalFollowUp = pendingControls.filter((control) => !legacyDeploymentControls.has(control.control) && control.control !== 'deployment_follow_up')
@@ -1587,6 +1590,9 @@ function ModelIntakeSettingsContent() {
                           {outcomeLabel}
                         </span>
                         <span className="text-xs text-gray-500">{review.requested_environment}</span>
+                        {supersededByNewerReview && (
+                          <span className="rounded bg-gray-800 px-2 py-1 text-xs text-gray-400">Earlier run · newer review available</span>
+                        )}
                       </div>
                       <div className="mt-2 text-sm font-medium text-white">{displayedStep.replace(/_/g, ' ')}</div>
                       {review.state === 'static_scan_pending' && review.static_scan_progress != null && (

@@ -542,6 +542,8 @@ test('automatic review history stays compact and names the static stage accurate
   assert.match(page, /Show \$\{automaticReviews\.length - 5\} older reviews/)
   assert.match(page, /Static scan details/)
   assert.match(page, /technicalFollowUp\.length === 1 \? 'needs' : 'need'/)
+  assert.match(page, /Earlier run · newer review available/)
+  assert.match(page, /newerReview\.source_label === review\.source_label/)
 })
 
 test('serialized Firecracker work is labeled queued until the runner starts it', () => {
