@@ -16151,7 +16151,7 @@ async def _advance_model_intake_automatic_review(conn: Any, review: Any) -> None
         )
         await _update_model_intake_automatic_review(
             conn, review, state="calibration_running", current_step="calibrate_known_answers",
-            progress=65, event="calibration_queued",
+            progress=70, event="calibration_queued",
             fields={
                 "calibration_job_id": uuid.UUID(str(response["job"]["id"])),
                 "deployment_bundle_json": bundle,

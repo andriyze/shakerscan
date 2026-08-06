@@ -944,6 +944,17 @@ def test_automatic_review_reports_unsupported_runtime_as_expected_incomplete():
     assert "Static reports and bills of materials remain useful" in source
 
 
+def test_automatic_review_progress_never_moves_backward_after_conversion():
+    source = inspect.getsource(api._advance_model_intake_automatic_review)
+    checkpoints = {
+        event: int(progress)
+        for progress, event in re.findall(r'progress=(\d+), event="([^"]+)"', source)
+    }
+
+    assert checkpoints["conversion_registered_and_rescanned"] < checkpoints["calibration_queued"]
+    assert checkpoints["calibration_queued"] < checkpoints["calibration_digest_recorded"]
+
+
 def test_model_intake_scan_fails_closed_on_stale_workers_before_database_access(monkeypatch):
     monkeypatch.setattr(api, "_worker_freshness_snapshot", lambda: {
         "available": True,
