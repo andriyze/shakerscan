@@ -11326,10 +11326,19 @@ def _model_intake_static_evidence_status(
     required_static_checks: dict[str, bool],
 ) -> str:
     severity = {str(item.get("severity") or "").lower() for item in findings if isinstance(item, dict)}
+    supply_chain = model_intake.get("supply_chain") if isinstance(model_intake.get("supply_chain"), dict) else {}
+    license_compliance = (
+        supply_chain.get("license_compliance")
+        if isinstance(supply_chain.get("license_compliance"), dict)
+        else {}
+    )
+    license_status = str(license_compliance.get("policy_status") or "")
+    if license_status == "BLOCK":
+        return "FAIL"
     if severity.intersection({"critical", "high"}):
         return "FAIL"
     if all(required_static_checks.values()):
-        return "PASS"
+        return "WARNING" if license_status == "REVIEW_REQUIRED" else "PASS"
     generated = model_intake.get("generated_evidence") if isinstance(model_intake.get("generated_evidence"), dict) else {}
     required_warning_names = set(generated.get("required_non_pass") or [])
     warning_results = [
@@ -11914,6 +11923,12 @@ async def attach_model_intake_static_run(
             if isinstance(model_intake.get("generated_evidence"), dict)
             else {}
         )
+        supply_chain = model_intake.get("supply_chain") if isinstance(model_intake.get("supply_chain"), dict) else {}
+        license_compliance = (
+            supply_chain.get("license_compliance")
+            if isinstance(supply_chain.get("license_compliance"), dict)
+            else {}
+        )
         artifact_size_bytes = _model_intake_artifact_size_bytes(model_intake, summary)
         static_evidence_payload = {
             "schema_version": "model-intake-static-report-summary/v1",
@@ -11938,6 +11953,20 @@ async def attach_model_intake_static_run(
                 for item in generated_evidence.get("results") or []
                 if isinstance(item, dict)
             ],
+            "license_compliance": {
+                "outcome": license_compliance.get("outcome"),
+                "policy_status": license_compliance.get("policy_status"),
+                "policy_version": license_compliance.get("policy_version"),
+                "legal_review_required": license_compliance.get("legal_review_required"),
+                "classification_counts": license_compliance.get("classification_counts") or {},
+                "reason_codes": [
+                    str(item.get("code") or "")
+                    for item in license_compliance.get("reasons") or []
+                    if isinstance(item, dict) and item.get("code")
+                ],
+                "obligations": license_compliance.get("obligations") or [],
+                "evidence_sha256": license_compliance.get("evidence_sha256"),
+            },
         }
         payload_digest = hashlib.sha256(json.dumps({
             "scan_id": str(scan_uuid),

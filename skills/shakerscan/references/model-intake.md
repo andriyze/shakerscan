@@ -110,11 +110,20 @@ and evidence freeze when the runner is READY. The server rejects the start if wo
 not fingerprint-uniform; do not retry around that gate—rebuild/restart the fleet first. It is database-backed
 and continues if the UI closes or the API restarts. Inspect it at
 `GET /model-intake/automatic-reviews/{id}`; the response names the scan report and JSON/HTML/SARIF technical
-report URLs. The UI also links the exact scan's CycloneDX, SPDX, and AIBOM downloads. Workflow completion is
+report URLs. The UI also links the exact scan's CycloneDX, SPDX, AIBOM, License BOM, and Third-Party Notices
+draft downloads. Workflow completion is
 separate from `technical_outcome`: `PASS`, `REVIEW_REQUIRED`,
 `INCOMPLETE`, or `BLOCK`. Never describe `technical_review_complete` by itself as a model pass. Human
 approvals, publisher trust, production KMS, policy decision, promotion, and corporate
 data-plane validation remain explicit pending controls.
+
+Complete reviews run Trivy's full repository license mode in addition to its offline vulnerability, secret,
+and misconfiguration checks. ShakerScan reconciles Trivy evidence with publisher declarations, native
+license-file fingerprints, dependency identities, dataset lineage, and deployment restrictions. The
+deterministic license outcome is `NO LEGAL BLOCKER DETECTED`, `LEGAL REVIEW REQUIRED`, or
+`BLOCKED BY LICENSE POLICY`. Unknown, custom, reciprocal, dataset-related, conflicting, or use-case-dependent
+terms always produce `LEGAL REVIEW REQUIRED` until a distinct `legal_reviewer` approves the latest frozen
+evidence. A model-security approval cannot substitute for that role.
 
 The automatic controller's internal preflight is intentionally technical-only: it forces complete acquisition
 and scanners but does not duplicate production signer, human approval, generated evaluation, or container
@@ -392,6 +401,19 @@ IP-family operations, and includes only a bounded sample. The complete syscall s
 receipt by digest. Treat conversion/model-load/known-answer correctness and network/resource containment as
 separate controls: one can pass while containment correctly blocks the overall review.
 
+Export the exact scan's legal-triage artifacts without re-inspecting the model:
+
+```bash
+curl -s "$API_BASE/model-intake/scans/$SCAN_ID/license-bom" > shakerscan-license-bom.json
+curl -s "$API_BASE/model-intake/scans/$SCAN_ID/third-party-notices" > THIRD-PARTY-NOTICES.txt
+```
+
+The License BOM contains normalized terms, classifications, policy reasons, obligations, and evidence digests.
+The notices file is deliberately labeled a draft: it points to digest-bound license files but does not invent or
+silently omit exact copyright, attribution, license, or NOTICE text. Legal must verify and complete it before a
+distribution. SPDX records discovered declarations but leaves `LicenseConcluded` as `NOASSERTION` because an
+automated scanner is not the legal authority.
+
 Always report one final outcome: `ALLOW`, `BLOCK`, `INCOMPLETE`, or `REVIEW`. For each control state:
 
 - what passed and the generated evidence/subject digest;
@@ -399,6 +421,7 @@ Always report one final outcome: `ALLOW`, `BLOCK`, `INCOMPLETE`, or `REVIEW`. Fo
 - what was not run, unsupported, timed out, crashed, truncated, or stale;
 - whether the complete artifact and repository were acquired within explicit byte/file/time budgets;
 - every Firecracker phase and the network/resource telemetry completeness state;
+- the reconciled license outcome, legal disposition, License BOM, SPDX declarations, and notices-draft gaps;
 - conversion/equivalence results when applicable;
 - corporate evaluation and vector-store/knowledge-graph controls that remain external;
 - required human roles, exceptions, restrictions, and reassessment triggers;

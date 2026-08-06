@@ -9,6 +9,7 @@ import FindingCard from '@/components/FindingCard'
 import {
   getApiUrl,
   getModelIntakeSbomSummary,
+  downloadModelIntakeLicenseArtifact,
   downloadModelIntakeSbom,
   type ModelIntakeSbomSummary,
 } from '@/lib/api'
@@ -480,6 +481,18 @@ function ModelIntakeSbomDownload({ scanId }: { scanId: string }) {
     }
   }
 
+  async function downloadLicense(format: 'license-bom' | 'third-party-notices') {
+    setBusy(format)
+    setError(null)
+    try {
+      await downloadModelIntakeLicenseArtifact(scanId, format)
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Export failed')
+    } finally {
+      setBusy('')
+    }
+  }
+
   if (!summary?.available) return null
   const thin = summary.dependency_inventory !== 'generated'
   return (
@@ -514,11 +527,34 @@ function ModelIntakeSbomDownload({ scanId }: { scanId: string }) {
             {busy === 'aibom' ? 'Exporting…' : 'AIBOM'}
           </button>
         )}
+        <button
+          type="button"
+          onClick={() => downloadLicense('license-bom')}
+          disabled={busy === 'license-bom'}
+          className="inline-flex items-center gap-2 rounded border border-gray-600 px-3 py-1.5 text-sm text-gray-200 hover:bg-gray-700 disabled:opacity-50"
+        >
+          <Download className="h-4 w-4" />
+          {busy === 'license-bom' ? 'Exporting…' : 'License BOM'}
+        </button>
+        <button
+          type="button"
+          onClick={() => downloadLicense('third-party-notices')}
+          disabled={busy === 'third-party-notices'}
+          className="inline-flex items-center gap-2 rounded border border-gray-600 px-3 py-1.5 text-sm text-gray-200 hover:bg-gray-700 disabled:opacity-50"
+        >
+          <Download className="h-4 w-4" />
+          {busy === 'third-party-notices' ? 'Exporting…' : 'Notices draft'}
+        </button>
       </div>
       <div className={`mt-1 text-xs ${thin ? 'text-yellow-300' : 'text-gray-500'}`}>
         {summary.component_count ?? 0} component{summary.component_count === 1 ? '' : 's'}
         {thin ? ' · no dependency inventory: re-run at Full scan depth' : ''}
       </div>
+      {summary.license_outcome && (
+        <div className={`mt-1 text-xs ${summary.legal_review_required ? 'text-yellow-300' : 'text-gray-500'}`}>
+          License outcome: {summary.license_outcome}
+        </div>
+      )}
       {error && <div className="mt-1 text-xs text-red-300">{error}</div>}
     </div>
   )
@@ -1842,9 +1878,10 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
               </div>
               <div className="rounded border border-gray-700 bg-gray-900 p-3">
                 <div className="text-xs text-gray-400">License policy</div>
-                <div className="mt-1 text-sm font-semibold text-white">
-                  {modelIntakeSupplyChain?.license_policy?.status || modelIntakeSummary?.license_policy_status || 'unknown'}
+                <div className={`mt-1 text-sm font-semibold ${modelIntakeSupplyChain?.license_compliance?.legal_review_required ? 'text-yellow-300' : 'text-white'}`}>
+                  {modelIntakeSupplyChain?.license_compliance?.outcome || modelIntakeSupplyChain?.license_policy?.status || modelIntakeSummary?.license_policy_status || 'unknown'}
                 </div>
+                <div className="mt-1 text-xs text-gray-500">Automated evidence triage; legal approval remains separate.</div>
               </div>
               <div className="rounded border border-gray-700 bg-gray-900 p-3">
                 <div className="text-xs text-gray-400">CycloneDX SBOM</div>

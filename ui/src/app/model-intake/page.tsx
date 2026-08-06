@@ -33,6 +33,7 @@ import {
   createModelIntakeAutomaticReview,
   listModelIntakeAutomaticReviews,
   downloadModelIntakeAutomaticReport,
+  downloadModelIntakeLicenseArtifact,
   downloadModelIntakeSbom,
   getPolicyProfiles,
   listRecentModelIntakeScans,
@@ -1208,6 +1209,21 @@ function ModelIntakeSettingsContent() {
     }
   }
 
+  async function exportAutomaticLicenseArtifact(
+    scanId: string,
+    format: 'license-bom' | 'third-party-notices',
+  ) {
+    const key = `${scanId}:${format}`
+    setAutomaticDownload(key)
+    try {
+      await downloadModelIntakeLicenseArtifact(scanId, format)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to download license evidence')
+    } finally {
+      setAutomaticDownload('')
+    }
+  }
+
   async function copyPayload() {
     try {
       await navigator.clipboard.writeText(JSON.stringify(buildPayload(), null, 2))
@@ -1414,7 +1430,7 @@ function ModelIntakeSettingsContent() {
           <span>Complete artifact + repository</span>
           <span>ModelScan, Fickling, Semgrep, Trivy</span>
           <span>Firecracker load + repeat inference</span>
-          <span>SBOM, AIBOM, JSON, HTML, SARIF</span>
+          <span>SBOM, AIBOM, License BOM, notices draft, JSON, HTML, SARIF</span>
         </div>
         {runnerReadiness === null && (
           <div className="mt-4 flex items-center gap-2 rounded-lg border border-gray-800 bg-gray-900/50 p-3 text-sm text-gray-400">
@@ -1540,6 +1556,19 @@ function ModelIntakeSettingsContent() {
                         className="rounded border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50"
                       >
                         {automaticDownload === `${review.scan_id}:${format}` ? 'Preparing…' : format === 'aibom' ? 'AIBOM' : `${format === 'cyclonedx' ? 'CycloneDX' : 'SPDX'} SBOM`}
+                      </button>
+                    ))}
+                    {review.submission_id && (['license-bom', 'third-party-notices'] as const).map((format) => (
+                      <button
+                        key={format}
+                        type="button"
+                        onClick={() => exportAutomaticLicenseArtifact(review.scan_id, format)}
+                        disabled={automaticDownload === `${review.scan_id}:${format}`}
+                        className="rounded border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50"
+                      >
+                        {automaticDownload === `${review.scan_id}:${format}`
+                          ? 'Preparing…'
+                          : format === 'license-bom' ? 'License BOM' : 'Notices draft'}
                       </button>
                     ))}
                     {review.submission_id && (['json', 'html', 'sarif'] as const).map((format) => (

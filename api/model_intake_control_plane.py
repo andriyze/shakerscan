@@ -23,7 +23,7 @@ POLICY_FACTS_SCHEMA = "model-admission-facts/v1"
 POLICY_DECISION_SCHEMA = "model-intake-policy-decision/v1"
 ADMISSION_SCHEMA = "model-intake-admission/v2"
 ADMISSION_PREDICATE_TYPE = "https://shakerscan.dev/attestation/model-admission/v2"
-POLICY_BUNDLE_VERSION = "shakerscan-embedded-model-admission-policy/v3"
+POLICY_BUNDLE_VERSION = "shakerscan-embedded-model-admission-policy/v4"
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 OCI_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -264,6 +264,20 @@ def freeze_evidence_manifest(
                 raise AdmissionContractError("evidence subject bindings must be valid JSON") from exc
         if not isinstance(bindings, dict) or not bindings:
             raise AdmissionContractError("evidence subject bindings are required")
+        policy_flags: list[str] = []
+        payload = record.get("payload_json")
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                payload = {}
+        if isinstance(payload, dict) and str(record.get("evidence_type") or "") == "static_analysis":
+            license_compliance = payload.get("license_compliance")
+            if (
+                isinstance(license_compliance, dict)
+                and license_compliance.get("policy_status") == "REVIEW_REQUIRED"
+            ):
+                policy_flags.append("legal_review_required")
         normalized_records.append({
             "id": record_id,
             "evidence_type": str(record.get("evidence_type") or "").strip(),
@@ -276,6 +290,7 @@ def freeze_evidence_manifest(
             "subject_bindings": bindings,
             "payload_sha256": _sha256(record.get("payload_sha256"), "payload_sha256"),
             "status": status,
+            "policy_flags": policy_flags,
             "expires_at": str(record.get("expires_at") or "") or None,
         })
         required = normalized_records[-1]
@@ -371,6 +386,7 @@ def evaluate_policy(
     evidence = evidence_manifest.get("evidence") if isinstance(evidence_manifest.get("evidence"), list) else []
     evidence_by_type = {str(item.get("evidence_type")): item for item in evidence if isinstance(item, dict)}
     reviewable_evidence: list[str] = []
+    legal_review_evidence: list[str] = []
     required_evidence = PRODUCTION_REQUIRED_EVIDENCE if environment == "production" else {
         "static_analysis": "GENERATED_STATIC"
     }
@@ -383,6 +399,8 @@ def evaluate_policy(
         else:
             if item.get("status") == "WARNING" and evidence_type == "static_analysis":
                 reviewable_evidence.append(evidence_type)
+                if "legal_review_required" in (item.get("policy_flags") or []):
+                    legal_review_evidence.append(evidence_type)
             elif item.get("status") != "PASS":
                 blockers.append(f"evidence_non_pass:{evidence_type}:{str(item.get('status')).lower()}")
             if item.get("expires_at") and _timestamp(item["expires_at"], "evidence expires_at") <= now:
@@ -421,6 +439,8 @@ def evaluate_policy(
             required_role_subjects[role] = str(approval.get("approved_by_subject") or "")
     if reviewable_evidence and "model_security_reviewer" not in approved_roles:
         blockers.extend(f"evidence_review_required:{item}" for item in reviewable_evidence)
+    if legal_review_evidence and "legal_reviewer" not in approved_roles:
+        blockers.extend(f"legal_review_required:{item}" for item in legal_review_evidence)
     for role in sorted(required_approvals - approved_roles):
         missing_controls.append(f"approval:{role}")
     if len(set(required_role_subjects.values())) < len(required_role_subjects):
@@ -464,6 +484,9 @@ def evaluate_policy(
         "policy_provider": policy_provider,
         "reviewed_warning_evidence": (
             sorted(reviewable_evidence) if "model_security_reviewer" in approved_roles else []
+        ),
+        "reviewed_legal_evidence": (
+            sorted(legal_review_evidence) if "legal_reviewer" in approved_roles else []
         ),
         "policy_bundle_sha256": _sha256(policy_bundle_sha256, "policy_bundle_sha256"),
         "input_sha256": digest_json(facts),

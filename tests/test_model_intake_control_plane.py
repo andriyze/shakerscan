@@ -34,7 +34,7 @@ def test_embedded_policy_identity_is_source_bound_stable_and_pin_checked():
 
     assert first == second
     assert first["schema_version"] == "model-intake-policy-bundle/v1"
-    assert first["version"] == "shakerscan-embedded-model-admission-policy/v3"
+    assert first["version"] == "shakerscan-embedded-model-admission-policy/v4"
     assert len(first["source_sha256"]) == 64
     assert len(first["bundle_sha256"]) == 64
     assert first["production_required_evidence"]["runtime_execution"] == "GENERATED_RUNTIME"
@@ -214,6 +214,78 @@ def test_warning_only_static_evidence_requires_and_accepts_bound_security_review
     assert "evidence_review_required:static_analysis" in without_review["reasons"]
     assert with_review["decision"] == "allow"
     assert with_review["reviewed_warning_evidence"] == ["static_analysis"]
+
+
+def test_license_warning_requires_distinct_legal_review_before_allow():
+    bundle = _bundle()
+    evidence = _evidence(bundle)
+    evidence["evidence"][0]["status"] = "WARNING"
+    evidence["evidence"][0]["policy_flags"] = ["legal_review_required"]
+    evidence["manifest_sha256"] = digest_json({
+        key: value for key, value in evidence.items() if key != "manifest_sha256"
+    })
+    security_approvals = _approvals(bundle, evidence)
+
+    without_legal = evaluate_policy(
+        deployment_bundle=bundle,
+        evidence_manifest=evidence,
+        approvals=security_approvals,
+        submitter_subject="operator:submitter",
+        policy_bundle_sha256="6" * 64,
+    )
+    legal = build_approval_receipt(
+        submission_id="00000000-0000-4000-8000-000000000010",
+        subject_bundle_sha256=bundle["bundle_sha256"],
+        evidence_manifest_sha256=evidence["manifest_sha256"],
+        policy_bundle_sha256="6" * 64,
+        environment="production",
+        approval_type="legal_reviewer",
+        decision="approve",
+        approved_by_subject="subject:legal_reviewer",
+        approved_by_role="legal_reviewer",
+        reason="approved exact reconciled terms and intended use",
+        expires_at=utc_now() + timedelta(days=7),
+    )
+    with_legal = evaluate_policy(
+        deployment_bundle=bundle,
+        evidence_manifest=evidence,
+        approvals=[*security_approvals, legal],
+        submitter_subject="operator:submitter",
+        policy_bundle_sha256="6" * 64,
+    )
+
+    assert "legal_review_required:static_analysis" in without_legal["reasons"]
+    assert without_legal["decision"] == "block"
+    assert with_legal["decision"] == "allow"
+    assert with_legal["reviewed_legal_evidence"] == ["static_analysis"]
+
+
+def test_freeze_manifest_binds_legal_review_flag_from_static_payload():
+    bundle = _bundle()
+    record = {
+        "id": "00000000-0000-4000-8000-000000000099",
+        "evidence_type": "static_analysis",
+        "schema_version": "static-analysis/v1",
+        "provenance_class": "GENERATED_STATIC",
+        "producer_id": "scanner",
+        "producer_version": "1",
+        "builder_id": "worker",
+        "invocation_id": "scan-legal",
+        "subject_bindings": {"model_artifact_sha256": bundle["model_artifact_sha256"]},
+        "payload_sha256": "9" * 64,
+        "payload_json": {"license_compliance": {"policy_status": "REVIEW_REQUIRED"}},
+        "status": "WARNING",
+    }
+
+    manifest = freeze_evidence_manifest(
+        submission_id="00000000-0000-4000-8000-000000000010",
+        subject_bundle_sha256=bundle["bundle_sha256"],
+        version=1,
+        evidence_records=[record],
+        frozen_by="control-plane:test",
+    )
+
+    assert manifest["evidence"][0]["policy_flags"] == ["legal_review_required"]
 
 
 def _approvals(bundle, evidence, policy_digest="6" * 64):

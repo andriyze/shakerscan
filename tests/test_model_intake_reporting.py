@@ -55,6 +55,15 @@ def _rows(*, artifact_uri: str = "hf://example/model/model.safetensors", active_
                     "finding_count": 0,
                     "coverage": {"files_scanned": 3},
                 }],
+                "license_compliance": {
+                    "outcome": "NO LEGAL BLOCKER DETECTED",
+                    "policy_status": "PASS",
+                    "policy_version": "shakerscan-corporate-license-policy/1",
+                    "legal_review_required": False,
+                    "classification_counts": {"permissive": 2},
+                    "reason_codes": [],
+                    "evidence_sha256": DIGESTS["f"],
+                },
             }
         evidence.append(record)
     phases = {
@@ -163,6 +172,7 @@ def test_complete_exact_subject_report_allows_only_with_matching_active_admissio
     assert set(report["control_counts"]) == CONTROL_STATUSES
     assert report["executive_summary"]["deployable_under_configured_shakerscan_policy"] is True
     assert report["executive_summary"]["full_corporate_approval"] == "NOT_DETERMINED_BY_SHAKERSCAN"
+    assert report["executive_summary"]["license_outcome"] == "NO LEGAL BLOCKER DETECTED"
     assert report["executive_summary"]["coverage"]["external_corporate_requirements"] >= 10
     assert report["detailed_review"]["static_analysis_detail"]["scanner_results"][0]["name"] == "semgrep"
     assert len(report["detailed_review"]["shakerscan_check_catalog"]) >= 15
@@ -171,6 +181,41 @@ def test_complete_exact_subject_report_allows_only_with_matching_active_admissio
     assert _control(report, "network_isolation")["status"] == "PASS"
     assert _control(report, "conversion_equivalence")["status"] == "NOT_APPLICABLE"
     assert all(report["authority_bindings"]["admission_statement_parity"].values())
+
+
+def test_license_review_is_prominent_and_requires_legal_reviewer_disposition():
+    rows = _rows()
+    static = next(item for item in rows["evidence"] if item["evidence_type"] == "static_analysis")
+    static["payload_json"]["license_compliance"] = {
+        "outcome": "LEGAL REVIEW REQUIRED",
+        "policy_status": "REVIEW_REQUIRED",
+        "policy_version": "shakerscan-corporate-license-policy/1",
+        "legal_review_required": True,
+        "classification_counts": {"reciprocal": 1},
+        "reason_codes": ["reciprocal_terms"],
+        "evidence_sha256": DIGESTS["f"],
+    }
+
+    pending = _report(rows)
+    assert pending["outcome"] == "REVIEW"
+    assert pending["executive_summary"]["legal_review_required"] is True
+    assert pending["executive_summary"]["legal_disposition"] == "PENDING"
+    assert _control(pending, "license_compliance")["status"] == "REVIEW"
+
+    rows["approvals"].append({
+        "id": "approval-legal",
+        "decision": "approve",
+        "approved_by_role": "legal_reviewer",
+        "approval_type": "legal_reviewer",
+        "approved_by_subject": "operator:legal-reviewer",
+        "evidence_manifest_id": "manifest-1",
+        "expires_at": NOW + timedelta(days=7),
+    })
+    approved = _report(rows)
+    assert approved["outcome"] == "ALLOW"
+    assert approved["executive_summary"]["legal_review_required"] is False
+    assert approved["executive_summary"]["legal_disposition"] == "APPROVED"
+    assert _control(approved, "license_compliance")["status"] == "PASS"
 
 
 def test_missing_runtime_and_required_conversion_are_plainly_incomplete():

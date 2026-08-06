@@ -74,6 +74,8 @@ test('normalized corporate report has UI and export parity', () => {
   assert.match(workflow, /Printable HTML \/ PDF/)
   assert.match(api, /format: 'json' \| 'html' \| 'sarif'/)
   assert.match(api, /ModelIntakeCorporateReport/)
+  assert.match(workflow, /License outcome:/)
+  assert.match(workflow, /A legal-review license outcome additionally requires a distinct legal reviewer/)
 })
 
 test('the model reference and deployment target are chosen once and reused downstream', () => {
@@ -262,7 +264,7 @@ test('one pasted Hugging Face link queues the complete technical review', () => 
   assert.match(page, /createModelIntakeAutomaticReview/)
   assert.match(page, /Advanced \/ manual/)
   assert.match(page, /Firecracker load \+ repeat inference/)
-  assert.match(page, /SBOM, AIBOM, JSON, HTML, SARIF/)
+  assert.match(page, /SBOM, AIBOM, License BOM, notices draft, JSON, HTML, SARIF/)
   assert.match(page, /The controller keeps working if this page is closed or the API restarts/)
   assert.match(page, /Firecracker is ready\. Automatic reviews will include isolated load and repeat-inference evidence/)
   assert.match(page, /review\.source_label/)
@@ -271,6 +273,9 @@ test('one pasted Hugging Face link queues the complete technical review', () => 
   assert.match(page, /CycloneDX/)
   assert.match(page, /SPDX/)
   assert.match(page, /AIBOM/)
+  assert.match(page, /License BOM/)
+  assert.match(page, /Notices draft/)
+  assert.match(api, /downloadModelIntakeLicenseArtifact/)
   assert.match(api, /model-intake\/automatic-reviews/)
   assert.match(api, /downloadModelIntakeAutomaticReport/)
 })

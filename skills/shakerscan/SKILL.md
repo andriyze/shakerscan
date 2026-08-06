@@ -105,6 +105,10 @@ requested count as successfully queued when the response is partial.
 - “Can we use/admit/approve/deploy this model?” means the authenticated controlled workflow: submission,
   completed static scan binding, exact-subject Firecracker evidence, frozen evidence, separated human
   approvals, deterministic policy, and isolated signer promotion.
+- For a complete review, inspect the License BOM and Third-Party Notices draft as well as the SBOM/AIBOM.
+  Trivy is the sole external license scanner. Unknown, custom, reciprocal, dataset-related, conflicting, or
+  use-case-dependent terms remain `LEGAL REVIEW REQUIRED` until a distinct legal reviewer approves the latest
+  frozen evidence; never translate `NO LEGAL BLOCKER DETECTED` into legal approval.
 - Inspect `/model-intake/scanners/readiness` and `/model-intake/runners/readiness` before promising coverage.
   Missing required tools or physical KVM is a non-pass, not a reason to omit the control.
 - The Firecracker microVM tier is **opt-in and not installed by default**, so `NOT_READY` on a KVM-capable

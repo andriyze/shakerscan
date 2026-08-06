@@ -819,6 +819,24 @@ def test_warning_only_required_scanner_evidence_stays_reviewable_not_pass_or_inc
     assert not all(checks.values())
 
 
+def test_license_policy_review_and_block_survive_static_evidence_binding():
+    summary = {
+        "acquisition_complete": True,
+        "inspection_complete": True,
+        "repository_manifest_complete": True,
+        "repository_snapshot_complete": True,
+        "generated_evidence_status": "PASS",
+        "checksum_status": "verified",
+    }
+    checks = api._model_intake_required_static_checks(summary)
+    review = {"supply_chain": {"license_compliance": {"policy_status": "REVIEW_REQUIRED"}}}
+    blocked = {"supply_chain": {"license_compliance": {"policy_status": "BLOCK"}}}
+
+    assert all(checks.values())
+    assert api._model_intake_static_evidence_status(review, summary, [], checks) == "WARNING"
+    assert api._model_intake_static_evidence_status(blocked, summary, [], checks) == "FAIL"
+
+
 def test_complete_large_safetensors_is_not_incomplete_only_because_memory_prefix_is_bounded():
     summary = {
         "acquisition_complete": True,

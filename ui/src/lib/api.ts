@@ -2259,6 +2259,9 @@ export interface ModelIntakeCorporateReport {
     deployable_under_configured_shakerscan_policy: boolean
     full_corporate_approval: 'NOT_DETERMINED_BY_SHAKERSCAN' | string
     decision_statement: string
+    license_outcome?: string
+    legal_disposition?: 'PENDING' | 'APPROVED' | 'NOT_REQUIRED_BY_AUTOMATION' | string
+    legal_review_required?: boolean
     authorization_scope: string
     scope_warning: string
     coverage: Record<string, number>
@@ -2279,6 +2282,7 @@ export interface ModelIntakeCorporateReport {
   detailed_review: {
     control_matrix: ModelIntakeReportControl[]
     static_analysis_detail: Record<string, unknown>
+    license_compliance?: Record<string, unknown>
     shakerscan_check_catalog: Array<Record<string, unknown>>
     external_approval_requirements: Array<{
       id: string
@@ -4061,7 +4065,10 @@ export interface ModelIntakeSbomSummary {
   available: boolean
   reason?: string
   formats?: Array<'cyclonedx' | 'spdx' | 'aibom'>
+  license_artifacts?: Array<'license-bom' | 'third-party-notices'>
   aibom_available?: boolean
+  license_outcome?: string
+  legal_review_required?: boolean
   spec_version?: string
   component_count?: number
   // "not_generated" means the scan ran at a depth that never enumerated
@@ -4091,6 +4098,26 @@ export async function downloadModelIntakeSbom(
   link.download = format === 'aibom'
     ? `shakerscan-aibom-${scanId}.json`
     : `shakerscan-sbom-${scanId}.${extension}`
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(url)
+}
+
+export async function downloadModelIntakeLicenseArtifact(
+  scanId: string,
+  format: 'license-bom' | 'third-party-notices',
+): Promise<void> {
+  const endpoint = format === 'license-bom' ? 'license-bom' : 'third-party-notices'
+  const res = await fetch(`${API_URL}/model-intake/scans/${scanId}/${endpoint}`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to export license evidence'))
+  const blob = await res.blob()
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = format === 'license-bom'
+    ? `shakerscan-license-bom-${scanId}.json`
+    : `THIRD-PARTY-NOTICES-${scanId}.txt`
   document.body.appendChild(link)
   link.click()
   link.remove()

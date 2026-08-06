@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { CheckCircle2, Circle, Copy, LockKeyhole, PackageCheck, ShieldAlert, Server } from 'lucide-react'
 import {
+  downloadModelIntakeLicenseArtifact,
   downloadModelIntakeSbom,
   getModelIntakeRunnerStage,
   startModelIntakeRunnerStage,
@@ -480,14 +481,32 @@ export function PreflightScanTracker({
                   Report
                 </a>
                 {scan.status === 'completed' && (
-                  <button
-                    type="button"
-                    onClick={() => { void downloadModelIntakeSbom(scan.id) }}
-                    title="Download the CycloneDX bill of materials for this scan"
-                    className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800"
-                  >
-                    SBOM
-                  </button>
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => { void downloadModelIntakeSbom(scan.id) }}
+                      title="Download the CycloneDX bill of materials for this scan"
+                      className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800"
+                    >
+                      SBOM
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { void downloadModelIntakeLicenseArtifact(scan.id, 'license-bom') }}
+                      title="Download reconciled model and dependency license evidence"
+                      className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800"
+                    >
+                      License BOM
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { void downloadModelIntakeLicenseArtifact(scan.id, 'third-party-notices') }}
+                      title="Download the draft third-party notices file"
+                      className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800"
+                    >
+                      Notices draft
+                    </button>
+                  </>
                 )}
                 <button
                   type="button"

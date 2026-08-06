@@ -31,6 +31,12 @@ CONTROL_DETAILS: dict[str, dict[str, str]] = {
         "method": "Evaluate digest-bound ShakerScan evidence produced by built-ins and applicable ModelScan, Fickling, Semgrep, and Trivy adapters.",
         "remediation": "Run every applicable required scanner against the complete snapshot with current rules/databases and resolve all non-pass results.",
     },
+    "license_compliance": {
+        "category": "Legal and intellectual property",
+        "question": "Were model, repository, dependency, dataset, and intended-use terms reconciled without a legal-review trigger?",
+        "method": "Reconcile publisher declarations, native license fingerprints, Trivy license evidence, dataset lineage, and deployment restrictions under the versioned corporate license policy.",
+        "remediation": "Review the License BOM and Third-Party Notices draft; obtain corporate legal disposition for every unknown, custom, reciprocal, dataset-related, conflicting, or use-case-dependent term.",
+    },
     "runtime_execution": {
         "category": "Isolated runtime",
         "question": "Is signed exact-subject runtime evidence attached?",
@@ -109,7 +115,7 @@ SHAKERSCAN_CHECK_CATALOG: list[dict[str, Any]] = [
     {"id": "MI-06", "category": "Source security", "check": "Python AST and Semgrep review of repository code and configuration", "implementation": "native + existing adapter", "applies_when": "code or configuration is present", "evidence_controls": ["static_analysis"]},
     {"id": "MI-07", "category": "Content safety", "check": "Secret rules, malware rules, and native-binary inventory", "implementation": "native", "applies_when": "complete subject material is available", "evidence_controls": ["static_analysis"]},
     {"id": "MI-08", "category": "Dependencies", "check": "CycloneDX SBOM, dependency inventory, and applicable offline Trivy SCA/misconfiguration scan", "implementation": "native + existing adapter", "applies_when": "dependency manifests or runtime components are present", "evidence_controls": ["static_analysis"]},
-    {"id": "MI-09", "category": "Licensing", "check": "License inventory and declared-license policy evidence", "implementation": "native + existing adapter", "applies_when": "license files or dependency metadata are present", "evidence_controls": ["static_analysis"]},
+    {"id": "MI-09", "category": "Licensing", "check": "Full Trivy license evidence, native reconciliation, deterministic corporate policy, SPDX enrichment, License BOM, and Third-Party Notices draft", "implementation": "native + existing Trivy adapter", "applies_when": "complete repository evidence is available", "evidence_controls": ["license_compliance"]},
     {"id": "MI-10", "category": "Provenance", "check": "Signature, signer trust, exact-subject attestation, lineage, and AIBOM evidence", "implementation": "native", "applies_when": "the policy requires or the source supplies this evidence", "evidence_controls": ["static_analysis", "frozen_evidence"]},
     {"id": "MI-11", "category": "Runtime", "check": "Firecracker import, tokenizer, load, warmup, inference, and teardown", "implementation": "Firecracker/KVM", "applies_when": "controlled admission requires runtime qualification", "evidence_controls": ["runtime_execution", "firecracker_runtime"]},
     {"id": "MI-12", "category": "Runtime", "check": "No-NIC egress prevention plus guest/host network-attempt telemetry", "implementation": "Firecracker/KVM", "applies_when": "runtime qualification runs", "evidence_controls": ["network_isolation"]},
@@ -528,6 +534,7 @@ def _static_check_detail(evidence: list[dict[str, Any]]) -> dict[str, Any]:
             }
             for item in scanner_results if isinstance(item, dict)
         ],
+        "license_compliance": _json(payload.get("license_compliance"), {}),
         "note": (
             "Per-check static evidence is available and content-free."
             if payload
@@ -615,6 +622,32 @@ def build_model_intake_report(
         ("data_plane_evaluation", "Vector-store and knowledge-graph authorization evaluation"),
     ):
         controls.append(_evidence_control(submission_id, evidence, evidence_type, label, now))
+    static_record = _latest(evidence, "evidence_type", "static_analysis")
+    static_payload = _json(static_record.get("payload_json"), {}) if static_record else {}
+    license_compliance = _json(static_payload.get("license_compliance"), {})
+    license_policy_status = str(license_compliance.get("policy_status") or "")
+    controls.append({
+        "id": "license_compliance",
+        "label": "Corporate license and notice policy",
+        "status": (
+            "PASS" if license_policy_status == "PASS"
+            else "FAIL" if license_policy_status == "BLOCK"
+            else "REVIEW" if license_policy_status == "REVIEW_REQUIRED"
+            else "INCOMPLETE"
+        ),
+        "detail": str(license_compliance.get("outcome") or "Reconciled license evidence is unavailable."),
+        "coverage": {
+            "policy_version": license_compliance.get("policy_version"),
+            "classification_counts": license_compliance.get("classification_counts") or {},
+            "reason_codes": license_compliance.get("reason_codes") or [],
+            "evidence_sha256": license_compliance.get("evidence_sha256"),
+        },
+        "evidence_refs": [] if not static_record else [{
+            "kind": "evidence_record",
+            "id": str(static_record.get("id") or ""),
+            "uri": f"/model-intake/submissions/{submission_id}#evidence-{static_record.get('id')}",
+        }],
+    })
     timelines = _runner_timelines(runner_jobs)
     artifact_uri = str(artifact.get("immutable_uri") or "").lower() if artifact else ""
     conversion_required = any(
@@ -667,6 +700,20 @@ def build_model_intake_report(
         and str(item.get("evidence_manifest_id") or "") == str(latest_manifest.get("id") or "")
         and (_timestamp(item.get("expires_at")) or datetime.min.replace(tzinfo=timezone.utc)) > now
     ]
+    legal_review_approved = any(
+        str(item.get("approved_by_role") or item.get("approval_type") or "") == "legal_reviewer"
+        for item in active_approvals
+    )
+    license_control = next(
+        (item for item in controls if item.get("id") == "license_compliance"), None,
+    )
+    if license_control and license_control.get("status") == "REVIEW" and legal_review_approved:
+        license_control["status"] = "PASS"
+        license_control["detail"] = "Corporate legal review approved the reconciled terms against the latest frozen evidence."
+        license_control["coverage"] = {
+            **_json(license_control.get("coverage"), {}),
+            "legal_disposition": "APPROVED",
+        }
     rejected = any(
         str(item.get("decision") or "") == "reject"
         and bool(latest_manifest)
@@ -761,7 +808,7 @@ def build_model_intake_report(
         outcome = "BLOCK"
         summary = "The active admission statement does not match the current authoritative records."
     elif active_admission and all(value is True for value in admission_parity.values()) and not (
-        statuses & {"FAIL", "ERROR", "INCOMPLETE", "NOT_RUN"}
+        statuses & {"FAIL", "ERROR", "INCOMPLETE", "NOT_RUN", "REVIEW"}
     ):
         outcome = "ALLOW"
         summary = "The exact deployment subject has an active signed admission."
@@ -815,6 +862,9 @@ def build_model_intake_report(
             "deployable_under_configured_shakerscan_policy": outcome == "ALLOW",
             "full_corporate_approval": "NOT_DETERMINED_BY_SHAKERSCAN",
             "decision_statement": summary,
+            "license_outcome": license_compliance.get("outcome") or "NOT_ASSESSED",
+            "legal_disposition": "APPROVED" if legal_review_approved else "PENDING" if license_compliance.get("legal_review_required") else "NOT_REQUIRED_BY_AUTOMATION",
+            "legal_review_required": bool(license_compliance.get("legal_review_required")) and not legal_review_approved,
             "authorization_scope": (
                 f"Exact registered subject for the {environment or 'unspecified'} environment"
                 + (f" until {admission_expiry}" if admission_expiry else "; no active admission expiry exists")
@@ -852,6 +902,7 @@ def build_model_intake_report(
         "detailed_review": {
             "control_matrix": controls,
             "static_analysis_detail": _static_check_detail(evidence),
+            "license_compliance": license_compliance,
             "shakerscan_check_catalog": _check_catalog_with_evidence(controls),
             "external_approval_requirements": external_requirements,
             "required_actions": actions,
@@ -1102,6 +1153,7 @@ th,td{{border:1px solid #ccd2dc;padding:8px;vertical-align:top;text-align:left}}
 <h2>Executive summary</h2>
 <div class="verdict"><strong>ShakerScan decision: {esc(executive.get('shakerscan_decision') or report.get('outcome'))}</strong><p>{esc(executive.get('decision_statement') or report.get('plain_language'))}</p><p><strong>Scope:</strong> {esc(executive.get('authorization_scope'))}</p></div>
 <div class="warning"><strong>Full corporate approval: {esc(executive.get('full_corporate_approval'))}</strong><p>{esc(executive.get('scope_warning'))}</p></div>
+<div class="warning"><strong>License outcome: {esc(executive.get('license_outcome') or 'NOT ASSESSED')}</strong><p>Legal disposition: {esc(executive.get('legal_disposition') or 'PENDING')}. Automated classification is evidence triage, not legal advice.</p></div>
 <div class="stats"><span class="stat">{esc(coverage.get('performed'))} performed</span><span class="stat">{esc(coverage.get('passed'))} passed</span><span class="stat">{esc(coverage.get('failed'))} failed</span><span class="stat">{esc(coverage.get('not_completed'))} not completed</span><span class="stat">{esc(coverage.get('external_corporate_requirements'))} external requirements</span></div>
 <h3>Required next actions</h3><ol>{action_rows}</ol>
 <h3>Checks performed</h3><table><thead><tr><th>Category</th><th>Control</th><th>Status</th><th>Result</th><th>Next step</th></tr></thead><tbody>{performed_rows}</tbody></table>
@@ -1153,6 +1205,8 @@ def model_intake_report_to_sarif(report: dict[str, Any]) -> dict[str, Any]:
                 "outcome": report.get("outcome"),
                 "reportSha256": report.get("report_sha256"),
                 "authorityBindings": report.get("authority_bindings"),
+                "licenseOutcome": _json(report.get("executive_summary"), {}).get("license_outcome"),
+                "legalDisposition": _json(report.get("executive_summary"), {}).get("legal_disposition"),
             },
         }],
     }

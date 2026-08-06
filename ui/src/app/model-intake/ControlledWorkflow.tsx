@@ -1164,7 +1164,7 @@ export function ControlledModelIntakeWorkflow({
             <div className="grid gap-3 sm:grid-cols-2"><label className="grid gap-1 text-xs text-gray-300">Approval role<select className={inputClass} value={approvalType} onChange={(event) => setApprovalType(event.target.value)}>{['model_security_reviewer', 'ml_platform_reviewer', 'release_manager', 'legal_reviewer', 'privacy_reviewer', 'data_owner', 'risk_acceptance'].map((role) => <option key={role}>{role}</option>)}</select></label><label className="grid gap-1 text-xs text-gray-300">Decision<select className={inputClass} value={approvalDecision} onChange={(event) => setApprovalDecision(event.target.value as 'approve' | 'reject')}><option value="approve">approve</option><option value="reject">reject</option></select></label></div>
             <label className="grid gap-1 text-xs text-gray-300">Approval rationale<textarea className={textareaClass} rows={3} value={approvalReason} onChange={(event) => setApprovalReason(event.target.value)} /></label>
             <button type="button" className={buttonClass} disabled={!manifestId || busy === 'approval'} onClick={recordApproval}><CheckCircle2 className="h-3.5 w-3.5" /> Record identity-bound approval</button>
-            <div className="text-[11px] text-gray-500">Production requires distinct server-configured identities for security, ML platform, and release-manager approvals. The submitter cannot approve its own submission.</div>
+            <div className="text-[11px] text-gray-500">Production requires distinct server-configured identities for security, ML platform, and release-manager approvals. A legal-review license outcome additionally requires a distinct legal reviewer. The submitter cannot approve its own submission.</div>
           </div>
           <div className="grid content-start gap-3">
             <button type="button" className={buttonClass} disabled={!manifestId || busy === 'policy'} onClick={evaluatePolicy}>Evaluate deterministic admission policy</button>
@@ -1203,6 +1203,10 @@ export function ControlledModelIntakeWorkflow({
                 <div className="mt-4 rounded border border-yellow-800/60 bg-yellow-950/20 p-3 text-xs text-yellow-100">
                   <div className="font-semibold">Full corporate approval: not determined by ShakerScan</div>
                   <p className="mt-1 text-yellow-100/80">{report.executive_summary.scope_warning}</p>
+                </div>
+                <div className={`mt-3 rounded border p-3 text-xs ${report.executive_summary.legal_review_required ? 'border-yellow-700/60 bg-yellow-950/20 text-yellow-100' : 'border-gray-700 bg-gray-950 text-gray-300'}`}>
+                  <div className="font-semibold">License outcome: {report.executive_summary.license_outcome || 'NOT ASSESSED'}</div>
+                  <p className="mt-1 opacity-80">Legal disposition: {report.executive_summary.legal_disposition || 'PENDING'}. Automated classification is evidence triage, not legal advice.</p>
                 </div>
                 <div className="mt-4 grid gap-2 sm:grid-cols-3 xl:grid-cols-6">
                   {[
