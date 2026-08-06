@@ -2392,6 +2392,72 @@ corporate retrieval/authorization benchmarks, legal/privacy approval, registry i
 enforcement, exception authority, or continuous reassessment. Those remain the external corporate controls
 listed in Sections 3.2 and 19.3.
 
+#### 14.5.3 One-link UI/API/agent acceptance and final report review — 2026-08-06
+
+The retained AWS `m8i.xlarge` KVM host was rebuilt from product code through `ad0fd84` on branch
+`claude/model-intake-improvements-2kbir1`. The API and five workers reported one current build fingerprint
+with zero stale workers. Scanner readiness was `READY` with 4/4 required adapters and a passing self-test:
+ModelScan 0.8.8, Semgrep 1.172.0 with rules digest
+`7b3d639936bd2a6d1eaca4472cf25eb69cd3de7b06523e05ed7b97487ea22902`, Fickling 0.1.12, and
+Trivy 0.72.0. Runner readiness was `READY`, `executor=firecracker-jailer`, and
+`fallback_execution=false`. The verified Firecracker, jailer, kernel, and rootfs digests were respectively
+`2fd0171309af7e24cf8dafc8a6f921c1434c49b5f9349bb996b7ed0a4deb8aa7`,
+`1f3a0c1fe86212d0001819bfe0819071c01208b3ccc9398c3b3bc1b84cf21edd`,
+`27a8310b9a727517e9eb02044524b6ceb77de5728e3491b6974d5c846227ecc8`, and
+`0a3f339af27e0bb5f5443ac179abcf86c5a82b3d55347bf193fb9aee48baa85b`.
+
+The browser test used the public Tailscale UI, not a mocked component. Automatic mode accepted one Hugging
+Face link and required no revision, file, digest, scan ID, or Firecracker job ID from the user. Advanced mode
+resolved the same link to the immutable revision, selected the correct artifact, populated the registry
+digest and model card, auto-sized the acquisition limit, defaulted to Full scan, showed all 4/4 adapters,
+blocked a Production preflight when signature/approval evidence was absent, and enabled the Research
+technical preflight without weakening the Production profile. The MI-01 through MI-27 help dialog described
+applicability and evidence source, and the scan-detail page clearly identified itself as the static stage and
+linked back to the end-to-end Automatic Review.
+
+| Exact source and final automatic review | Complete source acquisition and conversion | Separate Firecracker runtime result | Final engineer-facing result |
+|---|---|---|---|
+| `nomic-ai/CodeRankEmbed@3c4b60807d71f79b43f3c4363786d9493691f8b1`; review `8ac5a00c-3be5-4393-bba6-f0b5deb42d99`; scan `61ef39e4-e006-4a59-97ff-dbb4111bab3d`; submission `03c3cee5-3110-4956-83e4-8081e68c3fe3` | Complete 546,938,168-byte safetensors artifact and authoritative repository snapshot; conversion correctly `NOT_APPLICABLE`. | Six runtime phases `PASS`; independent replay matched embedding digest `f05869d24b2717333f98e595d3d640c70da33f2575f301d65bafb3b7041aa7ca` with shape 6x768. Peak memory 2,037,121,024/5,905,580,032 bytes; peak pids 5/64; no OOM. | `REVIEW_REQUIRED`: one exact `torch.load`/`weights_only` finding at `modeling_hf_nomic_bert.py:332`, plus missing repository license/NOTICE source text. Runtime, repeatability, network, resources, subject identity, and evidence integrity passed. |
+| `codesage/codesage-base-v2@92eac4f44c8674638f039f1b0d8280f2539cb4c7`; review `aa81fca2-bb7d-4350-a0ed-6e584a9eb2cb`; scan `d15ecb4d-a52a-493a-af10-ed31455dc026`; submission `97b46902-65c4-4007-a7d0-14590317b45c` | Complete 709,569,721-byte source artifact. Fixed conversion job `aa3aec18-c83a-4ac5-aa8b-ef0e845016f4` produced safetensors artifact `8ec9c4a138b2959d507303952c1c1fe04ef38cb31869f4d4efe90b7910958e24`; all 292 tensors and the conversion embedding matched with zero drift, then the target was rescanned with the original static/license evidence retained. | Calibration job `d8b1eb1d-d2ec-453e-9aa6-d87f218eaf40` and runtime job `8dff8c8d-580a-43a5-b9f5-9136d84e1a39` matched digest `5de41b285a08256a89b1b1f277040cd976c2cb7145628397a665d72a49d4a8dd` with shape 6x1024. Runtime peak memory 3,137,646,592/6,442,450,944 bytes; no OOM. | `REVIEW_REQUIRED`: two writable-file Semgrep findings at `tokenization_codesage.py:248` and `:252`; Apache-2.0 obligations and dataset-term review are separately explained in the License BOM. Conversion, runtime, repeatability, network, resources, and evidence integrity passed. |
+| `codesage/codesage-large-v2@6e5d6dc15db3e310c37c6dbac072409f95ffa5c5`; review `e2e054f9-028b-427c-8f27-fd543b6159f8`; scan `a7dc080d-1510-4334-bbfe-d3a59f029fda`; submission `2f9bd4f0-a80f-4a1d-86c9-c882e44bf285` | Complete 2,627,013,817-byte source artifact with no truncation. Fixed conversion job `569de204-7bc1-4eb0-9621-6213d5a3837b` produced artifact `d7cf192c14e0301ad9003efc7f2e40a6dfb0b3065b6be99f4b201af7c31c2f41`; all 292 tensors and the conversion embedding matched with zero drift, then the target was rescanned without erasing source evidence. | Calibration job `25c73794-7d82-4623-82ba-7f016a40a55f` and runtime job `8ed50979-1b61-4fd7-848b-f24152c48055` matched digest `8ab6af675bcb92e29dfe124c1b7c5fb51489026b42eb74711735bb53c631a083` with shape 6x2048. Runtime peak memory 9,320,628,224/12,884,901,888 bytes; no OOM. | `REVIEW_REQUIRED` for the same two exact code findings and license/dataset follow-up as Base. The report does not call the model malicious and does not confuse greater resource exposure with a vulnerability. |
+
+All three runtime receipts recorded 58 classified network events: 48 local IPC events and 10 IP socket-setup
+events, with **zero outbound attempts, zero DNS attempts, zero successful outbound operations, zero lost
+events, no guest NIC/tap, and only loopback interfaces**. This is the corrected containment interpretation and
+supersedes the obsolete zero-any-socket-event rule recorded in Section 14.5.2. Local IPC and an unconnected
+socket/bind setup are visible evidence but are not mislabeled as an external connection attempt. A real
+destination address and port would be reported for an outbound attempt; none existed in these runs.
+
+Every final scan returned schema-valid, non-empty CycloneDX, SPDX, AIBOM, License BOM, Third-Party Notices,
+JSON report, HTML report, and SARIF. The observed inventory sizes were 2/3/6 components or packages for
+CodeRank and 3/4/8 for each CodeSage scan (CycloneDX/SPDX/AIBOM respectively); each SARIF file contained the
+two actionable review results. The smaller SBOM counts are intentional and explicitly labeled
+`incomplete_first_party_only`: the repositories declared no pinned serving-image dependency manifest, so the
+report does not invent installed dependencies. The License BOM names the exact subject, detected MIT or
+Apache-2.0 term, evidence sources searched, missing source material, obligations, dataset reason codes, and
+owner/action. The notices draft turns those facts into a concise distribution checklist instead of repeating
+the complete evidence graph. The HTML report leads with one result, two attention rows, verified controls,
+and exact next steps; deployment follow-up is shown once in a separate section and excluded from the technical
+result.
+
+Defects discovered by this acceptance pass were repaired and rerun rather than documented away: a license
+control that contradicted the dedicated license evidence, missing-license findings duplicated under static
+analysis, ambiguous socket-event wording, conversion rescans that could erase source scanner/license evidence,
+nondeterministic multi-vCPU embedding replay, queued serialized jobs labeled as already running, stale UI
+copy about who produces technical evidence, and review-card grammar. The final production-image focused suite
+reported **104 passed**. The full repository suite, invoked from the correct repository root, reported
+**2,988 passed, 0 failed**; an earlier six-failure invocation from `/app` was rejected because it could not
+resolve repository-relative fixtures and was rerun correctly. Local UI tests reported **85 passed**, the
+production Next.js build completed successfully, and the browser exercised automatic, advanced/manual,
+report, help, scan-detail, and download paths. The API/agent reference contract also uses the same one-link
+automatic endpoint and documents that the returned review is nested under `review`, while scan/report URLs
+remain top-level.
+
+The default local PEM signer was retained for this development acceptance host. It proves receipt signing and
+verification only. Production KMS, the organization's deterministic admission policy/approvals, publisher
+trust decision, application data-plane test, and deployed digest-enforcement acceptance remain follow-up; they
+are not repeated as failures throughout the technical report and no signed production admission was issued.
+
 ### 14.6 Application-control tests
 
 - User A cannot retrieve User B-only vectors or graph facts.
