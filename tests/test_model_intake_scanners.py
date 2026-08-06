@@ -424,6 +424,25 @@ def test_builtin_license_inventory_identifies_license_and_binds_file_digest(tmp_
     assert len(result["summary"]["licenses"][0]["sha256"]) == 64
 
 
+def test_builtin_license_inventory_distinguishes_bsd_and_reciprocal_families(tmp_path):
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    (snapshot / "LICENSE-BSD").write_text(
+        "Redistribution and use in source and binary forms are permitted. Neither the name of Acme",
+        encoding="utf-8",
+    )
+    (snapshot / "COPYING").write_text(
+        "GNU Affero General Public License Version 3",
+        encoding="utf-8",
+    )
+
+    result = scanners.run_builtin_license_inventory(snapshot, _subject(kind="repository_snapshot"))
+    inventory = {item["path"]: item["spdx_candidates"] for item in result["summary"]["licenses"]}
+
+    assert inventory["LICENSE-BSD"] == ["BSD-3-Clause"]
+    assert inventory["COPYING"] == ["AGPL-3.0-only"]
+
+
 def test_materialized_converted_snapshot_is_rescanned_as_exact_safe_subject(monkeypatch, tmp_path):
     snapshot = tmp_path / "converted"
     snapshot.mkdir()

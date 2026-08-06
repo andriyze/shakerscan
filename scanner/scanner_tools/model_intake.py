@@ -40,6 +40,7 @@ from .model_intake_archives import inspect_archive as _inspect_complete_archive
 from .model_intake_attestation import verify_dsse_in_toto as _verify_dsse_in_toto
 from .model_intake_evaluation import evaluate as _evaluate_model_intake
 from .model_intake_evaluation import verify_report as _verify_model_intake_evaluation
+from .model_intake_licenses import build_corporate_license_assessment as _build_corporate_license_assessment
 from .model_intake_registry import adapter_capabilities as _adapter_capabilities
 from .model_intake_runtime import DTYPE_SIZES as _SAFETENSORS_DTYPE_SIZES
 from .model_intake_sandbox import request_sandbox_analysis as _request_sandbox_analysis
@@ -655,6 +656,7 @@ def _corporate_use_assessment(
     attestation_verification: dict[str, Any],
     deployment_approved: bool,
     custom_code_required: bool,
+    license_compliance: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     scanner_results = generated_evidence.get("results") if isinstance(generated_evidence.get("results"), list) else []
     scanner_statuses = {
@@ -733,6 +735,13 @@ def _corporate_use_assessment(
             else f"Dependency scanner status: {dependency_status or 'NOT_RUN'}."
         ),
     )
+    license_assessment = license_compliance if isinstance(license_compliance, dict) else {}
+    license_status = str(license_assessment.get("policy_status") or "INDETERMINATE")
+    control(
+        "license_compliance", "Model, dependency, dataset, and use-term review",
+        "PASS" if license_status == "PASS" else "FAIL" if license_status == "BLOCK" else "REVIEW" if license_status == "REVIEW_REQUIRED" else "INDETERMINATE",
+        str(license_assessment.get("outcome") or "License evidence was not reconciled."),
+    )
     sandbox_status = str(dynamic_sandbox.get("status") or "NOT_RUN")
     runtime = dynamic_sandbox.get("inspection", {}).get("runtime") if isinstance(dynamic_sandbox.get("inspection"), dict) else {}
     load_level = str((runtime or {}).get("load_level") or "none")
@@ -794,6 +803,8 @@ def _corporate_use_assessment(
         "can_use_in_corporate_environment": verdict == "APPROVED",
         "admission_mode": intake_mode,
         "decision": raw_decision,
+        "legal_outcome": license_assessment.get("outcome"),
+        "legal_review_required": bool(license_assessment.get("legal_review_required")),
         "plain_language": (
             "Approved for corporate use under the recorded policy and exact artifact digest."
             if verdict == "APPROVED"
@@ -2316,8 +2327,7 @@ def _signature_verification_status(
 
 _SPDX_PERMISSIVE = {
     "apache-2.0", "mit", "bsd-2-clause", "bsd-3-clause", "isc", "0bsd", "bsl-1.0",
-    "zlib", "unlicense", "cc0-1.0", "mpl-2.0", "python-2.0", "postgresql", "openrail",
-    "openrail++", "bigscience-openrail-m", "creativeml-openrail-m", "llama2", "llama3",
+    "zlib", "unlicense", "cc0-1.0", "python-2.0", "postgresql",
 }
 _SPDX_COPYLEFT = {
     "gpl-2.0", "gpl-3.0", "agpl-3.0", "lgpl-2.1", "lgpl-3.0", "epl-2.0", "cddl-1.0",
@@ -2356,7 +2366,7 @@ def _classify_license_token(token: str) -> str:
         return "permissive"
     if base in _SPDX_COPYLEFT or base.startswith(("gpl-", "agpl-", "lgpl-")):
         return "restricted"
-    if base.startswith(("apache", "mit", "bsd", "isc", "mpl", "openrail")):
+    if base.startswith(("apache", "mit", "bsd", "isc")):
         return "permissive"
     return "review_required"
 
@@ -3492,6 +3502,12 @@ async def run_model_intake_scan(
     }
     license_policy = _license_policy(license_ref)
     generated_results = generated_evidence.get("results") if isinstance(generated_evidence.get("results"), list) else []
+    license_compliance = _build_corporate_license_assessment(
+        declared_license=license_ref,
+        generated_results=generated_results,
+        training_data_ref=training_data_ref,
+        deployment_restrictions=deployment_restrictions,
+    )
     generated_sbom_result = next(
         (item for item in generated_results if item.get("scanner", {}).get("name") == "shakerscan-sbom"),
         None,
@@ -4317,26 +4333,42 @@ async def run_model_intake_scan(
             remediation="Record approved_by, approval timestamp, approval policy version, and deployment environment before production approval.",
         ))
 
-    if require_governance and not license_ref and not metadata_unavailable:
+    if require_governance and not metadata_unavailable and license_compliance["policy_status"] != "PASS":
+        missing_terms = any(
+            item.get("code") == "model_terms_missing"
+            for item in license_compliance.get("reasons") or []
+        )
+        blocked_terms = license_compliance["policy_status"] == "BLOCK"
         findings.append(_finding(
-            finding_id="missing_license_review",
-            title="Model license review missing",
-            severity="medium",
-            description="The intake metadata did not include a model license, license URL, or license review result.",
+            finding_id=(
+                "missing_license_review" if missing_terms
+                else "restricted_license_policy" if blocked_terms
+                else "corporate_license_legal_review_required"
+            ),
+            title=(
+                "Model license review missing" if missing_terms
+                else "Model terms violate corporate license policy" if blocked_terms
+                else "Corporate legal review is required"
+            ),
+            severity="high" if blocked_terms else "medium",
+            description=(
+                "The intake evidence contains forbidden or restricted terms that block this corporate policy."
+                if blocked_terms
+                else "Automated reconciliation found unknown, custom, reciprocal, dataset-related, conflicting, or use-case-dependent terms."
+            ),
             artifact_ref=artifact_ref,
-            evidence={"artifact": name, "metadata_keys": sorted(metadata.keys())},
-            remediation="Record model license, usage constraints, and legal/security review status before deployment.",
-        ))
-
-    if require_governance and license_policy["status"] == "restricted" and not metadata_unavailable:
-        findings.append(_finding(
-            finding_id="restricted_license_policy",
-            title="Model license requires deployment review",
-            severity="medium",
-            description="The supplied model license metadata contains restricted-use language that requires explicit approval before deployment.",
-            artifact_ref=artifact_ref,
-            evidence={"artifact": name, "license_policy": license_policy},
-            remediation="Confirm the intended deployment is allowed by the model license and record legal/security approval in intake metadata.",
+            evidence={
+                "artifact": name,
+                "license_outcome": license_compliance["outcome"],
+                "policy_version": license_compliance["policy_version"],
+                "reasons": license_compliance["reasons"],
+                "evidence_sha256": license_compliance["evidence_sha256"],
+            },
+            remediation=(
+                "Do not distribute or deploy this model under the prohibited terms; replace it or obtain approved alternative rights."
+                if blocked_terms
+                else "Route the exact model revision, reconciled terms, intended use, and notice obligations to corporate legal review."
+            ),
         ))
 
     if require_governance and not effective_sbom_evidence and not metadata_unavailable:
@@ -4565,6 +4597,9 @@ async def run_model_intake_scan(
         "format_posture": format_posture,
         "signature_verification_status": signature_status["status"],
         "license_policy_status": license_policy["status"],
+        "license_compliance_outcome": license_compliance["outcome"],
+        "license_compliance_policy_status": license_compliance["policy_status"],
+        "license_legal_review_required": license_compliance["legal_review_required"],
         "strict_governance": strict_governance,
         "deployment_environment": deployment_environment or None,
         "sbom_policy_status": sbom_policy["status"],
@@ -4627,6 +4662,7 @@ async def run_model_intake_scan(
         attestation_verification=attestation_verification,
         deployment_approved=deployment_approved,
         custom_code_required=bool(repository_manifest.get("custom_code_required")),
+        license_compliance=license_compliance,
     )
     summary["corporate_use_verdict"] = corporate_use["verdict"]
     summary["can_use_in_corporate_environment"] = corporate_use["can_use_in_corporate_environment"]
@@ -4673,6 +4709,7 @@ async def run_model_intake_scan(
                 "registry": safe_registry_reference,
                 "signature": safe_signature_status,
                 "license_policy": license_policy,
+                "license_compliance": redact_model_intake_value(license_compliance),
                 "sbom_policy": sbom_policy,
                 "malware_policy": malware_policy,
                 "eval_policy": eval_policy,
@@ -4700,12 +4737,14 @@ async def run_model_intake_scan(
                     if repository_manifest.get("custom_code_required") else None
                 ),
                 "format_specific_inspection": format_specific_ok,
-                "license_policy": None if metadata_unavailable or not license_ref else license_policy["status"] == "permissive",
+                "license_policy": None if metadata_unavailable else license_compliance["policy_status"] == "PASS",
                 "approval": (None if metadata_unavailable else deployment_approved) if require_approval else None,
                 "approval_evidence": (
                     None if metadata_unavailable else approval_policy["valid"]
                 ) if require_approval and strict_governance else None,
-                "license_review": (None if metadata_unavailable else bool(license_ref)) if require_governance else None,
+                "license_review": (
+                    None if metadata_unavailable else license_compliance["policy_status"] == "PASS"
+                ) if require_governance else None,
                 "sbom_dependencies": (
                     None if metadata_unavailable else (sbom_policy["valid"] if strict_governance else bool(sbom_ref))
                 ) if require_governance else None,

@@ -1780,11 +1780,38 @@ def run_builtin_binary_inventory(subject_path: Path, subject: dict[str, Any]) ->
 
 
 LICENSE_MARKERS = {
+    "AGPL-3.0-only": ("gnu affero general public license", "version 3"),
+    "LGPL-3.0-only": ("gnu lesser general public license", "version 3"),
+    "LGPL-2.1-only": ("gnu lesser general public license", "version 2.1"),
+    "GPL-3.0-only": ("gnu general public license", "version 3"),
+    "GPL-2.0-only": ("gnu general public license", "version 2"),
+    "MPL-2.0": ("mozilla public license", "version 2.0"),
+    "EPL-2.0": ("eclipse public license", "version 2.0"),
     "Apache-2.0": ("apache license", "version 2.0"),
     "MIT": ("permission is hereby granted, free of charge",),
     "BSD-3-Clause": ("redistribution and use in source and binary forms", "neither the name"),
     "BSD-2-Clause": ("redistribution and use in source and binary forms",),
+    "ISC": ("permission to use, copy, modify, and/or distribute",),
+    "BSL-1.0": ("boost software license - version 1.0",),
+    "Unlicense": ("free and unencumbered software released into the public domain",),
+    "CC0-1.0": ("cc0 1.0 universal",),
 }
+
+
+def _identify_license_text(text: str) -> list[str]:
+    matches = [
+        spdx for spdx, markers in LICENSE_MARKERS.items()
+        if all(marker in text for marker in markers)
+    ]
+    # The two-clause BSD signature is a strict subset of the three-clause
+    # signature. Do not manufacture an ambiguous dual-license result.
+    if "BSD-3-Clause" in matches and "BSD-2-Clause" in matches:
+        matches.remove("BSD-2-Clause")
+    # GNU family names contain "general public license". Prefer the explicit
+    # Affero/Lesser signature over a generic GPL match from the same text.
+    if any(item.startswith(("AGPL-", "LGPL-")) for item in matches):
+        matches = [item for item in matches if not item.startswith("GPL-")]
+    return matches
 
 
 def run_builtin_license_inventory(subject_path: Path, subject: dict[str, Any]) -> dict[str, Any]:
@@ -1808,10 +1835,7 @@ def run_builtin_license_inventory(subject_path: Path, subject: dict[str, Any]) -
     inventory: list[dict[str, Any]] = []
     for path in candidates:
         text = path.read_text("utf-8", errors="replace")[:1_000_000].lower()
-        matches = [
-            spdx for spdx, markers in LICENSE_MARKERS.items()
-            if all(marker in text for marker in markers)
-        ]
+        matches = _identify_license_text(text)
         inventory.append({
             "path": path.relative_to(subject_path).as_posix(),
             "sha256": _hash_path(path),

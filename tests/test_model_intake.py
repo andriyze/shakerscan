@@ -232,7 +232,9 @@ def test_model_intake_accepts_signed_safetensors_with_provenance(tmp_path):
         )
     )
 
-    assert result["findings"] == []
+    assert {item["id"] for item in result["findings"]} == {
+        "model_intake:corporate_license_legal_review_required"
+    }
     assert result["model_intake"]["summary"]["format_posture"] == "safer_static_format"
     assert result["model_intake"]["summary"]["aibom_generated"] is True
     # R1: a metadata-only cryptographic claim is "claimed", never "verified" — real
@@ -241,8 +243,8 @@ def test_model_intake_accepts_signed_safetensors_with_provenance(tmp_path):
     assert result["model_intake"]["summary"]["signature_cryptographically_verified"] is False
     assert result["model_intake"]["aibom"]["completeness"]["fields"]["base_model"] is True
     assert any(component["type"] == "tokenizer" for component in result["model_intake"]["aibom"]["components"])
-    assert result["result"]["grade"] == "A"
-    assert result["result"]["decision"] == "allow"
+    assert result["model_intake"]["supply_chain"]["license_compliance"]["outcome"] == "LEGAL REVIEW REQUIRED"
+    assert result["result"]["decision"] == "review"
 
 
 def test_model_intake_license_policy_requires_permissive_status(tmp_path):
@@ -1409,7 +1411,7 @@ def test_model_intake_runs_metadata_governance_when_registry_export_is_missing()
 
     finding_ids = {finding["id"] for finding in result["findings"]}
     assert "model_intake:artifact_fetch_failed" in finding_ids
-    assert result["model_intake"]["checks"]["license_review"] is True
+    assert result["model_intake"]["checks"]["license_review"] is False
     assert result["model_intake"]["checks"]["sbom_dependencies"] is True
 
 
