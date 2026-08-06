@@ -35,7 +35,10 @@ PROFILE_TEMPLATES = {
     },
     "onnx-embedding": {
         "artifact_extensions": [".onnx"],
-        "libraries": ["onnxruntime"],
+        # Hugging Face metadata normally identifies the model family that
+        # produced the graph, not the serving engine used for the selected
+        # artifact. The fixed profile still executes only onnxruntime.
+        "libraries": ["onnxruntime", "transformers", "sentence-transformers"],
         "entrypoint": "onnxruntime.InferenceSession",
         "trust_remote_code": False,
         "allow_pickle": False,

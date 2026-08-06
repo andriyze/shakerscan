@@ -79,6 +79,34 @@ def test_reviewed_sentence_transformers_custom_code_uses_fixed_safe_loader():
     assert result["profile"]["network"] == "none"
 
 
+def test_onnx_profile_uses_hash_locked_cpu_runtime_for_hugging_face_families():
+    result = resolve_loader_profile(
+        {"library_name": "transformers", "custom_code_required": False},
+        artifact_path="model.onnx",
+        runtime_image_digest="sha256:" + "a" * 64,
+    )
+
+    assert result["status"] == "READY"
+    assert result["profile"]["profile_id"] == "onnx-embedding"
+    assert result["profile"]["entrypoint"] == "onnxruntime.InferenceSession"
+    assert result["profile"]["trust_remote_code"] is False
+    assert result["profile"]["allow_pickle"] is False
+
+
+def test_firecracker_guest_packages_and_executes_the_declared_onnx_profile():
+    root = Path(__file__).resolve().parents[1]
+    requirements = (root / "runner" / "guest" / "requirements.lock").read_text()
+    guest = (root / "runner" / "guest" / "guest_worker.py").read_text()
+    runner = (root / "api" / "model_intake_firecracker_runner.py").read_text()
+
+    assert "onnxruntime==1.23.2" in requirements
+    assert 'profile_id == "onnx-embedding"' in guest
+    assert "ort.InferenceSession" in guest
+    assert 'providers=["CPUExecutionProvider"]' in guest
+    assert '"profile_id": loader_profile.get("profile_id")' in runner
+    assert '"artifact_path": loader_profile.get("artifact_path")' in runner
+
+
 def test_conversion_profile_is_narrow_digest_bound_and_model_agnostic():
     blocked = resolve_conversion_profile(
         {"library_name": "transformers", "custom_code_required": True},

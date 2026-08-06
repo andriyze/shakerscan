@@ -94,6 +94,56 @@ def _mean_embeddings(model_path: Path, texts: list[str], *, trust: bool, safe: b
     return ((hidden * mask).sum(1) / mask.sum(1).clamp(min=1)).detach().to(torch.float32).cpu()
 
 
+def _job_artifact(model_path: Path, job: dict) -> Path:
+    relative = Path(str(job.get("artifact_path") or ""))
+    if not relative.parts or relative.is_absolute() or ".." in relative.parts:
+        raise ValueError("loader profile artifact path is unsafe")
+    artifact = model_path / relative
+    if not artifact.is_file() or artifact.is_symlink():
+        raise ValueError("loader profile artifact is missing")
+    return artifact
+
+
+def _onnx_embeddings(model_path: Path, texts: list[str], job: dict):
+    import numpy as np
+    import onnxruntime as ort
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True, trust_remote_code=False)
+    encoded = tokenizer(texts, padding=True, truncation=True, return_tensors="np")
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = 1
+    options.inter_op_num_threads = 1
+    options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+    session = ort.InferenceSession(
+        str(_job_artifact(model_path, job)),
+        sess_options=options,
+        providers=["CPUExecutionProvider"],
+    )
+    input_names = {item.name for item in session.get_inputs()}
+    inputs = {
+        name: np.asarray(value)
+        for name, value in encoded.items()
+        if name in input_names
+    }
+    missing = input_names - set(inputs)
+    if missing:
+        raise ValueError(f"tokenizer did not produce required ONNX inputs: {sorted(missing)}")
+    outputs = session.run(None, inputs)
+    if not outputs:
+        raise ValueError("ONNX model produced no outputs")
+    hidden = np.asarray(outputs[0])
+    if hidden.ndim == 3:
+        mask = np.asarray(encoded.get("attention_mask", np.ones(hidden.shape[:2], dtype=np.int64)))
+        expanded = np.expand_dims(mask, -1).astype(hidden.dtype, copy=False)
+        vectors = (hidden * expanded).sum(axis=1) / np.clip(expanded.sum(axis=1), 1, None)
+    elif hidden.ndim == 2:
+        vectors = hidden
+    else:
+        raise ValueError(f"unsupported ONNX embedding output rank: {hidden.ndim}")
+    return np.ascontiguousarray(vectors, dtype=np.float32), session
+
+
 def inventory() -> None:
     interfaces = sorted(name for _idx, name in socket.if_nameindex())
     print(json.dumps({"guest_interfaces": interfaces}, sort_keys=True))
@@ -103,11 +153,17 @@ def run_phase(phase: str) -> None:
     state = _load_state()
     job = json.loads((INPUT / "job.json").read_text())
     model_path = INPUT / "model"
+    profile_id = str(job.get("profile_id") or "")
+    onnx_profile = profile_id == "onnx-embedding"
     try:
         if phase == "import":
-            import torch  # noqa: F401
-            import transformers  # noqa: F401
-            _install_transformers_compatibility()
+            if onnx_profile:
+                import onnxruntime  # noqa: F401
+                import transformers  # noqa: F401
+            else:
+                import torch  # noqa: F401
+                import transformers  # noqa: F401
+                _install_transformers_compatibility()
             state["phases"][phase] = "PASS"
         elif phase == "tokenizer":
             _install_transformers_compatibility()
@@ -117,49 +173,62 @@ def run_phase(phase: str) -> None:
             state["tokenizer_class"] = f"{tokenizer.__class__.__module__}.{tokenizer.__class__.__name__}"
             state["phases"][phase] = "PASS"
         elif phase == "model_load":
-            _install_transformers_compatibility()
-            from transformers import AutoModel
-            trust = bool(job.get("trust_remote_code"))
-            model = AutoModel.from_pretrained(
-                model_path, local_files_only=True, trust_remote_code=trust,
-                use_safetensors=not bool(job.get("allow_pickle")),
-            )
-            state["model_class"] = f"{model.__class__.__module__}.{model.__class__.__name__}"
+            if onnx_profile:
+                _vectors, session = _onnx_embeddings(model_path, ["bounded model load"], job)
+                state["model_class"] = f"{session.__class__.__module__}.{session.__class__.__name__}"
+            else:
+                _install_transformers_compatibility()
+                from transformers import AutoModel
+                trust = bool(job.get("trust_remote_code"))
+                model = AutoModel.from_pretrained(
+                    model_path, local_files_only=True, trust_remote_code=trust,
+                    use_safetensors=not bool(job.get("allow_pickle")),
+                )
+                state["model_class"] = f"{model.__class__.__module__}.{model.__class__.__name__}"
             state["phases"][phase] = "PASS"
         elif phase == "warmup":
-            import torch
-            _install_transformers_compatibility()
-            from transformers import AutoModel, AutoTokenizer
-            trust = bool(job.get("trust_remote_code"))
-            tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True, trust_remote_code=trust)
-            model = AutoModel.from_pretrained(
-                model_path, local_files_only=True, trust_remote_code=trust,
-                use_safetensors=not bool(job.get("allow_pickle")),
-            ).eval()
-            encoded = tokenizer(["bounded warmup"], padding=True, truncation=True, return_tensors="pt")
-            with torch.inference_mode():
-                model(**encoded)
+            if onnx_profile:
+                _onnx_embeddings(model_path, ["bounded warmup"], job)
+            else:
+                import torch
+                _install_transformers_compatibility()
+                from transformers import AutoModel, AutoTokenizer
+                trust = bool(job.get("trust_remote_code"))
+                tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True, trust_remote_code=trust)
+                model = AutoModel.from_pretrained(
+                    model_path, local_files_only=True, trust_remote_code=trust,
+                    use_safetensors=not bool(job.get("allow_pickle")),
+                ).eval()
+                encoded = tokenizer(["bounded warmup"], padding=True, truncation=True, return_tensors="pt")
+                with torch.inference_mode():
+                    model(**encoded)
             state["phases"][phase] = "PASS"
         elif phase == "inference":
-            import torch
-            _install_transformers_compatibility()
-            from transformers import AutoModel, AutoTokenizer
-            trust = bool(job.get("trust_remote_code"))
-            tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True, trust_remote_code=trust)
-            model = AutoModel.from_pretrained(
-                model_path, local_files_only=True, trust_remote_code=trust,
-                use_safetensors=not bool(job.get("allow_pickle")),
-            ).eval()
             texts = job.get("known_answer_inputs") or ["security review", "knowledge graph embedding"]
-            encoded = tokenizer(texts, padding=True, truncation=True, return_tensors="pt")
-            with torch.inference_mode():
-                output = model(**encoded)
-            hidden = output.last_hidden_state
-            mask = encoded.get("attention_mask", torch.ones(hidden.shape[:2], dtype=hidden.dtype)).unsqueeze(-1)
-            vectors = (hidden * mask).sum(1) / mask.sum(1).clamp(min=1)
-            vector_bytes = vectors.detach().to(torch.float32).cpu().contiguous().numpy().tobytes()
+            if onnx_profile:
+                vectors, _session = _onnx_embeddings(model_path, texts, job)
+                vector_bytes = vectors.tobytes()
+                shape = list(vectors.shape)
+            else:
+                import torch
+                _install_transformers_compatibility()
+                from transformers import AutoModel, AutoTokenizer
+                trust = bool(job.get("trust_remote_code"))
+                tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True, trust_remote_code=trust)
+                model = AutoModel.from_pretrained(
+                    model_path, local_files_only=True, trust_remote_code=trust,
+                    use_safetensors=not bool(job.get("allow_pickle")),
+                ).eval()
+                encoded = tokenizer(texts, padding=True, truncation=True, return_tensors="pt")
+                with torch.inference_mode():
+                    output = model(**encoded)
+                hidden = output.last_hidden_state
+                mask = encoded.get("attention_mask", torch.ones(hidden.shape[:2], dtype=hidden.dtype)).unsqueeze(-1)
+                vectors = (hidden * mask).sum(1) / mask.sum(1).clamp(min=1)
+                vector_bytes = vectors.detach().to(torch.float32).cpu().contiguous().numpy().tobytes()
+                shape = list(vectors.shape)
             state["embedding_output_sha256"] = hashlib.sha256(vector_bytes).hexdigest()
-            state["embedding_shape"] = list(vectors.shape)
+            state["embedding_shape"] = shape
             expected = job.get("known_answer_embedding_sha256")
             state["embedding_known_answers_status"] = (
                 "NOT_CONFIGURED" if not expected

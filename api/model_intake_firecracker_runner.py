@@ -475,9 +475,12 @@ class FirecrackerRunner:
             known_answer_suite = suite_identity(request.get("known_answer_inputs") or [])
         except ValueError as exc:
             raise FirecrackerExecutionError(str(exc)) from exc
+        loader_profile = request.get("loader_profile") if isinstance(request.get("loader_profile"), dict) else {}
         job = {
             "schema_version": "model-intake-firecracker-job/v1",
             "mode": request.get("mode", "runtime"),
+            "profile_id": loader_profile.get("profile_id"),
+            "artifact_path": loader_profile.get("artifact_path"),
             "trust_remote_code": bool(request.get("trust_remote_code")),
             "allow_pickle": bool(request.get("allow_pickle")),
             "known_answer_inputs": known_answer_suite["inputs"],
