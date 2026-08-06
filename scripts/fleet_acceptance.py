@@ -369,6 +369,17 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     _check(checks, "current_worker_fleet", uniform, "selected nodes are current and have active workers")
     worker_only = all(str((node.get("labels") or {}).get("transport") or "") in {"overlay", "broker"} for node in healthy)
     _check(checks, "worker_transport_labeled", bool(healthy) and worker_only, "nodes identify overlay or broker transport")
+    selected_transports = {
+        str((node.get("labels") or {}).get("transport") or "").strip().lower()
+        for node in healthy
+    }
+    shared_transport = next(iter(selected_transports)) if len(selected_transports) == 1 else ""
+    _check(
+        checks,
+        "uniform_worker_transport",
+        shared_transport in {"overlay", "broker"},
+        f"selected nodes use one remote worker transport ({shared_transport or 'mixed/unknown'})",
+    )
 
     storage = client.request("GET", "/artifacts/storage/health?probe=true")
     _check(checks, "artifact_store_write_probe", storage.get("status") == "ok", str(storage.get("status")))
@@ -425,6 +436,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     "custom_endpoints": _safe_parallel_endpoints(args.target, shard_count),
                     "request_budget_mode": args.request_budget_mode,
                     "require_current_workers": True,
+                    # Keep the physical proof on the selected fleet transport. Without
+                    # this constraint a control-plane-local worker could execute a
+                    # shard and make a nominal cross-node result misleading.
+                    "placement": {"transport": shared_transport},
                 },
             },
             timeout=60,

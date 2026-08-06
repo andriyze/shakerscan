@@ -42,6 +42,80 @@ def test_node_selection_is_explicit_and_rejects_missing_identity():
         raise AssertionError("missing selected node was accepted")
 
 
+def test_full_acceptance_routes_scan_to_shared_remote_transport(monkeypatch):
+    submitted = []
+
+    class Client:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def request(self, method, path, payload=None, timeout=None):
+            if path == "/health":
+                return {"status": "healthy"}
+            if path == "/fleet/nodes":
+                return {
+                    "nodes": [
+                        {
+                            "id": "node-a",
+                            "status": "healthy",
+                            "last_heartbeat_at": "now",
+                            "capacity": {"cpu_count": 2},
+                            "state_current": True,
+                            "image_current": True,
+                            "active_worker_count": 1,
+                            "labels": {"transport": "broker"},
+                        },
+                        {
+                            "id": "node-b",
+                            "status": "healthy",
+                            "last_heartbeat_at": "now",
+                            "capacity": {"cpu_count": 2},
+                            "state_current": True,
+                            "image_current": True,
+                            "active_worker_count": 1,
+                            "labels": {"transport": "broker"},
+                        },
+                    ]
+                }
+            if path.startswith("/artifacts/storage/health"):
+                return {"status": "ok"}
+            if path == "/fleet/acceptance/lease-probe":
+                return {
+                    "reclaimed": True,
+                    "delivery_attempts": 2,
+                    "heartbeat_ok": True,
+                    "first_ack": True,
+                    "duplicate_ack": False,
+                }
+            if method == "POST" and path == "/scans":
+                submitted.append(payload)
+                return {"scan_id": "scan-id", "parallel": True}
+            raise AssertionError((method, path, payload, timeout))
+
+    monkeypatch.setattr(fleet_acceptance, "ApiClient", Client)
+    monkeypatch.setattr(fleet_acceptance, "_probe_public_data_stores", lambda _host: {6379: True, 5432: True})
+    monkeypatch.setattr(fleet_acceptance, "_poll_scan", lambda *_args: {"status": "completed"})
+    monkeypatch.setattr(fleet_acceptance, "_evaluate_scan", lambda *_args: None)
+    args = types.SimpleNamespace(
+        api_url="https://fleet.example.test",
+        operator_token="token",
+        node_id=[],
+        public_host="fleet.example.test",
+        preflight_only=False,
+        target="https://lab.example.test",
+        authorized=True,
+        request_budget_mode="default",
+        fault_node_ssh=None,
+        fault_node_id=None,
+        timeout=60,
+        poll_seconds=1,
+    )
+
+    fleet_acceptance.run(args)
+
+    assert submitted[0]["options"]["placement"] == {"transport": "broker"}
+
+
 def test_scan_acceptance_requires_cross_node_context_dedupe_report_and_artifacts():
     parent_id = "11111111-1111-4111-8111-111111111111"
     shards = [
