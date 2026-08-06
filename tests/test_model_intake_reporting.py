@@ -244,6 +244,23 @@ def test_license_review_is_prominent_and_requires_legal_reviewer_disposition():
     assert _control(approved, "license_compliance")["status"] == "PASS"
 
 
+def test_missing_license_source_text_is_a_review_item_even_when_terms_pass_policy():
+    rows = _rows()
+    static = next(item for item in rows["evidence"] if item["evidence_type"] == "static_analysis")
+    static["payload_json"]["license_compliance"] = {
+        "policy_status": "PASS",
+        "missing_evidence": ["repository license or notice file"],
+        "terms": [{"declared": "mit"}],
+    }
+
+    report = _report(rows)
+    control = _control(report, "license_compliance")
+
+    assert control["status"] == "REVIEW"
+    assert "authoritative license or NOTICE source text" in control["detail"]
+    assert "preserve it with the pinned revision" in control["remediation"]
+
+
 def test_missing_runtime_and_required_conversion_are_plainly_incomplete():
     rows = _rows(artifact_uri="hf://example/model/pytorch_model.bin", active_admission=False)
     rows["runner_jobs"] = []

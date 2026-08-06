@@ -551,7 +551,9 @@ def _enrich_control(control: dict[str, Any]) -> dict[str, Any]:
         "category": detail.get("category", "Other"),
         "question": detail.get("question", str(control.get("label") or "")),
         "method": detail.get("method", "Inspect authoritative digest-bound evidence."),
-        "remediation": detail.get("remediation", "Resolve the non-pass result and generate fresh authoritative evidence."),
+        "remediation": control.get("remediation") or detail.get(
+            "remediation", "Resolve the non-pass result and generate fresh authoritative evidence."
+        ),
     }
 
 
@@ -793,6 +795,12 @@ def _presentation_summary(
 def _license_control_detail(license_compliance: dict[str, Any]) -> str:
     """Translate policy vocabulary into a concise engineer-facing result."""
     policy_status = str(license_compliance.get("policy_status") or "").upper()
+    missing = [str(item) for item in license_compliance.get("missing_evidence") or [] if item]
+    if policy_status == "PASS" and missing:
+        return (
+            "The publisher declaration did not trigger policy, but the repository is missing "
+            "the authoritative license or NOTICE source text."
+        )
     if policy_status == "PASS":
         return "Declared and detected license evidence did not trigger the configured license policy."
     if policy_status == "BLOCK":
@@ -871,16 +879,23 @@ def build_model_intake_report(
     static_payload = _json(static_record.get("payload_json"), {}) if static_record else {}
     license_compliance = _json(static_payload.get("license_compliance"), {})
     license_policy_status = str(license_compliance.get("policy_status") or "")
+    license_evidence_missing = bool(license_compliance.get("missing_evidence"))
     controls.append({
         "id": "license_compliance",
         "label": "License and attribution review",
         "status": (
-            "PASS" if license_policy_status == "PASS"
+            "REVIEW" if license_policy_status == "PASS" and license_evidence_missing
+            else "PASS" if license_policy_status == "PASS"
             else "FAIL" if license_policy_status == "BLOCK"
             else "REVIEW" if license_policy_status == "REVIEW_REQUIRED"
             else "INCOMPLETE"
         ),
         "detail": _license_control_detail(license_compliance),
+        "remediation": (
+            "Obtain the publisher's authoritative license/NOTICE text and preserve it with the pinned revision and any distribution."
+            if license_policy_status == "PASS" and license_evidence_missing
+            else "Review the exact component terms and reason codes in the License BOM."
+        ),
         "coverage": {
             "policy_version": license_compliance.get("policy_version"),
             "classification_counts": license_compliance.get("classification_counts") or {},
