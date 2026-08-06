@@ -32,7 +32,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any
-from xml.etree import ElementTree as ET
+from defusedxml import ElementTree as ET
 
 # Disable SSL verification for testing (corporate proxies, self-signed certs)
 ssl_context = ssl.create_default_context()

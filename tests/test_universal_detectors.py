@@ -52,6 +52,20 @@ def test_serve_index_markers_present():
     assert 'id="files"' in src
 
 
+def test_s3_listing_parser_does_not_expand_external_entities():
+    hostile = (
+        '<?xml version="1.0"?>'
+        '<!DOCTYPE bucket [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>'
+        '<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
+        '<Contents><Key>&xxe;</Key></Contents></ListBucketResult>'
+    )
+
+    extracted = ic._extract_s3_files(hostile)
+
+    assert extracted == ["&xxe;"]
+    assert not any("root:" in value for value in extracted)
+
+
 # ---------------------------------------------------------------------------
 # Sensitive-file harvest + encoded-null-byte allowlist bypass (CWE-158)
 # ---------------------------------------------------------------------------

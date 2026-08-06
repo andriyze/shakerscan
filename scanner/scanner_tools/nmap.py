@@ -208,7 +208,7 @@ async def nmap_full_scan(
     out, err, rc = await run(cmd, timeout=timeout)
 
     if rc == 0 and out:
-        import xml.etree.ElementTree as ET
+        from defusedxml import ElementTree as ET
         try:
             root = ET.fromstring(out)
             for host_elem in root.findall(".//host"):
@@ -309,7 +309,7 @@ async def comprehensive_port_scan(host: str, max_ports: int = 1000) -> dict[str,
         if err:
             results["errors"].append(f"stderr: {err[:300]}")
     if rc == 0 and out:
-        import xml.etree.ElementTree as ET
+        from defusedxml import ElementTree as ET
         try:
             root = ET.fromstring(out)
             for host_elem in root.findall(".//host"):
