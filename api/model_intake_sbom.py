@@ -126,6 +126,21 @@ def _aibom_components(aibom: dict[str, Any]) -> list[dict[str, Any]]:
     return components
 
 
+def _component_property(component: dict[str, Any], name: str) -> str:
+    for item in component.get("properties") or []:
+        if isinstance(item, dict) and str(item.get("name") or "") == name:
+            return str(item.get("value") or "")
+    return ""
+
+
+def _component_hashes(component: dict[str, Any]) -> set[str]:
+    return {
+        str(item.get("content") or "").strip().casefold()
+        for item in component.get("hashes") or []
+        if isinstance(item, dict) and str(item.get("content") or "").strip()
+    }
+
+
 def build_model_intake_cyclonedx(scan_result: Any, *, scan_id: str = "") -> dict[str, Any]:
     """Compose one CycloneDX 1.5 document from a completed Model Intake scan."""
     model_intake = _object(_object(scan_result).get("model_intake"))
@@ -191,6 +206,18 @@ def build_model_intake_cyclonedx(scan_result: Any, *, scan_id: str = "") -> dict
         components.append(component)
     for component in _aibom_components(aibom):
         ref = str(component["bom-ref"])
+        # The document metadata component is the authoritative top-level model
+        # package. AIBOM also records that same subject as ``model_artifact``;
+        # merge that identity instead of showing reviewers two copies of one
+        # model. Base models, adapters, tokenizers, and datasets remain distinct.
+        if _component_property(component, "shakerscan:aibom_type") == "model_artifact":
+            same_name = str(component.get("name") or "").strip().casefold() == artifact_name.casefold()
+            same_hash = bool(
+                artifact_sha256
+                and artifact_sha256.casefold() in _component_hashes(component)
+            )
+            if same_name or same_hash:
+                continue
         if ref in seen or ref == root["bom-ref"]:
             continue
         seen.add(ref)

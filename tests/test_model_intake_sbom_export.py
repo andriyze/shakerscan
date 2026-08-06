@@ -157,6 +157,18 @@ def test_spdx_export_describes_the_same_components_as_cyclonedx():
     assert "LEGAL REVIEW REQUIRED" in spdx["comment"]
 
 
+def test_top_level_model_is_not_duplicated_when_aibom_repeats_subject_identity():
+    from model_intake_sbom import build_model_intake_spdx
+
+    result = _scan_result()
+
+    cyclonedx = build_model_intake_cyclonedx(result, scan_id="s-1")
+    spdx = build_model_intake_spdx(result, scan_id="s-1")
+
+    assert [item["name"] for item in cyclonedx["components"]].count("model.safetensors") == 0
+    assert [item["name"] for item in spdx["packages"]].count("model.safetensors") == 1
+
+
 def test_spdx_export_is_reproducible_and_anchored_to_the_scan():
     from model_intake_sbom import build_model_intake_spdx
 
