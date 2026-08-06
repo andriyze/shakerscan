@@ -572,6 +572,10 @@ isolation, lease loss/reclaim/ack behavior, cross-node shard execution, executio
 finding deduplication, and central result manifests. It writes a content-free receipt to
 `results/fleet-acceptance.json` by default.
 
+The release gate defaults to passive `standard`. A development smoke test may use
+`--scan-type quick`; the selected depth is recorded in the receipt and does not replace the default
+release-candidate run.
+
 For a controlled failure-injection test, see `shakerscan fleet accept --help`; it can drain a chosen
 node and kill the exact worker executing a shard over non-interactive SSH.
 

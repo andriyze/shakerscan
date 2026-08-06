@@ -130,6 +130,7 @@ def test_full_acceptance_routes_scan_to_shared_remote_transport(monkeypatch):
         preflight_only=False,
         target="https://lab.example.test",
         authorized=True,
+        scan_type="quick",
         request_budget_mode="default",
         fault_node_ssh=None,
         fault_node_id=None,
@@ -141,6 +142,7 @@ def test_full_acceptance_routes_scan_to_shared_remote_transport(monkeypatch):
     fleet_acceptance.run(args)
 
     assert submitted[0]["options"]["placement"] == {"transport": "broker"}
+    assert submitted[0]["options"]["scan_type"] == "quick"
 
 
 def test_scan_acceptance_requires_cross_node_context_dedupe_report_and_artifacts():

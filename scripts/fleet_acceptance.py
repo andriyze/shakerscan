@@ -467,7 +467,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             {
                 "target": args.target,
                 "options": {
-                    "scan_type": "standard",
+                    "scan_type": args.scan_type,
                     "parallel": True,
                     "shards": shard_count,
                     "shard_strategy": "scope",
@@ -519,6 +519,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "selected_node_ids": sorted(str(node.get("id") or "") for node in nodes),
         "scan_id": scan_id,
         "target_sha256": _target_hash(args.target) if args.target else None,
+        "scan_type": args.scan_type,
         "physical_fault": physical_fault,
         "preflight_only": bool(args.preflight_only),
         "build_mode": build_mode,
@@ -543,6 +544,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--target", help="authorized passive web target for the cross-node scan")
     parser.add_argument("--authorized", action="store_true", help="confirm authorization to scan --target")
+    parser.add_argument(
+        "--scan-type",
+        choices=["quick", "standard"],
+        default="standard",
+        help="passive acceptance scan depth (default: standard)",
+    )
     parser.add_argument("--request-budget-mode", choices=["enforce", "off"], default="enforce")
     parser.add_argument("--fault-node-id", help="node UUID whose active worker will be killed during the scan")
     parser.add_argument("--fault-node-ssh", help="SSH [user@]host for --fault-node-id (BatchMode required)")
