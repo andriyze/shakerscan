@@ -188,12 +188,14 @@ except ModuleNotFoundError:
 
 try:
     from model_intake_reporting import (
+        apply_automatic_review_context as _apply_model_intake_automatic_review_context,
         build_model_intake_report as _build_model_intake_report,
         model_intake_report_to_sarif as _model_intake_report_to_sarif,
         render_model_intake_html as _render_model_intake_html,
     )
 except ModuleNotFoundError:
     from api.model_intake_reporting import (
+        apply_automatic_review_context as _apply_model_intake_automatic_review_context,
         build_model_intake_report as _build_model_intake_report,
         model_intake_report_to_sarif as _model_intake_report_to_sarif,
         render_model_intake_html as _render_model_intake_html,
@@ -16221,14 +16223,30 @@ async def get_model_intake_automatic_review_report(
 ):
     review_uuid = _model_intake_uuid(review_id, "automatic review id")
     async with db_pool.acquire() as conn:
-        submission_id = await conn.fetchval(
-            "SELECT submission_id FROM model_intake_automatic_reviews WHERE id=$1", review_uuid
+        review = await conn.fetchrow(
+            "SELECT * FROM model_intake_automatic_reviews WHERE id=$1", review_uuid
         )
+    submission_id = review["submission_id"] if review else None
     if not submission_id:
         raise HTTPException(status_code=409, detail="The automatic technical report is not ready")
-    return await get_model_intake_submission_report(
-        str(submission_id), _model_intake_automatic_system_request(), format=format
+    report = await get_model_intake_submission_report(
+        str(submission_id), _model_intake_automatic_system_request(), format="json"
     )
+    report = _apply_model_intake_automatic_review_context(report, row_to_dict(review))
+    filename = f"model-intake-{submission_id}"
+    if format == "html":
+        return Response(
+            content=_render_model_intake_html(report),
+            media_type="text/html",
+            headers={"Content-Disposition": f'inline; filename="{filename}.html"'},
+        )
+    if format == "sarif":
+        return JSONResponse(
+            content=_model_intake_report_to_sarif(report),
+            media_type="application/sarif+json",
+            headers={"Content-Disposition": f'attachment; filename="{filename}.sarif.json"'},
+        )
+    return report
 
 
 def _content_free_hash(value: Any) -> str:

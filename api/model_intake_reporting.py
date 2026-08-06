@@ -874,6 +874,136 @@ def build_model_intake_report(
     return report
 
 
+def apply_automatic_review_context(
+    report: dict[str, Any],
+    automatic_review: dict[str, Any],
+) -> dict[str, Any]:
+    """Bind the durable one-link controller result into every report format.
+
+    The underlying submission remains the authority for evidence and admission.
+    This context explains why an automatic technical workflow stopped before it
+    could produce evidence, which is especially important for formats that this
+    release can inspect statically but cannot load in a fixed microVM profile.
+    """
+    controls = report.get("controls") if isinstance(report.get("controls"), list) else []
+    pending = _json(automatic_review.get("pending_controls"), [])
+    timeline = _json(automatic_review.get("timeline_json"), [])
+    current_step = str(automatic_review.get("current_step") or "")
+    automatic = {
+        "id": str(automatic_review.get("id") or ""),
+        "state": automatic_review.get("state"),
+        "current_step": current_step,
+        "progress": _integer(automatic_review.get("progress")),
+        "technical_outcome": automatic_review.get("technical_outcome"),
+        "pending_controls": pending,
+        "timeline": timeline,
+        "authority": "technical_evidence_only",
+    }
+    report["automatic_review"] = automatic
+
+    if current_step == "runtime_profile_unavailable":
+        pending_runtime = next(
+            (
+                item for item in pending
+                if isinstance(item, dict) and item.get("control") == "isolated_runtime"
+            ),
+            {},
+        )
+        action = str(
+            pending_runtime.get("action")
+            or "Use a release with an approved fixed Firecracker profile for this exact format, or perform a separately governed runtime qualification."
+        )
+        raw_detail = str(pending_runtime.get("detail") or "no fixed loader profile")
+        firecracker = next(
+            (item for item in controls if item.get("id") == "firecracker_runtime"),
+            None,
+        )
+        if firecracker is not None:
+            firecracker.update({
+                "status": "INCOMPLETE",
+                "detail": (
+                    "UNSUPPORTED in this release: no fixed Firecracker loader or conversion "
+                    "profile applies to the exact model format and repository."
+                ),
+                "coverage": {
+                    **_json(firecracker.get("coverage"), {}),
+                    "support_status": "UNSUPPORTED",
+                    "reason": raw_detail[:500],
+                },
+                "remediation": action,
+            })
+        if str(report.get("outcome") or "") not in {"BLOCK", "FAIL"}:
+            report["outcome"] = "INCOMPLETE"
+            report["plain_language"] = (
+                "Static inspection completed, but this release cannot perform fixed-profile "
+                "isolated runtime qualification for the exact model format."
+            )
+
+    counts = {
+        status: sum(item.get("status") == status for item in controls)
+        for status in sorted(CONTROL_STATUSES)
+    }
+    performed = [item for item in controls if item.get("status") in {"PASS", "FAIL", "REVIEW"}]
+    not_completed = [
+        item for item in controls
+        if item.get("status") in {"ERROR", "INCOMPLETE", "NOT_RUN"}
+    ]
+    not_applicable = [item for item in controls if item.get("status") == "NOT_APPLICABLE"]
+    actions = _required_actions(controls)
+    executive = _json(report.get("executive_summary"), {})
+    executive.update({
+        "shakerscan_decision": report.get("outcome"),
+        "deployable_under_configured_shakerscan_policy": report.get("outcome") == "ALLOW",
+        "decision_statement": report.get("plain_language"),
+        "automatic_technical_review": {
+            "state": automatic.get("state"),
+            "current_step": current_step,
+            "outcome": automatic.get("technical_outcome"),
+            "pending_control_count": len(pending),
+        },
+        "coverage": {
+            **_json(executive.get("coverage"), {}),
+            "total_controls": len(controls),
+            "performed": len(performed),
+            "passed": counts["PASS"],
+            "failed": counts["FAIL"],
+            "review": counts["REVIEW"],
+            "not_completed": len(not_completed),
+            "not_applicable": len(not_applicable),
+        },
+        "key_results": [
+            {
+                "control_id": item.get("id"),
+                "label": item.get("label"),
+                "status": item.get("status"),
+                "result": item.get("detail"),
+            }
+            for item in controls
+            if item.get("status") in {"FAIL", "ERROR", "INCOMPLETE", "NOT_RUN", "REVIEW"}
+        ][:8],
+        "required_actions": actions[:8],
+    })
+    report["executive_summary"] = executive
+    report["control_counts"] = counts
+    report["assessment_scope"] = {
+        **_json(report.get("assessment_scope"), {}),
+        "checks_performed": [item.get("id") for item in performed],
+        "checks_not_completed": [item.get("id") for item in not_completed],
+        "checks_not_applicable": [item.get("id") for item in not_applicable],
+    }
+    detail = _json(report.get("detailed_review"), {})
+    detail.update({
+        "control_matrix": controls,
+        "shakerscan_check_catalog": _check_catalog_with_evidence(controls),
+        "required_actions": actions,
+    })
+    report["detailed_review"] = detail
+    report.pop("report_sha256", None)
+    digest_input = {key: value for key, value in report.items() if key != "generated_at"}
+    report["report_sha256"] = hashlib.sha256(_canonical(digest_input)).hexdigest()
+    return report
+
+
 def render_model_intake_html(report: dict[str, Any]) -> str:
     def esc(value: Any) -> str:
         return html.escape(str(value if value is not None else ""))
@@ -1001,6 +1131,6 @@ def model_intake_report_to_sarif(report: dict[str, Any]) -> dict[str, Any]:
 
 
 __all__ = [
-    "CONTROL_STATUSES", "REPORT_SCHEMA", "build_model_intake_report",
+    "CONTROL_STATUSES", "REPORT_SCHEMA", "apply_automatic_review_context", "build_model_intake_report",
     "model_intake_report_to_sarif", "render_model_intake_html",
 ]

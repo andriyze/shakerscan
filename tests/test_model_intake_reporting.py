@@ -7,6 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
 
 from model_intake_reporting import (  # noqa: E402
     CONTROL_STATUSES,
+    apply_automatic_review_context,
     build_model_intake_report,
     model_intake_report_to_sarif,
     render_model_intake_html,
@@ -183,6 +184,37 @@ def test_missing_runtime_and_required_conversion_are_plainly_incomplete():
     assert _control(report, "firecracker_runtime")["status"] == "NOT_RUN"
     assert _control(report, "conversion_equivalence")["status"] == "NOT_RUN"
     assert "firecracker_runtime" in report["assessment_scope"]["checks_not_completed"]
+
+
+def test_automatic_report_explains_static_only_unsupported_runtime_profile():
+    rows = _rows(artifact_uri="hf://example/model/model.gguf", active_admission=False)
+    rows["runner_jobs"] = []
+    report = apply_automatic_review_context(
+        _report(rows),
+        {
+            "id": "review-1",
+            "state": "attention_required",
+            "current_step": "runtime_profile_unavailable",
+            "progress": 100,
+            "technical_outcome": "INCOMPLETE",
+            "pending_controls": [{
+                "control": "isolated_runtime",
+                "status": "UNSUPPORTED",
+                "action": "Use an approved runtime profile.",
+                "detail": "no_loader_profile_for_format",
+            }],
+            "timeline_json": [{"event": "runtime_profile_unavailable"}],
+        },
+    )
+
+    control = _control(report, "firecracker_runtime")
+    assert report["outcome"] == "INCOMPLETE"
+    assert report["automatic_review"]["technical_outcome"] == "INCOMPLETE"
+    assert report["executive_summary"]["automatic_technical_review"]["current_step"] == "runtime_profile_unavailable"
+    assert control["status"] == "INCOMPLETE"
+    assert control["coverage"]["support_status"] == "UNSUPPORTED"
+    assert control["remediation"] == "Use an approved runtime profile."
+    assert len(report["report_sha256"]) == 64
     assert any(item["control_id"] == "firecracker_runtime" for item in report["executive_summary"]["required_actions"])
 
 
