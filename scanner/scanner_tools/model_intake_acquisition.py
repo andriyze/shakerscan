@@ -16,9 +16,10 @@ import pwd
 import socket
 import ssl
 import tempfile
+import time
 import urllib.parse
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 DEFAULT_REDIRECT_LIMIT = 5
@@ -464,6 +465,7 @@ def download_http_to_quarantine(
     quarantine_dir: Path,
     headers: dict[str, str] | None = None,
     policy: dict[str, Any] | None = None,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[bytes, dict[str, Any]]:
     """Stream a complete artifact into immutable content-addressed quarantine."""
     if inspection_bytes < 1 or max_artifact_bytes < inspection_bytes:
@@ -522,8 +524,36 @@ def download_http_to_quarantine(
             digest = hashlib.sha256()
             prefix = bytearray()
             total = 0
+            last_progress_bytes = 0
+            last_progress_at = time.monotonic()
+
+            def report_progress(*, complete: bool = False) -> None:
+                nonlocal last_progress_bytes, last_progress_at
+                if progress_callback is None:
+                    return
+                now = time.monotonic()
+                if (
+                    not complete
+                    and total > 0
+                    and total - last_progress_bytes < 64 * 1024**2
+                    and now - last_progress_at < 5
+                ):
+                    return
+                try:
+                    progress_callback({
+                        "bytes_observed": total,
+                        "bytes_total": declared_length,
+                        "complete": complete,
+                    })
+                except Exception:
+                    # Telemetry must never change acquisition or its verdict.
+                    pass
+                last_progress_bytes = total
+                last_progress_at = now
+
             try:
                 with temp_handle:
+                    report_progress()
                     while chunk := response.read(1024 * 1024):
                         total += len(chunk)
                         if total > max_artifact_bytes:
@@ -534,8 +564,10 @@ def download_http_to_quarantine(
                         temp_handle.write(chunk)
                         if len(prefix) < inspection_bytes:
                             prefix.extend(chunk[: inspection_bytes - len(prefix)])
+                        report_progress()
                 digest_hex = digest.hexdigest()
                 final_path = _commit_quarantine_file(temp_path, quarantine_dir, digest_hex, total)
+                report_progress(complete=True)
             except Exception:
                 temp_path.unlink(missing_ok=True)
                 raise

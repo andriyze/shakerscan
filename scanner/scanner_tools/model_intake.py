@@ -1045,6 +1045,7 @@ def _download_huggingface_complete(
     timeout_seconds: int,
     quarantine_dir: Path,
     fetch_policy: dict[str, Any] | None = None,
+    progress_callback: Any = None,
 ) -> tuple[bytes, dict[str, Any]]:
     hf_ref = parse_huggingface_ref(ref, metadata)
     if not hf_ref.get("repo_id") or not hf_ref.get("filename"):
@@ -1066,6 +1067,7 @@ def _download_huggingface_complete(
         quarantine_dir,
         headers=auth_headers,
         policy=fetch_policy,
+        progress_callback=progress_callback,
     )
     return data, {
         **fetch_meta,
@@ -1497,6 +1499,7 @@ async def _fetch_artifact(
     complete_download: bool = False,
     max_artifact_bytes: int | None = None,
     quarantine_dir: Path | None = None,
+    progress_callback: Any = None,
 ) -> tuple[bytes, dict[str, Any]]:
     parsed = urllib.parse.urlparse(ref)
     parsed_host = (parsed.hostname or "").lower().rstrip(".")
@@ -1518,6 +1521,7 @@ async def _fetch_artifact(
                     timeout_seconds,
                     quarantine_dir,
                     fetch_policy,
+                    progress_callback,
                 )
             if parsed.scheme in {"s3", "gs", "gcs", "azure"}:
                 cloud_ref = normalize_model_artifact_reference(ref, metadata or {})
@@ -1533,6 +1537,7 @@ async def _fetch_artifact(
                     quarantine_dir,
                     None,
                     fetch_policy,
+                    progress_callback,
                 )
                 return data, {**meta, "source": cloud_ref.get("kind") or "cloud_object", "cloud": cloud_ref}
             if parsed.scheme in {"oci", "mlflow", "models", "runs"}:
@@ -1548,6 +1553,7 @@ async def _fetch_artifact(
                     quarantine_dir,
                     None,
                     fetch_policy,
+                    progress_callback,
                 )
                 return data, {**meta, "source": parsed.scheme, "registry_reference": ref, "fetch_url": fetch_url}
             if parsed.scheme in {"http", "https"}:
@@ -1560,6 +1566,7 @@ async def _fetch_artifact(
                     quarantine_dir,
                     None,
                     fetch_policy,
+                    progress_callback,
                 )
             if parsed.scheme == "file" or not parsed.scheme:
                 if not allow_local_files:
@@ -3042,6 +3049,42 @@ async def run_model_intake_scan(
         **metadata,
         "expected_sha256": options.get("expected_sha256") or metadata.get("expected_sha256") or metadata.get("sha256"),
     }
+    await _emit_model_intake_activity(
+        activity,
+        event_callback,
+        phase="artifact_acquisition",
+        progress=20,
+        status="RUNNING",
+        source=_source_kind(artifact_ref, metadata),
+        bytes_observed=0,
+        complete=False,
+        truncated=False,
+    )
+    event_loop = asyncio.get_running_loop()
+
+    def acquisition_progress(observation: dict[str, Any]) -> None:
+        observed = int(observation.get("bytes_observed") or 0)
+        total = int(observation.get("bytes_total") or 0)
+        ratio = min(1.0, observed / total) if total > 0 else 0.0
+        future = asyncio.run_coroutine_threadsafe(
+            _emit_model_intake_activity(
+                activity,
+                event_callback,
+                phase="artifact_acquisition",
+                progress=min(34, 20 + int(ratio * 14)),
+                status="RUNNING",
+                source=_source_kind(artifact_ref, metadata),
+                bytes_observed=observed,
+                bytes_total=total or None,
+                complete=bool(observation.get("complete")),
+                truncated=False,
+            ),
+            event_loop,
+        )
+        # Preserve event ordering: the terminal acquisition event must never
+        # overtake the bounded byte-progress record queued from this thread.
+        future.result(timeout=5)
+
     artifact_bytes, artifact_meta = await _fetch_artifact(
         artifact_ref,
         max_bytes=inspection_bytes,
@@ -3052,6 +3095,7 @@ async def run_model_intake_scan(
         complete_download=stream_to_quarantine,
         max_artifact_bytes=effective_artifact_bytes,
         quarantine_dir=quarantine_dir if stream_to_quarantine else None,
+        progress_callback=acquisition_progress if stream_to_quarantine else None,
     )
     await _emit_model_intake_activity(
         activity,

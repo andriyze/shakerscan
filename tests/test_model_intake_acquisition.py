@@ -262,12 +262,14 @@ def test_complete_http_acquisition_streams_to_content_addressed_quarantine(monke
         lambda destination, headers, timeout: (FakeConnection(), FakeResponse()),
     )
 
+    progress = []
     prefix, meta = acquisition.download_http_to_quarantine(
         "https://models.example.test/model.bin",
         inspection_bytes=128,
         max_artifact_bytes=20_000,
         timeout_seconds=5,
         quarantine_dir=tmp_path,
+        progress_callback=progress.append,
     )
 
     expected_sha = hashlib.sha256(payload).hexdigest()
@@ -280,6 +282,11 @@ def test_complete_http_acquisition_streams_to_content_addressed_quarantine(monke
     assert meta["complete"] is True
     assert meta["truncated"] is False
     assert meta["inspection_truncated"] is True
+    assert progress[0] == {"bytes_observed": 0, "bytes_total": len(payload), "complete": False}
+    assert progress[-1] == {"bytes_observed": len(payload), "bytes_total": len(payload), "complete": True}
+    assert [item["bytes_observed"] for item in progress] == sorted(
+        item["bytes_observed"] for item in progress
+    )
 
 
 def test_complete_acquisition_rejects_declared_oversize_without_object(monkeypatch, tmp_path):

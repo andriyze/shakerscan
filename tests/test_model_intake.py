@@ -1020,7 +1020,10 @@ def test_huggingface_repository_snapshot_acquires_every_manifest_file(monkeypatc
     code_sha = hashlib.sha256(code_bytes).hexdigest()
     observed_urls = []
 
-    def fake_complete_download(url, inspection_bytes, max_bytes, timeout, quarantine_dir, headers=None, policy=None):
+    def fake_complete_download(
+        url, inspection_bytes, max_bytes, timeout, quarantine_dir,
+        headers=None, policy=None, progress_callback=None,
+    ):
         observed_urls.append(url)
         assert url.endswith(f"/{revision}/modeling.py")
         return code_bytes, {
@@ -2014,6 +2017,7 @@ def test_model_intake_emits_content_free_durable_activity(tmp_path):
     assert phases == [
         "intake_started",
         "artifact_acquisition",
+        "artifact_acquisition",
         "repository_snapshot",
         "generated_scanners",
         "dynamic_sandbox",
@@ -2023,6 +2027,8 @@ def test_model_intake_emits_content_free_durable_activity(tmp_path):
     assert observed_events == activity
     assert all(item["line"].startswith("[model-intake] phase=") for item in activity)
     assert all(str(artifact) not in item["line"] for item in activity)
+    assert activity[1]["status"] == "RUNNING"
+    assert activity[2]["status"] == "PASS"
     assert activity[-1]["progress"] == 95
     assert "decision=" in activity[-1]["line"]
 
