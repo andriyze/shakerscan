@@ -8,6 +8,7 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$ROOT_DIR"
 
 SCANNER_REPO="${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}"
+API_REPO="${API_IMAGE_REPO:-shakerscan/shakerscan-api}"
 UI_REPO="${UI_IMAGE_REPO:-shakerscan/shakerscan-ui}"
 SIGNER_REPO="${MODEL_INTAKE_SIGNER_IMAGE_REPO:-shakerscan/shakerscan-model-intake-signer}"
 TAG="${SCANNER_IMAGE_TAG:-}"
@@ -33,6 +34,7 @@ Options:
   --latest                Also tag/push :latest
   --tag TAG               Image tag to use (default: VERSION file)
   --scanner-repo REPO     Scanner image repo (default: shakerscan/shakerscan-scanner)
+  --api-repo REPO         API image repo (default: shakerscan/shakerscan-api)
   --ui-repo REPO          UI image repo (default: shakerscan/shakerscan-ui)
   --signer-repo REPO      Model Intake signer image repo
   --platform PLATFORM     build platform(s), e.g. linux/amd64 or linux/amd64,linux/arm64
@@ -41,7 +43,7 @@ Options:
   -h, --help              Show this help
 
 Environment overrides:
-  SCANNER_IMAGE_REPO, UI_IMAGE_REPO, MODEL_INTAKE_SIGNER_IMAGE_REPO,
+  SCANNER_IMAGE_REPO, API_IMAGE_REPO, UI_IMAGE_REPO, MODEL_INTAKE_SIGNER_IMAGE_REPO,
   SCANNER_IMAGE_TAG, SOURCE_URL, IMAGE_URL
 
 Examples:
@@ -73,6 +75,14 @@ while [[ $# -gt 0 ]]; do
             SCANNER_REPO="${2:-}"
             if [[ -z "$SCANNER_REPO" ]]; then
                 echo "Error: --scanner-repo requires a value" >&2
+                exit 1
+            fi
+            shift 2
+            ;;
+        --api-repo)
+            API_REPO="${2:-}"
+            if [[ -z "$API_REPO" ]]; then
+                echo "Error: --api-repo requires a value" >&2
                 exit 1
             fi
             shift 2
@@ -209,16 +219,19 @@ echo "  version:  $VERSION_LABEL"
 echo "  revision: $REVISION_LABEL"
 echo "  created:  $CREATED"
 echo "  scanner:  $SCANNER_REPO:$TAG"
+echo "  api:      $API_REPO:$TAG"
 echo "  ui:       $UI_REPO:$TAG"
 echo "  signer:   $SIGNER_REPO:$TAG"
 echo "  platform: $PLATFORM"
 echo
 
 SCANNER_TAGS=(-t "$SCANNER_REPO:$TAG")
+API_TAGS=(-t "$API_REPO:$TAG")
 UI_TAGS=(-t "$UI_REPO:$TAG")
 SIGNER_TAGS=(-t "$SIGNER_REPO:$TAG")
 if [[ "$TAG_LATEST" -eq 1 ]]; then
     SCANNER_TAGS+=(-t "$SCANNER_REPO:latest")
+    API_TAGS+=(-t "$API_REPO:latest")
     UI_TAGS+=(-t "$UI_REPO:latest")
     SIGNER_TAGS+=(-t "$SIGNER_REPO:latest")
 fi
@@ -230,6 +243,17 @@ docker buildx build \
     --label "org.opencontainers.image.title=ShakerScan Scanner" \
     --label "org.opencontainers.image.description=Open-source DAST scanner API, worker, and security tooling image" \
     "${SCANNER_TAGS[@]}" \
+    -f scanner/Dockerfile \
+    .
+
+docker buildx build \
+    "${BUILD_ARGS[@]}" \
+    "${OUTPUT_ARGS[@]}" \
+    "${COMMON_LABELS[@]}" \
+    --label "org.opencontainers.image.title=ShakerScan API Control Plane" \
+    --label "org.opencontainers.image.description=ShakerScan API with checksum-pinned Docker client for Model Intake guest staging" \
+    --build-arg "INSTALL_DOCKER_CLI=1" \
+    "${API_TAGS[@]}" \
     -f scanner/Dockerfile \
     .
 
