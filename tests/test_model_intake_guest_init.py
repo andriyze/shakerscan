@@ -33,3 +33,12 @@ def test_guest_selftest_cleans_container_owned_bind_mounts() -> None:
     assert "trap cleanup EXIT" in script
     assert '--entrypoint /bin/rm "$IMAGE" -rf /cleanup/input /cleanup/output' in script
     assert 'trap \'rm -rf "$TEMP_DIR"\' EXIT' not in script
+    assert 'docker build --platform "$PLATFORM"' in script
+    assert "docker buildx" not in script
+
+
+def test_guest_rootfs_builder_needs_only_standard_docker_build() -> None:
+    script = (ROOT / "scripts" / "build-model-intake-guest-rootfs.sh").read_text()
+
+    assert 'docker build --platform "$PLATFORM"' in script
+    assert "docker buildx" not in script

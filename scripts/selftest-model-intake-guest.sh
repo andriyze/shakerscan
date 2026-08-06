@@ -20,7 +20,7 @@ trap cleanup EXIT
 
 mkdir -p "$TEMP_DIR/input/model" "$TEMP_DIR/output/work"
 chmod -R 0777 "$TEMP_DIR"
-docker buildx build --platform "$PLATFORM" --load -f "$ROOT_DIR/runner/guest/Dockerfile" -t "$IMAGE" "$ROOT_DIR"
+docker build --platform "$PLATFORM" -f "$ROOT_DIR/runner/guest/Dockerfile" -t "$IMAGE" "$ROOT_DIR"
 
 DOCKER=(docker run --rm --platform "$PLATFORM" --network none --entrypoint /opt/venv/bin/python)
 "${DOCKER[@]}" -v "$TEMP_DIR/input:/input" "$IMAGE" -c '

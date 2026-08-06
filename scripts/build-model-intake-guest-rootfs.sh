@@ -26,7 +26,7 @@ command -v mkfs.ext4 >/dev/null
 mkdir -p "$(dirname "$OUTPUT")"
 PARTIAL_OUTPUT="${OUTPUT}.partial.$$"
 
-docker buildx build --platform "$PLATFORM" --load -f "$ROOT_DIR/runner/guest/Dockerfile" -t "$IMAGE" "$ROOT_DIR"
+docker build --platform "$PLATFORM" -f "$ROOT_DIR/runner/guest/Dockerfile" -t "$IMAGE" "$ROOT_DIR"
 CONTAINER_ID="$(docker create --platform "$PLATFORM" "$IMAGE")"
 mkdir "$TEMP_DIR/rootfs"
 docker export "$CONTAINER_ID" | tar -C "$TEMP_DIR/rootfs" -xf -
