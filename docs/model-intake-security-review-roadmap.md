@@ -30,12 +30,19 @@ The primary user journey is now deliberately simple: paste one Hugging Face mode
 environment, and select **Start review**. A database-backed controller then resolves and pins the provider
 revision, sizes and queues complete acquisition, binds the completed static evidence to a controlled
 submission, derives the exact loader and fixed embedding-test contract, runs a Firecracker calibration,
-re-runs the same known-answer suite against the observed digest, and freezes the resulting evidence. The
+automatically converts the one supported unsafe `.bin` layout to safetensors when required, strictly rescans
+the converted identity, runs calibration and the same known-answer suite, and freezes the resulting evidence. The
 controller continues when the browser closes or the API restarts. It publishes the scan report, SBOM, AIBOM,
 and normalized JSON/HTML/SARIF corporate report without asking the user to copy scan IDs or deployment-bundle
 fields. Missing signing, Firecracker, evaluation, or approval evidence remains visible as
 `NOT_RUN`/`INCOMPLETE`; automatic mode does not turn unavailable evidence into a pass and cannot create an
 approval, policy exception, policy decision, admission, or promotion.
+
+Finishing the workflow is not displayed as passing the model. Automatic review has a separate technical
+outcome: `PASS`, `REVIEW_REQUIRED`, `INCOMPLETE`, or `BLOCK`. Every non-pass generated evidence record is
+named beside its next action, followed by the remaining publisher, human, production-signer, and deployed
+data-plane controls. A completed workflow may therefore produce a clear `BLOCK`, which is a useful result
+rather than an execution failure.
 
 The advanced phased workflow remains available for custom sources, explicit trust material, controlled
 conversion, generated evaluation, identity-separated approvals, deterministic policy, signing, and
@@ -1810,12 +1817,16 @@ Implemented hardening:
   The host independently proves that every non-weight repository member is byte-identical, recomputes
   custom-code/tokenizer/configuration identities, and exports by the target snapshot digest so identical
   weights from different repositories cannot collide.
-- **Implemented converted-snapshot registration and rescan:** after a verified conversion PASS, the API
+- **Implemented converted-snapshot registration and rescan:** after a signature-verified conversion proves
+  every conversion phase plus exact tensor, numeric, and embedding equivalence, the API
   independently rehashes the exported tree, registers its artifact/snapshot/code/tokenizer/configuration
   subjects, and reruns the existing strict built-ins plus applicable ModelScan, Fickling, Semgrep, and Trivy
   adapters against that target identity. The resulting exact-bound static evidence is `PASS`, `WARNING`,
-  `FAIL`, or `INCOMPLETE`; high/critical findings remain blocking. Conversion evidence is excluded from the
-  final required-evidence set and a separate safe-loader runtime job is still mandatory.
+  `FAIL`, or `INCOMPLETE`; high/critical findings remain blocking. Network attempts or local-PEM trust keep
+  the conversion receipt non-pass and still block admission, but no longer discard a content-addressed,
+  equivalence-proven target that is needed for subsequent strict rescan/runtime evidence. Conversion evidence
+  is frozen with the target manifest but remains outside the policy's required-evidence set; a separate
+  safe-loader runtime job is still mandatory.
 - **Implemented UI/API/agent conversion handoff:** the refresh response returns the exact converted subjects
   and server-resolved safe-loader profile for the next runtime bundle; the UI seeds them and shows the target
   rescan status, and the bounded planner validates either the source or converted snapshot. Runner submission
@@ -2355,7 +2366,9 @@ Owners must decide and record:
 - [x] All signature, signed-admission, and DSSE tests execute in mandatory CI without module-level skips.
 - [x] Durable UI/API activity and deployment decisions exist.
 - [x] The default UI mode accepts one Hugging Face link and a deployment target, then a durable controller
-  performs every technically automatable step through evidence freeze. Advanced/manual mode retains every
+  performs every technically automatable step through optional controlled conversion, strict target rescan,
+  Firecracker calibration/repeat inference, and evidence freeze. It reports workflow completion separately
+  from the technical `PASS`/`REVIEW_REQUIRED`/`INCOMPLETE`/`BLOCK` outcome. Advanced/manual mode retains every
   source, trust, conversion, approval, policy, and promotion control. Automatic mode has no authority to
   approve, except, sign an admission, or promote a model.
 - [x] The core ModelScan/Semgrep/Fickling/Trivy adapters are pinned, isolated, packaged, functionally

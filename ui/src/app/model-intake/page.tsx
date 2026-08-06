@@ -1436,14 +1436,20 @@ function ModelIntakeSettingsContent() {
           <div className="mt-4 grid gap-3">
             {automaticReviews.map((review) => {
               const terminal = ['technical_review_complete', 'attention_required', 'failed', 'cancelled'].includes(review.state)
-              const successful = review.state === 'technical_review_complete'
+              const workflowComplete = review.state === 'technical_review_complete'
+              const outcome = (review.technical_outcome || '').toUpperCase()
+              const passed = workflowComplete && outcome === 'PASS'
+              const blocked = workflowComplete && outcome === 'BLOCK'
+              const outcomeLabel = workflowComplete
+                ? `Review finished · ${outcome === 'BLOCK' ? 'blocked' : outcome === 'PASS' ? 'technical checks passed' : outcome.toLowerCase().replace(/_/g, ' ') || 'results ready'}`
+                : review.state.replace(/_/g, ' ')
               return (
                 <div key={review.id} className="rounded-lg border border-gray-800 bg-gray-950 p-4">
                   <div className="flex flex-wrap items-start justify-between gap-3">
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
-                        <span className={`rounded px-2 py-1 text-xs font-semibold ${successful ? 'bg-green-950/60 text-green-300' : terminal ? 'bg-yellow-950/60 text-yellow-300' : 'bg-cyan-950/60 text-cyan-300'}`}>
-                          {review.state.replace(/_/g, ' ')}
+                        <span className={`rounded px-2 py-1 text-xs font-semibold ${passed ? 'bg-green-950/60 text-green-300' : blocked ? 'bg-red-950/60 text-red-300' : terminal ? 'bg-yellow-950/60 text-yellow-300' : 'bg-cyan-950/60 text-cyan-300'}`}>
+                          {outcomeLabel}
                         </span>
                         <span className="text-xs text-gray-500">{review.requested_environment}</span>
                       </div>
@@ -1452,8 +1458,14 @@ function ModelIntakeSettingsContent() {
                     </div>
                     <div className="text-right text-sm font-semibold text-white">{review.progress}%</div>
                   </div>
+                  {workflowComplete && (
+                    <div className={`mt-3 rounded border p-3 text-xs ${blocked ? 'border-red-800/60 bg-red-950/20 text-red-200' : passed ? 'border-green-800/60 bg-green-950/20 text-green-200' : 'border-yellow-800/60 bg-yellow-950/20 text-yellow-200'}`}>
+                      <div className="font-semibold">Technical outcome: {outcome || 'RESULTS READY'}</div>
+                      <div className="mt-1 opacity-80">The automated workflow finished. This is technical evidence, not corporate approval; remaining controls are listed below.</div>
+                    </div>
+                  )}
                   <div className="mt-3 h-2 overflow-hidden rounded-full bg-gray-800">
-                    <div className={`h-full ${terminal && !successful ? 'bg-yellow-500' : 'bg-cyan-500'}`} style={{ width: `${review.progress}%` }} />
+                    <div className={`h-full ${blocked ? 'bg-red-500' : terminal && !passed ? 'bg-yellow-500' : passed ? 'bg-green-500' : 'bg-cyan-500'}`} style={{ width: `${review.progress}%` }} />
                   </div>
                   {review.error_json?.message && (
                     <div role="alert" className="mt-3 rounded border border-yellow-800/60 bg-yellow-950/20 p-3 text-xs text-yellow-200">

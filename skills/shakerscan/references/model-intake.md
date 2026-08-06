@@ -104,10 +104,13 @@ curl -s -X POST "$API_BASE/model-intake/automatic-reviews" \
 ```
 
 This queues complete acquisition, repository snapshot, the existing scanner bundle, SBOM/AIBOM generation,
-controlled static-evidence binding, Firecracker calibration and repeat inference when the runner is READY,
-and evidence freeze. It is database-backed and continues if the UI closes or the API restarts. Inspect it at
+controlled static-evidence binding, automatic fixed-profile safetensors conversion plus strict target rescan
+when the source uses the one supported unsafe `.bin` layout, Firecracker calibration and repeat inference,
+and evidence freeze when the runner is READY. It is database-backed and continues if the UI closes or the API restarts. Inspect it at
 `GET /model-intake/automatic-reviews/{id}`; the response names the scan report and JSON/HTML/SARIF technical
-report URLs. Human approvals, publisher trust, production KMS, policy decision, promotion, and corporate
+report URLs. Workflow completion is separate from `technical_outcome`: `PASS`, `REVIEW_REQUIRED`,
+`INCOMPLETE`, or `BLOCK`. Never describe `technical_review_complete` by itself as a model pass. Human
+approvals, publisher trust, production KMS, policy decision, promotion, and corporate
 data-plane validation remain explicit pending controls.
 
 After queueing, report the automatic review ID, scan ID, and `${UI_BASE}/model-intake?automatic_review={id}`,

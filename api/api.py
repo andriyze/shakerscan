@@ -13298,6 +13298,39 @@ async def reply_model_intake_agent_session(
     }
 
 
+def _model_intake_evidence_matches_bundle(
+    evidence_type: str,
+    bindings: dict[str, Any],
+    bundle: dict[str, Any],
+) -> bool:
+    if evidence_type == "static_analysis":
+        return (
+            bindings.get("model_artifact_sha256") == bundle["model_artifact_sha256"]
+            and bindings.get("repository_snapshot_sha256") == bundle["repository_snapshot_sha256"]
+        )
+    if evidence_type == "conversion_equivalence":
+        # The conversion receipt's deployment/profile digests bind the source
+        # conversion job, not the target runtime loader. Its target component
+        # identities and runtime image must match the bundle being frozen.
+        return all((
+            bindings.get("model_artifact_sha256") == bundle["model_artifact_sha256"],
+            bindings.get("repository_snapshot_sha256") == bundle["repository_snapshot_sha256"],
+            bindings.get("custom_code_sha256") == bundle.get("custom_code_sha256"),
+            bindings.get("tokenizer_sha256") == bundle["tokenizer_sha256"],
+            bindings.get("configuration_sha256") == bundle["configuration_sha256"],
+            bindings.get("runtime_image_digest") == bundle["runtime_image_digest"],
+            bool(bindings.get("source_model_artifact_sha256")),
+            bool(bindings.get("source_repository_snapshot_sha256")),
+        ))
+    return (
+        bindings.get("deployment_bundle_sha256") == bundle["bundle_sha256"]
+        and bindings.get("model_artifact_sha256") == bundle["model_artifact_sha256"]
+        and bindings.get("repository_snapshot_sha256") == bundle["repository_snapshot_sha256"]
+        and bindings.get("runtime_image_digest") == bundle["runtime_image_digest"]
+        and bindings.get("loader_profile_sha256") == bundle["loader_profile_sha256"]
+    )
+
+
 @app.post("/model-intake/submissions/{submission_id}/freeze-evidence")
 async def freeze_model_intake_evidence(
     submission_id: str,
@@ -13342,7 +13375,10 @@ async def freeze_model_intake_evidence(
             SELECT DISTINCT ON (evidence_type) *
             FROM model_intake_evidence_records
             WHERE submission_id=$1
-              AND evidence_type IN ('static_analysis','runtime_execution','embedding_evaluation','data_plane_evaluation')
+              AND evidence_type IN (
+                  'static_analysis','conversion_equivalence','runtime_execution',
+                  'embedding_evaluation','data_plane_evaluation'
+              )
               AND (expires_at IS NULL OR expires_at>NOW())
             ORDER BY evidence_type,created_at DESC
             """,
@@ -13357,19 +13393,9 @@ async def freeze_model_intake_evidence(
             # Persist the normalized value into the record so a real database
             # row cannot fail after passing the exact-subject checks.
             record["subject_bindings"] = bindings
-            if record.get("evidence_type") == "static_analysis":
-                matches = (
-                    bindings.get("model_artifact_sha256") == bundle["model_artifact_sha256"]
-                    and bindings.get("repository_snapshot_sha256") == bundle["repository_snapshot_sha256"]
-                )
-            else:
-                matches = (
-                    bindings.get("deployment_bundle_sha256") == bundle["bundle_sha256"]
-                    and bindings.get("model_artifact_sha256") == bundle["model_artifact_sha256"]
-                    and bindings.get("repository_snapshot_sha256") == bundle["repository_snapshot_sha256"]
-                    and bindings.get("runtime_image_digest") == bundle["runtime_image_digest"]
-                    and bindings.get("loader_profile_sha256") == bundle["loader_profile_sha256"]
-                )
+            matches = _model_intake_evidence_matches_bundle(
+                str(record.get("evidence_type") or ""), bindings, bundle
+            )
             if not matches:
                 raise HTTPException(
                     status_code=409,
@@ -15839,7 +15865,42 @@ async def _advance_model_intake_automatic_review(conn: Any, review: Any) -> None
         await freeze_model_intake_evidence(
             submission_id, ModelEvidenceFreezeRequest(deployment_bundle=bundle), system_request
         )
+        evidence_rows = await conn.fetch(
+            """SELECT DISTINCT ON (evidence_type) evidence_type,status
+               FROM model_intake_evidence_records
+               WHERE submission_id=$1
+                 AND evidence_type IN (
+                     'static_analysis','conversion_equivalence','runtime_execution',
+                     'embedding_evaluation','data_plane_evaluation'
+                 )
+               ORDER BY evidence_type,created_at DESC""",
+            uuid.UUID(submission_id),
+        )
+        evidence_status = {
+            str(item["evidence_type"]): str(item["status"]).upper()
+            for item in evidence_rows
+        }
+        observed = set(evidence_status.values())
+        if observed.intersection({"FAIL", "CRASHED"}):
+            technical_outcome = "BLOCK"
+        elif observed.intersection({"INCOMPLETE", "UNSUPPORTED", "TIMEOUT"}):
+            technical_outcome = "INCOMPLETE"
+        elif "WARNING" in observed:
+            technical_outcome = "REVIEW_REQUIRED"
+        else:
+            technical_outcome = "PASS"
         pending = [
+            {
+                "control": evidence_type,
+                "status": status,
+                "action": (
+                    "Review this generated evidence and its detailed findings. "
+                    "A non-PASS technical control cannot be treated as approval."
+                ),
+            }
+            for evidence_type, status in sorted(evidence_status.items())
+            if status != "PASS"
+        ] + [
             {"control": "publisher_trust", "status": "PENDING", "action": "Verify publisher signature or attestation against an approved trust anchor."},
             {"control": "human_approvals", "status": "PENDING", "action": "Complete the required security, ML platform, legal, privacy, and risk reviews."},
             {"control": "production_signer", "status": "PENDING", "action": "Use KMS-backed runner and admission signers before production promotion."},
@@ -15848,7 +15909,7 @@ async def _advance_model_intake_automatic_review(conn: Any, review: Any) -> None
         await _update_model_intake_automatic_review(
             conn, review, state="technical_review_complete", current_step="review_results",
             progress=100, event="technical_evidence_frozen",
-            technical_outcome="TECHNICAL_REVIEW_COMPLETE", pending_controls=pending,
+            technical_outcome=technical_outcome, pending_controls=pending,
         )
 
 

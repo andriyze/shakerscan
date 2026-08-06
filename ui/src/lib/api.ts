@@ -1398,6 +1398,7 @@ export interface ModelIntakeAutomaticReview {
   id: string
   scan_id: string
   submission_id?: string | null
+  conversion_job_id?: string | null
   calibration_job_id?: string | null
   runtime_job_id?: string | null
   source_kind: ModelIntakePlatform

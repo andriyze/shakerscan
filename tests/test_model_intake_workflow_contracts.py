@@ -832,6 +832,37 @@ def test_failed_security_receipt_can_register_proven_equivalent_conversion_outpu
     assert api._model_intake_conversion_output_usable(payload) is False
 
 
+def test_conversion_evidence_freeze_binds_target_identity_not_source_loader():
+    bundle = {
+        "bundle_sha256": "0" * 64,
+        "model_artifact_sha256": "a" * 64,
+        "repository_snapshot_sha256": "b" * 64,
+        "custom_code_sha256": None,
+        "tokenizer_sha256": "c" * 64,
+        "configuration_sha256": "d" * 64,
+        "runtime_image_digest": "sha256:" + "e" * 64,
+        "loader_profile_sha256": "f" * 64,
+    }
+    conversion_bindings = {
+        **{key: bundle[key] for key in (
+            "model_artifact_sha256", "repository_snapshot_sha256", "custom_code_sha256",
+            "tokenizer_sha256", "configuration_sha256", "runtime_image_digest",
+        )},
+        "deployment_bundle_sha256": "1" * 64,
+        "loader_profile_sha256": "2" * 64,
+        "source_model_artifact_sha256": "3" * 64,
+        "source_repository_snapshot_sha256": "4" * 64,
+    }
+
+    assert api._model_intake_evidence_matches_bundle(
+        "conversion_equivalence", conversion_bindings, bundle
+    ) is True
+    conversion_bindings["model_artifact_sha256"] = "9" * 64
+    assert api._model_intake_evidence_matches_bundle(
+        "conversion_equivalence", conversion_bindings, bundle
+    ) is False
+
+
 def test_converted_snapshot_materialization_rehashes_every_member_and_derives_components(monkeypatch, tmp_path):
     monkeypatch.setattr(api, "RESULTS_DIR", tmp_path)
     monkeypatch.setenv("MODEL_INTAKE_RUNNER_HOST_RESULTS_ROOT", "/host/results")
