@@ -520,7 +520,7 @@ test('both bill-of-materials standards are offered', () => {
   assert.match(report, /download\('spdx'\)/)
 })
 
-test('a Model Intake scan opens on the executive report, not generic scan chrome', () => {
+test('a Model Intake scan distinguishes static inspection from the end-to-end review', () => {
   const report = readFileSync(path.join(root, 'src/components/ReportView.tsx'), 'utf8')
   assert.match(scanDetail, /if \(isModelIntake\)/)
   assert.match(scanDetail, /PageHeader title="Model Intake report"/)
@@ -530,7 +530,17 @@ test('a Model Intake scan opens on the executive report, not generic scan chrome
   assert.match(report, /order-first bg-gray-800\/50/)
   assert.match(report, /Technical evidence coverage/)
   assert.match(report, /Deployment follow-up is shown separately/)
+  assert.match(report, /Static acquisition and scanner stage/)
+  assert.match(report, /It does not contain the later Firecracker result/)
+  assert.match(report, /modelIntakeCorporateUse && !modelIntakeIsPreflight/)
+  assert.match(report, /modelIntakeDecision && !modelIntakeIsPreflight/)
   assert.doesNotMatch(report, /What the review established/)
+})
+
+test('automatic review history stays compact and names the static stage accurately', () => {
+  assert.match(page, /slice\(0, showAllAutomaticReviews \? automaticReviews\.length : 5\)/)
+  assert.match(page, /Show \$\{automaticReviews\.length - 5\} older reviews/)
+  assert.match(page, /Static scan details/)
 })
 
 test('a first Firecracker run is reachable without inventing anything', () => {

@@ -63,6 +63,16 @@ def _license_terms(model_intake: dict[str, Any]) -> list[dict[str, Any]]:
     return [item for item in terms if isinstance(item, dict)] if isinstance(terms, list) else []
 
 
+def _display_license_term(value: Any) -> str:
+    text = str(value or "").strip()
+    canonical = {
+        "mit": "MIT", "apache-2.0": "Apache-2.0", "bsd-2-clause": "BSD-2-Clause",
+        "bsd-3-clause": "BSD-3-Clause", "mpl-2.0": "MPL-2.0", "gpl-2.0": "GPL-2.0",
+        "gpl-3.0": "GPL-3.0", "lgpl-2.1": "LGPL-2.1", "lgpl-3.0": "LGPL-3.0",
+    }
+    return canonical.get(text.casefold(), text)
+
+
 def model_intake_license_display(compliance: dict[str, Any]) -> dict[str, Any]:
     """Return stable, plain-language licensing status for UI and exports.
 
@@ -74,7 +84,7 @@ def model_intake_license_display(compliance: dict[str, Any]) -> dict[str, Any]:
     missing = [str(item) for item in compliance.get("missing_evidence") or [] if item]
     terms = [item for item in compliance.get("terms") or [] if isinstance(item, dict)]
     declared = sorted({
-        str(item.get("declared") or "").strip()
+        _display_license_term(item.get("declared"))
         for item in terms if str(item.get("declared") or "").strip()
     })
     term_label = ", ".join(declared) if declared else "No license declaration"
@@ -473,7 +483,7 @@ def build_model_intake_license_bom(scan_result: Any, *, scan_id: str = "") -> di
         key = (
             str(item.get("scope") or "unknown"),
             str(item.get("component") or item.get("path") or summary.get("artifact_name") or "model"),
-            str(item.get("declared") or "UNKNOWN"),
+            _display_license_term(item.get("declared")) or "UNKNOWN",
             str(item.get("source") or "unknown"),
         )
         if key in seen:
@@ -600,7 +610,11 @@ def render_third_party_notices_draft(scan_result: Any, *, scan_id: str = "") -> 
     reasons = bom.get("unresolved_items") if isinstance(bom.get("unresolved_items"), list) else []
     output.extend(f"- {line(item.get('summary'))}" for item in reasons if isinstance(item, dict))
     if not reasons:
-        output.append("- No policy issue was detected in the available terms.")
+        output.append(
+            "- Publisher terms were found; missing source material is listed below."
+            if bom.get("missing_evidence")
+            else "- No policy issue was detected in the available terms."
+        )
     output.extend(["", "EVIDENCE SEARCH PERFORMED"])
     for item in bom.get("evidence_search") or []:
         output.append(

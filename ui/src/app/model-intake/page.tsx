@@ -440,6 +440,7 @@ function ModelIntakeSettingsContent() {
   const [workflowMode, setWorkflowMode] = useState<'automatic' | 'advanced'>('automatic')
   const [automaticReviews, setAutomaticReviews] = useState<ModelIntakeAutomaticReview[]>([])
   const [automaticReviewsError, setAutomaticReviewsError] = useState<string | null>(null)
+  const [showAllAutomaticReviews, setShowAllAutomaticReviews] = useState(false)
   const [automaticDownload, setAutomaticDownload] = useState('')
   const [checkCatalogOpen, setCheckCatalogOpen] = useState(false)
   const [checkCatalog, setCheckCatalog] = useState<ModelIntakeCheckCatalog | null>(null)
@@ -1557,7 +1558,7 @@ function ModelIntakeSettingsContent() {
           </div>
         ) : (
           <div className="mt-4 grid gap-3">
-            {automaticReviews.map((review) => {
+            {automaticReviews.slice(0, showAllAutomaticReviews ? automaticReviews.length : 5).map((review) => {
               const terminal = ['technical_review_complete', 'attention_required', 'failed', 'cancelled'].includes(review.state)
               const displayedProgress = review.effective_progress ?? review.progress
               const displayedStep = review.effective_current_step || review.current_step
@@ -1655,7 +1656,7 @@ function ModelIntakeSettingsContent() {
                     </details>
                   )}
                   <div className="mt-3 flex flex-wrap gap-2">
-                    <Link href={`/scans/${review.scan_id}`} className="rounded border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800">Technical scan</Link>
+                    <Link href={`/scans/${review.scan_id}`} className="rounded border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800">Static scan details</Link>
                     {review.submission_id && (['cyclonedx', 'spdx', 'aibom'] as const).map((format) => (
                       <button
                         key={format}
@@ -1695,6 +1696,15 @@ function ModelIntakeSettingsContent() {
                 </div>
               )
             })}
+            {automaticReviews.length > 5 && (
+              <button
+                type="button"
+                onClick={() => setShowAllAutomaticReviews((current) => !current)}
+                className="rounded border border-gray-700 px-3 py-2 text-xs text-gray-300 hover:bg-gray-800"
+              >
+                {showAllAutomaticReviews ? 'Hide older reviews' : `Show ${automaticReviews.length - 5} older reviews`}
+              </button>
+            )}
           </div>
         )}
       </Card>

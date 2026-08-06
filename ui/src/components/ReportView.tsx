@@ -683,6 +683,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   const modelIntakeSupplyChain = model_intake?.supply_chain || null
   const modelIntakeEvaluation = model_intake?.generated_evaluation || null
   const modelIntakeCorporateUse = model_intake?.corporate_use || null
+  const modelIntakeIsPreflight = String(modelIntakeSummary?.intake_mode || modelIntakeCorporateUse?.admission_mode || '').toLowerCase() === 'preflight'
   const modelIntakeActivity = Array.isArray(model_intake?.activity) ? model_intake.activity : []
   const modelIntakeScannerResults = Array.isArray(model_intake?.generated_evidence?.results)
     ? model_intake.generated_evidence.results
@@ -703,32 +704,29 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       coverage: item?.coverage || {},
       detail: item?.execution?.error || item?.summary?.error || null,
     })),
-    {
+    ...(!modelIntakeIsPreflight ? [{
       name: 'dynamic sandbox',
       status: model_intake?.dynamic_sandbox?.status || 'NOT_RUN',
       coverage: {},
       detail: model_intake?.dynamic_sandbox?.error || null,
-    },
-    {
+    }, {
       name: 'provenance attestation',
       status: model_intake?.attestation?.status || 'NOT_RUN',
       coverage: {},
       detail: Array.isArray(model_intake?.attestation?.blockers) ? model_intake.attestation.blockers.join(', ') : model_intake?.attestation?.error || null,
-    },
-    {
+    }, {
       name: 'embedding evaluation',
       status: modelIntakeEvaluation?.status || 'NOT_RUN',
       coverage: modelIntakeEvaluation?.metrics || {},
       detail: Array.isArray(modelIntakeEvaluation?.blockers) && modelIntakeEvaluation.blockers.length
         ? modelIntakeEvaluation.blockers.map((item: any) => item?.code).filter(Boolean).slice(0, 3).join(', ')
         : null,
-    },
-    {
+    }, {
       name: 'signed admission',
       status: model_intake?.admission?.status || 'NOT_RUN',
       coverage: {},
       detail: model_intake?.admission?.error || null,
-    },
+    }] : []),
   ]
   const modelIntakeControlGroups = modelIntakeExecutionControls.reduce(
     (groups: Record<string, any[]>, control: any) => {
@@ -1629,7 +1627,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
         <div className="order-first bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
           <div className="flex flex-wrap items-start justify-between gap-4 mb-5">
             <div>
-              <div className="text-xs font-semibold uppercase tracking-wide text-cyan-300">Model Intake report</div>
+              <div className="text-xs font-semibold uppercase tracking-wide text-cyan-300">{modelIntakeIsPreflight ? 'Static inspection' : 'Model Intake report'}</div>
               <h2 className="mt-1 text-2xl font-bold break-words">{modelIntakeArtifactLabel}</h2>
               <p className="mt-1 text-sm text-gray-400">Reviewed {new Date(scan.created_at).toLocaleString()}</p>
               {fullArtifactUrl && (
@@ -1657,7 +1655,17 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
             </div>
           </div>
 
-          {modelIntakeCorporateUse && (
+          {modelIntakeIsPreflight && (
+            <div className="mb-5 rounded-lg border border-cyan-700/50 bg-cyan-950/20 p-4 text-cyan-50">
+              <div className="text-sm font-semibold">Static acquisition and scanner stage</div>
+              <p className="mt-1 max-w-4xl text-sm text-cyan-100/80">
+                This page records the pinned revision, complete acquisition, hashes, format checks, repository scanners, and inventory artifacts. It does not contain the later Firecracker result. If this scan was started by Automatic Review, return there for the end-to-end technical result.
+              </p>
+              <Link href="/model-intake" className="mt-3 inline-flex rounded border border-cyan-600/60 px-3 py-1.5 text-xs font-medium text-cyan-200 hover:bg-cyan-900/30">Open Automatic Review</Link>
+            </div>
+          )}
+
+          {modelIntakeCorporateUse && !modelIntakeIsPreflight && (
             <div className={`mb-5 rounded-lg border p-4 ${
               modelIntakeCorporateUse.verdict === 'APPROVED'
                 ? 'border-green-500/40 bg-green-950/30 text-green-100'
@@ -1708,7 +1716,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
             </div>
           )}
 
-          {modelIntakeDecision && (
+          {modelIntakeDecision && !modelIntakeIsPreflight && (
             <div className={`mb-5 rounded-lg border p-4 ${modelIntakeDecisionClass}`}>
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
@@ -1759,7 +1767,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
             )}
           </div>
 
-          {modelIntakeRequiredActions.length > 0 && (
+          {modelIntakeRequiredActions.length > 0 && !modelIntakeIsPreflight && (
             <div className="mb-5 rounded border border-yellow-600/40 bg-yellow-950/20 p-4">
               <div className="text-sm font-semibold text-yellow-100">What to do next</div>
               <ol className="mt-2 list-decimal space-y-1 pl-5 text-sm text-yellow-50/90">
