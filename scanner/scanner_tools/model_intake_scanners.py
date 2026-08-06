@@ -358,9 +358,22 @@ def _output_digest(paths: list[Path]) -> str:
 
 
 def _tool_version(executable: str, args: tuple[str, ...], env: dict[str, str], cwd: Path) -> str | None:
+    command = _bounded_command(executable, args)
+    resolved = Path(executable).resolve()
+    # Semgrep's full CLI startup can exceed the bounded five-second version
+    # probe even though the scanner itself is healthy. Read the installed
+    # distribution metadata through the same pinned virtualenv instead; this
+    # remains sandboxed and returns the exact packaged version quickly.
+    if resolved.name == "semgrep":
+        venv_python = resolved.parent / "python"
+        if venv_python.is_file():
+            command = _bounded_command(
+                str(venv_python),
+                ("-c", "from importlib.metadata import version; print(version('semgrep'))"),
+            )
     try:
         completed = subprocess.run(
-            _bounded_command(executable, args),
+            command,
             cwd=cwd,
             env=env,
             stdin=subprocess.DEVNULL,
@@ -700,6 +713,12 @@ def _scanner_material_state(spec: ScannerSpec, *, now: datetime | None = None) -
 def run_external_scanner(spec: ScannerSpec, subject_path: Path, subject: dict[str, Any]) -> dict[str, Any]:
     started_at = _utc_iso()
     materials = _scanner_material_state(spec)
+    rules_material = materials.get("rules") if isinstance(materials.get("rules"), dict) else {}
+    database_material = materials.get("database") if isinstance(materials.get("database"), dict) else {}
+    material_execution = {
+        "rules_sha256": rules_material.get("sha256"),
+        "database_sha256": database_material.get("sha256"),
+    }
     if not materials["ready"]:
         return _scanner_result(
             name=spec.name,
@@ -712,6 +731,7 @@ def run_external_scanner(spec: ScannerSpec, subject_path: Path, subject: dict[st
                 "error": "scanner_material_missing_or_stale",
                 "required": spec.required,
                 "reassessment_trigger": "scanner_data_stale",
+                **material_execution,
             },
             summary={"materials": materials},
         )
@@ -724,7 +744,10 @@ def run_external_scanner(spec: ScannerSpec, subject_path: Path, subject: dict[st
             subject=subject,
             started_at=started_at,
             finished_at=_utc_iso(),
-            execution={"error": "executable_not_installed", "required": spec.required},
+            execution={
+                "error": "executable_not_installed", "required": spec.required,
+                **material_execution,
+            },
         )
     with tempfile.TemporaryDirectory(prefix=f"model-intake-{spec.name}-") as scratch_raw:
         scratch = Path(scratch_raw)
@@ -772,7 +795,10 @@ def run_external_scanner(spec: ScannerSpec, subject_path: Path, subject: dict[st
                 subject=subject,
                 started_at=started_at,
                 finished_at=_utc_iso(),
-                execution={"timeout_seconds": spec.timeout_seconds, "required": spec.required},
+                execution={
+                    "timeout_seconds": spec.timeout_seconds, "required": spec.required,
+                    **material_execution,
+                },
             )
         except OSError as exc:
             return _scanner_result(
@@ -782,7 +808,10 @@ def run_external_scanner(spec: ScannerSpec, subject_path: Path, subject: dict[st
                 subject=subject,
                 started_at=started_at,
                 finished_at=_utc_iso(),
-                execution={"error": f"{type(exc).__name__}: {exc}", "required": spec.required},
+                execution={
+                    "error": f"{type(exc).__name__}: {exc}", "required": spec.required,
+                    **material_execution,
+                },
             )
         stdout, stdout_truncated = _read_bounded(stdout_path)
         stderr, stderr_truncated = _read_bounded(stderr_path)
@@ -845,6 +874,7 @@ def run_external_scanner(spec: ScannerSpec, subject_path: Path, subject: dict[st
                 "adapter_kind": spec.adapter_kind,
                 "applicability": spec.applicability,
                 "target_scope": spec.target_scope,
+                **material_execution,
             },
             summary=summary,
         )

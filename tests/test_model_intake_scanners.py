@@ -8,6 +8,33 @@ def _subject(digest="a" * 64, kind="model_artifact"):
     return {"kind": kind, "digest": f"sha256:{digest}", "complete": True}
 
 
+def test_semgrep_version_uses_pinned_environment_metadata(monkeypatch, tmp_path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    semgrep = bin_dir / "semgrep"
+    python = bin_dir / "python"
+    semgrep.write_text("fixture")
+    python.write_text("fixture")
+    captured = {}
+
+    class Completed:
+        stdout = "1.172.0\n"
+        stderr = ""
+
+    def fake_run(argv, **_kwargs):
+        captured["argv"] = list(argv)
+        return Completed()
+
+    monkeypatch.setattr(scanners, "_bounded_command", lambda executable, args: [executable, *args])
+    monkeypatch.setattr(scanners.subprocess, "run", fake_run)
+
+    version = scanners._tool_version(str(semgrep), ("--version",), {}, tmp_path)
+
+    assert version == "1.172.0"
+    assert captured["argv"][0] == str(python)
+    assert "importlib.metadata" in captured["argv"][2]
+
+
 def test_missing_required_external_scanner_is_unsupported_and_fail_closed(monkeypatch, tmp_path):
     monkeypatch.setattr(scanners.shutil, "which", lambda executable: None)
     spec = scanners.ScannerSpec("required-tool", "missing", ("{subject}",), required=True)
@@ -28,7 +55,11 @@ def test_trivy_full_license_mode_is_limited_to_complete_repository(monkeypatch, 
     (snapshot / "LICENSE").write_text("fixture")
     captured: list[list[str]] = []
 
-    monkeypatch.setattr(scanners, "_scanner_material_state", lambda _spec: {"ready": True})
+    monkeypatch.setattr(scanners, "_scanner_material_state", lambda _spec: {
+        "ready": True,
+        "rules": None,
+        "database": {"sha256": "d" * 64},
+    })
     monkeypatch.setattr(scanners.shutil, "which", lambda _name: "/usr/bin/trivy")
     monkeypatch.setattr(scanners, "_tool_version", lambda *_args: "test")
     monkeypatch.setattr(scanners, "_prepare_unprivileged_paths", lambda *_args: None)
@@ -56,6 +87,7 @@ def test_trivy_full_license_mode_is_limited_to_complete_repository(monkeypatch, 
     assert "--license-full" not in incomplete["execution"]["argv_contract"]
     assert complete["execution"]["license_scan_mode"] == "full_repository"
     assert incomplete["execution"]["license_scan_mode"] == "package_metadata"
+    assert complete["execution"]["database_sha256"] == "d" * 64
 
 
 def test_unprivileged_selected_artifact_can_traverse_disposable_snapshot(monkeypatch, tmp_path):
