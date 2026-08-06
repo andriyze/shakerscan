@@ -191,6 +191,7 @@ ARG TARGETARCH
 ARG TRIVY_VERSION=0.73.0
 ARG TRIVY_AMD64_SHA256=2edd39da482bb4e9831962487b68f68e3928ec3137794757f54d00383d79547b
 ARG TRIVY_ARM64_SHA256=13833d97e8a1a5367471c372a173180157f593bece570e20d5d925fef552f5dd
+ARG TRIVY_DOWNLOAD_ATTEMPTS=4
 RUN set -eu; \
     case "${TARGETARCH}" in \
       amd64) trivy_arch="64bit"; trivy_sha="${TRIVY_AMD64_SHA256}" ;; \
@@ -198,15 +199,30 @@ RUN set -eu; \
       *) echo "Unsupported Trivy architecture: ${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
     trivy_archive="trivy_${TRIVY_VERSION}_Linux-${trivy_arch}.tar.gz"; \
-    curl -fsSL "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/${trivy_archive}" -o "/tmp/${trivy_archive}"; \
+    curl --retry 4 --retry-all-errors --retry-delay 3 --connect-timeout 20 -fsSL \
+      "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/${trivy_archive}" \
+      -o "/tmp/${trivy_archive}"; \
     echo "${trivy_sha}  /tmp/${trivy_archive}" | sha256sum -c -; \
     tar -xzf "/tmp/${trivy_archive}" -C /opt/tools trivy; \
     rm "/tmp/${trivy_archive}"; \
     chmod 755 /opt/tools/trivy; \
     mkdir -p /opt/trivy-cache; \
-    /opt/tools/trivy image --download-db-only --cache-dir /opt/trivy-cache; \
-    /opt/tools/trivy fs --scanners misconfig --format json \
-      --cache-dir /opt/trivy-cache /opt/model-intake-locks >/dev/null
+    download_trivy_data() { \
+      /opt/tools/trivy image --download-db-only --cache-dir /opt/trivy-cache && \
+      /opt/tools/trivy fs --scanners misconfig --format json \
+        --cache-dir /opt/trivy-cache /opt/model-intake-locks >/dev/null; \
+    }; \
+    attempt=1; \
+    until download_trivy_data; do \
+      if [ "$attempt" -ge "${TRIVY_DOWNLOAD_ATTEMPTS}" ]; then \
+        echo "Trivy database/check bundle download failed after ${TRIVY_DOWNLOAD_ATTEMPTS} attempts" >&2; \
+        exit 1; \
+      fi; \
+      delay=$((attempt * 5)); \
+      echo "Trivy data download failed (attempt ${attempt}/${TRIVY_DOWNLOAD_ATTEMPTS}); retrying in ${delay}s" >&2; \
+      sleep "$delay"; \
+      attempt=$((attempt + 1)); \
+    done
 
 # Playwright browser path
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright

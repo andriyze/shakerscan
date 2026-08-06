@@ -445,6 +445,14 @@ def test_go_tool_builder_retries_transient_network_failures_with_buildkit_caches
     assert "Go module download failed" in dockerfile
 
 
+def test_trivy_bundle_build_retries_transient_registry_failures():
+    dockerfile = (ROOT / "scanner" / "Dockerfile").read_text()
+    assert "ARG TRIVY_DOWNLOAD_ATTEMPTS=4" in dockerfile
+    assert "curl --retry 4 --retry-all-errors" in dockerfile
+    assert "until download_trivy_data" in dockerfile
+    assert "Trivy data download failed" in dockerfile
+
+
 def test_scanner_image_builds_network_tools_above_reviewed_security_floors():
     dockerfile = (ROOT / "scanner" / "Dockerfile").read_text()
     requirements = (ROOT / "scanner" / "requirements.txt").read_text()
