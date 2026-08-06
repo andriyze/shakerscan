@@ -9,6 +9,7 @@ __pycache__
 results
 test-results
 pic
+.shakerscan-model-intake-runner-stage
 
 ui/.next
 ui/node_modules

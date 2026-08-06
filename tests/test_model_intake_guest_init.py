@@ -42,3 +42,9 @@ def test_guest_rootfs_builder_needs_only_standard_docker_build() -> None:
 
     assert 'docker build --platform "$PLATFORM"' in script
     assert "docker buildx" not in script
+
+
+def test_guest_build_context_excludes_root_owned_runner_staging() -> None:
+    ignored = (ROOT / ".dockerignore").read_text().splitlines()
+
+    assert ".shakerscan-model-intake-runner-stage" in ignored
