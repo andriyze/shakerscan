@@ -264,6 +264,7 @@ def test_missing_license_source_text_is_a_review_item_even_when_terms_pass_polic
     assert control["status"] == "REVIEW"
     assert "authoritative license or NOTICE source text" in control["detail"]
     assert "preserve it with the pinned revision" in control["remediation"]
+    assert "license/NOTICE source file is missing" not in _control(report, "static_analysis")["detail"]
 
 
 def test_missing_runtime_and_required_conversion_are_plainly_incomplete():

@@ -1135,13 +1135,17 @@ def build_model_intake_report(
         for finding in item.get("findings") or []
         if isinstance(finding, dict)
     ]
+    static_security_findings = [
+        finding for finding in attention_findings
+        if finding.get("id") != "license_file_missing"
+    ]
     static_control = next((item for item in controls if item.get("id") == "static_analysis"), None)
-    if static_control and attention_findings:
+    if static_control and static_security_findings:
         labels: list[str] = []
         remediation_steps: list[str] = []
         seen_locations: set[str] = set()
         for finding in sorted(
-            attention_findings,
+            static_security_findings,
             key=lambda item: (
                 bool(str(item.get("message") or "").strip()),
                 len(str(item.get("message") or item.get("call") or item.get("id") or "")),
