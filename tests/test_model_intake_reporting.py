@@ -288,6 +288,54 @@ def test_automatic_report_explains_static_only_unsupported_runtime_profile():
     assert any(item["control_id"] == "firecracker_runtime" for item in report["executive_summary"]["required_actions"])
 
 
+def test_automatic_report_keeps_deployment_follow_up_out_of_technical_result():
+    rows = _rows(active_admission=False)
+    rows["evidence"] = [
+        item for item in rows["evidence"]
+        if item["evidence_type"] != "data_plane_evaluation"
+    ]
+    report = apply_automatic_review_context(
+        _report(rows),
+        {
+            "id": "review-technical",
+            "state": "technical_review_complete",
+            "current_step": "review_results",
+            "progress": 100,
+            "technical_outcome": "REVIEW_REQUIRED",
+            "pending_controls": [{"control": "static_analysis", "status": "WARNING"}],
+            "timeline_json": [],
+        },
+    )
+
+    assert report["outcome"] == "REVIEW"
+    assert report["plain_language"].startswith("Technical checks completed")
+    assert report["presentation"]["headline"] == "Review findings before use"
+    assert report["presentation"]["decision"] == "REVIEW_REQUIRED"
+    assert report["executive_summary"]["deployable_under_configured_shakerscan_policy"] is False
+    assert report["executive_summary"]["coverage"]["total_controls"] == 10
+    assert all(
+        item["control_id"] not in {"data_plane_evaluation", "human_approvals", "deterministic_policy", "signed_admission"}
+        for item in report["executive_summary"]["key_results"]
+    )
+    assert all(
+        item["control_id"] not in {"data_plane_evaluation", "human_approvals", "deterministic_policy", "signed_admission"}
+        for item in report["executive_summary"]["required_actions"]
+    )
+    assert len(report["detailed_review"]["control_matrix"]) == 10
+    sarif = model_intake_report_to_sarif(report)
+    assert all(
+        result["ruleId"] not in {
+            "model-intake/data_plane_evaluation", "model-intake/human_approvals",
+            "model-intake/deterministic_policy", "model-intake/signed_admission",
+        }
+        for result in sarif["runs"][0]["results"]
+    )
+    html = render_model_intake_html(report)
+    assert "Technical checks completed" in html
+    assert "Organization checklist" in html
+    assert "No data plane evaluation evidence is attached" not in html.split("Detailed technical review", 1)[1]
+
+
 def test_network_attempt_is_a_blocking_control_failure():
     rows = _rows(active_admission=False)
     telemetry = rows["runner_jobs"][0]["result_json"]["payload"]["observations"]["network_telemetry"]
@@ -412,7 +460,8 @@ def test_html_is_escaped_printable_and_sarif_preserves_normalized_failures():
 
     assert "Print / Save PDF" in rendered
     assert "Model Intake review" in rendered
-    assert "Deployment and organization follow-up" in rendered
+    assert "Deployment follow-up" in rendered
+    assert "Organization checklist" in rendered
     assert "Detailed technical review" in rendered
     assert "NOT_DETERMINED_BY_SHAKERSCAN" not in rendered
     assert "Full corporate approval" not in rendered

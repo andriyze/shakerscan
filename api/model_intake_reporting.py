@@ -694,10 +694,12 @@ def _presentation_summary(
         if str(item.get("id") or "") in DEPLOYMENT_FOLLOW_UP_CONTROL_IDS
     ]
     headline = {
+        "PASS": "Technical checks passed",
         "ALLOW": "Configured checks passed",
         "BLOCK": "Do not use this revision yet",
         "INCOMPLETE": "Review could not finish",
         "REVIEW": "Review findings before use",
+        "REVIEW_REQUIRED": "Review findings before use",
     }.get(str(outcome or "").upper(), "Review results available")
     if bool(license_compliance.get("legal_review_required")):
         license_note = (
@@ -736,6 +738,18 @@ def _presentation_summary(
             "organization_checklist_items": external_requirement_count,
         },
     }
+
+
+def _license_control_detail(license_compliance: dict[str, Any]) -> str:
+    """Translate policy vocabulary into a concise engineer-facing result."""
+    policy_status = str(license_compliance.get("policy_status") or "").upper()
+    if policy_status == "PASS":
+        return "Declared and detected license evidence did not trigger the configured license policy."
+    if policy_status == "BLOCK":
+        return "The configured license policy rejected one or more detected terms."
+    if policy_status == "REVIEW_REQUIRED":
+        return "One or more detected terms need a licensing review; see the License BOM for exact components and reasons."
+    return "License evidence was not complete enough to evaluate the configured policy."
 
 
 def _presentation_control(item: dict[str, Any]) -> dict[str, Any]:
@@ -809,7 +823,7 @@ def build_model_intake_report(
             else "REVIEW" if license_policy_status == "REVIEW_REQUIRED"
             else "INCOMPLETE"
         ),
-        "detail": str(license_compliance.get("outcome") or "Reconciled license evidence is unavailable."),
+        "detail": _license_control_detail(license_compliance),
         "coverage": {
             "policy_version": license_compliance.get("policy_version"),
             "classification_counts": license_compliance.get("classification_counts") or {},
@@ -1200,22 +1214,51 @@ def apply_automatic_review_context(
                 "isolated runtime qualification for the exact model format."
             )
 
+    technical_controls = [
+        item for item in controls
+        if str(item.get("id") or "") not in DEPLOYMENT_FOLLOW_UP_CONTROL_IDS
+    ]
     counts = {
-        status: sum(item.get("status") == status for item in controls)
+        status: sum(item.get("status") == status for item in technical_controls)
         for status in sorted(CONTROL_STATUSES)
     }
-    performed = [item for item in controls if item.get("status") in {"PASS", "FAIL", "REVIEW"}]
+    performed = [item for item in technical_controls if item.get("status") in {"PASS", "FAIL", "REVIEW"}]
     not_completed = [
-        item for item in controls
+        item for item in technical_controls
         if item.get("status") in {"ERROR", "INCOMPLETE", "NOT_RUN"}
     ]
-    not_applicable = [item for item in controls if item.get("status") == "NOT_APPLICABLE"]
-    actions = _required_actions(controls)
+    not_applicable = [item for item in technical_controls if item.get("status") == "NOT_APPLICABLE"]
+    actions = _required_actions(technical_controls)
+    automatic_outcome = str(automatic.get("technical_outcome") or "").upper()
+    normalized_outcome = {
+        "PASS": "ALLOW",
+        "REVIEW_REQUIRED": "REVIEW",
+        "REVIEW": "REVIEW",
+        "BLOCK": "BLOCK",
+        "INCOMPLETE": "INCOMPLETE",
+    }.get(automatic_outcome, str(report.get("outcome") or "INCOMPLETE"))
+    attention_count = sum(
+        item.get("status") in {"FAIL", "ERROR", "INCOMPLETE", "NOT_RUN", "REVIEW"}
+        for item in technical_controls
+    )
+    technical_statement = {
+        "PASS": "All selected technical checks completed without blocking findings.",
+        "REVIEW_REQUIRED": f"Technical checks completed; {attention_count} item(s) need review before use.",
+        "REVIEW": f"Technical checks completed; {attention_count} item(s) need review before use.",
+        "BLOCK": "One or more technical checks found a condition that blocks use of this revision.",
+        "INCOMPLETE": "The technical review did not collect all required evidence.",
+    }.get(automatic_outcome, str(report.get("plain_language") or "Technical review results are available."))
+    report["outcome"] = normalized_outcome
+    report["plain_language"] = technical_statement
     executive = _json(report.get("executive_summary"), {})
     executive.update({
-        "shakerscan_decision": report.get("outcome"),
-        "deployable_under_configured_shakerscan_policy": report.get("outcome") == "ALLOW",
-        "decision_statement": report.get("plain_language"),
+        "shakerscan_decision": normalized_outcome,
+        "deployable_under_configured_shakerscan_policy": False,
+        "decision_statement": technical_statement,
+        "authorization_scope": (
+            "Technical review of the exact pinned revision. This is not a deployment approval; "
+            "deployment follow-up is listed separately."
+        ),
         "automatic_technical_review": {
             "state": automatic.get("state"),
             "current_step": current_step,
@@ -1224,7 +1267,7 @@ def apply_automatic_review_context(
         },
         "coverage": {
             **_json(executive.get("coverage"), {}),
-            "total_controls": len(controls),
+            "total_controls": len(technical_controls),
             "performed": len(performed),
             "passed": counts["PASS"],
             "failed": counts["FAIL"],
@@ -1239,7 +1282,7 @@ def apply_automatic_review_context(
                 "status": item.get("status"),
                 "result": item.get("detail"),
             }
-            for item in controls
+            for item in technical_controls
             if item.get("status") in {"FAIL", "ERROR", "INCOMPLETE", "NOT_RUN", "REVIEW"}
         ][:8],
         "required_actions": actions[:8],
@@ -1254,22 +1297,16 @@ def apply_automatic_review_context(
     }
     detail = _json(report.get("detailed_review"), {})
     detail.update({
-        "control_matrix": controls,
+        "control_matrix": technical_controls,
         "shakerscan_check_catalog": _check_catalog_with_evidence(
             controls, _json(detail.get("static_analysis_detail"), {}),
         ),
         "required_actions": actions,
     })
     report["detailed_review"] = detail
-    automatic_outcome = str(automatic.get("technical_outcome") or "").upper()
-    presentation_outcome = (
-        "ALLOW" if automatic_outcome == "PASS"
-        else automatic_outcome if automatic_outcome in {"BLOCK", "INCOMPLETE", "REVIEW"}
-        else str(report.get("outcome") or "")
-    )
     report["presentation"] = _presentation_summary(
         controls,
-        outcome=presentation_outcome,
+        outcome=automatic_outcome or normalized_outcome,
         license_compliance=_json(detail.get("license_compliance"), {}),
         external_requirement_count=len(_json(detail.get("external_approval_requirements"), [])),
     )
@@ -1301,6 +1338,10 @@ def render_model_intake_html(report: dict[str, Any]) -> str:
         ) or f"<tr><td colspan='5'>{esc(empty)}</td></tr>"
 
     controls = report.get("controls", []) if isinstance(report.get("controls"), list) else []
+    technical_controls = (
+        [item for item in controls if str(item.get("id") or "") not in DEPLOYMENT_FOLLOW_UP_CONTROL_IDS]
+        if report.get("automatic_review") else controls
+    )
     verified_rows = control_rows(_json(groups.get("verified"), []), empty="No technical check recorded a passing result.")
     attention_rows = control_rows(_json(groups.get("needs_attention"), []), empty="No technical check needs attention.")
     not_applicable_rows = control_rows(_json(groups.get("not_applicable"), []), empty="No checks were marked not applicable.")
@@ -1311,7 +1352,11 @@ def render_model_intake_html(report: dict[str, Any]) -> str:
         f"<td>{esc(item.get('detail'))}</td><td>{esc(item.get('method'))}</td>"
         f"<td><code>{esc(json.dumps(item.get('coverage') or {}, sort_keys=True, default=str))}</code></td>"
         "</tr>"
-        for item in controls
+        for item in technical_controls
+    )
+    deployment_rows = control_rows(
+        _json(groups.get("deployment_follow_up"), []),
+        empty="No deployment follow-up controls were recorded.",
     )
     external_rows = "".join(
         "<tr>"
@@ -1351,18 +1396,24 @@ th,td{{border:1px solid #ccd2dc;padding:8px;vertical-align:top;text-align:left}}
 <h3>Checks that need attention</h3><table><thead><tr><th>Category</th><th>Control</th><th>Status</th><th>Result</th><th>Next step</th></tr></thead><tbody>{attention_rows}</tbody></table>
 <h3>Verified checks</h3><table><thead><tr><th>Category</th><th>Control</th><th>Status</th><th>Result</th><th>Evidence / next step</th></tr></thead><tbody>{verified_rows}</tbody></table>
 <h3>Checks not applicable</h3><table><thead><tr><th>Category</th><th>Control</th><th>Status</th><th>Result</th><th>Reason/next step</th></tr></thead><tbody>{not_applicable_rows}</tbody></table>
-<h2 class="page-break">Deployment and organization follow-up</h2><p>This appendix records decisions and evidence normally completed around deployment. These items are not scan failures and are intentionally excluded from the technical result counts.</p><table><thead><tr><th>ID</th><th>Category</th><th>Follow-up</th><th>Typical owner</th><th>Expected evidence</th></tr></thead><tbody>{external_rows}</tbody></table>
+<h2 class="page-break">Deployment follow-up</h2><p>These items are not scan failures and are excluded from the technical result above.</p><table><thead><tr><th>Category</th><th>Control</th><th>Status</th><th>Current state</th><th>Next step</th></tr></thead><tbody>{deployment_rows}</tbody></table>
+<details><summary>Organization checklist ({esc(presentation_counts.get('organization_checklist_items'))} items)</summary><p>Use this optional checklist when preparing the model for a specific deployment.</p><table><thead><tr><th>ID</th><th>Category</th><th>Follow-up</th><th>Typical owner</th><th>Expected evidence</th></tr></thead><tbody>{external_rows}</tbody></table></details>
 <h2 class="page-break">Detailed technical review</h2>
 <h3>Control evidence matrix</h3><table><thead><tr><th>Category</th><th>Question</th><th>Status</th><th>Answer</th><th>Method</th><th>Coverage/evidence</th></tr></thead><tbody>{rows}</tbody></table>
 <h2>Firecracker phase timeline</h2><table><thead><tr><th>Operation</th><th>Phase</th><th>Status</th><th>Duration ms</th><th>Detail</th></tr></thead><tbody>{phases}</tbody></table>
-<h2>ShakerScan check catalog</h2><p>Each row states what happened for this submission. Applicability alone is never treated as proof that a check ran.</p><table><thead><tr><th>ID</th><th>Category</th><th>Check</th><th>Result</th><th>Evidence summary</th><th>Implementation</th><th>Applicability</th></tr></thead><tbody>{catalog_rows}</tbody></table>
-<h2>Authority bindings</h2><pre>{esc(json.dumps(report.get('authority_bindings') or {}, indent=2, sort_keys=True, default=str))}</pre>
+<details><summary>Full ShakerScan check catalog</summary><p>Each row states what happened for this submission. Applicability alone is never treated as proof that a check ran.</p><table><thead><tr><th>ID</th><th>Category</th><th>Check</th><th>Result</th><th>Evidence summary</th><th>Implementation</th><th>Applicability</th></tr></thead><tbody>{catalog_rows}</tbody></table></details>
+<details><summary>Evidence and authority bindings</summary><pre>{esc(json.dumps(report.get('authority_bindings') or {}, indent=2, sort_keys=True, default=str))}</pre></details>
 <h2>Limitations</h2><ul>{''.join(f'<li>{esc(item)}</li>' for item in report.get('limitations', []))}</ul>
 </body></html>"""
 
 
 def model_intake_report_to_sarif(report: dict[str, Any]) -> dict[str, Any]:
     controls = report.get("controls") if isinstance(report.get("controls"), list) else []
+    if report.get("automatic_review"):
+        controls = [
+            item for item in controls
+            if str(item.get("id") or "") not in DEPLOYMENT_FOLLOW_UP_CONTROL_IDS
+        ]
     rules = [{
         "id": f"model-intake/{item['id']}",
         "name": item["label"],
