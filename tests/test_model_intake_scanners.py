@@ -52,6 +52,8 @@ def test_trivy_full_license_mode_is_limited_to_complete_repository(monkeypatch, 
 
     assert "--license-full" in captured[0]
     assert "--license-full" not in captured[1]
+    assert "--license-full" in complete["execution"]["argv_contract"]
+    assert "--license-full" not in incomplete["execution"]["argv_contract"]
     assert complete["execution"]["license_scan_mode"] == "full_repository"
     assert incomplete["execution"]["license_scan_mode"] == "package_metadata"
 

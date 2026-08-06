@@ -742,6 +742,9 @@ def run_external_scanner(spec: ScannerSpec, subject_path: Path, subject: dict[st
         )
         if full_license_scan and "--license-full" not in resolved_args:
             resolved_args.insert(-1, "--license-full")
+        argv_contract_args = list(spec.args)
+        if full_license_scan and "--license-full" not in argv_contract_args:
+            argv_contract_args.insert(-1, "--license-full")
         argv = [
             executable,
             *resolved_args,
@@ -833,7 +836,7 @@ def run_external_scanner(spec: ScannerSpec, subject_path: Path, subject: dict[st
                 "timeout_seconds": spec.timeout_seconds,
                 "raw_result_digest": raw_digest,
                 "required": spec.required,
-                "argv_contract": [spec.executable, *spec.args],
+                "argv_contract": [spec.executable, *argv_contract_args],
                 "license_scan_mode": (
                     "full_repository" if full_license_scan
                     else "package_metadata" if spec.name == "trivy"
