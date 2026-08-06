@@ -1322,6 +1322,7 @@ configure_runtime_mode() {
     fi
 
     export SCANNER_IMAGE_REPO="${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}"
+    export API_IMAGE_REPO="${API_IMAGE_REPO:-shakerscan/shakerscan-api}"
     export UI_IMAGE_REPO="${UI_IMAGE_REPO:-shakerscan/shakerscan-ui}"
     export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-shakerscan}"
     export SCANNER_RELEASE_VERSION="$(get_release_version)"
@@ -1680,6 +1681,7 @@ start_services() {
     fi
     if [ "$USE_PREBUILT" -eq 1 ]; then
         echo "Mode: prebuilt images"
+        echo "  api:     ${API_IMAGE_REPO}:${SCANNER_IMAGE_TAG}"
         echo "  scanner: ${SCANNER_IMAGE_REPO}:${SCANNER_IMAGE_TAG}"
         echo "  ui:      ${UI_IMAGE_REPO}:${SCANNER_IMAGE_TAG}"
         pull_prebuilt_images

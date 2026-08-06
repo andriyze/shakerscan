@@ -93,7 +93,11 @@ services:
     restart: unless-stopped
 
   api:
-    image: ${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}:${SCANNER_IMAGE_TAG:-latest}
+    # The API/control-plane image is deliberately distinct from the worker
+    # image. It contains the checksum-pinned Docker client required to stage
+    # the fixed Model Intake Firecracker guest through the mounted socket.
+    # Workers continue to use SCANNER_IMAGE_REPO and carry no Docker client.
+    image: ${API_IMAGE_REPO:-shakerscan/shakerscan-api}:${SCANNER_IMAGE_TAG:-latest}
     ports:
       - "${SHAKERSCAN_BIND_HOST:-127.0.0.1}:${SHAKERSCAN_API_PORT:-8080}:8080"
     environment:

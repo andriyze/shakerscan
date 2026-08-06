@@ -52,6 +52,21 @@ def test_compose_runtimes_mount_installed_readme_for_in_app_docs():
         assert "./README.md:/docs/README.md:ro" in compose
 
 
+def test_release_compose_separates_api_control_plane_from_workers():
+    compose = (ROOT / "docker-compose.release.yml").read_text()
+    api_block = re.search(
+        r"(?ms)^  api:\n.*?(?=^  [A-Za-z0-9_-]+:\n|\Z)", compose
+    ).group(0)
+    worker_block = re.search(
+        r"(?ms)^  worker:\n.*?(?=^  [A-Za-z0-9_-]+:\n|\Z)", compose
+    ).group(0)
+
+    assert "${API_IMAGE_REPO:-shakerscan/shakerscan-api}" in api_block
+    assert "${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}" not in api_block
+    assert "${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}" in worker_block
+    assert "${API_IMAGE_REPO:-shakerscan/shakerscan-api}" not in worker_block
+
+
 def test_docs_page_renders_markdown_without_raw_html_injection():
     page = (ROOT / "ui" / "src" / "app" / "docs" / "page.tsx").read_text()
     sidebar = (ROOT / "ui" / "src" / "components" / "Sidebar.tsx").read_text()
