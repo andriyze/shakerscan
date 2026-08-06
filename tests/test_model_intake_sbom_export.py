@@ -166,7 +166,7 @@ def test_spdx_export_describes_the_same_components_as_cyclonedx():
     assert transformers["licenseDeclared"] == "Apache-2.0"
     assert transformers["licenseConcluded"] == "NOASSERTION"
     assert "until the detected terms are resolved" in transformers["licenseComments"]
-    assert "LEGAL REVIEW REQUIRED" in spdx["comment"]
+    assert "one or more terms need licensing review" in spdx["comment"]
 
 
 def test_top_level_model_is_not_duplicated_when_aibom_repeats_subject_identity():
@@ -196,25 +196,28 @@ def test_spdx_export_is_reproducible_and_anchored_to_the_scan():
 def test_license_bom_is_concise_deduplicated_and_evidence_bound():
     document = build_model_intake_license_bom(_scan_result(), scan_id="s-1")
 
-    assert document["schema_version"] == "shakerscan-license-bom/v2"
-    assert document["decision"]["outcome"] == "LEGAL REVIEW REQUIRED"
-    assert document["decision"]["legal_review_required"] is True
+    assert document["schema_version"] == "shakerscan-license-bom/v3"
+    assert document["decision"]["status"] == "REVIEW_REQUIRED"
+    assert document["decision"]["review_required"] is True
+    assert document["decision"]["follow_up_required"] is True
+    assert "Apache-2.0" in document["decision"]["summary"]
+    assert document["policy_evidence"]["raw_outcome"] == "LEGAL REVIEW REQUIRED"
     assert {item["name"] for item in document["components"]} >= {"model.safetensors", "transformers"}
     assert len(document["document_sha256"]) == 64
     assert document["engineering_summary"]["license_or_notice_files_found"] == 1
     assert document["engineering_summary"]["trivy_license_items_found"] == 1
     assert document["missing_evidence"] == ["dataset_license_and_rights_disposition"]
-    assert any("ambiguous or use-dependent terms" in item.lower() for item in document["limitations"])
+    assert any("final licenseconcluded" in item.lower() for item in document["limitations"])
 
 
 def test_third_party_notices_draft_is_clear_about_missing_license_evidence():
     notice = render_third_party_notices_draft(_scan_result(), scan_id="s-1")
 
-    assert notice.startswith("THIRD-PARTY NOTICES — INCOMPLETE DRAFT")
-    assert "License evidence status: LEGAL REVIEW REQUIRED" in notice
+    assert notice.startswith("THIRD-PARTY NOTICES — REVIEW DRAFT")
+    assert "License evidence: Apache-2.0; one or more terms need licensing review." in notice
     assert "transformers — Apache-2.0" in notice
     assert "Dataset terms require review." in notice
-    assert "lists detected components and terms" in notice
+    assert "lists terms detected in the scanned revision" in notice
     assert "EVIDENCE SEARCH PERFORMED" in notice
-    assert "MISSING BEFORE RELEASE" in notice
+    assert "MISSING SOURCE MATERIAL" in notice
     assert "Attribution: Copyright 2026 Example Corp" in notice

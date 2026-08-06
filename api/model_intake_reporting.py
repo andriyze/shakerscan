@@ -570,6 +570,18 @@ def _static_check_detail(evidence: list[dict[str, Any]]) -> dict[str, Any]:
                 "required": bool(item.get("required")),
                 "applicability": item.get("applicability"),
                 "finding_count": _integer(item.get("finding_count")),
+                "findings": [
+                    {
+                        key: finding.get(key)
+                        for key in (
+                            "id", "rule_id", "severity", "classification", "call",
+                            "path", "line", "message",
+                        )
+                        if finding.get(key) is not None
+                    }
+                    for finding in item.get("findings") or []
+                    if isinstance(finding, dict)
+                ][:100],
                 "coverage": _json(item.get("coverage"), {}),
                 "version": item.get("version"),
                 "rules_sha256": item.get("rules_sha256"),
@@ -1031,6 +1043,43 @@ def build_model_intake_report(
         for item in EXTERNAL_APPROVAL_REQUIREMENTS
     ]
     static_detail = _static_check_detail(evidence)
+    attention_findings = [
+        {"scanner": item.get("name"), **finding}
+        for item in static_detail.get("scanner_results") or []
+        if item.get("status") in {"FAIL", "ERROR", "INCOMPLETE", "REVIEW"}
+        for finding in item.get("findings") or []
+        if isinstance(finding, dict)
+    ]
+    static_control = next((item for item in controls if item.get("id") == "static_analysis"), None)
+    if static_control and attention_findings:
+        labels: list[str] = []
+        seen_locations: set[str] = set()
+        for finding in attention_findings:
+            path = str(finding.get("path") or "")
+            line = finding.get("line")
+            location = f"{path}:{line}" if path and line else str(finding.get("id") or finding.get("rule_id") or "")
+            if location in seen_locations:
+                continue
+            seen_locations.add(location)
+            if finding.get("id") == "license_file_missing":
+                label = "repository license/NOTICE source file is missing"
+            else:
+                label = str(finding.get("message") or finding.get("call") or finding.get("id") or "scanner finding")
+                if path:
+                    label += f" ({path}{f':{line}' if line else ''})"
+            labels.append(label)
+        static_control["detail"] = (
+            f"{len(labels)} review item(s): " + "; ".join(labels[:5])
+            + (f"; and {len(labels) - 5} more" if len(labels) > 5 else "")
+        )
+        key_results = [
+            {
+                "control_id": item["id"], "label": item["label"],
+                "status": item["status"], "result": item["detail"],
+            }
+            for item in controls
+            if item["status"] in {"FAIL", "ERROR", "INCOMPLETE", "NOT_RUN", "REVIEW"}
+        ][:8]
     presentation = _presentation_summary(
         controls,
         outcome=outcome,

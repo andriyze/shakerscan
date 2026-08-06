@@ -1615,7 +1615,20 @@ function ModelIntakeSettingsContent() {
                       {technicalFollowUp.map((control) => (
                         <div key={control.control} className="rounded border border-gray-800 bg-gray-900 p-2 text-xs">
                           <div className="font-medium text-gray-200">{control.control.replace(/_/g, ' ')} · {control.status}</div>
-                          <div className="mt-1 text-gray-500">{control.action}</div>
+                          <div className="mt-1 text-gray-400">{control.summary || control.action}</div>
+                          {(control.items || []).length > 0 && (
+                            <ul className="mt-2 space-y-2">
+                              {(control.items || []).map((item, index) => (
+                                <li key={`${item.path || item.title}:${item.line || index}`} className="rounded border border-gray-800 bg-gray-950 p-2">
+                                  <div className="text-gray-200">{item.title}</div>
+                                  <div className="mt-1 text-[11px] text-gray-500">
+                                    {[item.path && `${item.path}${item.line ? `:${item.line}` : ''}`, (item.scanners || []).join(', ')].filter(Boolean).join(' · ')}
+                                  </div>
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                          {(control.items || []).length === 0 && <div className="mt-1 text-gray-500">{control.action}</div>}
                         </div>
                       ))}
                     </div>

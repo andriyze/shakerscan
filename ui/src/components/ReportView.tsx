@@ -552,9 +552,9 @@ function ModelIntakeSbomDownload({ scanId }: { scanId: string }) {
         {thin ? ' · no dependency manifest inventory: re-run at Full scan depth' : ''}
       </div>
       {summary.inventory_note && <div className="mt-1 max-w-xl text-xs text-gray-500">{summary.inventory_note}</div>}
-      {summary.license_outcome && (
-        <div className={`mt-1 text-xs ${summary.legal_review_required ? 'text-yellow-300' : 'text-gray-500'}`}>
-          License outcome: {summary.license_outcome}
+      {summary.license_summary && (
+        <div className={`mt-1 text-xs ${summary.license_follow_up_required ? 'text-yellow-300' : 'text-gray-500'}`}>
+          License evidence: {summary.license_summary}
         </div>
       )}
       {error && <div className="mt-1 text-xs text-red-300">{error}</div>}
@@ -1879,9 +1879,15 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                 </div>
               </div>
               <div className="rounded border border-gray-700 bg-gray-900 p-3">
-                <div className="text-xs text-gray-400">License policy</div>
+                <div className="text-xs text-gray-400">License evidence</div>
                 <div className={`mt-1 text-sm font-semibold ${modelIntakeSupplyChain?.license_compliance?.legal_review_required ? 'text-yellow-300' : 'text-white'}`}>
-                  {modelIntakeSupplyChain?.license_compliance?.outcome || modelIntakeSupplyChain?.license_policy?.status || modelIntakeSummary?.license_policy_status || 'unknown'}
+                  {modelIntakeSupplyChain?.license_compliance?.legal_review_required
+                    ? 'Review required'
+                    : modelIntakeSupplyChain?.license_compliance?.missing_evidence?.length
+                      ? 'Declaration found; source text missing'
+                      : modelIntakeSupplyChain?.license_compliance?.policy_status === 'PASS'
+                        ? 'No policy issue found'
+                        : modelIntakeSupplyChain?.license_policy?.status || modelIntakeSummary?.license_policy_status || 'unknown'}
                 </div>
                 <div className="mt-1 text-xs text-gray-500">Component-level evidence and any policy triggers are available in the License BOM.</div>
               </div>

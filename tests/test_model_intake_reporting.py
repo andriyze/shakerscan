@@ -69,6 +69,7 @@ def _rows(*, artifact_uri: str = "hf://example/model/model.safetensors", active_
                     "required": True,
                     "applicability": "repository_code",
                     "finding_count": 0,
+                    "findings": [],
                     "coverage": {"files_scanned": 3},
                 }],
                 "license_compliance": {
@@ -334,6 +335,33 @@ def test_automatic_report_keeps_deployment_follow_up_out_of_technical_result():
     assert "Technical checks completed" in html
     assert "Organization checklist" in html
     assert "No data plane evaluation evidence is attached" not in html.split("Detailed technical review", 1)[1]
+
+
+def test_static_report_names_safe_finding_location_and_remediation():
+    rows = _rows(active_admission=False)
+    static = next(item for item in rows["evidence"] if item["evidence_type"] == "static_analysis")
+    static["status"] = "WARNING"
+    static["payload_json"]["scanner_results"] = [{
+        "name": "semgrep", "status": "WARNING", "required": True,
+        "finding_count": 1, "coverage": {"files_analyzed": 2},
+        "findings": [{
+            "rule_id": "torch-load-version-dependent", "path": "modeling.py", "line": 42,
+            "message": "torch.load should use weights_only=True", "severity": "medium",
+        }],
+    }]
+    report = apply_automatic_review_context(
+        _report(rows),
+        {
+            "id": "review-finding", "state": "technical_review_complete",
+            "current_step": "review_results", "progress": 100,
+            "technical_outcome": "REVIEW_REQUIRED", "pending_controls": [], "timeline_json": [],
+        },
+    )
+
+    static_control = _control(report, "static_analysis")
+    assert "torch.load should use weights_only=True (modeling.py:42)" in static_control["detail"]
+    scanner = report["detailed_review"]["static_analysis_detail"]["scanner_results"][0]
+    assert scanner["findings"][0]["path"] == "modeling.py"
 
 
 def test_network_attempt_is_a_blocking_control_failure():

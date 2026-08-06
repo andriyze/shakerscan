@@ -1435,7 +1435,13 @@ export interface ModelIntakeAutomaticReview {
   static_scan_progress?: number | null
   static_scan_phase?: string | null
   technical_outcome?: string | null
-  pending_controls?: Array<{ control: string; status: string; action: string }>
+  pending_controls?: Array<{
+    control: string
+    status: string
+    action: string
+    summary?: string
+    items?: Array<{ title: string; severity?: string; path?: string | null; line?: number | null; scanners?: string[] }>
+  }>
   timeline_json?: Array<{ event: string; state: string; at: string }>
   error_json?: { code?: string; message?: string } | null
   scan_report_url?: string | null
@@ -1479,7 +1485,13 @@ function normalizeModelIntakeAutomaticReview(value: unknown): ModelIntakeAutomat
   if (typeof review.id !== 'string' || typeof review.scan_id !== 'string') return null
   return {
     ...review,
-    pending_controls: decodedAutomaticReviewArray<{ control: string; status: string; action: string }>(review.pending_controls),
+    pending_controls: decodedAutomaticReviewArray<{
+      control: string
+      status: string
+      action: string
+      summary?: string
+      items?: Array<{ title: string; severity?: string; path?: string | null; line?: number | null; scanners?: string[] }>
+    }>(review.pending_controls),
     timeline_json: decodedAutomaticReviewArray<{ event: string; state: string; at: string }>(review.timeline_json),
     error_json: decodedAutomaticReviewObject(review.error_json) as ModelIntakeAutomaticReview['error_json'],
   } as ModelIntakeAutomaticReview
@@ -4116,8 +4128,9 @@ export interface ModelIntakeSbomSummary {
   formats?: Array<'cyclonedx' | 'spdx' | 'aibom'>
   license_artifacts?: Array<'license-bom' | 'third-party-notices'>
   aibom_available?: boolean
-  license_outcome?: string
-  legal_review_required?: boolean
+  license_status?: 'PASS' | 'SOURCE_TEXT_MISSING' | 'REVIEW_REQUIRED' | 'BLOCKED' | 'INCOMPLETE' | string
+  license_summary?: string
+  license_follow_up_required?: boolean
   spec_version?: string
   component_count?: number
   dependency_component_count?: number

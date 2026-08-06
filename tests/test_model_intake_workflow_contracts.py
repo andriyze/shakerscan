@@ -919,6 +919,42 @@ def test_static_report_coverage_is_content_free():
     }
 
 
+def test_static_finding_summary_is_bounded_and_merges_duplicate_scanners():
+    findings = api._model_intake_finding_summary([{
+        "id": "dangerous_python_call",
+        "call": "torch.load",
+        "path": "modeling.py",
+        "line": 42,
+        "severity": "medium",
+        "message": "torch.load should use weights_only=True",
+        "matched_source": "secret source must not be copied",
+    }])
+    assert findings == [{
+        "id": "dangerous_python_call",
+        "severity": "medium",
+        "call": "torch.load",
+        "path": "modeling.py",
+        "line": 42,
+        "message": "torch.load should use weights_only=True",
+    }]
+
+    items = api._model_intake_attention_items({"scanner_results": [
+        {"name": "python-ast-security", "findings": findings},
+        {"name": "semgrep", "findings": [{
+            "rule_id": "torch-load-version-dependent", "path": "modeling.py", "line": 42,
+            "message": "Require weights_only=True.", "severity": "medium",
+        }]},
+        {"name": "shakerscan-license-inventory", "findings": [{
+            "id": "license_file_missing", "severity": "medium",
+        }]},
+    ]})
+    assert len(items) == 2
+    torch_item = next(item for item in items if item.get("path") == "modeling.py")
+    assert torch_item["scanners"] == ["python-ast-security", "semgrep"]
+    assert torch_item["title"] == "Require weights_only=True."
+    assert "publisher declaration" in next(item for item in items if not item.get("path"))["title"]
+
+
 def test_automatic_review_system_principal_is_server_scoped_and_not_a_bearer_shortcut():
     request = api._model_intake_automatic_system_request()
 

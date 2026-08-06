@@ -179,6 +179,7 @@ try:
         build_model_intake_license_bom as _build_model_intake_license_bom,
         build_model_intake_spdx as _build_model_intake_spdx,
         model_intake_bom_completeness as _model_intake_bom_completeness,
+        model_intake_license_display as _model_intake_license_display,
         render_third_party_notices_draft as _render_model_intake_third_party_notices,
     )
 except ModuleNotFoundError:
@@ -187,6 +188,7 @@ except ModuleNotFoundError:
         build_model_intake_license_bom as _build_model_intake_license_bom,
         build_model_intake_spdx as _build_model_intake_spdx,
         model_intake_bom_completeness as _model_intake_bom_completeness,
+        model_intake_license_display as _model_intake_license_display,
         render_third_party_notices_draft as _render_model_intake_third_party_notices,
     )
 
@@ -11375,6 +11377,65 @@ def _model_intake_content_free_coverage(value: Any) -> dict[str, Any]:
     }
 
 
+def _model_intake_finding_summary(value: Any) -> list[dict[str, Any]]:
+    """Keep bounded finding identity without copying matched source or secrets."""
+    if not isinstance(value, list):
+        return []
+    summaries: list[dict[str, Any]] = []
+    for item in value[:100]:
+        if not isinstance(item, dict):
+            continue
+        summary: dict[str, Any] = {}
+        for key in ("id", "rule_id", "severity", "classification", "call"):
+            text = str(item.get(key) or "").strip()
+            if text:
+                summary[key] = text[:240]
+        path = str(item.get("path") or "").strip().replace("\\", "/")
+        if path and not path.startswith("/") and ".." not in path.split("/"):
+            summary["path"] = path[:500]
+        line = item.get("line")
+        if isinstance(line, int) and not isinstance(line, bool) and line > 0:
+            summary["line"] = line
+        message = str(item.get("message") or "").strip()
+        if message:
+            summary["message"] = re.sub(r"\s+", " ", message)[:500]
+        if summary:
+            summaries.append(summary)
+    return summaries
+
+
+def _model_intake_attention_items(static_payload: Any) -> list[dict[str, Any]]:
+    """Merge duplicate AST/Semgrep observations into useful review items."""
+    payload = _model_intake_json_object(static_payload)
+    merged: dict[str, dict[str, Any]] = {}
+    for scanner in payload.get("scanner_results") or []:
+        if not isinstance(scanner, dict):
+            continue
+        scanner_name = str(scanner.get("name") or "scanner")
+        for finding in scanner.get("findings") or []:
+            if not isinstance(finding, dict):
+                continue
+            path = str(finding.get("path") or "")
+            line = finding.get("line") if isinstance(finding.get("line"), int) else None
+            finding_id = str(finding.get("id") or finding.get("rule_id") or "finding")
+            key = f"{path}:{line}" if path and line else finding_id
+            title = str(
+                finding.get("message") or finding.get("call")
+                or finding_id.replace("_", " ")
+            )
+            if finding_id == "license_file_missing":
+                title = "Repository has no license or NOTICE source file; the publisher declaration is recorded separately."
+            current = merged.setdefault(key, {
+                "title": title[:500], "severity": str(finding.get("severity") or "review"),
+                "path": path or None, "line": line, "scanners": [],
+            })
+            if finding.get("message"):
+                current["title"] = title[:500]
+            if scanner_name not in current["scanners"]:
+                current["scanners"].append(scanner_name)
+    return list(merged.values())[:20]
+
+
 def _model_intake_snapshot_custom_code_sha256(model_intake: dict[str, Any]) -> str | None:
     """Derive the reviewed-code identity only from a complete authoritative snapshot."""
     snapshot = model_intake.get("repository_snapshot") if isinstance(model_intake.get("repository_snapshot"), dict) else {}
@@ -11951,6 +12012,7 @@ async def attach_model_intake_static_run(
                     "applicability": (item.get("execution") or {}).get("applicability"),
                     "finding_count": len(item.get("findings") or []),
                     "coverage": _model_intake_content_free_coverage(item.get("coverage")),
+                    "findings": _model_intake_finding_summary(item.get("findings")),
                     "rules_sha256": (item.get("scanner") or {}).get("rules_sha256") or (item.get("execution") or {}).get("rules_sha256"),
                     "database_sha256": (item.get("scanner") or {}).get("database_sha256") or (item.get("execution") or {}).get("database_sha256"),
                 }
@@ -14819,13 +14881,15 @@ async def model_intake_sbom_summary(scan_id: str):
         if isinstance(model_intake, dict) and isinstance(model_intake.get("supply_chain"), dict)
         else {}
     )
+    license_display = _model_intake_license_display(license_compliance)
     return {
         "available": True,
         "formats": ["cyclonedx", "spdx", "aibom"],
         "license_artifacts": ["license-bom", "third-party-notices"],
         "aibom_available": bool(isinstance(model_intake, dict) and model_intake.get("aibom")),
-        "license_outcome": license_compliance.get("outcome"),
-        "legal_review_required": license_compliance.get("legal_review_required"),
+        "license_status": license_display["status"],
+        "license_summary": license_display["summary"],
+        "license_follow_up_required": license_display["follow_up_required"],
         "spec_version": document.get("specVersion"),
         **_model_intake_bom_completeness(document),
     }
@@ -16248,7 +16312,7 @@ async def _advance_model_intake_automatic_review(conn: Any, review: Any) -> None
             submission_id, ModelEvidenceFreezeRequest(deployment_bundle=bundle), system_request
         )
         evidence_rows = await conn.fetch(
-            """SELECT DISTINCT ON (evidence_type) evidence_type,status,signature_envelope
+            """SELECT DISTINCT ON (evidence_type) evidence_type,status,signature_envelope,payload_json
                FROM model_intake_evidence_records
                WHERE submission_id=$1
                  AND evidence_type IN (
@@ -16276,6 +16340,19 @@ async def _advance_model_intake_automatic_review(conn: Any, review: Any) -> None
                 "status": status,
                 "action": (
                     "Review the recorded evidence and resolve or rerun this technical check."
+                ),
+                **(
+                    {
+                        "summary": "Static analysis found items that need review.",
+                        "items": _model_intake_attention_items(next(
+                            (
+                                item.get("payload_json") for item in map(row_to_dict, evidence_rows)
+                                if str(item.get("evidence_type") or "") == "static_analysis"
+                            ),
+                            {},
+                        )),
+                    }
+                    if evidence_type == "static_analysis" else {}
                 ),
             }
             for evidence_type, status in sorted(evidence_status.items())

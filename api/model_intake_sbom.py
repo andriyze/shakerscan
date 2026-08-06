@@ -63,6 +63,46 @@ def _license_terms(model_intake: dict[str, Any]) -> list[dict[str, Any]]:
     return [item for item in terms if isinstance(item, dict)] if isinstance(terms, list) else []
 
 
+def model_intake_license_display(compliance: dict[str, Any]) -> dict[str, Any]:
+    """Return stable, plain-language licensing status for UI and exports.
+
+    The scanner's internal policy vocabulary remains evidence, but it is not a
+    useful headline.  This summary tells an engineer what was found and what,
+    if anything, is still missing.
+    """
+    policy_status = str(compliance.get("policy_status") or "").upper()
+    missing = [str(item) for item in compliance.get("missing_evidence") or [] if item]
+    terms = [item for item in compliance.get("terms") or [] if isinstance(item, dict)]
+    declared = sorted({
+        str(item.get("declared") or "").strip()
+        for item in terms if str(item.get("declared") or "").strip()
+    })
+    term_label = ", ".join(declared) if declared else "No license declaration"
+    if policy_status == "BLOCK":
+        status = "BLOCKED"
+        summary = "The configured license policy rejected one or more detected terms."
+    elif policy_status == "REVIEW_REQUIRED":
+        status = "REVIEW_REQUIRED"
+        summary = f"{term_label}; one or more terms need licensing review."
+    elif policy_status == "PASS" and missing:
+        status = "SOURCE_TEXT_MISSING"
+        summary = f"{term_label}; the repository did not include the expected license or notice source text."
+    elif policy_status == "PASS":
+        status = "PASS"
+        summary = f"{term_label}; no configured license-policy issue was found."
+    else:
+        status = "INCOMPLETE"
+        summary = "License evidence was not complete enough to evaluate."
+    return {
+        "status": status,
+        "summary": summary,
+        "follow_up_required": bool(missing) or policy_status in {"BLOCK", "REVIEW_REQUIRED"},
+        "review_required": policy_status == "REVIEW_REQUIRED",
+        "missing_evidence": missing,
+        "declared_terms": declared,
+    }
+
+
 def _cyclonedx_license(value: Any) -> dict[str, Any] | None:
     text = str(value or "").strip()
     if not text:
@@ -238,7 +278,7 @@ def build_model_intake_cyclonedx(scan_result: Any, *, scan_id: str = "") -> dict
                 # A bounded-prefix scan cannot enumerate dependencies, so the
                 # document must say so rather than read as a complete inventory.
                 {"name": "shakerscan:dependency_inventory", "value": "generated" if generated else "not_generated"},
-                {"name": "shakerscan:license_outcome", "value": str(_license_compliance(model_intake).get("outcome") or "not_assessed")},
+                {"name": "shakerscan:license_status", "value": model_intake_license_display(_license_compliance(model_intake))["status"]},
                 {"name": "shakerscan:license_policy_version", "value": str(_license_compliance(model_intake).get("policy_version") or "not_assessed")},
             ],
         },
@@ -339,9 +379,10 @@ def build_model_intake_spdx(
         "primaryPackagePurpose": "MACHINE_LEARNING_MODEL",
     }
     compliance = _license_compliance(_object(_object(scan_result).get("model_intake")))
+    license_display = model_intake_license_display(compliance)
     root_package["licenseComments"] = (
-        f"Automated policy outcome: {compliance.get('outcome') or 'not assessed'}. "
-        "LicenseConcluded remains NOASSERTION because the evidence does not establish a concluded license."
+        f"Scan result: {license_display['summary']} "
+        "LicenseConcluded remains NOASSERTION because this document records discovered evidence, not a final license selection."
     )
     checksums = [
         {"algorithm": str(entry.get("alg") or "SHA256").replace("-", ""), "checksumValue": str(entry.get("content"))}
@@ -407,8 +448,8 @@ def build_model_intake_spdx(
             "creators": ["Tool: ShakerScan-model-intake-1", "Organization: ShakerScan"],
         },
         "comment": (
-            f"License policy outcome: {compliance.get('outcome') or 'not assessed'}; "
-            f"evidence SHA-256: {compliance.get('evidence_sha256') or 'not available'}."
+            f"License evidence: {license_display['summary']} "
+            f"Evidence SHA-256: {compliance.get('evidence_sha256') or 'not available'}."
         ),
         "packages": packages,
         "relationships": relationships,
@@ -456,8 +497,9 @@ def build_model_intake_license_bom(scan_result: Any, *, scan_id: str = "") -> di
         }
         for item in compliance.get("reasons") or [] if isinstance(item, dict)
     ]
+    display = model_intake_license_display(compliance)
     document = {
-        "schema_version": "shakerscan-license-bom/v2",
+        "schema_version": "shakerscan-license-bom/v3",
         "scan_id": str(scan_id),
         "subject": {
             "name": summary.get("artifact_name"),
@@ -465,10 +507,19 @@ def build_model_intake_license_bom(scan_result: Any, *, scan_id: str = "") -> di
             "sha256": summary.get("sha256"),
         },
         "decision": {
-            "outcome": compliance.get("outcome"),
+            "status": display["status"],
+            "summary": display["summary"],
+            "follow_up_required": display["follow_up_required"],
+            "review_required": display["review_required"],
             "policy_status": compliance.get("policy_status"),
+        },
+        "policy_evidence": {
             "policy_version": compliance.get("policy_version"),
-            "legal_review_required": compliance.get("legal_review_required"),
+            "raw_outcome": compliance.get("outcome"),
+            "reason_codes": [
+                str(item.get("code") or "") for item in compliance.get("reasons") or []
+                if isinstance(item, dict) and item.get("code")
+            ],
             "reasons": compliance.get("reasons") or [],
         },
         "components": components,
@@ -489,12 +540,13 @@ def build_model_intake_license_bom(scan_result: Any, *, scan_id: str = "") -> di
                 for item in compliance.get("evidence_sources") or []
                 if isinstance(item, dict) and item.get("source") == "trivy_full_license_scan"
             ),
-            "ready_for_notice_drafting": bool(components) and not bool(compliance.get("missing_evidence")),
+            "notice_draft_generated": bool(components),
+            "source_text_complete": not bool(compliance.get("missing_evidence")),
         },
         "limitations": [
-            "LicenseConcluded is not asserted because automated evidence cannot resolve ambiguous or use-dependent terms.",
-            "Exact license and NOTICE text must be taken from the immutable evidence identified by path and digest.",
-            "Dataset and intended-use permissions remain open only when reported by the policy.",
+            "The inventory records discovered declarations; it does not select a final LicenseConcluded value.",
+            "When source files are present, exact license and NOTICE text should be copied from the digest-bound paths listed here.",
+            "Dataset or intended-use terms appear only when the scanned revision publishes evidence for them.",
         ],
         "evidence_sha256": compliance.get("evidence_sha256"),
     }
@@ -512,15 +564,15 @@ def render_third_party_notices_draft(scan_result: Any, *, scan_id: str = "") -> 
     subject = _object(bom.get("subject"))
     decision = _object(bom.get("decision"))
     output = [
-        "THIRD-PARTY NOTICES — INCOMPLETE DRAFT" if bom.get("missing_evidence") else "THIRD-PARTY NOTICES — DRAFT",
+        "THIRD-PARTY NOTICES — REVIEW DRAFT",
         "",
         f"Model: {line(subject.get('name')) or 'unknown'}",
         f"Reference: {line(subject.get('reference')) or 'unknown'}",
         f"SHA-256: {line(subject.get('sha256')) or 'not available'}",
-        f"License evidence status: {line(decision.get('outcome')) or 'not assessed'}",
+        f"License evidence: {line(decision.get('summary')) or 'not assessed'}",
         "",
-        "IMPORTANT",
-        "This draft lists detected components and terms. Before distribution, attach the exact license, copyright, attribution, and NOTICE text from the digest-bound source files identified below.",
+        "HOW TO USE THIS DRAFT",
+        "This file lists terms detected in the scanned revision. Where source text is missing, obtain it from the publisher before distributing the model.",
         "",
         "DETECTED COMPONENTS AND TERMS",
     ]
@@ -544,11 +596,11 @@ def render_third_party_notices_draft(scan_result: Any, *, scan_id: str = "") -> 
     output.extend(f"- {line(item)}" for item in obligations)
     if not obligations:
         output.append("- No automated obligations were identified; this does not mean no obligations exist.")
-    output.extend(["", "OPEN LICENSE QUESTIONS"])
-    reasons = decision.get("reasons") if isinstance(decision.get("reasons"), list) else []
+    output.extend(["", "OPEN ITEMS"])
+    reasons = bom.get("unresolved_items") if isinstance(bom.get("unresolved_items"), list) else []
     output.extend(f"- {line(item.get('summary'))}" for item in reasons if isinstance(item, dict))
     if not reasons:
-        output.append("- No automated license-policy trigger was detected.")
+        output.append("- No policy issue was detected in the available terms.")
     output.extend(["", "EVIDENCE SEARCH PERFORMED"])
     for item in bom.get("evidence_search") or []:
         output.append(
@@ -557,9 +609,9 @@ def render_third_party_notices_draft(scan_result: Any, *, scan_id: str = "") -> 
         )
     missing = bom.get("missing_evidence") if isinstance(bom.get("missing_evidence"), list) else []
     if missing:
-        output.extend(["", "MISSING BEFORE RELEASE"])
+        output.extend(["", "MISSING SOURCE MATERIAL"])
         output.extend(f"- {line(item).replace('_', ' ')}" for item in missing)
-    output.extend(["", f"Evidence receipt: scan {line(scan_id) or 'not available'}; document SHA-256 {line(bom.get('document_sha256'))}", "", "END OF AUTOMATED DRAFT", ""])
+    output.extend(["", f"Evidence receipt: scan {line(scan_id) or 'not available'}; document SHA-256 {line(bom.get('document_sha256'))}", "", "END OF DRAFT", ""])
     return "\n".join(output)
 
 
@@ -571,5 +623,6 @@ __all__ = [
     "build_model_intake_license_bom",
     "build_model_intake_spdx",
     "model_intake_bom_completeness",
+    "model_intake_license_display",
     "render_third_party_notices_draft",
 ]
