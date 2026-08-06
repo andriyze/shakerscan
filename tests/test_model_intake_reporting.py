@@ -198,6 +198,28 @@ def test_network_attempt_is_a_blocking_control_failure():
     assert report["runner_timelines"][0]["network"]["attempted_operations"][0]["operation"] == "connect"
 
 
+def test_embedding_control_distinguishes_behavior_from_runtime_containment():
+    rows = _rows(active_admission=False)
+    evaluation = next(item for item in rows["evidence"] if item["evidence_type"] == "embedding_evaluation")
+    evaluation["payload_json"] = {
+        "quality_status": "KNOWN_ANSWER_PASS",
+        "containment_status": "FAIL",
+        "embedding_shape": [2, 768],
+        "benchmark_dataset_sha256": DIGESTS["a"],
+        "thresholds_sha256": DIGESTS["b"],
+        "embedding_output_sha256": DIGESTS["c"],
+        "blockers": [],
+        "containment_blockers": ["network_quiet"],
+    }
+    report = _report(rows)
+    control = _control(report, "embedding_evaluation")
+
+    assert control["status"] == "PASS"
+    assert control["coverage"]["quality_status"] == "KNOWN_ANSWER_PASS"
+    assert control["coverage"]["containment_status"] == "FAIL"
+    assert "reported separately" in control["detail"]
+
+
 def test_active_admission_mismatch_blocks_even_when_other_controls_pass():
     rows = _rows()
     rows["admissions"][0]["admission_package"]["statement"]["predicate"]["decision"] = "block"

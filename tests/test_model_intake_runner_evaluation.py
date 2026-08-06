@@ -54,13 +54,22 @@ def test_verified_runtime_measurements_derive_pass_evaluation_without_vectors():
     assert len(report["evidence_sha256"]) == 64
 
 
-def test_nonpass_or_incomplete_runtime_cannot_derive_pass_evaluation():
+def test_runtime_containment_failure_does_not_falsely_fail_known_answer_evaluation():
     payload = _payload("FAIL")
     payload["observations"]["network_telemetry"]["attempt_count"] = 1
+    report = derive_embedding_evaluation(payload, "9" * 64)
+    assert report["status"] == "PASS"
+    assert report["quality_status"] == "KNOWN_ANSWER_PASS"
+    assert report["containment_status"] == "FAIL"
+    assert set(report["containment_blockers"]) == {"runtime_pass", "network_quiet"}
+
+
+def test_incomplete_known_answer_measurements_fail_evaluation():
+    payload = _payload("FAIL")
     payload["observations"]["embedding_known_answers_status"] = "NOT_CONFIGURED"
     report = derive_embedding_evaluation(payload, "9" * 64)
     assert report["status"] == "FAIL"
-    assert set(report["blockers"]) >= {"runtime_pass", "known_answer_pass", "network_quiet"}
+    assert "known_answer_pass" in report["blockers"]
 
 
 def test_non_runtime_receipt_is_rejected():

@@ -243,22 +243,43 @@ def _evidence_control(
         status = "INCOMPLETE"
     provenance = str(record.get("provenance_class") or "unknown")
     bindings = _json(record.get("subject_bindings"), {})
+    payload = _json(record.get("payload_json"), {})
+    detail = (
+        f"{provenance} evidence expired at {_iso(expiry)}."
+        if expiry is not None and expiry <= now
+        else f"{provenance} evidence reported {record.get('status') or 'unknown'}."
+    )
+    additional_coverage: dict[str, Any] = {}
+    if evidence_type == "embedding_evaluation" and payload:
+        quality_status = payload.get("quality_status")
+        containment_status = payload.get("containment_status")
+        detail = (
+            f"Known-answer embedding evaluation: {quality_status or 'unknown'}; "
+            f"runtime containment: {containment_status or 'unknown'} (reported separately)."
+        )
+        additional_coverage = {
+            "quality_status": quality_status,
+            "containment_status": containment_status,
+            "embedding_shape": payload.get("embedding_shape"),
+            "benchmark_dataset_sha256": payload.get("benchmark_dataset_sha256"),
+            "thresholds_sha256": payload.get("thresholds_sha256"),
+            "embedding_output_sha256": payload.get("embedding_output_sha256"),
+            "evaluation_blockers": payload.get("blockers") or [],
+            "containment_blockers": payload.get("containment_blockers") or [],
+        }
     return {
         "id": evidence_type,
         "label": label,
         "status": status,
-        "detail": (
-            f"{provenance} evidence expired at {_iso(expiry)}."
-            if expiry is not None and expiry <= now
-            else f"{provenance} evidence reported {record.get('status') or 'unknown'}."
-        ),
+        "detail": detail,
         "coverage": {
             "provenance_class": provenance,
             "producer_id": record.get("producer_id"),
             "builder_id": record.get("builder_id"),
             "payload_sha256": record.get("payload_sha256"),
             "subject_bindings": bindings,
-                "expires_at": _iso(expiry),
+            "expires_at": _iso(expiry),
+            **additional_coverage,
         },
         "evidence_refs": [{
             "kind": "evidence_record",

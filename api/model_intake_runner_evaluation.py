@@ -25,8 +25,7 @@ def derive_embedding_evaluation(runtime_payload: dict[str, Any], source_payload_
     network = observations.get("network_telemetry") if isinstance(observations.get("network_telemetry"), dict) else {}
     resource = observations.get("resource_telemetry") if isinstance(observations.get("resource_telemetry"), dict) else {}
     blockers: list[str] = []
-    required = {
-        "runtime_pass": runtime_payload.get("status") == "PASS",
+    evaluation_required = {
         "runner_generated": observations.get("observations_generated_by_runner") is True,
         "known_answer_pass": observations.get("embedding_known_answers_status") == "PASS",
         "embedding_output_digest": bool(observations.get("embedding_output_sha256")),
@@ -37,6 +36,10 @@ def derive_embedding_evaluation(runtime_payload: dict[str, Any], source_payload_
         ),
         "benchmark_dataset_digest": bool(observations.get("benchmark_dataset_sha256")),
         "thresholds_digest": bool(observations.get("thresholds_sha256")),
+        "resources_measured": observations.get("resource_limits_enforced") is True and resource.get("complete") is True,
+    }
+    containment_required = {
+        "runtime_pass": runtime_payload.get("status") == "PASS",
         "network_quiet": (
             observations.get("network_egress_blocked") is True
             and network.get("complete") is True
@@ -44,9 +47,9 @@ def derive_embedding_evaluation(runtime_payload: dict[str, Any], source_payload_
             and network.get("overflowed") is False
             and network.get("lost_events") == 0
         ),
-        "resources_measured": observations.get("resource_limits_enforced") is True and resource.get("complete") is True,
     }
-    blockers.extend(name for name, passed in required.items() if not passed)
+    blockers.extend(name for name, passed in evaluation_required.items() if not passed)
+    containment_blockers = [name for name, passed in containment_required.items() if not passed]
     report = {
         "schema_version": SCHEMA,
         "provenance_class": "GENERATED_EVALUATION",
@@ -67,10 +70,15 @@ def derive_embedding_evaluation(runtime_payload: dict[str, Any], source_payload_
         "embedding_shape": observations.get("embedding_shape"),
         "resource_limits_sha256": resource.get("limits_sha256"),
         "network_telemetry_sha256": network.get("telemetry_sha256"),
+        # Runtime containment is intentionally reported separately. A framework
+        # socket attempt must block admission through runtime/network controls,
+        # but it must not falsely say that known-answer embedding checks failed.
         "security_status": "PASS" if not blockers else "FAIL",
         "quality_status": "KNOWN_ANSWER_PASS" if not blockers else "INCOMPLETE",
+        "containment_status": "PASS" if not containment_blockers else "FAIL",
         "status": "PASS" if not blockers else "FAIL",
         "blockers": blockers,
+        "containment_blockers": containment_blockers,
         "started_at": runtime_payload.get("started_at"),
         "finished_at": runtime_payload.get("finished_at"),
         "expires_at": runtime_payload.get("expires_at"),
