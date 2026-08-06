@@ -106,9 +106,12 @@ curl -s -X POST "$API_BASE/model-intake/automatic-reviews" \
 This queues complete acquisition, repository snapshot, the existing scanner bundle, SBOM/AIBOM generation,
 controlled static-evidence binding, automatic fixed-profile safetensors conversion plus strict target rescan
 when the source uses the one supported unsafe `.bin` layout, Firecracker calibration and repeat inference,
-and evidence freeze when the runner is READY. It is database-backed and continues if the UI closes or the API restarts. Inspect it at
+and evidence freeze when the runner is READY. The server rejects the start if workers are missing, stale, or
+not fingerprint-uniform; do not retry around that gate—rebuild/restart the fleet first. It is database-backed
+and continues if the UI closes or the API restarts. Inspect it at
 `GET /model-intake/automatic-reviews/{id}`; the response names the scan report and JSON/HTML/SARIF technical
-report URLs. Workflow completion is separate from `technical_outcome`: `PASS`, `REVIEW_REQUIRED`,
+report URLs. The UI also links the exact scan's CycloneDX, SPDX, and AIBOM downloads. Workflow completion is
+separate from `technical_outcome`: `PASS`, `REVIEW_REQUIRED`,
 `INCOMPLETE`, or `BLOCK`. Never describe `technical_review_complete` by itself as a model pass. Human
 approvals, publisher trust, production KMS, policy decision, promotion, and corporate
 data-plane validation remain explicit pending controls.
@@ -236,7 +239,11 @@ curl -s -X POST "$API_BASE/model-intake/submissions/$SUBMISSION_ID/runner-jobs" 
 
 - `calibration` may discover a known-answer digest but is not admission evidence by itself.
 - `runtime` requires a reviewed known-answer digest and runs import, tokenizer, model load, warmup, inference,
-  and teardown for the exact materialized subject.
+  and teardown for the exact materialized subject. Supported immutable facts currently resolve either the
+  fixed offline Transformers/safetensors profile or the fixed CPU ONNX Runtime profile. The ONNX path binds
+  the exact graph path, tokenizer/configuration, graph inputs, pooled embedding, and repeat-known-answer
+  result. GGUF has structural static checks but no runtime profile and therefore remains `INCOMPLETE` when
+  execution is required.
 - `conversion` is only the fixed PyTorch-bin-to-safetensors profile. It uses `weights_only=True` inside the
   microVM, proves tensor and embedding equivalence, and emits a new content-addressed snapshot. On refresh,
   the server independently rehashes and registers the target artifact/snapshot/code/tokenizer/configuration,
@@ -373,6 +380,11 @@ control set, outcome, phase timeline, evidence references, and active-admission 
 cryptographically reverifies an active DSSE admission against current server-owned signer trust before the
 report can say `ALLOW`. Any signature, statement, or current-record mismatch is `BLOCK`; expired evidence or
 admission material cannot become `PASS`.
+
+The report summarizes network attempts by phase, operation, and address family, distinguishes local IPC from
+IP-family operations, and includes only a bounded sample. The complete syscall stream stays in the signed
+receipt by digest. Treat conversion/model-load/known-answer correctness and network/resource containment as
+separate controls: one can pass while containment correctly blocks the overall review.
 
 Always report one final outcome: `ALLOW`, `BLOCK`, `INCOMPLETE`, or `REVIEW`. For each control state:
 
