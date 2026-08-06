@@ -1644,6 +1644,20 @@ def test_broker_request_budget_explicit_off_preserves_operator_control():
     assert asyncio.run(api_module._broker_reserve_request_budget(None, None, payload)) == {}
 
 
+def test_broker_budget_deferral_exposes_waiting_phase():
+    calls = []
+
+    class Conn:
+        async def execute(self, query, *args):
+            calls.append((query, args))
+
+    scan_id = "11111111-1111-4111-8111-111111111111"
+    asyncio.run(api_module._mark_broker_budget_wait(Conn(), {"scan_id": scan_id}))
+
+    assert "waiting_for_request_budget" in calls[0][0]
+    assert str(calls[0][1][0]) == scan_id
+
+
 def test_normalize_dast_scan_options_explicit_smart_sets_legacy_active():
     # An explicit smart/full/aggressive scan implies the legacy active flag.
     options = api_module.ScanOptions(scan_type="smart")

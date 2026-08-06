@@ -8842,6 +8842,22 @@ async def _broker_reserve_request_budget(
     }
 
 
+async def _mark_broker_budget_wait(conn: Any, payload: Mapping[str, Any]) -> None:
+    """Expose a transient broker budget deferral without failing or bypassing it."""
+    try:
+        scan_id = uuid.UUID(str(payload.get("scan_id") or ""))
+    except ValueError:
+        return
+    await conn.execute(
+        """
+        UPDATE scans
+        SET current_phase='waiting_for_request_budget'
+        WHERE id=$1 AND status IN ('pending','queued')
+        """,
+        scan_id,
+    )
+
+
 def _fleet_node_is_schedulable(node: Mapping[str, Any]) -> bool:
     """Return whether a remote node may accept work right now.
 
@@ -9055,6 +9071,8 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
     async with db_pool.acquire() as conn:
         payload = await _hydrate_broker_job_options(conn, payload)
         budget_reservation = await _broker_reserve_request_budget(conn, redis_client, payload)
+        if budget_reservation is None:
+            await _mark_broker_budget_wait(conn, payload)
         if budget_reservation is not None:
             await conn.execute(
                 """

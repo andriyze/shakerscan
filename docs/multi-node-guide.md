@@ -320,7 +320,13 @@ control plane's immutable production digest as its desired-image identity while 
 runtime override explicitly; the node agent uses that override for local scaling. A later fleet image
 rollout replaces the development override with the selected registry digest. Local build mode is a
 broker development facility, not a production deployment mechanism, and the Docker build can still
-download base images and pinned tool dependencies. A healthy local-build node remains schedulable
+download base images and pinned tool dependencies. Keep at least 12 GiB free for a clean local
+build. Before and after a successful rebuild, ShakerScan removes only older unused
+`shakerscan-fleet-local:*` image tags; Docker protects any image still used by a running container,
+and volumes, scan data, configuration, and unrelated images are never pruned. If less than 12 GiB
+remains after that scoped cleanup, the command warns with the available space and remediation but
+continues, preserving the operator's choice to build on a cache-warm or space-constrained host. A
+healthy local-build node remains schedulable
 and selectable in **New Scan**, but Fleet labels it **local test build** and keeps it in the image-drift
 count. This preserves development freedom without presenting unpublished code as a production-pinned
 or benchmark-safe worker.

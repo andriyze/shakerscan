@@ -524,6 +524,11 @@ def test_broker_runtime_forces_per_node_compose_project_and_skips_pull_for_local
     monkeypatch.setattr(fleet_cli, "_docker_compose_command", lambda: ["docker", "compose"])
     monkeypatch.setattr(
         fleet_cli,
+        "_prune_obsolete_local_broker_images",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        fleet_cli,
         "_run",
         lambda argv, **kwargs: calls.append((argv, kwargs))
         or types.SimpleNamespace(returncode=0, stdout=""),
@@ -539,6 +544,65 @@ def test_broker_runtime_forces_per_node_compose_project_and_skips_pull_for_local
     argv = calls[0][0]
     assert argv[:4] == ["docker", "compose", "--project-name", "shakerscan-fleet-11111111"]
     assert "pull" not in argv
+
+
+def test_local_broker_image_cleanup_removes_only_obsolete_product_tags(monkeypatch):
+    calls = []
+
+    def fake_run(argv, **_kwargs):
+        calls.append(argv)
+        if argv[:3] == ["docker", "image", "ls"]:
+            return types.SimpleNamespace(
+                returncode=0,
+                stdout=(
+                    "shakerscan-fleet-local:abc1234\n"
+                    "shakerscan-fleet-local:old1234\n"
+                    "unrelated:latest\n"
+                ),
+            )
+        return types.SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr(fleet_cli, "_run", fake_run)
+
+    removed = fleet_cli._prune_obsolete_local_broker_images(
+        keep_image="shakerscan-fleet-local:abc1234"
+    )
+
+    assert removed == ["shakerscan-fleet-local:old1234"]
+    assert ["docker", "image", "rm", "unrelated:latest"] not in calls
+
+
+def test_local_broker_build_warns_but_continues_when_disk_is_low(tmp_path, monkeypatch, capsys):
+    paths = fleet_cli.RuntimePaths(tmp_path)
+    (tmp_path / "scanner").mkdir()
+    (tmp_path / "scanner" / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+    (tmp_path / "api").mkdir()
+    (tmp_path / "api" / "broker_worker.py").write_text("", encoding="utf-8")
+    built = []
+
+    def fake_run(argv, **_kwargs):
+        if argv[:4] == ["git", "-C", str(tmp_path), "rev-parse"]:
+            return types.SimpleNamespace(returncode=0, stdout="abc1234\n")
+        if argv[:2] == ["docker", "build"]:
+            built.append(argv)
+        return types.SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr(fleet_cli, "_run", fake_run)
+    monkeypatch.setattr(fleet_cli.shutil, "which", lambda _name: "/usr/bin/git")
+    monkeypatch.setattr(
+        fleet_cli,
+        "_prune_obsolete_local_broker_images",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        fleet_cli.shutil,
+        "disk_usage",
+        lambda _path: types.SimpleNamespace(free=2 * 1024**3),
+    )
+
+    assert fleet_cli._build_local_broker_worker_image(paths) == "shakerscan-fleet-local:abc1234"
+    assert len(built) == 1
+    assert "build will continue" in capsys.readouterr().out
 
 
 def test_broker_join_can_pin_a_private_enrollment_ca(tmp_path, monkeypatch):

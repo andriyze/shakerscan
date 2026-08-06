@@ -278,7 +278,9 @@ four VPSs with five workers each, the fleet can run about twenty worker jobs at 
 subject to scan type, memory, CPU, and global rate limits.
 Known-endpoint ASM and Full Coverage work reserves endpoint budget through shared Redis buckets.
 Joined workers turn the compatibility request-meter default into enforcement and use shared
-root-domain request-token reservation. Operators retain the explicit `request_budget_mode=off`
+root-domain request-token reservation. A broker job deferred by an exhausted domain budget remains
+pending with the explicit `waiting_for_request_budget` phase instead of appearing stuck with no
+reason. Operators retain the explicit `request_budget_mode=off`
 override for authorized local labs and other intentionally unrestricted targets. Standalone scans
 retain compatibility mode by default.
 

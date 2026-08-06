@@ -43,6 +43,7 @@ IMAGE_REFERENCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/:~-]*$")
 ENV_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 URL_SAFE_SECRET_RE = re.compile(r"^[A-Za-z0-9._~-]+$")
 LOCAL_WORKER_IMAGE_RE = re.compile(r"^shakerscan-fleet-local:[a-z0-9][a-z0-9_.-]{0,127}$")
+LOCAL_BUILD_RECOMMENDED_FREE_BYTES = 12 * 1024**3
 
 
 class FleetCLIError(RuntimeError):
@@ -1779,11 +1780,49 @@ def _build_local_broker_worker_image(paths: RuntimePaths) -> str:
     if not re.fullmatch(r"[0-9a-f]{7,12}", suffix):
         suffix = "dev"
     image = f"shakerscan-fleet-local:{suffix}"
+    # Commit-tagged development images are deliberately immutable, but keeping
+    # every old tag eventually fills small worker VPS disks. Remove only this
+    # product's unused local-build tags; Docker refuses tags still backing a
+    # running container. Preserve the image we are about to rebuild/reuse.
+    _prune_obsolete_local_broker_images(keep_image=image)
+    free_bytes = shutil.disk_usage(paths.root).free
+    if free_bytes < LOCAL_BUILD_RECOMMENDED_FREE_BYTES:
+        free_gib = free_bytes / 1024**3
+        recommended_gib = LOCAL_BUILD_RECOMMENDED_FREE_BYTES / 1024**3
+        print(
+            f"Warning: local worker builds recommend {recommended_gib:.0f} GiB free after "
+            f"old-image cleanup ({free_gib:.1f} GiB available). The build will continue; "
+            "if it runs out of space, remove Docker build cache or expand the worker disk."
+        )
     _run(
         ["docker", "build", "--tag", image, "--file", str(dockerfile), str(paths.root)],
         capture=False,
     )
     return image
+
+
+def _prune_obsolete_local_broker_images(*, keep_image: str) -> list[str]:
+    """Remove unused commit-tagged fleet development images, never volumes/data."""
+    if not LOCAL_WORKER_IMAGE_RE.fullmatch(keep_image):
+        raise FleetCLIError("local broker worker image reference is invalid")
+    listed = _run(
+        [
+            "docker", "image", "ls", "--format", "{{.Repository}}:{{.Tag}}",
+            "--filter", "reference=shakerscan-fleet-local:*",
+        ],
+        check=False,
+    )
+    if listed.returncode != 0:
+        return []
+    removed: list[str] = []
+    for candidate in sorted(set(str(listed.stdout or "").splitlines())):
+        candidate = candidate.strip()
+        if candidate == keep_image or not LOCAL_WORKER_IMAGE_RE.fullmatch(candidate):
+            continue
+        result = _run(["docker", "image", "rm", candidate], check=False)
+        if result.returncode == 0:
+            removed.append(candidate)
+    return removed
 
 
 def _start_broker_runtime(
@@ -1817,6 +1856,10 @@ def _start_broker_runtime(
         ],
         capture=False,
     )
+    if runtime_image is not None:
+        removed = _prune_obsolete_local_broker_images(keep_image=runtime_image)
+        if removed:
+            print(f"Removed {len(removed)} obsolete local fleet image tag(s)")
 
 
 def run_join_preflight(
