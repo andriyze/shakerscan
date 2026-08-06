@@ -11910,6 +11910,7 @@ async def attach_model_intake_static_run(
             if isinstance(model_intake.get("generated_evidence"), dict)
             else {}
         )
+        artifact_size_bytes = _model_intake_artifact_size_bytes(model_intake, summary)
         static_evidence_payload = {
             "schema_version": "model-intake-static-report-summary/v1",
             "required_static_checks": required_static_checks,
@@ -11951,7 +11952,7 @@ async def attach_model_intake_static_run(
             submission_uuid,
             f"scan://{scan_uuid}/artifact",
             artifact_sha,
-            summary.get("artifact_size"),
+            artifact_size_bytes,
             summary.get("revision"),
             json.dumps({"registered_by": actor, "required_static_checks": required_static_checks}),
         )
@@ -15688,6 +15689,34 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
 _MODEL_INTAKE_AUTO_TERMINAL_STATES = {
     "technical_review_complete", "attention_required", "failed", "cancelled",
 }
+
+
+def _model_intake_artifact_size_bytes(
+    model_intake: Mapping[str, Any],
+    summary: Mapping[str, Any],
+) -> int | None:
+    """Return the authoritative observed artifact size for subject binding.
+
+    New reports publish ``artifact_size_bytes`` directly.  The artifact fetch
+    receipt is retained as a compatibility source for complete scans created
+    before that field existed.  Declared/caller metadata is intentionally not
+    accepted for Firecracker resource sizing.
+    """
+    artifact = model_intake.get("artifact")
+    fetch = artifact.get("fetch") if isinstance(artifact, Mapping) else None
+    candidates = [summary.get("artifact_size_bytes")]
+    if isinstance(fetch, Mapping) and fetch.get("complete") is True and not fetch.get("truncated"):
+        candidates.extend((fetch.get("bytes_total"), fetch.get("bytes_observed")))
+    for value in candidates:
+        if isinstance(value, bool):
+            continue
+        try:
+            size = int(value)
+        except (TypeError, ValueError):
+            continue
+        if size > 0:
+            return size
+    return None
 
 
 def _model_intake_auto_timeline(value: Any) -> list[dict[str, Any]]:

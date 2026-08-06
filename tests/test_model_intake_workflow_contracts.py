@@ -55,6 +55,29 @@ def test_automatic_review_payload_fails_safe_for_malformed_jsonb():
     assert payload["deployment_bundle_json"] is None
 
 
+def test_complete_artifact_size_uses_generated_observation_not_declared_metadata():
+    digest = "a" * 64
+    model_intake = {
+        "artifact": {
+            "fetch": {
+                "complete": True,
+                "truncated": False,
+                "bytes_total": 2_627_013_817,
+            }
+        },
+        "metadata": {"artifact_size_bytes": 1},
+    }
+
+    assert api._model_intake_artifact_size_bytes(
+        model_intake,
+        {"sha256": digest},
+    ) == 2_627_013_817
+    assert api._model_intake_artifact_size_bytes(
+        {"artifact": {"fetch": {"complete": False, "bytes_total": 2_627_013_817}}},
+        {"artifact_size_bytes": None},
+    ) is None
+
+
 def _operator_request(token: str):
     return api.Request({
         "type": "http",

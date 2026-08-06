@@ -4493,6 +4493,16 @@ async def run_model_intake_scan(
         "extension": ext,
         "sha256": sha256,
         "sha256_scope": observed_hash_scope,
+        # Persist the authoritative complete-object size alongside the digest.
+        # Controlled intake uses this value to size a bounded Firecracker guest;
+        # omitting it made multi-gigabyte models silently fall back to 4 GiB.
+        "artifact_size_bytes": (
+            int(artifact_meta.get("bytes_total") or artifact_meta.get("bytes_observed"))
+            if bool(artifact_meta.get("complete"))
+            and not artifact_truncated
+            and int(artifact_meta.get("bytes_total") or artifact_meta.get("bytes_observed") or 0) > 0
+            else None
+        ),
         "acquisition_complete": bool(artifact_meta.get("complete")) and not artifact_truncated,
         "inspection_complete": not inspection_truncated,
         "quarantine_object": artifact_meta.get("quarantine_object"),

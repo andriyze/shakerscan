@@ -964,6 +964,7 @@ def test_model_intake_complete_acquisition_verifies_full_hash_and_full_zip(tmp_p
     assert summary["sha256_scope"] == "full_artifact"
     assert summary["checksum_status"] == "verified"
     assert summary["acquisition_complete"] is True
+    assert summary["artifact_size_bytes"] == artifact.stat().st_size
     assert summary["inspection_complete"] is False
     assert fetch["complete"] is True
     assert fetch["inspection_truncated"] is True
