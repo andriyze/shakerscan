@@ -2680,7 +2680,7 @@ function ModelIntakeSettingsContent() {
                   <h2 className="text-sm font-semibold">Evidence Checklist</h2>
                 </div>
                 <p className="mt-1 max-w-3xl text-sm text-gray-400">
-                  Platform metadata covers public model facts. Your organization still owns approval, SBOM, malware scan, eval, and monitoring evidence.
+                  ShakerScan generates the technical scan, SBOM, malware, runtime, and evaluation evidence. Add the organization-specific approval, private data context, production restrictions, and monitoring plan needed for your deployment.
                 </p>
               </div>
               <span className={`rounded px-2 py-1 text-xs ${evidenceBadgeClass}`}>{evidenceBadgeText}</span>

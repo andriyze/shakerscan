@@ -607,3 +607,8 @@ test('every runner input is carried from a previous step without operator action
   assert.match(workflow, /Observed by calibration job/)
   assert.match(workflow, /Confirm it is the embedding this deployment should reproduce/)
 })
+
+test('the evidence checklist credits generated technical artifacts accurately', () => {
+  assert.match(page, /ShakerScan generates the technical scan, SBOM, malware, runtime, and evaluation evidence/)
+  assert.doesNotMatch(page, /organization still owns approval, SBOM, malware scan/)
+})
