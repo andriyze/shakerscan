@@ -33,6 +33,7 @@ def test_model_intake_skill_covers_the_same_controlled_api_and_planner_catalog()
         "/policy-decisions",
         "/promote",
         "/report",
+        "/model-intake/checks",
     )
     for route in required_routes:
         assert route in reference
@@ -49,7 +50,9 @@ def test_model_intake_skill_preserves_fail_closed_firecracker_and_report_semanti
     reference = (ROOT / "skills/shakerscan/references/model-intake.md").read_text()
 
     assert "Do not substitute the container sandbox, QEMU, Docker" in reference
-    assert "any attempt, loss, overflow, contradiction" in reference
+    assert "any outbound IP/DNS attempt" in reference
+    assert "Local Unix IPC and socket creation" in reference
+    assert "What ShakerScan checks" in reference
     assert "`ALLOW`, `BLOCK`, `INCOMPLETE`, or `REVIEW`" in reference
     assert "Kubernetes is not required" in reference
     assert "conformance fixtures, not a hard-coded allowlist" in reference

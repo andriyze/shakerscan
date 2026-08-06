@@ -154,7 +154,10 @@ uses full artifact and repository acquisition with explicit byte/file/time budge
 ModelScan, Fickling, Semgrep, and Trivy adapters. A capped partial download is
 `known_unverified_truncated`/`INCOMPLETE`, never a false hash mismatch and never clean coverage.
 
-`max_download_bytes` is the artifact acquisition ceiling, not a memory budget, and accepts up to 100 GB.
+`max_download_bytes` is the artifact acquisition ceiling, not a memory budget, and accepts up to 500 GB for
+one artifact. Complete repository acquisition accepts up to 2 TB for sharded repositories. Automatic
+Hugging Face review derives limits from the authoritative pinned manifest with headroom; declared object size
+must also fit available quarantine storage before the body is read.
 Production models are routinely 1 GB or larger. Hugging Face resolution sizes the returned acquisition
 budget to the selected artifact plus bounded headroom. For other sources whose size is unknown, set an
 explicit reviewed limit that covers the whole file: anything above the bounded
@@ -279,7 +282,8 @@ The signed receipt must bind exact artifact/snapshot/bundle/runtime/loader diges
 phase. Network evidence must include attempted `socket`, `connect`, `bind`, `listen`, DNS-related and adjacent
 syscall activity; attempts by phase; bounded privacy-safe destinations; guest and host interface inventories;
 host firewall drops; completeness, overflow, and lost-event counters; and a telemetry digest. Admission fails
-on any attempt, loss, overflow, contradiction, missing loopback-only/no-device proof, or digest mismatch.
+on any outbound IP/DNS attempt, firewall drop, loss, overflow, contradiction, missing loopback-only/no-device
+proof, or digest mismatch. Local Unix IPC and socket creation remain recorded but are not mislabeled as egress.
 Resource evidence is host-cgroup measured. The receipt and derived embedding evaluation retain digests and
 bounded measurements, not raw source text or vectors.
 
@@ -396,9 +400,11 @@ cryptographically reverifies an active DSSE admission against current server-own
 report can say `ALLOW`. Any signature, statement, or current-record mismatch is `BLOCK`; expired evidence or
 admission material cannot become `PASS`.
 
-The report summarizes network attempts by phase, operation, and address family, distinguishes local IPC from
-IP-family operations, and includes only a bounded sample. The complete syscall stream stays in the signed
-receipt by digest. Treat conversion/model-load/known-answer correctness and network/resource containment as
+The report summarizes networking by phase, operation, and address family. It distinguishes local Unix IPC,
+socket creation, local bind/listen activity, DNS, and actual IP connect/send attempts; a local socket or failed
+bind is not mislabeled as egress. Outbound samples include destination address/port when observed, result,
+success, and phase. The complete syscall stream stays in the signed receipt by digest. Treat
+conversion/model-load/known-answer correctness and network/resource containment as
 separate controls: one can pass while containment correctly blocks the overall review.
 
 Export the exact scan's legal-triage artifacts without re-inspecting the model:
@@ -408,11 +414,16 @@ curl -s "$API_BASE/model-intake/scans/$SCAN_ID/license-bom" > shakerscan-license
 curl -s "$API_BASE/model-intake/scans/$SCAN_ID/third-party-notices" > THIRD-PARTY-NOTICES.txt
 ```
 
-The License BOM contains normalized terms, classifications, policy reasons, obligations, and evidence digests.
-The notices file is deliberately labeled a draft: it points to digest-bound license files but does not invent or
-silently omit exact copyright, attribution, license, or NOTICE text. Legal must verify and complete it before a
-distribution. SPDX records discovered declarations but leaves `LicenseConcluded` as `NOASSERTION` because an
-automated scanner is not the legal authority.
+The License BOM contains normalized terms, classifications, policy reasons, obligations, evidence paths/digests,
+the exact evidence sources searched, discovered copyright/attribution lines, missing evidence, and unresolved
+items. The notices file is labeled **INCOMPLETE DRAFT** whenever required evidence is absent. It includes detected
+attribution lines and a search/missing-evidence section rather than padding an empty file with boilerplate. Legal
+must verify and complete it before distribution. SPDX records discovered declarations but leaves
+`LicenseConcluded` as `NOASSERTION` because an automated scanner is not the legal authority.
+
+Read the implemented catalog from `GET /model-intake/checks` or the UI's **What ShakerScan checks** dialog.
+Catalog membership is capability documentation, not execution proof; the exact scan report must supply the
+per-check status, evidence basis, result summary, and evidence reference.
 
 Always report one final outcome: `ALLOW`, `BLOCK`, `INCOMPLETE`, or `REVIEW`. For each control state:
 

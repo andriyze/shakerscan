@@ -375,11 +375,17 @@ adds deterministic evidence reconciliation and reporting instead of adding anoth
    a distinct `legal_reviewer` must approve the latest frozen evidence before deterministic admission can
    allow. A new or changed snapshot, policy, scanner database, or approval invalidates that disposition through
    the existing evidence/policy lifecycle.
-6. CycloneDX and SPDX exports include discovered declarations. SPDX intentionally retains
-   `LicenseConcluded: NOASSERTION`. A concise License BOM records policy reasons, normalized terms, obligations,
-   and evidence digests. The Third-Party Notices file is explicitly a draft and points to exact license-file
-   paths/digests; legal/release owners must attach and verify complete copyright, attribution, license, and
-   NOTICE text before distribution.
+6. CycloneDX and SPDX exports include actual model-system and pinned dependency components, relationships,
+   provenance properties, and a composition/completeness statement. SPDX intentionally retains
+   `LicenseConcluded: NOASSERTION`. The License BOM records normalized terms, source paths/digests, evidence
+   searches, detected attribution lines, obligations, conflicts, missing evidence, and unresolved owners.
+   The Third-Party Notices file includes detected attribution and a source-search summary and is labeled
+   `INCOMPLETE DRAFT` whenever required evidence is absent.
+
+Artifact acceptance is content-based, not existence-based. A complete-review test must assert useful component
+names/versions or model relationships, subject and snapshot identity, evidence completeness, license source
+coverage, actionable unresolved items, and non-duplicated root identity. An empty component list plus hashes and
+generic legal boilerplate fails acceptance even when the JSON is schema-valid.
 
 This is the maximum responsible automation boundary. License classification, evidence reconciliation,
 approval routing, and notice drafting are product behavior. Legal interpretation, jurisdiction/use-case
@@ -550,7 +556,7 @@ telemetry stream by digest instead of flooding the executive report with repetit
 | Typed non-scanner providers | Implemented and boundary-frozen | Sandbox execution, runner-derived embedding evaluation, source-bound embedded policy, and normalized report/signed-admission export are separate classes | OPA and additional provider frameworks are out of scope and are not advertised as product capabilities |
 | Signed admission statement and lifecycle registry | Exact-bundle v2 control plane and isolated signer implemented | Workers emit only unsigned non-deployable candidates. The signer has a dedicated minimal hash-locked image, isolated internal network, separate least-privilege database role, shipped AWS KMS client, request idempotency lock, and initiating-operator audit identity. Frozen evidence, approvals, exact component verification, latest-manifest checks, and evidence-change invalidation are durable. | Prove production KMS rotation/failure paths and remaining revocation/recovery negative paths |
 | Saved Model Intake policy profiles | Implemented server-owned admission expansion | Admission uses the operator-selected server default; caller booleans/subsets/exceptions cannot weaken it; mutations require operator auth | Add organization-specific required scanner/runtime/benchmark fields |
-| Executive and detailed corporate report | Implemented across UI/JSON/HTML/SARIF as `model-intake-corporate-report/v2` | The executive section separates ShakerScan `ALLOW/BLOCK/INCOMPLETE/REVIEW` from `NOT_DETERMINED_BY_SHAKERSCAN` full corporate approval, exact scope, coverage, key deficiencies, and next actions. The detailed section includes enriched controls, scanner-level content-free static summaries, operation-versus-containment results, bounded Firecracker network/resource timelines, the 17-check capability catalog, and 14 external corporate requirements with owners/evidence. Raw high-volume telemetry remains in signed evidence instead of being duplicated into every report. | Add organization-specific policy/remediation text only when useful; it is not an admission dependency and may not hide or relabel a non-pass |
+| Executive and detailed corporate report | Implemented across UI/JSON/HTML/SARIF as `model-intake-corporate-report/v2` | The executive section separates ShakerScan `ALLOW/BLOCK/INCOMPLETE/REVIEW` from `NOT_DETERMINED_BY_SHAKERSCAN` full corporate approval, exact scope, coverage, key deficiencies, and next actions. The detailed section includes enriched controls, scanner-level content-free static summaries, operation-versus-containment results, bounded Firecracker network/resource timelines, the evidence-backed 27-check catalog, and 14 external corporate requirements with owners/evidence. Raw high-volume telemetry remains in signed evidence instead of being duplicated into every report. | Add organization-specific policy/remediation text only when useful; it is not an admission dependency and may not hide or relabel a non-pass |
 | Deployment by exact approved digest | Pure v2 verifier, explicit observation endpoint, configured OCI publisher, and namespace/object-scoped Kubernetes webhook installer implemented | `oras` performs one fixed HTTPS registry copy and verifies the remote descriptor; cert-manager injects the webhook CA; immutable image configuration and rollout are validated. No live corporate registry/cluster acceptance has been run. | Run digest-variant, outage, expiry, revocation, and recovery acceptance against the organization-operated registry and cluster; add no other orchestrator |
 | Legal, privacy, data provenance, and risk acceptance | Recorded as governance evidence | Organization-dependent | Keep human-owned; enforce required owner, approval, scope, and expiry |
 
@@ -817,22 +823,65 @@ and implemented across the `model_intake*` modules in
    deployment verification. Production KMS, registry, Firecracker, and cluster configuration remain
    deployment responsibilities and hardening targets.
 
-### 6.1 Complete acquisition versus bounded inspection
+### 6.1 Authoritative check catalog and result meaning
+
+`GET /model-intake/checks` is the authoritative product catalog used by the UI information dialog, coding-agent
+workflow, and corporate report. Catalog membership is not proof of execution. Every per-model report must state
+`PASS`, `FAIL`, `REVIEW`, `INCOMPLETE`, `ERROR`, `NOT_RUN`, or `NOT_APPLICABLE`, identify the evidence basis,
+summarize the result, and link the digest-bound evidence. The implemented checks are:
+
+1. **Source resolution and revision pinning** — resolve the provider repository and bind the review to an immutable revision.
+2. **Complete acquisition** — stream the complete selected artifact within explicit limits; detect truncation and oversize responses.
+3. **SHA-256 integrity** — hash the acquired bytes and compare registry or supplied digests.
+4. **Repository completeness** — compare every authoritative manifest member by safe path, size, and SHA-256.
+5. **Format identification** — recognize safetensors, PyTorch/pickle, ONNX, GGUF, archives, and supported formats.
+6. **Safetensors validation** — validate header JSON, tensor metadata, offsets, bounds, overlap, and payload structure.
+7. **Pickle analysis** — inspect opcodes and callable references without deserializing the model.
+8. **Archive safety** — recursively inspect ZIP/TAR paths, links/devices, nesting, expansion limits, and bombs.
+9. **ModelScan** — report the adapter's actual applicability, version, coverage, findings, and result.
+10. **Fickling** — report semantic pickle analysis only when the adapter supports the artifact.
+11. **Semgrep** — review repository code for unsafe deserialization, execution, networking, imports, and file access.
+12. **Trivy** — scan the complete repository offline for dependencies, vulnerabilities, configuration, and full-license evidence.
+13. **Native Python AST analysis** — inventory executable custom code and suspicious load-time constructs.
+14. **Dependency inventory** — parse declared runtime manifests and identify unpinned or unreproducible custom-code dependencies.
+15. **SBOM and AIBOM generation** — compose CycloneDX, SPDX, and AI inventories with explicit completeness and relationships.
+16. **License and governance metadata** — reconcile model, repository, dependency, dataset, and use terms under deterministic policy.
+17. **Signature and attestation verification** — verify configured trust anchors, exact subjects, DSSE/in-toto statements, and bindings.
+18. **Unsafe-format conversion** — convert eligible pickle weights to safetensors only inside Firecracker.
+19. **Conversion equivalence** — compare tensor names, shapes, dtypes, values, and embeddings before registering the converted subject.
+20. **Isolated model loading** — import the fixed loader, tokenizer, and model inside a no-NIC Firecracker microVM.
+21. **Warmup and inference** — execute bounded inference through the fixed embedding harness.
+22. **Known-answer repeatability** — calibrate an embedding digest, then verify it in a separate microVM execution.
+23. **Network monitoring** — prevent egress and separately classify local IPC, socket creation, bind/listen, DNS, and outbound destinations.
+24. **Resource enforcement** — enforce and measure CPU, memory, PIDs, output/file size, and wall-clock time; report cgroup OOM explicitly.
+25. **Evidence integrity** — bind snapshot, scanners, runtime observations, components, and limits into signed receipts.
+26. **Deterministic policy decision** — return `ALLOW`, `BLOCK`, `INCOMPLETE`, or `REVIEW` without caller or AI override.
+27. **Corporate-approval gap analysis** — list the human, legal, privacy, publisher, production, and deployed-system checks still external.
+
+The UI exposes this list through **What ShakerScan checks**. The report is the authority for what actually ran.
+Adapter-backed rows use the adapter result rather than inheriting a broad static-analysis status.
+
+### 6.2 Complete acquisition versus bounded inspection
 
 The 10 MB default `max_download_bytes` is an in-memory inspection-prefix limit, configurable up to 100 MB.
 It is not a final model-size limit. Complete acquisition streams to quarantine with separate fail-closed
 ceilings:
 
-- `max_artifact_bytes`: 10 GB by default, up to 100 GB.
-- `max_repository_bytes`: 50 GB by default, up to 500 GB.
+- `max_artifact_bytes`: 10 GB by default, up to 500 GB for one artifact.
+- `max_repository_bytes`: 50 GB by default, up to 2 TB for sharded repositories.
 - `max_repository_files`: 10,000.
+
+Automatic Hugging Face review derives both byte ceilings from the authoritative pinned manifest with controlled
+headroom. The downloader checks declared length against both the review limit and available quarantine storage
+before reading the body, and stops unknown-length transfers before exhausting the filesystem. Raising a ceiling
+does not reserve storage or turn an incomplete acquisition into a pass.
 
 All three example weight files fit within the default complete-artifact ceiling. A production review must
 enable `complete_artifact_download` and `complete_repository_snapshot`, use a server-resolved authoritative
 pinned manifest, set ceilings from that manifest plus controlled headroom, and reject unexpected growth. A prefix-only result remains
 `known_unverified_truncated` and cannot authorize deployment.
 
-### 6.2 What the current sandbox proves
+### 6.3 What the current sandbox proves
 
 The sandbox proves that its bounded inspector ran in a non-root, no-egress, read-only, capability-free,
 seccomp-filtered container and returned request/nonce/evidence/subject-bound output under service-side limits.
@@ -847,7 +896,7 @@ as a disposable microVM, nor does it independently collect syscall/file/import t
 of untrusted `trust_remote_code`, native kernels, or unsafe deserialization requires the remaining disposable
 KVM/microVM runner.
 
-### 6.3 What the current evaluator proves
+### 6.4 What the current evaluator proves
 
 The evaluator can score supplied documents, query embeddings, retrieval observations, ACL/tenant labels,
 poisoning results, resource measurements, deletion receipts, graph-boundary outcomes, cache context, and
