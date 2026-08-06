@@ -24,6 +24,11 @@ def _payload(status="PASS"):
         "finished_at": "2026-07-30T00:01:00+00:00",
         "expires_at": "2026-08-06T00:01:00+00:00",
         "observations": {
+            "status": "PASS",
+            "phases": {
+                phase: "PASS"
+                for phase in ("import", "tokenizer", "model_load", "warmup", "inference", "teardown")
+            },
             "observations_generated_by_runner": True,
             "embedding_known_answers_status": "PASS",
             "embedding_output_sha256": "f" * 64,
@@ -61,7 +66,7 @@ def test_runtime_containment_failure_does_not_falsely_fail_known_answer_evaluati
     assert report["status"] == "PASS"
     assert report["quality_status"] == "KNOWN_ANSWER_PASS"
     assert report["containment_status"] == "FAIL"
-    assert set(report["containment_blockers"]) == {"runtime_pass", "network_quiet"}
+    assert report["containment_blockers"] == ["network_quiet"]
 
 
 def test_incomplete_known_answer_measurements_fail_evaluation():

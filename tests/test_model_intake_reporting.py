@@ -228,6 +228,8 @@ def test_network_attempt_is_a_blocking_control_failure():
     report = _report(rows)
 
     assert report["outcome"] == "BLOCK"
+    assert _control(report, "runtime_execution")["status"] == "PASS"
+    assert "containment is reported" in _control(report, "runtime_execution")["detail"]
     assert _control(report, "network_isolation")["status"] == "FAIL"
     network = report["runner_timelines"][0]["network"]
     assert network["attempt_sample"][0]["operation"] == "connect"

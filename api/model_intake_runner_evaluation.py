@@ -39,7 +39,20 @@ def derive_embedding_evaluation(runtime_payload: dict[str, Any], source_payload_
         "resources_measured": observations.get("resource_limits_enforced") is True and resource.get("complete") is True,
     }
     containment_required = {
-        "runtime_pass": runtime_payload.get("status") == "PASS",
+        # The signed receipt's top-level status includes independent
+        # containment gates. Runtime execution is the guest operation and its
+        # fixed phases; networking is evaluated by the next control. Keeping
+        # these separate prevents one socket attempt from falsely claiming the
+        # model failed to load or produce its known-answer embeddings.
+        "runtime_pass": (
+            observations.get("status") == "PASS"
+            and isinstance(observations.get("phases"), dict)
+            and bool(observations["phases"])
+            and all(
+                str(value.get("status") if isinstance(value, dict) else value).upper() == "PASS"
+                for value in observations["phases"].values()
+            )
+        ),
         "network_quiet": (
             observations.get("network_egress_blocked") is True
             and network.get("complete") is True

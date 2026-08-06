@@ -621,7 +621,35 @@ def build_model_intake_report(
         artifact_uri.split("?", 1)[0].endswith(extension)
         for extension in (".bin", ".pt", ".pth", ".ckpt", ".pkl", ".pickle", ".joblib")
     )
-    controls.extend(_runner_controls(timelines, conversion_required=conversion_required))
+    runner_controls = _runner_controls(timelines, conversion_required=conversion_required)
+    controls.extend(runner_controls)
+    # A runtime receipt has one overall status that also covers network and
+    # resource containment. The report exposes those as independent controls,
+    # so derive the runtime-execution answer from the fixed guest phases rather
+    # than double-counting a containment failure as a model-load failure.
+    firecracker_control = next(
+        (item for item in runner_controls if item.get("id") == "firecracker_runtime"),
+        None,
+    )
+    runtime_evidence_control = next(
+        (item for item in controls if item.get("id") == "runtime_execution"),
+        None,
+    )
+    if firecracker_control and runtime_evidence_control and runtime_evidence_control.get("status") != "NOT_RUN":
+        execution_status = str(firecracker_control.get("status") or "INCOMPLETE")
+        receipt_overall_status = runtime_evidence_control.get("status")
+        runtime_evidence_control["status"] = execution_status
+        runtime_evidence_control["detail"] = (
+            "Exact-subject model load, warmup, inference, and teardown passed; "
+            "runtime containment is reported by separate network and resource controls."
+            if execution_status == "PASS"
+            else "One or more fixed exact-subject runtime phases did not pass."
+        )
+        runtime_evidence_control["coverage"] = {
+            **_json(runtime_evidence_control.get("coverage"), {}),
+            "execution_status": execution_status,
+            "receipt_overall_status": receipt_overall_status,
+        }
     latest_manifest = manifests[-1] if manifests else None
     controls.append({
         "id": "frozen_evidence",
