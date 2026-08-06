@@ -5288,7 +5288,8 @@ def _require_model_intake_operator(request: Request) -> None:
     # This principal is used only to call the existing evidence-generation
     # functions; the controller has no path to approvals, exceptions, policy
     # decisions, promotion, or signer issuance.
-    if request.scope.get("shakerscan.model_intake_system_actor") == "system:model-intake-auto":
+    scope = getattr(request, "scope", {})
+    if isinstance(scope, Mapping) and scope.get("shakerscan.model_intake_system_actor") == "system:model-intake-auto":
         return
     peer = getattr(getattr(request, "client", None), "host", None)
     try:
@@ -5387,7 +5388,8 @@ def _model_intake_operator_credential(request: Request) -> dict[str, Any] | None
 
 def _model_intake_authenticated_subject(request: Request) -> str:
     """Return a server-derived identity; never accept approver identity in JSON."""
-    system_actor = request.scope.get("shakerscan.model_intake_system_actor")
+    scope = getattr(request, "scope", {})
+    system_actor = scope.get("shakerscan.model_intake_system_actor") if isinstance(scope, Mapping) else None
     if system_actor == "system:model-intake-auto":
         return system_actor
     _require_model_intake_operator(request)
@@ -5426,7 +5428,7 @@ def _model_intake_submission_subject(request: Request) -> str:
 
 def _model_intake_automatic_system_request() -> Request:
     """Create an internal principal without persisting or replaying a bearer token."""
-    return Request({
+    scope = {
         "type": "http",
         "http_version": "1.1",
         "method": "POST",
@@ -5438,7 +5440,14 @@ def _model_intake_automatic_system_request() -> Request:
         "client": ("127.0.0.1", 0),
         "server": ("127.0.0.1", 8080),
         "shakerscan.model_intake_system_actor": "system:model-intake-auto",
-    })
+    }
+    request = Request(scope)
+    # Minimal FastAPI request doubles used by the complete suite intentionally
+    # expose only headers/client/url. Preserve the server-only scope contract so
+    # those requests fail closed while the internal controller remains testable.
+    if not hasattr(request, "scope"):
+        request.scope = scope
+    return request
 
 
 def _fleet_connection_bundle() -> dict[str, Any]:
