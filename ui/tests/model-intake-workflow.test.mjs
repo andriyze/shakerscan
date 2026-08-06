@@ -507,7 +507,9 @@ test('a bill of materials states its own coverage', () => {
   // A Quick check never enumerates dependencies, so a small component count is
   // a coverage fact rather than a clean bill.
   assert.match(report, /dependency_inventory !== 'generated'/)
-  assert.match(report, /no dependency inventory: re-run at Full scan depth/)
+  assert.match(report, /no dependency manifest inventory: re-run at Full scan depth/)
+  assert.match(report, /pinned dependenc/)
+  assert.match(report, /model-system component/)
   assert.match(api, /dependency_inventory\?: 'generated' \| 'not_generated'/)
 })
 
