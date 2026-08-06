@@ -136,6 +136,16 @@ jobs:
       - name: Build locked scanner image
         run: docker build -f scanner/Dockerfile -t shakerscan-scanner:release-candidate .
 
+      - name: Build and verify locked API control-plane image
+        run: |
+          docker build --build-arg INSTALL_DOCKER_CLI=1 \
+            -f scanner/Dockerfile -t shakerscan-api:release-candidate .
+          docker run --rm --entrypoint sh shakerscan-scanner:release-candidate -ceu \
+            'if command -v docker >/dev/null 2>&1; then echo "worker image must not contain Docker" >&2; exit 1; fi'
+          docker run --rm --entrypoint docker shakerscan-api:release-candidate --version
+          docker run --rm --entrypoint sh shakerscan-api:release-candidate -ceu \
+            'if docker buildx version >/dev/null 2>&1; then echo "runtime API must not carry Buildx" >&2; exit 1; fi'
+
       - name: Build and smoke-test locked Model Intake signer image
         run: |
           docker build -f api/model_intake_signer.Dockerfile -t shakerscan-model-intake-signer:release-candidate .
