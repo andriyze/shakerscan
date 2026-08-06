@@ -12222,6 +12222,88 @@ def _model_intake_conversion_output_usable(receipt_payload: dict[str, Any]) -> b
     )
 
 
+def _model_intake_automatic_control_statuses(
+    records: list[dict[str, Any]],
+) -> dict[str, str]:
+    """Project evidence records into user-facing, decision-specific controls.
+
+    Runner receipt ``status`` is intentionally conservative: containment,
+    signer trust, resource telemetry, and the actual model operation can all
+    make it fail.  Reusing that aggregate status for every named control tells
+    an operator that conversion or inference failed when those operations may
+    have succeeded.  This projection keeps every failure blocking while naming
+    the control that actually failed.
+    """
+    output: dict[str, str] = {}
+    rank = {
+        "PASS": 0,
+        "NOT_APPLICABLE": 0,
+        "WARNING": 1,
+        "REVIEW": 1,
+        "REVIEW_REQUIRED": 1,
+        "INCOMPLETE": 2,
+        "UNSUPPORTED": 2,
+        "TIMEOUT": 3,
+        "ERROR": 3,
+        "CRASHED": 4,
+        "FAIL": 4,
+    }
+
+    def record(control: str, status: str) -> None:
+        normalized = str(status or "INCOMPLETE").upper()
+        current = output.get(control)
+        if current is None or rank.get(normalized, 2) > rank.get(current, 2):
+            output[control] = normalized
+
+    for item in records:
+        evidence_type = str(item.get("evidence_type") or "")
+        raw_status = str(item.get("status") or "INCOMPLETE").upper()
+        if evidence_type not in {"conversion_equivalence", "runtime_execution"}:
+            record(evidence_type, raw_status)
+            continue
+        envelope = _model_intake_json_object(item.get("signature_envelope"))
+        payload = _model_intake_untrusted_runner_claims(envelope)
+        observations = _model_intake_json_object(payload.get("observations"))
+        phases = _model_intake_json_object(observations.get("phases"))
+        phase_pass = bool(phases) and all(
+            str(value.get("status") if isinstance(value, dict) else value).upper() == "PASS"
+            for value in phases.values()
+        )
+        if evidence_type == "conversion_equivalence":
+            record(
+                evidence_type,
+                "PASS" if _model_intake_conversion_output_usable(payload) else raw_status,
+            )
+        else:
+            execution_pass = observations.get("status") == "PASS" and phase_pass
+            record(evidence_type, "PASS" if execution_pass else raw_status)
+
+        network = _model_intake_json_object(observations.get("network_telemetry"))
+        attempt_count = network.get("attempt_count")
+        lost_events = network.get("lost_events")
+        firewall_drops = network.get("host_firewall_drop_count")
+        if any(
+            isinstance(value, int) and not isinstance(value, bool) and value > 0
+            for value in (attempt_count, firewall_drops)
+        ):
+            network_status = "FAIL"
+        elif (
+            network.get("complete") is True
+            and network.get("no_network_device") is True
+            and network.get("overflowed") is False
+            and attempt_count == 0
+            and lost_events == 0
+            and firewall_drops == 0
+        ):
+            network_status = "PASS"
+        else:
+            network_status = "INCOMPLETE"
+        record("network_isolation", network_status)
+        resources = _model_intake_json_object(observations.get("resource_telemetry"))
+        record("resource_envelope", "PASS" if resources.get("complete") is True else "INCOMPLETE")
+    return output
+
+
 async def _register_and_rescan_converted_snapshot(
     submission_uuid: uuid.UUID,
     receipt_payload: dict[str, Any],
@@ -15904,7 +15986,7 @@ async def _advance_model_intake_automatic_review(conn: Any, review: Any) -> None
             submission_id, ModelEvidenceFreezeRequest(deployment_bundle=bundle), system_request
         )
         evidence_rows = await conn.fetch(
-            """SELECT DISTINCT ON (evidence_type) evidence_type,status
+            """SELECT DISTINCT ON (evidence_type) evidence_type,status,signature_envelope
                FROM model_intake_evidence_records
                WHERE submission_id=$1
                  AND evidence_type IN (
@@ -15914,10 +15996,9 @@ async def _advance_model_intake_automatic_review(conn: Any, review: Any) -> None
                ORDER BY evidence_type,created_at DESC""",
             uuid.UUID(submission_id),
         )
-        evidence_status = {
-            str(item["evidence_type"]): str(item["status"]).upper()
-            for item in evidence_rows
-        }
+        evidence_status = _model_intake_automatic_control_statuses(
+            [row_to_dict(item) for item in evidence_rows]
+        )
         observed = set(evidence_status.values())
         if observed.intersection({"FAIL", "CRASHED"}):
             technical_outcome = "BLOCK"

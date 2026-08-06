@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import hashlib
 import inspect
 import json
@@ -863,6 +864,72 @@ def test_failed_security_receipt_can_register_proven_equivalent_conversion_outpu
     assert api._model_intake_conversion_output_usable(payload) is True
     payload["observations"]["phases"]["tensor_equivalence"] = "FAIL"
     assert api._model_intake_conversion_output_usable(payload) is False
+
+
+def test_automatic_summary_names_containment_failure_without_falsely_failing_operations():
+    conversion = {
+        "evidence_type": "conversion_equivalence",
+        "status": "FAIL",
+        "observations": {
+            "status": "PASS",
+            "target_artifact_sha256": "a" * 64,
+            "target_repository_snapshot_sha256": "b" * 64,
+            "target_tokenizer_sha256": "c" * 64,
+            "target_configuration_sha256": "d" * 64,
+            "tensor_inventory_equivalent": True,
+            "numeric_equivalence_status": "PASS",
+            "embedding_equivalence_status": "PASS",
+            "phases": {phase: "PASS" for phase in (
+                "import", "deserialize_convert", "tensor_equivalence",
+                "embedding_equivalence", "teardown",
+            )},
+            "network_telemetry": {
+                "complete": True,
+                "no_network_device": True,
+                "attempt_count": 2,
+                "overflowed": False,
+                "lost_events": 0,
+                "host_firewall_drop_count": 0,
+            },
+            "resource_telemetry": {"complete": True},
+        },
+    }
+    runtime = {
+        "evidence_type": "runtime_execution",
+        "status": "FAIL",
+        "observations": {
+            "status": "PASS",
+            "phases": {phase: "PASS" for phase in (
+                "import", "tokenizer", "model_load", "warmup", "inference", "teardown",
+            )},
+            "network_telemetry": {
+                "complete": True,
+                "no_network_device": True,
+                "attempt_count": 0,
+                "overflowed": False,
+                "lost_events": 0,
+                "host_firewall_drop_count": 0,
+            },
+            "resource_telemetry": {"complete": True},
+        },
+    }
+
+    def row(payload):
+        encoded = base64.b64encode(json.dumps(payload).encode()).decode()
+        return {
+            "evidence_type": payload["evidence_type"],
+            "status": payload["status"],
+            "signature_envelope": {"payload": encoded},
+        }
+
+    controls = api._model_intake_automatic_control_statuses([
+        row(conversion), row(runtime),
+    ])
+
+    assert controls["conversion_equivalence"] == "PASS"
+    assert controls["runtime_execution"] == "PASS"
+    assert controls["resource_envelope"] == "PASS"
+    assert controls["network_isolation"] == "FAIL"
 
 
 def test_conversion_evidence_freeze_binds_target_identity_not_source_loader():

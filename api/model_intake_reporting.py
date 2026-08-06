@@ -295,6 +295,48 @@ def _runner_observations(job: dict[str, Any]) -> dict[str, Any]:
     return _json(payload.get("observations"), {})
 
 
+def _network_summary(network: dict[str, Any]) -> dict[str, Any]:
+    """Keep the report useful without copying the full syscall stream into it.
+
+    The signed receipt remains the authoritative, complete evidence object.  A
+    corporate report needs the decision-driving counts and a small sample, not
+    hundreds of repetitive AF_UNIX probes emitted by framework libraries.
+    """
+    attempts = network.get("attempted_operations")
+    attempts = attempts if isinstance(attempts, list) else []
+    by_family: dict[str, int] = {}
+    by_operation: dict[str, int] = {}
+    local_ipc_count = 0
+    ip_network_count = 0
+    for raw in attempts:
+        item = raw if isinstance(raw, dict) else {}
+        family = str(item.get("address_family") or "UNKNOWN")
+        operation = str(item.get("operation") or "unknown")
+        by_family[family] = by_family.get(family, 0) + 1
+        by_operation[operation] = by_operation.get(operation, 0) + 1
+        if family == "AF_UNIX":
+            local_ipc_count += 1
+        elif family in {"AF_INET", "AF_INET6"}:
+            ip_network_count += 1
+    return {
+        "complete": network.get("complete"),
+        "attempt_count": network.get("attempt_count"),
+        "local_ipc_attempt_count": local_ipc_count,
+        "ip_network_attempt_count": ip_network_count,
+        "attempts_by_family": dict(sorted(by_family.items())),
+        "attempts_by_operation": dict(sorted(by_operation.items())),
+        "attempts_by_phase": network.get("attempts_by_phase"),
+        "attempt_sample": attempts[:12],
+        "attempt_sample_truncated": len(attempts) > 12,
+        "overflowed": network.get("overflowed"),
+        "lost_events": network.get("lost_events"),
+        "guest_interfaces": network.get("guest_interfaces"),
+        "host_interfaces": network.get("host_interfaces"),
+        "host_firewall_drop_count": network.get("host_firewall_drop_count"),
+        "telemetry_sha256": network.get("telemetry_sha256"),
+    }
+
+
 def _runner_timelines(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     output: list[dict[str, Any]] = []
     for job in jobs:
@@ -320,18 +362,7 @@ def _runner_timelines(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "started_at": _iso(job.get("started_at")),
             "finished_at": _iso(job.get("finished_at")),
             "phases": phase_rows,
-            "network": {
-                "complete": network.get("complete"),
-                "attempt_count": network.get("attempt_count"),
-                "attempted_operations": network.get("attempted_operations"),
-                "attempts_by_phase": network.get("attempts_by_phase"),
-                "overflowed": network.get("overflowed"),
-                "lost_events": network.get("lost_events"),
-                "guest_interfaces": network.get("guest_interfaces"),
-                "host_interfaces": network.get("host_interfaces"),
-                "host_firewall_drop_count": network.get("host_firewall_drop_count"),
-                "telemetry_sha256": network.get("telemetry_sha256"),
-            },
+            "network": _network_summary(network),
             "resources": resources,
             "error": _json(job.get("error_json"), {}),
         })
@@ -435,9 +466,14 @@ def _runner_controls(
             if conversion_required and not conversion
             else "No conversion was required."
             if not conversion
-            else "Fixed conversion/equivalence phase evidence is recorded."
+            else "Fixed tensor and embedding equivalence phases passed; network containment is reported separately."
+            if all(item.get("status") == "PASS" for item in conversion.get("phases") or [])
+            else "One or more fixed conversion/equivalence phases did not pass."
         ),
-        "coverage": {} if not conversion else {"phases": len(conversion.get("phases") or [])},
+        "coverage": {} if not conversion else {
+            "phases": len(conversion.get("phases") or []),
+            "network": conversion.get("network") or {},
+        },
         "evidence_refs": [] if not conversion else [{"kind": "runner_job", "id": conversion["job_id"]}],
     }
     return [runtime_control, network_control, resource_control, conversion_control]
