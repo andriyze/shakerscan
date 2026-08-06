@@ -1376,6 +1376,28 @@ export interface ModelIntakeScannerReadiness {
   adapters: ModelIntakeScannerAdapterReadiness[]
 }
 
+export interface ModelIntakeCheckCatalogItem {
+  id: string
+  category: string
+  check: string
+  description: string
+  implementation: string
+  applies_when: string
+}
+
+export interface ModelIntakeCheckCatalog {
+  schema_version: string
+  status_note: string
+  checks: ModelIntakeCheckCatalogItem[]
+  external_approval_requirements: Array<{
+    id: string
+    category: string
+    requirement: string
+    typical_owner: string
+    expected_evidence: string
+  }>
+}
+
 export interface ModelIntakeRunnerReadiness {
   status: 'READY' | 'NOT_READY' | 'UNSUPPORTED_HOST' | string
   // False when this host cannot run a microVM at all, as opposed to a host
@@ -4001,6 +4023,14 @@ export async function getModelIntakeScannerReadiness(): Promise<ModelIntakeScann
   const res = await fetch(`${API_URL}/model-intake/scanners/readiness`)
   if (!res.ok) {
     throw new Error(await getApiErrorMessage(res, 'Failed to load Model Intake scanner readiness'))
+  }
+  return res.json()
+}
+
+export async function getModelIntakeCheckCatalog(): Promise<ModelIntakeCheckCatalog> {
+  const res = await fetch(`${API_URL}/model-intake/checks`)
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Failed to load the Model Intake check catalog'))
   }
   return res.json()
 }

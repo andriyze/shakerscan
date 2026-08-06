@@ -280,6 +280,14 @@ test('one pasted Hugging Face link queues the complete technical review', () => 
   assert.match(api, /downloadModelIntakeAutomaticReport/)
 })
 
+test('model intake exposes the authoritative check catalog in an information dialog', () => {
+  assert.match(page, /What ShakerScan checks/)
+  assert.match(page, /What Model Intake checks/)
+  assert.match(page, /getModelIntakeCheckCatalog/)
+  assert.match(page, /A catalog entry by itself is never proof that a check ran/)
+  assert.match(api, /\/model-intake\/checks/)
+})
+
 test('automatic review JSONB values cannot crash the Model Intake route', () => {
   assert.match(api, /normalizeModelIntakeAutomaticReview/)
   assert.match(api, /decodedAutomaticReviewArray/)

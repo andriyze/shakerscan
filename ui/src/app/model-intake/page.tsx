@@ -3,7 +3,7 @@
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'next/navigation'
 import Link from 'next/link'
-import { Card, CardSkeleton, ErrorState, useToast } from '@/components/ui'
+import { Card, CardSkeleton, ErrorState, Modal, useToast } from '@/components/ui'
 import {
   AlertTriangle,
   CheckCircle2,
@@ -13,6 +13,7 @@ import {
   FileJson,
   GitBranch,
   Globe2,
+  Info,
   PackageCheck,
   Play,
   RefreshCw,
@@ -27,6 +28,7 @@ import {
   getModelIntakeTrustAnchors,
   getModelIntakeAdmissions,
   getModelIntakeOperatorCredential,
+  getModelIntakeCheckCatalog,
   getModelIntakeScannerReadiness,
   getModelIntakeRunnerReadiness,
   getModelIntakeRunnerInstallPlan,
@@ -41,6 +43,7 @@ import {
   submitModelIntakeScan,
   MODEL_INTAKE_OPERATOR_TOKEN_KEY,
   type ModelIntakeOperatorCredential,
+  type ModelIntakeCheckCatalog,
   type AITestReadinessControl,
   type AITestScenario,
   type ModelIntakePlatform,
@@ -438,6 +441,10 @@ function ModelIntakeSettingsContent() {
   const [automaticReviews, setAutomaticReviews] = useState<ModelIntakeAutomaticReview[]>([])
   const [automaticReviewsError, setAutomaticReviewsError] = useState<string | null>(null)
   const [automaticDownload, setAutomaticDownload] = useState('')
+  const [checkCatalogOpen, setCheckCatalogOpen] = useState(false)
+  const [checkCatalog, setCheckCatalog] = useState<ModelIntakeCheckCatalog | null>(null)
+  const [checkCatalogLoading, setCheckCatalogLoading] = useState(false)
+  const [checkCatalogError, setCheckCatalogError] = useState<string | null>(null)
   const [scanDepth, setScanDepth] = useState<ModelIntakeScanDepth>('full')
   const [platform, setPlatform] = useState<ModelIntakePlatform>('auto')
   const [environment, setEnvironment] = useState<ModelIntakeEnvironment>('production')
@@ -1346,6 +1353,20 @@ function ModelIntakeSettingsContent() {
   })
   const hasTrustFailures = hasIntakeInput && trustPreview.blockingFailures.length > 0
 
+  async function openCheckCatalog() {
+    setCheckCatalogOpen(true)
+    if (checkCatalog || checkCatalogLoading) return
+    setCheckCatalogLoading(true)
+    setCheckCatalogError(null)
+    try {
+      setCheckCatalog(await getModelIntakeCheckCatalog())
+    } catch (error) {
+      setCheckCatalogError(error instanceof Error ? error.message : 'Failed to load the check catalog')
+    } finally {
+      setCheckCatalogLoading(false)
+    }
+  }
+
   return (
     <div className="min-w-0 max-w-full space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -1359,7 +1380,68 @@ function ModelIntakeSettingsContent() {
             through controlled admission.
           </p>
         </div>
+        <button
+          type="button"
+          onClick={openCheckCatalog}
+          className="inline-flex items-center gap-2 rounded-lg border border-cyan-700/60 bg-cyan-950/30 px-3 py-2 text-sm font-medium text-cyan-100 hover:bg-cyan-900/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
+        >
+          <Info className="h-4 w-4" />
+          What ShakerScan checks
+        </button>
       </div>
+
+      <Modal
+        open={checkCatalogOpen}
+        onClose={() => setCheckCatalogOpen(false)}
+        title="What Model Intake checks"
+        size="xl"
+      >
+        <div className="space-y-4">
+          <div className="rounded-lg border border-cyan-800/50 bg-cyan-950/20 p-4 text-sm text-cyan-50">
+            This is the implemented capability catalog. Every completed report separately states whether each
+            applicable check ran, what evidence it produced, and whether it passed, failed, was incomplete, or needs review.
+            A catalog entry by itself is never proof that a check ran.
+          </div>
+          {checkCatalogLoading && <CardSkeleton />}
+          {checkCatalogError && <ErrorState message={checkCatalogError} />}
+          {checkCatalog && (
+            <>
+              <div className="text-sm text-gray-400">{checkCatalog.status_note}</div>
+              <div className="grid gap-3 md:grid-cols-2">
+                {checkCatalog.checks.map((item) => (
+                  <div key={item.id} className="rounded-lg border border-gray-800 bg-gray-950/60 p-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="font-medium text-white">{item.check}</div>
+                      <span className="shrink-0 rounded bg-gray-800 px-2 py-0.5 font-mono text-xs text-gray-300">{item.id}</span>
+                    </div>
+                    <p className="mt-1 text-sm leading-5 text-gray-300">{item.description}</p>
+                    <div className="mt-2 text-xs text-gray-500">
+                      <span className="text-gray-400">Runs when:</span> {item.applies_when}
+                    </div>
+                    <div className="mt-1 text-xs text-gray-500">
+                      <span className="text-gray-400">Evidence source:</span> {item.implementation}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <details className="rounded-lg border border-amber-800/40 bg-amber-950/20 p-4">
+                <summary className="cursor-pointer font-medium text-amber-100">
+                  Corporate approvals outside Model Intake ({checkCatalog.external_approval_requirements.length})
+                </summary>
+                <div className="mt-3 space-y-3">
+                  {checkCatalog.external_approval_requirements.map((item) => (
+                    <div key={item.id} className="border-l-2 border-amber-700/60 pl-3 text-sm">
+                      <div className="font-medium text-amber-50">{item.id} — {item.category}</div>
+                      <div className="mt-1 text-gray-300">{item.requirement}</div>
+                      <div className="mt-1 text-xs text-gray-500">Owner: {item.typical_owner} · Evidence: {item.expected_evidence}</div>
+                    </div>
+                  ))}
+                </div>
+              </details>
+            </>
+          )}
+        </div>
+      </Modal>
 
       <div className="inline-flex rounded-lg border border-gray-800 bg-gray-950 p-1" aria-label="Model Intake workflow mode">
         <button
