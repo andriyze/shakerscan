@@ -18,6 +18,41 @@ def test_trivy_sca_adapter_validates_schema_and_findings():
     assert _parse_external_scanner("trivy", json.dumps(trivy), "", 0)[0] == "FAIL"
 
 
+def test_trivy_license_adapter_preserves_inventory_and_requires_review():
+    trivy = {"Results": [{
+        "Target": "/snapshot/LICENSE.custom",
+        "Licenses": [
+            {"Name": "MIT", "Category": "permissive", "Severity": "LOW", "PkgName": "safe-lib"},
+            {"Name": "GPL-3.0-only", "Category": "reciprocal", "Severity": "MEDIUM", "PkgName": "copyleft-lib"},
+            {"Name": "Acme Research Terms", "Category": "unknown", "Severity": "UNKNOWN"},
+        ],
+    }]}
+
+    status, findings, summary = _parse_external_scanner("trivy", json.dumps(trivy), "", 0)
+
+    assert status == "WARNING"
+    assert findings == []
+    assert summary["licenses"] == 3
+    assert summary["license_class_counts"] == {"permissive": 1, "reciprocal": 1, "unknown": 1}
+    assert [item["license"] for item in summary["license_inventory"]] == [
+        "MIT", "GPL-3.0-only", "Acme Research Terms",
+    ]
+    assert all(len(item["evidence_sha256"]) == 64 for item in summary["license_inventory"])
+
+
+def test_trivy_forbidden_and_restricted_licenses_fail():
+    trivy = {"Results": [{"Licenses": [
+        {"Name": "AGPL-3.0-only", "Category": "restricted", "Severity": "HIGH"},
+        {"Name": "Proprietary", "Category": "forbidden", "Severity": "CRITICAL"},
+    ]}]}
+
+    status, findings, summary = _parse_external_scanner("trivy", json.dumps(trivy), "", 1)
+
+    assert status == "FAIL"
+    assert [item["severity"] for item in findings] == ["high", "critical"]
+    assert summary["licenses"] == 2
+
+
 def test_modelscan_adapter_is_fail_closed():
     assert _parse_external_scanner("modelscan", '{"issues":[]}', "", 0)[0] == "PASS"
     modelscan_preamble = (
@@ -124,6 +159,8 @@ def test_scanner_plan_is_format_and_repository_fact_driven(tmp_path):
     assert zip_by_name["modelscan"]["applicable"] is True
     assert zip_by_name["fickling"]["applicable"] is False
     assert zip_by_name["fickling"]["reason"] == "pytorch_zip_not_supported_by_fickling"
+    assert zip_by_name["trivy"]["applicable"] is True
+    assert zip_by_name["trivy"]["reason"] == "complete_repository_snapshot"
 
 
 def test_requested_adapter_is_required_and_unknown_names_are_not_in_plan(tmp_path):
@@ -155,6 +192,7 @@ def test_adapter_catalog_separates_provider_kind_and_policy():
     assert catalog["semgrep"]["applicability"] == "repository_code"
     assert catalog["fickling"]["target_scope"] == "artifact"
     assert catalog["trivy"]["required_profiles"] == ["strict"]
+    assert catalog["trivy"]["applicability"] == "repository_compliance"
 
 
 def test_readiness_requires_functional_self_test_for_default_adapters(tmp_path, monkeypatch):

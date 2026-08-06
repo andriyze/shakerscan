@@ -22,6 +22,40 @@ def test_missing_required_external_scanner_is_unsupported_and_fail_closed(monkey
     assert summary["required_non_pass"] == ["required-tool"]
 
 
+def test_trivy_full_license_mode_is_limited_to_complete_repository(monkeypatch, tmp_path):
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    (snapshot / "LICENSE").write_text("fixture")
+    captured: list[list[str]] = []
+
+    monkeypatch.setattr(scanners, "_scanner_material_state", lambda _spec: {"ready": True})
+    monkeypatch.setattr(scanners.shutil, "which", lambda _name: "/usr/bin/trivy")
+    monkeypatch.setattr(scanners, "_tool_version", lambda *_args: "test")
+    monkeypatch.setattr(scanners, "_prepare_unprivileged_paths", lambda *_args: None)
+    monkeypatch.setattr(scanners, "_bounded_command", lambda executable, args: [executable, *args])
+
+    class Completed:
+        returncode = 0
+
+    def fake_run(argv, **_kwargs):
+        captured.append(list(argv))
+        _kwargs["stdout"].write(b'{"Results":[]}')
+        return Completed()
+
+    monkeypatch.setattr(scanners.subprocess, "run", fake_run)
+    spec = next(item for item in scanners.EXTERNAL_SCANNERS if item.name == "trivy")
+
+    complete = scanners.run_external_scanner(spec, snapshot, _subject(kind="repository_snapshot"))
+    incomplete = scanners.run_external_scanner(
+        spec, snapshot, {**_subject(kind="repository_snapshot"), "complete": False},
+    )
+
+    assert "--license-full" in captured[0]
+    assert "--license-full" not in captured[1]
+    assert complete["execution"]["license_scan_mode"] == "full_repository"
+    assert incomplete["execution"]["license_scan_mode"] == "package_metadata"
+
+
 def test_unprivileged_selected_artifact_can_traverse_disposable_snapshot(monkeypatch, tmp_path):
     disposable = tmp_path / "model-intake-subject-fixture"
     snapshot = disposable / "snapshot"

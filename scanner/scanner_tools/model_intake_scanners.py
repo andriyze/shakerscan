@@ -105,7 +105,7 @@ EXTERNAL_SCANNERS: tuple[ScannerSpec, ...] = (
             "--offline-scan", "--disable-telemetry", "--skip-version-check",
             "--cache-dir", "/opt/trivy-cache", "{subject}",
         ),
-        applicability="dependency_repository", enabled_by_default=True, required_profiles=("strict",),
+        applicability="repository_compliance", enabled_by_default=True, required_profiles=("strict",),
         database_path="/opt/trivy-cache/db/metadata.json",
     ),
 )
@@ -175,6 +175,9 @@ def scanner_applicability(spec: ScannerSpec, subject_path: Path) -> dict[str, An
     elif spec.applicability == "dependency_repository":
         applicable = subject_path.is_dir() and bool(names & DEPENDENCY_FILENAMES)
         reason = "dependency_manifest_present" if applicable else "no_dependency_manifest"
+    elif spec.applicability == "repository_compliance":
+        applicable = subject_path.is_dir()
+        reason = "complete_repository_snapshot" if applicable else "repository_snapshot_required"
     elif spec.applicability == "python_dependency_repository":
         applicable = subject_path.is_dir() and bool(names & PYTHON_DEPENDENCY_FILENAMES)
         reason = "python_dependency_manifest_present" if applicable else "no_python_dependency_manifest"
@@ -485,7 +488,9 @@ def _parse_external_scanner(
             results = parsed.get("Results") if isinstance(parsed, dict) else None
             if not isinstance(results, list):
                 return "INCOMPLETE", [], {"error": "trivy_results_missing"}
-            counts = {"vulnerabilities": 0, "secrets": 0, "misconfigurations": 0}
+            counts = {"vulnerabilities": 0, "secrets": 0, "misconfigurations": 0, "licenses": 0}
+            license_class_counts: dict[str, int] = {}
+            normalized_licenses: list[dict[str, Any]] = []
             warning = False
             for result in results:
                 if not isinstance(result, dict):
@@ -499,7 +504,53 @@ def _parse_external_scanner(
                             findings.append(_external_finding(scanner, item, "critical" if severity == "critical" else "high"))
                         elif severity in {"medium", "low", "unknown"}:
                             warning = True
+                license_items = result.get("Licenses") if isinstance(result.get("Licenses"), list) else []
+                counts["licenses"] += len(license_items)
+                target = str(result.get("Target") or "")
+                for item in license_items:
+                    if not isinstance(item, dict):
+                        continue
+                    category = str(
+                        item.get("Category") or item.get("Classification") or "unknown"
+                    ).strip().lower() or "unknown"
+                    normalized_category = re.sub(r"[^a-z0-9]+", "_", category).strip("_") or "unknown"
+                    license_class_counts[normalized_category] = license_class_counts.get(normalized_category, 0) + 1
+                    name = str(
+                        item.get("Name") or item.get("License") or item.get("LicenseName") or "UNKNOWN"
+                    ).strip() or "UNKNOWN"
+                    package = str(
+                        item.get("PkgName") or item.get("Package") or item.get("PackageName") or ""
+                    ).strip()
+                    path = str(item.get("FilePath") or item.get("Path") or target).strip()
+                    normalized = {
+                        "license": name[:300],
+                        "classification": normalized_category,
+                        "severity": str(item.get("Severity") or "UNKNOWN").upper()[:20],
+                        "package": package[:300] or None,
+                        "path": Path(path).name[:300] if path else None,
+                        "confidence": item.get("Confidence") if isinstance(item.get("Confidence"), (int, float)) else None,
+                    }
+                    normalized = {key: value for key, value in normalized.items() if value is not None}
+                    normalized["evidence_sha256"] = _sha256_json(normalized)
+                    if len(normalized_licenses) < 10_000:
+                        normalized_licenses.append(normalized)
+                    if normalized_category in {"forbidden", "restricted"}:
+                        severity = "critical" if normalized_category == "forbidden" else "high"
+                        findings.append({
+                            "id": "trivy_license_policy_violation",
+                            "severity": severity,
+                            "license": name[:300],
+                            "classification": normalized_category,
+                            "package": package[:300] or None,
+                            "path": Path(path).name[:300] if path else None,
+                            "evidence_sha256": normalized["evidence_sha256"],
+                        })
+                    elif normalized_category in {"reciprocal", "unknown"}:
+                        warning = True
             summary.update(counts)
+            summary["license_class_counts"] = dict(sorted(license_class_counts.items()))
+            summary["license_inventory"] = normalized_licenses
+            summary["license_inventory_truncated"] = counts["licenses"] > len(normalized_licenses)
             summary["warning_only"] = warning and not findings
         if exit_code not in {0, 1}:
             return "CRASHED", findings, {**summary, "error": (stderr or "unexpected exit code")[:1000]}
@@ -680,12 +731,20 @@ def run_external_scanner(spec: ScannerSpec, subject_path: Path, subject: dict[st
         _prepare_unprivileged_paths(subject_path, scratch)
         env = _safe_environment(scratch)
         version = _tool_version(executable, spec.version_args, env, scratch)
+        resolved_args = [
+            value.replace("{subject}", str(subject_path)).replace("{scratch}", str(scratch))
+            for value in spec.args
+        ]
+        full_license_scan = bool(
+            spec.name == "trivy"
+            and subject_path.is_dir()
+            and subject.get("complete") is True
+        )
+        if full_license_scan and "--license-full" not in resolved_args:
+            resolved_args.insert(-1, "--license-full")
         argv = [
             executable,
-            *(
-                value.replace("{subject}", str(subject_path)).replace("{scratch}", str(scratch))
-                for value in spec.args
-            ),
+            *resolved_args,
         ]
         stdout_path = scratch / "stdout"
         stderr_path = scratch / "stderr"
@@ -775,6 +834,11 @@ def run_external_scanner(spec: ScannerSpec, subject_path: Path, subject: dict[st
                 "raw_result_digest": raw_digest,
                 "required": spec.required,
                 "argv_contract": [spec.executable, *spec.args],
+                "license_scan_mode": (
+                    "full_repository" if full_license_scan
+                    else "package_metadata" if spec.name == "trivy"
+                    else None
+                ),
                 "adapter_kind": spec.adapter_kind,
                 "applicability": spec.applicability,
                 "target_scope": spec.target_scope,
