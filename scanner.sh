@@ -2512,7 +2512,7 @@ doctor() {
     fi
 
     echo ""
-    echo "Expected local URLs:"
+    echo "Expected service URLs:"
     echo "  UI:  $(ui_base_url)"
     echo "  API: $(api_base_url)"
 
