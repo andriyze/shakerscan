@@ -136,8 +136,12 @@ Complete these before creating a tag:
 - [x] Replace the hard-coded `0.5.7` GitHub release highlights with version-specific release notes.
       (`docs/releases/0.7.0.md`; the workflow refuses to publish without non-empty version notes.)
 - [x] Make the Release workflow run the required documentation, release-gate, and candidate
-      validation jobs. (`release.yml` builds the candidate scanner image and runs unit/contract +
-      `release_gates.py` + `npm audit --audit-level=high` + inventory `--check` before publish.)
+      validation jobs. (`release.yml` builds the candidate scanner and API images, proves that only
+      the API contains the pinned Docker client, and runs unit/contract + `release_gates.py` +
+      `npm audit --audit-level=high` + inventory `--check` before publish.)
+- [x] Publish a distinct API/control-plane image for both native architectures and keep the shared
+      scanner/worker image free of Docker tooling. (`shakerscan/shakerscan-api` is built with
+      `INSTALL_DOCKER_CLI=1`; release Compose uses it only for `api`.)
 - [x] Restrict manual release dispatch to an approved release commit/branch and verify that the
       requested version matches `VERSION`. (Candidate SHA must equal checked-out HEAD and be an
       ancestor of `origin/main`; the tag must equal `v${VERSION}`.)
@@ -156,7 +160,8 @@ blocking work and candidate validation are complete:
 1. Confirm `VERSION`, the version-specific release notes, and the pending
    [`../RELEASES.md`](../RELEASES.md) row still match the frozen candidate.
 2. Merge the exact candidate to `main`.
-3. Tag that commit and publish both multi-architecture images.
+3. Tag that commit and publish all four multi-architecture images: scanner/worker, API control
+   plane, UI, and Model Intake signer.
 4. Record the release commit and image digests in `RELEASES.md`.
 
 Do not reuse `0.5.7`; it is already a published release.
@@ -176,6 +181,15 @@ After the release commit is public:
       `scripts/local_planner_adapter.py`, `scripts/planner_evals.py`, and
       `api/command_arsenal.py`.
 - [ ] Run a clean install into an empty temporary home.
+- [ ] Confirm the installed runtime includes the Model Intake host/guest locks, fixed guest builder,
+      Firecracker provisioner, runner service modules, and `.dockerignore` needed by the staging
+      workflow.
+- [ ] On an AMD64 KVM host, start the prebuilt Compose stack, stage the fixed guest through the API,
+      install the runner with explicit operator confirmation, and require READY plus a guest
+      self-test. On ARM64, require a clear `UNSUPPORTED_HOST` result for the x86-only runner tier.
+- [ ] Inspect all four published manifests and prove that each contains `linux/amd64` and
+      `linux/arm64`; prove `docker --version` succeeds in the API image and the Docker command is
+      absent from the scanner/worker image.
 - [ ] Verify `shakerscan doctor`, `shakerscan status`, `shakerscan mcp`, planner startup, agent
       launch, skill discovery, and one safe quick-scan submission.
 - [ ] Verify an upgrade preserves `.env`, results, and Docker volumes.

@@ -92,12 +92,15 @@ Release packaging has three explicit dependency layers. `runner/host/system-requ
 host packages needed for KVM orchestration and telemetry; `runner/host/requirements.lock` owns the hash-locked
 Python service environment; `runner/guest/requirements.lock` owns the offline model-loading environment,
 including Transformers, safetensors, PyTorch, and ONNX Runtime. The guest kernel/rootfs manifest pins the
-resulting machine image. A source checkout can build that image locally today. A future binary/package release
-must publish the matching kernel and rootfs as signed, digest-pinned release assets with SBOM/provenance,
-verify them before installation, and retain local build as an explicit source/developer fallback. The one-click
-installer must never fetch an unversioned “latest” guest image or quietly mix a guest from another ShakerScan
-release. Installation succeeds only after the host, service, API, trust anchor, guest self-test, and exact
-component identities all report READY.
+resulting machine image. Source checkouts and the minimal hosted runtime both carry the fixed builder, guest
+source, host/guest locks, provisioner, and runner service modules. Prebuilt deployments use a distinct
+multi-architecture API/control-plane image containing the checksum-pinned Docker client; the scanner/worker
+image remains client-free. Buildx is required on official release builders but is not embedded in runtime
+images. A future binary/package release must publish the matching kernel and rootfs as signed, digest-pinned
+release assets with SBOM/provenance, verify them before installation, and retain local build as an explicit
+source/developer fallback. The one-click installer must never fetch an unversioned “latest” guest image or
+quietly mix a guest from another ShakerScan release. Installation succeeds only after the host, service, API,
+trust anchor, guest self-test, and exact component identities all report READY.
 
 ## 0. Scope freeze — harden, do not expand
 

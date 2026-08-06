@@ -1219,7 +1219,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Scanner wrapper commands | 27 | `scanner.sh` |
 | Make targets | 11 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
-| Runtime environment keys | 309 | Python sources + Compose manifests |
+| Runtime environment keys | 310 | Python sources + Compose manifests |
 | Scanner modules | 99 | `scanner/scanner_tools/` |
 | UI pages | 31 | `ui/src/app/` |
 | Skills | 6 | `skills/` |
@@ -1875,6 +1875,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `AI_VERIFY_MAX_PER_SCAN` | `api/worker.py` |
 | `AI_VERIFY_MIN_SEVERITY` | `api/api.py`, `api/retest_contract.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner.py` |
 | `AI_VERIFY_USE_BROWSER` | `api/worker.py` |
+| `API_IMAGE_REPO` | `docker-compose.release.yml` |
 | `APPROVAL_RECEIPTS_REQUIRED_FOR_STATE_CHANGING_ACTIONS` | `api/api.py` |
 | `ARTIFACT_CHECKPOINT_INTERVAL_SECONDS` | `api/worker.py` |
 | `ARTIFACT_REFERENCED_FILE_MAX_BYTES` | `api/worker.py` |
