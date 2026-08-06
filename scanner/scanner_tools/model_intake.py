@@ -108,8 +108,8 @@ PICKLE_MAGIC_PREFIXES = (b"\x80\x02", b"\x80\x03", b"\x80\x04", b"\x80\x05")
 PICKLE_OPCODE_MARKERS = (b"__reduce__", b"cposix\nsystem", b"cos\nsystem")
 
 MAX_INSPECTION_BYTES = 100_000_000
-MAX_ARTIFACT_BYTES = 100_000_000_000
-MAX_REPOSITORY_BYTES = 500_000_000_000
+MAX_ARTIFACT_BYTES = 500_000_000_000
+MAX_REPOSITORY_BYTES = 2_000_000_000_000
 MAX_REPOSITORY_FILES = 10_000
 
 # Metadata documents and artifact-side metadata are publisher declarations,

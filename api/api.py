@@ -3829,7 +3829,7 @@ class ModelIntakeScanRequest(BaseModel):
     max_download_bytes: int = Field(
         default=10_000_000,
         ge=1024,
-        le=100_000_000_000,
+        le=500_000_000_000,
         description=(
             "Artifact byte ceiling for this intake. Production models are routinely 1GB+, so anything "
             "above the in-memory inspection prefix is streamed into content-addressed quarantine "
@@ -3843,7 +3843,7 @@ class ModelIntakeScanRequest(BaseModel):
     max_artifact_bytes: int = Field(
         default=10_000_000_000,
         ge=1024,
-        le=100_000_000_000,
+        le=500_000_000_000,
         description="Fail-closed total-byte ceiling used only for complete artifact acquisition.",
     )
     complete_repository_snapshot: bool = Field(
@@ -3853,7 +3853,7 @@ class ModelIntakeScanRequest(BaseModel):
     max_repository_bytes: int = Field(
         default=50_000_000_000,
         ge=1024,
-        le=500_000_000_000,
+        le=2_000_000_000_000,
         description="Fail-closed aggregate byte ceiling for complete repository snapshots.",
     )
     max_repository_files: int = Field(default=10_000, ge=1, le=10_000)
@@ -14191,8 +14191,17 @@ def _resolve_huggingface_model_intake(request: ModelIntakeResolveRequest) -> dic
     model_card_url = str(metadata_out.get("model_card_url") or "") or None
     selected_size = int(selected.get("size_bytes") or 0) if selected else 0
     acquisition_limit = min(
-        100_000_000_000,
+        500_000_000_000,
         max(10_000_000, math.ceil(selected_size * 1.05)),
+    )
+    repository_files = repository_manifest.get("files") if isinstance(repository_manifest, dict) else []
+    repository_size = sum(
+        int(item.get("size_bytes") or 0)
+        for item in repository_files if isinstance(item, dict)
+    )
+    repository_limit = min(
+        2_000_000_000_000,
+        max(50_000_000_000, math.ceil(repository_size * 1.05)),
     )
     scan_payload = {
         "artifact_url": artifact_url,
@@ -14207,6 +14216,7 @@ def _resolve_huggingface_model_intake(request: ModelIntakeResolveRequest) -> dic
         "max_download_bytes": acquisition_limit,
         "max_artifact_bytes": max(10_000_000_000, acquisition_limit),
         "complete_repository_snapshot": True,
+        "max_repository_bytes": repository_limit,
         "run_generated_scanners": True,
         "run_dynamic_sandbox": True,
         "timeout_seconds": 20,

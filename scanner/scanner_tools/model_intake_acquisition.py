@@ -13,6 +13,7 @@ import hashlib
 import ipaddress
 import os
 import pwd
+import shutil
 import socket
 import ssl
 import tempfile
@@ -519,6 +520,15 @@ def download_http_to_quarantine(
                 )
 
             quarantine_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if declared_length is not None:
+                free_bytes = shutil.disk_usage(quarantine_dir).free
+                reserve_bytes = min(1_000_000_000, max(64 * 1024**2, declared_length // 20))
+                if declared_length + reserve_bytes > free_bytes:
+                    raise AcquisitionPolicyError(
+                        "Artifact cannot fit in quarantine: "
+                        f"requires {declared_length} bytes plus {reserve_bytes} bytes reserve; "
+                        f"only {free_bytes} bytes are free"
+                    )
             temp_handle = tempfile.NamedTemporaryFile(prefix="acquire-", dir=quarantine_dir, delete=False)
             temp_path = Path(temp_handle.name)
             digest = hashlib.sha256()
@@ -560,6 +570,12 @@ def download_http_to_quarantine(
                             raise AcquisitionPolicyError(
                                 f"Artifact exceeds the complete acquisition limit of {max_artifact_bytes} bytes"
                             )
+                        if declared_length is None and total % (1024**3) < len(chunk):
+                            free_bytes = shutil.disk_usage(quarantine_dir).free
+                            if free_bytes < 64 * 1024**2:
+                                raise AcquisitionPolicyError(
+                                    "Artifact acquisition stopped because quarantine has less than 64 MiB free"
+                                )
                         digest.update(chunk)
                         temp_handle.write(chunk)
                         if len(prefix) < inspection_bytes:

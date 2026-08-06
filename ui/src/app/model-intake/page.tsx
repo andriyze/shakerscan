@@ -232,7 +232,9 @@ const ARTIFACT_LIMIT_PRESETS: Array<{ label: string; bytes: number; helper: stri
   { label: '1 GB', bytes: 1_000_000_000, helper: 'Typical single-file model' },
   { label: '5 GB', bytes: 5_000_000_000, helper: '7B-class weights' },
   { label: '20 GB', bytes: 20_000_000_000, helper: 'Large or multi-shard weights' },
-  { label: '100 GB', bytes: 100_000_000_000, helper: 'Maximum supported artifact' },
+  { label: '100 GB', bytes: 100_000_000_000, helper: 'Large individual shard or model' },
+  { label: '250 GB', bytes: 250_000_000_000, helper: 'Very large model artifact' },
+  { label: '500 GB', bytes: 500_000_000_000, helper: 'Maximum supported single artifact' },
 ]
 
 // Strict signing verification is meaningless against a truncated prefix, so
@@ -282,7 +284,7 @@ const DEFAULT_INTAKE_DEPTH: IntakeDepth = 'full'
 function artifactLimitForSize(sizeBytes: number): number {
   const withHeadroom = Math.ceil(sizeBytes * 1.05)
   const preset = ARTIFACT_LIMIT_PRESETS.find((item) => item.bytes >= withHeadroom)
-  return preset ? preset.bytes : 100_000_000_000
+  return preset ? preset.bytes : 500_000_000_000
 }
 
 const TRUST_PREVIEW_BADGE: Record<ModelIntakeTrustPreviewStatus, string> = {

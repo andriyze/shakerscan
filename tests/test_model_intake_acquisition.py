@@ -323,6 +323,42 @@ def test_complete_acquisition_rejects_declared_oversize_without_object(monkeypat
     assert list(tmp_path.rglob("*")) == []
 
 
+def test_complete_acquisition_rejects_artifact_that_cannot_fit_quarantine(monkeypatch, tmp_path):
+    _dns(monkeypatch, {"models.example.test": ["93.184.216.34"]})
+
+    class FakeResponse:
+        status = 200
+        reason = "OK"
+
+        def getheaders(self):
+            return [("Content-Length", "5000")]
+
+        def read(self, size):
+            raise AssertionError("a response that cannot fit must not be read")
+
+    class FakeConnection:
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        acquisition, "_open_response",
+        lambda destination, headers, timeout: (FakeConnection(), FakeResponse()),
+    )
+    monkeypatch.setattr(
+        acquisition.shutil, "disk_usage",
+        lambda _path: type("Usage", (), {"free": 4096})(),
+    )
+
+    with pytest.raises(acquisition.AcquisitionPolicyError, match="cannot fit in quarantine"):
+        acquisition.download_http_to_quarantine(
+            "https://models.example.test/model.bin",
+            inspection_bytes=128,
+            max_artifact_bytes=10_000,
+            timeout_seconds=5,
+            quarantine_dir=tmp_path,
+        )
+
+
 def test_local_quarantine_deduplicates_and_revalidates_existing_object(tmp_path):
     source = tmp_path / "source.bin"
     quarantine = tmp_path / "quarantine"
