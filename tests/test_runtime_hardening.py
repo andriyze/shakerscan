@@ -96,6 +96,7 @@ def test_fleet_ui_is_capability_driven_and_keeps_remote_capacity_last():
 
 def test_hosted_installer_packages_advertised_host_side_adapters():
     expected_downloads = (
+        ".dockerignore",
         "docker-compose.worker.yml",
         "docker-compose.broker-worker.yml",
         "scripts/shakerscan_mcp.py",
@@ -103,15 +104,37 @@ def test_hosted_installer_packages_advertised_host_side_adapters():
         "scripts/planner_evals.py",
         "scripts/fleet_cli.py",
         "scripts/fleet_acceptance.py",
+        "scripts/model_intake_runner_cli.py",
+        "scripts/build-model-intake-guest-rootfs.sh",
+        "scripts/provision-model-intake-firecracker.sh",
         "api/command_arsenal.py",
+        "api/model_intake_control_plane.py",
+        "api/model_intake_components.py",
+        "api/model_intake_loader_profiles.py",
+        "api/model_intake_runner_inputs.py",
+        "api/model_intake_runner_controller.py",
+        "api/model_intake_runner_receipts.py",
+        "api/model_intake_firecracker_runner.py",
+        "api/model_intake_runner_service.py",
+        "runner/guest/Dockerfile",
+        "runner/guest/guest-init",
+        "runner/guest/guest_worker.py",
+        "runner/guest/requirements.in",
+        "runner/guest/requirements.lock",
+        "runner/host/requirements.in",
+        "runner/host/requirements.lock",
+        "runner/host/system-requirements.ubuntu.txt",
     )
     installer = (ROOT / "install" / "index.sh").read_text()
     hosted = (ROOT / "install" / "index.html").read_text()
 
     assert installer == hosted
     assert 'mkdir -p "$INSTALL_DIR/db" "$INSTALL_DIR/results" "$INSTALL_DIR/scripts" "$INSTALL_DIR/api"' in installer
+    assert 'mkdir -p "$INSTALL_DIR/runner/guest" "$INSTALL_DIR/runner/host"' in installer
     for relative_path in expected_downloads:
         assert f'download "$REPO_RAW_BASE/{relative_path}" "$INSTALL_DIR/{relative_path}"' in installer
+    assert 'chmod +x "$INSTALL_DIR/scripts/build-model-intake-guest-rootfs.sh"' in installer
+    assert 'chmod +x "$INSTALL_DIR/scripts/provision-model-intake-firecracker.sh"' in installer
 
 
 def test_minimal_installed_research_adapter_has_all_imports(tmp_path):
