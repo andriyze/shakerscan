@@ -9,10 +9,15 @@
 # results into one multi-arch manifest, so there is no QEMU emulation (which is
 # what blew past GitHub's 6h job limit on the v0.5.4 build) and katana's CGO
 # dependency (go-tree-sitter) compiles cleanly.
-FROM golang:1.25@sha256:9006890ecba0a168034d99516084099ae3114d9f2b7d6572c77f2dde57ebc980 AS go-builder
+FROM golang:1.26.5-bookworm@sha256:6c5605ab3a9a9fb3c4eafe5b3d63cdbf3881caf113262b67862547b54a9db599 AS go-builder
 
 # Install ProjectDiscovery tools + Gungnir (CT log scanner). Versions remain
 # immutable, while bounded retries tolerate transient DNS/module-proxy outages.
+# Each command is built from a small wrapper module so minimum-version
+# selection can lift security-sensitive transitive dependencies above the
+# versions still pinned by otherwise-current upstream releases. This keeps the
+# scanner versions stable while lifting compatible network parsers used on
+# attacker-controlled responses above their known-vulnerable dependency floors.
 # Cache mounts preserve completed downloads and compilations across retries and
 # subsequent builds. Separate installs are required because Go expects packages
 # in one `go install` invocation to share a module version.
@@ -20,16 +25,35 @@ ARG GO_INSTALL_ATTEMPTS=4
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     set -eu; \
+    build_tool() { \
+      tool_name="$1"; \
+      tool_package="$2"; \
+      tool_version="$3"; \
+      tool_dir="/tmp/build-${tool_name}"; \
+      rm -rf "${tool_dir}"; \
+      mkdir -p "${tool_dir}"; \
+      cd "${tool_dir}"; \
+      go mod init "shakerscan.local/${tool_name}" >/dev/null || return 1; \
+      go get "${tool_package}@${tool_version}" || return 1; \
+      go get \
+        golang.org/x/crypto@v0.53.0 \
+        golang.org/x/net@v0.56.0 \
+        golang.org/x/text@v0.39.0 \
+        github.com/jackc/pgx/v5@v5.9.0 || return 1; \
+      go build -mod=mod -trimpath -o "/go/bin/${tool_name}" "${tool_package}" || return 1; \
+      cd /; \
+      rm -rf "${tool_dir}"; \
+    }; \
     install_tools() { \
-      go install github.com/projectdiscovery/tlsx/cmd/tlsx@v1.2.2 && \
-      go install github.com/projectdiscovery/httpx/cmd/httpx@v1.9.0 && \
-      go install github.com/projectdiscovery/katana/cmd/katana@v1.5.0 && \
-      go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@v2.13.0 && \
-      go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@v3.8.0 && \
-      go install github.com/hahwul/dalfox/v2@v2.12.0 && \
-      go install github.com/ffuf/ffuf/v2@v2.1.0 && \
-      go install github.com/tomnomnom/meg@v0.3.0 && \
-      go install github.com/g0ldencybersec/gungnir/cmd/gungnir@v1.4.0; \
+      build_tool tlsx github.com/projectdiscovery/tlsx/cmd/tlsx v1.3.0 && \
+      build_tool httpx github.com/projectdiscovery/httpx/cmd/httpx v1.10.0 && \
+      build_tool katana github.com/projectdiscovery/katana/cmd/katana v1.7.0 && \
+      build_tool subfinder github.com/projectdiscovery/subfinder/v2/cmd/subfinder v2.15.0 && \
+      build_tool nuclei github.com/projectdiscovery/nuclei/v3/cmd/nuclei v3.11.0 && \
+      build_tool dalfox github.com/hahwul/dalfox/v2 v2.13.0 && \
+      build_tool ffuf github.com/ffuf/ffuf/v2 v2.2.1 && \
+      build_tool meg github.com/tomnomnom/meg v0.3.0 && \
+      build_tool gungnir github.com/g0ldencybersec/gungnir/cmd/gungnir v1.4.0; \
     }; \
     attempt=1; \
     until install_tools; do \
@@ -44,7 +68,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     done
 
 # --- Stage 2: Runtime with Playwright (Chromium) ---
-FROM mcr.microsoft.com/playwright/python:v1.59.0-noble@sha256:d8d9811a0e7cfac967f0c2f55d12b739087ae4b0808577b794c2a29ed5124938
+FROM mcr.microsoft.com/playwright/python:v1.62.0-noble@sha256:aa81288e738725378becba5b3e06cb0f3a7f012a610e87e8d767a090ea3f740d
 
 # System deps for network tooling and additional scanners
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -154,12 +178,19 @@ RUN set -eu; \
       ln -s "/opt/model-intake-tools/${tool}/bin/${tool}" "/opt/tools/${tool}"; \
     done
 
+# Compiler headers are build-only. Keeping them in the scanner runtime both
+# enlarges the release image and exposes kernel-header packages that no scan
+# path executes.
+RUN apt-get purge -y --auto-remove \
+      make gcc libcurl4-openssl-dev libssl-dev python3-dev && \
+    rm -rf /var/lib/apt/lists/*
+
 # Trivy is a checksum-pinned native adapter. The vulnerability database is
 # captured in the image and scanned offline; readiness exposes its metadata.
 ARG TARGETARCH
-ARG TRIVY_VERSION=0.72.0
-ARG TRIVY_AMD64_SHA256=bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea
-ARG TRIVY_ARM64_SHA256=2ca2c023109c2db6b2b77366b6717291452d4531167377d95c79547f0c8e3467
+ARG TRIVY_VERSION=0.73.0
+ARG TRIVY_AMD64_SHA256=2edd39da482bb4e9831962487b68f68e3928ec3137794757f54d00383d79547b
+ARG TRIVY_ARM64_SHA256=13833d97e8a1a5367471c372a173180157f593bece570e20d5d925fef552f5dd
 RUN set -eu; \
     case "${TARGETARCH}" in \
       amd64) trivy_arch="64bit"; trivy_sha="${TRIVY_AMD64_SHA256}" ;; \

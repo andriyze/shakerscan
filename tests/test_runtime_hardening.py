@@ -445,6 +445,21 @@ def test_go_tool_builder_retries_transient_network_failures_with_buildkit_caches
     assert "Go module download failed" in dockerfile
 
 
+def test_scanner_image_builds_network_tools_above_reviewed_security_floors():
+    dockerfile = (ROOT / "scanner" / "Dockerfile").read_text()
+    requirements = (ROOT / "scanner" / "requirements.txt").read_text()
+
+    assert "build_tool()" in dockerfile
+    assert "go build -mod=mod -trimpath" in dockerfile
+    assert "golang.org/x/crypto@v0.53.0" in dockerfile
+    assert "golang.org/x/net@v0.56.0" in dockerfile
+    assert "golang.org/x/text@v0.39.0" in dockerfile
+    assert "github.com/jackc/pgx/v5@v5.9.0" in dockerfile
+    assert "apt-get purge -y --auto-remove" in dockerfile
+    assert "playwright==1.62.0" in requirements
+    assert "playwright/python:v1.62.0-noble@sha256:" in dockerfile
+
+
 def test_compose_passes_secret_bound_gateway_and_join_rate_limit_to_api_processes():
     for compose_name in ("docker-compose.yml", "docker-compose.release.yml"):
         compose = (ROOT / compose_name).read_text()
