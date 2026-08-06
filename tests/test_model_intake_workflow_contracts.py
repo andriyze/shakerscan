@@ -41,6 +41,24 @@ def test_automatic_review_payload_decodes_jsonb_for_browser_contract():
     assert payload["deployment_bundle_json"] == {"model_artifact_sha256": "a" * 64}
 
 
+def test_automatic_review_payload_tracks_live_static_scan_progress():
+    payload = api._model_intake_automatic_review_payload({
+        "id": "review-1",
+        "scan_id": "scan-1",
+        "state": "static_scan_pending",
+        "current_step": "static_scan",
+        "progress": 5,
+        "static_scan_status": "running",
+        "static_scan_progress": 35,
+        "static_scan_phase": "artifact_acquisition",
+        "timeline_json": [],
+        "pending_controls": [],
+    })
+
+    assert payload["effective_progress"] == 18
+    assert payload["effective_current_step"] == "artifact_acquisition"
+
+
 def test_automatic_review_payload_fails_safe_for_malformed_jsonb():
     payload = api._model_intake_automatic_review_payload({
         "timeline_json": '{not-json',

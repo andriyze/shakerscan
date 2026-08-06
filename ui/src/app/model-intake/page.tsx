@@ -1459,6 +1459,8 @@ function ModelIntakeSettingsContent() {
           <div className="mt-4 grid gap-3">
             {automaticReviews.map((review) => {
               const terminal = ['technical_review_complete', 'attention_required', 'failed', 'cancelled'].includes(review.state)
+              const displayedProgress = review.effective_progress ?? review.progress
+              const displayedStep = review.effective_current_step || review.current_step
               const workflowComplete = review.state === 'technical_review_complete'
               const outcome = (review.technical_outcome || '').toUpperCase()
               const passed = workflowComplete && outcome === 'PASS'
@@ -1479,11 +1481,16 @@ function ModelIntakeSettingsContent() {
                         </span>
                         <span className="text-xs text-gray-500">{review.requested_environment}</span>
                       </div>
-                      <div className="mt-2 text-sm font-medium text-white">{review.current_step.replace(/_/g, ' ')}</div>
+                      <div className="mt-2 text-sm font-medium text-white">{displayedStep.replace(/_/g, ' ')}</div>
+                      {review.state === 'static_scan_pending' && review.static_scan_progress != null && (
+                        <div className="mt-1 text-xs text-cyan-300">
+                          Technical scan {review.static_scan_progress}% complete
+                        </div>
+                      )}
                       <div className="mt-1 text-[11px] text-gray-500">Started {new Date(review.created_at).toLocaleString()} · {review.source_kind}</div>
                       <div className="mt-1 font-mono text-[11px] text-gray-600">review {review.id} · scan {review.scan_id}</div>
                     </div>
-                    <div className="text-right text-sm font-semibold text-white">{review.progress}%</div>
+                    <div className="text-right text-sm font-semibold text-white">{displayedProgress}%</div>
                   </div>
                   {workflowComplete && (
                     <div className={`mt-3 rounded border p-3 text-xs ${blocked ? 'border-red-800/60 bg-red-950/20 text-red-200' : passed ? 'border-green-800/60 bg-green-950/20 text-green-200' : 'border-yellow-800/60 bg-yellow-950/20 text-yellow-200'}`}>
@@ -1492,7 +1499,7 @@ function ModelIntakeSettingsContent() {
                     </div>
                   )}
                   <div className="mt-3 h-2 overflow-hidden rounded-full bg-gray-800">
-                    <div className={`h-full ${blocked ? 'bg-red-500' : terminal && !passed ? 'bg-yellow-500' : passed ? 'bg-green-500' : 'bg-cyan-500'}`} style={{ width: `${review.progress}%` }} />
+                    <div className={`h-full ${blocked ? 'bg-red-500' : terminal && !passed ? 'bg-yellow-500' : passed ? 'bg-green-500' : 'bg-cyan-500'}`} style={{ width: `${displayedProgress}%` }} />
                   </div>
                   {review.error_json?.message && (
                     <div role="alert" className="mt-3 rounded border border-yellow-800/60 bg-yellow-950/20 p-3 text-xs text-yellow-200">

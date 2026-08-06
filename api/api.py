@@ -15752,6 +15752,20 @@ def _model_intake_automatic_review_payload(row: Any) -> dict[str, Any]:
     payload["deployment_bundle_json"] = (
         dict(bundle) if isinstance(bundle, Mapping) else None
     )
+    controller_progress = int(payload.get("progress") or 0)
+    effective_progress = controller_progress
+    effective_step = str(payload.get("current_step") or "model_review")
+    if str(payload.get("state") or "") == "static_scan_pending":
+        try:
+            scan_progress = max(0, min(100, int(payload.get("static_scan_progress") or 0)))
+        except (TypeError, ValueError):
+            scan_progress = 0
+        effective_progress = max(controller_progress, min(44, 5 + scan_progress * 39 // 100))
+        scan_phase = str(payload.get("static_scan_phase") or "").strip()
+        if scan_phase:
+            effective_step = scan_phase
+    payload["effective_progress"] = effective_progress
+    payload["effective_current_step"] = effective_step
     return payload
 
 
@@ -16290,7 +16304,13 @@ async def create_model_intake_automatic_review(request: ModelIntakeAutomaticRevi
 async def list_model_intake_automatic_reviews(limit: int = Query(10, ge=1, le=100)):
     async with db_pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT * FROM model_intake_automatic_reviews ORDER BY created_at DESC LIMIT $1",
+            """
+            SELECT r.*,s.status AS static_scan_status,s.progress AS static_scan_progress,
+                   s.current_phase AS static_scan_phase
+            FROM model_intake_automatic_reviews r
+            LEFT JOIN scans s ON s.id=r.scan_id
+            ORDER BY r.created_at DESC LIMIT $1
+            """,
             limit,
         )
     return {"reviews": [_model_intake_automatic_review_payload(row) for row in rows]}
@@ -16301,7 +16321,13 @@ async def get_model_intake_automatic_review(review_id: str):
     review_uuid = _model_intake_uuid(review_id, "automatic review id")
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT * FROM model_intake_automatic_reviews WHERE id=$1", review_uuid
+            """
+            SELECT r.*,s.status AS static_scan_status,s.progress AS static_scan_progress,
+                   s.current_phase AS static_scan_phase
+            FROM model_intake_automatic_reviews r
+            LEFT JOIN scans s ON s.id=r.scan_id WHERE r.id=$1
+            """,
+            review_uuid,
         )
     if not row:
         raise HTTPException(status_code=404, detail="Automatic Model Intake review not found")

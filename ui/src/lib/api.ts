@@ -1407,6 +1407,11 @@ export interface ModelIntakeAutomaticReview {
   state: string
   current_step: string
   progress: number
+  effective_current_step?: string
+  effective_progress?: number
+  static_scan_status?: string | null
+  static_scan_progress?: number | null
+  static_scan_phase?: string | null
   technical_outcome?: string | null
   pending_controls?: Array<{ control: string; status: string; action: string }>
   timeline_json?: Array<{ event: string; state: string; at: string }>
