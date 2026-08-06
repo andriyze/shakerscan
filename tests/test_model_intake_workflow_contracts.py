@@ -778,6 +778,60 @@ def test_warning_only_required_scanner_evidence_stays_reviewable_not_pass_or_inc
     assert not all(checks.values())
 
 
+def test_complete_large_safetensors_is_not_incomplete_only_because_memory_prefix_is_bounded():
+    summary = {
+        "acquisition_complete": True,
+        "inspection_complete": False,
+        "repository_manifest_complete": True,
+        "repository_snapshot_complete": True,
+        "generated_evidence_status": "REVIEW_REQUIRED",
+        "checksum_status": "verified",
+    }
+    model_intake = {
+        "supply_chain": {
+            "format_inspection": {
+                "extension": ".safetensors",
+                "safetensors_header": {
+                    "valid": True,
+                    "validation_complete": True,
+                    "payload_bounds_checked": True,
+                    "payload_coverage_complete": True,
+                },
+            },
+        },
+        "generated_evidence": {
+            "required_non_pass": ["python-ast-security"],
+            "results": [{
+                "scanner": {"name": "python-ast-security"},
+                "execution": {"status": "WARNING", "required": True},
+            }],
+        },
+    }
+
+    checks = api._model_intake_required_static_checks(summary, model_intake)
+
+    assert checks["inspection_complete"] is True
+    assert api._model_intake_static_evidence_status(
+        model_intake, summary, [], checks,
+    ) == "WARNING"
+
+
+def test_bounded_unknown_or_onnx_payload_remains_incomplete_without_full_parser_evidence():
+    summary = {"acquisition_complete": True, "inspection_complete": False}
+    model_intake = {
+        "supply_chain": {
+            "format_inspection": {
+                "extension": ".onnx",
+                "onnx": {"parser_status": "not_executed_in_worker"},
+            },
+        },
+    }
+
+    checks = api._model_intake_required_static_checks(summary, model_intake)
+
+    assert checks["inspection_complete"] is False
+
+
 def test_static_report_coverage_is_content_free():
     digest = "a" * 64
     assert api._model_intake_content_free_coverage({

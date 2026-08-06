@@ -11261,11 +11261,53 @@ def _model_intake_json_object(value: Any) -> dict[str, Any]:
     return decoded if isinstance(decoded, dict) else {}
 
 
-def _model_intake_required_static_checks(summary: dict[str, Any]) -> dict[str, bool]:
+def _model_intake_effective_inspection_complete(
+    model_intake: dict[str, Any],
+    summary: dict[str, Any],
+) -> bool:
+    """Distinguish bounded in-memory bytes from conclusive artifact review.
+
+    Complete acquisitions are streamed to quarantine and may be much larger
+    than the bounded prefix retained in worker memory.  The old summary flag
+    treated every such artifact as incompletely inspected even when a
+    safetensors header proved all tensor bounds against the full byte length,
+    or a complete archive walk covered the quarantined object.  That turned
+    ordinary review warnings into ``INCOMPLETE`` and made the corporate report
+    contradict its own coverage evidence.
+
+    Only recognize the two formats for which the existing scanner records a
+    conclusive full-object invariant.  ONNX/GGUF bounded hints remain
+    incomplete unless the worker actually observed their whole payload.
+    """
+    if summary.get("inspection_complete") is True:
+        return True
+    if summary.get("acquisition_complete") is not True:
+        return False
+    artifact = _model_intake_json_object(model_intake.get("artifact"))
+    archive = _model_intake_json_object(artifact.get("archive"))
+    if archive.get("is_archive") is True and archive.get("complete") is True:
+        return True
+    supply_chain = _model_intake_json_object(model_intake.get("supply_chain"))
+    format_inspection = _model_intake_json_object(supply_chain.get("format_inspection"))
+    safetensors = _model_intake_json_object(format_inspection.get("safetensors_header"))
+    return bool(
+        safetensors.get("validation_complete") is True
+        and safetensors.get("valid") is True
+        and safetensors.get("payload_bounds_checked") is True
+        and safetensors.get("payload_coverage_complete") is True
+    )
+
+
+def _model_intake_required_static_checks(
+    summary: dict[str, Any],
+    model_intake: dict[str, Any] | None = None,
+) -> dict[str, bool]:
     """Checks that a persisted scan must prove before becoming admission evidence."""
     return {
         "acquisition_complete": summary.get("acquisition_complete") is True,
-        "inspection_complete": summary.get("inspection_complete") is True,
+        "inspection_complete": _model_intake_effective_inspection_complete(
+            model_intake or {}, summary,
+        ),
         "repository_manifest_complete": summary.get("repository_manifest_complete") is True,
         "repository_snapshot_complete": summary.get("repository_snapshot_complete") is True,
         "generated_evidence_pass": summary.get("generated_evidence_status") == "PASS",
@@ -11856,7 +11898,7 @@ async def attach_model_intake_static_run(
                     detail="Static scan source does not match the controlled submission",
                 )
         findings = result.get("findings") if isinstance(result.get("findings"), list) else []
-        required_static_checks = _model_intake_required_static_checks(summary)
+        required_static_checks = _model_intake_required_static_checks(summary, model_intake)
         static_status = _model_intake_static_evidence_status(
             model_intake,
             summary,
