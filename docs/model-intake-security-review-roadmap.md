@@ -2445,8 +2445,8 @@ control that contradicted the dedicated license evidence, missing-license findin
 analysis, ambiguous socket-event wording, conversion rescans that could erase source scanner/license evidence,
 nondeterministic multi-vCPU embedding replay, queued serialized jobs labeled as already running, stale UI
 copy about who produces technical evidence, and review-card grammar. The final production-image focused suite
-reported **104 passed**. The full repository suite, invoked from the correct repository root, reported
-**2,988 passed, 0 failed**; an earlier six-failure invocation from `/app` was rejected because it could not
+reported **108 passed** including the agent-skill contract. The full repository suite, invoked from the correct repository root, reported
+**2,989 passed, 0 failed**; an earlier six-failure invocation from `/app` was rejected because it could not
 resolve repository-relative fixtures and was rerun correctly. Local UI tests reported **85 passed**, the
 production Next.js build completed successfully, and the browser exercised automatic, advanced/manual,
 report, help, scan-detail, and download paths. The API/agent reference contract also uses the same one-link
