@@ -3854,6 +3854,10 @@ class ModelIntakeScanRequest(BaseModel):
     generated_scanner_names: Optional[list[str]] = Field(default=None, max_length=50)
     run_dynamic_sandbox: bool = False
     require_dynamic_sandbox: bool = False
+    require_current_workers: bool = Field(
+        default=False,
+        description="Reject submission unless every reported worker matches the current source fingerprint.",
+    )
     sandbox_timeout_seconds: int = Field(default=120, ge=1, le=600)
     evaluation_spec_json: Optional[dict[str, Any]] = None
     run_generated_evaluation: bool = False
@@ -15358,6 +15362,25 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
     # Validate the raw public DTO before registry enrichment or policy
     # expansion can blur which authority came from the requester.
     _validate_model_intake_admission_request_authority(request)
+    freshness = _worker_freshness_snapshot()
+    unsafe_worker_count = int(freshness.get("stale_count") or 0) + int(freshness.get("pending_count") or 0)
+    if request.require_current_workers and (
+        not freshness.get("available")
+        or int(freshness.get("fleet_size") or 0) < 1
+        or unsafe_worker_count > 0
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "workers_not_confirmed_current",
+                "message": (
+                    "Model Intake requires a non-empty, fingerprint-current worker fleet. "
+                    "Restart workers and wait for current build fingerprints before retrying."
+                ),
+                "stale_workers": freshness.get("stale_names", []),
+                "pending_workers": freshness.get("pending_names", []),
+            },
+        )
     request = await _enrich_model_intake_scan_request(request)
     request = await _expand_model_intake_policy_profile_requirements(request)
     request = await _expand_model_intake_saved_trust_anchors(request)
@@ -15422,6 +15445,7 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
         "generated_scanner_names": request.generated_scanner_names,
         "run_dynamic_sandbox": request.run_dynamic_sandbox,
         "require_dynamic_sandbox": request.require_dynamic_sandbox,
+        "require_current_workers": request.require_current_workers,
         "sandbox_timeout_seconds": request.sandbox_timeout_seconds,
         # The raw benchmark may contain embeddings. Only the content-free,
         # digest-bound computed report may enter durable scan options/Redis.
@@ -15438,6 +15462,11 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
         "allowed_acquisition_ports": request.allowed_acquisition_ports,
         "max_acquisition_redirects": request.max_acquisition_redirects,
     }
+    if freshness.get("available"):
+        options["expected_build_fingerprint_at_submit"] = freshness.get("expected_build_fingerprint")
+        options["stale_worker_count_at_submit"] = freshness.get("stale_count")
+        options["pending_worker_count_at_submit"] = freshness.get("pending_count")
+        options["worker_fleet_size_at_submit"] = freshness.get("fleet_size")
     if request.policy_profile in POLICY_PROFILES:
         options["environment"] = request.policy_profile
         if request.policy_profile == "production":
@@ -16004,6 +16033,7 @@ async def create_model_intake_automatic_review(request: ModelIntakeAutomaticRevi
         "run_generated_scanners": True,
         "run_dynamic_sandbox": True,
         "require_dynamic_sandbox": request.intended_environment in {"staging", "production"},
+        "require_current_workers": True,
     })
     queued = await scan_model_intake(scan_request)
     review_id = uuid.uuid4()

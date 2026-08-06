@@ -771,6 +771,36 @@ def test_automatic_review_system_principal_is_server_scoped_and_not_a_bearer_sho
         api._model_intake_authenticated_subject(ordinary)
 
 
+def test_automatic_review_requires_fingerprint_current_workers():
+    source = inspect.getsource(api.create_model_intake_automatic_review)
+
+    assert '"require_current_workers": True' in source
+    fields = api.ModelIntakeScanRequest.model_fields
+    assert fields["require_current_workers"].default is False
+
+
+def test_model_intake_scan_fails_closed_on_stale_workers_before_database_access(monkeypatch):
+    monkeypatch.setattr(api, "_worker_freshness_snapshot", lambda: {
+        "available": True,
+        "expected_build_fingerprint": "a" * 16,
+        "fleet_size": 2,
+        "stale_count": 1,
+        "pending_count": 0,
+        "stale_names": ["worker-2"],
+        "pending_names": [],
+    })
+
+    request = api.ModelIntakeScanRequest(
+        artifact_url="https://huggingface.co/example/model/resolve/main/model.safetensors",
+        require_current_workers=True,
+    )
+    with pytest.raises(api.HTTPException) as caught:
+        asyncio.run(api.scan_model_intake(request))
+
+    assert caught.value.status_code == 409
+    assert caught.value.detail["error"] == "workers_not_confirmed_current"
+
+
 def test_automatic_review_bundle_records_the_fixed_guest_embedding_contract():
     authoritative = {"deployment_bundle": {
         "model_artifact_sha256": "a" * 64,
