@@ -3292,6 +3292,7 @@ async def run_schema_migrations(pool) -> None:
                     calibration_job_id UUID REFERENCES model_intake_runner_jobs(id) ON DELETE SET NULL,
                     runtime_job_id UUID REFERENCES model_intake_runner_jobs(id) ON DELETE SET NULL,
                     source_kind TEXT NOT NULL,
+                    source_label TEXT NOT NULL DEFAULT 'Model review',
                     source_reference_hash TEXT NOT NULL,
                     requested_environment TEXT NOT NULL,
                     state TEXT NOT NULL DEFAULT 'static_scan_pending',
@@ -3313,6 +3314,8 @@ async def run_schema_migrations(pool) -> None:
                 ALTER TABLE model_intake_automatic_reviews
                     ADD COLUMN IF NOT EXISTS conversion_job_id UUID
                     REFERENCES model_intake_runner_jobs(id) ON DELETE SET NULL;
+                ALTER TABLE model_intake_automatic_reviews
+                    ADD COLUMN IF NOT EXISTS source_label TEXT NOT NULL DEFAULT 'Model review';
                 CREATE TABLE IF NOT EXISTS model_intake_agent_sessions (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     submission_id UUID NOT NULL REFERENCES model_intake_submissions(id) ON DELETE CASCADE,

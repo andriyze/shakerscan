@@ -1402,6 +1402,7 @@ export interface ModelIntakeAutomaticReview {
   calibration_job_id?: string | null
   runtime_job_id?: string | null
   source_kind: ModelIntakePlatform
+  source_label?: string
   requested_environment: 'development' | 'test' | 'staging' | 'production'
   state: string
   current_step: string

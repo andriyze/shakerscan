@@ -16037,19 +16037,25 @@ async def create_model_intake_automatic_review(request: ModelIntakeAutomaticRevi
     })
     queued = await scan_model_intake(scan_request)
     review_id = uuid.uuid4()
+    repository = str(resolved.get("repository") or "").strip()
+    pinned_revision = str(resolved.get("revision") or "").strip()
+    source_label = (repository or str(scan_payload.get("name") or _short_url_label(source)))[:300]
+    if repository and pinned_revision:
+        source_label = f"{repository}@{pinned_revision[:12]}"
     timeline = [{"event": "static_scan_queued", "state": "static_scan_pending", "at": utc_now_iso()}]
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow(
             """
             INSERT INTO model_intake_automatic_reviews
-                (id,scan_id,source_kind,source_reference_hash,requested_environment,
+                (id,scan_id,source_kind,source_label,source_reference_hash,requested_environment,
                  state,current_step,progress,timeline_json)
-            VALUES ($1,$2,$3,$4,$5,'static_scan_pending','static_scan',5,$6::jsonb)
+            VALUES ($1,$2,$3,$4,$5,$6,'static_scan_pending','static_scan',5,$7::jsonb)
             RETURNING *
             """,
             review_id,
             uuid.UUID(str(queued["scan_id"])),
             str(resolved.get("platform") or "auto"),
+            source_label,
             hashlib.sha256(source.encode()).hexdigest(),
             request.intended_environment,
             json.dumps(timeline),

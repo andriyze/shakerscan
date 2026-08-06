@@ -33,6 +33,7 @@ import {
   createModelIntakeAutomaticReview,
   listModelIntakeAutomaticReviews,
   downloadModelIntakeAutomaticReport,
+  downloadModelIntakeSbom,
   getPolicyProfiles,
   listRecentModelIntakeScans,
   resolveModelIntakeReference,
@@ -1195,6 +1196,18 @@ function ModelIntakeSettingsContent() {
     }
   }
 
+  async function exportAutomaticBom(scanId: string, format: 'cyclonedx' | 'spdx' | 'aibom') {
+    const key = `${scanId}:${format}`
+    setAutomaticDownload(key)
+    try {
+      await downloadModelIntakeSbom(scanId, format)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to download model bill of materials')
+    } finally {
+      setAutomaticDownload('')
+    }
+  }
+
   async function copyPayload() {
     try {
       await navigator.clipboard.writeText(JSON.stringify(buildPayload(), null, 2))
@@ -1403,7 +1416,17 @@ function ModelIntakeSettingsContent() {
           <span>Firecracker load + repeat inference</span>
           <span>SBOM, AIBOM, JSON, HTML, SARIF</span>
         </div>
-        {runnerReadiness?.status !== 'READY' && (
+        {runnerReadiness === null && (
+          <div className="mt-4 flex items-center gap-2 rounded-lg border border-gray-800 bg-gray-900/50 p-3 text-sm text-gray-400">
+            <RefreshCw className="h-4 w-4 animate-spin" /> Checking the isolated runtime on this host…
+          </div>
+        )}
+        {runnerReadiness?.status === 'READY' && (
+          <div className="mt-4 flex items-center gap-2 rounded-lg border border-green-800/60 bg-green-950/20 p-3 text-sm text-green-200">
+            <CheckCircle2 className="h-4 w-4" /> Firecracker is ready. Automatic reviews will include isolated load and repeat-inference evidence.
+          </div>
+        )}
+        {runnerReadiness !== null && runnerReadiness.status !== 'READY' && (
           <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-yellow-700/50 bg-yellow-950/20 p-3 text-sm text-yellow-100">
             <span>
               The static review can run now, but isolated model loading will be marked not tested until the microVM runner is ready.
@@ -1447,6 +1470,9 @@ function ModelIntakeSettingsContent() {
                 <div key={review.id} className="rounded-lg border border-gray-800 bg-gray-950 p-4">
                   <div className="flex flex-wrap items-start justify-between gap-3">
                     <div className="min-w-0">
+                      <div className="truncate text-base font-semibold text-white" title={review.source_label || review.id}>
+                        {review.source_label || 'Model review'}
+                      </div>
                       <div className="flex flex-wrap items-center gap-2">
                         <span className={`rounded px-2 py-1 text-xs font-semibold ${passed ? 'bg-green-950/60 text-green-300' : blocked ? 'bg-red-950/60 text-red-300' : terminal ? 'bg-yellow-950/60 text-yellow-300' : 'bg-cyan-950/60 text-cyan-300'}`}>
                           {outcomeLabel}
@@ -1454,6 +1480,7 @@ function ModelIntakeSettingsContent() {
                         <span className="text-xs text-gray-500">{review.requested_environment}</span>
                       </div>
                       <div className="mt-2 text-sm font-medium text-white">{review.current_step.replace(/_/g, ' ')}</div>
+                      <div className="mt-1 text-[11px] text-gray-500">Started {new Date(review.created_at).toLocaleString()} · {review.source_kind}</div>
                       <div className="mt-1 font-mono text-[11px] text-gray-600">review {review.id} · scan {review.scan_id}</div>
                     </div>
                     <div className="text-right text-sm font-semibold text-white">{review.progress}%</div>
@@ -1482,8 +1509,32 @@ function ModelIntakeSettingsContent() {
                       ))}
                     </div>
                   )}
+                  {(review.timeline_json || []).length > 0 && (
+                    <details className="mt-3 rounded border border-gray-800 bg-gray-900/60 p-3 text-xs">
+                      <summary className="cursor-pointer font-medium text-gray-300">Workflow steps ({(review.timeline_json || []).length})</summary>
+                      <ol className="mt-2 grid gap-2 border-l border-gray-700 pl-3">
+                        {(review.timeline_json || []).map((event, index) => (
+                          <li key={`${event.event}:${event.at}:${index}`} className="text-gray-400">
+                            <span className="font-medium text-gray-200">{event.event.replace(/_/g, ' ')}</span>
+                            <span> · {event.state.replace(/_/g, ' ')} · {new Date(event.at).toLocaleString()}</span>
+                          </li>
+                        ))}
+                      </ol>
+                    </details>
+                  )}
                   <div className="mt-3 flex flex-wrap gap-2">
                     <Link href={`/scans/${review.scan_id}`} className="rounded border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800">Technical scan</Link>
+                    {review.submission_id && (['cyclonedx', 'spdx', 'aibom'] as const).map((format) => (
+                      <button
+                        key={format}
+                        type="button"
+                        onClick={() => exportAutomaticBom(review.scan_id, format)}
+                        disabled={automaticDownload === `${review.scan_id}:${format}`}
+                        className="rounded border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50"
+                      >
+                        {automaticDownload === `${review.scan_id}:${format}` ? 'Preparing…' : format === 'aibom' ? 'AIBOM' : `${format === 'cyclonedx' ? 'CycloneDX' : 'SPDX'} SBOM`}
+                      </button>
+                    ))}
                     {review.submission_id && (['json', 'html', 'sarif'] as const).map((format) => (
                       <button
                         key={format}
