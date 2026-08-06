@@ -249,9 +249,13 @@ def test_missing_license_source_text_is_a_review_item_even_when_terms_pass_polic
     static = next(item for item in rows["evidence"] if item["evidence_type"] == "static_analysis")
     static["payload_json"]["license_compliance"] = {
         "policy_status": "PASS",
-        "missing_evidence": ["repository license or notice file"],
         "terms": [{"declared": "mit"}],
     }
+    static["payload_json"]["scanner_results"].append({
+        "name": "shakerscan-license-inventory",
+        "status": "WARNING",
+        "findings": [{"id": "license_file_missing"}],
+    })
 
     report = _report(rows)
     control = _control(report, "license_compliance")

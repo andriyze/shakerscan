@@ -879,7 +879,19 @@ def build_model_intake_report(
     static_payload = _json(static_record.get("payload_json"), {}) if static_record else {}
     license_compliance = _json(static_payload.get("license_compliance"), {})
     license_policy_status = str(license_compliance.get("policy_status") or "")
-    license_evidence_missing = bool(license_compliance.get("missing_evidence"))
+    static_scanner_results = (
+        static_payload.get("scanner_results")
+        if isinstance(static_payload.get("scanner_results"), list)
+        else []
+    )
+    license_source_missing = any(
+        finding.get("id") == "license_file_missing"
+        for scanner in static_scanner_results
+        if isinstance(scanner, dict)
+        for finding in scanner.get("findings") or []
+        if isinstance(finding, dict)
+    )
+    license_evidence_missing = bool(license_compliance.get("missing_evidence")) or license_source_missing
     controls.append({
         "id": "license_compliance",
         "label": "License and attribution review",
@@ -890,7 +902,13 @@ def build_model_intake_report(
             else "REVIEW" if license_policy_status == "REVIEW_REQUIRED"
             else "INCOMPLETE"
         ),
-        "detail": _license_control_detail(license_compliance),
+        "detail": _license_control_detail({
+            **license_compliance,
+            "missing_evidence": (
+                license_compliance.get("missing_evidence")
+                or (["repository license or notice file"] if license_source_missing else [])
+            ),
+        }),
         "remediation": (
             "Obtain the publisher's authoritative license/NOTICE text and preserve it with the pinned revision and any distribution."
             if license_policy_status == "PASS" and license_evidence_missing
@@ -1164,9 +1182,7 @@ def build_model_intake_report(
         outcome=outcome,
         license_compliance=license_compliance,
         external_requirement_count=len(external_requirements),
-        license_source_missing=any(
-            finding.get("id") == "license_file_missing" for finding in attention_findings
-        ),
+        license_source_missing=license_source_missing,
     )
     report = {
         "schema_version": REPORT_SCHEMA,
