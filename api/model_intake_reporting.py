@@ -30,7 +30,7 @@ CONTROL_DETAILS: dict[str, dict[str, str]] = {
     },
     "static_analysis": {
         "category": "Static security and supply chain",
-        "question": "Did the required format, serialization, code, secret, malware, SBOM, dependency, binary, and license checks complete?",
+        "question": "Did the required format, serialization, code, secret, malware, SBOM, dependency, and binary checks complete?",
         "method": "Evaluate digest-bound ShakerScan evidence produced by built-ins and applicable ModelScan, Fickling, Semgrep, and Trivy adapters.",
         "remediation": "Run every applicable required scanner against the complete snapshot with current rules/databases and resolve all non-pass results.",
     },
