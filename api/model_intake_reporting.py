@@ -13,6 +13,9 @@ REPORT_SCHEMA = "model-intake-corporate-report/v2"
 CONTROL_STATUSES = {
     "PASS", "FAIL", "REVIEW", "INCOMPLETE", "ERROR", "NOT_RUN", "NOT_APPLICABLE",
 }
+DEPLOYMENT_FOLLOW_UP_CONTROL_IDS = {
+    "data_plane_evaluation", "human_approvals", "deterministic_policy", "signed_admission",
+}
 PRODUCTION_APPROVAL_ROLES = {
     "model_security_reviewer", "ml_platform_reviewer", "release_manager",
 }
@@ -32,10 +35,10 @@ CONTROL_DETAILS: dict[str, dict[str, str]] = {
         "remediation": "Run every applicable required scanner against the complete snapshot with current rules/databases and resolve all non-pass results.",
     },
     "license_compliance": {
-        "category": "Legal and intellectual property",
-        "question": "Were model, repository, dependency, dataset, and intended-use terms reconciled without a legal-review trigger?",
-        "method": "Reconcile publisher declarations, native license fingerprints, Trivy license evidence, dataset lineage, and deployment restrictions under the versioned corporate license policy.",
-        "remediation": "Review the License BOM and Third-Party Notices draft; obtain corporate legal disposition for every unknown, custom, reciprocal, dataset-related, conflicting, or use-case-dependent term.",
+        "category": "Licensing and attribution",
+        "question": "Were model, repository, dependency, dataset, and intended-use terms identified without an unresolved license-policy trigger?",
+        "method": "Reconcile publisher declarations, native license fingerprints, Trivy evidence, dataset lineage, and use restrictions under the configured license policy.",
+        "remediation": "Review the License BOM and notices draft, then resolve unknown, custom, reciprocal, dataset-related, conflicting, or use-case-dependent terms.",
     },
     "runtime_execution": {
         "category": "Isolated runtime",
@@ -50,10 +53,10 @@ CONTROL_DETAILS: dict[str, dict[str, str]] = {
         "remediation": "Run approved known-answer, stability, robustness, and embedding-quality tests against the exact subject.",
     },
     "data_plane_evaluation": {
-        "category": "Corporate integration",
+        "category": "Application integration",
         "question": "Did the intended vector-store and knowledge-graph authorization path pass?",
         "method": "Verify trusted generated observations for ACL, tenant, graph, cache, deletion, and index/model compatibility controls.",
-        "remediation": "Run the corporate data-plane test contract with representative principals, tenants, index, graph, and deletion flows.",
+        "remediation": "Run the data-plane test contract with representative principals, tenants, index, graph, and deletion flows.",
     },
     "firecracker_runtime": {
         "category": "Isolated runtime",
@@ -633,7 +636,7 @@ def _check_catalog_with_evidence(
         else:
             status = "PASS"
             result_summary = (
-                f"The report includes {len(EXTERNAL_APPROVAL_REQUIREMENTS)} explicit external corporate requirements."
+                f"The report includes {len(EXTERNAL_APPROVAL_REQUIREMENTS)} deployment and organization follow-up items."
             )
             evidence_basis = "report_generation"
             execution_evidence = {"external_requirement_count": len(EXTERNAL_APPROVAL_REQUIREMENTS)}
@@ -666,6 +669,84 @@ def _required_actions(controls: list[dict[str, Any]]) -> list[dict[str, str]]:
         }
         for item in unresolved
     ]
+
+
+def _presentation_summary(
+    controls: list[dict[str, Any]],
+    *,
+    outcome: str,
+    license_compliance: dict[str, Any],
+    external_requirement_count: int,
+) -> dict[str, Any]:
+    """Build the human-facing summary without weakening machine policy semantics."""
+    technical = [
+        item for item in controls
+        if str(item.get("id") or "") not in DEPLOYMENT_FOLLOW_UP_CONTROL_IDS
+    ]
+    verified = [item for item in technical if item.get("status") == "PASS"]
+    needs_attention = [
+        item for item in technical
+        if item.get("status") in {"FAIL", "ERROR", "INCOMPLETE", "NOT_RUN", "REVIEW"}
+    ]
+    not_applicable = [item for item in technical if item.get("status") == "NOT_APPLICABLE"]
+    follow_up = [
+        item for item in controls
+        if str(item.get("id") or "") in DEPLOYMENT_FOLLOW_UP_CONTROL_IDS
+    ]
+    headline = {
+        "ALLOW": "Configured checks passed",
+        "BLOCK": "Do not use this revision yet",
+        "INCOMPLETE": "Review could not finish",
+        "REVIEW": "Review findings before use",
+    }.get(str(outcome or "").upper(), "Review results available")
+    if bool(license_compliance.get("legal_review_required")):
+        license_note = (
+            "One or more license terms need specialist review. See the License BOM for the exact "
+            "components, evidence, and reason codes."
+        )
+    elif license_compliance.get("policy_status") == "PASS":
+        license_note = (
+            "License evidence was collected and no configured policy trigger was found. "
+            "See the License BOM for component-level details."
+        )
+    else:
+        license_note = (
+            "License evidence is incomplete. See the License BOM for the missing declarations "
+            "or component records."
+        )
+    return {
+        "headline": headline,
+        "decision": str(outcome or ""),
+        "review_boundary": (
+            "This result covers the pinned model revision and the technical checks selected for this run. "
+            "Deployment follow-up is listed once in the appendix."
+        ),
+        "license_note": license_note,
+        "groups": {
+            "verified": [_presentation_control(item) for item in verified],
+            "needs_attention": [_presentation_control(item) for item in needs_attention],
+            "not_applicable": [_presentation_control(item) for item in not_applicable],
+            "deployment_follow_up": [_presentation_control(item) for item in follow_up],
+        },
+        "counts": {
+            "verified": len(verified),
+            "needs_attention": len(needs_attention),
+            "not_applicable": len(not_applicable),
+            "deployment_follow_up": len(follow_up),
+            "organization_checklist_items": external_requirement_count,
+        },
+    }
+
+
+def _presentation_control(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": item.get("id"),
+        "label": item.get("label"),
+        "category": item.get("category"),
+        "status": item.get("status"),
+        "result": item.get("detail"),
+        "next_step": item.get("remediation"),
+    }
 
 
 def build_model_intake_report(
@@ -721,7 +802,7 @@ def build_model_intake_report(
     license_policy_status = str(license_compliance.get("policy_status") or "")
     controls.append({
         "id": "license_compliance",
-        "label": "Corporate license and notice policy",
+        "label": "License and attribution review",
         "status": (
             "PASS" if license_policy_status == "PASS"
             else "FAIL" if license_policy_status == "BLOCK"
@@ -802,7 +883,7 @@ def build_model_intake_report(
     )
     if license_control and license_control.get("status") == "REVIEW" and legal_review_approved:
         license_control["status"] = "PASS"
-        license_control["detail"] = "Corporate legal review approved the reconciled terms against the latest frozen evidence."
+        license_control["detail"] = "A designated reviewer approved the reconciled terms against the latest frozen evidence."
         license_control["coverage"] = {
             **_json(license_control.get("coverage"), {}),
             "legal_disposition": "APPROVED",
@@ -936,6 +1017,12 @@ def build_model_intake_report(
         for item in EXTERNAL_APPROVAL_REQUIREMENTS
     ]
     static_detail = _static_check_detail(evidence)
+    presentation = _presentation_summary(
+        controls,
+        outcome=outcome,
+        license_compliance=license_compliance,
+        external_requirement_count=len(external_requirements),
+    )
     report = {
         "schema_version": REPORT_SCHEMA,
         "generated_at": _iso(now),
@@ -951,6 +1038,7 @@ def build_model_intake_report(
         },
         "outcome": outcome,
         "plain_language": summary,
+        "presentation": presentation,
         "executive_summary": {
             "shakerscan_decision": outcome,
             "deployable_under_configured_shakerscan_policy": outcome == "ALLOW",
@@ -964,8 +1052,8 @@ def build_model_intake_report(
                 + (f" until {admission_expiry}" if admission_expiry else "; no active admission expiry exists")
             ),
             "scope_warning": (
-                "ALLOW means the exact subject satisfies the configured ShakerScan admission policy. "
-                "It is not, by itself, legal, privacy, business, regulatory, platform, or operational authorization."
+                "The result applies only to the pinned subject and checks evidenced by this run. "
+                "Deployment follow-up remains separate."
             ),
             "coverage": {
                 "total_controls": len(controls),
@@ -988,7 +1076,7 @@ def build_model_intake_report(
                 "performed": "PASS, FAIL, or REVIEW means the control produced a determinate result.",
                 "not_completed": "ERROR, INCOMPLETE, or NOT_RUN means the control did not produce sufficient approval evidence.",
                 "not_applicable": "NOT_APPLICABLE is acceptable only when applicability was explicitly resolved from subject facts.",
-                "external": "EXTERNAL_REQUIRED identifies corporate decisions or operational proofs ShakerScan does not make.",
+                "external": "EXTERNAL_REQUIRED identifies deployment or organization decisions outside this technical run.",
             },
         },
         "controls": controls,
@@ -1035,10 +1123,10 @@ def build_model_intake_report(
             "authority": "advisory_only",
         } for item in agent_sessions],
         "limitations": [
-            "A clean static scan is not runtime, embedding-quality, privacy, or deployment approval.",
-            "Corporate corpus and data-plane results are authoritative only when attached as trusted generated evidence.",
+            "A clean static scan does not substitute for runtime, embedding-quality, or application testing.",
+            "Corpus and data-plane results are authoritative only when attached as trusted generated evidence.",
             "The optional coding-agent planner is advisory and never admission authority.",
-            "ShakerScan does not determine legal, privacy, regulatory, supplier, business, safety/fairness, or residual-risk acceptability.",
+            "Use-case, data, supplier, regulatory, and operational decisions remain deployment responsibilities.",
             "Product check-catalog entries describe supported capabilities; only per-submission control and scanner evidence proves execution and applicability.",
         ],
     }
@@ -1173,6 +1261,18 @@ def apply_automatic_review_context(
         "required_actions": actions,
     })
     report["detailed_review"] = detail
+    automatic_outcome = str(automatic.get("technical_outcome") or "").upper()
+    presentation_outcome = (
+        "ALLOW" if automatic_outcome == "PASS"
+        else automatic_outcome if automatic_outcome in {"BLOCK", "INCOMPLETE", "REVIEW"}
+        else str(report.get("outcome") or "")
+    )
+    report["presentation"] = _presentation_summary(
+        controls,
+        outcome=presentation_outcome,
+        license_compliance=_json(detail.get("license_compliance"), {}),
+        external_requirement_count=len(_json(detail.get("external_approval_requirements"), [])),
+    )
     report.pop("report_sha256", None)
     digest_input = {key: value for key, value in report.items() if key != "generated_at"}
     report["report_sha256"] = hashlib.sha256(_canonical(digest_input)).hexdigest()
@@ -1184,26 +1284,26 @@ def render_model_intake_html(report: dict[str, Any]) -> str:
         return html.escape(str(value if value is not None else ""))
 
     executive = _json(report.get("executive_summary"), {})
-    coverage = _json(executive.get("coverage"), {})
+    presentation = _json(report.get("presentation"), {})
+    groups = _json(presentation.get("groups"), {})
+    presentation_counts = _json(presentation.get("counts"), {})
     detail = _json(report.get("detailed_review"), {})
-    performed_ids = set(_json(report.get("assessment_scope"), {}).get("checks_performed") or [])
-    not_completed_ids = set(_json(report.get("assessment_scope"), {}).get("checks_not_completed") or [])
-    not_applicable_ids = set(_json(report.get("assessment_scope"), {}).get("checks_not_applicable") or [])
 
     def control_rows(items: list[dict[str, Any]], *, empty: str) -> str:
         return "".join(
             "<tr>"
             f"<td>{esc(item.get('category'))}</td><td>{esc(item.get('label'))}</td>"
             f"<td class='status {esc(str(item.get('status') or '').lower())}'>{esc(item.get('status'))}</td>"
-            f"<td>{esc(item.get('detail'))}</td><td>{esc(item.get('remediation'))}</td>"
+            f"<td>{esc(item.get('result') if 'result' in item else item.get('detail'))}</td>"
+            f"<td>{esc(item.get('next_step') if 'next_step' in item else item.get('remediation'))}</td>"
             "</tr>"
             for item in items
         ) or f"<tr><td colspan='5'>{esc(empty)}</td></tr>"
 
     controls = report.get("controls", []) if isinstance(report.get("controls"), list) else []
-    performed_rows = control_rows([item for item in controls if item.get("id") in performed_ids], empty="No determinate checks were recorded.")
-    incomplete_rows = control_rows([item for item in controls if item.get("id") in not_completed_ids], empty="No supported checks are incomplete or not run.")
-    not_applicable_rows = control_rows([item for item in controls if item.get("id") in not_applicable_ids], empty="No checks were marked not applicable.")
+    verified_rows = control_rows(_json(groups.get("verified"), []), empty="No technical check recorded a passing result.")
+    attention_rows = control_rows(_json(groups.get("needs_attention"), []), empty="No technical check needs attention.")
+    not_applicable_rows = control_rows(_json(groups.get("not_applicable"), []), empty="No checks were marked not applicable.")
     rows = "".join(
         "<tr>"
         f"<td>{esc(item.get('category'))}</td><td>{esc(item.get('question'))}</td>"
@@ -1213,13 +1313,9 @@ def render_model_intake_html(report: dict[str, Any]) -> str:
         "</tr>"
         for item in controls
     )
-    action_rows = "".join(
-        f"<li><strong>{esc(item.get('status'))} — {esc(item.get('control_id'))}:</strong> {esc(item.get('action'))}</li>"
-        for item in executive.get("required_actions") or []
-    ) or "<li>No unresolved ShakerScan control action is recorded.</li>"
     external_rows = "".join(
         "<tr>"
-        f"<td>{esc(item.get('id'))}</td><td>{esc(item.get('status'))}</td><td>{esc(item.get('category'))}</td><td>{esc(item.get('requirement'))}</td>"
+        f"<td>{esc(item.get('id'))}</td><td>{esc(item.get('category'))}</td><td>{esc(item.get('requirement'))}</td>"
         f"<td>{esc(item.get('typical_owner'))}</td><td>{esc(item.get('expected_evidence'))}</td>"
         "</tr>"
         for item in detail.get("external_approval_requirements") or []
@@ -1246,17 +1342,16 @@ th,td{{border:1px solid #ccd2dc;padding:8px;vertical-align:top;text-align:left}}
 .no-print{{margin-right:8px}}.page-break{{break-before:page}}@media print{{.no-print{{display:none}}body{{margin:12mm}}}}
 </style></head><body>
 <button class="no-print" onclick="window.print()">Print / Save PDF</button>
-<h1>Model Intake corporate review</h1><div class="meta">Submission {esc(report.get('submission', {}).get('id'))} · report sha256:{esc(report.get('report_sha256'))}</div>
-<h2>Executive summary</h2>
-<div class="verdict"><strong>ShakerScan decision: {esc(executive.get('shakerscan_decision') or report.get('outcome'))}</strong><p>{esc(executive.get('decision_statement') or report.get('plain_language'))}</p><p><strong>Scope:</strong> {esc(executive.get('authorization_scope'))}</p></div>
-<div class="warning"><strong>Full corporate approval: {esc(executive.get('full_corporate_approval'))}</strong><p>{esc(executive.get('scope_warning'))}</p></div>
-<div class="warning"><strong>License outcome: {esc(executive.get('license_outcome') or 'NOT ASSESSED')}</strong><p>Legal disposition: {esc(executive.get('legal_disposition') or 'PENDING')}. Automated classification is evidence triage, not legal advice.</p></div>
-<div class="stats"><span class="stat">{esc(coverage.get('performed'))} performed</span><span class="stat">{esc(coverage.get('passed'))} passed</span><span class="stat">{esc(coverage.get('failed'))} failed</span><span class="stat">{esc(coverage.get('not_completed'))} not completed</span><span class="stat">{esc(coverage.get('external_corporate_requirements'))} external requirements</span></div>
-<h3>Required next actions</h3><ol>{action_rows}</ol>
-<h3>Checks performed</h3><table><thead><tr><th>Category</th><th>Control</th><th>Status</th><th>Result</th><th>Next step</th></tr></thead><tbody>{performed_rows}</tbody></table>
-<h3>Supported checks not completed</h3><table><thead><tr><th>Category</th><th>Control</th><th>Status</th><th>Result</th><th>Next step</th></tr></thead><tbody>{incomplete_rows}</tbody></table>
+<h1>Model Intake review</h1><div class="meta">Submission {esc(report.get('submission', {}).get('id'))} · report sha256:{esc(report.get('report_sha256'))}</div>
+<h2>Summary</h2>
+<div class="verdict"><strong>{esc(presentation.get('headline') or 'Review results available')}</strong><p>{esc(executive.get('decision_statement') or report.get('plain_language'))}</p><p><strong>Result:</strong> {esc(presentation.get('decision') or report.get('outcome'))}</p><p><strong>Scope:</strong> {esc(executive.get('authorization_scope'))}</p></div>
+<div class="warning"><strong>Review boundary</strong><p>{esc(presentation.get('review_boundary'))}</p></div>
+<div class="warning"><strong>Licensing and attribution</strong><p>{esc(presentation.get('license_note'))}</p></div>
+<div class="stats"><span class="stat">{esc(presentation_counts.get('verified'))} verified</span><span class="stat">{esc(presentation_counts.get('needs_attention'))} need attention</span><span class="stat">{esc(presentation_counts.get('not_applicable'))} not applicable</span></div>
+<h3>Checks that need attention</h3><table><thead><tr><th>Category</th><th>Control</th><th>Status</th><th>Result</th><th>Next step</th></tr></thead><tbody>{attention_rows}</tbody></table>
+<h3>Verified checks</h3><table><thead><tr><th>Category</th><th>Control</th><th>Status</th><th>Result</th><th>Evidence / next step</th></tr></thead><tbody>{verified_rows}</tbody></table>
 <h3>Checks not applicable</h3><table><thead><tr><th>Category</th><th>Control</th><th>Status</th><th>Result</th><th>Reason/next step</th></tr></thead><tbody>{not_applicable_rows}</tbody></table>
-<h2 class="page-break">Corporate requirements outside ShakerScan</h2><p>These are normal approval inputs, not hidden scan failures. ShakerScan may bind their resulting approvals or evidence, but it does not make these decisions.</p><table><thead><tr><th>ID</th><th>Status</th><th>Category</th><th>Required corporate review</th><th>Typical owner</th><th>Expected evidence</th></tr></thead><tbody>{external_rows}</tbody></table>
+<h2 class="page-break">Deployment and organization follow-up</h2><p>This appendix records decisions and evidence normally completed around deployment. These items are not scan failures and are intentionally excluded from the technical result counts.</p><table><thead><tr><th>ID</th><th>Category</th><th>Follow-up</th><th>Typical owner</th><th>Expected evidence</th></tr></thead><tbody>{external_rows}</tbody></table>
 <h2 class="page-break">Detailed technical review</h2>
 <h3>Control evidence matrix</h3><table><thead><tr><th>Category</th><th>Question</th><th>Status</th><th>Answer</th><th>Method</th><th>Coverage/evidence</th></tr></thead><tbody>{rows}</tbody></table>
 <h2>Firecracker phase timeline</h2><table><thead><tr><th>Operation</th><th>Phase</th><th>Status</th><th>Duration ms</th><th>Detail</th></tr></thead><tbody>{phases}</tbody></table>

@@ -2276,6 +2276,25 @@ export interface ModelIntakeCorporateReport {
   report_sha256: string
   outcome: 'ALLOW' | 'BLOCK' | 'INCOMPLETE' | 'REVIEW'
   plain_language: string
+  presentation?: {
+    headline: string
+    decision: string
+    review_boundary: string
+    license_note: string
+    groups: {
+      verified: Array<{ id: string; label: string; category: string; status: ModelIntakeReportStatus; result: string; next_step: string }>
+      needs_attention: Array<{ id: string; label: string; category: string; status: ModelIntakeReportStatus; result: string; next_step: string }>
+      not_applicable: Array<{ id: string; label: string; category: string; status: ModelIntakeReportStatus; result: string; next_step: string }>
+      deployment_follow_up: Array<{ id: string; label: string; category: string; status: ModelIntakeReportStatus; result: string; next_step: string }>
+    }
+    counts: {
+      verified: number
+      needs_attention: number
+      not_applicable: number
+      deployment_follow_up: number
+      organization_checklist_items: number
+    }
+  }
   executive_summary: {
     shakerscan_decision: 'ALLOW' | 'BLOCK' | 'INCOMPLETE' | 'REVIEW'
     deployable_under_configured_shakerscan_policy: boolean

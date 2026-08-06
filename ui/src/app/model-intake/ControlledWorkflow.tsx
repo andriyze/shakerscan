@@ -809,10 +809,10 @@ export function ControlledModelIntakeWorkflow({
   // A loopback deployment resolves its own credential, so the manual field
   // only appears when the UI server declined to provide one.
   const operatorCredentialAutofilled = Boolean(operatorToken.trim()) && operatorCredential?.available === true
-  const performedControlIds = new Set(report?.assessment_scope?.checks_performed || [])
-  const incompleteControlIds = new Set(report?.assessment_scope?.checks_not_completed || [])
-  const performedControls = report?.controls.filter((control) => performedControlIds.has(control.id)) || []
-  const incompleteControls = report?.controls.filter((control) => incompleteControlIds.has(control.id)) || []
+  const deploymentFollowUpIds = new Set(['data_plane_evaluation', 'human_approvals', 'deterministic_policy', 'signed_admission'])
+  const technicalControls = report?.controls.filter((control) => !deploymentFollowUpIds.has(control.id)) || []
+  const verifiedControls = technicalControls.filter((control) => control.status === 'PASS')
+  const attentionControls = technicalControls.filter((control) => ['FAIL', 'ERROR', 'INCOMPLETE', 'NOT_RUN', 'REVIEW'].includes(control.status))
 
   return (
     <Card className="min-w-0 p-4" id="controlled-model-intake-workflow">
@@ -820,7 +820,7 @@ export function ControlledModelIntakeWorkflow({
         <div>
           <div className="flex items-center gap-2 text-white">
             <LockKeyhole className="h-4 w-4 text-cyan-300" />
-            <h2 className="text-sm font-semibold">4. Controlled Corporate Admission Workflow</h2>
+            <h2 className="text-sm font-semibold">4. Controlled Admission Workflow</h2>
           </div>
           <p className="mt-1 max-w-4xl text-xs text-gray-400">
             Generated static evidence, exact-subject Firecracker execution, frozen evidence, identity-separated approvals, deterministic policy, and isolated signing. Technical preflight above never grants deployment authority.
@@ -850,7 +850,7 @@ export function ControlledModelIntakeWorkflow({
           <div className="flex gap-2">
             <ShieldAlert className="h-4 w-4 shrink-0 text-gray-500" />
             <span>
-              Corporate approval actions are signed by a named reviewer, so this stage needs an
+              Admission actions are signed by a named reviewer, so this stage needs an
               operator credential. Everything before it — resolving a model and running the preflight
               evidence scan — needs nothing.
             </span>
@@ -1025,7 +1025,7 @@ export function ControlledModelIntakeWorkflow({
               )}
             </div>
             <div className="rounded border border-gray-800 bg-gray-900 p-3">
-              <div className="text-xs font-medium text-gray-300">Corporate deployment bindings</div>
+              <div className="text-xs font-medium text-gray-300">Deployment bindings</div>
               <p className="mt-1 text-[11px] text-gray-500">
                 Optional. These identify the serving application and vector-index contract that will
                 consume the model, so they only apply once that deployment exists. Leave them empty
@@ -1184,15 +1184,15 @@ export function ControlledModelIntakeWorkflow({
       </details>
 
       <details className="mt-3 rounded-lg border border-gray-800 bg-gray-950" open={Boolean(report)}>
-        <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-white">4.6 Normalized corporate review report</summary>
+        <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-white">4.6 Review report</summary>
         <div className="border-t border-gray-800 p-4">
           {!report ? <div className="text-xs text-gray-500">Select a controlled submission to generate its authoritative report.</div> : (
             <div className="grid gap-4">
               <section className="rounded-lg border border-gray-800 bg-gray-900 p-4" aria-label="Model Intake executive summary">
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div className="min-w-0">
-                    <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">Executive summary</div>
-                    <div className="mt-2 flex items-center gap-2"><FileText className="h-4 w-4 text-cyan-300" /><span className={`rounded px-2 py-1 text-xs font-bold ${statusClass(report.outcome)}`}>ShakerScan: {report.outcome}</span></div>
+                    <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">Summary</div>
+                    <div className="mt-2 flex items-center gap-2"><FileText className="h-4 w-4 text-cyan-300" /><span className={`rounded px-2 py-1 text-xs font-bold ${statusClass(report.presentation?.decision || report.outcome)}`}>{report.presentation?.headline || `Result: ${report.outcome}`}</span></div>
                     <p className="mt-2 max-w-4xl text-sm text-gray-200">{report.executive_summary.decision_statement}</p>
                     <p className="mt-2 text-xs text-gray-500">{report.executive_summary.authorization_scope}</p>
                   </div>
@@ -1200,33 +1200,41 @@ export function ControlledModelIntakeWorkflow({
                     {(['json', 'html', 'sarif'] as const).map((format) => <button key={format} type="button" className={buttonClass} disabled={busy === `report:${format}`} onClick={() => void exportReport(format)}><Download className="h-3.5 w-3.5" /> {format === 'html' ? 'Printable HTML / PDF' : format.toUpperCase()}</button>)}
                   </div>
                 </div>
-                <div className="mt-4 rounded border border-yellow-800/60 bg-yellow-950/20 p-3 text-xs text-yellow-100">
-                  <div className="font-semibold">Full corporate approval: not determined by ShakerScan</div>
-                  <p className="mt-1 text-yellow-100/80">{report.executive_summary.scope_warning}</p>
+                <div className="mt-4 rounded border border-gray-700 bg-gray-950 p-3 text-xs text-gray-300">
+                  <div className="font-semibold">Review boundary</div>
+                  <p className="mt-1 text-gray-500">{report.presentation?.review_boundary || report.executive_summary.scope_warning}</p>
                 </div>
                 <div className={`mt-3 rounded border p-3 text-xs ${report.executive_summary.legal_review_required ? 'border-yellow-700/60 bg-yellow-950/20 text-yellow-100' : 'border-gray-700 bg-gray-950 text-gray-300'}`}>
-                  <div className="font-semibold">License outcome: {report.executive_summary.license_outcome || 'NOT ASSESSED'}</div>
-                  <p className="mt-1 opacity-80">Legal disposition: {report.executive_summary.legal_disposition || 'PENDING'}. Automated classification is evidence triage, not legal advice.</p>
+                  <div className="font-semibold">Licensing and attribution</div>
+                  <p className="mt-1 opacity-80">{report.presentation?.license_note || report.executive_summary.license_outcome || 'License evidence was not assessed.'}</p>
                 </div>
-                <div className="mt-4 grid gap-2 sm:grid-cols-3 xl:grid-cols-6">
+                <div className="mt-4 grid gap-2 sm:grid-cols-3">
                   {[
-                    ['performed', report.executive_summary.coverage.performed],
-                    ['passed', report.executive_summary.coverage.passed],
-                    ['failed', report.executive_summary.coverage.failed],
-                    ['review', report.executive_summary.coverage.review],
-                    ['not completed', report.executive_summary.coverage.not_completed],
-                    ['external', report.executive_summary.coverage.external_corporate_requirements],
+                    ['verified', report.presentation?.counts.verified ?? verifiedControls.length],
+                    ['need attention', report.presentation?.counts.needs_attention ?? attentionControls.length],
+                    ['not applicable', report.presentation?.counts.not_applicable ?? 0],
                   ].map(([label, value]) => <div key={String(label)} className="rounded border border-gray-800 bg-gray-950 p-2 text-center"><div className="text-lg font-semibold text-white">{String(value ?? 0)}</div><div className="text-[10px] uppercase tracking-wide text-gray-500">{label}</div></div>)}
                 </div>
-                {report.executive_summary.required_actions.length > 0 && <div className="mt-4"><div className="text-xs font-semibold text-gray-300">Required next actions</div><ol className="mt-2 list-decimal space-y-1 pl-5 text-xs text-gray-400">{report.executive_summary.required_actions.map((action) => <li key={`${action.control_id}-${action.status}`}><span className={statusClass(action.status)}>{action.status}</span> · {action.action}</li>)}</ol></div>}
                 <div className="mt-3 break-all font-mono text-[10px] text-gray-600">report sha256:{report.report_sha256}</div>
               </section>
 
-              <section className="rounded-lg border border-gray-800 bg-gray-900 p-4" aria-label="Checks performed">
-                <div className="text-sm font-semibold text-white">Checks performed</div>
-                <p className="mt-1 text-xs text-gray-500">These controls produced a determinate PASS, FAIL, or REVIEW result for this exact submission.</p>
+              <section className="rounded-lg border border-gray-800 bg-gray-900 p-4" aria-label="Checks that need attention">
+                <div className="text-sm font-semibold text-white">Checks that need attention</div>
+                <p className="mt-1 text-xs text-gray-500">Only technical issues from this run appear here. Deployment follow-up is listed once below.</p>
+                <div className="mt-3 space-y-2">
+                  {attentionControls.length === 0 ? <div className="text-xs text-green-300">No technical check needs attention.</div> : attentionControls.map((control) => (
+                    <div key={control.id} className="rounded border border-red-900/50 bg-red-950/10 p-3">
+                      <div className="flex flex-wrap items-start justify-between gap-2"><div><div className="text-[10px] uppercase tracking-wide text-gray-600">{control.category}</div><div className="mt-1 text-xs font-medium text-gray-200">{control.label}</div></div><span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${statusClass(control.status)}`}>{control.status}</span></div>
+                      <p className="mt-2 text-[11px] text-gray-500">{control.detail}</p><p className="mt-1 text-[11px] text-cyan-300">Next: {control.remediation}</p>
+                    </div>
+                  ))}
+                </div>
+              </section>
+
+              <section className="rounded-lg border border-gray-800 bg-gray-900 p-4" aria-label="Verified checks">
+                <div className="text-sm font-semibold text-white">Verified checks</div>
                 <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
-                  {performedControls.length === 0 ? <div className="text-xs text-gray-500">No determinate control results.</div> : performedControls.map((control) => (
+                  {verifiedControls.length === 0 ? <div className="text-xs text-gray-500">No technical check recorded a passing result.</div> : verifiedControls.map((control) => (
                     <div key={control.id} className="rounded border border-gray-800 bg-gray-950 p-3">
                       <div className="text-[10px] uppercase tracking-wide text-gray-600">{control.category}</div>
                       <div className="mt-1 flex items-start justify-between gap-2"><span className="text-xs font-medium text-gray-200">{control.label}</span><span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold ${statusClass(control.status)}`}>{control.status}</span></div>
@@ -1236,22 +1244,9 @@ export function ControlledModelIntakeWorkflow({
                 </div>
               </section>
 
-              <section className="rounded-lg border border-gray-800 bg-gray-900 p-4" aria-label="Checks not completed">
-                <div className="text-sm font-semibold text-white">Supported checks not completed</div>
-                <p className="mt-1 text-xs text-gray-500">ERROR, INCOMPLETE, and NOT_RUN are visible gaps and never count as approval evidence.</p>
-                <div className="mt-3 space-y-2">
-                  {incompleteControls.length === 0 ? <div className="text-xs text-green-300">No supported controls are incomplete or not run.</div> : incompleteControls.map((control) => (
-                    <div key={control.id} className="rounded border border-red-900/50 bg-red-950/10 p-3">
-                      <div className="flex flex-wrap items-start justify-between gap-2"><div><div className="text-[10px] uppercase tracking-wide text-gray-600">{control.category}</div><div className="mt-1 text-xs font-medium text-gray-200">{control.label}</div></div><span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${statusClass(control.status)}`}>{control.status}</span></div>
-                      <p className="mt-2 text-[11px] text-gray-500">{control.detail}</p><p className="mt-1 text-[11px] text-cyan-300">Next: {control.remediation}</p>
-                    </div>
-                  ))}
-                </div>
-              </section>
-
               <details className="rounded-lg border border-gray-800 bg-gray-900">
-                <summary className="cursor-pointer px-4 py-3 text-sm font-semibold text-white">Corporate approval requirements outside ShakerScan ({report.detailed_review.external_approval_requirements.length})</summary>
-                <div className="border-t border-gray-800 p-4"><p className="mb-3 text-xs text-gray-500">These are expected corporate reviews—not hidden scanner failures. ShakerScan can bind resulting evidence, but it does not make these decisions.</p><div className="space-y-2">{report.detailed_review.external_approval_requirements.map((item) => <div key={item.id} className="rounded border border-gray-800 bg-gray-950 p-3"><div className="flex flex-wrap items-center gap-2"><span className="font-mono text-[10px] text-gray-600">{item.id}</span><span className="text-[10px] uppercase tracking-wide text-gray-500">{item.category}</span><span className="rounded bg-blue-950 px-1.5 py-0.5 text-[9px] font-semibold text-blue-300">{item.status}</span></div><div className="mt-1 text-xs text-gray-200">{item.requirement}</div><div className="mt-2 text-[11px] text-gray-500">Owner: {item.typical_owner} · Evidence: {item.expected_evidence}</div></div>)}</div></div>
+                <summary className="cursor-pointer px-4 py-3 text-sm font-semibold text-white">Deployment and organization follow-up ({report.detailed_review.external_approval_requirements.length})</summary>
+                <div className="border-t border-gray-800 p-4"><p className="mb-3 text-xs text-gray-500">These items are not scan failures. They are recorded here once for teams preparing a deployment.</p><div className="space-y-2">{report.detailed_review.external_approval_requirements.map((item) => <div key={item.id} className="rounded border border-gray-800 bg-gray-950 p-3"><div className="flex flex-wrap items-center gap-2"><span className="font-mono text-[10px] text-gray-600">{item.id}</span><span className="text-[10px] uppercase tracking-wide text-gray-500">{item.category}</span></div><div className="mt-1 text-xs text-gray-200">{item.requirement}</div><div className="mt-2 text-[11px] text-gray-500">Owner: {item.typical_owner} · Evidence: {item.expected_evidence}</div></div>)}</div></div>
               </details>
 
               <details className="rounded-lg border border-gray-800 bg-gray-900">

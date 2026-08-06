@@ -75,10 +75,11 @@ The following implementation defects found in the branch audit are closed:
   to the builder and environment. Local PEM is the install default and may sign production-targeted technical
   evidence, but the receipt is labeled `non_production_local_pem` and forced to `INCOMPLETE`; only an
   organization-approved KMS key may satisfy the production signer control.
-- Reports now lead with one decision, passed/failed/review/not-tested counts, concrete failed and incomplete
-  checks, and numbered next actions. Technical matrices, phase logs, hashes, platform metadata, AIBOM, and
-  SBOM detail are collapsed by default. The generated CycloneDX SBOM has a compact summary and remains
-  separately downloadable as raw evidence.
+- Reports now lead with one plain-language result and three engineering groups: **verified**, **needs
+  attention**, and **not applicable**. Later admission and organization work appears once under **deployment
+  follow-up** and is excluded from technical failure counts. Licensing has one concise summary linked to the
+  License BOM instead of repeated disclaimers. Technical matrices, phase logs, hashes, platform metadata,
+  AIBOM, and SBOM detail are collapsed by default and remain downloadable as evidence.
 
 The web application cannot and must not silently install a root system service. On a supported Linux/KVM
 host, the Status page stages the large verified inputs and copies one explicit host command. That command
@@ -358,7 +359,7 @@ hash-locked virtual environments so their transitive dependencies cannot replace
 Trivy is checksum-pinned and runs with build-captured data and runtime update/network lookups disabled. An
 image build fails unless every core adapter detects its corresponding deterministic malicious fixture.
 
-#### 2.2.2 Corporate license compliance boundary
+#### 2.2.2 License evidence and policy boundary
 
 The implemented license path deliberately uses **Trivy as the only external license scanner**. ShakerScan
 adds deterministic evidence reconciliation and reporting instead of adding another overlapping engine:
@@ -370,10 +371,10 @@ adds deterministic evidence reconciliation and reporting instead of adding anoth
    review. Raw license text is not copied into the ordinary scan result.
 3. ShakerScan fingerprints common repository license files, distinguishes overlapping BSD and GNU-family
    signatures, and reconciles those facts with publisher declarations and Trivy package/source evidence.
-4. The versioned corporate policy returns exactly one automated outcome: `NO LEGAL BLOCKER DETECTED`,
+4. The versioned policy returns exactly one automated outcome: `NO LEGAL BLOCKER DETECTED`,
    `LEGAL REVIEW REQUIRED`, or `BLOCKED BY LICENSE POLICY`. Unknown, custom, reciprocal, dataset-related,
    conflicting, or intended-use-dependent terms always route to legal review. Clearly forbidden/restricted
-   corporate terms block. “No legal blocker detected” is never rendered as legal approval.
+   prohibited terms block. “No legal blocker detected” is never rendered as an approval statement.
 5. The controlled evidence manifest binds `legal_review_required`. Model-security approval cannot clear it;
    a distinct `legal_reviewer` must approve the latest frozen evidence before deterministic admission can
    allow. A new or changed snapshot, policy, scanner database, or approval invalidates that disposition through
@@ -388,11 +389,11 @@ adds deterministic evidence reconciliation and reporting instead of adding anoth
 Artifact acceptance is content-based, not existence-based. A complete-review test must assert useful component
 names/versions or model relationships, subject and snapshot identity, evidence completeness, license source
 coverage, actionable unresolved items, and non-duplicated root identity. An empty component list plus hashes and
-generic legal boilerplate fails acceptance even when the JSON is schema-valid.
+generic disclaimer text fails acceptance even when the JSON is schema-valid.
 
 This is the maximum responsible automation boundary. License classification, evidence reconciliation,
-approval routing, and notice drafting are product behavior. Legal interpretation, jurisdiction/use-case
-analysis, indemnity acceptance, and final distribution approval remain human corporate authority.
+approval routing, and notice drafting are product behavior. Interpretation of ambiguous terms,
+jurisdiction/use-case analysis, indemnity acceptance, and final distribution approval remain human decisions.
 
 ### 2.3 Plain-language answer every report must provide
 
@@ -404,14 +405,15 @@ Every controlled intake report must answer, on its first screen, in JSON, and in
    evidence.
 3. **What failed?** The failed control, evidence reference, policy consequence, and remediation.
 4. **What did not run?** Missing tool, unsupported format, absent benchmark, timeout, crash, skipped control,
-   or unavailable corporate input. A required non-run is never a pass.
+   or unavailable input. A required non-run is never a pass. The UI distinguishes this from an explicitly
+   resolved `NOT_APPLICABLE` result.
 5. **What is the ShakerScan decision?** `ALLOW`, `REVIEW`, `INCOMPLETE`, or `BLOCK`, with a short reason and
    the exact policy/evidence/admission identities that produced it.
-6. **Is this full corporate approval?** Always answer separately. ShakerScan reports
-   `NOT_DETERMINED_BY_SHAKERSCAN` because legal, privacy, business, regulatory, platform, and residual-risk
-   authority remain organizational decisions even when ShakerScan returns `ALLOW`.
-7. **What remains outside ShakerScan?** Name the required owner and expected evidence for each corporate
-   approval or operational proof, rather than hiding these items in a generic limitations paragraph.
+6. **What is outside this run?** State the technical review boundary once, then put deployment and
+   organization follow-up in a collapsed appendix. These items are not scan failures and must not inflate the
+   executive failure count.
+7. **Does licensing need follow-up?** Give one concise answer. Link to component terms, paths, digests,
+   policy reason codes, and missing evidence in the License BOM; do not repeat legal boilerplate per control.
 
 Normalized control states must be `PASS`, `FAIL`, `WARNING`, `REVIEW_REQUIRED`, `NOT_RUN`, `UNSUPPORTED`,
 `TIMEOUT`, `CRASHED`, `INCOMPLETE`, `SKIPPED_BY_POLICY`, or `NOT_APPLICABLE`. Only `PASS` and an explicitly
@@ -419,15 +421,15 @@ justified `NOT_APPLICABLE` can directly satisfy a required gate. A policy may tu
 an approval with recorded rationale; every other non-pass remains visible. The UI may use friendlier labels,
 but the exported status must remain unambiguous.
 
-The normalized controlled report uses `model-intake-corporate-report/v2` and has two deliberately different
+The normalized controlled report retains `model-intake-corporate-report/v2` for integration compatibility and has two deliberately different
 layers:
 
-- **Executive summary:** ShakerScan decision, full-corporate-approval disclaimer, exact authorization scope,
-  coverage counts, key deficiencies, and prioritized next actions. It is short enough for a risk owner to
-  make a disposition without reading scanner payloads.
+- **Summary:** one plain-language headline and result, exact scope, verified/attention/not-applicable counts,
+  prioritized technical findings, one review-boundary note, and one licensing note. It is short enough for an
+  engineer or risk owner to understand without reading scanner payloads.
 - **Detailed technical review:** the control question, status, answer, method, coverage, evidence references,
   remediation, static per-scanner summary, Firecracker phase/network/resource timeline, authority bindings,
-  complete ShakerScan capability catalog, and corporate requirements outside ShakerScan.
+  complete ShakerScan capability catalog, and a collapsed deployment/organization follow-up appendix.
 
 This format follows NIST's assessment-report guidance: an executive summary should state what and when was
 assessed, deficiencies, and recommendations, while the detailed report preserves assessed controls, results,
@@ -541,7 +543,7 @@ telemetry stream by digest instead of flooding the executive report with repetit
 
 | Capability | Product mechanism | Installed/operational by default | Remaining action |
 |---|---:|---:|---|
-| One-link automatic technical review | Durable API controller plus default UI mode | **Yes.** One Hugging Face link queues the complete scan only on a current, fingerprint-uniform worker fleet, performs controlled static-evidence binding, supported conversion/rescan, Firecracker calibration/runtime verification when ready, and evidence freeze. The result screen labels the pinned source and timeline and directly downloads JSON/HTML/SARIF, CycloneDX, SPDX, AIBOM, License BOM, and Third-Party Notices draft artifacts. Browser presence and operator bearer-token storage are not required. | Human approvals, publisher trust, KMS production signing, policy decision, promotion, corporate data-plane evidence, and any required legal disposition intentionally remain explicit controls. |
+| One-link automatic technical review | Durable API controller plus default UI mode | **Yes.** One Hugging Face link queues the complete scan only on a current, fingerprint-uniform worker fleet, performs controlled static-evidence binding, supported conversion/rescan, Firecracker calibration/runtime verification when ready, and evidence freeze. The result screen labels the pinned source and timeline and directly downloads JSON/HTML/SARIF, CycloneDX, SPDX, AIBOM, License BOM, and Third-Party Notices draft artifacts. Browser presence and operator bearer-token storage are not required. | Publisher trust, production signing, policy/promotion, application data-plane evidence, and organization-required approvals remain one consolidated deployment follow-up section. |
 | Provider-neutral source adapters and pinned identities | Implemented | Hugging Face/HTTPS paths usable; cloud/OCI/MLflow contracts are tested and need credentials/configuration | Maintain provider contract tests; unsupported repository-snapshot semantics remain explicit |
 | SSRF-resistant acquisition and complete quarantine | Implemented | Available when complete acquisition is enabled and storage is configured; strict saved profiles force it | Maintain provider/redirect contract tests and controlled egress |
 | Repository manifests, archives, custom code, safe-format checks | Implemented mechanism | Provider-authoritative pinned HF inventory, containment, recursive archive/config inspection, and explicit truncation are enforced | Other providers remain artifact-only unless they later supply an equivalent authoritative snapshot API |
@@ -559,7 +561,7 @@ telemetry stream by digest instead of flooding the executive report with repetit
 | Typed non-scanner providers | Implemented and boundary-frozen | Sandbox execution, runner-derived embedding evaluation, source-bound embedded policy, and normalized report/signed-admission export are separate classes | OPA and additional provider frameworks are out of scope and are not advertised as product capabilities |
 | Signed admission statement and lifecycle registry | Exact-bundle v2 control plane and isolated signer implemented | Workers emit only unsigned non-deployable candidates. The signer has a dedicated minimal hash-locked image, isolated internal network, separate least-privilege database role, shipped AWS KMS client, request idempotency lock, and initiating-operator audit identity. Frozen evidence, approvals, exact component verification, latest-manifest checks, and evidence-change invalidation are durable. | Prove production KMS rotation/failure paths and remaining revocation/recovery negative paths |
 | Saved Model Intake policy profiles | Implemented server-owned admission expansion | Admission uses the operator-selected server default; caller booleans/subsets/exceptions cannot weaken it; mutations require operator auth | Add organization-specific required scanner/runtime/benchmark fields |
-| Executive and detailed corporate report | Implemented across UI/JSON/HTML/SARIF as `model-intake-corporate-report/v2` | The executive section separates ShakerScan `ALLOW/BLOCK/INCOMPLETE/REVIEW` from `NOT_DETERMINED_BY_SHAKERSCAN` full corporate approval, exact scope, coverage, key deficiencies, and next actions. The detailed section includes enriched controls, scanner-level content-free static summaries, operation-versus-containment results, bounded Firecracker network/resource timelines, the evidence-backed 27-check catalog, and 14 external corporate requirements with owners/evidence. Raw high-volume telemetry remains in signed evidence instead of being duplicated into every report. | Add organization-specific policy/remediation text only when useful; it is not an admission dependency and may not hide or relabel a non-pass |
+| Engineer-first summary and detailed report | Implemented across UI/JSON/HTML/SARIF with compatibility schema `model-intake-corporate-report/v2` | The first screen shows one result plus verified/attention/not-applicable groups. Licensing is summarized once. Admission-stage and organization items are excluded from technical failure counts and appear once in a collapsed deployment-follow-up appendix. The detailed section preserves enriched controls, scanner summaries, operation-versus-containment results, bounded Firecracker network/resource timelines, the evidence-backed 27-check catalog, and 14 owner/evidence follow-up items. Raw telemetry remains in signed evidence. | Add organization-specific policy/remediation text only when useful; it may not hide or relabel a non-pass |
 | Deployment by exact approved digest | Pure v2 verifier, explicit observation endpoint, configured OCI publisher, and namespace/object-scoped Kubernetes webhook installer implemented | `oras` performs one fixed HTTPS registry copy and verifies the remote descriptor; cert-manager injects the webhook CA; immutable image configuration and rollout are validated. No live corporate registry/cluster acceptance has been run. | Run digest-variant, outage, expiry, revocation, and recovery acceptance against the organization-operated registry and cluster; add no other orchestrator |
 | Legal, privacy, data provenance, and risk acceptance | Recorded as governance evidence | Organization-dependent | Keep human-owned; enforce required owner, approval, scope, and expiry |
 
@@ -2136,13 +2138,14 @@ same fixed action catalog and lifecycle endpoints, preserves Firecracker no-fall
 rules, and uses the same `ALLOW`/`BLOCK`/`INCOMPLETE`/`REVIEW` vocabulary. Cross-surface tests prove the API,
 UI, and skill carry the same permissions and cannot reach privileged admission mutations indirectly.
 
-### Phase 5 — Useful report and release gate — **product mechanisms complete; corporate deployment acceptance pending**
+### Phase 5 — Useful report and release gate — **product mechanisms complete; deployment acceptance pending**
 
-Delivered: a first-screen executive summary that separates the configured ShakerScan decision from full
-corporate approval, exact authorization scope, coverage counts, key deficiencies, and concrete next actions;
+Delivered: a first-screen summary with one plain-language result, exact scope, verified/attention/not-applicable
+counts, key technical deficiencies, one licensing note, and concrete next actions. Deployment and organization
+follow-up is listed once in a collapsed appendix and excluded from technical failure counts;
 plus a detailed technical section with enriched control questions/methods/evidence/remediation, per-scanner
 content-free static summaries, Firecracker timelines, the complete check catalog, and explicitly external
-corporate requirements. Malicious-primitive proof remains separate from format capability. Findings, AIBOM,
+follow-up requirements. Malicious-primitive proof remains separate from format capability. Findings, AIBOM,
 evidence, activity logs, JSON/PDF
 exports, optional signed statements, lifecycle registry, reassessment, expiry, supersession, and revocation.
 The exact-subject verifier authorizes only signed `allow` decisions, and the HTTP path additionally requires

@@ -62,19 +62,19 @@ test('Codex workflow is prominently advisory and promotion remains a separate op
   assert.match(workflow, /cancelModelIntakeAgentSession/)
 })
 
-test('normalized corporate report has UI and export parity', () => {
-  assert.match(workflow, /Normalized corporate review report/)
-  assert.match(workflow, /Executive summary/)
-  assert.match(workflow, /Full corporate approval: not determined by ShakerScan/)
-  assert.match(workflow, /Checks performed/)
-  assert.match(workflow, /Supported checks not completed/)
-  assert.match(workflow, /Corporate approval requirements outside ShakerScan/)
+test('normalized review report has engineer-first UI and export parity', () => {
+  assert.match(workflow, /4\.6 Review report/)
+  assert.match(workflow, /Review boundary/)
+  assert.match(workflow, /Checks that need attention/)
+  assert.match(workflow, /Verified checks/)
+  assert.match(workflow, /Deployment and organization follow-up/)
+  assert.doesNotMatch(workflow, /Full corporate approval: not determined by ShakerScan/)
   assert.match(workflow, /Detailed control evidence/)
   assert.match(workflow, /PASS, FAIL, REVIEW, INCOMPLETE, ERROR, NOT_RUN, or NOT_APPLICABLE/)
   assert.match(workflow, /Printable HTML \/ PDF/)
   assert.match(api, /format: 'json' \| 'html' \| 'sarif'/)
   assert.match(api, /ModelIntakeCorporateReport/)
-  assert.match(workflow, /License outcome:/)
+  assert.match(workflow, /Licensing and attribution/)
   assert.match(workflow, /A legal-review license outcome additionally requires a distinct legal reviewer/)
 })
 
@@ -108,7 +108,7 @@ test('page stages are numbered in the order they are rendered', () => {
     assert.ok(index > cursor, `${marker} is rendered out of numbered order`)
     cursor = index
   }
-  assert.match(workflow, /4\. Controlled Corporate Admission Workflow/)
+  assert.match(workflow, /4\. Controlled Admission Workflow/)
   for (const stage of ['4.1', '4.2', '4.3', '4.4', '4.5', '4.6']) {
     assert.ok(workflow.includes(`>${stage} `), `controlled stage ${stage} is missing`)
   }
@@ -392,7 +392,7 @@ test('the deployment bundle arrives prefilled from the scanned revision', () => 
   assert.match(workflow, /Seed authoritative runner bundle/)
   // The profile is resolved by the server now, not recomputed here.
   assert.match(workflow, /getModelIntakeRunnerBundle/)
-  assert.match(workflow, /Corporate deployment bindings/)
+  assert.match(workflow, /Deployment bindings/)
   assert.match(workflow, /Retrieval application SHA-256/)
   assert.match(workflow, /Index schema SHA-256/)
   // Seeded on load, not only when the operator finds the seed button.
@@ -529,7 +529,7 @@ test('a Model Intake scan opens on the executive report, not generic scan chrome
   assert.match(report, /!isModelIntakeScan && <div className="bg-gray-800\/50/)
   assert.match(report, /order-first bg-gray-800\/50/)
   assert.match(report, /Technical evidence coverage/)
-  assert.match(report, /These counts are not the corporate policy decision shown above/)
+  assert.match(report, /Deployment follow-up is shown separately/)
   assert.doesNotMatch(report, /What the review established/)
 })
 

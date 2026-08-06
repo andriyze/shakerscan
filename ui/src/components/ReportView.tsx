@@ -294,7 +294,7 @@ const MODEL_INTAKE_ACTIONS: Record<string, string> = {
   provenance: 'Attach source repository, revision, and release provenance evidence.',
   malware_scan: 'Attach or run a malware/YARA scan result with engine, result, and timestamp.',
   license_policy: 'Record the license and review whether it permits the intended deployment.',
-  license_review: 'Add license or legal/security review evidence.',
+  license_review: 'Resolve the license-policy trigger and attach reviewer evidence.',
   security_evals: 'Attach model safety/security evaluation results and acceptance criteria.',
   monitoring_plan: 'Define monitoring for drift, abuse, leakage, cost anomalies, and incident response.',
   artifact_signing: 'Attach a signature, Sigstore bundle, cosign attestation, or registry signing evidence, then rerun intake for verification.',
@@ -1667,7 +1667,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
             }`}>
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
-                  <div className="text-xs uppercase tracking-wide opacity-80">Corporate use verdict</div>
+                  <div className="text-xs uppercase tracking-wide opacity-80">Use decision</div>
                   <div className="mt-1 text-xl font-semibold">{String(modelIntakeCorporateUse.verdict).replace(/_/g, ' ')}</div>
                   <div className="mt-1 max-w-3xl text-sm opacity-90">{modelIntakeCorporateUse.plain_language}</div>
                 </div>
@@ -1725,7 +1725,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
           <div className="mb-5 rounded-lg border border-gray-700 bg-gray-900 p-4">
             <div className="text-sm font-semibold text-white">Technical evidence coverage</div>
             <p className="mt-1 text-xs text-gray-400">
-              Execution status for scanners and evidence-producing controls. These counts are not the corporate policy decision shown above.
+              Execution status for scanners and evidence-producing controls. Deployment follow-up is shown separately.
             </p>
             <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
               <div><div className="text-xs text-gray-500">Checks passed</div><div className="text-2xl font-semibold text-green-300">{modelIntakeControlGroups.passed.length}</div></div>
@@ -1883,7 +1883,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                 <div className={`mt-1 text-sm font-semibold ${modelIntakeSupplyChain?.license_compliance?.legal_review_required ? 'text-yellow-300' : 'text-white'}`}>
                   {modelIntakeSupplyChain?.license_compliance?.outcome || modelIntakeSupplyChain?.license_policy?.status || modelIntakeSummary?.license_policy_status || 'unknown'}
                 </div>
-                <div className="mt-1 text-xs text-gray-500">Automated evidence triage; legal approval remains separate.</div>
+                <div className="mt-1 text-xs text-gray-500">Component-level evidence and any policy triggers are available in the License BOM.</div>
               </div>
               <div className="rounded border border-gray-700 bg-gray-900 p-3">
                 <div className="text-xs text-gray-400">CycloneDX SBOM</div>
@@ -2064,7 +2064,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
             <div className="mt-2 grid gap-2 text-sm text-gray-300 md:grid-cols-3">
               <div>Runtime execution: {String(model_intake?.dynamic_sandbox?.status || 'NOT_RUN').replace(/_/g, ' ')}</div>
               <div>Integrity: {modelIntakeFetch?.truncated ? 'partial artifact only' : modelIntakeSummary?.sha256 ? 'complete observed digest' : 'not established'}</div>
-              <div>Corporate admission: {String(model_intake?.admission?.status || 'NOT_RUN').replace(/_/g, ' ')}</div>
+              <div>Admission status: {String(model_intake?.admission?.status || 'NOT_RUN').replace(/_/g, ' ')}</div>
             </div>
           </div>
             </div>

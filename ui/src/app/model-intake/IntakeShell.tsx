@@ -20,7 +20,7 @@ import {
 export const INTAKE_PHASES = [
   { id: 'source', label: 'Source', helper: 'Model and deployment target' },
   { id: 'preflight', label: 'Preflight', helper: 'Technical evidence scan' },
-  { id: 'admission', label: 'Admission', helper: 'Controlled corporate approval' },
+  { id: 'admission', label: 'Admission', helper: 'Controlled deployment decision' },
   { id: 'status', label: 'Status', helper: 'Adapters, runners, admissions' },
 ] as const
 

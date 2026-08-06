@@ -165,7 +165,7 @@ def test_spdx_export_describes_the_same_components_as_cyclonedx():
     transformers = next(package for package in spdx["packages"] if package["name"] == "transformers")
     assert transformers["licenseDeclared"] == "Apache-2.0"
     assert transformers["licenseConcluded"] == "NOASSERTION"
-    assert "pending corporate review" in transformers["licenseComments"]
+    assert "until the detected terms are resolved" in transformers["licenseComments"]
     assert "LEGAL REVIEW REQUIRED" in spdx["comment"]
 
 
@@ -204,17 +204,17 @@ def test_license_bom_is_concise_deduplicated_and_evidence_bound():
     assert document["engineering_summary"]["license_or_notice_files_found"] == 1
     assert document["engineering_summary"]["trivy_license_items_found"] == 1
     assert document["missing_evidence"] == ["dataset_license_and_rights_disposition"]
-    assert any("not legal advice" in item.lower() for item in document["limitations"])
+    assert any("ambiguous or use-dependent terms" in item.lower() for item in document["limitations"])
 
 
-def test_third_party_notices_draft_is_clear_about_missing_legal_completion():
+def test_third_party_notices_draft_is_clear_about_missing_license_evidence():
     notice = render_third_party_notices_draft(_scan_result(), scan_id="s-1")
 
     assert notice.startswith("THIRD-PARTY NOTICES — INCOMPLETE DRAFT")
-    assert "License review status: LEGAL REVIEW REQUIRED" in notice
+    assert "License evidence status: LEGAL REVIEW REQUIRED" in notice
     assert "transformers — Apache-2.0" in notice
     assert "Dataset terms require review." in notice
-    assert "not legal advice or a release-ready notice file" in notice
+    assert "lists detected components and terms" in notice
     assert "EVIDENCE SEARCH PERFORMED" in notice
     assert "MISSING BEFORE RELEASE" in notice
     assert "Attribution: Copyright 2026 Example Corp" in notice

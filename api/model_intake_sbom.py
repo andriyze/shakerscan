@@ -341,7 +341,7 @@ def build_model_intake_spdx(
     compliance = _license_compliance(_object(_object(scan_result).get("model_intake")))
     root_package["licenseComments"] = (
         f"Automated policy outcome: {compliance.get('outcome') or 'not assessed'}. "
-        "LicenseConcluded remains NOASSERTION because ShakerScan does not provide legal approval."
+        "LicenseConcluded remains NOASSERTION because the evidence does not establish a concluded license."
     )
     checksums = [
         {"algorithm": str(entry.get("alg") or "SHA256").replace("-", ""), "checksumValue": str(entry.get("content"))}
@@ -379,7 +379,7 @@ def build_model_intake_spdx(
             classes = sorted({str(item.get("classification") or "unknown") for item in component_terms})
             package["licenseComments"] = (
                 f"Detected by generated evidence; classifications: {', '.join(classes)}. "
-                "LicenseConcluded remains NOASSERTION pending corporate review."
+                "LicenseConcluded remains NOASSERTION until the detected terms are resolved."
             )
         if component.get("version"):
             package["versionInfo"] = str(component["version"])
@@ -407,9 +407,8 @@ def build_model_intake_spdx(
             "creators": ["Tool: ShakerScan-model-intake-1", "Organization: ShakerScan"],
         },
         "comment": (
-            f"ShakerScan license policy outcome: {compliance.get('outcome') or 'not assessed'}; "
-            f"evidence SHA-256: {compliance.get('evidence_sha256') or 'not available'}. "
-            "This SPDX document records evidence and does not constitute legal advice."
+            f"License policy outcome: {compliance.get('outcome') or 'not assessed'}; "
+            f"evidence SHA-256: {compliance.get('evidence_sha256') or 'not available'}."
         ),
         "packages": packages,
         "relationships": relationships,
@@ -418,7 +417,7 @@ def build_model_intake_spdx(
 
 
 def build_model_intake_license_bom(scan_result: Any, *, scan_id: str = "") -> dict[str, Any]:
-    """Build a concise, evidence-bound license inventory for legal triage."""
+    """Build a concise, evidence-bound license inventory for engineering review."""
     model_intake = _object(_object(scan_result).get("model_intake"))
     if not model_intake:
         raise ValueError("scan result does not contain Model Intake evidence")
@@ -453,7 +452,7 @@ def build_model_intake_license_bom(scan_result: Any, *, scan_id: str = "") -> di
         {
             "code": str(item.get("code") or "review_required"),
             "summary": str(item.get("summary") or "Review is required."),
-            "owner": "Legal / open-source program office",
+            "owner": "Licensing / open-source program office",
         }
         for item in compliance.get("reasons") or [] if isinstance(item, dict)
     ]
@@ -493,9 +492,9 @@ def build_model_intake_license_bom(scan_result: Any, *, scan_id: str = "") -> di
             "ready_for_notice_drafting": bool(components) and not bool(compliance.get("missing_evidence")),
         },
         "limitations": [
-            "LicenseConcluded is not asserted; automated classification is not legal advice.",
+            "LicenseConcluded is not asserted because automated evidence cannot resolve ambiguous or use-dependent terms.",
             "Exact license and NOTICE text must be taken from the immutable evidence identified by path and digest.",
-            "Dataset and intended-use permissions require separate review when reported by the policy.",
+            "Dataset and intended-use permissions remain open only when reported by the policy.",
         ],
         "evidence_sha256": compliance.get("evidence_sha256"),
     }
@@ -518,10 +517,10 @@ def render_third_party_notices_draft(scan_result: Any, *, scan_id: str = "") -> 
         f"Model: {line(subject.get('name')) or 'unknown'}",
         f"Reference: {line(subject.get('reference')) or 'unknown'}",
         f"SHA-256: {line(subject.get('sha256')) or 'not available'}",
-        f"License review status: {line(decision.get('outcome')) or 'not assessed'}",
+        f"License evidence status: {line(decision.get('outcome')) or 'not assessed'}",
         "",
         "IMPORTANT",
-        "This is an automated draft, not legal advice or a release-ready notice file. Attach and verify the exact license, copyright, attribution, and NOTICE text from the digest-bound source files before distribution.",
+        "This draft lists detected components and terms. Before distribution, attach the exact license, copyright, attribution, and NOTICE text from the digest-bound source files identified below.",
         "",
         "DETECTED COMPONENTS AND TERMS",
     ]
@@ -539,17 +538,17 @@ def render_third_party_notices_draft(scan_result: Any, *, scan_id: str = "") -> 
             for notice in item.get("copyright_notices") or []:
                 output.append(f"  Attribution: {line(notice)}")
     else:
-        output.append("- No component license evidence was recorded. Legal review is required before release.")
+        output.append("- No component license evidence was recorded. Re-run a complete review or supply the missing declarations.")
     output.extend(["", "OBLIGATIONS TO VERIFY"])
     obligations = bom.get("obligations") if isinstance(bom.get("obligations"), list) else []
     output.extend(f"- {line(item)}" for item in obligations)
     if not obligations:
         output.append("- No automated obligations were identified; this does not mean no obligations exist.")
-    output.extend(["", "OPEN LEGAL REVIEW ITEMS"])
+    output.extend(["", "OPEN LICENSE QUESTIONS"])
     reasons = decision.get("reasons") if isinstance(decision.get("reasons"), list) else []
     output.extend(f"- {line(item.get('summary'))}" for item in reasons if isinstance(item, dict))
     if not reasons:
-        output.append("- No automated legal-review trigger was detected. Corporate release approval is still separate.")
+        output.append("- No automated license-policy trigger was detected.")
     output.extend(["", "EVIDENCE SEARCH PERFORMED"])
     for item in bom.get("evidence_search") or []:
         output.append(

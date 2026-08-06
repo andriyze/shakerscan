@@ -190,6 +190,9 @@ def test_complete_exact_subject_report_allows_only_with_matching_active_admissio
     assert report["executive_summary"]["full_corporate_approval"] == "NOT_DETERMINED_BY_SHAKERSCAN"
     assert report["executive_summary"]["license_outcome"] == "NO LEGAL BLOCKER DETECTED"
     assert report["executive_summary"]["coverage"]["external_corporate_requirements"] >= 10
+    assert report["presentation"]["headline"] == "Configured checks passed"
+    assert report["presentation"]["counts"]["needs_attention"] == 0
+    assert report["presentation"]["counts"]["deployment_follow_up"] == 4
     assert report["detailed_review"]["static_analysis_detail"]["scanner_results"][0]["name"] == "semgrep"
     catalog = report["detailed_review"]["shakerscan_check_catalog"]
     assert len(catalog) == 27
@@ -408,10 +411,12 @@ def test_html_is_escaped_printable_and_sarif_preserves_normalized_failures():
     sarif = model_intake_report_to_sarif(report)
 
     assert "Print / Save PDF" in rendered
-    assert "Executive summary" in rendered
-    assert "Corporate requirements outside ShakerScan" in rendered
+    assert "Model Intake review" in rendered
+    assert "Deployment and organization follow-up" in rendered
     assert "Detailed technical review" in rendered
-    assert "NOT_DETERMINED_BY_SHAKERSCAN" in rendered
+    assert "NOT_DETERMINED_BY_SHAKERSCAN" not in rendered
+    assert "Full corporate approval" not in rendered
+    assert "Checks that need attention" in rendered
     assert "<script>alert(1)</script>" not in rendered
     assert "model-intake-corporate-report/v2" == sarif["runs"][0]["properties"]["schemaVersion"]
     assert sarif["runs"][0]["properties"]["reportSha256"] == report["report_sha256"]

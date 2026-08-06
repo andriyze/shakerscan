@@ -1426,7 +1426,7 @@ function ModelIntakeSettingsContent() {
               </div>
               <details className="rounded-lg border border-amber-800/40 bg-amber-950/20 p-4">
                 <summary className="cursor-pointer font-medium text-amber-100">
-                  Corporate approvals outside Model Intake ({checkCatalog.external_approval_requirements.length})
+                  Deployment and organization follow-up ({checkCatalog.external_approval_requirements.length})
                 </summary>
                 <div className="mt-3 space-y-3">
                   {checkCatalog.external_approval_requirements.map((item) => (
@@ -1471,8 +1471,8 @@ function ModelIntakeSettingsContent() {
           <p className="mt-1 text-sm text-gray-400">
             Paste one Hugging Face link and click Start. ShakerScan pins the revision, acquires and hashes the complete
             model repository, runs every applicable built-in scanner, creates SBOM/AIBOM outputs, performs Firecracker
-            calibration and repeat inference, freezes the evidence, and prepares one technical report. Human and legal
-            approvals remain clearly pending; they are never guessed.
+            calibration and repeat inference, freezes the evidence, and prepares one technical report. The result clearly
+            separates verified checks, issues to fix, and deployment follow-up.
           </p>
         </div>
         <div className="mt-4 grid gap-3 lg:grid-cols-[minmax(0,1fr)_12rem_auto]">
@@ -1529,7 +1529,7 @@ function ModelIntakeSettingsContent() {
         {runnerReadiness !== null && runnerReadiness.status !== 'READY' && (
           <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-yellow-700/50 bg-yellow-950/20 p-3 text-sm text-yellow-100">
             <span>
-              The static review can run now, but isolated model loading will be marked not tested until the microVM runner is ready.
+              Static checks can run now, but isolated loading cannot run until the microVM runner is ready.
             </span>
             <button
               type="button"
@@ -1565,6 +1565,10 @@ function ModelIntakeSettingsContent() {
               const outcome = (review.technical_outcome || '').toUpperCase()
               const passed = workflowComplete && outcome === 'PASS'
               const blocked = workflowComplete && outcome === 'BLOCK'
+              const pendingControls = review.pending_controls || []
+              const legacyDeploymentControls = new Set(['publisher_trust', 'human_approvals', 'production_signer', 'deployed_data_plane'])
+              const technicalFollowUp = pendingControls.filter((control) => !legacyDeploymentControls.has(control.control) && control.control !== 'deployment_follow_up')
+              const deploymentFollowUp = pendingControls.filter((control) => legacyDeploymentControls.has(control.control) || control.control === 'deployment_follow_up')
               const outcomeLabel = workflowComplete
                 ? `Review finished · ${outcome === 'BLOCK' ? 'blocked' : outcome === 'PASS' ? 'technical checks passed' : outcome.toLowerCase().replace(/_/g, ' ') || 'results ready'}`
                 : review.state.replace(/_/g, ' ')
@@ -1594,8 +1598,8 @@ function ModelIntakeSettingsContent() {
                   </div>
                   {workflowComplete && (
                     <div className={`mt-3 rounded border p-3 text-xs ${blocked ? 'border-red-800/60 bg-red-950/20 text-red-200' : passed ? 'border-green-800/60 bg-green-950/20 text-green-200' : 'border-yellow-800/60 bg-yellow-950/20 text-yellow-200'}`}>
-                      <div className="font-semibold">Technical outcome: {outcome || 'RESULTS READY'}</div>
-                      <div className="mt-1 opacity-80">The automated workflow finished. This is technical evidence, not corporate approval; remaining controls are listed below.</div>
+                      <div className="font-semibold">{blocked ? 'Do not use this revision yet' : passed ? 'Technical checks passed' : 'Review needs attention'}</div>
+                      <div className="mt-1 opacity-80">{blocked ? 'One or more required technical checks failed. Open the report for evidence and next steps.' : passed ? 'All technical checks selected for this review completed successfully.' : 'Some checks need review or could not complete.'}</div>
                     </div>
                   )}
                   <div className="mt-3 h-2 overflow-hidden rounded-full bg-gray-800">
@@ -1606,15 +1610,23 @@ function ModelIntakeSettingsContent() {
                       {review.error_json.message}
                     </div>
                   )}
-                  {(review.pending_controls || []).length > 0 && (
+                  {technicalFollowUp.length > 0 && (
                     <div className="mt-3 grid gap-2 md:grid-cols-2">
-                      {(review.pending_controls || []).map((control) => (
+                      {technicalFollowUp.map((control) => (
                         <div key={control.control} className="rounded border border-gray-800 bg-gray-900 p-2 text-xs">
                           <div className="font-medium text-gray-200">{control.control.replace(/_/g, ' ')} · {control.status}</div>
                           <div className="mt-1 text-gray-500">{control.action}</div>
                         </div>
                       ))}
                     </div>
+                  )}
+                  {deploymentFollowUp.length > 0 && (
+                    <details className="mt-3 rounded border border-gray-800 bg-gray-900/60 p-3 text-xs">
+                      <summary className="cursor-pointer font-medium text-gray-300">Deployment follow-up</summary>
+                      <p className="mt-2 text-gray-500">
+                        Confirm publisher trust, production signing, application/data-plane controls, and any reviews required by your organization before deployment.
+                      </p>
+                    </details>
                   )}
                   {(review.timeline_json || []).length > 0 && (
                     <details className="mt-3 rounded border border-gray-800 bg-gray-900/60 p-3 text-xs">
@@ -1953,7 +1965,7 @@ function ModelIntakeSettingsContent() {
           <div className="mt-4 rounded-lg border border-yellow-700/50 bg-yellow-950/20 p-3">
             <div className="text-sm font-medium text-yellow-100">Technical preflight only</div>
             <div className="mt-1 text-xs text-yellow-200/70">
-              This page produces non-deployable technical evidence. Corporate authorization is available only through the controlled submission, frozen-evidence, approval, policy, signer, and promotion workflow.
+              This page produces technical evidence for the pinned model revision. A deployment decision is created separately from frozen evidence, policy, signing, and any required approvals.
             </div>
           </div>
           <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">

@@ -16275,17 +16275,20 @@ async def _advance_model_intake_automatic_review(conn: Any, review: Any) -> None
                 "control": evidence_type,
                 "status": status,
                 "action": (
-                    "Review this generated evidence and its detailed findings. "
-                    "A non-PASS technical control cannot be treated as approval."
+                    "Review the recorded evidence and resolve or rerun this technical check."
                 ),
             }
             for evidence_type, status in sorted(evidence_status.items())
             if status != "PASS"
         ] + [
-            {"control": "publisher_trust", "status": "PENDING", "action": "Verify publisher signature or attestation against an approved trust anchor."},
-            {"control": "human_approvals", "status": "PENDING", "action": "Complete the required security, ML platform, legal, privacy, and risk reviews."},
-            {"control": "production_signer", "status": "PENDING", "action": "Use KMS-backed runner and admission signers before production promotion."},
-            {"control": "deployed_data_plane", "status": "EXTERNAL_REQUIRED", "action": "Validate the retrieval application, index schema, authorization, deletion, and monitoring in the target environment."},
+            {
+                "control": "deployment_follow_up",
+                "status": "OUTSIDE_REVIEW",
+                "action": (
+                    "Before deployment, confirm publisher trust, production signing, application/data-plane "
+                    "controls, and any organization-required approvals."
+                ),
+            },
         ]
         await _update_model_intake_automatic_review(
             conn, review, state="technical_review_complete", current_step="review_results",
