@@ -256,7 +256,9 @@ Implemented controls include:
   offline scans. No additional external scanner adapter will be added under this roadmap.
 - The core bundle is selected from immutable repository facts, never a model-name allowlist: ModelScan for
   supported serialized artifacts, Fickling for raw pickle artifacts it can parse reliably, Semgrep for
-  repository code/config, and Trivy when dependency manifests are present. Fickling is explicitly
+  repository code/config, and Trivy for every complete repository snapshot. Trivy dependency/CVE evidence is
+  meaningful when manifests or packages exist; its full source/text license mode still applies to a complete
+  repository without a dependency manifest. Fickling is explicitly
   `NOT_APPLICABLE` to PyTorch ZIP checkpoints because extracting their ordinary tensor `data.pkl` stream
   produces high-volume reconstruction false positives; ModelScan and ShakerScan's archive-aware pickle
   opcode analysis cover that family. Every worker image build runs all four on deterministic malicious
@@ -333,7 +335,7 @@ The useful default is deliberately smaller than the original ten-tool sketch:
 | ModelScan | **Ship and enable by applicability** | Independent model-format/serialization analysis; complements ShakerScan pickle semantics |
 | Fickling | **Ship for raw pickle artifacts; declare PyTorch ZIP not applicable** | Deep raw-pickle semantics and a second engine where its parser is reliable; ordinary PyTorch state-dict reconstruction produces unusable false positives after manual member extraction |
 | Semgrep | **Ship and enable for repository code/config** | Mature source-pattern engine with a narrow, versioned model-intake ruleset; complements the built-in AST analyzer |
-| Trivy | **Ship and enable when dependency manifests exist** | One maintained engine provides vulnerability, secret, misconfiguration, and license evidence without shipping four overlapping defaults |
+| Trivy | **Ship for every complete repository; enable full-license mode only there** | One maintained engine provides vulnerability, secret, misconfiguration, and license evidence without shipping four overlapping defaults. Package CVE applicability and repository license applicability are reported separately. |
 | Any additional external scanner | **Do not implement** | Harden the four existing engines and built-in checks; unsupported organization-specific depth remains external to ShakerScan |
 | Firecracker | **Only production execution provider** | Loading/import/inference and controlled conversion require a stronger boundary than static evidence scanning; unavailable Firecracker is `INCOMPLETE` with no fallback |
 | Embedding test | Separate evaluation provider | Needs an approved runner, benchmark corpus, thresholds, and data-plane observations |
@@ -352,6 +354,36 @@ schema, explicit applicability, and normalized non-pass states. The core package
 hash-locked virtual environments so their transitive dependencies cannot replace API/worker dependencies.
 Trivy is checksum-pinned and runs with build-captured data and runtime update/network lookups disabled. An
 image build fails unless every core adapter detects its corresponding deterministic malicious fixture.
+
+#### 2.2.2 Corporate license compliance boundary
+
+The implemented license path deliberately uses **Trivy as the only external license scanner**. ShakerScan
+adds deterministic evidence reconciliation and reporting instead of adding another overlapping engine:
+
+1. A full/complete review invokes Trivy with `--license-full` against the immutable repository snapshot.
+   Quick, partial, or artifact-only scans never claim full source/text license coverage.
+2. The strict Trivy parser retains normalized package/file license name, Trivy class, severity, bounded path,
+   confidence, and evidence digest. Forbidden/restricted classes fail; reciprocal/unknown classes require
+   review. Raw license text is not copied into the ordinary scan result.
+3. ShakerScan fingerprints common repository license files, distinguishes overlapping BSD and GNU-family
+   signatures, and reconciles those facts with publisher declarations and Trivy package/source evidence.
+4. The versioned corporate policy returns exactly one automated outcome: `NO LEGAL BLOCKER DETECTED`,
+   `LEGAL REVIEW REQUIRED`, or `BLOCKED BY LICENSE POLICY`. Unknown, custom, reciprocal, dataset-related,
+   conflicting, or intended-use-dependent terms always route to legal review. Clearly forbidden/restricted
+   corporate terms block. “No legal blocker detected” is never rendered as legal approval.
+5. The controlled evidence manifest binds `legal_review_required`. Model-security approval cannot clear it;
+   a distinct `legal_reviewer` must approve the latest frozen evidence before deterministic admission can
+   allow. A new or changed snapshot, policy, scanner database, or approval invalidates that disposition through
+   the existing evidence/policy lifecycle.
+6. CycloneDX and SPDX exports include discovered declarations. SPDX intentionally retains
+   `LicenseConcluded: NOASSERTION`. A concise License BOM records policy reasons, normalized terms, obligations,
+   and evidence digests. The Third-Party Notices file is explicitly a draft and points to exact license-file
+   paths/digests; legal/release owners must attach and verify complete copyright, attribution, license, and
+   NOTICE text before distribution.
+
+This is the maximum responsible automation boundary. License classification, evidence reconciliation,
+approval routing, and notice drafting are product behavior. Legal interpretation, jurisdiction/use-case
+analysis, indemnity acceptance, and final distribution approval remain human corporate authority.
 
 ### 2.3 Plain-language answer every report must provide
 
@@ -411,8 +443,8 @@ timed-out, crashed, unsupported, or stale check remains visible and cannot silen
 | `MI-05` | Unsafe serialization | ShakerScan `pickletools` semantic callable/opcode analysis, ModelScan for supported serialized models, and Fickling for applicable raw pickle | Pickle/serialized artifacts; expected framework reconstruction is distinguished from a proven dangerous callable but can still violate format policy |
 | `MI-06` | Repository source/configuration security | Built-in Python AST analysis plus the versioned Model Intake Semgrep ruleset | Code/config present; parse failure, large-file omission, rules staleness, timeout, or unresolved findings remain visible |
 | `MI-07` | Secrets, malware indicators, and native binaries | Built-in secret/malware rules, file-type facts, and native-binary inventory; Trivy adds applicable secret/misconfiguration evidence | Complete subject material exists; this is bounded detection, not a guarantee that no novel malware exists |
-| `MI-08` | SBOM, dependencies, CVEs, and misconfiguration | Native CycloneDX SBOM/dependency facts plus offline Trivy vulnerability, secret, misconfiguration, and license scan with database identity/freshness | Dependency manifests/runtime components present; missing lock/runtime identity or stale data can make the result incomplete |
-| `MI-09` | License inventory | Native license-file/dependency inventory and Trivy license results; declared license metadata is kept separate | License evidence present; PASS is inventory/policy evidence, never a legal opinion |
+| `MI-08` | SBOM, dependencies, CVEs, and misconfiguration | Native CycloneDX SBOM/dependency facts plus offline Trivy vulnerability, secret, and misconfiguration results with database identity/freshness | Trivy scans every complete repository; package/CVE coverage is applicable only when package or manifest facts exist, and missing lock/runtime identity remains visible |
+| `MI-09` | License evidence, policy, and notices | Trivy `--license-full`, native fingerprints, publisher/dependency/dataset/use-term reconciliation, deterministic corporate policy, SPDX declarations, License BOM, and Third-Party Notices draft | Every complete repository; PASS means no automated legal-review trigger was detected, never legal approval. Unknown/custom/reciprocal/dataset/use-dependent terms require a distinct legal review |
 | `MI-10` | Provenance, signature, attestation, lineage, and AIBOM | Exact digest verification, configured signer/trust pins, offline DSSE/in-toto subject checks, model/base/dataset declarations, and CycloneDX AI/ML metadata | Required by policy or supplied by source; presence is not trust, and publisher declarations remain declared evidence |
 | `MI-11` | Exact model runtime in Firecracker | Fixed no-shell guest executes import, tokenizer, model construction/load, warmup, inference, and teardown for the exact deployment bundle | Controlled admission requiring runtime qualification; KVM or loader unavailability is `INCOMPLETE`, with no fallback |
 | `MI-12` | Network prevention and attempted-network observation | No virtual NIC plus guest network syscalls, phase/destination digests, interface inventories, host nft counter deltas, loss/overflow, and telemetry digest | Every runtime job; PASS requires zero attempts/drops and complete non-lossy guest/host telemetry |
@@ -500,12 +532,13 @@ telemetry stream by digest instead of flooding the executive report with repetit
 
 | Capability | Product mechanism | Installed/operational by default | Remaining action |
 |---|---:|---:|---|
-| One-link automatic technical review | Durable API controller plus default UI mode | **Yes.** One Hugging Face link queues the complete scan only on a current, fingerprint-uniform worker fleet, performs controlled static-evidence binding, supported conversion/rescan, Firecracker calibration/runtime verification when ready, and evidence freeze. The result screen labels the pinned source and timeline and directly downloads JSON/HTML/SARIF, CycloneDX, SPDX, and AIBOM artifacts. Browser presence and operator bearer-token storage are not required. | Human approvals, publisher trust, KMS production signing, policy decision, promotion, and corporate data-plane evidence intentionally remain explicit controls. |
+| One-link automatic technical review | Durable API controller plus default UI mode | **Yes.** One Hugging Face link queues the complete scan only on a current, fingerprint-uniform worker fleet, performs controlled static-evidence binding, supported conversion/rescan, Firecracker calibration/runtime verification when ready, and evidence freeze. The result screen labels the pinned source and timeline and directly downloads JSON/HTML/SARIF, CycloneDX, SPDX, AIBOM, License BOM, and Third-Party Notices draft artifacts. Browser presence and operator bearer-token storage are not required. | Human approvals, publisher trust, KMS production signing, policy decision, promotion, corporate data-plane evidence, and any required legal disposition intentionally remain explicit controls. |
 | Provider-neutral source adapters and pinned identities | Implemented | Hugging Face/HTTPS paths usable; cloud/OCI/MLflow contracts are tested and need credentials/configuration | Maintain provider contract tests; unsupported repository-snapshot semantics remain explicit |
 | SSRF-resistant acquisition and complete quarantine | Implemented | Available when complete acquisition is enabled and storage is configured; strict saved profiles force it | Maintain provider/redirect contract tests and controlled egress |
 | Repository manifests, archives, custom code, safe-format checks | Implemented mechanism | Provider-authoritative pinned HF inventory, containment, recursive archive/config inspection, and explicit truncation are enforced | Other providers remain artifact-only unless they later supply an equivalent authoritative snapshot API |
 | Built-in semantic, source, secret, malware-rule, SBOM, binary, and license checks | Implemented | Yes | Improve detection depth and rule updates |
 | ModelScan, Semgrep, Fickling, and Trivy core adapters | Packaged and self-testing | **Yes in a newly rebuilt source worker image.** Hash-locked Python environments, checksum-pinned Trivy, offline DB/policy cache, bounded execution, strict parsers, rule/DB digests, age limits, and malicious-fixture receipts are exposed by `/model-intake/scanners/readiness` | Operate recurring image/data refresh and reassessment within the enforced age limits |
+| Corporate license evidence and policy | Implemented with existing Trivy plus native reconciliation | Complete snapshots use Trivy full-license mode; scan/report/admission surfaces expose one outcome, reason codes, SPDX declarations, License BOM, notices draft, and legal-review role gate | Legal/release owners must complete exact notices and approve custom, reciprocal, dataset, intended-use, conflicting, or unknown terms |
 | Additional external scanner adapters | Out of scope | Existing unshipped compatibility contracts cannot satisfy policy | Do not package or expand them; remove them from presets and future-roadmap claims |
 | Isolated semantic sandbox | Implemented container boundary | Request/subject/evidence binding, isolation/seccomp gating, broker-worker service, and per-job limits are present | Treat it as bounded staging evidence, not a substitute for host-independent execution isolation |
 | Built-in safetensors weights adapter | Official parser plus fail-closed defense-in-depth inspector implemented and enabled by format | A hash-locked safetensors 0.8.0 Rust binding is authoritative for format acceptance; ShakerScan independently checks shape/range/coverage, re-hashes the exact artifact, and vector-scans every F16/F32/F64/BF16 value through bounded NumPy memmap chunks. The release image runs non-skippable valid, hostile-metadata, non-finite, and truncated self-tests. Parser identity and full-value counts survive into evidence. | It still does not instantiate the model graph, tokenize, or generate embeddings; those belong to a loader profile in the disposable runner tier. |
@@ -1024,6 +1057,7 @@ The representative external scanner command for a quarantined snapshot is:
 
 ```bash
 trivy fs --scanners vuln,secret,misconfig,license --format json /snapshot
+trivy fs --scanners vuln,secret,misconfig,license --license-full --format json /complete-snapshot
 ```
 
 These are command contracts, not instructions to run untrusted code on the ShakerScan API host. Execute them
@@ -1033,6 +1067,15 @@ fix/remediation modes against untrusted repositories because package-manager hoo
 Required SCA policy:
 
 - Resolve an exact, hash-locked runtime environment. A repository with no lockfile is incomplete, not clean.
+- Use `--license-full` only for a complete immutable repository snapshot. A prefix, selected artifact, or
+  incomplete tree cannot satisfy source/text license coverage.
+- Preserve Trivy's license classification and normalized component/file evidence. Reconcile it with declared
+  model terms, native license files, datasets, and intended-use restrictions; do not collapse disagreement
+  into one publisher-authored string.
+- Require legal review for unknown, custom, reciprocal, dataset-related, conflicting, or use-case-dependent
+  terms. A model-security reviewer cannot clear the distinct legal gate.
+- Export a License BOM and draft Third-Party Notices file, but retain SPDX `LicenseConcluded: NOASSERTION` and
+  require legal/release owners to verify exact notice and license text before distribution.
 - Scan both source-declared and actually installed dependencies.
 - Include the Transformers remote-code loader, PyTorch, Safetensors, Tokenizers, Einops, NumPy, CUDA/ROCm,
   OS packages, model server, and base image.
@@ -2209,7 +2252,7 @@ rebuilt branch on a Linux/KVM host; direct API calls and mocked browser tests do
 
 | UI path | Public model/format | Required proof |
 |---|---|---|
-| Automatic | `nomic-ai/CodeRankEmbed` / safetensors plus custom Python | Paste only the Hugging Face link, start once, observe durable progress through complete static acquisition and Firecracker runtime, then open the executive/detailed report and download JSON, HTML, SARIF, CycloneDX, SPDX, and AIBOM. Verify custom-code findings, known-answer result, network/resource result, and remaining corporate controls are distinct. |
+| Automatic | `nomic-ai/CodeRankEmbed` / safetensors plus custom Python | Paste only the Hugging Face link, start once, observe durable progress through complete static acquisition and Firecracker runtime, then open the executive/detailed report and download JSON, HTML, SARIF, CycloneDX, SPDX, AIBOM, License BOM, and Third-Party Notices draft. Verify custom-code findings, known-answer result, network/resource result, license outcome, and remaining corporate controls are distinct. |
 | Automatic | `codesage/codesage-base-v2` / PyTorch `.bin` | Paste only the link. Verify unsafe serialization triggers the fixed conversion, exact target identity, tensor/numeric/embedding equivalence, strict target rescan, safe-loader runtime, and report wording that separates conversion correctness from containment. |
 | Automatic | `codesage/codesage-large-v2` / large PyTorch `.bin` | Exercise the same path under the 12 GiB envelope; verify complete 2.6 GB acquisition, conversion/runtime resource measurements, no hidden truncation, and an honest non-pass if the host cannot qualify it. |
 | Automatic | `typeof/all-MiniLM-L6-v2-onnx` / ONNX | Verify the exact `model.onnx` is selected and the fixed offline CPU ONNX Runtime profile—not Transformers weight loading—performs tokenizer, graph execution, pooled embedding, repeat known-answer, and telemetry phases. |
@@ -2449,6 +2492,10 @@ Owners must decide and record:
   status, coverage, evidence references, remediation, and phase timelines. Printable HTML/browser-PDF, SARIF,
   stable digest parity, expiry handling, and active-admission/current-record parity use the same authoritative
   `model-intake-corporate-report/v2` builder.
+- [x] Complete reviews run Trivy full-license mode and reconcile publisher, repository, dependency, dataset,
+  and intended-use terms under a versioned deterministic policy. License-driven warnings remain bound through
+  frozen evidence and require a distinct legal reviewer. UI/API/agent flows export SPDX declarations, a
+  License BOM, and a Third-Party Notices draft without claiming legal approval.
 - [ ] The embedded Python policy, production KMS rotation/outage path, and live configured registry/Kubernetes
   deployments pass their complete negative-path and recovery gates. OCI remote-digest verification and pure,
   scoped/certified webhook mechanisms are implemented and unit-tested.
@@ -2515,6 +2562,9 @@ deployment. Shipping a mechanism does not check a run box.
 - [Protect AI ModelScan](https://github.com/protectai/modelscan)
 - [Trail of Bits Fickling](https://github.com/trailofbits/fickling)
 - [Trivy filesystem scanning](https://trivy.dev/docs/latest/target/filesystem/)
+- [Trivy license scanning and `--license-full`](https://www.trivy.dev/docs/latest/scanner/license/)
+- [SPDX license expressions](https://spdx.github.io/spdx-spec/v3.0.1/annexes/spdx-license-expressions/)
+- [Apache NOTICE guidance](https://infra.apache.org/licensing-howto.html)
 - [NIST adversarial machine learning taxonomy](https://www.nist.gov/publications/adversarial-machine-learning-taxonomy-and-terminology-attacks-and-mitigations)
 
 These sources describe tool and ecosystem capabilities. ShakerScan acceptance must depend on locally generated,
