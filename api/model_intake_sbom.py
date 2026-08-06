@@ -54,6 +54,34 @@ def _generated_sbom(model_intake: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def _license_compliance(model_intake: dict[str, Any]) -> dict[str, Any]:
+    return _object(_object(model_intake.get("supply_chain")).get("license_compliance"))
+
+
+def _license_terms(model_intake: dict[str, Any]) -> list[dict[str, Any]]:
+    terms = _license_compliance(model_intake).get("terms")
+    return [item for item in terms if isinstance(item, dict)] if isinstance(terms, list) else []
+
+
+def _cyclonedx_license(value: Any) -> dict[str, Any] | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if re.fullmatch(r"[A-Za-z0-9.+-]+", text):
+        return {"license": {"id": text}}
+    if re.fullmatch(r"[A-Za-z0-9.+() -]+\s(?:AND|OR|WITH)\s[A-Za-z0-9.+() -]+", text):
+        return {"expression": text}
+    return {"license": {"name": text}}
+
+
+def _component_license_terms(model_intake: dict[str, Any], component_name: str) -> list[dict[str, Any]]:
+    wanted = component_name.strip().casefold()
+    return [
+        item for item in _license_terms(model_intake)
+        if str(item.get("component") or "").strip().casefold() == wanted
+    ]
+
+
 def _aibom_components(aibom: dict[str, Any]) -> list[dict[str, Any]]:
     components: list[dict[str, Any]] = []
     raw = aibom.get("components")
@@ -120,8 +148,17 @@ def build_model_intake_cyclonedx(scan_result: Any, *, scan_id: str = "") -> dict
     if artifact_sha256:
         root["hashes"] = [{"alg": "SHA-256", "content": artifact_sha256}]
     license_ref = _object(_object(model_intake.get("supply_chain")).get("license_policy")).get("declared")
+    if not license_ref:
+        license_ref = _object(_object(model_intake.get("supply_chain")).get("license_policy")).get("license")
+    if not license_ref:
+        license_ref = next(
+            (item.get("declared") for item in _license_terms(model_intake) if item.get("scope") == "model"),
+            None,
+        )
     if license_ref:
-        root["licenses"] = [{"license": {"name": str(license_ref)}}]
+        root_license = _cyclonedx_license(license_ref)
+        if root_license:
+            root["licenses"] = [root_license]
 
     # Dependency components from the generated adapter, then everything the
     # AIBOM knows. Deduplicate on bom-ref so a package listed in both appears once.
@@ -143,6 +180,14 @@ def build_model_intake_cyclonedx(scan_result: Any, *, scan_id: str = "") -> dict
             component["version"] = str(item["version"])
         if item.get("purl"):
             component["purl"] = str(item["purl"])
+        detected_licenses = list(dict.fromkeys(
+            str(term.get("declared") or "").strip()
+            for term in _component_license_terms(model_intake, str(item["name"]))
+            if str(term.get("declared") or "").strip()
+        ))
+        licenses = [_cyclonedx_license(value) for value in detected_licenses]
+        if licenses:
+            component["licenses"] = [item for item in licenses if item]
         components.append(component)
     for component in _aibom_components(aibom):
         ref = str(component["bom-ref"])
@@ -166,6 +211,8 @@ def build_model_intake_cyclonedx(scan_result: Any, *, scan_id: str = "") -> dict
                 # A bounded-prefix scan cannot enumerate dependencies, so the
                 # document must say so rather than read as a complete inventory.
                 {"name": "shakerscan:dependency_inventory", "value": "generated" if generated else "not_generated"},
+                {"name": "shakerscan:license_outcome", "value": str(_license_compliance(model_intake).get("outcome") or "not_assessed")},
+                {"name": "shakerscan:license_policy_version", "value": str(_license_compliance(model_intake).get("policy_version") or "not_assessed")},
             ],
         },
         "components": components,
@@ -213,6 +260,8 @@ def build_model_intake_spdx(
 
     def _licenses(component: dict[str, Any]) -> str:
         for entry in component.get("licenses") or []:
+            if isinstance(entry, dict) and entry.get("expression"):
+                return str(entry["expression"])
             license_object = _object(_object(entry).get("license"))
             declared = license_object.get("id") or license_object.get("name")
             if declared:
@@ -235,6 +284,11 @@ def build_model_intake_spdx(
         "copyrightText": "NOASSERTION",
         "primaryPackagePurpose": "MACHINE_LEARNING_MODEL",
     }
+    compliance = _license_compliance(_object(_object(scan_result).get("model_intake")))
+    root_package["licenseComments"] = (
+        f"Automated policy outcome: {compliance.get('outcome') or 'not assessed'}. "
+        "LicenseConcluded remains NOASSERTION because ShakerScan does not provide legal approval."
+    )
     checksums = [
         {"algorithm": str(entry.get("alg") or "SHA256").replace("-", ""), "checksumValue": str(entry.get("content"))}
         for entry in root.get("hashes") or []
@@ -264,6 +318,15 @@ def build_model_intake_spdx(
             "licenseDeclared": _licenses(component),
             "copyrightText": "NOASSERTION",
         }
+        component_terms = _component_license_terms(
+            _object(_object(scan_result).get("model_intake")), name,
+        )
+        if component_terms:
+            classes = sorted({str(item.get("classification") or "unknown") for item in component_terms})
+            package["licenseComments"] = (
+                f"Detected by generated evidence; classifications: {', '.join(classes)}. "
+                "LicenseConcluded remains NOASSERTION pending corporate review."
+            )
         if component.get("version"):
             package["versionInfo"] = str(component["version"])
         if component.get("purl"):
@@ -289,10 +352,125 @@ def build_model_intake_spdx(
             "created": created_at,
             "creators": ["Tool: ShakerScan-model-intake-1", "Organization: ShakerScan"],
         },
+        "comment": (
+            f"ShakerScan license policy outcome: {compliance.get('outcome') or 'not assessed'}; "
+            f"evidence SHA-256: {compliance.get('evidence_sha256') or 'not available'}. "
+            "This SPDX document records evidence and does not constitute legal advice."
+        ),
         "packages": packages,
         "relationships": relationships,
     }
     return document
+
+
+def build_model_intake_license_bom(scan_result: Any, *, scan_id: str = "") -> dict[str, Any]:
+    """Build a concise, evidence-bound license inventory for legal triage."""
+    model_intake = _object(_object(scan_result).get("model_intake"))
+    if not model_intake:
+        raise ValueError("scan result does not contain Model Intake evidence")
+    summary = _object(model_intake.get("summary"))
+    compliance = _license_compliance(model_intake)
+    if not compliance:
+        raise ValueError("scan result does not contain reconciled license evidence")
+    terms = _license_terms(model_intake)
+    components: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for item in terms:
+        key = (
+            str(item.get("scope") or "unknown"),
+            str(item.get("component") or item.get("path") or summary.get("artifact_name") or "model"),
+            str(item.get("declared") or "UNKNOWN"),
+            str(item.get("source") or "unknown"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        components.append({
+            "scope": key[0],
+            "name": key[1],
+            "license": key[2],
+            "classification": str(item.get("classification") or "unknown"),
+            "source": key[3],
+            "path": item.get("path"),
+            "evidence_sha256": item.get("evidence_sha256") or item.get("sha256"),
+        })
+    document = {
+        "schema_version": "shakerscan-license-bom/v1",
+        "scan_id": str(scan_id),
+        "subject": {
+            "name": summary.get("artifact_name"),
+            "reference": summary.get("artifact_ref"),
+            "sha256": summary.get("sha256"),
+        },
+        "decision": {
+            "outcome": compliance.get("outcome"),
+            "policy_status": compliance.get("policy_status"),
+            "policy_version": compliance.get("policy_version"),
+            "legal_review_required": compliance.get("legal_review_required"),
+            "reasons": compliance.get("reasons") or [],
+        },
+        "components": components,
+        "classification_counts": compliance.get("classification_counts") or {},
+        "obligations": compliance.get("obligations") or [],
+        "limitations": [
+            "LicenseConcluded is not asserted; automated classification is not legal advice.",
+            "Exact license and NOTICE text must be taken from the immutable evidence identified by path and digest.",
+            "Dataset and intended-use permissions require separate review when reported by the policy.",
+        ],
+        "evidence_sha256": compliance.get("evidence_sha256"),
+    }
+    document["document_sha256"] = _digest(document)
+    return document
+
+
+def render_third_party_notices_draft(scan_result: Any, *, scan_id: str = "") -> str:
+    """Render a bounded notice draft without inventing absent license text."""
+    bom = build_model_intake_license_bom(scan_result, scan_id=scan_id)
+
+    def line(value: Any) -> str:
+        return re.sub(r"[\r\n]+", " ", str(value or "")).strip()
+
+    subject = _object(bom.get("subject"))
+    decision = _object(bom.get("decision"))
+    output = [
+        "THIRD-PARTY NOTICES — DRAFT",
+        "",
+        f"Model: {line(subject.get('name')) or 'unknown'}",
+        f"Reference: {line(subject.get('reference')) or 'unknown'}",
+        f"SHA-256: {line(subject.get('sha256')) or 'not available'}",
+        f"Scan: {line(scan_id) or 'not available'}",
+        f"License review status: {line(decision.get('outcome')) or 'not assessed'}",
+        "",
+        "IMPORTANT",
+        "This is an automated draft, not legal advice or a release-ready notice file. Attach and verify the exact license, copyright, attribution, and NOTICE text from the digest-bound source files before distribution.",
+        "",
+        "DETECTED COMPONENTS AND TERMS",
+    ]
+    components = bom.get("components") if isinstance(bom.get("components"), list) else []
+    if components:
+        for item in components:
+            output.append(
+                f"- {line(item.get('name')) or 'unnamed'} — {line(item.get('license')) or 'UNKNOWN'} "
+                f"[{line(item.get('classification')) or 'unknown'}; {line(item.get('source')) or 'unknown source'}]"
+            )
+            if item.get("path") or item.get("evidence_sha256"):
+                output.append(
+                    f"  Evidence: {line(item.get('path')) or 'no path'}; SHA-256 {line(item.get('evidence_sha256')) or 'not available'}"
+                )
+    else:
+        output.append("- No component license evidence was recorded. Legal review is required before release.")
+    output.extend(["", "OBLIGATIONS TO VERIFY"])
+    obligations = bom.get("obligations") if isinstance(bom.get("obligations"), list) else []
+    output.extend(f"- {line(item)}" for item in obligations)
+    if not obligations:
+        output.append("- No automated obligations were identified; this does not mean no obligations exist.")
+    output.extend(["", "OPEN LEGAL REVIEW ITEMS"])
+    reasons = decision.get("reasons") if isinstance(decision.get("reasons"), list) else []
+    output.extend(f"- {line(item.get('summary'))}" for item in reasons if isinstance(item, dict))
+    if not reasons:
+        output.append("- No automated legal-review trigger was detected. Corporate release approval is still separate.")
+    output.extend(["", "END OF AUTOMATED DRAFT", ""])
+    return "\n".join(output)
 
 
 __all__ = [
@@ -300,6 +478,8 @@ __all__ = [
     "SPDX_DATA_LICENSE",
     "SPDX_VERSION",
     "build_model_intake_cyclonedx",
+    "build_model_intake_license_bom",
     "build_model_intake_spdx",
     "model_intake_bom_completeness",
+    "render_third_party_notices_draft",
 ]

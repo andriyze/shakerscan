@@ -9,7 +9,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
 
 from model_intake_sbom import (  # noqa: E402
     build_model_intake_cyclonedx,
+    build_model_intake_license_bom,
     model_intake_bom_completeness,
+    render_third_party_notices_draft,
 )
 
 
@@ -33,7 +35,24 @@ def _scan_result(*, with_generated_sbom=True, sha256="a" * 64):
             "acquisition_complete": True,
         },
         "artifact": {"name": "model.safetensors", "fetch": {"sha256": sha256}},
-        "supply_chain": {"license_policy": {"declared": "apache-2.0"}},
+        "supply_chain": {
+            "license_policy": {"declared": "apache-2.0"},
+            "license_compliance": {
+                "outcome": "LEGAL REVIEW REQUIRED",
+                "policy_status": "REVIEW_REQUIRED",
+                "policy_version": "shakerscan-corporate-license-policy/1",
+                "legal_review_required": True,
+                "evidence_sha256": "e" * 64,
+                "classification_counts": {"permissive": 2, "unknown": 1},
+                "reasons": [{"code": "dataset_terms_require_review", "summary": "Dataset terms require review."}],
+                "obligations": ["Preserve applicable license and NOTICE material."],
+                "terms": [
+                    {"scope": "model", "source": "publisher_declaration", "declared": "Apache-2.0", "classification": "permissive", "tokens": ["apache-2.0"]},
+                    {"scope": "dependency", "source": "trivy", "component": "transformers", "declared": "Apache-2.0", "classification": "permissive", "tokens": ["apache-2.0"], "evidence_sha256": "c" * 64},
+                    {"scope": "dataset", "source": "publisher_declaration", "component": "internal-approved:v1", "declared": None, "classification": "unknown", "tokens": []},
+                ],
+            },
+        },
         "aibom": {"components": [
             {"type": "model_artifact", "name": "model.safetensors",
              "ref": "hf://nomic-ai/CodeRankEmbed",
@@ -131,6 +150,11 @@ def test_spdx_export_describes_the_same_components_as_cyclonedx():
         for ref in package.get("externalRefs", [])
     }
     assert "pkg:pypi/transformers@4.44.0" in purls
+    transformers = next(package for package in spdx["packages"] if package["name"] == "transformers")
+    assert transformers["licenseDeclared"] == "Apache-2.0"
+    assert transformers["licenseConcluded"] == "NOASSERTION"
+    assert "pending corporate review" in transformers["licenseComments"]
+    assert "LEGAL REVIEW REQUIRED" in spdx["comment"]
 
 
 def test_spdx_export_is_reproducible_and_anchored_to_the_scan():
@@ -143,3 +167,24 @@ def test_spdx_export_is_reproducible_and_anchored_to_the_scan():
     assert first["documentNamespace"] != build_model_intake_spdx(
         _scan_result(sha256="b" * 64), scan_id="s-1", created="2026-07-31T10:00:00Z"
     )["documentNamespace"]
+
+
+def test_license_bom_is_concise_deduplicated_and_evidence_bound():
+    document = build_model_intake_license_bom(_scan_result(), scan_id="s-1")
+
+    assert document["schema_version"] == "shakerscan-license-bom/v1"
+    assert document["decision"]["outcome"] == "LEGAL REVIEW REQUIRED"
+    assert document["decision"]["legal_review_required"] is True
+    assert {item["name"] for item in document["components"]} >= {"model.safetensors", "transformers"}
+    assert len(document["document_sha256"]) == 64
+    assert any("not legal advice" in item.lower() for item in document["limitations"])
+
+
+def test_third_party_notices_draft_is_clear_about_missing_legal_completion():
+    notice = render_third_party_notices_draft(_scan_result(), scan_id="s-1")
+
+    assert notice.startswith("THIRD-PARTY NOTICES — DRAFT")
+    assert "License review status: LEGAL REVIEW REQUIRED" in notice
+    assert "transformers — Apache-2.0" in notice
+    assert "Dataset terms require review." in notice
+    assert "not legal advice or a release-ready notice file" in notice

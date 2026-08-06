@@ -176,14 +176,18 @@ except ModuleNotFoundError:
 try:
     from model_intake_sbom import (
         build_model_intake_cyclonedx as _build_model_intake_cyclonedx,
+        build_model_intake_license_bom as _build_model_intake_license_bom,
         build_model_intake_spdx as _build_model_intake_spdx,
         model_intake_bom_completeness as _model_intake_bom_completeness,
+        render_third_party_notices_draft as _render_model_intake_third_party_notices,
     )
 except ModuleNotFoundError:
     from api.model_intake_sbom import (
         build_model_intake_cyclonedx as _build_model_intake_cyclonedx,
+        build_model_intake_license_bom as _build_model_intake_license_bom,
         build_model_intake_spdx as _build_model_intake_spdx,
         model_intake_bom_completeness as _model_intake_bom_completeness,
+        render_third_party_notices_draft as _render_model_intake_third_party_notices,
     )
 
 try:
@@ -14753,13 +14757,69 @@ async def model_intake_sbom_summary(scan_id: str):
     except ValueError:
         return {"available": False, "reason": "no_model_intake_evidence"}
     model_intake = result.get("model_intake") if isinstance(result.get("model_intake"), dict) else {}
+    license_compliance = (
+        model_intake.get("supply_chain", {}).get("license_compliance", {})
+        if isinstance(model_intake, dict) and isinstance(model_intake.get("supply_chain"), dict)
+        else {}
+    )
     return {
         "available": True,
         "formats": ["cyclonedx", "spdx", "aibom"],
+        "license_artifacts": ["license-bom", "third-party-notices"],
         "aibom_available": bool(isinstance(model_intake, dict) and model_intake.get("aibom")),
+        "license_outcome": license_compliance.get("outcome"),
+        "legal_review_required": license_compliance.get("legal_review_required"),
         "spec_version": document.get("specVersion"),
         **_model_intake_bom_completeness(document),
     }
+
+
+@app.get("/model-intake/scans/{scan_id}/license-bom")
+async def download_model_intake_license_bom(scan_id: str, download: bool = Query(True)):
+    """Export the reconciled license evidence and deterministic policy result."""
+    scan_uuid = _model_intake_uuid(scan_id, "scan id")
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT status,scan_type,result FROM scans WHERE id=$1", scan_uuid)
+    if not row:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    if str(row["scan_type"]) != "model_intake":
+        raise HTTPException(status_code=409, detail="Scan is not a Model Intake scan")
+    if str(row["status"]) != "completed":
+        raise HTTPException(status_code=409, detail="License evidence is only exported from a completed scan")
+    try:
+        document = _build_model_intake_license_bom(
+            _model_intake_json_object(row["result"]), scan_id=str(scan_uuid),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    headers = {
+        "Content-Disposition": f'attachment; filename="shakerscan-license-bom-{scan_uuid}.json"'
+    } if download else {}
+    return JSONResponse(content=document, headers=headers, media_type="application/json")
+
+
+@app.get("/model-intake/scans/{scan_id}/third-party-notices")
+async def download_model_intake_third_party_notices(scan_id: str, download: bool = Query(True)):
+    """Export a human-readable Third-Party Notices draft from recorded evidence."""
+    scan_uuid = _model_intake_uuid(scan_id, "scan id")
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT status,scan_type,result FROM scans WHERE id=$1", scan_uuid)
+    if not row:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    if str(row["scan_type"]) != "model_intake":
+        raise HTTPException(status_code=409, detail="Scan is not a Model Intake scan")
+    if str(row["status"]) != "completed":
+        raise HTTPException(status_code=409, detail="Notices are only exported from a completed scan")
+    try:
+        document = _render_model_intake_third_party_notices(
+            _model_intake_json_object(row["result"]), scan_id=str(scan_uuid),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    headers = {
+        "Content-Disposition": f'attachment; filename="THIRD-PARTY-NOTICES-{scan_uuid}.txt"'
+    } if download else {}
+    return Response(content=document, headers=headers, media_type="text/plain; charset=utf-8")
 
 
 @app.get("/model-intake/runners/install-plan")
