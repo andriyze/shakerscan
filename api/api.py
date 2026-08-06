@@ -12175,6 +12175,40 @@ async def _persist_model_intake_runner_evidence(
     }
 
 
+def _model_intake_conversion_output_usable(receipt_payload: dict[str, Any]) -> bool:
+    """Return whether a verified receipt produced an equivalent target.
+
+    Overall receipt status also covers attempted network operations and signer
+    trust.  Those controls must remain visible and can block admission, but
+    they must not discard a content-addressed conversion whose tensor and
+    embedding equivalence checks passed.  Registering that output only makes
+    it available for strict rescanning and runtime evidence; it never approves
+    or promotes it.
+    """
+    observations = (
+        receipt_payload.get("observations")
+        if isinstance(receipt_payload.get("observations"), dict) else {}
+    )
+    phases = observations.get("phases") if isinstance(observations.get("phases"), dict) else {}
+    required_phases = {
+        "import", "deserialize_convert", "tensor_equivalence",
+        "embedding_equivalence", "teardown",
+    }
+    return bool(
+        receipt_payload.get("evidence_type") == "conversion_equivalence"
+        and all(observations.get(field) for field in (
+            "target_artifact_sha256",
+            "target_repository_snapshot_sha256",
+            "target_tokenizer_sha256",
+            "target_configuration_sha256",
+        ))
+        and observations.get("tensor_inventory_equivalent") is True
+        and observations.get("numeric_equivalence_status") == "PASS"
+        and observations.get("embedding_equivalence_status") == "PASS"
+        and all(phases.get(phase) == "PASS" for phase in required_phases)
+    )
+
+
 async def _register_and_rescan_converted_snapshot(
     submission_uuid: uuid.UUID,
     receipt_payload: dict[str, Any],
@@ -12183,8 +12217,8 @@ async def _register_and_rescan_converted_snapshot(
 ) -> dict[str, Any]:
     """Register and strictly rescan a verified Firecracker conversion output."""
     observations = receipt_payload.get("observations") if isinstance(receipt_payload.get("observations"), dict) else {}
-    if receipt_payload.get("evidence_type") != "conversion_equivalence" or receipt_payload.get("status") != "PASS":
-        return {"status": "NOT_APPLICABLE", "reason": "conversion_receipt_not_pass"}
+    if not _model_intake_conversion_output_usable(receipt_payload):
+        return {"status": "NOT_APPLICABLE", "reason": "conversion_equivalence_not_proven"}
     artifact_sha = str(receipt_payload.get("model_artifact_sha256") or "")
     snapshot_sha = str(receipt_payload.get("repository_snapshot_sha256") or "")
     materialized = await asyncio.to_thread(
@@ -12258,7 +12292,7 @@ async def _register_and_rescan_converted_snapshot(
             """
             SELECT id FROM model_intake_evidence_records
             WHERE submission_id=$1 AND evidence_type='conversion_equivalence'
-              AND invocation_id=$2 AND status='PASS'
+              AND invocation_id=$2
             """,
             submission_uuid,
             receipt_payload["invocation_id"],
@@ -12875,7 +12909,7 @@ async def refresh_model_intake_runner_job(submission_id: str, job_id: str, http_
     conversion_rescan = None
     if state == "completed" and result:
         claims = _model_intake_untrusted_runner_claims(verified_evidence_envelope)
-        if claims.get("evidence_type") == "conversion_equivalence" and claims.get("status") == "PASS":
+        if _model_intake_conversion_output_usable(claims):
             conversion_rescan = await _register_and_rescan_converted_snapshot(
                 submission_uuid,
                 claims,
@@ -15491,7 +15525,7 @@ async def _update_model_intake_automatic_review(
         "at": utc_now_iso(),
     })
     allowed = {
-        "submission_id", "calibration_job_id", "runtime_job_id",
+        "submission_id", "conversion_job_id", "calibration_job_id", "runtime_job_id",
         "deployment_bundle_json", "known_answer_embedding_sha256",
     }
     updates = {key: value for key, value in (fields or {}).items() if key in allowed}
@@ -15552,6 +15586,27 @@ def _model_intake_auto_observed_embedding(job: dict[str, Any]) -> str | None:
     observations = payload.get("observations") if isinstance(payload.get("observations"), dict) else {}
     digest = str(observations.get("embedding_output_sha256") or "").lower()
     return digest if re.fullmatch(r"[0-9a-f]{64}", digest) else None
+
+
+async def _model_intake_auto_memory_mib(
+    conn: Any,
+    submission_id: str,
+    bundle: dict[str, Any],
+) -> int:
+    """Size a bounded guest for the exact artifact, without model allowlists."""
+    artifact_sha = str(bundle.get("model_artifact_sha256") or "")
+    size = await conn.fetchval(
+        """SELECT size_bytes FROM model_intake_subjects
+           WHERE submission_id=$1 AND subject_kind='artifact' AND sha256=$2
+           ORDER BY created_at DESC LIMIT 1""",
+        uuid.UUID(str(submission_id)),
+        artifact_sha,
+    )
+    artifact_mib = max(0, math.ceil(int(size or 0) / (1024 * 1024)))
+    # PyTorch loading and conversion need working memory in addition to the
+    # mapped weights. Round to a stable 512 MiB boundary and retain a hard cap.
+    requested = max(4096, 2048 + artifact_mib * 3)
+    return min(12288, int(math.ceil(requested / 512) * 512))
 
 
 async def _advance_model_intake_automatic_review(conn: Any, review: Any) -> None:
@@ -15630,18 +15685,91 @@ async def _advance_model_intake_automatic_review(conn: Any, review: Any) -> None
                 }],
             )
             return
-        authoritative = await model_intake_runner_bundle(
-            submission_id, system_request, operation="calibration"
-        )
         published = await model_intake_embedding_configuration(submission_id, system_request)
         if not published.get("available"):
             raise ValueError("The pinned model revision does not publish a usable embedding contract")
+        try:
+            authoritative = await model_intake_runner_bundle(
+                submission_id, system_request, operation="calibration"
+            )
+        except HTTPException as runtime_error:
+            try:
+                conversion = await model_intake_runner_bundle(
+                    submission_id, system_request, operation="conversion"
+                )
+            except HTTPException:
+                raise runtime_error
+            conversion_bundle = _model_intake_auto_embedding_bundle(conversion, published)
+            memory_mib = await _model_intake_auto_memory_mib(conn, submission_id, conversion_bundle)
+            response = await create_model_intake_runner_job(
+                submission_id,
+                ModelRunnerJobCreateRequest(
+                    operation="conversion", deployment_bundle=conversion_bundle,
+                    known_answer_inputs=[], vcpu_count=2, memory_mib=memory_mib,
+                    timeout_seconds=1800,
+                ),
+                system_request,
+            )
+            await _update_model_intake_automatic_review(
+                conn, review, state="conversion_running", current_step="convert_unsafe_serialization",
+                progress=60, event="conversion_queued",
+                fields={
+                    "conversion_job_id": uuid.UUID(str(response["job"]["id"])),
+                    "deployment_bundle_json": conversion_bundle,
+                },
+            )
+            return
         bundle = _model_intake_auto_embedding_bundle(authoritative, published)
+        await _update_model_intake_automatic_review(
+            conn, review, state="calibration_pending", current_step="calibrate_known_answers",
+            progress=62, event="runtime_subjects_prepared",
+            fields={"deployment_bundle_json": bundle},
+        )
+        return
+
+    if state == "conversion_running":
+        response = await refresh_model_intake_runner_job(
+            submission_id, str(review["conversion_job_id"]), system_request
+        )
+        job = response["job"]
+        if str(job.get("state")) in {"pending", "running"}:
+            return
+        if str(job.get("state")) != "completed":
+            raise RuntimeError(str(
+                _model_intake_json_object(job.get("error_json")).get("message")
+                or "controlled conversion failed"
+            ))
+        rescan = response.get("conversion_rescan")
+        next_subjects = (
+            rescan.get("next_runtime_subjects") if isinstance(rescan, dict) else None
+        )
+        if not isinstance(next_subjects, dict) or not next_subjects.get("loader_profile_sha256"):
+            raise RuntimeError("conversion completed without an equivalent, strictly rescanned runtime subject")
+        published = await model_intake_embedding_configuration(submission_id, system_request)
+        if not published.get("available"):
+            raise ValueError("The pinned model revision does not publish a usable embedding contract")
+        bundle = _model_intake_auto_embedding_bundle(
+            {"deployment_bundle": {
+                **next_subjects,
+                "target_environment": str(review["requested_environment"]),
+            }},
+            published,
+        )
+        await _update_model_intake_automatic_review(
+            conn, review, state="calibration_pending", current_step="calibrate_converted_model",
+            progress=68, event="conversion_registered_and_rescanned",
+            fields={"deployment_bundle_json": bundle},
+        )
+        return
+
+    bundle = _model_intake_json_object(review["deployment_bundle_json"])
+    if state == "calibration_pending":
+        memory_mib = await _model_intake_auto_memory_mib(conn, submission_id, bundle)
         response = await create_model_intake_runner_job(
             submission_id,
             ModelRunnerJobCreateRequest(
                 operation="calibration", deployment_bundle=bundle,
-                known_answer_inputs=[], vcpu_count=2, memory_mib=4096, timeout_seconds=900,
+                known_answer_inputs=[], vcpu_count=2, memory_mib=memory_mib, timeout_seconds=900,
             ),
             system_request,
         )
@@ -15674,14 +15802,14 @@ async def _advance_model_intake_automatic_review(conn: Any, review: Any) -> None
         )
         return
 
-    bundle = _model_intake_json_object(review["deployment_bundle_json"])
     if state == "runtime_pending":
+        memory_mib = await _model_intake_auto_memory_mib(conn, submission_id, bundle)
         response = await create_model_intake_runner_job(
             submission_id,
             ModelRunnerJobCreateRequest(
                 operation="runtime", deployment_bundle=bundle, known_answer_inputs=[],
                 known_answer_embedding_sha256=str(review["known_answer_embedding_sha256"]),
-                vcpu_count=2, memory_mib=4096, timeout_seconds=900,
+                vcpu_count=2, memory_mib=memory_mib, timeout_seconds=900,
             ),
             system_request,
         )

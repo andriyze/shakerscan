@@ -804,6 +804,34 @@ def test_automatic_review_never_guesses_missing_embedding_dimensions():
         )
 
 
+def test_failed_security_receipt_can_register_proven_equivalent_conversion_output():
+    payload = {
+        "evidence_type": "conversion_equivalence",
+        # Network attempts or a non-production signer can fail the overall
+        # security receipt without invalidating the separately proven target.
+        "status": "FAIL",
+        "observations": {
+            "target_artifact_sha256": "a" * 64,
+            "target_repository_snapshot_sha256": "b" * 64,
+            "target_tokenizer_sha256": "c" * 64,
+            "target_configuration_sha256": "d" * 64,
+            "tensor_inventory_equivalent": True,
+            "numeric_equivalence_status": "PASS",
+            "embedding_equivalence_status": "PASS",
+            "phases": {
+                phase: "PASS" for phase in (
+                    "import", "deserialize_convert", "tensor_equivalence",
+                    "embedding_equivalence", "teardown",
+                )
+            },
+        },
+    }
+
+    assert api._model_intake_conversion_output_usable(payload) is True
+    payload["observations"]["phases"]["tensor_equivalence"] = "FAIL"
+    assert api._model_intake_conversion_output_usable(payload) is False
+
+
 def test_converted_snapshot_materialization_rehashes_every_member_and_derives_components(monkeypatch, tmp_path):
     monkeypatch.setattr(api, "RESULTS_DIR", tmp_path)
     monkeypatch.setenv("MODEL_INTAKE_RUNNER_HOST_RESULTS_ROOT", "/host/results")
