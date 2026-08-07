@@ -51688,22 +51688,22 @@ async def list_findings(
     request: Request,
     severity: Optional[str] = None,
     status: Optional[str] = None,
-    source_type: Optional[str] = Query(None, regex="^(dast|ai|ai_gate|ai_session|deep_hunt|autonomous|model_intake|asm|manual)$"),
+    source_type: Optional[str] = Query(None, pattern="^(dast|ai|ai_gate|ai_session|deep_hunt|autonomous|model_intake|asm|manual)$"),
     target_id: Optional[str] = None,
     ai_target_id: Optional[str] = None,
     scan_id: Optional[str] = None,
     root_domain: Optional[str] = None,
-    verification_verdict: Optional[str] = Query(None, regex="^(exploited|likely_vulnerable|blocked_by_security|out_of_scope_internal|false_positive|likely_fixed|inconclusive|error)$"),
-    verification_mode: Optional[str] = Query(None, regex="^(deterministic|ai_driven)$"),
+    verification_verdict: Optional[str] = Query(None, pattern="^(exploited|likely_vulnerable|blocked_by_security|out_of_scope_internal|false_positive|likely_fixed|inconclusive|error)$"),
+    verification_mode: Optional[str] = Query(None, pattern="^(deterministic|ai_driven)$"),
     verified_only: bool = False,
-    driven_by: Optional[str] = Query(None, regex="^(autonomous_research)$"),
+    driven_by: Optional[str] = Query(None, pattern="^(autonomous_research)$"),
     research_campaign_id: Optional[str] = None,
     search: Optional[str] = None,
     seen_within_days: Optional[int] = Query(None, ge=1),
     first_seen_within_days: Optional[int] = Query(None, ge=1),
     resolved_within_days: Optional[int] = Query(None, ge=1),
-    sort_by: Optional[str] = Query(None, regex="^(severity|first_seen|last_seen|cvss)$"),
-    sort_order: Optional[str] = Query("desc", regex="^(asc|desc)$"),
+    sort_by: Optional[str] = Query(None, pattern="^(severity|first_seen|last_seen|cvss)$"),
+    sort_order: Optional[str] = Query("desc", pattern="^(asc|desc)$"),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0)
 ):
@@ -52730,7 +52730,7 @@ async def record_evidence_instance(req: EvidenceInstanceRequest):
 async def evidence_export_manifest(
     finding_id: Optional[str] = Query(None),
     scan_id: Optional[str] = Query(None),
-    retention_class: Optional[str] = Query(None, regex="^(standard|short|audit|legal_hold|sensitive)$"),
+    retention_class: Optional[str] = Query(None, pattern="^(standard|short|audit|legal_hold|sensitive)$"),
     limit: int = Query(200, ge=1, le=1000),
 ):
     """Return a content-free manifest for evidence export/audit."""
@@ -52770,10 +52770,10 @@ async def evidence_export_manifest(
 async def evidence_export_bundle(
     finding_id: Optional[str] = Query(None),
     scan_id: Optional[str] = Query(None),
-    retention_class: Optional[str] = Query(None, regex="^(standard|short|audit|legal_hold|sensitive)$"),
+    retention_class: Optional[str] = Query(None, pattern="^(standard|short|audit|legal_hold|sensitive)$"),
     limit: int = Query(200, ge=1, le=1000),
     record_event: bool = Query(False, description="Persist a content-free export event for deliberate audit logging."),
-    export_format: str = Query("json", alias="format", regex="^(json|zip)$"),
+    export_format: str = Query("json", alias="format", pattern="^(json|zip)$"),
 ):
     """Return a content-free export bundle descriptor or metadata zip."""
     retention_class = _direct_query_value(retention_class)
@@ -53570,7 +53570,7 @@ async def get_finding(finding_id: str):
 async def retest_finding(
     finding_id: str,
     request: FindingRetestRequest | None = None,
-    mode: Optional[str] = Query(None, regex="^(ai|deterministic)$"),
+    mode: Optional[str] = Query(None, pattern="^(ai|deterministic)$"),
 ):
     """Queue a retest for a finding and persist verification history.
 
