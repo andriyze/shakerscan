@@ -4,7 +4,7 @@ UV ?= uv
 UVX ?= uvx
 
 .PHONY: e2e e2e-model-intake e2e-model-intake-fixture e2e-ai-gate e2e-dast test \
-	release-gates dependency-lock dependency-audit upgrade-smoke fleet-acceptance
+	release-gates dependency-lock dependency-audit installer-smoke upgrade-smoke fleet-acceptance
 
 ## Regenerate the cross-platform Python 3.12 runtime lock consumed by scanner/Dockerfile.
 dependency-lock:
@@ -15,7 +15,11 @@ dependency-lock:
 ## Uses the same --audit-level=high threshold as the release workflow so local == CI.
 dependency-audit:
 	npm --prefix ui audit --omit=dev --audit-level=high
-	$(UVX) pip-audit --no-deps --disable-pip -r scanner/requirements.lock
+	$(UVX) pip-audit==2.10.1 --no-deps --disable-pip -r scanner/requirements.lock
+
+## Install from this exact checkout into an empty temporary home without starting services.
+installer-smoke:
+	scripts/installer_smoke.sh
 
 ## Exercise current migrations twice over clean and duplicate-dirty published schemas.
 upgrade-smoke:

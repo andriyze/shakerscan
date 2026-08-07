@@ -133,6 +133,9 @@ jobs:
       - name: Verify generated documentation
         run: python3 scripts/generate_capability_inventory.py --check
 
+      - name: Smoke-test frozen-source installer
+        run: make installer-smoke
+
       - name: Build locked scanner image
         run: docker build -f scanner/Dockerfile -t shakerscan-scanner:release-candidate .
 
@@ -168,6 +171,9 @@ jobs:
             shakerscan-scanner:release-candidate \
             scripts/release_gates.py
 
+      - name: Verify clean and dirty schema upgrades
+        run: SCANNER_IMAGE=shakerscan-scanner:release-candidate scripts/upgrade_smoke.sh
+
       - name: Set up supported Node runtime
         uses: actions/setup-node@v6
         with:
@@ -180,6 +186,11 @@ jobs:
           npm --prefix ui ci
           npm --prefix ui audit --omit=dev --audit-level=high
           npm --prefix ui run build
+
+      - name: Audit locked Python dependencies
+        run: |
+          python3 -m pip install --disable-pip-version-check pip-audit==2.10.1
+          python3 -m pip_audit --no-deps --disable-pip -r scanner/requirements.lock
 
   # Build each architecture on a NATIVE runner (no QEMU emulation — that is what
   # blew past the 6h job limit, and katana's CGO dep cannot cross-compile). Each
