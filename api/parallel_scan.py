@@ -1587,6 +1587,10 @@ def merge_job(parent_id: str) -> dict[str, Any]:
     return {
         "type": MERGE_JOB_TYPE,
         "parent_scan_id": parent_id,
+        # Merge owns durable DB/result aggregation and must never execute on
+        # an outbound-only broker worker. The broker endpoint also repairs a
+        # base-queue copy into this local-only route during rolling upgrades.
+        "placement": {"node_scope": "local"},
         "attempt": 1,
         "plan_version": PLAN_VERSION,
     }

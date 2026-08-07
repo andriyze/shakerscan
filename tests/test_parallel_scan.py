@@ -5,6 +5,7 @@ barrier reconciliation using lightweight fakes for the DB connection and Redis.
 """
 
 import asyncio
+import json
 import os
 import sys
 import uuid
@@ -366,6 +367,7 @@ def test_reconcile_enqueues_merge_when_all_terminal():
     assert queue == "scan_jobs"
     assert parallel_scan.MERGE_JOB_TYPE in payload
     assert pid in payload
+    assert json.loads(payload)["placement"] == {"node_scope": "local"}
     assert r.calls[0][0] == "eval"
     assert r.calls[1][0] == "lpush"
 

@@ -3093,11 +3093,7 @@ async def run_due_schedules(pool: asyncpg.Pool):
             'schedule_id': str(schedule_id)
         }
         if parallel_enabled:
-            job_data['type'] = 'scan_plan'
-            job_data['attempt'] = 1
-            job_data['plan_version'] = parallel_scan.PLAN_VERSION
-            if parallel_worker_count is not None:
-                job_data['parallel_worker_count'] = parallel_worker_count
+            _configure_scan_plan_job(job_data, parallel_worker_count)
 
         try:
             enqueue_job(r, QUEUE_NAME, job_data)
@@ -5242,6 +5238,24 @@ class BrokerLeaseHeartbeatRequest(BaseModel):
 class BrokerResultRequest(BaseModel):
     lease_token: str = Field(min_length=32, max_length=256)
     result: dict[str, Any]
+
+
+def _configure_scan_plan_job(
+    job_data: dict[str, Any], parallel_worker_count: int | None = None
+) -> None:
+    """Keep control-plane orchestration local while preserving shard placement.
+
+    ``process_scan_plan_job`` needs direct Postgres and Redis access, which an
+    outbound-only broker worker deliberately never receives. The requested
+    execution placement remains in ``options`` and is copied to child shards;
+    this top-level placement controls only the plan job's queue route.
+    """
+    job_data["type"] = parallel_scan.PLAN_JOB_TYPE
+    job_data["placement"] = {"node_scope": "local"}
+    job_data["attempt"] = 1
+    job_data["plan_version"] = parallel_scan.PLAN_VERSION
+    if parallel_worker_count is not None:
+        job_data["parallel_worker_count"] = parallel_worker_count
 
 
 def _fleet_bootstrap_config() -> FleetBootstrapConfig:
@@ -9096,7 +9110,18 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
         raise HTTPException(status_code=500, detail="broker encountered malformed queued work")
     job_type = str(payload.get("type") or "scan")
     if job_type not in {"scan", parallel_scan.SHARD_JOB_TYPE}:
-        enqueue_job(redis_client, str(payload.get("_base_queue_name") or QUEUE_NAME), payload)
+        requeued_payload = dict(payload)
+        if job_type in {parallel_scan.PLAN_JOB_TYPE, parallel_scan.MERGE_JOB_TYPE}:
+            # These orchestration jobs require the control plane's DB/Redis
+            # access. A broker may see a pre-upgrade/base-queue copy, so move
+            # it to the local-only route instead of requeueing it forever on
+            # the remote route.
+            requeued_payload["placement"] = {"node_scope": "local"}
+        enqueue_job(
+            redis_client,
+            str(payload.get("_base_queue_name") or QUEUE_NAME),
+            requeued_payload,
+        )
         await asyncio.to_thread(acknowledge_lease, redis_client, lease)
         return Response(status_code=204)
     if lease.delivery_attempts > BROKER_MAX_DELIVERY_ATTEMPTS:
@@ -20732,11 +20757,7 @@ async def submit_scan(request: ScanRequest):
     # Parallel scans are routed to the plan stage, which decomposes the parent
     # into shard jobs. Everything else stays on the standard scan path.
     if parallel_enabled:
-        job_data['type'] = 'scan_plan'
-        job_data['attempt'] = 1
-        job_data['plan_version'] = parallel_scan.PLAN_VERSION
-        if parallel_worker_count is not None:
-            job_data['parallel_worker_count'] = parallel_worker_count
+        _configure_scan_plan_job(job_data, parallel_worker_count)
     try:
         enqueue_job(r, QUEUE_NAME, job_data)
     except RouteCapacityExceeded as exc:

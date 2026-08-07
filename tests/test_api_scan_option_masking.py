@@ -1725,6 +1725,21 @@ def test_fleet_rollout_update_advances_desired_state_timestamp(monkeypatch):
     assert "desired_state_changed_at = NOW()" in conn.update_sql
 
 
+def test_parallel_plan_runs_locally_but_preserves_remote_shard_placement():
+    job = {
+        "options": {
+            "parallel": True,
+            "placement": {"node_scope": "remote", "region": "eu-west"},
+        }
+    }
+    api_module._configure_scan_plan_job(job, parallel_worker_count=3)
+
+    assert job["type"] == api_module.parallel_scan.PLAN_JOB_TYPE
+    assert job["placement"] == {"node_scope": "local"}
+    assert job["options"]["placement"] == {"node_scope": "remote", "region": "eu-west"}
+    assert job["parallel_worker_count"] == 3
+
+
 def test_broker_lease_models_bound_worker_and_heartbeat_payloads():
     lease = api_module.BrokerLeaseRequest(worker_id="node-1:worker.2", wait_seconds=30)
     assert lease.wait_seconds == 30
