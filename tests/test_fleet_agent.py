@@ -26,6 +26,7 @@ class FakeDocker:
         return {
             "Id": container_id,
             "State": state,
+            "StartedAt": "2026-08-07T00:00:00Z",
             "ImageName": image or "registry/shakerscan@sha256:" + "a" * 64,
             "Labels": {
                 "com.docker.compose.project": "fleet-test",
@@ -55,6 +56,7 @@ class FakeDocker:
                     "RestartPolicy": {"Name": "unless-stopped"},
                     "Privileged": True,  # must not be copied by the allowlist
                 },
+                "State": {"StartedAt": item["StartedAt"]},
             }
         if method == "POST" and path.startswith("/containers/create?"):
             number = int(body["Labels"]["com.docker.compose.container-number"])
@@ -269,6 +271,23 @@ def test_drain_workers_keeps_busy_container_running(tmp_path):
     assert fleet_agent.drain_workers(client, node_id=NODE_ID, busy_ids=busy) == 1
     states = {item["Id"]: item["State"] for item in client.containers}
     assert states == {"one": "running", "two": "exited"}
+
+
+def test_busy_marker_from_before_container_restart_is_pruned(tmp_path):
+    client = FakeDocker()
+    client.containers[0]["StartedAt"] = "2026-08-07T00:05:00Z"
+    marker_dir = tmp_path / ".fleet-busy"
+    marker_dir.mkdir()
+    marker = marker_dir / "one.json"
+    marker.write_text(
+        json.dumps({"container_id": "one", "started_at": "2026-08-07T00:04:00+00:00"}),
+        encoding="utf-8",
+    )
+
+    busy = fleet_agent.busy_container_ids(tmp_path, client=client, node_id=NODE_ID)
+
+    assert busy == set()
+    assert not marker.exists()
 
 
 def test_rollout_does_not_replace_busy_old_worker():

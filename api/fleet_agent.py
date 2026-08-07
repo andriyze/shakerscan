@@ -315,9 +315,42 @@ def pull_image(client: DockerClient, image: str) -> None:
         raise AgentError(f"Docker image pull failed with status {status}: {message}")
 
 
-def busy_container_ids(results_dir: Path = Path("/results")) -> set[str]:
+def _parse_runtime_timestamp(value: Any) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def busy_container_ids(
+    results_dir: Path = Path("/results"),
+    *,
+    client: DockerClient | None = None,
+    node_id: str | None = None,
+) -> set[str]:
+    """Return live occupancy markers, pruning markers invalidated by a restart."""
     directory = results_dir / ".fleet-busy"
     busy: set[str] = set()
+    running: dict[str, datetime | None] | None = None
+    if client is not None and node_id:
+        running = {}
+        try:
+            for container in worker_containers(client, node_id):
+                if container.get("State") != "running":
+                    continue
+                container_id = str(container.get("Id") or "").strip().lower()
+                if not container_id:
+                    continue
+                inspect = _inspect_worker(client, container)
+                state = inspect.get("State") if isinstance(inspect.get("State"), dict) else {}
+                running[container_id] = _parse_runtime_timestamp(state.get("StartedAt"))
+        except (AgentError, TypeError, ValueError):
+            # Docker uncertainty must remain conservative: keep every readable marker busy.
+            running = None
     try:
         markers = list(directory.glob("*.json"))
     except OSError:
@@ -326,8 +359,23 @@ def busy_container_ids(results_dir: Path = Path("/results")) -> set[str]:
         try:
             payload = json.loads(marker.read_text(encoding="utf-8"))
             container_id = str(payload.get("container_id") or "").strip().lower()
-            if container_id:
-                busy.add(container_id)
+            if not container_id:
+                continue
+            if running is not None:
+                match = next(
+                    (item for item in running if item.startswith(container_id) or container_id.startswith(item[:12])),
+                    None,
+                )
+                marker_started = _parse_runtime_timestamp(payload.get("started_at"))
+                container_started = running.get(match) if match else None
+                if match is None or (
+                    marker_started is not None
+                    and container_started is not None
+                    and marker_started <= container_started
+                ):
+                    marker.unlink(missing_ok=True)
+                    continue
+            busy.add(container_id)
         except (OSError, json.JSONDecodeError):
             # A partially visible marker is conservatively busy until the next pass.
             busy.add(marker.stem.lower())
@@ -482,14 +530,14 @@ def run_once(state: dict[str, Any], client: DockerClient) -> dict[str, Any]:
                 node_id=node_id,
                 desired_image=desired_image,
                 desired_count=configured_count,
-                busy_ids=busy_container_ids(),
+                busy_ids=busy_container_ids(client=client, node_id=node_id),
             )
             reconciliation_complete = rollout_complete
         elif draining:
             reconciliation_complete = drain_workers(
                 client,
                 node_id=node_id,
-                busy_ids=busy_container_ids(),
+                busy_ids=busy_container_ids(client=client, node_id=node_id),
             ) == 0
         else:
             reconcile_workers(
