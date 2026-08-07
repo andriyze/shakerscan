@@ -40,6 +40,7 @@ import asyncpg
 import redis
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.params import Param
 from fastapi.responses import Response, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
@@ -29290,7 +29291,13 @@ async def _persist_operation_plan(conn, req: OperationPlanRequest) -> dict[str, 
     }
 
 
+def _direct_query_value(value: Any) -> Any:
+    """Unwrap FastAPI parameter defaults for trusted in-process endpoint calls."""
+    return value.default if isinstance(value, Param) else value
+
+
 def _optional_uuid(value: str | uuid.UUID | None) -> uuid.UUID | None:
+    value = _direct_query_value(value)
     if not value:
         return None
     return value if isinstance(value, uuid.UUID) else uuid.UUID(str(value))
@@ -39385,12 +39392,16 @@ async def mission_timeline(
     one normalized event feed with explicit, API-backed statuses. Read-only: it
     computes nothing the browser would otherwise have to infer from scan JSON.
     """
-    target_uuid = None
-    if target_id:
-        try:
-            target_uuid = uuid.UUID(str(target_id))
-        except ValueError:
-            raise HTTPException(status_code=400, detail="target_id must be a UUID")
+    try:
+        target_uuid = _optional_uuid(target_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="target_id must be a UUID") from exc
+    include_campaign_actions = bool(_direct_query_value(include_campaign_actions))
+    include_scans = bool(_direct_query_value(include_scans))
+    include_schedules = bool(_direct_query_value(include_schedules))
+    include_evidence = bool(_direct_query_value(include_evidence))
+    include_refuters = bool(_direct_query_value(include_refuters))
+    include_exports = bool(_direct_query_value(include_exports))
     hidden_roles = _hidden_scan_roles_for_list()
 
     async with db_pool.acquire() as conn:
@@ -52723,6 +52734,7 @@ async def evidence_export_manifest(
     limit: int = Query(200, ge=1, le=1000),
 ):
     """Return a content-free manifest for evidence export/audit."""
+    retention_class = _direct_query_value(retention_class)
     try:
         finding_uuid = _optional_uuid(finding_id)
         scan_uuid = _optional_uuid(scan_id)
@@ -52764,6 +52776,9 @@ async def evidence_export_bundle(
     export_format: str = Query("json", alias="format", regex="^(json|zip)$"),
 ):
     """Return a content-free export bundle descriptor or metadata zip."""
+    retention_class = _direct_query_value(retention_class)
+    record_event = bool(_direct_query_value(record_event))
+    export_format = str(_direct_query_value(export_format) or "json")
     try:
         finding_uuid = _optional_uuid(finding_id)
         scan_uuid = _optional_uuid(scan_id)
