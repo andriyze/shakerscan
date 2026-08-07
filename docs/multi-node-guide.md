@@ -393,6 +393,16 @@ Tailscale IPv4, and then permits token-authenticated fleet operations over that 
 HTTP transport. The exception does not apply to wildcard, public, stale, or manually asserted bind
 addresses; those still require HTTPS.
 
+Retrieve the token locally on the control-plane host from the owner-only runtime file; paste only the
+printed value into the Fleet page and do not send it to worker hosts:
+
+```bash
+awk -F= '$1 == "FLEET_OPERATOR_TOKEN" { print substr($0, index($0, "=") + 1) }' .env
+```
+
+The token authorizes fleet reads and lifecycle changes. It is different from short-lived enrollment
+tokens and from the unique credential issued to each joined node.
+
 A ready fleet should show:
 
 - every intended node as `healthy`;
@@ -490,6 +500,7 @@ On **New Scan**, choose **Execution location**:
 - **Automatic** lets any available local or remote worker execute the scan and provides the widest
   failover.
 - **Control plane (local)** keeps the scan on local workers.
+- **Remote fleet** uses any available remote node while preserving failover between joined nodes.
 - **Specific remote node** keeps it on any healthy worker replica within that node.
 
 Advanced placement constraints can additionally require a region, network, egress group,
