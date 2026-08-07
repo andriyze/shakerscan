@@ -49,6 +49,14 @@ def test_broker_state_rejects_non_https_control_plane(tmp_path):
         broker_worker.load_state(state_path)
 
 
+def test_worker_runtime_identity_includes_unique_container(monkeypatch):
+    monkeypatch.setenv("HOSTNAME", "abcdef1234567890")
+    monkeypatch.setenv("WORKER_ID", "node-1-broker")
+
+    assert broker_worker.worker_runtime_identity() == "node-1-broker:abcdef123456"
+    assert broker_worker.worker_runtime_identity("node-1-broker:abcdef123456") == "node-1-broker:abcdef123456"
+
+
 def test_broker_state_has_explicit_ca_modes_and_clear_errors(tmp_path):
     state_path = tmp_path / "state.json"
     base = {

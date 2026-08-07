@@ -14,6 +14,7 @@ import hashlib
 import json
 import mimetypes
 import os
+import socket
 import ssl
 import sys
 import urllib.error
@@ -361,12 +362,23 @@ async def run_forever(state: dict[str, Any], worker_id: str) -> None:
             backoff = min(60, backoff * 2)
 
 
+def worker_runtime_identity(configured: str | None = None) -> str:
+    """Return a lease identity that names one physical worker container."""
+    base = str(configured or os.environ.get("WORKER_ID") or "broker-worker").strip()
+    hostname = str(os.environ.get("HOSTNAME") or socket.gethostname() or "").strip()
+    short_hostname = hostname[:12]
+    if base and short_hostname and short_hostname not in base:
+        return f"{base}:{short_hostname}"
+    return base or hostname or "broker-worker"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="ShakerScan outbound-only HTTPS broker worker")
     parser.add_argument("--state", default=os.environ.get("FLEET_BROKER_STATE_PATH", "/run/shakerscan-fleet/broker-state.json"))
     parser.add_argument("--worker-id", default=os.environ.get("WORKER_ID") or os.environ.get("HOSTNAME") or "broker-worker")
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
+    worker_id = worker_runtime_identity(args.worker_id)
     os.environ["SHAKERSCAN_BROKER_LEASE"] = "1"
     os.environ["ARTIFACT_STORAGE_REQUIRED"] = "false"
     state = load_state(Path(args.state))
@@ -376,13 +388,13 @@ def main() -> int:
             state,
             "POST",
             f"/fleet/broker/nodes/{state['node_id']}/lease",
-            {"worker_id": args.worker_id, "wait_seconds": 0},
+            {"worker_id": worker_id, "wait_seconds": 0},
             allow_empty=True,
         )
         if lease:
             asyncio.run(execute_lease(state, lease))
         return 0
-    asyncio.run(run_forever(state, args.worker_id))
+    asyncio.run(run_forever(state, worker_id))
     return 0
 
 
