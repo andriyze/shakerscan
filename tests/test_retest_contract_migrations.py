@@ -48,9 +48,16 @@ class _FailingCanonicalInvariantConn(_FakeMigrationConn):
         self.index_failures = list(index_failures)
         self.index_attempts = 0
 
+    async def fetchval(self, query, *args):
+        if "app_schema_migrations" in query:
+            return False
+        if "indisunique" in query:
+            return True
+        return await super().fetchval(query, *args)
+
     async def execute(self, query, *args):
         self.executed.append((query, args))
-        if "CREATE UNIQUE INDEX IF NOT EXISTS idx_targets_canonical_key" in query:
+        if "CREATE UNIQUE INDEX idx_targets_canonical_key" in query:
             self.index_attempts += 1
             if self.index_failures:
                 raise self.index_failures.pop(0)
@@ -201,8 +208,8 @@ def test_hypothesis_proof_link_migration_adds_durable_promoted_finding_ids():
     assert "promoted_finding_ids JSONB NOT NULL DEFAULT '[]'::jsonb" in statement
 
 
-def test_canonical_key_invariant_auto_repairs_then_retries(monkeypatch):
-    conn = _FailingCanonicalInvariantConn([RuntimeError("duplicate canonical key")])
+def test_canonical_key_invariant_repairs_rewrites_and_recreates_index(monkeypatch):
+    conn = _FailingCanonicalInvariantConn([])
 
     async def fake_merge(_conn):
         assert _conn is conn
@@ -212,11 +219,38 @@ def test_canonical_key_invariant_auto_repairs_then_retries(monkeypatch):
 
     asyncio.run(retest_contract._ensure_target_canonical_key_invariant(conn))
 
-    assert conn.index_attempts == 2
+    assert conn.index_attempts == 1
+    statements = [query for query, _args in conn.executed]
+    assert any("DROP INDEX IF EXISTS idx_targets_canonical_key" in query for query in statements)
+    assert any("UPDATE targets SET url=url" in query for query in statements)
+    assert any(
+        "INSERT INTO app_schema_migrations" in query
+        and args == (retest_contract.TARGET_HOST_IDENTITY_MIGRATION,)
+        for query, args in conn.executed
+    )
+
+
+def test_canonical_key_invariant_skips_data_rewrite_after_successful_migration():
+    conn = _FailingCanonicalInvariantConn([])
+
+    async def migrated_fetchval(query, *args):
+        if "app_schema_migrations" in query:
+            return True
+        if "indisunique" in query:
+            return True
+        return None
+
+    conn.fetchval = migrated_fetchval
+    asyncio.run(retest_contract._ensure_target_canonical_key_invariant(conn))
+
+    statements = [query for query, _args in conn.executed]
+    assert not any("DROP INDEX IF EXISTS idx_targets_canonical_key" in query for query in statements)
+    assert not any("UPDATE targets SET url=url" in query for query in statements)
+    assert conn.index_attempts == 0
 
 
 def test_schema_migration_failure_blocks_startup_and_releases_lock(monkeypatch):
-    conn = _FailingCanonicalInvariantConn([RuntimeError("duplicate canonical key")])
+    conn = _FailingCanonicalInvariantConn([])
 
     async def failed_merge(_conn):
         raise RuntimeError("retention preview blocks merge")
@@ -229,7 +263,6 @@ def test_schema_migration_failure_blocks_startup_and_releases_lock(monkeypatch):
     message = str(exc.value)
     assert "startup is blocked" in message
     assert "idx_targets_canonical_key" in message
-    assert "duplicate canonical key" in message
     assert "retention preview blocks merge" in message
     assert isinstance(exc.value.__cause__, RuntimeError)
     assert any("pg_advisory_unlock(8675309)" in query for query, _args in conn.executed)

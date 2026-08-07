@@ -70,7 +70,8 @@ point-in-time audit remains available in Git history.
   typed redaction pipeline and old-data rewrite are not 0.7.0 gates.
 - **AUD-10 — mandatory approval receipts for ordinary local DAST — DEFERRED beyond 0.7.0** under the
   trusted-operator boundary. Receipts, target binding, expiry, and the global enforcement toggle are
-  already implemented; Deep Hunt requires them. Scope, same-origin enforcement, and active-testing
+  already implemented; Deep Hunt requires them. Scope, same-target-host enforcement with explicit
+  concrete origins, and active-testing
   warnings remain required for ordinary scans even when blanket receipt enforcement is disabled.
 - **AUD-11 — deployment trust boundary — STANDING documented requirement.** Until ShakerScan has
   application authentication, docs and installer defaults bind to localhost and require Tailscale, a

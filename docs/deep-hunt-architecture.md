@@ -16,7 +16,7 @@ constants, tables) are named rather than line-numbered so the references survive
 
 Deep Hunt is the keyless, AI-driven investigation workflow reached through `/agent/hunt/*`. A coding
 agent (Claude/Codex/OpenCode) — or a configured provider model — drives a bounded ReAct loop: it reads
-a redacted target context, composes its own same-origin probes and bounded active-scanner runs,
+a redacted target context, composes its own target-host probes and bounded active-scanner runs,
 records only tool-evidence-backed claims, and asks the server's deterministic proof workflows to
 promote supported claims. ShakerScan owns scope, credentials, ceilings, evidence provenance, and every
 promotion to VERIFIED. The model never sees credentials and can never self-stamp a verdict.
@@ -37,7 +37,7 @@ Two dimensions carry the entire trust story:
 | File | Role |
 |---|---|
 | `api/agent_loop.py` | Pure ReAct orchestration: system prompt, anti-stall messages, tool-output capping, duplicate/hallucination classifier |
-| `api/agent_tools.py` | Tool schemas + pure guards (same-origin, header allowlist, `run_tool` argv templates, BOLA target derivation) |
+| `api/agent_tools.py` | Tool schemas + pure guards (target-host scope, header allowlist, `run_tool` argv templates, BOLA target derivation) |
 | `api/agent_provenance.py` | SUSPECTED-tier provenance gate + self-verification stripping |
 | `api/agent_text_toolcalls.py` | Keyless text-contract shim: render the contract, parse `tool_calls`/debrief, detect refusals |
 | `api/agent_context_pack.py` | Token-bounded context packer with honest drop telemetry |
@@ -65,8 +65,9 @@ Two dimensions carry the entire trust story:
 
 `CALLABLE_TOOL_NAMES = {http_request, query_kb, diff, note, run_tool}`:
 
-- **`http_request`** — same-origin path only (absolute URLs, `//host`, and control characters are
-  rejected); request headers pass an allowlist that strips forbidden/sensitive headers; auth is
+- **`http_request`** — an absolute path plus an optional concrete HTTP(S) origin. The origin may
+  change scheme or port but must keep the selected target host; cross-host URLs, `//host`, and control
+  characters are rejected. Request headers pass an allowlist that strips forbidden/sensitive headers; auth is
   injected server-side from a resolved `as_principal` slot, so credentials are never model-visible;
   write methods are gated (`needs_approval` unless the hunt is write-authorized); bounded body, 15s
   timeout. A successful **tool-provenance** request produces a `resp_N` evidence ref.
@@ -78,11 +79,21 @@ Two dimensions carry the entire trust story:
   board or create a finding.
 - **`run_tool`** — argv-templated scanner runs (`httpx` read-only; `nuclei` / `katana` / `ffuf` are
   active and require write/active authorization). Argv is hardcoded per tool with only regex-gated
-  tunables; same-origin is forced; output is capped; the subprocess is wall-clock killed. A
+  tunables; target-host scope is forced while the exact scheme/port is retained; output is capped;
+  the subprocess is wall-clock killed. A
   successful run receives a `scan_N` evidence ref, although the current prompt does not advertise it.
 
 Arbitrary state-changing HTTP stays blocked in the free-form loop; controlled mutations belong to typed
 verification workflows with cleanup/restoration contracts.
+
+## Target identity and concrete origins
+
+A web target is one host asset. `http://app:8080`, `https://app:9090`, and `http://app` therefore
+share the same target, findings, endpoint inventory, credentials, campaigns, and Deep Hunt context.
+The exact origin is still execution data: every DAST scan stores its normalized scheme and port, and
+Deep Hunt exposes the recently scanned origins plus an explicit same-host origin override. Selecting
+one origin never silently rewrites a request to another port. Model Intake artifact subjects are not
+web targets and retain their complete artifact identity.
 
 ### Ceilings and anti-stall
 

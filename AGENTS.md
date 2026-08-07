@@ -453,7 +453,8 @@ global kill switch. The current coding-agent session is the planner; no stored A
 required. ShakerScan seeds a redacted context pack, then suspends at each turn; the
 session reads the transcript, requests tools with a fenced
 ` ```json {"tool_calls":[...]} ``` ` block (or ends with a `{"done":true,"findings":[...]}` debrief),
-and the server executes the tools (same-origin/approval-gated) and returns the next observation. Tools:
+and the server executes the tools (same-target-host/approval-gated, with explicit scheme/port origins)
+and returns the next observation. Tools:
 `http_request` (send as a server-managed `as_principal` — credentials are never model-visible),
 `query_kb`, `diff`, `note`, and a bounded argv-templated `run_tool`.
 

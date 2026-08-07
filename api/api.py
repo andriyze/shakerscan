@@ -403,6 +403,7 @@ from research_agent import (
 from target_dedupe import (
     TargetMergeBlockedError,
     canonical_target_key as _canonical_target_key,
+    canonical_web_host as _canonical_web_host,
     ensure_no_executing_retention_previews as _ensure_target_merge_safe,
     merge_target_group as _merge_target_group,
     plan_canonical_merges,
@@ -958,7 +959,101 @@ def _public_target_row(row: Any) -> dict[str, Any]:
     target = row_to_dict(row)
     if "scan_options" in target:
         target["scan_options"] = _sanitize_scan_options(target.get("scan_options"))
+    if str(target.get("discovery_source") or "").lower() != "model-intake":
+        values = _decode_json_value(target.get("origins")) or []
+        if not isinstance(values, list):
+            values = []
+        origins: list[str] = []
+        for value in [*values, target.get("url")]:
+            try:
+                origin, _note = normalize_target_url(str(value or ""))
+            except TargetNormalizationError:
+                continue
+            if origin and origin not in origins:
+                origins.append(origin)
+        target["origins"] = origins
     return target
+
+
+def _normalized_web_origins(primary_url: Any, values: Any = None) -> list[str]:
+    """Normalize and de-duplicate concrete origins while preserving preference order."""
+    candidates = values if isinstance(values, list) else []
+    origins: list[str] = []
+    for value in [*candidates, primary_url]:
+        try:
+            origin, _note = normalize_target_url(str(value or ""))
+        except TargetNormalizationError:
+            continue
+        if origin and origin not in origins:
+            origins.append(origin)
+    return origins
+
+
+async def _target_web_origins(conn: Any, target_id: uuid.UUID, primary_url: Any) -> list[str]:
+    """Return most-recently scanned concrete origins for one host-level web target."""
+    rows = await conn.fetch(
+        """
+        SELECT target_url, MAX(created_at) AS last_seen
+        FROM scans
+        WHERE target_id=$1 AND run_kind='web_dast'
+        GROUP BY target_url
+        ORDER BY last_seen DESC
+        LIMIT 32
+        """,
+        target_id,
+    )
+    return _normalized_web_origins(primary_url, [row["target_url"] for row in rows])
+
+
+def _resolve_hunt_origin(primary_url: Any, origins: list[str], requested_origin: Any = None) -> str:
+    """Choose a concrete Deep Hunt origin inside the target's host boundary.
+
+    A requested scheme/port may be new, but it must resolve to the same host asset.
+    Without an explicit choice, the most recently scanned origin wins.
+    """
+    primary_host = _canonical_web_host(primary_url)
+    if not primary_host:
+        raise HTTPException(status_code=400, detail="Deep Hunt requires a valid web target host")
+    if requested_origin:
+        try:
+            chosen, _note = normalize_target_url(str(requested_origin))
+        except TargetNormalizationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not chosen or _canonical_web_host(chosen) != primary_host:
+            raise HTTPException(
+                status_code=400,
+                detail="Deep Hunt origin must use the same host as the selected target",
+            )
+        return chosen
+    for origin in origins:
+        if _canonical_web_host(origin) == primary_host:
+            return origin
+    normalized, _note = normalize_target_url(str(primary_url or ""))
+    if not normalized:
+        raise HTTPException(status_code=400, detail="Deep Hunt target origin is invalid")
+    return normalized
+
+
+def _resolve_hunt_tool_url(target_url: str, requested_target: Any) -> str:
+    """Resolve a scanner target inside the selected web-host boundary."""
+    raw = str(requested_target or "")
+    if raw.startswith("http://") or raw.startswith("https://"):
+        try:
+            concrete_origin, _note = normalize_target_url(raw)
+        except TargetNormalizationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if _canonical_web_host(concrete_origin) != _canonical_web_host(target_url):
+            raise HTTPException(
+                status_code=400,
+                detail="run_tool target must use the selected target host",
+            )
+        parsed_raw = urllib.parse.urlsplit(raw)
+        path = parsed_raw.path or "/"
+        if parsed_raw.query:
+            path += f"?{parsed_raw.query}"
+        return urllib.parse.urljoin(concrete_origin.rstrip("/") + "/", path.lstrip("/"))
+    path = raw if raw.startswith("/") else "/" + raw
+    return _provision_same_origin_url(target_url, path)
 
 
 def _source_type_filter_sql(source_type: Optional[str]) -> str:
@@ -20938,11 +21033,18 @@ async def get_scan_deployment_decision(scan_id: str):
         # zero-finding duplicate cannot hide a sibling's criticals). Fail-closed.
         sibling_ids: list = [target_id] if target_id else []
         if target_id:
-            this_target = await conn.fetchrow("SELECT url FROM targets WHERE id = $1", target_id)
+            this_target = await conn.fetchrow(
+                "SELECT url, discovery_source FROM targets WHERE id = $1", target_id
+            )
             if this_target:
-                canon = _canonical_target_key(this_target["url"])
-                all_targets = await conn.fetch("SELECT id, url FROM targets")
-                sibling_ids = [r["id"] for r in all_targets if _canonical_target_key(r["url"]) == canon] or [target_id]
+                canon = _canonical_target_key(
+                    this_target["url"], this_target.get("discovery_source")
+                )
+                all_targets = await conn.fetch("SELECT id, url, discovery_source FROM targets")
+                sibling_ids = [
+                    r["id"] for r in all_targets
+                    if _canonical_target_key(r["url"], r.get("discovery_source")) == canon
+                ] or [target_id]
         taf_rows = await conn.fetch("""
             SELECT id, fingerprint, title, severity, tool, url
             FROM findings
@@ -21919,9 +22021,21 @@ async def list_targets(
     """List all targets."""
     async with db_pool.acquire() as conn:
         query = """
-            SELECT t.*, fs.total_active as active_findings
+            SELECT t.*, fs.total_active as active_findings,
+                   COALESCE(origins.items, '[]'::jsonb) AS origins
             FROM targets t
             LEFT JOIN findings_summary fs ON t.id = fs.target_id
+            LEFT JOIN LATERAL (
+                SELECT jsonb_agg(item.target_url ORDER BY item.last_seen DESC) AS items
+                FROM (
+                    SELECT s.target_url, MAX(s.created_at) AS last_seen
+                    FROM scans s
+                    WHERE s.target_id=t.id AND s.run_kind='web_dast'
+                    GROUP BY s.target_url
+                    ORDER BY MAX(s.created_at) DESC
+                    LIMIT 32
+                ) item
+            ) origins ON true
             WHERE 1=1
         """
         params = []
@@ -21945,8 +22059,8 @@ async def list_targets(
 
 
 def _dedupe_canonical_target_rows(rows: list) -> list:
-    """Collapse target rows that share a canonical key (scheme/trailing-slash variants
-    of the same origin) so grouped targets don't EXPOSE duplicate normalized targets.
+    """Collapse target rows that share a canonical host key (scheme/port variants
+    of the same web asset) so grouped targets don't expose duplicate targets.
     Keeps one survivor per key — active first, then most active findings, then most
     scans, then an https URL — preserving first-occurrence order. Display-layer
     safeguard; a deliberate data merge is the durable fix."""
@@ -21962,7 +22076,7 @@ def _dedupe_canonical_target_rows(rows: list) -> list:
     survivors: dict[str, Any] = {}
     order: list[str] = []
     for row in rows:
-        key = _canonical_target_key(row['url'])
+        key = _canonical_target_key(row['url'], row.get('discovery_source'))
         if key not in survivors:
             survivors[key] = row
             order.append(key)
@@ -21980,9 +22094,9 @@ async def dedupe_targets(
     payload: Optional[DedupeTargetsRequest] = None,
     dry_run: Optional[bool] = Query(default=None),
 ):
-    """Merge scheme/trailing-slash duplicate target rows that share a canonical origin
+    """Merge web target rows that share a host across scheme/port variants
     into one survivor (active > most findings > most scans > https), reassigning all
-    scans/findings/endpoints/graph/schedules/exceptions and deleting the duplicates.
+    scans/findings/endpoints/graph/Deep Hunt/credentials/evidence/audit rows before deleting duplicates.
     Defaults to a dry run. JSON {"dry_run": false} and the backwards-compatible
     ?dry_run=false query both execute when they do not conflict; a true value in
     either input wins safely. Idempotent and per-group transactional."""
@@ -22594,9 +22708,20 @@ async def get_target(target_id: str):
     target_uuid = _uuid_or_400(target_id, "target id")
     async with db_pool.acquire() as conn:
         target = await conn.fetchrow("""
-            SELECT t.*, fs.*
+            SELECT t.*, fs.*, COALESCE(origins.items, '[]'::jsonb) AS origins
             FROM targets t
             LEFT JOIN findings_summary fs ON t.id = fs.target_id
+            LEFT JOIN LATERAL (
+                SELECT jsonb_agg(item.target_url ORDER BY item.last_seen DESC) AS items
+                FROM (
+                    SELECT s.target_url, MAX(s.created_at) AS last_seen
+                    FROM scans s
+                    WHERE s.target_id=t.id AND s.run_kind='web_dast'
+                    GROUP BY s.target_url
+                    ORDER BY MAX(s.created_at) DESC
+                    LIMIT 32
+                ) item
+            ) origins ON true
             WHERE t.id = $1
         """, target_uuid)
 
@@ -25352,6 +25477,10 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
 
     target_payload = _json_safe_row(target)
     metadata = _decode_json_value(target_payload.get("metadata_json")) or {}
+    try:
+        target_origins = await _target_web_origins(conn, target_uuid, target_payload.get("url"))
+    except Exception:
+        target_origins = _normalized_web_origins(target_payload.get("url"))
     coverage = await asm_inventory.coverage_summary(conn, str(target_uuid))
     endpoint_counts = await conn.fetch(
         """
@@ -25693,7 +25822,7 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
         async with _optional_database_savepoint(conn):
             scan_rows = await conn.fetch(
                 """
-                SELECT id, parent_scan_id, scan_role, scan_type, run_kind, status,
+                SELECT id, parent_scan_id, scan_role, scan_type, run_kind, status, target_url,
                        current_phase, findings_count, score, grade, options, result,
                        created_at,
                        COALESCE(completed_at, started_at, created_at) AS updated_at
@@ -25763,6 +25892,7 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
     target_summary = {
         "target_id": str(target_uuid),
         "url": target_payload.get("url"),
+        "origins": target_origins,
         "name": target_payload.get("name"),
         "root_domain": target_payload.get("root_domain"),
         "is_active": bool(target_payload.get("is_active")),
@@ -26026,7 +26156,7 @@ async def get_agent_context_pack(
 # =============================================================================
 # Autonomous-agent tools (slice 3). Each tool enforces scope + approval BEFORE its
 # handler (borrow T3MP3ST execute() placement — containment in code, not the model):
-# http_request is same-origin only and auth comes only from a server-resolved principal;
+# http_request stays on the selected target host and auth comes only from a server-resolved principal;
 # writes are gated. Every tool call records a durable tool_receipt.
 # =============================================================================
 
@@ -26062,7 +26192,12 @@ async def _agent_tool_http_request(
     form_body = args.get("form_body") if isinstance(args.get("form_body"), dict) else None
 
     try:
-        url = _provision_same_origin_url(target_url, path)
+        request_origin = _resolve_hunt_origin(
+            target_url,
+            [target_url],
+            args.get("origin"),
+        )
+        url = _provision_same_origin_url(request_origin, path)
     except HTTPException as exc:
         return {"ok": False, "error": f"scope: {exc.detail}"}
 
@@ -26082,6 +26217,7 @@ async def _agent_tool_http_request(
 
     request_view = {
         "method": method,
+        "origin": request_origin,
         "path": path,
         "query_keys": sorted(query or {}),
         "as_principal": slot,
@@ -26131,7 +26267,11 @@ async def _agent_tool_http_request(
                     tool_name="agent.http_request",
                     adapter_version="2026-07-18.v1",
                     redacted_argv=["agent.http_request", method, path, f"as:{slot}"],
-                    target_scope={"target_id": str(target_uuid), "target_url": target_url, "same_origin_only": True},
+                    target_scope={
+                        "target_id": str(target_uuid),
+                        "target_url": request_origin,
+                        "same_target_host_only": True,
+                    },
                     approval_receipt_id=approval_receipt_id,
                     status=status_label,
                     parser_status="parsed" if safe_summary else "not_applicable",
@@ -26262,23 +26402,17 @@ async def _agent_tool_run_tool(
 ) -> dict[str, Any]:
     """Run a bounded external scanner via a hardcoded argv template (port of T3MP3ST
     adapterToCustomTool): the model picks tool + target only; every flag is fixed; the
-    target is forced same-origin; active scanners require the gated tier."""
+    target is forced onto the selected target host; active scanners require the gated tier."""
     name, raw_target, options = agent_tools.coerce_run_tool(args)
     template = agent_tools.SCANNER_ARG_TEMPLATES[name]
     if template["risk"] != "read_only" and not allow_active:
         return {"ok": False, "needs_approval": True,
                 "error": f"run_tool '{name}' is active; it requires a gated episode with an approval receipt."}
 
-    raw = str(raw_target or "")
-    if raw.startswith("http://") or raw.startswith("https://"):
-        if urllib.parse.urlsplit(raw)[:2] != urllib.parse.urlsplit(target_url)[:2]:
-            return {"ok": False, "error": "run_tool target must be same-origin as the target"}
-        url = raw
-    else:
-        try:
-            url = _provision_same_origin_url(target_url, raw if raw.startswith("/") else "/" + raw)
-        except HTTPException as exc:
-            return {"ok": False, "error": f"scope: {exc.detail}"}
+    try:
+        url = _resolve_hunt_tool_url(target_url, raw_target)
+    except HTTPException as exc:
+        return {"ok": False, "error": f"scope: {exc.detail}"}
 
     binary, argv, timeout_ms = agent_tools.build_scanner_argv(name, url, options)
     started_at = datetime.now(timezone.utc)
@@ -26328,7 +26462,11 @@ async def _agent_tool_run_tool(
                     tool_name=f"agent.run_tool.{name}",
                     adapter_version="2026-07-18.v1",
                     redacted_argv=[binary, name, safe_url],
-                    target_scope={"target_id": str(target_uuid), "target_url": target_url, "same_origin_only": True},
+                    target_scope={
+                        "target_id": str(target_uuid),
+                        "target_url": safe_url,
+                        "same_target_host_only": True,
+                    },
                     approval_receipt_id=approval_receipt_id,
                     status=status_label,
                     parser_status="parsed" if lines else "not_applicable",
@@ -26758,6 +26896,7 @@ async def _agent_seed_state(
     created_by: str,
     token_budget: int,
     max_iterations: int,
+    target_origins: Optional[list[str]] = None,
     source_excerpt: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Build the context pack (slice 1) + system/user seed and return a fresh loop state."""
@@ -26784,6 +26923,8 @@ async def _agent_seed_state(
         {"role": "user", "content": agent_loop.build_user_message(objective, pack["text"])},
     ]
     state = _agent_new_state(objective, messages, pack["included"])
+    state["target_url"] = target_url
+    state["target_origins"] = _normalized_web_origins(target_url, target_origins or [])
     if source_excerpt and isinstance(source_excerpt.get("stats"), dict):
         state["source_ingest"] = source_excerpt["stats"]
     return state
@@ -27474,11 +27615,13 @@ async def _run_agent_hunt(
     active_action_budget_limit: Optional[int] = None,
     wall_time_budget_seconds: Optional[int] = None,
     model_token_budget_limit: Optional[int] = None,
+    target_origins: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     run_started = time.monotonic()
     state = await _agent_seed_state(
         target_uuid, target_url, objective,
         created_by=created_by, token_budget=token_budget, max_iterations=max_iterations,
+        target_origins=target_origins,
     )
     state["request_budget_limit"] = request_budget_limit
     state["action_budget_limit"] = action_budget_limit
@@ -27853,6 +27996,7 @@ class AgentHuntRequest(BaseModel):
     # Persisting a SUSPECTED finding is a state change; when the operator has enabled the
     # approval-receipt policy, a hunt must carry a receipt (the app's authorization mechanism).
     approval_receipt_id: Optional[str] = None
+    origin_url: Optional[str] = Field(default=None, max_length=2048)
 
 
 @app.post("/agent/hunt/{target_id}")
@@ -27866,15 +28010,18 @@ async def run_agent_hunt_endpoint(target_id: str, req: AgentHuntRequest):
         target = await conn.fetchrow("SELECT id, url, is_active FROM targets WHERE id=$1", target_uuid)
         if not target or not target["is_active"]:
             raise HTTPException(status_code=404, detail="Active target not found")
+        target_origins = await _target_web_origins(conn, target_uuid, target["url"])
+        target_url = _resolve_hunt_origin(target["url"], target_origins, req.origin_url)
         await _require_approval_receipt_if_policy_enabled(
             conn, req.approval_receipt_id, action_name="agent.hunt", risk_tier="active",
             created_by="agent_hunt_endpoint",
         )
     return await _run_agent_hunt(
-        target_uuid, str(target["url"]), req.objective,
+        target_uuid, target_url, req.objective,
         max_iterations=req.max_iterations, created_by="agent_hunt_endpoint",
         allow_write=False, allow_active=False, token_budget=req.token_budget,
         approval_receipt_id=req.approval_receipt_id, persist=req.persist,
+        target_origins=target_origins,
     )
 
 
@@ -27910,6 +28057,11 @@ class AgentHuntSessionStartRequest(BaseModel):
     # to ingest into a security-ranked source_excerpt pack section + source-derived leads. Absent
     # -> the hunt runs black-box only (the default).
     source_dir: Optional[str] = Field(default=None, max_length=500)
+    origin_url: Optional[str] = Field(
+        default=None,
+        max_length=2048,
+        description="Concrete HTTP(S) origin on the selected target host. Defaults to the most recently scanned origin.",
+    )
 
 
 class AgentHuntReplyRequest(BaseModel):
@@ -27934,6 +28086,8 @@ def _agent_hunt_run_public(row: Any) -> dict[str, Any]:
     return {
         "run_id": str(item.get("id")) if item.get("id") else None,
         "target_id": str(item.get("target_id")) if item.get("target_id") else None,
+        "target_url": state.get("target_url"),
+        "target_origins": state.get("target_origins") or [],
         "objective": item.get("objective"),
         "status": status,
         "awaiting_planner": awaiting,
@@ -27988,6 +28142,8 @@ async def start_agent_hunt_session(target_id: str, req: AgentHuntSessionStartReq
         target = await conn.fetchrow("SELECT id, url, is_active FROM targets WHERE id=$1", target_uuid)
         if not target or not target["is_active"]:
             raise HTTPException(status_code=404, detail="Active target not found")
+        target_origins = await _target_web_origins(conn, target_uuid, target["url"])
+        target_url = _resolve_hunt_origin(target["url"], target_origins, req.origin_url)
         if allow_active:
             if not _ai_ops_execute_enabled():
                 raise HTTPException(
@@ -27997,7 +28153,7 @@ async def start_agent_hunt_session(target_id: str, req: AgentHuntSessionStartReq
             await _validate_approval_receipt_for_action(
                 conn,
                 req.approval_receipt_id,
-                target_url=str(target["url"]),
+                target_url=target_url,
                 target_id=target_uuid,
                 action_name="agent.hunt",
                 command="agent.hunt",
@@ -28022,11 +28178,12 @@ async def start_agent_hunt_session(target_id: str, req: AgentHuntSessionStartReq
         except source_ingest.SourceIngestError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     state = await _agent_seed_state(
-        target_uuid, str(target["url"]), req.objective,
+        target_uuid, target_url, req.objective,
         created_by="deep_hunt_session" if allow_active else "agent_hunt_session",
         token_budget=req.token_budget,
         max_iterations=req.max_iterations,
         source_excerpt=source_excerpt,
+        target_origins=target_origins,
     )
     # Source-derived route hints become residue-backed LEADS on the board (never findings);
     # best-effort, bounded — a hint ingest failure must never block a hunt.
@@ -28057,7 +28214,8 @@ async def start_agent_hunt_session(target_id: str, req: AgentHuntSessionStartReq
         "Deep Hunt authorization is active for this target. You may use bounded active run_tool "
         "templates and authenticated read probes when useful. Raw POST/PUT/PATCH/DELETE requests "
         "remain blocked; use evidence-backed leads and the server's deterministic proof workflows "
-        "for verification. Stay same-origin and stop when the objective is answered."
+        "for verification. Stay on the selected target host, name the concrete origin when switching "
+        "scheme or port, and stop when the objective is answered."
         if allow_active else
         "This is a read-only discovery run. Active scanner templates and state-changing HTTP are blocked."
     )
@@ -28130,15 +28288,20 @@ async def submit_agent_hunt_reply(run_id: str, req: AgentHuntReplyRequest):
                 raise HTTPException(status_code=409, detail="Another reply for this run is already in flight")
             target_uuid = row["target_id"]
             target = await conn.fetchrow("SELECT url, is_active FROM targets WHERE id=$1", target_uuid)
-            target_url = str((target or {}).get("url") or "")
+            primary_target_url = str((target or {}).get("url") or "")
             # Stop hunting a target the operator has deactivated (soft-deleted) mid-run. (Audit P1.)
-            if not target_url or not (target or {}).get("is_active"):
+            if not primary_target_url or not (target or {}).get("is_active"):
                 cancelled = await conn.fetchrow(
                     "UPDATE agent_hunt_runs SET status='cancelled', stop_reason='target_deactivated', "
                     "updated_at=NOW() WHERE id=$1 RETURNING *", run_uuid)
                 return _agent_hunt_run_public(cancelled)
             approval_receipt_id = str(row["approval_receipt_id"]) if row["approval_receipt_id"] else None
             state = _decode_json_value(row["state"]) or {}
+            target_url = _resolve_hunt_origin(
+                primary_target_url,
+                _normalized_web_origins(primary_target_url, state.get("target_origins") or []),
+                state.get("target_url"),
+            )
             max_iterations = int(row["max_iterations"] or _AGENT_HUNT_DEFAULT_ITERATIONS)
             allow_write = bool(row["allow_write"])
             allow_active = bool(row["allow_active"])

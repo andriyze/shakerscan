@@ -14,8 +14,8 @@ CREATE TABLE targets (
 
     -- Target identification
     url TEXT UNIQUE NOT NULL,
-    -- Scheme/trailing-slash-insensitive canonical origin (auto-maintained by the
-    -- trg_targets_canonical_key trigger below); UNIQUE so duplicate origins can't form.
+    -- Host-level identity for web targets and full subject identity for Model Intake
+    -- artifacts (auto-maintained by trg_targets_canonical_key below).
     canonical_key TEXT,
     name TEXT,
     root_domain TEXT,
@@ -54,17 +54,32 @@ CREATE TABLE targets (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Canonical de-dupe: keep canonical_key in sync with url (must match the Python
--- _canonical_target_key in api.py), and forbid two rows sharing a canonical origin.
+-- Canonical de-dupe: a web target is the host asset, while a Model Intake target is
+-- the exact artifact subject. Concrete web scheme/port origins stay on scans.
 CREATE OR REPLACE FUNCTION targets_set_canonical_key() RETURNS trigger AS $$
+DECLARE
+    raw TEXT;
+    authority TEXT;
+    host_part TEXT;
 BEGIN
-    NEW.canonical_key := rtrim(
-        regexp_replace(lower(btrim(COALESCE(NEW.url, ''))), '^https?://', ''), '/');
+    raw := regexp_replace(lower(btrim(COALESCE(NEW.url, ''))), '^https?://', '');
+    IF lower(COALESCE(NEW.discovery_source, '')) = 'model-intake' THEN
+        NEW.canonical_key := 'artifact:' || rtrim(raw, '/');
+    ELSE
+        authority := regexp_replace(raw, '[/?#].*$', '');
+        authority := regexp_replace(authority, '^.*@', '');
+        IF authority ~ '^\[[^]]+\]' THEN
+            host_part := substring(authority FROM '^\[([^]]+)\]');
+        ELSE
+            host_part := regexp_replace(authority, ':[0-9]+$', '');
+        END IF;
+        NEW.canonical_key := 'web:' || rtrim(host_part, '.');
+    END IF;
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
 CREATE TRIGGER trg_targets_canonical_key
-    BEFORE INSERT OR UPDATE OF url ON targets
+    BEFORE INSERT OR UPDATE OF url, discovery_source ON targets
     FOR EACH ROW EXECUTE FUNCTION targets_set_canonical_key();
 CREATE UNIQUE INDEX idx_targets_canonical_key ON targets(canonical_key);
 

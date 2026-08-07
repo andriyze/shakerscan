@@ -15,25 +15,32 @@ import api  # noqa: E402
 import target_dedupe  # noqa: E402
 
 
-def test_canonical_key_is_scheme_slash_case_insensitive():
+def test_canonical_web_key_is_scheme_port_slash_case_insensitive():
     k = api._canonical_target_key
-    assert k("https://Example.com/") == "example.com"
-    assert k("http://example.com") == "example.com"
-    assert k("example.com") == "example.com"
-    assert k("https://example.com///") == "example.com"
-    assert k("HTTP://Host.Docker.Internal:3001/") == "host.docker.internal:3001"
-    assert k("  https://example.com  ") == "example.com"
+    assert k("https://Example.com/") == "web:example.com"
+    assert k("http://example.com") == "web:example.com"
+    assert k("http://example.com:8080") == "web:example.com"
+    assert k("https://example.com:9090") == "web:example.com"
+    assert k("example.com") == "web:example.com"
+    assert k("https://example.com///", "manual") == "web:example.com"
+    assert k("HTTP://Host.Docker.Internal:3001/") == "web:host.docker.internal"
+    assert k("  https://example.com  ") == "web:example.com"
 
 
 def test_canonical_key_keeps_path_drops_only_trailing_slash():
     # Path is part of the artifact identity (e.g. model-intake URLs); only the trailing
     # slash is stripped, not the whole path.
-    assert api._canonical_target_key("https://hf.co/org/model/") == "hf.co/org/model"
-    assert api._canonical_target_key("https://hf.co/org/model") == "hf.co/org/model"
+    assert api._canonical_target_key("https://hf.co/org/model/", "model-intake") == \
+        "artifact:hf.co/org/model"
+    assert api._canonical_target_key("https://hf.co/org/model", "model-intake") == \
+        "artifact:hf.co/org/model"
+    assert api._canonical_target_key("https://hf.co/org/other", "model-intake") != \
+        api._canonical_target_key("https://hf.co/org/model", "model-intake")
+    assert api._canonical_target_key("https://hf.co/a/dast/path", "manual") == "web:hf.co"
 
 
 def _row(rid, url, active=True, findings=0, scans=0):
-    return {"id": rid, "url": url, "is_active": active,
+    return {"id": rid, "url": url, "discovery_source": "manual", "is_active": active,
             "active_findings_count": findings, "total_scans": scans}
 
 
@@ -56,7 +63,7 @@ def test_dedupe_survivor_prefers_active_then_findings_then_https():
     assert len(out) == 1 and out[0]["id"] == "active-http"  # active beats more-findings-but-inactive
 
 
-def test_dedupe_keeps_distinct_origins():
+def test_dedupe_keeps_distinct_hosts():
     rows = [_row("1", "https://a.com"), _row("2", "https://b.com")]
     out = api._dedupe_canonical_target_rows(rows)
     assert {r["id"] for r in out} == {"1", "2"}
@@ -189,6 +196,37 @@ def test_merge_target_group_translates_retention_fk_race_to_blocked_error():
 
     assert set(exc.value.target_ids) == {str(survivor_id), str(dupe_id)}
     assert exc.value.preview_ids == []
+
+
+class _RecordingMergeConn:
+    def __init__(self):
+        self.statements = []
+
+    async def fetch(self, query, *_args):
+        assert "FROM evidence_retention_previews" in query
+        return []
+
+    async def execute(self, query, *_args):
+        self.statements.append(" ".join(query.split()))
+        return "OK"
+
+
+def test_merge_target_group_reassigns_deep_hunt_credentials_and_evidence_before_delete():
+    conn = _RecordingMergeConn()
+    asyncio.run(target_dedupe.merge_target_group(conn, uuid.uuid4(), [uuid.uuid4()]))
+    sql = "\n".join(conn.statements)
+
+    for table in (
+        "agent_context_packs", "agent_hunt_runs", "research_episodes", "hypotheses",
+        "target_credential_profiles", "target_principals", "target_endpoint_expectations",
+        "evidence_instances", "export_events", "campaigns", "campaign_actions",
+    ):
+        assert table in sql
+    assert sql.index("UPDATE agent_hunt_runs") < sql.index("DELETE FROM targets")
+    assert sql.index("UPDATE evidence_instances") < sql.index("DELETE FROM targets")
+    assert sql.index("UPDATE evidence_objects child SET finding_id") < sql.index("DELETE FROM findings")
+    assert sql.index("UPDATE asm_endpoint_attempts child SET endpoint_id") < \
+        sql.index("DELETE FROM target_endpoints")
 
 
 def test_retention_preview_fk_is_present_in_fresh_and_upgrade_schemas():

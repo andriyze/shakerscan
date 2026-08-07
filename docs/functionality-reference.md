@@ -715,7 +715,8 @@ OpenCode session plans turns through the keyless `POST /agent/hunt/{target_id}/s
 is enabled in standard installs and can be disabled globally with
 `AI_OPS_ROUTER_EXECUTE_ENABLED=false`. The approval is revalidated before every turn.
 
-The free-form loop can issue same-origin read probes, compare managed principal contexts when they
+The free-form loop can issue read probes on any explicit HTTP(S) origin of the selected target host,
+compare managed principal contexts when they
 are configured, query stored knowledge, record notes, and invoke bounded active scanner templates. It cannot issue
 arbitrary state-changing HTTP. Tool calls, request units, active actions, and turns are bounded. A
 request unit is one tool invocation, not one wire request — a bounded scanner may issue many target
@@ -724,6 +725,12 @@ session uses its token budget to size the seed context pack, because the server 
 external coding agent's tokens. A debrief can persist only evidence-backed **Suspected** findings;
 supported families reach **Verified** only through server-run deterministic proof. The compatibility `/research/*`
 controller remains available for specialized guided verification and is not the Deep Hunt launcher.
+
+Web target identity is host-level: scheme and port variants share one target record and durable
+security history, while each scan and hunt retains the exact concrete origin it executes against.
+The target APIs return `origins` ordered by recent DAST use. Deep Hunt start requests accept
+`origin_url`; the UI offers known origins and permits a new same-host origin. Cross-host origins are
+rejected. Model Intake artifact targets remain exact-subject identities.
 
 Natural-language routing treats an unqualified “scan” as Quick DAST, named scan types as DAST,
 “Deep Hunt” as this workflow, “verify this finding” as deterministic retest/verification, and manual

@@ -19,6 +19,7 @@ from typing import Any
 RETEST_QUEUE_SCHEMA_VERSION = 1
 ASM_ENDPOINT_FINGERPRINT_MIGRATION = "asm_endpoint_fingerprint_v2"
 CAMPAIGN_SCAN_FINDING_LINKS_MIGRATION = "campaign_scan_finding_links_v1"
+TARGET_HOST_IDENTITY_MIGRATION = "target_host_identity_v1"
 
 
 class SchemaMigrationError(RuntimeError):
@@ -839,16 +840,31 @@ async def _migrate_hypothesis_proof_links(conn) -> None:
 async def _ensure_target_canonical_key_invariant(conn) -> None:
     """Create the canonical target key and fail startup if uniqueness cannot heal.
 
-    Older installations may contain scheme/trailing-slash variants of the same
-    target. The automatic merge is safe and idempotent, but continuing without
-    the unique index is not: current insert paths rely on that invariant.
+    Web identity is host-level, so an upgrade may need to merge rows that previously
+    differed only by scheme or port. Model Intake artifact rows retain full subject
+    identity. Continuing without the unique index is not safe: insert paths rely on it.
     """
     await conn.execute("ALTER TABLE targets ADD COLUMN IF NOT EXISTS canonical_key TEXT")
-    await conn.execute("""
+    await conn.execute(r"""
         CREATE OR REPLACE FUNCTION targets_set_canonical_key() RETURNS trigger AS $$
+        DECLARE
+            raw TEXT;
+            authority TEXT;
+            host_part TEXT;
         BEGIN
-            NEW.canonical_key := rtrim(
-                regexp_replace(lower(btrim(COALESCE(NEW.url, ''))), '^https?://', ''), '/');
+            raw := regexp_replace(lower(btrim(COALESCE(NEW.url, ''))), '^https?://', '');
+            IF lower(COALESCE(NEW.discovery_source, '')) = 'model-intake' THEN
+                NEW.canonical_key := 'artifact:' || rtrim(raw, '/');
+            ELSE
+                authority := regexp_replace(raw, '[/?#].*$', '');
+                authority := regexp_replace(authority, '^.*@', '');
+                IF authority ~ '^\[[^]]+\]' THEN
+                    host_part := substring(authority FROM '^\[([^]]+)\]');
+                ELSE
+                    host_part := regexp_replace(authority, ':[0-9]+$', '');
+                END IF;
+                NEW.canonical_key := 'web:' || rtrim(host_part, '.');
+            END IF;
             RETURN NEW;
         END;
         $$ LANGUAGE plpgsql
@@ -856,54 +872,43 @@ async def _ensure_target_canonical_key_invariant(conn) -> None:
     await conn.execute("DROP TRIGGER IF EXISTS trg_targets_canonical_key ON targets")
     await conn.execute("""
         CREATE TRIGGER trg_targets_canonical_key
-            BEFORE INSERT OR UPDATE OF url ON targets
+            BEFORE INSERT OR UPDATE OF url, discovery_source ON targets
             FOR EACH ROW EXECUTE FUNCTION targets_set_canonical_key()
     """)
-    await conn.execute("""
-        UPDATE targets
-        SET canonical_key = rtrim(regexp_replace(lower(btrim(url)), '^https?://', ''), '/')
-        WHERE url IS NOT NULL AND (canonical_key IS NULL OR canonical_key = '')
-    """)
 
-    # A prior half-migration may have left a NON-unique index of this exact name. CREATE UNIQUE
-    # INDEX IF NOT EXISTS matches by NAME only, so it would then be a silent no-op and the required
-    # uniqueness invariant would be falsely reported as established. Drop the wrong index first so
-    # the unique index is actually built (the canonical_key index is unique by contract; a
-    # non-unique one of this name is corruption, not a valid state).
+    migration_applied = bool(await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM app_schema_migrations WHERE name=$1)",
+        TARGET_HOST_IDENTITY_MIGRATION,
+    ))
     existing_index_is_unique = await conn.fetchval(
-        "SELECT indisunique FROM pg_index WHERE indexrelid = to_regclass('idx_targets_canonical_key')"
+        "SELECT indisunique FROM pg_index WHERE indexrelid=to_regclass('idx_targets_canonical_key')"
     )
-    if existing_index_is_unique is False:
-        await conn.execute("DROP INDEX IF EXISTS idx_targets_canonical_key")
-
-    initial_index_error: Exception | None = None
-    try:
-        await conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_targets_canonical_key ON targets(canonical_key)"
-        )
+    if migration_applied and existing_index_is_unique is True:
         return
-    except Exception as index_error:
-        initial_index_error = index_error
-        from target_dedupe import merge_all_canonical_duplicates
 
-        print(
-            "[schema] canonical_key unique index blocked; attempting automatic "
-            f"duplicate-target repair ({index_error})",
-            flush=True,
-        )
-
+    # The former unique origin index would reject the first host-key rewrite when two
+    # historical rows use different ports. Startup runs under the schema advisory lock,
+    # so remove it, repair complete target groups, recompute every key through the trigger,
+    # and restore the invariant before serving requests.
+    await conn.execute("DROP INDEX IF EXISTS idx_targets_canonical_key")
+    from target_dedupe import merge_all_canonical_duplicates
     try:
         removed = await merge_all_canonical_duplicates(conn)
+        await conn.execute("UPDATE targets SET url=url WHERE url IS NOT NULL")
         await conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_targets_canonical_key ON targets(canonical_key)"
+            "CREATE UNIQUE INDEX idx_targets_canonical_key ON targets(canonical_key)"
+        )
+        await conn.execute(
+            "INSERT INTO app_schema_migrations(name) VALUES ($1) ON CONFLICT DO NOTHING",
+            TARGET_HOST_IDENTITY_MIGRATION,
         )
     except Exception as repair_error:
         message = (
             "Required schema invariant idx_targets_canonical_key could not be established "
-            "after automatic duplicate-target repair. ShakerScan startup is blocked to avoid "
+            "after automatic host-level duplicate-target repair. ShakerScan startup is blocked to avoid "
             "running against a half-migrated database. Restore a database backup or repair "
             "canonical duplicate targets in maintenance mode, then restart. "
-            f"Initial index error: {initial_index_error}; repair/retry error: {repair_error}"
+            f"Repair/retry error: {repair_error}"
         )
         print(f"[schema] FATAL: {message}", flush=True)
         raise SchemaMigrationError(message) from repair_error
@@ -3474,8 +3479,11 @@ async def run_schema_migrations(pool) -> None:
             """)
 
             # Canonical de-dupe prevention must be present before startup completes;
-            # current ON CONFLICT insert paths rely on this unique index.
-            await _ensure_target_canonical_key_invariant(conn)
+            # current ON CONFLICT insert paths rely on this unique index. Keep the
+            # trigger rewrite, every child-row merge, and index replacement atomic so
+            # a failed collision repair cannot leave a half-migrated database.
+            async with conn.transaction():
+                await _ensure_target_canonical_key_invariant(conn)
         finally:
             await conn.execute("SELECT pg_advisory_unlock(8675309)")
 

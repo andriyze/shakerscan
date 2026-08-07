@@ -16902,7 +16902,11 @@ def test_agent_hunt_public_shape_exposes_product_mode_and_capability_boundary():
         "max_iterations": 12,
         "allow_write": False,
         "allow_active": False,
-        "state": {"messages": [], "iterations": 0},
+        "state": {
+            "messages": [], "iterations": 0,
+            "target_url": "http://example.test:8080",
+            "target_origins": ["http://example.test:8080", "https://example.test:9090"],
+        },
         "result": {},
     })
     deep_hunt = api_module._agent_hunt_run_public({
@@ -16918,11 +16922,63 @@ def test_agent_hunt_public_shape_exposes_product_mode_and_capability_boundary():
     })
 
     assert passive["mode"] == "read_only"
+    assert passive["target_url"] == "http://example.test:8080"
+    assert passive["target_origins"] == [
+        "http://example.test:8080", "https://example.test:9090",
+    ]
     assert passive["tool_surface"]["allow_active"] is False
     assert deep_hunt["mode"] == "deep_hunt"
     assert deep_hunt["tool_surface"]["allow_active"] is True
     assert deep_hunt["tool_surface"]["allow_write"] is False
     assert "arbitrary state-changing HTTP remains blocked" in deep_hunt["tool_surface"]["note"]
+
+
+def test_deep_hunt_origin_selection_is_port_aware_but_host_bound():
+    origins = ["https://target.test:9090", "http://target.test:8080"]
+
+    assert api_module._resolve_hunt_origin("http://target.test", origins) == \
+        "https://target.test:9090"
+    assert api_module._resolve_hunt_origin(
+        "http://target.test", origins, "http://TARGET.test:8080/path?ignored=yes"
+    ) == "http://target.test:8080"
+
+    with pytest.raises(api_module.HTTPException) as exc:
+        api_module._resolve_hunt_origin(
+            "http://target.test", origins, "https://other.test:9090"
+        )
+    assert exc.value.status_code == 400
+    assert "same host" in str(exc.value.detail)
+
+
+def test_target_origin_inventory_keeps_exact_scheme_and_port():
+    assert api_module._normalized_web_origins(
+        "http://target.test",
+        [
+            "https://target.test:9090/path",
+            "http://target.test:8080",
+            "https://target.test:9090",
+        ],
+    ) == [
+        "https://target.test:9090",
+        "http://target.test:8080",
+        "http://target.test",
+    ]
+
+
+def test_deep_hunt_tool_url_preserves_same_host_scheme_port_and_path():
+    assert api_module._resolve_hunt_tool_url(
+        "http://target.test:8080", "https://TARGET.test:9090/admin?q=1"
+    ) == "https://target.test:9090/admin?q=1"
+    assert api_module._resolve_hunt_tool_url(
+        "http://target.test:8080", "/api/health"
+    ) == "http://target.test:8080/api/health"
+
+    with pytest.raises(api_module.HTTPException) as exc:
+        api_module._resolve_hunt_tool_url(
+            "http://target.test:8080", "https://other.test:9090/admin"
+        )
+    assert exc.value.status_code == 400
+    assert "selected target host" in str(exc.value.detail)
 
 
 def test_research_autobind_requires_ranked_live_operation_identity():

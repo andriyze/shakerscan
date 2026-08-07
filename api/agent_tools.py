@@ -3,14 +3,14 @@
 The bounded tools exposed to the Deep Hunt planner (documented in
 docs/functionality-reference.md, section 11.6).
 This module holds the **function-call schemas** (consumed by the text-contract renderer
-in :mod:`agent_text_toolcalls`) and the **pure guards** — same-origin path validation,
+in :mod:`agent_text_toolcalls`) and the **pure guards** — target-host origin/path validation,
 request-header allowlisting (so the model can never inject an auth header — real auth
 comes only from a server-resolved ``as_principal``), method classification, and result
 shaping. The async execution (httpx, DB, tool_receipts, principal resolution) lives in
 api.py, which owns those dependencies; this layer stays dependency-free and host-testable.
 
 Containment is enforced in code, before every handler (borrow T3MP3ST ``execute()``):
-scope (same-origin) and approval (write methods are gated) are checked server-side, never
+scope (same target host) and approval (write methods are gated) are checked server-side, never
 left to the model.
 """
 from __future__ import annotations
@@ -64,7 +64,7 @@ AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
         "name": "http_request",
         "risk": "active",  # elevated to gated when the method is a write
         "description": (
-            "Issue ONE same-origin HTTP request to the target and get a structured "
+            "Issue ONE HTTP request to an origin on the selected target host and get a structured "
             "response summary (status, headers, body sample, json keys, sha256, timing). "
             "Set as_principal to a configured principal slot (e.g. 'user1','user2','admin') "
             "to send it authenticated AS that server-managed identity — you never see the "
@@ -76,7 +76,8 @@ AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "method": {"type": "string", "description": "GET|HEAD|OPTIONS|POST|PUT|PATCH|DELETE"},
-                "path": {"type": "string", "description": "absolute same-origin path, must start with / (e.g. /rest/basket/1)"},
+                "origin": {"type": "string", "description": "optional concrete http(s) origin on the selected target host, including port"},
+                "path": {"type": "string", "description": "absolute path on that origin, must start with / (e.g. /rest/basket/1)"},
                 "query": {"type": "object", "description": "optional query params {k:v}"},
                 "json_body": {"type": "object", "description": "optional JSON request body"},
                 "form_body": {"type": "object", "description": "optional form-encoded body"},
@@ -213,11 +214,11 @@ def _tmpl_ffuf(url: str, opts: dict[str, Any]) -> list[str]:
 # has a fixed argv (no arbitrary flags/paths) and a hard wall-clock cap so the sync loop stays safe.
 SCANNER_ARG_TEMPLATES: dict[str, dict[str, Any]] = {
     "httpx": {"binary": "httpx", "risk": "read_only", "default_timeout_ms": 30_000, "build": _tmpl_httpx,
-              "desc": "passive HTTP fingerprint (status, title, tech, server) of a same-origin URL"},
+              "desc": "passive HTTP fingerprint (status, title, tech, server) of a target-host URL"},
     "nuclei": {"binary": "nuclei", "risk": "active", "default_timeout_ms": 90_000, "build": _tmpl_nuclei,
-               "desc": "bounded Nuclei template scan (default high,critical) of a same-origin URL; options {severity,tags}"},
+               "desc": "bounded Nuclei template scan (default high,critical) of a target-host URL; options {severity,tags}"},
     "katana": {"binary": "katana", "risk": "active", "default_timeout_ms": 75_000, "build": _tmpl_katana,
-               "desc": "bounded same-origin crawl + JS endpoint extraction (depth 2, 45s, same-host only)"},
+               "desc": "bounded target-host crawl + JS endpoint extraction (depth 2, 45s, same-host only)"},
     "ffuf": {"binary": "ffuf", "risk": "active", "default_timeout_ms": 75_000, "build": _tmpl_ffuf,
              "desc": "bounded content/dir discovery over a small bundled wordlist; options {wordlist: common|api|admin}"},
 }
@@ -227,7 +228,7 @@ RUN_TOOL_SCHEMA: dict[str, Any] = {
     "name": "run_tool",
     "risk": "active",
     "description": (
-        "Run a bounded external scanner against a SAME-ORIGIN URL. You pick tool + target "
+        "Run a bounded external scanner against a URL on the SELECTED TARGET HOST. You pick tool + target "
         f"only; all flags are fixed. Tools: {sorted(RUN_TOOL_NAMES)} — httpx = passive "
         "fingerprint; nuclei = bounded templates (options {severity,tags}); katana = crawl + "
         "JS endpoint extraction (finds linked/JS-referenced routes); ffuf = content/dir "
@@ -239,7 +240,7 @@ RUN_TOOL_SCHEMA: dict[str, Any] = {
         "type": "object",
         "properties": {
             "name": {"type": "string", "description": "httpx | nuclei | katana | ffuf"},
-            "target": {"type": "string", "description": "same-origin absolute path (/) or URL to scan"},
+            "target": {"type": "string", "description": "absolute path (/) on the chosen origin or an http(s) URL on the selected target host"},
             "options": {"type": "object", "description": "nuclei: {severity:'high,critical', tags:'cve,exposure'}; ffuf: {wordlist:'common'|'api'|'admin'}"},
         },
         "required": ["name", "target"],

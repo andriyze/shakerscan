@@ -103,7 +103,8 @@ GET  /agent/findings/{target_id}
 Callable tools are `http_request`, `query_kb`, `diff`, `note`, and `run_tool`. Follow the tool
 schemas embedded in the first transcript exactly.
 
-- All target traffic stays same-origin.
+- All target traffic stays on the selected target host. Scheme and port may change only through an
+  explicit concrete origin; never cross to another host.
 - Credentials are resolved server-side through managed principal slots and never enter planner
   messages.
 - Use different principals and `diff` for access-control hypotheses.

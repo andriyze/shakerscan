@@ -5,7 +5,9 @@ instead of leaving target creation broken when the UNIQUE index can't be built.
 
 This module imports nothing from api/retest_contract, so it is safe to import from both.
 """
+import ipaddress
 import re
+import urllib.parse
 import uuid
 from typing import Any
 
@@ -58,27 +60,381 @@ async def ensure_no_executing_retention_previews(conn, target_ids: list[Any]) ->
         )
 
 
-def canonical_target_key(url: Any) -> str:
-    """Scheme-and-trailing-slash-insensitive canonical origin. MUST stay equivalent to
-    the SQL form in the targets_set_canonical_key trigger (db/init.sql / migration)."""
+def canonical_web_host(url: Any) -> str:
+    """Return the host identity shared by every HTTP(S) origin on that host.
+
+    Scheme, credentials, port, path, query, and fragment are deliberately not part of
+    a web target's identity. They remain part of the concrete scan/hunt origin. This is
+    what lets ``http://app:8080`` and ``https://app:9090`` contribute evidence to one
+    target without accidentally sending a request to the wrong origin.
+    """
+    raw = str(url or "").strip()
+    if not raw:
+        return ""
+    candidate = raw if "://" in raw else f"//{raw}"
+    try:
+        parsed = urllib.parse.urlsplit(candidate)
+        host = str(parsed.hostname or "").strip().strip("[]").rstrip(".").lower()
+    except ValueError:
+        return ""
+    if not host:
+        return ""
+    try:
+        return ipaddress.ip_address(host).compressed.lower()
+    except ValueError:
+        return host
+
+
+def canonical_target_key(url: Any, discovery_source: Any = None) -> str:
+    """Return the durable target identity key.
+
+    Web targets are host assets, not origins: all HTTP(S) schemes and ports share one
+    ``web:`` key. Model Intake rows are artifact subjects and therefore retain their
+    complete scheme-insensitive path/query identity under ``artifact:``. Callers that
+    create artifact subjects must therefore provide the ``model-intake`` discovery
+    source; ordinary DAST and Deep Hunt URLs remain web targets even when they include
+    a path.
+
+    This MUST stay equivalent to ``targets_set_canonical_key`` in ``db/init.sql`` and
+    ``retest_contract.py`` for normalized stored URLs.
+    """
     raw = str(url or "").strip().lower()
-    raw = re.sub(r"^https?://", "", raw).rstrip("/")
-    return raw
+    source = str(discovery_source or "").strip().lower()
+    if source == "model-intake":
+        subject = re.sub(r"^https?://", "", raw).rstrip("/")
+        return f"artifact:{subject}"
+    host = canonical_web_host(raw)
+    return f"web:{host}" if host else "web:"
 
 
 # target_id-bearing tables with a UNIQUE(target_id, ...) constraint: reassigning a
 # duplicate's rows can collide, so colliding rows are dropped first (survivor- or
 # lower-id-sibling-wins; NULL keys never collide).
 MERGE_UNIQUE_TABLES: list[tuple[str, list[str]]] = [
-    ("findings", ["fingerprint"]),
-    ("target_endpoints", ["fingerprint"]),
     ("application_graph_nodes", ["node_type", "node_key"]),
     ("application_graph_edges", ["src_key", "dst_key", "edge_type"]),
+    ("target_principal_provisioning_attempts", ["auth_state"]),
 ]
 # target_id-bearing tables without a target_id unique constraint — plain reassignment.
 MERGE_PLAIN_TABLES: list[str] = [
-    "scans", "scan_campaigns", "schedules", "finding_exceptions", "finding_verifications",
+    "agent_context_packs", "agent_hunt_runs", "campaign_actions", "campaigns",
+    "evidence_instances", "evidence_retention_previews", "export_events",
+    "finding_exceptions", "finding_verifications", "model_intake_admissions",
+    "refuter_reviews", "research_episodes", "scan_campaigns", "scans", "schedules",
+    "target_invariant_contracts",
 ]
+
+
+async def _table_exists(conn, table: str) -> bool:
+    """Migration-safe existence check for tables added after the original schema."""
+    fetchval = getattr(conn, "fetchval", None)
+    if not callable(fetchval):
+        # Lightweight unit-test connections model the current schema and only record
+        # mutations. Production asyncpg connections always take the catalog path.
+        return True
+    return bool(await fetchval("SELECT to_regclass($1) IS NOT NULL", f"public.{table}"))
+
+
+async def _merge_named_credentials(conn, survivor_id, dupe_ids: list) -> None:
+    if not await _table_exists(conn, "target_credential_profiles"):
+        return
+    # Keep the most recently rotated credential for each case-insensitive name. The
+    # secret stays encrypted; only ownership moves to the surviving target.
+    await conn.execute(
+        """
+        DELETE FROM target_credential_profiles d
+        USING target_credential_profiles keep
+        WHERE d.target_id = ANY($1::uuid[])
+          AND keep.target_id = ANY($2::uuid[])
+          AND lower(keep.name) = lower(d.name)
+          AND (keep.rotated_at, keep.updated_at, keep.id) > (d.rotated_at, d.updated_at, d.id)
+        """,
+        dupe_ids,
+        [survivor_id, *dupe_ids],
+    )
+    # If the newest row belonged to a duplicate, remove an older survivor row first.
+    await conn.execute(
+        """
+        DELETE FROM target_credential_profiles old
+        USING target_credential_profiles newest
+        WHERE old.target_id = $1
+          AND newest.target_id = ANY($2::uuid[])
+          AND lower(old.name) = lower(newest.name)
+          AND (newest.rotated_at, newest.updated_at, newest.id) >
+              (old.rotated_at, old.updated_at, old.id)
+        """,
+        survivor_id,
+        dupe_ids,
+    )
+    await conn.execute(
+        "UPDATE target_credential_profiles SET target_id=$2 WHERE target_id=ANY($1::uuid[])",
+        dupe_ids,
+        survivor_id,
+    )
+
+
+async def _merge_findings(conn, survivor_id, dupe_ids: list) -> None:
+    """Merge fingerprint collisions without cascading away proof history."""
+    if not await _table_exists(conn, "findings"):
+        return
+    all_ids = [survivor_id, *dupe_ids]
+    child_tables = (
+        "evidence_instances",
+        "evidence_objects",
+        "export_events",
+        "finding_verifications",
+        "refuter_reviews",
+    )
+    for table in child_tables:
+        if not await _table_exists(conn, table):
+            continue
+        await conn.execute(
+            f"""
+            WITH ranked AS (
+                SELECT id,
+                       FIRST_VALUE(id) OVER (
+                           PARTITION BY fingerprint
+                           ORDER BY (target_id=$2) DESC, updated_at DESC, id DESC
+                       ) AS keep_id
+                FROM findings WHERE target_id=ANY($1::uuid[])
+            )
+            UPDATE {table} child SET finding_id=r.keep_id
+            FROM ranked r WHERE child.finding_id=r.id AND r.id<>r.keep_id
+            """,
+            all_ids,
+            survivor_id,
+        )
+    await conn.execute(
+        """
+        WITH ranked AS (
+            SELECT id, ROW_NUMBER() OVER (
+                PARTITION BY fingerprint
+                ORDER BY (target_id=$2) DESC, updated_at DESC, id DESC
+            ) AS rn
+            FROM findings WHERE target_id=ANY($1::uuid[])
+        )
+        DELETE FROM findings f USING ranked r WHERE f.id=r.id AND r.rn>1
+        """,
+        all_ids,
+        survivor_id,
+    )
+    await conn.execute(
+        "UPDATE findings SET target_id=$2 WHERE target_id=ANY($1::uuid[])",
+        dupe_ids,
+        survivor_id,
+    )
+
+
+async def _merge_target_endpoints(conn, survivor_id, dupe_ids: list) -> None:
+    """Merge endpoint fingerprints while retaining attempts and expectations."""
+    if not await _table_exists(conn, "target_endpoints"):
+        return
+    all_ids = [survivor_id, *dupe_ids]
+    for table in ("asm_endpoint_attempts", "target_endpoint_expectations"):
+        if not await _table_exists(conn, table):
+            continue
+        await conn.execute(
+            f"""
+            WITH ranked AS (
+                SELECT id,
+                       FIRST_VALUE(id) OVER (
+                           PARTITION BY fingerprint
+                           ORDER BY (target_id=$2) DESC, updated_at DESC, id DESC
+                       ) AS keep_id
+                FROM target_endpoints WHERE target_id=ANY($1::uuid[])
+            )
+            UPDATE {table} child SET endpoint_id=r.keep_id
+            FROM ranked r WHERE child.endpoint_id=r.id AND r.id<>r.keep_id
+            """,
+            all_ids,
+            survivor_id,
+        )
+    await conn.execute(
+        """
+        WITH ranked AS (
+            SELECT id, ROW_NUMBER() OVER (
+                PARTITION BY fingerprint
+                ORDER BY (target_id=$2) DESC, updated_at DESC, id DESC
+            ) AS rn
+            FROM target_endpoints WHERE target_id=ANY($1::uuid[])
+        )
+        DELETE FROM target_endpoints e USING ranked r WHERE e.id=r.id AND r.rn>1
+        """,
+        all_ids,
+        survivor_id,
+    )
+    await conn.execute(
+        "UPDATE target_endpoints SET target_id=$2 WHERE target_id=ANY($1::uuid[])",
+        dupe_ids,
+        survivor_id,
+    )
+
+
+async def _merge_hypotheses(conn, survivor_id, dupe_ids: list) -> None:
+    """Merge hypothesis keys and preserve links from reviews and decisions."""
+    if not await _table_exists(conn, "hypotheses"):
+        return
+    all_ids = [survivor_id, *dupe_ids]
+    for table in ("refuter_reviews", "research_decisions"):
+        if not await _table_exists(conn, table):
+            continue
+        await conn.execute(
+            f"""
+            WITH ranked AS (
+                SELECT id,
+                       FIRST_VALUE(id) OVER (
+                           PARTITION BY family, dedupe_key
+                           ORDER BY (target_id=$2) DESC, updated_at DESC, id DESC
+                       ) AS keep_id
+                FROM hypotheses WHERE target_id=ANY($1::uuid[])
+            )
+            UPDATE {table} child SET hypothesis_id=r.keep_id
+            FROM ranked r WHERE child.hypothesis_id=r.id AND r.id<>r.keep_id
+            """,
+            all_ids,
+            survivor_id,
+        )
+    await conn.execute(
+        """
+        WITH ranked AS (
+            SELECT id, ROW_NUMBER() OVER (
+                PARTITION BY family, dedupe_key
+                ORDER BY (target_id=$2) DESC, updated_at DESC, id DESC
+            ) AS rn
+            FROM hypotheses WHERE target_id=ANY($1::uuid[])
+        )
+        DELETE FROM hypotheses h USING ranked r WHERE h.id=r.id AND r.rn>1
+        """,
+        all_ids,
+        survivor_id,
+    )
+    await conn.execute(
+        "UPDATE hypotheses SET target_id=$2 WHERE target_id=ANY($1::uuid[])",
+        dupe_ids,
+        survivor_id,
+    )
+
+
+async def _merge_target_principals(conn, survivor_id, dupe_ids: list) -> None:
+    if not await _table_exists(conn, "target_principals"):
+        return
+    all_ids = [survivor_id, *dupe_ids]
+    # Repoint expectation references before removing exact duplicate identities.
+    # Rank across the complete group, not just survivor-vs-duplicate: two duplicate
+    # targets may carry the same identity even when the chosen survivor has none.
+    if await _table_exists(conn, "target_endpoint_expectations"):
+        # Mapping two equivalent principals can make two expectations identical on
+        # their current target. Remove only that exact collision before changing the
+        # principal FK, preserving the newest authored expectation.
+        await conn.execute(
+            """
+            WITH principal_map AS (
+                SELECT id,
+                       FIRST_VALUE(id) OVER (
+                           PARTITION BY lower(label), COALESCE(tenant_id, ''), COALESCE(auth_state, '')
+                           ORDER BY (target_id=$2) DESC, updated_at DESC, id DESC
+                       ) AS keep_id
+                FROM target_principals WHERE target_id=ANY($1::uuid[])
+            ), ranked AS (
+                SELECT e.id, ROW_NUMBER() OVER (
+                    PARTITION BY e.target_id, e.method, e.path, e.param_shape, e.param_location,
+                                 COALESCE(pm.keep_id, e.principal_id,
+                                     '00000000-0000-0000-0000-000000000000'::uuid),
+                                 COALESCE(e.principal_role, ''), COALESCE(e.tenant_id, '')
+                    ORDER BY e.updated_at DESC, e.id DESC
+                ) AS rn
+                FROM target_endpoint_expectations e
+                LEFT JOIN principal_map pm ON pm.id=e.principal_id
+                WHERE e.target_id=ANY($1::uuid[])
+            )
+            DELETE FROM target_endpoint_expectations e
+            USING ranked r WHERE e.id=r.id AND r.rn>1
+            """,
+            all_ids,
+            survivor_id,
+        )
+        await conn.execute(
+            """
+            WITH ranked AS (
+                SELECT id,
+                       FIRST_VALUE(id) OVER (
+                           PARTITION BY lower(label), COALESCE(tenant_id, ''), COALESCE(auth_state, '')
+                           ORDER BY (target_id=$2) DESC, updated_at DESC, id DESC
+                       ) AS keep_id
+                FROM target_principals WHERE target_id=ANY($1::uuid[])
+            )
+            UPDATE target_endpoint_expectations e SET principal_id=r.keep_id
+            FROM ranked r WHERE e.principal_id=r.id AND r.id<>r.keep_id
+            """,
+            all_ids,
+            survivor_id,
+        )
+    await conn.execute(
+        """
+        WITH ranked AS (
+            SELECT id, ROW_NUMBER() OVER (
+                PARTITION BY lower(label), COALESCE(tenant_id, ''), COALESCE(auth_state, '')
+                ORDER BY (target_id=$2) DESC, updated_at DESC, id DESC
+            ) AS rn
+            FROM target_principals WHERE target_id=ANY($1::uuid[])
+        )
+        DELETE FROM target_principals p USING ranked r WHERE p.id=r.id AND r.rn>1
+        """,
+        all_ids,
+        survivor_id,
+    )
+    # Two previously separate rows may both own the active user1/user2 slot. Keep
+    # every identity, but only the newest one active before consolidating ownership.
+    await conn.execute(
+        """
+        WITH ranked AS (
+            SELECT id, ROW_NUMBER() OVER (
+                PARTITION BY auth_state ORDER BY updated_at DESC, id DESC
+            ) AS rn
+            FROM target_principals
+            WHERE target_id = ANY($1::uuid[])
+              AND is_active = true AND auth_state IN ('user1','user2')
+        )
+        UPDATE target_principals p SET is_active=false, updated_at=NOW()
+        FROM ranked r WHERE p.id=r.id AND r.rn>1
+        """,
+        all_ids,
+    )
+    await conn.execute(
+        "UPDATE target_principals SET target_id=$2 WHERE target_id=ANY($1::uuid[])",
+        dupe_ids,
+        survivor_id,
+    )
+
+
+async def _merge_endpoint_expectations(conn, survivor_id, dupe_ids: list) -> None:
+    if not await _table_exists(conn, "target_endpoint_expectations"):
+        return
+    await conn.execute(
+        """
+        DELETE FROM target_endpoint_expectations d
+        WHERE d.target_id = ANY($1::uuid[])
+          AND EXISTS (
+              SELECT 1 FROM target_endpoint_expectations keep
+              WHERE keep.target_id = ANY($2::uuid[])
+                AND keep.method=d.method AND keep.path=d.path
+                AND keep.param_shape=d.param_shape AND keep.param_location=d.param_location
+                AND COALESCE(keep.principal_id, '00000000-0000-0000-0000-000000000000'::uuid) =
+                    COALESCE(d.principal_id, '00000000-0000-0000-0000-000000000000'::uuid)
+                AND COALESCE(keep.principal_role, '') = COALESCE(d.principal_role, '')
+                AND COALESCE(keep.tenant_id, '') = COALESCE(d.tenant_id, '')
+                AND (keep.target_id=$3 OR keep.id<d.id)
+          )
+        """,
+        dupe_ids,
+        [survivor_id, *dupe_ids],
+        survivor_id,
+    )
+    await conn.execute(
+        "UPDATE target_endpoint_expectations SET target_id=$2 WHERE target_id=ANY($1::uuid[])",
+        dupe_ids,
+        survivor_id,
+    )
 
 
 async def merge_target_group(conn, survivor_id, dupe_ids: list) -> None:
@@ -86,7 +442,14 @@ async def merge_target_group(conn, survivor_id, dupe_ids: list) -> None:
     the duplicates and recompute the survivor's counts. Runs in the caller's txn."""
     group_target_ids = [survivor_id, *dupe_ids]
     await ensure_no_executing_retention_previews(conn, group_target_ids)
+    await _merge_named_credentials(conn, survivor_id, dupe_ids)
+    await _merge_target_principals(conn, survivor_id, dupe_ids)
+    await _merge_findings(conn, survivor_id, dupe_ids)
+    await _merge_target_endpoints(conn, survivor_id, dupe_ids)
+    await _merge_hypotheses(conn, survivor_id, dupe_ids)
     for table, key_cols in MERGE_UNIQUE_TABLES:
+        if not await _table_exists(conn, table):
+            continue
         key_match = " AND ".join(f"o.{c} = d.{c}" for c in key_cols)
         await conn.execute(f"""
             DELETE FROM {table} d
@@ -100,7 +463,10 @@ async def merge_target_group(conn, survivor_id, dupe_ids: list) -> None:
         await conn.execute(
             f"UPDATE {table} SET target_id = $2 WHERE target_id = ANY($1::uuid[])",
             dupe_ids, survivor_id)
+    await _merge_endpoint_expectations(conn, survivor_id, dupe_ids)
     for table in MERGE_PLAIN_TABLES:
+        if not await _table_exists(conn, table):
+            continue
         await conn.execute(
             f"UPDATE {table} SET target_id = $2 WHERE target_id = ANY($1::uuid[])",
             dupe_ids, survivor_id)
@@ -128,10 +494,10 @@ async def plan_canonical_merges(conn) -> list[dict]:
     """Group targets by canonical key and, for each group with >1 member, pick a
     survivor (active > most findings > most scans > https) and list the merges."""
     rows = await conn.fetch(
-        "SELECT id, url, is_active, total_scans, active_findings_count FROM targets")
+        "SELECT id, url, discovery_source, is_active, total_scans, active_findings_count FROM targets")
     groups: dict[str, list] = {}
     for r in rows:
-        groups.setdefault(canonical_target_key(r["url"]), []).append(r)
+        groups.setdefault(canonical_target_key(r["url"], r.get("discovery_source")), []).append(r)
 
     plan: list[dict] = []
     for key, members in groups.items():
@@ -157,8 +523,12 @@ async def plan_canonical_merges(conn) -> list[dict]:
 
 
 async def merge_all_canonical_duplicates(conn) -> int:
-    """Merge every canonical-duplicate group (per-group transactional). Returns the
-    number of duplicate rows removed. Used by the migration's index-build fail-safe."""
+    """Merge every canonical-duplicate group and return the rows removed.
+
+    The schema migration wraps this operation in one outer transaction; the per-group
+    transactions below are savepoints, so one late collision rolls back the entire
+    host-identity migration rather than committing a partial repair.
+    """
     removed = 0
     plan = await plan_canonical_merges(conn)
     all_target_ids = [

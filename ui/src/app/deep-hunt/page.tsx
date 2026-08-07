@@ -85,6 +85,7 @@ function DeepHuntPage() {
   const searchParams = useSearchParams()
   const [targets, setTargets] = useState<Target[]>([])
   const [targetId, setTargetId] = useState('')
+  const [originUrl, setOriginUrl] = useState('')
   const [objective, setObjective] = useState(DEFAULT_OBJECTIVE)
   const [maxIterations, setMaxIterations] = useState('20')
   const [tokenBudget, setTokenBudget] = useState('9000')
@@ -104,7 +105,17 @@ function DeepHuntPage() {
   const findingsTargetId = session?.target_id || targetId
   const activeTarget = useMemo(() => targets.find((t) => t.id === findingsTargetId), [targets, findingsTargetId])
   const launchTarget = useMemo(() => targets.find((t) => t.id === targetId), [targets, targetId])
-  const activeHost = activeTarget ? hostFromUrl(activeTarget.url) : ''
+  const launchOrigins = useMemo(() => {
+    if (!launchTarget) return []
+    const values = [...(launchTarget.origins || []), launchTarget.url]
+    return values.filter((value, index) => value && values.indexOf(value) === index)
+  }, [launchTarget])
+  const activeOrigin = session?.target_url || activeTarget?.url || ''
+  const activeHost = activeOrigin ? hostFromUrl(activeOrigin) : ''
+
+  useEffect(() => {
+    setOriginUrl((current) => launchOrigins.includes(current) ? current : (launchOrigins[0] || ''))
+  }, [launchOrigins])
   // Use a real (random) target in the terminal example when the DB has any.
   const exampleCommand = useMemo(() => {
     const host = targets.length
@@ -170,7 +181,7 @@ function DeepHuntPage() {
     try {
       const approvalReceiptId = await createTargetPolicyApproval(
         launchTarget.id,
-        launchTarget.url,
+        originUrl || launchTarget.url,
         120,
         'credential',
       )
@@ -180,6 +191,7 @@ function DeepHuntPage() {
         token_budget: Math.min(24000, Math.max(1000, Number.parseInt(tokenBudget, 10) || 9000)),
         mode: 'deep_hunt',
         approval_receipt_id: approvalReceiptId,
+        origin_url: originUrl || launchTarget.url,
       })
       setSession(started)
       setSelectedRunId(started.run_id)
@@ -211,7 +223,7 @@ function DeepHuntPage() {
     if (!activeTarget) return
     setVerifyingId(finding.id)
     try {
-      const receiptId = await createTargetPolicyApproval(activeTarget.id, activeTarget.url, 30, 'credential')
+      const receiptId = await createTargetPolicyApproval(activeTarget.id, activeOrigin || activeTarget.url, 30, 'credential')
       const result = await verifySuspectedAgentFinding(finding.id, receiptId)
       if (result.verified) {
         toast.success('Verified — promoted through the proof moat', { link: { href: `/findings/${result.verified_finding_id || finding.id}`, label: 'View finding' } })
@@ -260,6 +272,22 @@ function DeepHuntPage() {
                 {targets.map((t) => <option key={t.id} value={t.id}>{targetLabel(t)} · {hostFromUrl(t.url)}</option>)}
               </Select>
             </Field>
+            {launchTarget ? (
+              <>
+                <Field label="Origin" hint="Scheme and port used for requests. You can enter another HTTP(S) origin on this same host.">
+                  <Input
+                    list="deep-hunt-origins"
+                    value={originUrl}
+                    onChange={(e) => setOriginUrl(e.target.value)}
+                    placeholder={launchTarget.url}
+                    spellCheck={false}
+                  />
+                </Field>
+                <datalist id="deep-hunt-origins">
+                  {launchOrigins.map((origin) => <option key={origin} value={origin} />)}
+                </datalist>
+              </>
+            ) : null}
             <Field label="Objective" hint="What should it investigate? The AI chooses its own requests and tools.">
               <Textarea value={objective} onChange={(e) => setObjective(e.target.value)} rows={3} maxLength={2000} />
             </Field>
@@ -273,7 +301,7 @@ function DeepHuntPage() {
             </div>
             <div className="flex items-center justify-between gap-3 border-t border-gray-800 pt-4">
               <p className="text-xs text-gray-500">
-                Active, same-origin security testing with hard turn, request, and action ceilings. Arbitrary write requests remain blocked; deterministic workflows handle proof and controlled mutation.
+                Active security testing stays on the selected target host and concrete origin, with hard turn, request, and action ceilings. Arbitrary write requests remain blocked; deterministic workflows handle proof and controlled mutation.
               </p>
               <Button onClick={() => setPendingStart(true)} loading={starting} disabled={!targetId} className="min-w-36">
                 <Rocket className="h-4 w-4" />Start Deep Hunt
@@ -308,8 +336,8 @@ function DeepHuntPage() {
         title="Authorize Deep Hunt?"
         message={
           <div className="space-y-2">
-            <p>Deep Hunt performs AI-driven exploration and bounded active exploitation against <span className="font-mono text-gray-200">{launchTarget ? hostFromUrl(launchTarget.url) : 'this target'}</span>.</p>
-            <p className="text-xs text-gray-500">Continue only if you own the target or have explicit permission. This creates a target-scoped, expiring credential-tier approval. Requests remain same-origin and bounded; arbitrary write methods stay blocked.</p>
+            <p>Deep Hunt performs AI-driven exploration and bounded active exploitation against <span className="font-mono text-gray-200">{originUrl || (launchTarget ? launchTarget.url : 'this target')}</span>.</p>
+            <p className="text-xs text-gray-500">Continue only if you own the target or have explicit permission. This creates a host-scoped, expiring credential-tier approval. Requests remain on that host and use an explicit scheme/port origin; arbitrary write methods stay blocked.</p>
           </div>
         }
         confirmLabel="Authorize & start"
@@ -386,6 +414,7 @@ function SessionMonitor({
             <span className="text-xs tabular-nums text-gray-500">turn {session.iterations}/{session.max_iterations}</span>
           </div>
           <p className="mt-1 line-clamp-2 text-xs text-gray-500">{session.objective}</p>
+          {session.target_url ? <p className="mt-1 truncate font-mono text-[11px] text-blue-300">{session.target_url}</p> : null}
         </div>
         {!terminal ? (
           <Button variant="danger" onClick={onCancel} loading={cancelling}><CircleStop className="h-4 w-4" />Stop</Button>

@@ -52,6 +52,10 @@ target binding, approvals, budgets, evidence, and finding proof.
 | Multi-node fleet setup or operations | Check `/workers.fleet`, then use `shakerscan fleet *`, `shakerscan join`, and `/fleet/*` only when supported/enabled |
 | Exhaustive operation or schema lookup | Read `AGENTS.md` and the live `/openapi.json` |
 
+Web DAST and Deep Hunt use one durable target per host. Different HTTP(S) schemes and ports share
+findings, inventory, credentials, and history, while each scan or hunt keeps its exact concrete
+origin. Model Intake artifacts remain exact-subject targets.
+
 ## Apply Safety Gates
 
 - Never scan a target without ownership or explicit authorization.

@@ -1781,6 +1781,7 @@ export interface Target {
   investigator_suspected_count?: number
   created_at: string
   asm_coverage?: AsmCoverageRollup | null
+  origins?: string[]
 }
 
 export interface GroupedDomain {
@@ -3633,6 +3634,8 @@ export interface AgentHuntResult {
 export interface AgentHuntSession {
   run_id: string | null
   target_id: string | null
+  target_url: string | null
+  target_origins: string[]
   objective: string
   status: AgentHuntStatus
   awaiting_planner: boolean
@@ -3707,6 +3710,7 @@ export async function startAgentHuntSession(
     token_budget?: number
     mode?: 'read_only' | 'deep_hunt'
     approval_receipt_id?: string
+    origin_url?: string
   },
 ): Promise<AgentHuntSession> {
   const res = await fetch(`${API_URL}/agent/hunt/${encodeURIComponent(targetId)}/session`, {

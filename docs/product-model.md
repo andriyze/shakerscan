@@ -38,7 +38,7 @@ Agents must preserve these distinctions:
 Deep Hunt is one user workflow. The current coding-agent session:
 
 1. reads a redacted target context;
-2. composes its own same-origin probes;
+2. composes its own probes against an explicit HTTP(S) origin on the selected target host;
 3. queries stored endpoints, findings, leads, and principal state;
 4. runs bounded active scanner templates when authorized;
 5. can compare responses across controls and principals when managed principals are configured;
@@ -56,6 +56,10 @@ Deep Hunt requires:
 - the server gated-execution policy, enabled in standard installs and globally disabled with
   `AI_OPS_ROUTER_EXECUTE_ENABLED=false` when required;
 - hard turn, request, and active-action ceilings.
+
+DAST and Deep Hunt treat a web host as one durable target across schemes and ports. Concrete origins
+remain explicit execution choices, so `http://app:8080` and `https://app:9090` share history without
+silently redirecting requests between them.
 
 The free-form loop may use approved active scanner templates. Arbitrary state-changing HTTP remains
 blocked; controlled mutations belong to typed workflows with cleanup, restoration, and proof
