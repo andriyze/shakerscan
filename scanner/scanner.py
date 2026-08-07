@@ -12800,16 +12800,35 @@ async def build_report(target: str,
     request_budget_telemetry = request_meter.snapshot()
     request_budget_telemetry["hooks"] = request_meter_hooks
     report["request_budget"] = request_budget_telemetry
-    request_budget_stopped = bool(
-        request_budget_telemetry.get("rejected_requests")
+    request_budget_exhausted = bool(
+        request_budget_telemetry.get("budget_exhausted")
         and request_budget_telemetry.get("mode") == "enforce"
+    )
+    unmetered_network_blocked = bool(
+        request_budget_telemetry.get("unmetered_tool_invocations")
+        and request_budget_telemetry.get("mode") == "enforce"
+    )
+    request_budget_limited = request_budget_exhausted or unmetered_network_blocked
+    request_budget_reason = (
+        "request_budget_exhausted"
+        if request_budget_exhausted
+        else "unmetered_network_tools_blocked"
+        if unmetered_network_blocked
+        else "request_budget_accounted"
+    )
+    request_budget_receipt_status = (
+        "failed"
+        if request_budget_exhausted
+        else "blocked"
+        if unmetered_network_blocked
+        else "completed"
     )
     report.setdefault("scanner_execution_receipts", []).append({
         "family": "request_budget",
         "phase": "scan",
         "dispatch_adapter": "shared_request_meter",
-        "status": "failed" if request_budget_stopped else "completed",
-        "reason": "request_budget_exhausted" if request_budget_stopped else "request_budget_accounted",
+        "status": request_budget_receipt_status,
+        "reason": request_budget_reason,
         "telemetry_schema": "request_meter_v1",
         "proof_contract": [
             "planned_requests", "reserved_requests", "attempted_requests",
@@ -12817,11 +12836,15 @@ async def build_report(target: str,
         ],
         "telemetry": request_budget_telemetry,
     })
-    if request_budget_stopped:
+    if request_budget_limited:
         checks_skipped.append({
             "check": "outbound_requests",
-            "reason": "request_budget_exhausted",
-            "impact": "remaining network-backed checks were not run",
+            "reason": request_budget_reason,
+            "impact": (
+                "remaining network-backed checks were not run"
+                if request_budget_exhausted
+                else "network tools without shared request metering were blocked"
+            ),
             "configured": True,
         })
     if active_checks and public_only:

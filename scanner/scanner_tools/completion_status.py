@@ -290,12 +290,17 @@ def build_scan_completion_status(
         capped_lists["urls"] = {k: v for k, v in discovery_cap.items() if v is not None}
 
     any_capped = any(bool(value.get("capped")) for value in capped_lists.values() if isinstance(value, dict))
-    request_budget_stopped = bool(
+    request_budget_rejected = bool(
         isinstance(request_budget, dict)
         and request_budget.get("mode") == "enforce"
         and int(request_budget.get("rejected_requests") or 0) > 0
     )
-    if request_budget_stopped:
+    request_budget_exhausted = bool(
+        isinstance(request_budget, dict)
+        and request_budget.get("mode") == "enforce"
+        and request_budget.get("budget_exhausted")
+    )
+    if request_budget_exhausted:
         budget_exhausted = True
         budget_exhausted_at = "request_budget"
     if any_capped and not budget_exhausted:
@@ -305,7 +310,7 @@ def build_scan_completion_status(
             if (capped_lists.get("active_endpoints") or {}).get("capped")
             else "discovery"
         )
-    limited = bool(skipped_modules or any_capped or request_budget_stopped)
+    limited = bool(skipped_modules or any_capped or request_budget_rejected)
     normalized_coverage = coverage_status or "unknown"
 
     return {

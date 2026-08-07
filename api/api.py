@@ -22415,7 +22415,7 @@ async def create_target(request: TargetCreate):
                 INSERT INTO targets (url, name, root_domain, is_root, scan_options, asm_enabled, asm_config)
                 VALUES ($1, $2, $3, $4, $5, $6, $7)
                 ON CONFLICT (canonical_key) DO UPDATE SET url = targets.url
-                RETURNING id, url, (xmax = 0) AS created
+                RETURNING id, url, root_domain, is_root, (xmax = 0) AS created
             """, normalized_target, request.name, root_domain, is_root,
                  json.dumps(_attach_target_note(request.scan_options or {}, request.url, target_note, scheme_inferred)),
                  _default_asm_enabled_for_new_web_target("manual"),
@@ -22424,8 +22424,11 @@ async def create_target(request: TargetCreate):
             response = {
                 'id': str(row['id']),
                 'url': row['url'],
-                'root_domain': root_domain,
-                'is_root': is_root,
+                # When a different origin reuses an existing host-level target,
+                # report the stored target metadata rather than metadata derived
+                # from the just-submitted origin.
+                'root_domain': row['root_domain'],
+                'is_root': row['is_root'],
                 'status': 'created' if row['created'] else 'already_exists'
             }
             # Surface warning if path/query was stripped

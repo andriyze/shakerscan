@@ -18069,6 +18069,39 @@ def test_normalize_target_url_preserves_operator_choice_for_all_http_targets():
         assert norm
 
 
+def test_create_target_reuse_reports_stored_host_metadata(monkeypatch):
+    """A new origin may reuse a target whose stored root classification differs."""
+    existing_id = uuid.uuid4()
+
+    class Conn:
+        async def fetchrow(self, query, *args):
+            assert "RETURNING id, url, root_domain, is_root" in query
+            return {
+                "id": existing_id,
+                "url": "http://localhost:3001",
+                "root_domain": "localhost",
+                "is_root": False,
+                "created": False,
+            }
+
+    monkeypatch.setattr(api_module, "db_pool", _pool_for(Conn()))
+    request = types.SimpleNamespace(
+        url="https://localhost:9090",
+        name="alternate origin",
+        scan_options={},
+    )
+
+    response = asyncio.run(api_module.create_target(request))
+
+    assert response == {
+        "id": str(existing_id),
+        "url": "http://localhost:3001",
+        "root_domain": "localhost",
+        "is_root": False,
+        "status": "already_exists",
+    }
+
+
 def test_cors_allow_origins_is_an_allowlist_not_wildcard(monkeypatch):
     """Audit P0-1: CORS must never be `*`; it must include the local UI origin and honor env
     extension, so a foreign origin is not reflected."""

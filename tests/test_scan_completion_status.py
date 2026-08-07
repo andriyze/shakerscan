@@ -68,13 +68,35 @@ def test_completion_status_marks_clean_complete_scan():
 def test_completion_status_degrades_enforced_request_budget_stop():
     status = build_scan_completion_status(
         coverage_status="complete",
-        request_budget={"mode": "enforce", "rejected_requests": 1},
+        request_budget={
+            "mode": "enforce",
+            "rejected_requests": 1,
+            "budget_exhausted": True,
+        },
     )
 
     assert status["complete"] is False
     assert status["limited"] is True
     assert status["budget_exhausted"] is True
     assert status["budget_exhausted_at"] == "request_budget"
+
+
+def test_completion_status_does_not_call_unmetered_tool_block_a_budget_exhaustion():
+    status = build_scan_completion_status(
+        coverage_status="complete",
+        request_budget={
+            "mode": "enforce",
+            "rejected_requests": 4,
+            "unmetered_tool_invocations": 4,
+            "budget_exhausted": False,
+            "remaining_requests": 368,
+        },
+    )
+
+    assert status["complete"] is True
+    assert status["limited"] is True
+    assert status["budget_exhausted"] is False
+    assert status["budget_exhausted_at"] is None
 
 
 def test_completion_status_records_config_skips_without_budget_failure():
