@@ -18505,3 +18505,27 @@ def test_model_intake_queue_persists_content_free_evaluation_not_vectors(monkeyp
     assert "synthetic secret" not in serialized
     assert "evaluation_spec_json" not in captured["stored_options"]
     assert captured["stored_options"]["generated_evaluation_report"]["status"] == "PASS"
+
+
+def test_queue_delivery_prefers_durable_broker_reclaim_evidence():
+    payload = api_module._scan_queue_delivery_payload(
+        "11111111-1111-4111-8111-111111111111",
+        {
+            "status": "completed",
+            "executing_node_id": "node-b",
+            "worker_id": "broker:node-b:abcdef123456",
+        },
+        {"queue_delivery_attempts": "1", "queue_reclaimed": "false"},
+        {
+            "delivery_attempts": 2,
+            "stream_key": "scan_jobs:leased",
+            "message_id": "123-0",
+            "consumer_name": "broker-node-b",
+        },
+    )
+
+    assert payload["delivery_attempts"] == 2
+    assert payload["reclaimed"] is True
+    assert payload["queue_message_id"] == "123-0"
+    assert payload["processing_queue"] == "scan_jobs:leased"
+    assert payload["consumer"] == "broker-node-b"

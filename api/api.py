@@ -21766,23 +21766,60 @@ async def get_scan_queue_delivery(scan_id: str):
             "SELECT id, job_id, status, executing_node_id, worker_id FROM scans WHERE id=$1",
             scan_uuid,
         )
+        broker_delivery = await conn.fetchrow(
+            """
+            SELECT delivery_attempts, stream_key, message_id, consumer_name
+            FROM broker_job_leases
+            WHERE scan_id=$1
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            scan_uuid,
+        )
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
     metadata = _redis_hash_text(get_redis().hgetall(f"job:{scan['job_id']}")) if scan.get("job_id") else {}
+    return _scan_queue_delivery_payload(scan_id, scan, metadata, broker_delivery)
+
+
+def _scan_queue_delivery_payload(
+    scan_id: str,
+    scan: Mapping[str, Any],
+    metadata: Mapping[str, str],
+    broker_delivery: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Merge local Stream metadata with durable broker delivery evidence."""
     try:
         attempts = int(metadata.get("queue_delivery_attempts") or 0)
-    except ValueError:
+    except (TypeError, ValueError):
         attempts = 0
+    if broker_delivery:
+        try:
+            attempts = max(attempts, int(broker_delivery.get("delivery_attempts") or 0))
+        except (TypeError, ValueError):
+            pass
     return {
         "scan_id": scan_id,
         "status": str(scan.get("status") or ""),
         "executing_node_id": str(scan.get("executing_node_id") or "") or None,
         "worker_id": str(scan.get("worker_id") or "") or None,
-        "queue_message_id": metadata.get("queue_message_id") or None,
+        "queue_message_id": (
+            (str(broker_delivery.get("message_id") or "") if broker_delivery else "")
+            or metadata.get("queue_message_id")
+            or None
+        ),
         "delivery_attempts": attempts,
-        "reclaimed": metadata.get("queue_reclaimed", "").lower() == "true",
-        "consumer": metadata.get("queue_consumer") or None,
-        "processing_queue": metadata.get("processing_queue") or None,
+        "reclaimed": metadata.get("queue_reclaimed", "").lower() == "true" or attempts >= 2,
+        "consumer": (
+            (str(broker_delivery.get("consumer_name") or "") if broker_delivery else "")
+            or metadata.get("queue_consumer")
+            or None
+        ),
+        "processing_queue": (
+            (str(broker_delivery.get("stream_key") or "") if broker_delivery else "")
+            or metadata.get("processing_queue")
+            or None
+        ),
     }
 
 

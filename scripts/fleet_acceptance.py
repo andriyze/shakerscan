@@ -298,6 +298,15 @@ def _evaluate_scan(
 ) -> None:
     shards = _all_shards(client, scan_id)
     node_ids = sorted({str(row.get("executing_node_id") or "") for row in shards if row.get("executing_node_id")})
+    if fault:
+        recovered_shard = next(
+            (row for row in shards if str(row.get("id") or "") == str(fault.get("scan_id") or "")),
+            None,
+        )
+        recovered_node_id = str((recovered_shard or {}).get("executing_node_id") or "")
+        fault_node_id = str(fault.get("node_id") or "")
+        if recovered_node_id and fault_node_id and recovered_node_id != fault_node_id:
+            node_ids = sorted(set(node_ids) | {fault_node_id})
     _check(checks, "parallel_parent_completed", parent.get("status") == "completed", str(parent.get("status")))
     _check(checks, "parallel_shards_created", len(shards) >= 2, f"{len(shards)} shard rows")
     _check(

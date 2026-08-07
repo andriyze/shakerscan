@@ -224,3 +224,46 @@ def test_physical_fault_kills_only_attributed_container(monkeypatch):
         "root@worker-a.example.test", "docker", "kill", "abcdef123456",
         ],
     ]
+
+
+def test_physical_reclaim_counts_fault_and_recovery_nodes():
+    parent_id = "11111111-1111-4111-8111-111111111111"
+    shard_id = "22222222-2222-4222-8222-222222222222"
+    fault = {"scan_id": shard_id, "node_id": "node-a"}
+    shards = [{
+        "id": shard_id,
+        "status": "completed",
+        "executing_node_id": "node-b",
+        "execution_context": {
+            "credential_scope": "broker_job_lease",
+            "worker_id": "broker:node-b:abcdef123456",
+        },
+    }]
+
+    class Client:
+        def request(self, _method, path):
+            if path == f"/scans/{parent_id}":
+                return {"shards": shards}
+            if path == f"/scans/{shard_id}":
+                return {"findings": []}
+            if path == f"/scans/{shard_id}/queue-delivery":
+                return {
+                    "status": "completed",
+                    "executing_node_id": "node-b",
+                    "delivery_attempts": 2,
+                    "reclaimed": True,
+                }
+            if path.endswith("/result"):
+                return {"result": {"score": 100}}
+            if "/artifacts?" in path:
+                return {
+                    "artifacts": [{"status": "available", "content_sha256": "a" * 64, "size_bytes": 10}]
+                }
+            raise AssertionError(path)
+
+    checks = []
+    fleet_acceptance._evaluate_scan(Client(), parent_id, {"status": "completed"}, checks, fault)
+
+    by_name = {item["name"]: item for item in checks}
+    assert by_name["cross_node_shard_execution"]["pass"] is True
+    assert by_name["physical_worker_loss_recovered"]["pass"] is True
