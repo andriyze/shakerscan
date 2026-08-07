@@ -1606,6 +1606,125 @@ def test_fleet_desired_state_requires_digest_pinned_rollout_image():
     assert api_module.FleetDesiredStateRequest(worker_image_digest=digest).worker_image_digest == digest
 
 
+def test_fleet_desired_state_uses_a_heartbeat_independent_timestamp(monkeypatch):
+    node_id = uuid.uuid4()
+    desired_changed_at = api_module.datetime.now(api_module.timezone.utc)
+
+    class AsyncContext:
+        def __init__(self, value):
+            self.value = value
+
+        async def __aenter__(self):
+            return self.value
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Conn:
+        def transaction(self):
+            return AsyncContext(self)
+
+    class Pool:
+        def __init__(self, conn):
+            self.conn = conn
+
+        def acquire(self):
+            return AsyncContext(self.conn)
+
+    async def authenticate(_conn, *, node_id, credential):
+        assert credential == "node-secret"
+        return {
+            "id": uuid.UUID(node_id),
+            "desired_worker_count": 1,
+            "desired_state_version": 2,
+            "applied_state_version": 1,
+            "worker_image_digest": "registry/shakerscan@sha256:" + "a" * 64,
+            "rollout_in_progress": True,
+            "desired_state_changed_at": desired_changed_at,
+            "updated_at": desired_changed_at + api_module.timedelta(minutes=5),
+            "status": "draining",
+            "drain": True,
+        }
+
+    monkeypatch.setattr(api_module, "db_pool", Pool(Conn()))
+    monkeypatch.setattr(api_module, "_require_fleet_https", lambda _request: None)
+    monkeypatch.setattr(api_module, "_fleet_bearer_credential", lambda _request: "node-secret")
+    monkeypatch.setattr(api_module, "_authenticate_fleet_node", authenticate)
+
+    state = asyncio.run(api_module.get_fleet_node_state(str(node_id), object()))
+    assert state["desired_state_changed_at"] == desired_changed_at.isoformat()
+
+
+def test_fleet_rollout_update_advances_desired_state_timestamp(monkeypatch):
+    node_id = uuid.uuid4()
+    digest = "registry/shakerscan@sha256:" + "b" * 64
+
+    class AsyncContext:
+        def __init__(self, value):
+            self.value = value
+
+        async def __aenter__(self):
+            return self.value
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Conn:
+        def __init__(self):
+            self.update_sql = ""
+            self.calls = 0
+
+        def transaction(self):
+            return AsyncContext(self)
+
+        async def fetchrow(self, sql, *_args):
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "id": node_id,
+                    "status": "healthy",
+                    "desired_worker_count": 1,
+                    "desired_state_version": 1,
+                    "drain": False,
+                    "worker_image_digest": "registry/shakerscan@sha256:" + "a" * 64,
+                }
+            self.update_sql = " ".join(sql.split())
+            return {
+                "id": node_id,
+                "status": "draining",
+                "desired_worker_count": 1,
+                "desired_state_version": 2,
+                "applied_state_version": 1,
+                "drain": True,
+                "rollout_in_progress": True,
+                "worker_image_digest": digest,
+            }
+
+    class Pool:
+        def __init__(self, conn):
+            self.conn = conn
+
+        def acquire(self):
+            return AsyncContext(self.conn)
+
+    async def record_event(*_args, **_kwargs):
+        return None
+
+    conn = Conn()
+    monkeypatch.setattr(api_module, "db_pool", Pool(conn))
+    monkeypatch.setattr(api_module, "_require_fleet_operator", lambda _request: None)
+    monkeypatch.setattr(api_module, "_record_fleet_node_event", record_event)
+
+    asyncio.run(
+        api_module.update_fleet_node_state(
+            str(node_id),
+            api_module.FleetDesiredStateRequest(worker_image_digest=digest),
+            object(),
+        )
+    )
+    assert "desired_state_changed_at = NOW()" in conn.update_sql
+
+
 def test_broker_lease_models_bound_worker_and_heartbeat_payloads():
     lease = api_module.BrokerLeaseRequest(worker_id="node-1:worker.2", wait_seconds=30)
     assert lease.wait_seconds == 30

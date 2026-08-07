@@ -1173,6 +1173,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     active_worker_image_digest TEXT,
     agent_version TEXT,
     desired_state_version INTEGER NOT NULL DEFAULT 1 CHECK (desired_state_version > 0),
+    desired_state_changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     applied_state_version INTEGER NOT NULL DEFAULT 0 CHECK (applied_state_version >= 0),
     last_error TEXT,
     desired_worker_count INTEGER NOT NULL DEFAULT 0 CHECK (desired_worker_count BETWEEN 0 AND 128),

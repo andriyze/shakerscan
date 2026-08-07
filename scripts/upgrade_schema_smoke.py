@@ -75,6 +75,21 @@ async def _assert_common(conn) -> None:
     if missing:
         raise RuntimeError(f"reusable fleet join-token migration is incomplete: {missing}")
 
+    desired_state_changed_at = await conn.fetchval(
+        """
+        SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'nodes'
+              AND column_name = 'desired_state_changed_at'
+              AND is_nullable = 'NO'
+        )
+        """
+    )
+    if not desired_state_changed_at:
+        raise RuntimeError("fleet desired-state timestamp migration is missing")
+
 
 async def _assert_dirty_merge(conn) -> None:
     rows = await conn.fetch(

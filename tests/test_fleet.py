@@ -510,6 +510,7 @@ def test_heartbeat_query_explicitly_types_nullable_status_parameters():
         assert result["status"] == "healthy"
         assert "last_error = $8::text" in conn.sql
         assert "WHEN $8::text IS NOT NULL" in conn.sql
+        assert "desired_state_changed_at" not in conn.sql
         assert conn.args[7] is None
 
     asyncio.run(run())

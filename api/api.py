@@ -8474,6 +8474,7 @@ async def scale_fleet_workers(body: FleetScaleRequest, request: Request):
                     UPDATE nodes
                     SET desired_worker_count=$2,
                         desired_state_version=desired_state_version + 1,
+                        desired_state_changed_at=NOW(),
                         updated_at=NOW()
                     WHERE id=$1 AND status <> 'disabled'
                     RETURNING desired_state_version
@@ -8604,9 +8605,10 @@ async def get_fleet_node_state(node_id: str, request: Request):
             "worker_image_digest": node.get("worker_image_digest"),
             "rollout_in_progress": bool(node.get("rollout_in_progress")),
             "desired_state_changed_at": (
-                node.get("updated_at").isoformat()
-                if node.get("updated_at") and hasattr(node.get("updated_at"), "isoformat")
-                else node.get("updated_at")
+                node.get("desired_state_changed_at").isoformat()
+                if node.get("desired_state_changed_at")
+                and hasattr(node.get("desired_state_changed_at"), "isoformat")
+                else node.get("desired_state_changed_at")
             ),
             "status": node.get("status"),
         }
@@ -8650,6 +8652,7 @@ async def update_fleet_node_state(node_id: str, body: FleetDesiredStateRequest, 
                         ELSE rollout_in_progress
                     END,
                     desired_state_version = desired_state_version + 1,
+                    desired_state_changed_at = NOW(),
                     status = CASE
                         WHEN ($4::text IS NOT NULL AND $4 IS DISTINCT FROM worker_image_digest)
                              OR rollout_in_progress
@@ -8714,6 +8717,7 @@ async def heartbeat_fleet_node(node_id: str, body: FleetHeartbeatRequest, reques
                         SET rollout_in_progress = false,
                             drain = false,
                             desired_state_version = desired_state_version + 1,
+                            desired_state_changed_at = NOW(),
                             status = 'joining',
                             updated_at = NOW()
                         WHERE id = $1
