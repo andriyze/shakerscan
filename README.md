@@ -347,8 +347,23 @@ continues to support standalone ShakerScan, but does not expose Fleet navigation
 capacity; a direct Fleet-page visit explains the Linux requirement. Standalone Linux installs also
 hide Fleet and remote placement until `fleet init` succeeds.
 
-ShakerScan can add digest-pinned worker VPSs to one control plane. Use the WireGuard transport for
-machines you own and trust with scoped Redis/PostgreSQL access:
+ShakerScan can add digest-pinned worker VPSs to one control plane. The supported 0.7.0 production
+transport is the outbound-only HTTPS broker. Broker workers receive no Redis, PostgreSQL, or
+object-store credentials:
+
+```bash
+# Control plane
+shakerscan fleet init --network broker \
+  --public-url https://scanner.example.com
+shakerscan fleet join-token --ttl 24h --transport broker
+
+# Worker VPS
+shakerscan join https://scanner.example.com --token <join-token> --transport broker
+```
+
+The built-in WireGuard workflow remains available as an operator preview for machines you own and
+trust, but it is excluded from the 0.7.0 production support boundary until its physical two-host
+acceptance passes in the next release cycle:
 
 ```bash
 # Control plane
@@ -359,19 +374,6 @@ shakerscan fleet join-token --ttl 24h
 
 # Worker VPS
 shakerscan join https://scanner.example.com --token <join-token>
-```
-
-Use the outbound-only HTTPS broker transport for customer-hosted or zero-trust worker nodes. Broker
-workers receive no Redis, PostgreSQL, or object-store credentials:
-
-```bash
-# Control plane
-shakerscan fleet init --network broker \
-  --public-url https://scanner.example.com
-shakerscan fleet join-token --ttl 24h --transport broker
-
-# Worker VPS
-shakerscan join https://scanner.example.com --token <join-token> --transport broker
 ```
 
 Join tokens are single-use by default. For a controlled multi-worker rollout, generate one bounded

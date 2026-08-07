@@ -1228,7 +1228,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Local-agent adapters | 4 | `api/command_arsenal.py` |
 | Scanner CLI flags | 158 | `scanner/scanner.py` |
 | Scanner wrapper commands | 27 | `scanner.sh` |
-| Make targets | 11 | `Makefile` |
+| Make targets | 12 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
 | Runtime environment keys | 310 | Python sources + Compose manifests |
 | Scanner modules | 99 | `scanner/scanner_tools/` |
@@ -1845,7 +1845,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Surface | Names |
 |---|---|
 | `scanner.sh` commands | `agent`, `ai`, `backup`, `build`, `doctor`, `env`, `fleet`, `gungnir`, `help`, `install-deps`, `join`, `logs`, `mcp`, `model-intake-runner`, `rebuild`, `reload`, `research`, `reset`, `restart`, `scale`, `scan`, `scan-full`, `scan-smart`, `shell`, `start`, `status`, `stop` |
-| Make targets | `dependency-audit`, `dependency-lock`, `e2e`, `e2e-ai-gate`, `e2e-dast`, `e2e-model-intake`, `e2e-model-intake-fixture`, `fleet-acceptance`, `release-gates`, `test`, `upgrade-smoke` |
+| Make targets | `dependency-audit`, `dependency-lock`, `e2e`, `e2e-ai-gate`, `e2e-dast`, `e2e-model-intake`, `e2e-model-intake-fixture`, `fleet-acceptance`, `installer-smoke`, `release-gates`, `test`, `upgrade-smoke` |
 | Release gates | `test:evidence-provenance`, `test:fleet-current`, `test:hypothesis-proof-promotion`, `test:mcp-read-only`, `test:no-ai-verified`, `test:no-benchmark-fitting`, `test:no-phantom-tools`, `test:planner-no-shell`, `test:planner-risk`, `test:planner-scope`, `test:scanner-auth-quality`, `test:scanner-bounds`, `test:scanner-proof-truth`, `test:scanner-registry-coverage` |
 
 ### Runtime Environment-Key Inventory

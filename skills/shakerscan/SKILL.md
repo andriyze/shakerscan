@@ -158,6 +158,11 @@ Host-side `shakerscan fleet` commands resolve the API bind persisted by `scanner
 loopback after a Tailscale-only `--remote` start unless the operator explicitly overrides
 `--local-api`.
 
+For the 0.7.0 release boundary, initialize and join production fleets with `--network broker` and
+`--transport broker`. WireGuard fleet transport is implemented preview code but is not a supported
+0.7.0 production topology; do not present it as release-accepted until its deferred two-host
+physical matrix passes in the next release cycle.
+
 Use node-level placement, not a worker-container identity. `node_id=local` selects control-plane
 workers; a Fleet UUID selects any healthy replica on that remote node. Keep automatic placement as
 the default because it preserves failover. A verified `shakerscan-fleet-local:*` node remains

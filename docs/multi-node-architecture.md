@@ -1,6 +1,6 @@
 # Multi-Node Architecture
 
-**Status:** Design authority + implementation complete; release-candidate physical acceptance pending. The fan-out
+**Status:** Design authority + implementation complete; broker release-candidate physical acceptance in progress. The fan-out
 substrate is shipped (see the code-grounded capability table below), and the durable node identity,
 bounded enrollment, authenticated heartbeat, and one-time connection-bundle API foundation is now
 implemented. The digest-pinned worker-only Compose runtime, pull-based node-agent, and versioned
@@ -11,10 +11,11 @@ per-scan worker/node attribution, current-vs-desired node drift derivation, flee
 per-node activity APIs are implemented. The Fleet operations UI is implemented with health/drift,
 separate local/remote capacity, current-work, per-node scaling, drain/resume, and revoke controls.
 Scan submission exposes automatic, control-plane-local, remote-fleet, and specific-remote-node execution location.
-A two-VPS HTTPS-broker development deployment has passed non-destructive topology/storage/lease
-preflight plus exact-node and remote-fleet quick scans with centralized results and artifacts. The
-digest-pinned release-candidate scan and destructive physical worker-loss/reclaim gate, and the
-equivalent WireGuard-topology acceptance, remain incomplete. Redis Stream
+A two-VPS HTTPS-broker deployment has passed non-destructive topology/storage/lease preflight plus
+exact-node and remote-fleet quick scans with centralized results and artifacts. Digest-pinned
+release-candidate and destructive physical worker-loss/reclaim evidence must still be retained on
+the final frozen SHA. WireGuard physical acceptance is deferred to the next release, so WireGuard
+remains preview code and is explicitly outside the 0.7.0 supported deployment boundary. Redis Stream
 lease/heartbeat/ack/reclaim delivery is implemented. The
 general artifact manifest, deterministic result/checkpoint/diagnostic upload, referenced screenshot
 centralization, hash-verified proxy download, cross-node stale recovery, fleet-worker fail-closed
@@ -23,7 +24,8 @@ and enforceable fleet-wide admission/request limits are implemented. Graceful dr
 one-at-a-time worker image rollout are implemented. The outbound-only Phase-3 HTTPS broker, thin
 worker runtime, broker enrollment, lease/result/artifact protocol, and control-plane ingestion are
 implemented. Capacity-weighted fleet-wide scaling, immutable execution-context snapshots, and
-durable per-node lifecycle events are implemented. Release-candidate physical acceptance remains.
+durable per-node lifecycle events are implemented. Broker release-candidate acceptance remains the
+0.7.0 production gate.
 **Scope:** run a coordinated ShakerScan fleet across multiple VMs/VPS hosts so one UI/API
 can scan more targets at once and run high-budget Full Coverage scans by using workers
 from many machines.
@@ -49,15 +51,15 @@ becoming stale prose. For product priority and phased order, see
 | Central artifact plane | **Built** — Compose forwards S3 settings and includes a digest-pinned MinIO profile that `fleet init` configures with generated credentials unless external S3 is already complete. Result JSON, live checkpoints, terminal diagnostics, and bounded referenced screenshots/files use deterministic keys plus a durable `scan_artifacts` manifest. Joined nodes fail closed when required upload/manifest persistence fails; the API hash-verifies proxy downloads, stale recovery reads remote checkpoints, one control-plane sweeper enforces retention, and fleet init requires a real PUT/GET/DELETE probe. | `artifact_storage.py`; `worker.py` `persist_result_artifact`, `_mirror_checkpoint`; `scan_artifact_retention_runner`; `GET /scans/{id}/artifacts` |
 | Job-queue delivery | **Built with leased delivery** — Redis Streams consumer groups, explicit ack/delete after successful dispatch, lease heartbeats, visibility-timeout reclaim, bounded delivery attempts, and fail-closed execution cancellation when lease ownership/heartbeat authority is lost. Pre-upgrade list entries remain drainable. | `job_queue.py`; `worker.py` `_run_job_under_lease` |
 | Remote worker scaling and rolling lifecycle | **Built per node** — the control plane changes versioned desired count/drain/image state; workers fail closed on drain before leasing and publish host-visible busy markers while executing; the pull agent waits a race-closure grace period, preserves busy workers, starts each digest-pinned successor before stopping its idle predecessor, and resumes scheduling only after the final image-confirming heartbeat. | `PATCH /fleet/nodes/{id}/state`; `worker.py` `_fleet_node_accepts_work`, `_fleet_busy_marker`; `fleet_agent.py` `drain_workers`, `rollout_worker_once` |
-| Node identity, enrollment, join tokens, heartbeat, credential rotation/revocation, CA bootstrap, overlay TLS edge, `nodes` table | **Foundation built and broker-tested on two VPSs** — release-candidate fault injection and WireGuard physical acceptance remain incomplete | `fleet.py`; `/fleet/*`; `fleet-edge`; `nodes`, `node_join_tokens`, `node_credentials` |
+| Node identity, enrollment, join tokens, heartbeat, credential rotation/revocation, CA bootstrap, overlay TLS edge, `nodes` table | **Foundation built and broker-tested on two VPSs** — broker fault injection is the 0.7.0 release gate; WireGuard physical acceptance is deferred to the next release | `fleet.py`; `/fleet/*`; `fleet-edge`; `nodes`, `node_join_tokens`, `node_credentials` |
 | Worker-only deployment and pull-based node-agent | **Built for owned-fleet lifecycle** — digest-pinned worker/agent-only Compose, owner-only local state, versioned desired state, local Docker reconciliation, graceful drain-to-zero, rolling image replacement, capacity/error heartbeat | `docker-compose.worker.yml`; `fleet_agent.py`; `GET|PATCH /fleet/nodes/{id}/state` |
-| WireGuard/CLI host provisioning | **Built, awaiting physical two-VPS acceptance** — aggregated preflight before mutation, tag-to-digest image resolution, route/port collision checks, automatic standalone backup, persistent identity, CA/server certificates, overlay/data binding, automatic or explicitly manual peer reconciliation, actionable TLS/handshake diagnostics, public HTTPS enrollment, overlay proof, one-time bundle persistence, worker-only startup | `scripts/fleet_cli.py`; `scanner.sh fleet`; `scanner.sh join` |
+| WireGuard/CLI host provisioning | **Built preview; excluded from 0.7.0 production support pending next-release physical two-VPS acceptance** — aggregated preflight before mutation, tag-to-digest image resolution, route/port collision checks, automatic standalone backup, persistent identity, CA/server certificates, overlay/data binding, automatic or explicitly manual peer reconciliation, actionable TLS/handshake diagnostics, public HTTPS enrollment, overlay proof, one-time bundle persistence, worker-only startup | `scripts/fleet_cli.py`; `scanner.sh fleet`; `scanner.sh join` |
 | Per-node execution attribution and fleet rollup | **Built** — scan/shard rows record the executing node and unique worker replica; revoked nodes fail closed and re-enqueue refused work; node API derives state/image drift and exposes recent activity | `scans.executing_node_id`; `worker.py` `_attribute_job_execution`; `GET /fleet/nodes`; `GET /fleet/nodes/{id}/activity` |
 | Fleet-wide scaling and node audit trail | **Built** — one operator request distributes an exact worker total across healthy schedulable nodes using reported CPU/worker weights and optional per-node caps. State changes, join, credential rotation, bundle delivery, heartbeat transitions, rollout completion, broker leases/results, and revocation create bounded credential-free node events. Every scan snapshots node, worker build/image, egress, transport, and credential scope at execution time. | `POST /fleet/scale`; `fleet.py` `distribute_worker_count`; `GET /fleet/nodes/{id}/events`; `fleet_node_events`; `scans.execution_context` |
 | Fleet UI | **Built** — host-aware, opt-in visibility hides Fleet navigation, remote counts, and remote placement on standalone installs; direct macOS visits explain the Linux boundary and direct uninitialized Linux visits show setup guidance. Enabled control planes get unified remote-node health/capacity/drift (including an explicit derived unhealthy state for a heartbeating node with reconciliation errors and a first-WireGuard-connection warning), separate local/remote/total available-worker capacity, recent attributed work, desired remote-worker scaling, graceful drain/resume, digest-pinned rollout, revoke confirmation, placement labels, and session-only remote operator credential handling. | `fleet_feature_state`; `ui/src/app/fleet/page.tsx`; `GET /health`/`GET /workers` `fleet`; `GET /workers` `execution_capacity`; sidebar `/fleet` |
 | Capability/region/egress placement | **Built** — scan options accept normalized placement constraints; jobs enter deterministic capability Streams; workers dynamically subscribe only to routes matching their node/region/network/residency/tier/tool labels. `node_scope=remote` selects any eligible joined node, `node_id=local` selects control-plane workers, and a Fleet UUID selects any healthy replica on that remote node. Broker-side leasing and overlay workers share the same remote-scope and canonical-node identity, so selection is transport-neutral. Equivalent eligible workers retain normal lease failover. Fleet join persists labels and the UI exposes Automatic, Control plane, Remote fleet, exact-node selection, and advanced constraints. | `job_queue.py` `routed_queue_name`, `qualified_route_queues`; `ScanOptions.placement`; `_broker_node_labels`; `_worker_placement_labels`; `/scan/new`; `/fleet` |
 | HTTPS broker for zero-trust nodes | **Built** — `--transport broker` enrolls an outbound-only node without WireGuard, Redis, PostgreSQL, or object-store credentials. Automatic HTTPS mode can provision a digest-pinned Caddy gateway with public-CA certificate renewal, a worker-route allowlist, post-start isolation checks, and rollback. Node/job-scoped HTTPS leases use hashed single-job tokens, Stream ownership heartbeat/reclaim, bounded delivery, global admission and root-domain reservations, progress/log forwarding, cancellation, lease-bound proxy artifact uploads, immutable result hashes, and idempotent control-plane ingestion for normal and shard scans. | `broker_worker.py`; `docker-compose.broker-worker.yml`; `fleet-gateway`; `/fleet/broker/*`; `broker_job_leases`; `broker_job_results` |
-| Physical acceptance automation | **Built; non-destructive broker preflight and remote execution verified on two VPSs in uniform local-build development mode** — the digest-pinned release-candidate scan, physical worker-loss/reclaim gate, and WireGuard-topology run remain required. One command validates node/current-image health, heartbeat/capacity, artifact-store writes, public Redis/PostgreSQL isolation, an isolated Redis server-time lease loss/reclaim/heartbeat/ack sequence, duplicate completion behavior, passive cross-node parallel shards, execution snapshots, finding dedupe, and central result/artifact manifests. It emits a content-free hashed receipt. | `shakerscan fleet accept`; `scripts/fleet_acceptance.py`; `tests/test_fleet_acceptance.py` |
+| Physical acceptance automation | **Built; broker preflight and remote execution verified on two VPSs** — the final frozen-SHA receipt must prove digest-pinned execution and physical worker-loss/reclaim. WireGuard-topology acceptance is a next-release gate. One command validates node/current-image health, heartbeat/capacity, artifact-store writes, public Redis/PostgreSQL isolation, an isolated Redis server-time lease loss/reclaim/heartbeat/ack sequence, duplicate completion behavior, passive cross-node parallel shards, execution snapshots, finding dedupe, and central result/artifact manifests. It emits a content-free hashed receipt. | `shakerscan fleet accept`; `scripts/fleet_acceptance.py`; `tests/test_fleet_acceptance.py` |
 
 The takeaways that shape the plan:
 
@@ -69,9 +71,8 @@ The takeaways that shape the plan:
   general result/checkpoint/diagnostic plane now share the S3-compatible store; the database manifest
   and hash-verified proxy are the supported cross-node contract (§8).
 - The node identity/enrollment/overlay and leased/acked/reclaimable queue are now implemented. The
-  largest remaining production gate is executing the complete digest-pinned physical multi-VPS
-  scan and failure-injection matrix on each release topology. The broker preflight and remote
-  execution path have been exercised on two VPSs in local-build development mode.
+  remaining 0.7.0 fleet gate is the complete digest-pinned broker scan and failure-injection matrix
+  on the frozen candidate. WireGuard is deliberately deferred rather than represented as accepted.
 
 The parallel-scan design answers: "How does one logical scan fan out into plan, shard, and merge
 jobs?" This document answers: "How can those worker jobs run safely on more than one host?"
@@ -950,7 +951,7 @@ Purpose: prove remote workers can consume jobs from the control plane.
 
 Acceptance criteria:
 
-- control plane and one worker VPS are connected over ShakerScan-managed WireGuard;
+- control plane and at least two worker VPSs are connected through the supported HTTPS broker;
 - control plane can create a short-lived join token;
 - worker VPS can join with one command after ShakerScan is installed;
 - joined worker instance appears in a fleet/node list with heartbeat and capacity;
@@ -999,8 +1000,8 @@ the operational gate for an unattended-production claim.
 
 | Decision | Recommendation |
 |---|---|
-| Overlay first or broker first? | **Resolved:** both are built. Use WireGuard/shared stores for owned nodes and HTTPS broker transport for untrusted/customer-hosted nodes. |
-| Tailscale or WireGuard? | Built-in WireGuard by default for the copy/paste VPS workflow; Tailscale remains optional for operators who already use it. |
+| Overlay first or broker first? | **Resolved for 0.7.0:** broker is the supported production transport. WireGuard is built preview code pending next-release physical acceptance. |
+| Tailscale or WireGuard? | Tailscale may protect operator UI access independently of worker transport. Built-in WireGuard worker transport is deferred to the next release. |
 | Self-hosted or managed data stores? | Self-host for early internal deployments; managed Postgres/Redis when HA or operational maturity matters. |
 | MinIO or cloud S3? | MinIO for self-hosted; S3-compatible API either way. |
 | Node-agent or orchestrator first? | Node-agent first. Revisit Nomad, Docker Swarm, or Kubernetes when fleet size and rollout complexity justify it. |
@@ -1008,16 +1009,15 @@ the operational gate for an unattended-production claim.
 
 ## Final Recommendation
 
-Begin the post-0.7 multi-node initiative in layers, while keeping DAST/auth quality and execution
-contracts as acceptance gates:
+Ship and extend multi-node in layers while keeping DAST/auth quality and execution contracts as
+acceptance gates:
 
-1. **Labeled lab proof:** run `shakerscan fleet accept` against two digest-pinned remote workers. The
-   shared Redis/Postgres and centralized-artifact implementation is not a production claim without
-   that physical receipt.
-2. **Owned-fleet hardening before unattended use:** the code paths are built: Stream fencing uses
+1. **0.7.0 broker gate:** run `shakerscan fleet accept` against two digest-pinned remote workers and
+   retain the content-free receipt for the exact frozen SHA.
+2. **Broker hardening before unattended use:** the code paths are built: Stream fencing uses
    Redis server idle time (not worker clocks), execution revalidates durable target/terminal state and
    current node/image/placement at dispatch, and request-budget telemetry is broken down by adapter.
    Preserve a passing physical acceptance receipt for the release candidate.
-3. **Zero-trust nodes:** use the implemented HTTPS broker transport when Redis/PostgreSQL/object-store
-   credentials must not leave the control plane; keep the overlay transport for owned nodes.
+3. **Next release:** execute and retain the equivalent WireGuard physical topology matrix before
+   promoting the built overlay transport from preview to supported production use.
 ---

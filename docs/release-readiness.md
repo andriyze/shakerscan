@@ -1,6 +1,6 @@
 # Release Readiness
 
-**Status (2026-08-06):** `0.7.0` candidate preparation continues on `v8`; `VERSION` remains
+**Status (2026-08-07):** `0.7.0` candidate preparation continues on `pre8`; `VERSION` remains
 `0.7.0`. Multi-node is now in candidate scope, but the branch is not release-ready until its
 physical fleet, upgrade, installer, benchmark, and full E2E gates pass on one frozen SHA.
 This is the single live release scope, stop-ship, validation, installer, and publication checklist.
@@ -30,6 +30,10 @@ multi-tenant security platform.
   are not promised in 0.7.0.
 - Target authentication remains core scanner functionality, including distinct-principal BOLA
   testing, credential rotation, and proof that the target accepted each test identity.
+- Multi-node production support in this candidate is limited to the outbound-only HTTPS **broker**
+  transport. The built-in WireGuard transport remains available as preview code, but it is excluded
+  from the 0.7.0 supported deployment boundary until its own two-host physical acceptance passes in
+  the next release cycle.
 
 ## Stop-ship contract
 
@@ -44,7 +48,7 @@ multi-tenant security platform.
 | **BUILD-01** | Release-critical tools, assets, templates, base images, source SHA, and final image digests are reproducible and auditable. | Immutable references/checksums, repeat-build inventory comparison, and published multi-architecture digests. |
 | **VAL-01** | One exact frozen candidate passes every applicable release gate and current-fleet acceptance run. | Candidate SHA, uniform worker fingerprints, content-free artifacts, installer smoke, E2E, and benchmark evidence. |
 | **REL-01** | Publication fails closed on the wrong SHA/version and the public docs describe the scoped product consistently. | Release workflow checks plus README, walkthrough, agent instructions, installer, API reference, release notes, and this checklist in agreement. |
-| **FLEET-01** | Multi-node enrollment, broker/overlay transport, placement, leases, artifacts, lifecycle controls, and build truth fail closed across real hosts. A local test build must remain visible as drift, and enrollment throttling must not trust caller-controlled forwarding metadata. | Two-VPS physical acceptance for the supported topology, worker-loss/reclaim and duplicate-result probes, reusable-token exhaustion/revocation, remote placement, artifact verification, and a clean/current fleet receipt. |
+| **FLEET-01** | Multi-node broker enrollment, placement, leases, artifacts, lifecycle controls, and build truth fail closed across real hosts. A local test build must remain visible as drift, and enrollment throttling must not trust caller-controlled forwarding metadata. WireGuard is explicitly outside the 0.7.0 support boundary. | Two-VPS physical acceptance for the broker topology, worker-loss/reclaim and duplicate-result probes, reusable-token exhaustion/revocation, remote placement, artifact verification, and a clean/current fleet receipt. |
 
 The release owner may accept a candidate exception only with rationale, compensating control, owner,
 and expiry. Known high/critical production dependency findings, untrustworthy proof, unsafe unbounded
@@ -123,8 +127,9 @@ candidate SHA.
       Development evidence on the current branch includes two healthy broker nodes on one uniform
       local source build and an exact-node quick scan with centrally persisted findings and an
       S3-backed result artifact; this is a smoke result, not frozen-candidate release evidence.
-- [ ] WireGuard mode either passes its physical acceptance matrix or is explicitly excluded from
-      the candidate's supported deployment boundary before release.
+- [x] WireGuard mode is explicitly excluded from the 0.7.0 supported deployment boundary and
+      deferred to the next release pending its own physical acceptance matrix. The implementation
+      remains available as preview code and is not removed.
 - [ ] Open P0/P1 audit items are fixed or explicitly accepted by the release owner with rationale.
 
 The implemented-versus-planned E2E matrix is maintained in [`E2E_TEST_PLAN.md`](E2E_TEST_PLAN.md).

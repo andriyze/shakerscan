@@ -4,6 +4,11 @@ This guide explains how to operate one ShakerScan control plane with worker node
 hosts. For the trust model and implementation details, see
 [Multi-Node Architecture](multi-node-architecture.md).
 
+> **0.7.0 support boundary:** production Fleet support is the outbound-only HTTPS `broker`
+> transport. The `wireguard` workflow is an operator preview for the next release and has not yet
+> passed its required physical two-host acceptance. Do not use WireGuard mode for a 0.7.0
+> production deployment.
+
 ## What You Are Building
 
 A fleet is one coordinated ShakerScan installation, not several independent scanners:
@@ -62,12 +67,14 @@ capacity. `GET /health` and `GET /workers` expose the same non-secret `fleet` ca
 
 | Transport | Use it when | Worker receives | Network requirement |
 |---|---|---|---|
-| `wireguard` | You own and trust the worker hosts | Scoped private Redis/PostgreSQL and artifact credentials | Worker must reach the control plane's WireGuard UDP port |
-| `broker` | The worker is customer-hosted or should have minimum control-plane access | A node credential and one job-scoped lease at a time; no database, Redis, or object-store credentials | Worker needs outbound HTTPS only |
+| `broker` | Supported in 0.7.0; use for owned or customer-hosted workers | A node credential and one job-scoped lease at a time; no database, Redis, or object-store credentials | Worker needs outbound HTTPS only |
+| `wireguard` | Preview for the next release; owned/trusted worker hosts only | Scoped private Redis/PostgreSQL and artifact credentials | Worker must reach the control plane's WireGuard UDP port |
 
-WireGuard offers the simplest high-throughput owned fleet. Broker mode has the smaller worker trust
-boundary. Both modes use digest-pinned worker images, authenticated node identities, leased jobs,
-centralized artifacts, and control-plane admission limits.
+Broker mode is the supported 0.7.0 path and has the smaller worker trust boundary. WireGuard is the
+planned high-throughput owned-fleet path after its physical acceptance is complete. Both modes use
+digest-pinned worker images, authenticated node identities, leased jobs, centralized artifacts,
+and control-plane admission limits, but implementation presence does not make the preview transport
+part of the current release support contract.
 
 ## Prerequisites
 
