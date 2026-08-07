@@ -1,6 +1,6 @@
 # Release Readiness
 
-**Status (2026-07-26):** `0.7.0` candidate preparation continues on `v8`; `VERSION` remains
+**Status (2026-08-06):** `0.7.0` candidate preparation continues on `v8`; `VERSION` remains
 `0.7.0`. Multi-node is now in candidate scope, but the branch is not release-ready until its
 physical fleet, upgrade, installer, benchmark, and full E2E gates pass on one frozen SHA.
 This is the single live release scope, stop-ship, validation, installer, and publication checklist.
@@ -120,6 +120,9 @@ candidate SHA.
 - [ ] Broker multi-node physical acceptance passes on the frozen candidate, including a bounded
       multi-use token, explicit revocation of unused enrollment capacity, node-specific placement,
       local-build drift visibility, lease loss/reclaim, and central artifact/result verification.
+      Development evidence on the current branch includes two healthy broker nodes on one uniform
+      local source build and an exact-node quick scan with centrally persisted findings and an
+      S3-backed result artifact; this is a smoke result, not frozen-candidate release evidence.
 - [ ] WireGuard mode either passes its physical acceptance matrix or is explicitly excluded from
       the candidate's supported deployment boundary before release.
 - [ ] Open P0/P1 audit items are fixed or explicitly accepted by the release owner with rationale.

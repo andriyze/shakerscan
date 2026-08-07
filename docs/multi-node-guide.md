@@ -376,7 +376,7 @@ fleet_api() {
 }
 
 fleet_api http://127.0.0.1:8080/fleet/nodes | jq
-curl -sS http://127.0.0.1:8080/workers | jq
+fleet_api http://127.0.0.1:8080/workers | jq
 ```
 
 The `fleet_api` helper is used by the operator examples below. It reaches the API from the API
@@ -419,9 +419,12 @@ execution capacity. `GET /workers` exposes the same aggregate under `execution_c
 }
 ```
 
-"Available" excludes stale, draining, state-drifted, image-drifted, and zero-worker remote nodes.
-The top-level `/workers.count` remains the local Docker worker count so existing local scaling
-clients remain compatible.
+"Available" excludes stale, draining, state-drifted, rolling, unexplained image-drifted, and
+zero-worker remote nodes. A verified `shakerscan-fleet-local:*` development node is the deliberate
+exception: it remains available for operator-selected testing while still reporting image drift and
+`local_build_active=true`. It is never production-current or benchmark-safe. The top-level
+`/workers.count` remains the local Docker worker count so existing local scaling clients remain
+compatible.
 
 Do not benchmark or rely on scan coverage while `/workers` reports stale or pending builds.
 
@@ -616,7 +619,7 @@ again. Do not copy shared credentials or weaken the delivery gate.
 | State or image drift persists | Inspect node-agent logs, Docker pull access, local disk/memory, and the digest. A mutable image tag is invalid. |
 | Routed scan remains pending | Confirm at least one recently heartbeating, non-draining node with active workers matches every placement constraint and supports the requested scan tier/tools. |
 | Bundle retry returns a conflict | The one-time response was already consumed. Revoke and re-enroll the incomplete node. |
-| Fleet API returns `403` remotely | Use HTTPS and the control plane's operator token. Binding a host port to loopback does not authenticate Docker-network callers. |
+| Fleet API returns `403` remotely | Use the control plane's operator token over HTTPS, or use the token over HTTP only through ShakerScan's verified live Tailscale bind. Binding a host port to loopback does not authenticate Docker-network callers. |
 | Redis/PostgreSQL is reachable publicly | Treat this as a deployment failure. Close the ports immediately and rerun physical preflight acceptance. |
 
 Useful diagnostics:
@@ -628,11 +631,13 @@ docker compose logs --tail=200 api
 fleet_api http://127.0.0.1:8080/fleet/nodes | jq
 
 # Worker host, from the ShakerScan runtime
-docker compose --env-file .shakerscan-fleet/node/compose.env \
+NODE_PROJECT="shakerscan-fleet-$(jq -r '.node_id' .shakerscan-fleet/node/state.json | cut -c1-8)"
+docker compose -p "$NODE_PROJECT" --env-file .shakerscan-fleet/node/compose.env \
   -f docker-compose.worker.yml logs --tail=200 node-agent worker
 
 # Broker worker host
-docker compose --env-file .shakerscan-fleet/node/compose.env \
+NODE_PROJECT="shakerscan-fleet-$(jq -r '.node_id' .shakerscan-fleet/node/state.json | cut -c1-8)"
+docker compose -p "$NODE_PROJECT" --env-file .shakerscan-fleet/node/compose.env \
   -f docker-compose.broker-worker.yml logs --tail=200 node-agent worker
 ```
 

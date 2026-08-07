@@ -40,7 +40,6 @@ import asyncpg
 import redis
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.params import Param
 from fastapi.responses import Response, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
@@ -29296,7 +29295,12 @@ async def _persist_operation_plan(conn, req: OperationPlanRequest) -> dict[str, 
 
 def _direct_query_value(value: Any) -> Any:
     """Unwrap FastAPI parameter defaults for trusted in-process endpoint calls."""
-    return value.default if isinstance(value, Param) else value
+    # Avoid coupling this module (and isolated test harnesses) to FastAPI's
+    # private Param base class while still recognizing Query/Header subclasses.
+    value_type = type(value)
+    if value_type.__module__ == "fastapi.params" and hasattr(value, "default"):
+        return value.default
+    return value
 
 
 def _optional_uuid(value: str | uuid.UUID | None) -> uuid.UUID | None:

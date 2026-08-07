@@ -18102,6 +18102,15 @@ def test_create_target_reuse_reports_stored_host_metadata(monkeypatch):
     }
 
 
+def test_direct_query_value_unwraps_fastapi_parameter_without_private_import():
+    query_type = type("Query", (), {"__module__": "fastapi.params"})
+    query = query_type()
+    query.default = "json"
+
+    assert api_module._direct_query_value(query) == "json"
+    assert api_module._direct_query_value("json") == "json"
+
+
 def test_cors_allow_origins_is_an_allowlist_not_wildcard(monkeypatch):
     """Audit P0-1: CORS must never be `*`; it must include the local UI origin and honor env
     extension, so a foreign origin is not reflected."""

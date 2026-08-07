@@ -160,7 +160,12 @@ loopback after a Tailscale-only `--remote` start unless the operator explicitly 
 
 Use node-level placement, not a worker-container identity. `node_id=local` selects control-plane
 workers; a Fleet UUID selects any healthy replica on that remote node. Keep automatic placement as
-the default because it preserves failover.
+the default because it preserves failover. A verified `shakerscan-fleet-local:*` node remains
+schedulable for development but must continue to report image drift and `local_build_active=true`;
+never use it as production-current or benchmark evidence. For worker-host logs, use the per-node
+Compose project derived from the first eight characters of `.shakerscan-fleet/node/state.json`'s
+`node_id`, as shown in the guide; plain `docker compose logs` may select an unrelated standalone
+project on the same host.
 
 ## Read Results
 
