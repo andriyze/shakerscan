@@ -613,6 +613,52 @@ def test_broker_runtime_forces_per_node_compose_project_and_skips_pull_for_local
     assert "pull" not in argv
 
 
+def test_persist_worker_runtime_template_captures_only_clone_allowlist(tmp_path, monkeypatch):
+    paths = fleet_cli.RuntimePaths(tmp_path)
+    paths.node.mkdir(parents=True)
+    state_path = paths.node / "state.json"
+    state_path.write_text(json.dumps({"node_id": NODE_ID}), encoding="utf-8")
+    state_path.chmod(0o600)
+
+    def fake_run(argv, **_kwargs):
+        if argv[:3] == ["docker", "ps", "-a"]:
+            return types.SimpleNamespace(returncode=0, stdout="worker123\n")
+        if argv[:2] == ["docker", "inspect"]:
+            return types.SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps([
+                    {
+                        "Config": {
+                            "Image": "shakerscan-fleet-local:abc1234",
+                            "Cmd": ["python3", "/app/broker_worker.py"],
+                            "Env": ["SAFE=1"],
+                            "Labels": {"com.docker.compose.project": "shakerscan-fleet-11111111"},
+                            "WorkingDir": "/app",
+                        },
+                        "HostConfig": {
+                            "Binds": ["/srv/results:/results:rw"],
+                            "NetworkMode": "fleet-test_default",
+                            "RestartPolicy": {"Name": "unless-stopped"},
+                            "Memory": 1024,
+                            "Privileged": True,
+                        },
+                    }
+                ]),
+            )
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(fleet_cli, "_run", fake_run)
+    fleet_cli._persist_worker_runtime_template(
+        paths,
+        {"node_id": NODE_ID, "worker_image_digest": IMAGE},
+    )
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["worker_runtime_template"]
+    assert persisted["Config"]["Cmd"] == ["python3", "/app/broker_worker.py"]
+    assert persisted["HostConfig"]["Binds"] == ["/srv/results:/results:rw"]
+    assert "Privileged" not in persisted["HostConfig"]
+
+
 def test_local_broker_image_cleanup_removes_only_obsolete_product_tags(monkeypatch):
     calls = []
 

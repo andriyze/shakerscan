@@ -103,6 +103,10 @@ def load_state(path: Path) -> dict[str, Any]:
     runtime_override = str(state.get("runtime_image_override") or "").strip()
     if runtime_override and not LOCAL_WORKER_IMAGE_RE.fullmatch(runtime_override):
         raise AgentError("runtime_image_override must be a ShakerScan local-build image")
+    if state.get("worker_runtime_template") is not None:
+        state["worker_runtime_template"] = _validated_worker_runtime_template(
+            state["worker_runtime_template"]
+        )
     try:
         normalize_tls_ca_state(state)
     except FleetTLSConfigurationError as exc:
@@ -188,6 +192,54 @@ def _safe_host_config(inspect: dict[str, Any]) -> dict[str, Any]:
     return {key: source[key] for key in allowed if key in source and source[key] is not None}
 
 
+def _validated_worker_runtime_template(value: Any) -> dict[str, Any]:
+    """Validate the root-owned fallback used after every worker container is lost.
+
+    The join command captures this from the Compose-created worker. Keeping only
+    the same fields that the ordinary clone path already permits prevents the
+    recovery path from becoming a broader Docker-control surface.
+    """
+    if not isinstance(value, dict):
+        raise AgentError("worker_runtime_template must be an object")
+    raw_config = value.get("Config") if isinstance(value.get("Config"), dict) else {}
+    image = str(raw_config.get("Image") or "").strip()
+    if not image:
+        raise AgentError("worker_runtime_template has no image")
+    command = raw_config.get("Cmd")
+    if not isinstance(command, list) or not command or len(command) > 32 or any(
+        not isinstance(item, str) or len(item) > 4096 for item in command
+    ):
+        raise AgentError("worker_runtime_template has an invalid command")
+    environment = raw_config.get("Env") or []
+    if not isinstance(environment, list) or len(environment) > 512 or any(
+        not isinstance(item, str) or len(item) > 16384 or "\n" in item or "\r" in item
+        for item in environment
+    ):
+        raise AgentError("worker_runtime_template has an invalid environment")
+    raw_labels = raw_config.get("Labels") or {}
+    if not isinstance(raw_labels, dict) or len(raw_labels) > 256 or any(
+        not isinstance(key, str)
+        or not isinstance(item, str)
+        or len(key) > 256
+        or len(item) > 4096
+        for key, item in raw_labels.items()
+    ):
+        raise AgentError("worker_runtime_template has invalid labels")
+    working_dir = str(raw_config.get("WorkingDir") or "")
+    if len(working_dir) > 4096:
+        raise AgentError("worker_runtime_template has an invalid working directory")
+    return {
+        "Config": {
+            "Image": image,
+            "Cmd": list(command),
+            "Env": list(environment),
+            "Labels": dict(raw_labels),
+            "WorkingDir": working_dir,
+        },
+        "HostConfig": _safe_host_config(value),
+    }
+
+
 def _container_number(container: dict[str, Any]) -> int:
     labels = container.get("Labels") if isinstance(container.get("Labels"), dict) else {}
     try:
@@ -219,6 +271,24 @@ def _clone_worker(
     image: str | None = None,
 ) -> str:
     inspect = _inspect_worker(client, template)
+    return _clone_worker_from_inspect(
+        client,
+        inspect,
+        number,
+        node_id,
+        image=image,
+    )
+
+
+def _clone_worker_from_inspect(
+    client: DockerClient,
+    inspect: dict[str, Any],
+    number: int,
+    node_id: str,
+    *,
+    image: str | None = None,
+) -> str:
+    inspect = _validated_worker_runtime_template(inspect)
     config = inspect.get("Config") if isinstance(inspect.get("Config"), dict) else {}
     labels = dict(config.get("Labels") or {})
     labels.update(
@@ -264,6 +334,7 @@ def reconcile_workers(
     node_id: str,
     desired_count: int,
     desired_image: str | None = None,
+    fallback_template: dict[str, Any] | None = None,
 ) -> int:
     desired = max(0, min(128, int(desired_count)))
     containers = sorted(worker_containers(client, node_id), key=_container_number)
@@ -291,17 +362,26 @@ def reconcile_workers(
 
     if needed > 0:
         templates = running or stopped
-        if not templates:
+        if not templates and fallback_template is None:
             raise AgentError("no worker template exists; start the worker-only Compose project first")
         next_number = max((_container_number(item) for item in containers), default=0) + 1
         for offset in range(needed):
-            _clone_worker(
-                client,
-                templates[0],
-                next_number + offset,
-                node_id,
-                image=desired_image,
-            )
+            if templates:
+                _clone_worker(
+                    client,
+                    templates[0],
+                    next_number + offset,
+                    node_id,
+                    image=desired_image,
+                )
+            else:
+                _clone_worker_from_inspect(
+                    client,
+                    fallback_template or {},
+                    next_number + offset,
+                    node_id,
+                    image=desired_image,
+                )
     return desired
 
 
@@ -411,6 +491,7 @@ def rollout_worker_once(
     desired_image: str,
     desired_count: int,
     busy_ids: set[str],
+    fallback_template: dict[str, Any] | None = None,
 ) -> bool:
     """Replace at most one old worker, starting its successor before stopping it."""
     containers = sorted(worker_containers(client, node_id), key=_container_number)
@@ -445,6 +526,7 @@ def rollout_worker_once(
         node_id=node_id,
         desired_count=desired_count,
         desired_image=desired_image,
+        fallback_template=fallback_template,
     )
     running = [item for item in worker_containers(client, node_id) if item.get("State") == "running"]
     return len(running) == max(0, min(128, int(desired_count))) and all(
@@ -531,6 +613,7 @@ def run_once(state: dict[str, Any], client: DockerClient) -> dict[str, Any]:
                 desired_image=desired_image,
                 desired_count=configured_count,
                 busy_ids=busy_container_ids(client=client, node_id=node_id),
+                fallback_template=state.get("worker_runtime_template"),
             )
             reconciliation_complete = rollout_complete
         elif draining:
@@ -545,6 +628,7 @@ def run_once(state: dict[str, Any], client: DockerClient) -> dict[str, Any]:
                 node_id=node_id,
                 desired_count=configured_count,
                 desired_image=effective_image or None,
+                fallback_template=state.get("worker_runtime_template"),
             )
             reconciliation_complete = True
     except Exception as exc:

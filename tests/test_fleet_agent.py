@@ -182,6 +182,53 @@ def test_worker_reconciliation_refuses_scale_up_without_template():
         fleet_agent.reconcile_workers(client, node_id=NODE_ID, desired_count=1)
 
 
+def test_worker_reconciliation_recovers_after_all_containers_are_removed():
+    client = FakeDocker()
+    _, template = client.request("GET", "/containers/one/json")
+    client.containers = []
+
+    assert fleet_agent.reconcile_workers(
+        client,
+        node_id=NODE_ID,
+        desired_count=2,
+        desired_image="shakerscan-fleet-local:abc1234",
+        fallback_template=template,
+    ) == 2
+
+    running = [item for item in client.containers if item["State"] == "running"]
+    assert len(running) == 2
+    assert {item["ImageName"] for item in running} == {"shakerscan-fleet-local:abc1234"}
+    creates = [body for method, path, body in client.calls if method == "POST" and path.startswith("/containers/create?")]
+    assert all(body["Cmd"] == ["python3", "/app/worker.py"] for body in creates)
+    assert all("Privileged" not in body["HostConfig"] for body in creates)
+
+
+def test_state_file_rejects_unsafe_worker_runtime_template(tmp_path):
+    state_path = tmp_path / "state.json"
+    base = {
+        "node_id": NODE_ID,
+        "node_credential": "node-secret",
+        "control_plane_url": "https://fleet.example.test",
+        "worker_image_digest": "registry/shakerscan@sha256:" + "a" * 64,
+        "transport": "broker",
+        "tls_ca_mode": "system",
+        "worker_runtime_template": {
+            "Config": {
+                "Image": "registry/shakerscan@sha256:" + "a" * 64,
+                "Cmd": ["python3", "/app/broker_worker.py"],
+                "Env": ["SAFE=1\nINJECTED=1"],
+                "Labels": {},
+            },
+            "HostConfig": {"Privileged": True},
+        },
+    }
+    state_path.write_text(json.dumps(base), encoding="utf-8")
+    state_path.chmod(0o600)
+
+    with pytest.raises(fleet_agent.AgentError, match="invalid environment"):
+        fleet_agent.load_state(state_path)
+
+
 def test_observed_worker_image_comes_from_container_not_desired_state():
     client = FakeDocker()
     containers = fleet_agent.worker_containers(client, NODE_ID)

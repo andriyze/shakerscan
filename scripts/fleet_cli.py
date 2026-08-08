@@ -1738,6 +1738,69 @@ def _write_compose_env(path: Path, values: dict[str, str]) -> None:
     atomic_write(path, "".join(f"{key}={value}\n" for key, value in sorted(values.items())), 0o600)
 
 
+def _persist_worker_runtime_template(paths: RuntimePaths, response: dict[str, Any]) -> None:
+    """Freeze the safe Compose worker shape for recovery after total container loss."""
+    state_path = paths.node / "state.json"
+    if not state_path.is_file():
+        return
+    project = f"shakerscan-fleet-{str(response['node_id'])[:8]}"
+    listed = _run(
+        [
+            "docker",
+            "ps",
+            "-a",
+            "--filter",
+            f"label=com.docker.compose.project={project}",
+            "--filter",
+            "label=com.docker.compose.service=worker",
+            "--format",
+            "{{.ID}}",
+        ],
+    )
+    container_ids = [line.strip() for line in str(listed.stdout or "").splitlines() if line.strip()]
+    if len(container_ids) != 1:
+        raise FleetCLIError(
+            f"expected one Compose worker while capturing recovery state, found {len(container_ids)}"
+        )
+    inspected = _run(["docker", "inspect", container_ids[0]])
+    try:
+        payload = json.loads(str(inspected.stdout or ""))
+        item = payload[0]
+        config = item["Config"]
+        host_config = item["HostConfig"]
+    except (json.JSONDecodeError, IndexError, KeyError, TypeError) as exc:
+        raise FleetCLIError("could not capture the Compose worker recovery state") from exc
+    allowed_host_keys = (
+        "Binds",
+        "NetworkMode",
+        "RestartPolicy",
+        "Memory",
+        "NanoCpus",
+        "CpuShares",
+        "Init",
+        "ShmSize",
+        "CapDrop",
+        "SecurityOpt",
+    )
+    template = {
+        "Config": {
+            "Image": config.get("Image"),
+            "Cmd": config.get("Cmd"),
+            "Env": config.get("Env") or [],
+            "Labels": config.get("Labels") or {},
+            "WorkingDir": config.get("WorkingDir") or "",
+        },
+        "HostConfig": {
+            key: host_config[key]
+            for key in allowed_host_keys
+            if key in host_config and host_config[key] is not None
+        },
+    }
+    state = _read_node_state(state_path)
+    state["worker_runtime_template"] = template
+    atomic_write(state_path, json.dumps(state, sort_keys=True, indent=2) + "\n", 0o600)
+
+
 def _start_worker_runtime(paths: RuntimePaths, response: dict[str, Any]) -> None:
     if not paths.worker_compose.is_file():
         raise FleetCLIError("docker-compose.worker.yml is missing from the runtime")
@@ -1761,6 +1824,7 @@ def _start_worker_runtime(paths: RuntimePaths, response: dict[str, Any]) -> None
         ],
         capture=False,
     )
+    _persist_worker_runtime_template(paths, response)
 
 
 def _build_local_broker_worker_image(paths: RuntimePaths) -> str:
@@ -1856,6 +1920,7 @@ def _start_broker_runtime(
         ],
         capture=False,
     )
+    _persist_worker_runtime_template(paths, response)
     if runtime_image is not None:
         removed = _prune_obsolete_local_broker_images(keep_image=runtime_image)
         if removed:
