@@ -1390,7 +1390,23 @@ def _plan_scope(
     requested: int,
     notes: list[str],
 ) -> list[ShardSpec]:
-    n = min(requested, len(endpoints))
+    # ``request_max`` is a parent-level traffic contract. Copying the resolved
+    # value into every child multiplies the caller's allowance by shard count
+    # and can also deadlock the scatter/gather workflow against the domain-wide
+    # hourly cap. Resolve it once, then partition that exact allowance across
+    # the disjoint endpoint buckets below.
+    resolved_parent_budget = parent_options.get("resolved_budget")
+    if not isinstance(resolved_parent_budget, dict):
+        resolved_parent_budget = resolve_scan_budget(
+            parent_options.get("scan_type") or "standard",
+            parent_options.get("budget_profile"),
+            parent_options.get("custom_budget") if isinstance(parent_options.get("custom_budget"), dict) else None,
+        )
+    try:
+        parent_request_max = max(1, int(resolved_parent_budget.get("request_max") or 1))
+    except (TypeError, ValueError):
+        parent_request_max = 1
+    n = min(requested, len(endpoints), parent_request_max)
     if n < 2:
         notes.append(
             f"scope strategy needs >=2 endpoints to fan out; got {len(endpoints)} "
@@ -1412,6 +1428,8 @@ def _plan_scope(
             "budget and kept resource-family endpoints together for cross-principal BOLA"
         )
     shards: list[ShardSpec] = []
+    assigned_endpoint_count = 0
+    total_endpoint_count = max(1, sum(len(bucket) for bucket in buckets))
     for i, slice_eps in enumerate(buckets):
         opts = _base_child_options(parent_options)
         opts["custom_endpoints"] = slice_eps
@@ -1419,6 +1437,10 @@ def _plan_scope(
         # Trim discovery and active breadth unless the caller provided stricter
         # custom caps. This is the raw speed path for known API endpoints.
         endpoint_count = max(1, len(slice_eps))
+        request_start = (parent_request_max * assigned_endpoint_count) // total_endpoint_count
+        assigned_endpoint_count += len(slice_eps)
+        request_end = (parent_request_max * assigned_endpoint_count) // total_endpoint_count
+        shard_request_max = max(1, request_end - request_start)
         budget_defaults = {
             "max_duration_minutes": max(5, min(10, 4 + (2 * endpoint_count))),
             "max_urls": 150,
@@ -1446,7 +1468,15 @@ def _plan_scope(
                 }
             )
         _merge_custom_budget_defaults(opts, budget_defaults)
+        # Deliberately override a caller-supplied parent request_max: it is the
+        # total logical-scan ceiling, not a per-child ceiling. Other explicit
+        # custom caps remain per-shard and continue to win above.
+        _merge_custom_budget(opts, {"request_max": shard_request_max})
         shards.append(ShardSpec(index=i, label=f"scope[{i}]", options=opts))
+    notes.append(
+        f"scope request budget partitioned across {len(shards)} shard(s) "
+        f"without exceeding parent request_max={parent_request_max}"
+    )
     return shards
 
 

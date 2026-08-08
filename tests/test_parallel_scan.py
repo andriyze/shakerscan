@@ -127,6 +127,46 @@ def test_scope_trims_discovery_budget():
         assert s.options["custom_budget"]["smart_bola_max_endpoints"] == 2
 
 
+def test_scope_partitions_parent_request_budget_without_multiplication():
+    eps = [f"GET /api/x{i}" for i in range(6)]
+    parent_options = {"scan_type": "quick", "custom_endpoints": eps}
+    parent_request_max = parallel_scan.resolve_scan_budget("quick")["request_max"]
+
+    plan = plan_shards(
+        parent_options,
+        scan_type="quick",
+        strategy="scope",
+        requested_shards=6,
+    )
+
+    child_limits = [shard.options["custom_budget"]["request_max"] for shard in plan.shards]
+    assert len(child_limits) == 6
+    assert all(limit > 0 for limit in child_limits)
+    assert sum(child_limits) == parent_request_max
+    assert all(shard.options["resolved_budget"]["request_max"] == limit
+               for shard, limit in zip(plan.shards, child_limits))
+    assert any("without exceeding parent request_max" in note for note in plan.notes)
+
+
+def test_scope_request_budget_smaller_than_requested_fanout_reduces_shards():
+    eps = [f"GET /api/x{i}" for i in range(6)]
+    plan = plan_shards(
+        {
+            "scan_type": "quick",
+            "custom_endpoints": eps,
+            "custom_budget": {"request_max": 3},
+        },
+        scan_type="quick",
+        strategy="scope",
+        requested_shards=6,
+    )
+
+    assert plan.shard_count == 3
+    assert sum(shard.options["custom_budget"]["request_max"] for shard in plan.shards) == 3
+    assigned = [endpoint for shard in plan.shards for endpoint in shard.options["custom_endpoints"]]
+    assert sorted(assigned) == sorted(eps)
+
+
 def test_scope_preserves_explicit_custom_budget_caps():
     eps = ["GET /a?id=1", "GET /b?id=2"]
     plan = plan_shards(
