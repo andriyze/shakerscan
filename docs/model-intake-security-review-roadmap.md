@@ -20,7 +20,7 @@ chooses the already implemented webhook; Kubernetes is not required by ShakerSca
 
 **Implementation and automation-boundary review:** 2026-07-29
 
-**Scope:** ShakerScan Model Intake, CodeRankEmbed, CodeSage Base v2, CodeSage Large v2, and the knowledge-graph/vector-embedding deployment path
+**Scope:** ShakerScan Model Intake and knowledge-graph/vector-embedding deployment paths
 
 **Audience:** Security engineering, ML platform, application security, infrastructure, legal/privacy, model owners, and release approvers
 
@@ -118,7 +118,7 @@ Implement and harden:
    executable host controller, fixed guest, provisioning/build scripts, and signed measured-telemetry path
    are implemented and physically exercised on KVM. Production still needs an organization-operated runner
    and trust anchor; no model receives a pass when runtime network attempts are present.
-4. Controlled CodeSage `.bin` to safetensors conversion inside Firecracker, followed by tensor and embedding
+4. Controlled supported `.bin` to safetensors conversion inside Firecracker, followed by tensor and embedding
    equivalence evidence and a complete rescan of the new artifact identity.
 5. The existing Python policy engine, approval model, signer service, OCI promotion path, CI verifier,
    Kubernetes admission webhook, UI/reporting, reassessment, and worker/storage lifecycle. The signer now
@@ -153,12 +153,8 @@ returns `INCOMPLETE`; it does not cause a new subsystem to be added.
 
 This document defines what ShakerScan can realistically automate, what remains to be implemented in
 ShakerScan, and which controls require organization-operated infrastructure or human authority. It also
-provides the complete security-review
-procedure for the following embedding models:
-
-- `nomic-ai/CodeRankEmbed`
-- `codesage/codesage-base-v2`
-- `codesage/codesage-large-v2`
+provides a complete security-review procedure for embedding models without tying product behavior or
+documentation scope to named repositories.
 
 The intended use is a corporate knowledge graph whose developers want vector embeddings. Approval must
 therefore cover more than the model file. It must cover the repository snapshot, executable model code,
@@ -197,7 +193,7 @@ grant business risk acceptance, or prove that an organization actually deploys o
 At the original checkout, the audit found these issues:
 
 1. Remote artifacts and related metadata were fetched before a complete destination-safety decision.
-2. The public download limit prevented complete hashing and inspection of the three example weight files.
+2. The public download limit prevented complete hashing and inspection of representative large weight files.
 3. The repository inventory excluded arbitrary Python files despite `trust_remote_code=True` requirements.
 4. SBOM, malware, secrets, and evaluation evidence was primarily caller-supplied.
 5. Unsafe-serialization detection was a bounded heuristic rather than semantic analysis.
@@ -213,16 +209,16 @@ The completed implementation and remaining validation order is:
    durable workflow events, idempotent evidence replay, and downstream admission/deployment invalidation.
 2. **Implemented and physically exercised:** deploy one disposable no-egress Firecracker/KVM loader for
    custom code, model construction, inference, known-answer embeddings, telemetry, and signed exact-bundle
-   receipts. The final CodeRankEmbed run passed every functional phase and exact known-answer replay; strict
+   receipts. A representative custom-code/safetensors run passed every functional phase and exact known-answer replay; strict
    policy then blocked the receipt on measured socket attempts. No alternate runner is in scope.
-3. **Implemented and physically exercised:** use that same Firecracker path to convert CodeSage Base v2 to
+3. **Implemented and physically exercised:** use that same Firecracker path to convert a representative pickle-backed embedding model to
    safetensors, prove tensor/embedding equivalence, register and rescan the new identity, then require a separate
-   safe-loader runtime job. Base conversion achieved exact tensor/numeric/embedding equivalence, but its target
+   safe-loader runtime job. The conversion achieved exact tensor/numeric/embedding equivalence, but its target
    was deliberately not registered because the strict network-attempt gate made the signed receipt non-pass.
    Do not admit the upstream pickle-capable artifact directly.
-4. CodeSage Large v2 also completed exact conversion/equivalence inside a 12 GiB envelope, peaking at
-   12,391,227,392 bytes. It remains a conditional higher-resource candidate and is not justified unless Base
-   cannot meet the versioned retrieval requirement. Do not add a GPU runner.
+4. A representative large pickle-backed model also completed exact conversion/equivalence inside a bounded
+   memory envelope. Higher-resource candidates remain conditional and must be justified against the versioned
+   retrieval requirement. Do not add a GPU runner.
 5. **Implemented; corporate acceptance pending:** harden policy, approvals, signer, OCI promotion, deployment
    verification, reporting, reassessment, storage, and failure recovery, then prove configured external paths.
 6. **Implemented:** the bounded keyless Codex planner is aligned across API, UI, and shipped skill without
@@ -230,13 +226,13 @@ The completed implementation and remaining validation order is:
 
 For a production profile, the correct decision for any exact model revision is **block/incomplete** until
 every required automated control has generated digest-bound evidence and the required corporate approvals
-and deployment bindings exist. No repository is approved merely because it is one of the three examples in
-this document.
+and deployment bindings exist. No repository is approved merely because it is used as a private validation
+fixture.
 
 ### 2.1 Implementation completion addendum
 
-ShakerScan now implements the roadmap as a model-agnostic admission framework rather than as logic tied to
-CodeRankEmbed or CodeSage. The named models remain immediate validation targets, but the same contracts accept
+ShakerScan now implements the roadmap as a model-agnostic admission framework. Private validation fixtures
+exercise the supported format families, while the same contracts accept
 other Hugging Face repositories, HTTPS artifacts, S3, GCS, Azure Blob, OCI registry exports, MLflow exports,
 and future source adapters.
 
@@ -315,7 +311,7 @@ deployment-approval declarations; Section 2.6 supersedes any earlier claim that 
 boundary is server-owned. Preflight remains non-admissible.
 Active strict saved profiles impose non-weakenable minimum acquisition, full Hugging Face snapshot, scanner,
 sandbox, evaluation, signed-admission, hash, governance, and deployment-approval requirements.
-Real controlled CodeRankEmbed and CodeSage runs now produce the required physical evidence. Their runbooks
+Real controlled format-family runs now produce the required physical evidence. Their runbooks
 remain incomplete for corporate approval because strict runtime policy and organization-owned controls are
 still non-pass or external; these are admission inputs, not missing model-specific code.
 
@@ -558,7 +554,7 @@ telemetry stream by digest instead of flooding the executive report with repetit
 | Isolated semantic sandbox | Implemented container boundary | Request/subject/evidence binding, isolation/seccomp gating, broker-worker service, and per-job limits are present | Treat it as bounded staging evidence, not a substitute for host-independent execution isolation |
 | Built-in safetensors weights adapter | Official parser plus fail-closed defense-in-depth inspector implemented and enabled by format | A hash-locked safetensors 0.8.0 Rust binding is authoritative for format acceptance; ShakerScan independently checks shape/range/coverage, re-hashes the exact artifact, and vector-scans every F16/F32/F64/BF16 value through bounded NumPy memmap chunks. The release image runs non-skippable valid, hostile-metadata, non-finite, and truncated self-tests. Parser identity and full-value counts survive into evidence. | It still does not instantiate the model graph, tokenize, or generate embeddings; those belong to a loader profile in the disposable runner tier. |
 | Operator runtime adapter | Implemented integration contract | Can prove exact-digest model load and known-answer tests in the hardened container when an operator image/argv adapter is installed | Treat as staging evidence, not a substitute for the microVM tier |
-| Actual tokenizer/model load and inference in disposable microVM | Executable Firecracker/jailer host controller and fixed guest implemented | The controller verifies pinned binaries/kernel/rootfs, authoritative manifest members, loader profile, reviewed custom code, and runtime digest; creates immutable input and bounded output ext4 drives; starts one jailed no-NIC microVM with cgroup-v2 limits; executes fixed import/load/inference phases; hard-kills on timeout; and signs an exact-subject receipt. Fixed offline Transformers/safetensors and ONNX Runtime CPU profiles are implemented; GGUF runtime is explicitly unsupported. It has no container fallback or arbitrary guest command. CodeRankEmbed and both CodeSage conversion paths were physically exercised on nested-virtualization KVM. | Operate the same digest-pinned runner with a production trust anchor and acceptance-test the ONNX profile on the release guest; the older VPS remains a valid `NOT_READY` no-KVM deployment |
+| Actual tokenizer/model load and inference in disposable microVM | Executable Firecracker/jailer host controller and fixed guest implemented | The controller verifies pinned binaries/kernel/rootfs, authoritative manifest members, loader profile, reviewed custom code, and runtime digest; creates immutable input and bounded output ext4 drives; starts one jailed no-NIC microVM with cgroup-v2 limits; executes fixed import/load/inference phases; hard-kills on timeout; and signs an exact-subject receipt. Fixed offline Transformers/safetensors and ONNX Runtime CPU profiles are implemented; GGUF runtime is explicitly unsupported. It has no container fallback or arbitrary guest command. The custom-code/safetensors and medium/large conversion paths were physically exercised on nested-virtualization KVM. | Operate the same digest-pinned runner with a production trust anchor and acceptance-test the ONNX profile on the release guest; the older VPS remains a valid `NOT_READY` no-KVM deployment |
 | Runtime behavior telemetry | Measured guest/host producer and strict receipt verifier implemented | Root-owned `strace` streams capture network/process/file syscalls by fixed phase; destination addresses are privacy-safe digests with ports/DNS flags; guest and host interface inventories, deny-all nft counter deltas, raw-trace digest, canonical telemetry digest, overflow/loss/completeness, cgroup limits/peaks, and no-NIC configuration digest are bound into the receipt. Any attempt, loss, overflow, contradiction, missing trace, extra interface, or digest mutation makes PASS impossible. Physical reference-model runs recorded complete telemetry and blocked on 58/44/44 attempted socket operations despite no NIC and zero firewall egress. | Retain deliberate-connect, timeout, crash, telemetry-loss, and signature-negative fixtures as recurring release tests |
 | Provider-neutral evaluation contract | Deterministic scorer plus automatic runner-derived embedding evaluation implemented | Public caller observations are `DECLARED` and fail closed. Every verified runtime receipt now automatically creates durable `GENERATED_EVALUATION` evidence from signed known-answer, output-shape, resource, and network measurements, without retaining vectors. Corporate retrieval/vector-store observations remain separately required `GENERATED_DATA_PLANE` evidence with connector/index/run identity. | Operate the corporate data-plane connector against the intended vector store; never infer that result from the model microVM |
 | Corporate benchmark and thresholds | Integration point implemented | No universal corpus can ship | Organization supplies/version-controls corpus; ShakerScan automates execution and scoring |
@@ -683,7 +679,7 @@ Gate 0 exit criteria:
 After Gate 0, implementation proceeds through: a submission/evidence/approval API split; immutable evidence
 records and frozen manifests; purpose/environment trust; admission v2 and a dedicated signer; strict
 safetensors inspection; one Firecracker/KVM execution service; fact-selected loader profiles; isolated
-CodeSage conversion; runner-generated benchmark observations; exact OCI promotion; existing CI/Kubernetes
+supported `.bin` conversion; runner-generated benchmark observations; exact OCI promotion; existing CI/Kubernetes
 deployment enforcement; and event-driven reassessment. Models that cannot run inside the approved
 Firecracker resource envelope remain `INCOMPLETE`; this roadmap does not add a GPU or alternate runner.
 
@@ -759,52 +755,26 @@ flowchart LR
 Only an immutable, approved artifact from the internal registry may cross into production. Production must
 not download model code or weights directly from Hugging Face.
 
-## 5. Model inventory at the reviewed revisions
+## 5. Format-family inventory requirements
 
-Model repositories change. The following values are valid only for the named commit revisions and must be
-re-resolved and re-verified at intake time.
+Model repositories change. Each intake must independently re-resolve and verify the immutable revision,
+authoritative file inventory, artifact sizes and digests, license declarations, custom code, model lineage,
+datasets, and intended-use restrictions. Product documentation intentionally does not name private
+validation repositories.
 
-| Model | Pinned revision | Primary artifact | Size | LFS SHA-256 | License | Important risk |
-|---|---|---:|---:|---|---|---|
-| CodeRankEmbed | `3c4b60807d71f79b43f3c4363786d9493691f8b1` | `model.safetensors` | 546,938,168 bytes | `827529bcd58aef0d9082e66eeff7e7d53a02f62bd005f841a26b3d3e2fb17ebe` | MIT | Custom remote code despite safer weight format |
-| CodeSage Base v2 | `92eac4f44c8674638f039f1b0d8280f2539cb4c7` | `pytorch_model.bin` | 709,569,721 bytes | `4a3ec46f2ba2027c541e159b4f1598ddbc4043ad41ac2b1f704adc69b96bcbfe` | Apache-2.0 | Pickle-backed PyTorch artifact and custom code |
-| CodeSage Large v2 | `6e5d6dc15db3e310c37c6dbac072409f95ffa5c5` | `pytorch_model.bin` | 2,627,013,817 bytes | `78a7ed76ffa5ca4e145100610e5541201ca0f3ecc75f1b73433303ae9348c77c` | Apache-2.0 | Same execution risks plus materially larger resource exposure |
+The acceptance set must cover at least these materially different families:
 
-Authoritative model records:
+| Format family | Required coverage | Important risk |
+|---|---|---|
+| Safetensors with custom Python | Complete repository, safetensors structure, source review, fixed-loader import/inference, repeat known answer | A safe weight container does not make repository code non-executable |
+| Medium pickle-backed PyTorch model | Complete repository, archive/pickle semantics, conversion, tensor and embedding equivalence, target rescan, safe-loader runtime | Executable serialization and custom code |
+| Large pickle-backed PyTorch model | Every medium-model check plus acquisition, storage, memory, timeout, and recovery limits | Same execution risks plus materially larger resource exposure |
+| ONNX | Complete graph/external-data inventory and fixed offline CPU runtime | Graph operators, external data, and unsupported runtime behavior |
+| GGUF or another static-only format | Complete structural checks with an explicit runtime qualification gap | Header validity is not end-to-end execution evidence |
 
-- [CodeRankEmbed model page](https://huggingface.co/nomic-ai/CodeRankEmbed) and
-  [API record with blobs](https://huggingface.co/api/models/nomic-ai/CodeRankEmbed?blobs=true)
-- [CodeSage Base v2 model page](https://huggingface.co/codesage/codesage-base-v2) and
-  [API record with blobs](https://huggingface.co/api/models/codesage/codesage-base-v2?blobs=true)
-- [CodeSage Large v2 model page](https://huggingface.co/codesage/codesage-large-v2) and
-  [API record with blobs](https://huggingface.co/api/models/codesage/codesage-large-v2?blobs=true)
-
-### 5.1 CodeRankEmbed observations
-
-- The repository uses custom configuration and model code, including
-  `configuration_hf_nomic_bert.py` and `modeling_hf_nomic_bert.py`.
-- The model card instructs consumers to use `trust_remote_code=True`.
-- The reviewed source imports PyTorch, Transformers, Safetensors, and Einops. It also contains a
-  `torch.load` fallback path, so a safetensors primary artifact does not make the complete repository
-  execution-free.
-- The model is approximately 137 million parameters and advertises a long context. Long-context attention
-  makes memory, latency, batching, and denial-of-service testing important.
-- The model is based on Snowflake Arctic Embed lineage. Parent model and dataset provenance must be captured,
-  not just the leaf repository.
-
-### 5.2 CodeSage v2 observations
-
-- Base v2 and Large v2 use custom files such as `config_codesage.py`, `modeling_codesage.py`, and
-  `tokenization_codesage.py`.
-- Their model cards require `trust_remote_code=True`.
-- The primary artifacts are `.bin` PyTorch weights and must be treated as unsafe serialization until semantic
-  scanners and an isolated load test say otherwise.
-- Base v2 is approximately 356 million parameters with a 1,024-dimensional embedding.
-- Large v2 is approximately 1.3 billion parameters with a 2,048-dimensional embedding.
-- The model cards identify The Stack-derived training data. License, attribution, opt-out, sensitive-code,
-  and corporate policy questions remain separate from an Apache-2.0 repository license.
-- Base and Large share substantial code lineage. A clean source review can be reused only when file digests
-  are identical; artifact and runtime results remain model-specific.
+When two revisions appear to share source, review evidence may be reused only when the relevant file digests
+are identical. Artifact, conversion, runtime, license, dataset, and deployment results remain bound to each
+exact model revision.
 
 ## 6. What ShakerScan Model Intake automates today
 
@@ -1008,7 +978,7 @@ be paired with malicious model code, tokenizer code, import hooks, build scripts
 - Produce a repository manifest before any scanner runs.
 
 **Acceptance gate:** A fixture containing benign weights and a malicious unreferenced Python file must still
-scan and block. The CodeRankEmbed and CodeSage custom-code files must appear in the produced manifest and
+scan and block. All custom-code files must appear in the produced manifest and
 evidence.
 
 ### 7.4 P0 — Generate evidence; do not accept assertions as scan results
@@ -1060,7 +1030,7 @@ roadmap.
 
 **Delivery status: built-in semantic analysis plus packaged ModelScan and Fickling are implemented.**
 ModelScan 0.8.8 and Fickling 0.1.12 live in separate hash-locked environments and must detect a deterministic
-malicious pickle during the image build. CodeSage `.bin` files remain conservatively blocked from dynamic
+malicious pickle during the image build. Pickle-backed `.bin` files remain conservatively blocked from dynamic
 container loading. Applicability, required flags, parser failures, enumeration limits, and caller-selected
 adapter sets fail closed. Fickling returns `PASS` only for its documented successful exit, returns
 `INCOMPLETE` for parse/tool failures, and is `NOT_APPLICABLE` to PyTorch ZIP checkpoints; it must not turn a
@@ -1664,14 +1634,14 @@ Trigger reassessment on:
 The monitor may revoke approval. Revocation must stop new deployments, alert owners, preserve evidence, and
 start rollback/reindex procedures according to incident severity.
 
-## 11. Model-specific runbooks
+## 11. Format-family runbooks
 
-### 11.1 CodeRankEmbed
+### 11.1 Safetensors with custom Python
 
 **Automation status:** ShakerScan can automate the pinned complete snapshot, full hash, safetensors structure,
 custom-code inventory/AST/Semgrep checks, built-in SBOM/secret/malware/license evidence, adapter orchestration,
 policy, and admission report. The built-in no-egress safetensors adapter proves exact-digest weight
-readability, tensor inventory/ranges, and sampled numeric finiteness. It does **not** import CodeRank's custom
+readability, tensor inventory/ranges, and sampled numeric finiteness. It does **not** import repository custom
 code, instantiate the model graph, or generate an embedding; that statement applies only to static/preflight
 inspection. The Firecracker tier physically proved the
 exact import, tokenizer, model load, warmup, inference, known-answer replay, and teardown path for the pinned
@@ -1683,12 +1653,10 @@ legal/privacy decisions, and deployment enforcement.
 
 Required evidence before a controlled pilot:
 
-1. Complete snapshot of revision `3c4b60807d71f79b43f3c4363786d9493691f8b1`.
-2. Full SHA-256 verification of `model.safetensors` against
-   `827529bcd58aef0d9082e66eeff7e7d53a02f62bd005f841a26b3d3e2fb17ebe`.
+1. Complete snapshot of the exact provider-pinned revision.
+2. Full SHA-256 verification of the selected safetensors artifact against provider or trusted supplied metadata.
 3. Safetensors structural and tensor inventory validation.
-4. Full static and manual review of `configuration_hf_nomic_bert.py`,
-   `modeling_hf_nomic_bert.py`, and every other Python file.
+4. Full static and manual review of every custom configuration, model, tokenizer, and other Python file.
 5. Explicit review of all `torch.load` fallback paths and proof that the production load path uses the
    approved safetensors artifact.
 6. Hash-locked runtime with exact PyTorch, Transformers, Safetensors, Tokenizers, Einops, and native runtime.
@@ -1701,7 +1669,7 @@ Recommended initial decision: **controlled pilot only**. Safetensors reduces wei
 does not reduce custom remote-code risk. The production runtime should package reviewed code internally and
 must not use network-based `trust_remote_code` loading.
 
-### 11.2 CodeSage Base v2
+### 11.2 Medium pickle-backed PyTorch model
 
 **Automation status:** ShakerScan can automate complete snapshot/hash, semantic pickle classification,
 custom-code AST/Semgrep review assistance, evidence/policy/reporting, and bundled ModelScan/Fickling
@@ -1711,9 +1679,9 @@ sandbox deliberately blocks `.bin` loading. The fixed Firecracker guest now impl
 `weights_only=True` deserialization, safetensors export, exact tensor comparison, and source/target embedding
 equivalence; the ordinary runtime path still prohibits pickle. A verified conversion now creates separate
 source/target receipt bindings, registers and fully rescans the target snapshot, and returns the exact safe
-runtime bundle. The designated VPS lacks `/dev/kvm`, so the real CodeSage conversion/runtime run remains
-unavailable there; a supported nested-virtualization KVM host is required. A KVM run subsequently proved exact 292-tensor, numeric, and embedding
-equivalence and produced target artifact digest `8ec9c4a138b2959d507303952c1c1fe04ef38cb31869f4d4efe90b7910958e24`.
+runtime bundle. A host without `/dev/kvm` cannot perform the conversion/runtime run; a supported
+nested-virtualization KVM host is required. A physical KVM run subsequently proved exact tensor, numeric,
+and embedding equivalence.
 The equivalent target is registered only as a new quarantined identity so it can be strictly rescanned and
 runtime-tested; that registration is not approval. Forty-four measured socket attempts still made the
 separate containment control and overall admission non-pass.
@@ -1721,13 +1689,11 @@ The corporation owns manual approval, benchmark fitness, and production promotio
 
 Required evidence before a controlled pilot:
 
-1. Complete snapshot of revision `92eac4f44c8674638f039f1b0d8280f2539cb4c7`.
-2. Full SHA-256 verification of `pytorch_model.bin` against
-   `4a3ec46f2ba2027c541e159b4f1598ddbc4043ad41ac2b1f704adc69b96bcbfe`.
+1. Complete snapshot of the exact provider-pinned revision.
+2. Full SHA-256 verification of the selected `.bin` artifact against provider or trusted supplied metadata.
 3. ModelScan, pickletools, archive-member, built-in malware/secret, Semgrep, and Trivy analysis of the complete
    `.bin`; record Fickling as `NOT_APPLICABLE` when the artifact is a PyTorch ZIP checkpoint.
-4. Full static and manual review of `config_codesage.py`, `modeling_codesage.py`,
-   `tokenization_codesage.py`, and every other executable file.
+4. Full static and manual review of every custom configuration, model, tokenizer, and other executable file.
 5. Locked runtime SBOM and all SCA/license gates.
 6. No-egress sandbox load from the original artifact.
 7. Controlled conversion to safetensors if the model can be loaded safely in quarantine.
@@ -1736,37 +1702,36 @@ Required evidence before a controlled pilot:
    tolerance.
 10. Run the retrieval, poisoning, ACL, and resource suite.
 
-Recommended initial decision: **evaluate before Large v2**. Base limits blast radius and operational cost while
-validating the CodeSage code path. Conversion does not erase the need to review how the original artifact was
+Recommended initial decision: **evaluate the smaller suitable model first**. This limits blast radius and
+operational cost while validating the conversion path. Conversion does not erase the need to review how the original artifact was
 loaded or prove that conversion was isolated.
 
-### 11.3 CodeSage Large v2
+### 11.3 Large pickle-backed PyTorch model
 
 **Automation status:** The same current static controls apply without model-name-specific code. Complete
 acquisition fits the product ceilings, but the ordinary PR path should not spend the storage/memory budget.
-Phase 3/4 may run this profile only after Base passes and only when the same Firecracker runner has an
+Phase 3/4 may run this profile only after the smaller candidate passes and only when the same Firecracker runner has an
 approved resource envelope large enough for it. Otherwise the result remains `INCOMPLETE`; a GPU-specific
 runner is outside this roadmap. The physical acceptance run completed exact conversion/equivalence in
 351.222 seconds and peaked at 12,391,227,392 of 12,884,901,888 allowed bytes, with no cgroup OOM event. Its
 44 observed socket attempts still made the signed receipt non-pass. The corporation must justify the larger model against its own quality,
 capacity, cost, and data requirements.
 
-Perform every Base v2 step against revision `6e5d6dc15db3e310c37c6dbac072409f95ffa5c5` and digest
-`78a7ed76ffa5ca4e145100610e5541201ca0f3ecc75f1b73433303ae9348c77c`.
+Perform every medium-model step against the exact pinned large-model revision and digest.
 
 Additional gates:
 
-- Prove the custom code files are byte-identical to the already reviewed Base files or perform a fresh diff
+- Prove the custom code files are byte-identical to already reviewed files or perform a fresh diff
   and review.
 - Increase acquisition, scanner, sandbox, and registry quotas for a 2.6 GB artifact without relaxing global
   safety limits.
 - Measure cold-start, peak Firecracker guest/host memory, concurrency, maximum-length input, and out-of-memory
   recovery.
 - Confirm resource exhaustion cannot destabilize colocated services.
-- Demonstrate a material quality benefit over Base v2 for the corporate corpus. Size alone is not a security
+- Demonstrate a material quality benefit over the smaller candidate for the representative corpus. Size alone is not a security
   or business justification.
 
-Recommended initial decision: **hold until Base v2 succeeds**.
+Recommended initial decision: **hold until the smaller suitable candidate succeeds**.
 
 ## 12. Policy model
 
@@ -1833,11 +1798,11 @@ Each increment must be independently committed and leave required controls fail 
 3. **Physical Firecracker runner — implemented and model-path acceptance complete:** the controller uses Linux/KVM with jailer,
    exact read-only subjects, no egress/credentials, approved runtime/loader digests, resource limits,
    phase telemetry, known-answer embeddings, signed receipts, teardown, and no fallback.
-4. **CodeSage conversion — implemented and physically exercised:** the narrowly scoped `.bin` to safetensors
+4. **Supported `.bin` conversion — implemented and physically exercised:** the narrowly scoped `.bin` to safetensors
    profile uses `torch.load(weights_only=True)` only inside Firecracker, proves exact tensor inventory/dtype/
    shape/value equality plus source/target embedding equivalence, and exports a new content-addressed artifact
    and complete manifest. Verified output is registered and strictly rescanned under its target identity;
-   both CodeSage sizes completed these phases on KVM. Strict network-attempt evidence still blocks promotion.
+   representative medium and large artifacts completed these phases on KVM. Strict network-attempt evidence still blocks promotion.
 5. **Control-plane and deployment hardening — implemented; external acceptance pending:** strengthen embedded policy tests, role separation, signer/KMS
    isolation, OCI push verification, CI/Kubernetes denial paths, revocation/cache behavior, storage quotas,
    restart/replay recovery, and first-screen reporting.
@@ -1857,15 +1822,9 @@ claims. A surface may offer fewer administrative operations, but it may not sile
 legacy preflight scan when they requested admission or describe preflight evidence as deployable approval.
 
 The final release candidate must be rebuilt from the exact branch on the designated Linux/KVM VPS and tested
-through all three surfaces. Acceptance includes physical Firecracker execution and complete pinned intake of:
-
-- `nomic-ai/CodeRankEmbed`
-- `codesage/codesage-base-v2`
-- `codesage/codesage-large-v2`
-
-These models are conformance fixtures, not hard-coded product targets. CodeRankEmbed must exercise the
-custom-code/safetensors loader path; CodeSage Base must exercise quarantined executable serialization,
-Firecracker conversion, and equivalence; Large must exercise the same controls plus the approved resource
+through all three surfaces. Private conformance fixtures must exercise the custom-code/safetensors loader
+path, quarantined executable serialization, Firecracker conversion and equivalence, and the same controls
+with a large artifact under the approved resource
 envelope and must remain explicitly `INCOMPLETE` rather than bypassing limits if the VPS cannot qualify it.
 For every model, retain the scan/submission IDs, immutable revision and artifact digests, phase logs, runner
 receipt and telemetry digests, policy/admission result, UI evidence, API response evidence, and agent-skill
@@ -2050,11 +2009,12 @@ Remaining production infrastructure and recurring acceptance work:
   converter image, tensor inventory, exact numeric equivalence, embedding equivalence, resource evidence,
   and complete network telemetry into the signed receipt. Unsafe source serialization never executes in the
   API/static worker. Target registration and strict full rescan are automatic after verified refresh;
-  physical Base and Large conversion execution is now recorded below; production fleet operation remains external.
+  physical medium and large conversion execution is now recorded below; production fleet operation remains external.
 - Prove the purpose-scoped KMS signer and trust-anchor rotation path on the physical runner host.
 
-Reference-model exit evidence: CodeRankEmbed and CodeSage Base were exercised without corporate network,
-credentials, or guest host access; prohibited socket attempts reliably blocked. CodeSage Large completed in
+Format-family exit evidence: custom-code/safetensors and medium pickle-backed fixtures were exercised without
+corporate network, credentials, or guest host access; prohibited socket attempts reliably blocked. A large
+pickle-backed fixture completed in
 the same Firecracker implementation within a 12 GiB cgroup, so no GPU-specific backend was added. Production
 admission remains blocked until an approved runtime produces zero prohibited attempts or policy explicitly
 disposes them without weakening evidence integrity.
@@ -2291,8 +2251,8 @@ key cannot become a trust anchor; positive trust is exercised only through durab
 selected by server policy. Controlled-workflow E2E must separately exercise frozen evidence, approvals,
 policy decision, signer promotion, and verification; preflight scan success is never a substitute.
 The
-2026-07-29 remote validation below proves complete acquisition and the installed scanner bundle against the
-three exact public revisions. For CodeRank it also proves bounded safetensors weight loading, while clearly
+2026-07-29 remote validation below proves complete acquisition and the installed scanner bundle against
+representative exact public revisions. For the custom-code/safetensors path it also proves bounded weight loading, while clearly
 recording that custom code, model construction, and embeddings did not run. It does not exercise a corporate
 data plane, verify organization signatures/approvals, or qualify production use.
 
@@ -2300,12 +2260,12 @@ Maintain these tiers:
 
 1. **PR fixture:** local safe/malicious fixtures, policy/report contracts, no external network.
 2. **Public acquisition smoke:** current bounded Hugging Face shard path; never treated as full integrity.
-3. **Scheduled complete admission-mechanism intake:** full pinned CodeRankEmbed and CodeSage Base snapshots,
+3. **Scheduled complete admission-mechanism intake:** full pinned custom-code/safetensors and pickle-backed snapshots,
    all fact-applicable scanner images ready, complete hashes, semantic serialization evidence, safetensors
    weight-load evidence where applicable, and corporate-use report assertions.
-4. **Scheduled isolated execution:** CodeRankEmbed and Base import/load/inference, telemetry, embedding tests,
-   and optional Base conversion equivalence in the Phase 3 runner.
-5. **Conditional Large qualification:** CodeSage Large complete snapshot, scanners, Firecracker
+4. **Scheduled isolated execution:** custom-code/safetensors and medium pickle-backed import/load/inference,
+   telemetry, embedding tests, and applicable conversion equivalence in the Phase 3 runner.
+5. **Conditional large-model qualification:** complete snapshot, scanners, Firecracker
    load/inference, CPU/memory envelope, robustness, evaluation, report, and admission/deployment verification;
    if it does not fit, report `INCOMPLETE` without adding a backend.
 
@@ -2321,9 +2281,9 @@ rebuilt branch on a Linux/KVM host; direct API calls and mocked browser tests do
 
 | UI path | Public model/format | Required proof |
 |---|---|---|
-| Automatic | `nomic-ai/CodeRankEmbed` / safetensors plus custom Python | Paste only the Hugging Face link, start once, observe durable progress through complete static acquisition and Firecracker runtime, then open the executive/detailed report and download JSON, HTML, SARIF, CycloneDX, SPDX, AIBOM, License BOM, and Third-Party Notices draft. Verify custom-code findings, known-answer result, network/resource result, license outcome, and remaining corporate controls are distinct. |
-| Automatic | `codesage/codesage-base-v2` / PyTorch `.bin` | Paste only the link. Verify unsafe serialization triggers the fixed conversion, exact target identity, tensor/numeric/embedding equivalence, strict target rescan, safe-loader runtime, and report wording that separates conversion correctness from containment. |
-| Automatic | `codesage/codesage-large-v2` / large PyTorch `.bin` | Exercise the same path under the calculated 13 GiB envelope; verify complete 2.6 GB acquisition, conversion/runtime resource measurements, no hidden truncation, and an honest `INCOMPLETE` result before launch when the configured cap or KVM host reserve cannot qualify it. |
+| Automatic | Safetensors plus custom Python | Paste only the Hugging Face link, start once, observe durable progress through complete static acquisition and Firecracker runtime, then open the executive/detailed report and download JSON, HTML, SARIF, CycloneDX, SPDX, AIBOM, License BOM, and Third-Party Notices draft. Verify custom-code findings, known-answer result, network/resource result, license outcome, and remaining corporate controls are distinct. |
+| Automatic | Medium PyTorch `.bin` | Paste only the link. Verify unsafe serialization triggers the fixed conversion, exact target identity, tensor/numeric/embedding equivalence, strict target rescan, safe-loader runtime, and report wording that separates conversion correctness from containment. |
+| Automatic | Large PyTorch `.bin` | Exercise the same path under the calculated memory envelope; verify complete multi-gigabyte acquisition, conversion/runtime resource measurements, no hidden truncation, and an honest `INCOMPLETE` result before launch when the configured cap or KVM host reserve cannot qualify it. |
 | Automatic | `typeof/all-MiniLM-L6-v2-onnx` / ONNX | Verify the exact `model.onnx` is selected and the fixed offline CPU ONNX Runtime profile—not Transformers weight loading—performs tokenizer, graph execution, pooled embedding, repeat known-answer, and telemetry phases. |
 | Automatic | A small pinned public GGUF repository | Verify static GGUF structure and generic scanner/SBOM artifacts are useful, while runtime qualification is clearly `INCOMPLETE` because no GGUF loader is implemented. No four-byte/header check may appear as end-to-end approval. |
 | Advanced/manual | At least one safetensors/custom-code model and one `.bin` model | Select Source, Full preflight, bind that exact scan with **Use in admission**, inspect seeded immutable bundle facts, exercise applicable runner/conversion controls, freeze evidence, and open the same normalized report/artifact set. No scan UUID or digest should need manual copying when the UI already generated it. |
@@ -2354,9 +2314,9 @@ or self-authored-receipt substitution was used.
 
 | Exact subject | Final preflight scan | What ShakerScan proved | Corporate-use answer |
 |---|---|---|---|
-| `nomic-ai/CodeRankEmbed@3c4b60807d71f79b43f3c4363786d9493691f8b1` | `7dc7b8d7-0bed-4ca6-984f-7ad25066d25f` | Complete 546,938,168-byte artifact and 14/14-file repository snapshot; expected digest verified; safetensors inventory contained 112 tensors and all 136,731,648 numeric values were checked. The bounded no-egress/seccomp/non-root sandbox passed with `load_level=weights`. The malicious-primitive control passed. Semgrep produced one calibrated review warning at `modeling_hf_nomic_bert.py:332` because `torch.load` omits `weights_only`; it was not presented as proven exploitation. | **PREFLIGHT_ONLY / REVIEW; not proven malicious.** The report provides actionable custom-code review, exact scanner finding disposition, signing, evaluation, restrictions, and monitoring steps. Do not deploy until those controls, hash-locked runtime dependency SCA, exact Firecracker import/load/inference and embedding tests, and identity-separated approval are complete. |
-| `codesage/codesage-base-v2@92eac4f44c8674638f039f1b0d8280f2539cb4c7` | `f03d8570-e941-496b-a1af-43d3faebd754` | Complete 709,569,721-byte artifact and 16/16-file snapshot; expected digest verified; all 294 archive members and 709,514,499 expanded bytes inspected. ModelScan and semantic pickletools passed; only expected framework globals were present and `malicious_primitive_proven=false`. Semgrep produced two writable-file review warnings in `tokenization_codesage.py`. | **PREFLIGHT_ONLY / BLOCK; not proven malicious.** The malicious-primitive control passes, while the separate executable-serialization policy fails and the sandbox correctly returns `BLOCKED_BY_POLICY`. The report emits one useful next action: controlled safetensors conversion, tensor/numeric/embedding equivalence, target rescan, then an exact Firecracker runtime run. |
-| `codesage/codesage-large-v2@6e5d6dc15db3e310c37c6dbac072409f95ffa5c5` | `b90e25e7-e1ba-470e-a0d5-5a1a999359ad` | Complete 2,627,013,817-byte artifact and 16/16-file snapshot; expected digest verified; all 294 archive members and 2,626,958,595 expanded bytes inspected without truncation. ModelScan and pickletools passed with the same expected framework classification; Semgrep findings matched Base. | **PREFLIGHT_ONLY / BLOCK; not proven malicious.** The same conversion and corporate controls as Base remain, plus materially greater storage, memory, and accelerator exposure. Do not qualify Large unless Base first fails a versioned retrieval benchmark and Large proves a justified benefit inside a separately approved resource envelope. |
+| Private custom-code/safetensors fixture | `7dc7b8d7-0bed-4ca6-984f-7ad25066d25f` | Complete 546,938,168-byte artifact and 14/14-file repository snapshot; expected digest verified; safetensors inventory contained 112 tensors and all 136,731,648 numeric values were checked. The bounded no-egress/seccomp/non-root sandbox passed with `load_level=weights`. The malicious-primitive control passed. Semgrep produced one calibrated `torch.load` review warning because `weights_only` was omitted; it was not presented as proven exploitation. | **PREFLIGHT_ONLY / REVIEW; not proven malicious.** The report provides actionable custom-code review, exact scanner finding disposition, signing, evaluation, restrictions, and monitoring steps. Do not deploy until those controls, hash-locked runtime dependency SCA, exact Firecracker import/load/inference and embedding tests, and identity-separated approval are complete. |
+| Private medium pickle-backed fixture | `f03d8570-e941-496b-a1af-43d3faebd754` | Complete 709,569,721-byte artifact and 16/16-file snapshot; expected digest verified; all 294 archive members and 709,514,499 expanded bytes inspected. ModelScan and semantic pickletools passed; only expected framework globals were present and `malicious_primitive_proven=false`. Semgrep produced two writable-file review warnings in custom tokenizer code. | **PREFLIGHT_ONLY / BLOCK; not proven malicious.** The malicious-primitive control passes, while the separate executable-serialization policy fails and the sandbox correctly returns `BLOCKED_BY_POLICY`. The report emits one useful next action: controlled safetensors conversion, tensor/numeric/embedding equivalence, target rescan, then an exact Firecracker runtime run. |
+| Private large pickle-backed fixture | `b90e25e7-e1ba-470e-a0d5-5a1a999359ad` | Complete 2,627,013,817-byte artifact and 16/16-file snapshot; expected digest verified; all 294 archive members and 2,626,958,595 expanded bytes inspected without truncation. ModelScan and pickletools passed with the same expected framework classification; Semgrep findings matched the medium fixture. | **PREFLIGHT_ONLY / BLOCK; not proven malicious.** The same conversion and corporate controls as the medium fixture remain, plus materially greater storage, memory, and accelerator exposure. Do not qualify a larger model unless the smaller suitable candidate fails a versioned retrieval benchmark and the larger model proves a justified benefit inside a separately approved resource envelope. |
 
 The first rebuilt runs exposed three normalized-report defects: unrelated review warnings kept the
 malicious-primitive control indeterminate even after both relevant scanners passed, a policy-refused pickle
@@ -2389,9 +2349,9 @@ remains an explicit non-default production configuration and was not impersonate
 
 | Exact subject/path | Controlled submission and runner job | Functional result inside guest | Isolation/resource result | Signed admission evidence result |
 |---|---|---|---|---|
-| CodeRankEmbed runtime | submission `51cd2947-855b-4a44-8984-68b679d79725`; job `a2cd05d8-0635-4af3-91c6-22e68ee3c505` | Import, tokenizer, model load, warmup, inference, exact known-answer replay, and teardown all `PASS`. Embedding digest `a33dac258af0413e460b4d282de6f265dd51746385df3ac0251819b09535b728`; duration 75.806 s. | Peak memory 1,905,639,424/8,589,934,592 bytes; peak pids 6/64. Complete telemetry recorded 58 attempts. Guest and host interfaces were only `lo`; no NIC/tap existed; no egress succeeded. | `FAIL`, correctly: the zero-attempt control treats the measured AF_UNIX socket/connect activity and failed AF_INET6 socket/bind activity as prohibited attempts even though prevention worked. |
-| CodeSage Base conversion | submission `c3509007-7cea-45b8-ab19-4ee02c2c3551`; job `07898a04-2e2b-4ca8-99b6-4e360478580d` | Import, restricted deserialization/conversion, tensor equivalence, embedding equivalence, and teardown all `PASS`. All 292 tensors matched with zero numeric and embedding drift. Target artifact `8ec9c4a138b2959d507303952c1c1fe04ef38cb31869f4d4efe90b7910958e24`; target snapshot `d2721b3c5994e577b78295a63c4089d94c25706e844b019ea4be9eec7d7d6268`; duration 109.281 s. | Peak memory 4,114,026,496/8,589,934,592 bytes; peak pids 6/64. Complete telemetry recorded 44 attempts with no NIC/tap or successful egress. | Conversion equivalence `PASS`; containment and the overall result `FAIL` under the zero-attempt rule. The equivalent target may be registered only as quarantined evidence for strict rescan/runtime qualification; it is not promoted. |
-| CodeSage Large conversion | submission `b6f0a2cb-f42f-4231-820f-533608e1afcb`; job `f58b9941-9933-4469-b587-76ab6136a47e` | The same five phases all `PASS`; 292 tensors matched with zero numeric and embedding drift. Target artifact `d7cf192c14e0301ad9003efc7f2e40a6dfb0b3065b6be99f4b201af7c31c2f41`; target snapshot `48286dc1b725c398b4cbfef6503a69046ee91249a3158450b593a1add7f983e5`; duration 351.222 s. | Peak memory 12,391,227,392/12,884,901,888 bytes; peak pids 6/64; no cgroup OOM event. Complete telemetry recorded 44 attempts with no NIC/tap or successful egress. | Conversion equivalence `PASS`; containment and the overall result `FAIL` under the same zero-attempt rule. This proves technical fit only narrowly inside the 12 GiB envelope; it does not justify choosing Large over Base. |
+| Custom-code/safetensors runtime | submission `51cd2947-855b-4a44-8984-68b679d79725`; job `a2cd05d8-0635-4af3-91c6-22e68ee3c505` | Import, tokenizer, model load, warmup, inference, exact known-answer replay, and teardown all `PASS`. Embedding digest `a33dac258af0413e460b4d282de6f265dd51746385df3ac0251819b09535b728`; duration 75.806 s. | Peak memory 1,905,639,424/8,589,934,592 bytes; peak pids 6/64. Complete telemetry recorded 58 attempts. Guest and host interfaces were only `lo`; no NIC/tap existed; no egress succeeded. | `FAIL`, correctly: the zero-attempt control treats the measured AF_UNIX socket/connect activity and failed AF_INET6 socket/bind activity as prohibited attempts even though prevention worked. |
+| Medium-model conversion | submission `c3509007-7cea-45b8-ab19-4ee02c2c3551`; job `07898a04-2e2b-4ca8-99b6-4e360478580d` | Import, restricted deserialization/conversion, tensor equivalence, embedding equivalence, and teardown all `PASS`. All 292 tensors matched with zero numeric and embedding drift. Target artifact `8ec9c4a138b2959d507303952c1c1fe04ef38cb31869f4d4efe90b7910958e24`; target snapshot `d2721b3c5994e577b78295a63c4089d94c25706e844b019ea4be9eec7d7d6268`; duration 109.281 s. | Peak memory 4,114,026,496/8,589,934,592 bytes; peak pids 6/64. Complete telemetry recorded 44 attempts with no NIC/tap or successful egress. | Conversion equivalence `PASS`; containment and the overall result `FAIL` under the zero-attempt rule. The equivalent target may be registered only as quarantined evidence for strict rescan/runtime qualification; it is not promoted. |
+| Large-model conversion | submission `b6f0a2cb-f42f-4231-820f-533608e1afcb`; job `f58b9941-9933-4469-b587-76ab6136a47e` | The same five phases all `PASS`; 292 tensors matched with zero numeric and embedding drift. Target artifact `d7cf192c14e0301ad9003efc7f2e40a6dfb0b3065b6be99f4b201af7c31c2f41`; target snapshot `48286dc1b725c398b4cbfef6503a69046ee91249a3158450b593a1add7f983e5`; duration 351.222 s. | Peak memory 12,391,227,392/12,884,901,888 bytes; peak pids 6/64; no cgroup OOM event. Complete telemetry recorded 44 attempts with no NIC/tap or successful egress. | Conversion equivalence `PASS`; containment and the overall result `FAIL` under the same zero-attempt rule. This proves technical fit only narrowly inside the 12 GiB envelope; it does not justify choosing a larger model over a suitable smaller one. |
 
 The physical runs exposed defects that mocked tests did not: duplicate guest mounts, missing guest scratch
 space, shutdown semantics, jailer/VM PID lifetime, cache placement, non-traversable subject roots, missing
@@ -2431,9 +2391,9 @@ linked back to the end-to-end Automatic Review.
 
 | Exact source and final automatic review | Complete source acquisition and conversion | Separate Firecracker runtime result | Final engineer-facing result |
 |---|---|---|---|
-| `nomic-ai/CodeRankEmbed@3c4b60807d71f79b43f3c4363786d9493691f8b1`; review `8ac5a00c-3be5-4393-bba6-f0b5deb42d99`; scan `61ef39e4-e006-4a59-97ff-dbb4111bab3d`; submission `03c3cee5-3110-4956-83e4-8081e68c3fe3` | Complete 546,938,168-byte safetensors artifact and authoritative repository snapshot; conversion correctly `NOT_APPLICABLE`. | Six runtime phases `PASS`; independent replay matched embedding digest `f05869d24b2717333f98e595d3d640c70da33f2575f301d65bafb3b7041aa7ca` with shape 6x768. Peak memory 2,037,121,024/5,905,580,032 bytes; peak pids 5/64; no OOM. | `REVIEW_REQUIRED`: one exact `torch.load`/`weights_only` finding at `modeling_hf_nomic_bert.py:332`, plus missing repository license/NOTICE source text. Runtime, repeatability, network, resources, subject identity, and evidence integrity passed. |
-| `codesage/codesage-base-v2@92eac4f44c8674638f039f1b0d8280f2539cb4c7`; review `aa81fca2-bb7d-4350-a0ed-6e584a9eb2cb`; scan `d15ecb4d-a52a-493a-af10-ed31455dc026`; submission `97b46902-65c4-4007-a7d0-14590317b45c` | Complete 709,569,721-byte source artifact. Fixed conversion job `aa3aec18-c83a-4ac5-aa8b-ef0e845016f4` produced safetensors artifact `8ec9c4a138b2959d507303952c1c1fe04ef38cb31869f4d4efe90b7910958e24`; all 292 tensors and the conversion embedding matched with zero drift, then the target was rescanned with the original static/license evidence retained. | Calibration job `d8b1eb1d-d2ec-453e-9aa6-d87f218eaf40` and runtime job `8dff8c8d-580a-43a5-b9f5-9136d84e1a39` matched digest `5de41b285a08256a89b1b1f277040cd976c2cb7145628397a665d72a49d4a8dd` with shape 6x1024. Runtime peak memory 3,137,646,592/6,442,450,944 bytes; no OOM. | `REVIEW_REQUIRED`: two writable-file Semgrep findings at `tokenization_codesage.py:248` and `:252`; Apache-2.0 obligations and dataset-term review are separately explained in the License BOM. Conversion, runtime, repeatability, network, resources, and evidence integrity passed. |
-| `codesage/codesage-large-v2@6e5d6dc15db3e310c37c6dbac072409f95ffa5c5`; review `e2e054f9-028b-427c-8f27-fd543b6159f8`; scan `a7dc080d-1510-4334-bbfe-d3a59f029fda`; submission `2f9bd4f0-a80f-4a1d-86c9-c882e44bf285` | Complete 2,627,013,817-byte source artifact with no truncation. Fixed conversion job `569de204-7bc1-4eb0-9621-6213d5a3837b` produced artifact `d7cf192c14e0301ad9003efc7f2e40a6dfb0b3065b6be99f4b201af7c31c2f41`; all 292 tensors and the conversion embedding matched with zero drift, then the target was rescanned without erasing source evidence. | Calibration job `25c73794-7d82-4623-82ba-7f016a40a55f` and runtime job `8ed50979-1b61-4fd7-848b-f24152c48055` matched digest `8ab6af675bcb92e29dfe124c1b7c5fb51489026b42eb74711735bb53c631a083` with shape 6x2048. Runtime peak memory 9,320,628,224/12,884,901,888 bytes; no OOM. | `REVIEW_REQUIRED` for the same two exact code findings and license/dataset follow-up as Base. The report does not call the model malicious and does not confuse greater resource exposure with a vulnerability. |
+| Private custom-code/safetensors fixture; review `8ac5a00c-3be5-4393-bba6-f0b5deb42d99`; scan `61ef39e4-e006-4a59-97ff-dbb4111bab3d`; submission `03c3cee5-3110-4956-83e4-8081e68c3fe3` | Complete 546,938,168-byte safetensors artifact and authoritative repository snapshot; conversion correctly `NOT_APPLICABLE`. | Six runtime phases `PASS`; independent replay matched embedding digest `f05869d24b2717333f98e595d3d640c70da33f2575f301d65bafb3b7041aa7ca` with shape 6x768. Peak memory 2,037,121,024/5,905,580,032 bytes; peak pids 5/64; no OOM. | `REVIEW_REQUIRED`: one exact `torch.load`/`weights_only` finding, plus missing repository license/NOTICE source text. Runtime, repeatability, network, resources, subject identity, and evidence integrity passed. |
+| Private medium pickle-backed fixture; review `aa81fca2-bb7d-4350-a0ed-6e584a9eb2cb`; scan `d15ecb4d-a52a-493a-af10-ed31455dc026`; submission `97b46902-65c4-4007-a7d0-14590317b45c` | Complete 709,569,721-byte source artifact. Fixed conversion job `aa3aec18-c83a-4ac5-aa8b-ef0e845016f4` produced safetensors artifact `8ec9c4a138b2959d507303952c1c1fe04ef38cb31869f4d4efe90b7910958e24`; all 292 tensors and the conversion embedding matched with zero drift, then the target was rescanned with the original static/license evidence retained. | Calibration job `d8b1eb1d-d2ec-453e-9aa6-d87f218eaf40` and runtime job `8dff8c8d-580a-43a5-b9f5-9136d84e1a39` matched digest `5de41b285a08256a89b1b1f277040cd976c2cb7145628397a665d72a49d4a8dd` with shape 6x1024. Runtime peak memory 3,137,646,592/6,442,450,944 bytes; no OOM. | `REVIEW_REQUIRED`: two writable-file Semgrep findings in custom tokenizer code; license obligations and dataset-term review are separately explained in the License BOM. Conversion, runtime, repeatability, network, resources, and evidence integrity passed. |
+| Private large pickle-backed fixture; review `e2e054f9-028b-427c-8f27-fd543b6159f8`; scan `a7dc080d-1510-4334-bbfe-d3a59f029fda`; submission `2f9bd4f0-a80f-4a1d-86c9-c882e44bf285` | Complete 2,627,013,817-byte source artifact with no truncation. Fixed conversion job `569de204-7bc1-4eb0-9621-6213d5a3837b` produced artifact `d7cf192c14e0301ad9003efc7f2e40a6dfb0b3065b6be99f4b201af7c31c2f41`; all 292 tensors and the conversion embedding matched with zero drift, then the target was rescanned without erasing source evidence. | Calibration job `25c73794-7d82-4623-82ba-7f016a40a55f` and runtime job `8ed50979-1b61-4fd7-848b-f24152c48055` matched digest `8ab6af675bcb92e29dfe124c1b7c5fb51489026b42eb74711735bb53c631a083` with shape 6x2048. Runtime peak memory 9,320,628,224/12,884,901,888 bytes; no OOM. | `REVIEW_REQUIRED` for the same two exact code findings and license/dataset follow-up as the medium fixture. The report does not call the model malicious and does not confuse greater resource exposure with a vulnerability. |
 
 All three runtime receipts recorded 58 classified network events: 48 local IPC events and 10 IP socket-setup
 events, with **zero outbound attempts, zero DNS attempts, zero successful outbound operations, zero lost
@@ -2444,7 +2404,7 @@ destination address and port would be reported for an outbound attempt; none exi
 
 Every final scan returned schema-valid, non-empty CycloneDX, SPDX, AIBOM, License BOM, Third-Party Notices,
 JSON report, HTML report, and SARIF. The observed inventory sizes were 2/3/6 components or packages for
-CodeRank and 3/4/8 for each CodeSage scan (CycloneDX/SPDX/AIBOM respectively); each SARIF file contained the
+custom-code/safetensors and 3/4/8 for each pickle-backed scan (CycloneDX/SPDX/AIBOM respectively); each SARIF file contained the
 two actionable review results. The smaller SBOM counts are intentional and explicitly labeled
 `incomplete_first_party_only`: the repositories declared no pinned serving-image dependency manifest, so the
 report does not invent installed dependencies. The License BOM names the exact subject, detected MIT or
@@ -2569,7 +2529,7 @@ Owners must decide and record:
 - Which licenses, training-data sources, and code/data provenance are prohibited?
 - Which data classes may be embedded, and may embeddings leave a jurisdiction or security boundary?
 - Does the chosen vector database provide sufficiently strong pre-query authorization and tenant isolation?
-- What retrieval-quality benefit justifies CodeSage Large over Base?
+- What retrieval-quality benefit justifies a larger model over the smaller suitable candidate?
 - What is the approval duration, reassessment interval, and maximum exception duration?
 - Who holds signing authority, who can approve exceptions, and who can revoke deployments?
 - How long are snapshots, raw evidence, reports, embeddings, and indexes retained?
@@ -2648,7 +2608,8 @@ Owners must decide and record:
   promotion, evidence-writing, or arbitrary-execution authority, and durably enforces iteration/action budgets.
   Physical and UI cross-surface acceptance remains part of the release run below.
 - [x] The exact release branch is rebuilt on the designated VPS and complete public preflight runs for
-  CodeRankEmbed, CodeSage Base v2, and CodeSage Large v2 retain accurate API/UI evidence and outcomes.
+  private custom-code/safetensors, medium pickle-backed, and large pickle-backed fixtures retain accurate
+  API/UI evidence and outcomes.
 - [x] Physical Firecracker import/load/inference/conversion runs completed for those exact subjects on a
   designated Linux/KVM runner. Every functional phase passed; each signed outer receipt correctly remained
   non-pass because strict policy recorded prohibited socket attempts. The older VPS still correctly reports
@@ -2674,8 +2635,8 @@ deployment. Shipping a mechanism does not check a run box.
 - [ ] The report contains no required `NOT_RUN`, `UNSUPPORTED`, `TIMEOUT`, `CRASHED`, `INCOMPLETE`, or
   unapproved `REVIEW_REQUIRED` control.
 - [ ] The decision package is signed and active, and a digest variant is rejected by deployment verification.
-- [ ] CodeRankEmbed completes its profile first; CodeSage Base completes pickle/conversion gates before
-  CodeSage Large is considered for the higher-resource tier.
+- [ ] The custom-code/safetensors profile completes first; the medium pickle-backed profile completes
+  conversion gates before a large model is considered for the higher-resource tier.
 
 ### 19.3 Corporate operational readiness
 
