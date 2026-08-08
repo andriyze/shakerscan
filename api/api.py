@@ -140,10 +140,12 @@ try:
     from model_intake_loader_profiles import resolve_conversion_profile as _resolve_model_conversion_profile
     from model_intake_loader_profiles import resolve_loader_profile as _resolve_model_loader_profile
     from model_intake_runner_controller import firecracker_readiness as _model_firecracker_readiness
+    from model_intake_runner_controller import runner_memory_admission as _model_runner_memory_admission
 except ModuleNotFoundError:
     from api.model_intake_loader_profiles import resolve_conversion_profile as _resolve_model_conversion_profile
     from api.model_intake_loader_profiles import resolve_loader_profile as _resolve_model_loader_profile
     from api.model_intake_runner_controller import firecracker_readiness as _model_firecracker_readiness
+    from api.model_intake_runner_controller import runner_memory_admission as _model_runner_memory_admission
 
 try:
     from model_intake_agent import (
@@ -16320,10 +16322,33 @@ async def _model_intake_auto_memory_mib(
     # dictionary, model parameters, and inference buffers.  Three artifact
     # sizes proved insufficient for a 2.63 GB CodeSage model under the real
     # cgroup: Firecracker was OOM-killed before it could finalize evidence.
-    # Four artifact sizes plus a fixed 3 GiB envelope remains deterministic,
-    # rounds to 512 MiB, and retains the 12 GiB hard ceiling for a 16 GiB host.
+    # Four artifact sizes plus a fixed 3 GiB envelope remains deterministic.
+    # The 13 GiB default keeps a two-GiB-plus host reserve on a 16 GiB runner
+    # while giving the 2.63 GB CodeSage conversion meaningful headroom.
     requested = max(4096, 3072 + artifact_mib * 4)
-    return min(12288, int(math.ceil(requested / 512) * 512))
+    rounded = int(math.ceil(requested / 512) * 512)
+    configured_cap = max(4096, min(262144, int(os.getenv(
+        "MODEL_INTAKE_AUTO_MAX_MEMORY_MIB", "13312",
+    ))))
+    if rounded > configured_cap:
+        raise RuntimeError(
+            "The exact model needs an estimated "
+            f"{rounded} MiB Firecracker envelope, above this runner's automatic-review cap "
+            f"of {configured_cap} MiB. Use a larger runner and raise "
+            "MODEL_INTAKE_AUTO_MAX_MEMORY_MIB, then start a new review."
+        )
+    return rounded
+
+
+def _require_model_intake_auto_runner_memory(memory_mib: int) -> dict[str, Any]:
+    readiness = _model_intake_runner_readiness_snapshot()
+    plan = _model_runner_memory_admission(readiness, memory_mib)
+    if plan.get("sufficient") is False:
+        raise RuntimeError(
+            "The Firecracker host does not have enough memory for this exact model: "
+            f"{plan.get('reason')}. Move the runner to a larger KVM host and start a new review."
+        )
+    return plan
 
 
 async def _advance_model_intake_automatic_review(conn: Any, review: Any) -> None:
@@ -16438,6 +16463,7 @@ async def _advance_model_intake_automatic_review(conn: Any, review: Any) -> None
                 raise ValueError("The pinned model revision does not publish a usable embedding contract")
             conversion_bundle = _model_intake_auto_embedding_bundle(conversion, published)
             memory_mib = await _model_intake_auto_memory_mib(conn, submission_id, conversion_bundle)
+            await asyncio.to_thread(_require_model_intake_auto_runner_memory, memory_mib)
             response = await create_model_intake_runner_job(
                 submission_id,
                 ModelRunnerJobCreateRequest(
@@ -16505,6 +16531,7 @@ async def _advance_model_intake_automatic_review(conn: Any, review: Any) -> None
     bundle = _model_intake_json_object(review["deployment_bundle_json"])
     if state == "calibration_pending":
         memory_mib = await _model_intake_auto_memory_mib(conn, submission_id, bundle)
+        await asyncio.to_thread(_require_model_intake_auto_runner_memory, memory_mib)
         response = await create_model_intake_runner_job(
             submission_id,
             ModelRunnerJobCreateRequest(
@@ -16544,6 +16571,7 @@ async def _advance_model_intake_automatic_review(conn: Any, review: Any) -> None
 
     if state == "runtime_pending":
         memory_mib = await _model_intake_auto_memory_mib(conn, submission_id, bundle)
+        await asyncio.to_thread(_require_model_intake_auto_runner_memory, memory_mib)
         response = await create_model_intake_runner_job(
             submission_id,
             ModelRunnerJobCreateRequest(

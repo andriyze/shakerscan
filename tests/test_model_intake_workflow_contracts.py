@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT / "api"))
 import api  # noqa: E402
 
 
-def test_automatic_large_model_memory_envelope_reaches_bounded_12_gib_cap():
+def test_automatic_large_model_memory_envelope_gives_codesage_13_gib():
     class Connection:
         async def fetchval(self, *_args):
             return 2_627_013_817
@@ -27,7 +27,7 @@ def test_automatic_large_model_memory_envelope_reaches_bounded_12_gib_cap():
         Connection(), str(uuid.uuid4()), {"model_artifact_sha256": "a" * 64},
     ))
 
-    assert memory_mib == 12_288
+    assert memory_mib == 13_312
 
 
 def test_automatic_review_payload_decodes_jsonb_for_browser_contract():

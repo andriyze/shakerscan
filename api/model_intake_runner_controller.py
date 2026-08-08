@@ -73,6 +73,68 @@ def cpu_exposes_virtualization(cpuinfo_path: Path | None = None) -> bool | None:
     return False if saw_flags else None
 
 
+def host_memory_resources(meminfo_path: Path | None = None) -> dict[str, int | None]:
+    """Read host memory capacity for deterministic microVM admission planning."""
+    path = meminfo_path or Path("/proc/meminfo")
+    values: dict[str, int] = {}
+    try:
+        for line in path.read_text(errors="replace").splitlines():
+            name, separator, raw = line.partition(":")
+            if not separator or name not in {"MemTotal", "MemAvailable"}:
+                continue
+            match = __import__("re").match(r"\s*(\d+)\s+kB", raw)
+            if match:
+                values[name] = int(match.group(1)) * 1024
+    except OSError:
+        pass
+    return {
+        "host_memory_total_bytes": values.get("MemTotal"),
+        "host_memory_available_bytes": values.get("MemAvailable"),
+    }
+
+
+def runner_memory_admission(readiness: dict[str, Any], requested_memory_mib: int) -> dict[str, Any]:
+    """Reserve host capacity for ShakerScan and fail before launching an unsafe VM."""
+    resources = readiness.get("resources") if isinstance(readiness.get("resources"), dict) else {}
+    total_bytes = resources.get("host_memory_total_bytes")
+    available_bytes = resources.get("host_memory_available_bytes")
+    total_mib = int(total_bytes) // (1024 * 1024) if isinstance(total_bytes, int) and total_bytes > 0 else None
+    available_mib = int(available_bytes) // (1024 * 1024) if isinstance(available_bytes, int) and available_bytes > 0 else None
+    reserve_mib = max(2048, int((total_mib or 0) * 0.15)) if total_mib else None
+    total_sufficient = (
+        None if total_mib is None
+        else requested_memory_mib + int(reserve_mib or 0) <= total_mib
+    )
+    available_sufficient = (
+        None if available_mib is None else requested_memory_mib <= available_mib
+    )
+    sufficient = (
+        False if False in {total_sufficient, available_sufficient}
+        else True if total_sufficient is True and available_sufficient in {True, None}
+        else None
+    )
+    if total_sufficient is False:
+        reason = (
+            f"requested {requested_memory_mib} MiB guest plus {reserve_mib} MiB host "
+            f"reserve exceeds {total_mib} MiB host memory"
+        )
+    elif available_sufficient is False:
+        reason = (
+            f"requested {requested_memory_mib} MiB guest exceeds {available_mib} MiB "
+            "currently available host memory"
+        )
+    else:
+        reason = None
+    return {
+        "requested_guest_memory_mib": requested_memory_mib,
+        "host_memory_total_mib": total_mib,
+        "host_memory_available_mib": available_mib,
+        "host_reserve_mib": reserve_mib,
+        "sufficient": sufficient,
+        "reason": reason,
+    }
+
+
 def firecracker_readiness(
     environment: dict[str, str] | None = None,
     *,
@@ -110,6 +172,7 @@ def firecracker_readiness(
         "filesystem_tool": shutil.which("mkfs.ext4") is not None and shutil.which("debugfs") is not None,
     }
     identities: dict[str, str] = {}
+    resources = host_memory_resources()
     for name, variable, digest_variable in (
         ("firecracker", "MODEL_INTAKE_FIRECRACKER_BIN", "MODEL_INTAKE_FIRECRACKER_SHA256"),
         ("jailer", "MODEL_INTAKE_JAILER_BIN", "MODEL_INTAKE_JAILER_SHA256"),
@@ -166,6 +229,7 @@ def firecracker_readiness(
             "unsupported_reason": reason_code,
             "checks": checks,
             "verified_component_sha256": identities,
+            "resources": resources,
             "fallback_execution": False,
         }
     return {
@@ -176,6 +240,7 @@ def firecracker_readiness(
         "executor": "firecracker-jailer",
         "checks": checks,
         "verified_component_sha256": identities,
+        "resources": resources,
         "fallback_execution": False,
     }
 
@@ -213,4 +278,7 @@ def build_firecracker_config(request: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-__all__ = ["build_firecracker_config", "firecracker_readiness"]
+__all__ = [
+    "build_firecracker_config", "firecracker_readiness", "host_memory_resources",
+    "runner_memory_admission",
+]

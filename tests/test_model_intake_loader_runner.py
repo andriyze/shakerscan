@@ -642,6 +642,28 @@ def test_unreadable_cpuinfo_leaves_a_linux_host_eligible(tmp_path):
     assert result["supported_host"] is True
 
 
+def test_runner_memory_admission_reserves_capacity_for_host_services():
+    from model_intake_runner_controller import runner_memory_admission
+
+    readiness = {"resources": {
+        "host_memory_total_bytes": 16 * 1024**3,
+        "host_memory_available_bytes": 14 * 1024**3,
+    }}
+    codesage = runner_memory_admission(readiness, 13_312)
+    oversized = runner_memory_admission(readiness, 15_000)
+    busy_host = runner_memory_admission({"resources": {
+        "host_memory_total_bytes": 16 * 1024**3,
+        "host_memory_available_bytes": 12 * 1024**3,
+    }}, 13_312)
+
+    assert codesage["sufficient"] is True
+    assert codesage["host_reserve_mib"] >= 2048
+    assert oversized["sufficient"] is False
+    assert "exceeds" in oversized["reason"]
+    assert busy_host["sufficient"] is False
+    assert "currently available" in busy_host["reason"]
+
+
 def test_locally_derived_loader_profiles_diverge_from_the_authoritative_one():
     """Why the UI must not recompute the runner bundle.
 

@@ -25,10 +25,12 @@ from pydantic import BaseModel, ConfigDict, Field
 try:
     from model_intake_control_plane import canonical_bytes
     from model_intake_firecracker_runner import FirecrackerRunner, firecracker_readiness
+    from model_intake_runner_controller import runner_memory_admission
     from model_intake_runner_inputs import normalize_known_answer_inputs
 except ModuleNotFoundError:  # pragma: no cover
     from api.model_intake_control_plane import canonical_bytes
     from api.model_intake_firecracker_runner import FirecrackerRunner, firecracker_readiness
+    from api.model_intake_runner_controller import runner_memory_admission
     from api.model_intake_runner_inputs import normalize_known_answer_inputs
 
 
@@ -103,6 +105,13 @@ class DurableRunnerQueue:
             normalized_inputs = normalize_known_answer_inputs(request.known_answer_inputs)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        resource_plan = runner_memory_admission(firecracker_readiness(), request.memory_mib)
+        if resource_plan.get("sufficient") is False:
+            raise HTTPException(status_code=422, detail={
+                "code": "insufficient_runner_memory",
+                "message": resource_plan.get("reason"),
+                "resource_plan": resource_plan,
+            })
         job = {
             "schema_version": "model-intake-runner-job/v1",
             "id": str(uuid.uuid4()),
@@ -116,6 +125,7 @@ class DurableRunnerQueue:
             "finished_at": None,
             "result": None,
             "error": None,
+            "resource_plan": resource_plan,
         }
         self._write(job)
         self.pending.put_nowait(job["id"])
