@@ -19,4 +19,6 @@ def test_every_release_image_verifies_latest_matches_version_digest():
     text = WORKFLOW.read_text(encoding="utf-8")
 
     assert text.count('latest_digest="$(docker buildx imagetools inspect') == 4
+    assert text.count("&& !found {print $2; found=1}") == 8
+    assert "{print $2; exit}" not in text
     assert text.count('[[ -n "$version_digest" && "$version_digest" == "$latest_digest" ]]') == 4

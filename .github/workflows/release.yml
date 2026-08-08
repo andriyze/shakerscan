@@ -415,8 +415,8 @@ jobs:
             $(printf "${SCANNER_IMAGE}@sha256:%s " *)
           docker buildx imagetools inspect "${SCANNER_IMAGE}:${VERSION}"
           if [[ "$PUSH_LATEST" == "true" ]]; then
-            version_digest="$(docker buildx imagetools inspect "${SCANNER_IMAGE}:${VERSION}" | awk '$1 == "Digest:" {print $2; exit}')"
-            latest_digest="$(docker buildx imagetools inspect "${SCANNER_IMAGE}:latest" | awk '$1 == "Digest:" {print $2; exit}')"
+            version_digest="$(docker buildx imagetools inspect "${SCANNER_IMAGE}:${VERSION}" | awk '$1 == "Digest:" && !found {print $2; found=1}')"
+            latest_digest="$(docker buildx imagetools inspect "${SCANNER_IMAGE}:latest" | awk '$1 == "Digest:" && !found {print $2; found=1}')"
             [[ -n "$version_digest" && "$version_digest" == "$latest_digest" ]]
           fi
 
@@ -435,8 +435,8 @@ jobs:
             $(printf "${API_IMAGE}@sha256:%s " *)
           docker buildx imagetools inspect "${API_IMAGE}:${VERSION}"
           if [[ "$PUSH_LATEST" == "true" ]]; then
-            version_digest="$(docker buildx imagetools inspect "${API_IMAGE}:${VERSION}" | awk '$1 == "Digest:" {print $2; exit}')"
-            latest_digest="$(docker buildx imagetools inspect "${API_IMAGE}:latest" | awk '$1 == "Digest:" {print $2; exit}')"
+            version_digest="$(docker buildx imagetools inspect "${API_IMAGE}:${VERSION}" | awk '$1 == "Digest:" && !found {print $2; found=1}')"
+            latest_digest="$(docker buildx imagetools inspect "${API_IMAGE}:latest" | awk '$1 == "Digest:" && !found {print $2; found=1}')"
             [[ -n "$version_digest" && "$version_digest" == "$latest_digest" ]]
           fi
 
@@ -455,8 +455,8 @@ jobs:
             $(printf "${UI_IMAGE}@sha256:%s " *)
           docker buildx imagetools inspect "${UI_IMAGE}:${VERSION}"
           if [[ "$PUSH_LATEST" == "true" ]]; then
-            version_digest="$(docker buildx imagetools inspect "${UI_IMAGE}:${VERSION}" | awk '$1 == "Digest:" {print $2; exit}')"
-            latest_digest="$(docker buildx imagetools inspect "${UI_IMAGE}:latest" | awk '$1 == "Digest:" {print $2; exit}')"
+            version_digest="$(docker buildx imagetools inspect "${UI_IMAGE}:${VERSION}" | awk '$1 == "Digest:" && !found {print $2; found=1}')"
+            latest_digest="$(docker buildx imagetools inspect "${UI_IMAGE}:latest" | awk '$1 == "Digest:" && !found {print $2; found=1}')"
             [[ -n "$version_digest" && "$version_digest" == "$latest_digest" ]]
           fi
 
@@ -475,8 +475,8 @@ jobs:
             $(printf "${SIGNER_IMAGE}@sha256:%s " *)
           docker buildx imagetools inspect "${SIGNER_IMAGE}:${VERSION}"
           if [[ "$PUSH_LATEST" == "true" ]]; then
-            version_digest="$(docker buildx imagetools inspect "${SIGNER_IMAGE}:${VERSION}" | awk '$1 == "Digest:" {print $2; exit}')"
-            latest_digest="$(docker buildx imagetools inspect "${SIGNER_IMAGE}:latest" | awk '$1 == "Digest:" {print $2; exit}')"
+            version_digest="$(docker buildx imagetools inspect "${SIGNER_IMAGE}:${VERSION}" | awk '$1 == "Digest:" && !found {print $2; found=1}')"
+            latest_digest="$(docker buildx imagetools inspect "${SIGNER_IMAGE}:latest" | awk '$1 == "Digest:" && !found {print $2; found=1}')"
             [[ -n "$version_digest" && "$version_digest" == "$latest_digest" ]]
           fi
 
