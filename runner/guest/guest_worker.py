@@ -66,18 +66,35 @@ def _state_dict(value):
 
 
 def _install_transformers_compatibility() -> None:
-    """Install only identity-preserving aliases required by reviewed legacy code.
+    """Install only identity-preserving defaults required by reviewed legacy code.
 
     Some older Hugging Face repositories import ``Conv1D`` from
     ``transformers.modeling_utils``.  Current Transformers exposes the same
     class from ``transformers.pytorch_utils``.  Binding that exact class under
     its former public location lets the digest-pinned runtime assess the
     repository without editing model-controlled source or relaxing the loader.
+
+    Transformers 5 computes tied-weight metadata in ``post_init``. Legacy
+    remote classes that predate that contract may omit the call, so initialize
+    the same empty per-instance mapping used before expansion. Models that call
+    ``post_init`` replace it with the authoritative mapping; models that do not
+    must still pass source/converted embedding equivalence below.
     """
     import transformers.modeling_utils as modeling_utils
     if not hasattr(modeling_utils, "Conv1D"):
         from transformers.pytorch_utils import Conv1D
         modeling_utils.Conv1D = Conv1D
+    model_base = modeling_utils.PreTrainedModel
+    if not getattr(model_base, "_shakerscan_legacy_post_init_compat", False):
+        original_init = model_base.__init__
+
+        def compatibility_init(self, *args, **kwargs):
+            original_init(self, *args, **kwargs)
+            if not hasattr(self, "all_tied_weights_keys"):
+                self.all_tied_weights_keys = {}
+
+        model_base.__init__ = compatibility_init
+        model_base._shakerscan_legacy_post_init_compat = True
 
 
 def _configure_deterministic_torch(torch) -> None:

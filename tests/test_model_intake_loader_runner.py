@@ -242,7 +242,7 @@ def test_runner_subject_root_is_traversable_despite_service_umask(tmp_path):
     assert (destination / "1_Pooling" / "config.json").stat().st_mode & 0o777 == 0o644
 
 
-def test_guest_installs_only_the_canonical_legacy_conv1d_alias(monkeypatch):
+def test_guest_installs_only_identity_preserving_transformers_compatibility(monkeypatch):
     guest_root = Path(__file__).resolve().parents[1] / "runner" / "guest"
     monkeypatch.syspath_prepend(str(guest_root))
     import guest_worker
@@ -253,6 +253,15 @@ def test_guest_installs_only_the_canonical_legacy_conv1d_alias(monkeypatch):
     modeling_utils = types.ModuleType("transformers.modeling_utils")
     pytorch_utils = types.ModuleType("transformers.pytorch_utils")
     pytorch_utils.Conv1D = canonical
+
+    class LegacyModel:
+        def __init__(self, marker):
+            self.marker = marker
+            if marker == "mapped":
+                self.all_tied_weights_keys = {"decoder.weight": "encoder.weight"}
+
+    original_init = LegacyModel.__init__
+    modeling_utils.PreTrainedModel = LegacyModel
     monkeypatch.setitem(sys.modules, "transformers", package)
     monkeypatch.setitem(sys.modules, "transformers.modeling_utils", modeling_utils)
     monkeypatch.setitem(sys.modules, "transformers.pytorch_utils", pytorch_utils)
@@ -260,6 +269,17 @@ def test_guest_installs_only_the_canonical_legacy_conv1d_alias(monkeypatch):
     guest_worker._install_transformers_compatibility()
 
     assert modeling_utils.Conv1D is canonical
+    model = LegacyModel("reviewed")
+    assert model.marker == "reviewed"
+    assert model.all_tied_weights_keys == {}
+    assert LegacyModel.__init__ is not original_init
+
+    # Repeated phases do not stack wrappers or replace a populated mapping.
+    wrapped_init = LegacyModel.__init__
+    guest_worker._install_transformers_compatibility()
+    assert LegacyModel.__init__ is wrapped_init
+    model_with_mapping = LegacyModel("mapped")
+    assert model_with_mapping.all_tied_weights_keys == {"decoder.weight": "encoder.weight"}
 
 
 def test_guest_embedding_equivalence_uses_deterministic_cpu_execution():
