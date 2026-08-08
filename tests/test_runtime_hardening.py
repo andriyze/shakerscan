@@ -97,6 +97,7 @@ def test_fleet_ui_is_capability_driven_and_keeps_remote_capacity_last():
 def test_hosted_installer_packages_advertised_host_side_adapters():
     expected_downloads = (
         ".dockerignore",
+        "db/configure-model-intake-signer-role.sh",
         "docker-compose.worker.yml",
         "docker-compose.broker-worker.yml",
         "scripts/shakerscan_mcp.py",

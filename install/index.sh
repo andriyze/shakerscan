@@ -269,6 +269,11 @@ download "$REPO_RAW_BASE/docker-compose.release.yml" "$INSTALL_DIR/docker-compos
 download "$REPO_RAW_BASE/docker-compose.worker.yml" "$INSTALL_DIR/docker-compose.worker.yml"
 download "$REPO_RAW_BASE/docker-compose.broker-worker.yml" "$INSTALL_DIR/docker-compose.broker-worker.yml"
 download "$REPO_RAW_BASE/db/init.sql" "$INSTALL_DIR/db/init.sql"
+if [ -d "$INSTALL_DIR/db/configure-model-intake-signer-role.sh" ]; then
+    rmdir "$INSTALL_DIR/db/configure-model-intake-signer-role.sh" || \
+        fail "cannot replace non-empty signer role script directory from an earlier broken install"
+fi
+download "$REPO_RAW_BASE/db/configure-model-intake-signer-role.sh" "$INSTALL_DIR/db/configure-model-intake-signer-role.sh"
 download "$REPO_RAW_BASE/VERSION" "$INSTALL_DIR/VERSION"
 download "$REPO_RAW_BASE/README.md" "$INSTALL_DIR/README.md"
 download "$REPO_RAW_BASE/AGENTS.md" "$INSTALL_DIR/AGENTS.md"
@@ -337,6 +342,7 @@ download "$REPO_RAW_BASE/.claude/commands/workers.md" "$INSTALL_DIR/.claude/comm
 download "$REPO_RAW_BASE/.claude/hooks/session-start.sh" "$INSTALL_DIR/.claude/hooks/session-start.sh"
 download "$REPO_RAW_BASE/.claude/settings.json" "$INSTALL_DIR/.claude/settings.json"
 chmod +x "$INSTALL_DIR/scanner.sh"
+chmod +x "$INSTALL_DIR/db/configure-model-intake-signer-role.sh"
 chmod +x "$INSTALL_DIR/scripts/build-model-intake-guest-rootfs.sh"
 chmod +x "$INSTALL_DIR/scripts/provision-model-intake-firecracker.sh"
 chmod +x "$INSTALL_DIR/.claude/hooks/session-start.sh"

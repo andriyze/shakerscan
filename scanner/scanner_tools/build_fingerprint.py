@@ -56,6 +56,17 @@ def source_file_map(workspace_root: str = "/workspace") -> dict[str, str]:
     files: dict[str, str] = {}
     scanner_root = root / "scanner"
     api_root = root / "api"
+    # The curl installer deliberately packages a small host-side api/ support
+    # directory under /workspace, but it is not a source checkout. Treating any
+    # api/*.py file as proof of a checkout produces a partial checksum that can
+    # never match the worker image. Require both execution anchors before
+    # enumerating a workspace; otherwise return the complete legacy manifest so
+    # require_all=True fails and callers correctly fall back to /app.
+    if not (scanner_root / "scanner.py").is_file() or not (api_root / "worker.py").is_file():
+        return {
+            name: os.path.join(workspace_root, source_relative)
+            for name, source_relative, _ in FINGERPRINT_SOURCE_FILES
+        }
     if scanner_root.is_dir():
         for path in sorted(scanner_root.glob("*.py")):
             files[path.name] = str(path)
@@ -80,12 +91,7 @@ def source_file_map(workspace_root: str = "/workspace") -> dict[str, str]:
     for logical_name, path in auxiliary:
         if path.is_file():
             files[logical_name] = str(path)
-    if files:
-        return files
-    return {
-        name: os.path.join(workspace_root, source_relative)
-        for name, source_relative, _ in FINGERPRINT_SOURCE_FILES
-    }
+    return files
 
 
 def runtime_file_map(

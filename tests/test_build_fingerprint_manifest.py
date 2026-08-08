@@ -55,6 +55,7 @@ def test_security_rule_guest_lock_and_guest_code_changes_invalidate_fingerprint(
     (workspace / "runner" / "guest").mkdir(parents=True)
     (workspace / "api").mkdir()
     (workspace / "scanner" / "scanner.py").write_text("SCAN = 1\n", encoding="utf-8")
+    (workspace / "api" / "worker.py").write_text("WORKER = 1\n", encoding="utf-8")
     semgrep = workspace / "scanner" / "scanner_tools" / "model_intake_semgrep.yml"
     semgrep.write_text("rules: []\n", encoding="utf-8")
     guest_lock = workspace / "runner" / "guest" / "requirements.lock"
@@ -73,3 +74,17 @@ def test_security_rule_guest_lock_and_guest_code_changes_invalidate_fingerprint(
     after_guest_code = hash_source_files(source_file_map(str(workspace)), require_all=True)
 
     assert before and before != after_rule != after_lock != after_guest_code
+
+
+def test_installed_support_directory_is_not_mistaken_for_source_checkout(tmp_path):
+    workspace = tmp_path / "workspace"
+    (workspace / "api").mkdir(parents=True)
+    (workspace / "api" / "model_intake_control_plane.py").write_text(
+        "SUPPORT = 1\n", encoding="utf-8"
+    )
+
+    files = source_file_map(str(workspace))
+
+    assert "model_intake_control_plane.py" not in files
+    assert files["scanner.py"] == str(workspace / "scanner" / "scanner.py")
+    assert hash_source_files(files, require_all=True) is None

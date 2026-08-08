@@ -14,6 +14,10 @@ export SHAKERSCAN_START=0
 export SHELL=/bin/bash
 
 mkdir -p "$HOME"
+# Docker created this empty directory on affected 0.8.0 installs because the
+# bootstrap omitted the bind-mounted signer role script. The next installer
+# must repair that state rather than nesting the script inside the directory.
+mkdir -p "$SHAKERSCAN_HOME/db/configure-model-intake-signer-role.sh"
 sh "$ROOT_DIR/install/index.sh" >/dev/null
 export PATH="$SHAKERSCAN_BIN_DIR:$PATH"
 
@@ -23,6 +27,7 @@ required_files=(
   docker-compose.worker.yml
   docker-compose.broker-worker.yml
   db/init.sql
+  db/configure-model-intake-signer-role.sh
   VERSION
   README.md
   AGENTS.md
@@ -80,6 +85,7 @@ done
 
 test -x "$SHAKERSCAN_BIN_DIR/shakerscan"
 test -x "$SHAKERSCAN_HOME/scanner.sh"
+test -x "$SHAKERSCAN_HOME/db/configure-model-intake-signer-role.sh"
 test -x "$SHAKERSCAN_HOME/scripts/build-model-intake-guest-rootfs.sh"
 test -x "$SHAKERSCAN_HOME/scripts/provision-model-intake-firecracker.sh"
 test -x "$SHAKERSCAN_HOME/.claude/hooks/session-start.sh"
