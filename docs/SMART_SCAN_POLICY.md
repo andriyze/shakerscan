@@ -85,7 +85,7 @@ Recommended thresholds:
 - Apply adaptive backoff on `429`/`503`.
 - Downgrade unverified `critical/high` findings after verification budget exhaustion.
 - Require explicit operator consent for active modes. Approval receipts and a global enforcement
-  toggle are implemented, and Deep Hunt requires a target-bound expiring approval. Under the 0.7.0
+  toggle are implemented, and Deep Hunt requires a target-bound expiring approval. Under the 0.8.0
   trusted-operator scope, mandatory receipt enforcement for every ordinary local DAST scan remains
   optional; starting the scan is treated as the local operator's authorization.
 

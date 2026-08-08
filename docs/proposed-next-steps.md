@@ -83,17 +83,20 @@ backlog mapped to concrete seams — is [deep-hunt-architecture.md](deep-hunt-ar
   replay uncertain active traffic after a restart.
 - Keep arbitrary shell, model-supplied credentials, and AI-only verified findings excluded.
 
-## 6. Graduate AI preview surfaces
+## 6. Graduate the remaining AI preview surface
 
-- Implement the remaining AI Gate and Model Intake full-pipeline E2E cases for deterministic-judge,
-  exception, and deployment-decision seams.
-- Promote either surface from preview only after its candidate build passes those real-stack gates.
+- Implement the remaining AI Gate full-pipeline E2E cases for deterministic-judge and exception
+  seams.
+- Promote AI Gate from preview only after its candidate build passes those real-stack gates.
+- Keep Model Intake's real-model/KVM matrix current as a release gate; do not move deterministic
+  admission authority into an AI planner.
 - Keep live MCP invocation fuzzing, full registry-native Sigstore/cosign, and built-in AV/YARA as
   separately scoped future capabilities.
 
 ## Delivery order
 
-1. Finish audit cleanup, then freeze and validate 0.7.0 using `release-readiness.md`.
-2. Obtain physical broker and WireGuard acceptance evidence for the exact frozen SHA.
+1. Freeze and validate 0.8.0 using `release-readiness.md`.
+2. Retain physical broker and Model Intake KVM acceptance evidence for the exact frozen SHA.
 3. Run upgrade/rollback, installer, full E2E, and current-fleet benchmark gates without code changes.
-4. Continue DAST/auth quality and execution-contract work only on a new post-candidate branch.
+4. Test WireGuard separately before considering it for a future supported release boundary.
+5. Continue DAST/auth quality and execution-contract work only on a new post-candidate branch.

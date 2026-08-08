@@ -1,6 +1,6 @@
 # Documentation Index
 
-**Reconciled:** 2026-07-28. This directory contains maintained product references, operating policy,
+**Reconciled:** 2026-08-08. This directory contains maintained product references, operating policy,
 release material, and active architecture. Point-in-time audits, completed prompts, implementation
 ledgers, and obsolete screenshots are kept in Git history rather than copied into the release docs.
 Code, database schemas, runtime receipts, and tests remain authoritative when a document disagrees.
@@ -25,7 +25,7 @@ Code, database schemas, runtime receipts, and tests remain authoritative when a 
 | [`release-readiness.md`](release-readiness.md) | Single release scope, stop-ship, validation, publishing, installer, and documentation checklist |
 | [`upgrade-and-rollback.md`](upgrade-and-rollback.md) | Backup, upgrade, verification, and rollback runbook for source and installer deployments |
 | [`multi-node-guide.md`](multi-node-guide.md) | Set up and operate WireGuard or outbound-HTTPS multi-node fleets |
-| [`releases/0.7.0.md`](releases/0.7.0.md) | Version-specific ShakerScan 0.7.0 release notes and supported product boundary |
+| [`releases/0.8.0.md`](releases/0.8.0.md) | Version-specific ShakerScan 0.8.0 release notes and supported product boundary |
 | [`SMART_SCAN_POLICY.md`](SMART_SCAN_POLICY.md) | Smart-scan budget, proof, safety, and release policy |
 | [`owasp-coverage-matrix.md`](owasp-coverage-matrix.md) | Implemented DAST mechanisms mapped to OWASP categories |
 | [`E2E_TEST_PLAN.md`](E2E_TEST_PLAN.md) | Real-stack E2E contract, implemented/planned cases, and freshness rules |
@@ -44,7 +44,7 @@ Code, database schemas, runtime receipts, and tests remain authoritative when a 
 |---|---|
 | [`AI_TEST_WORKFLOWS.md`](AI_TEST_WORKFLOWS.md) | Generic AI workflows and optional Honey calibration contract |
 | [`INTERACTIVE_SESSIONS_GUIDE.md`](INTERACTIVE_SESSIONS_GUIDE.md) | Authorized interactive browser/session testing guide |
-| [`model-intake-security-review-roadmap.md`](model-intake-security-review-roadmap.md) | Model Intake audit, target architecture, corporate model-review procedure, CodeRankEmbed/CodeSage runbooks, implementation roadmap, and acceptance gates |
+| [`model-intake-security-review-roadmap.md`](model-intake-security-review-roadmap.md) | Model Intake controls, architecture, provider-neutral review procedure, implementation status, limitations, and acceptance gates |
 | [`AUDIT-2026-07.md`](AUDIT-2026-07.md) | 2026-07 end-to-end product/security audit: findings, fixes, and verified-good behavior |
 | [`audit-evidence-2026-07.md`](audit-evidence-2026-07.md) | Durable evidence index, reproduction commands, and remediation release gates for the 2026-07 audit |
 

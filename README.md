@@ -21,7 +21,7 @@ ShakerScan covers:
 - DAST for websites and APIs, from fast posture checks to authorized active XSS/SQLi testing
 - Continuous attack-surface management (ASM), subdomain discovery, and certificate-transparency monitoring
 - AI Gate tests for chat, RAG, agent, and MCP endpoints *(preview)*
-- Model Intake checks for provenance, signatures, checksums, unsafe serialization, and policy readiness *(preview)*
+- Model Intake reviews for provenance, dependencies, licenses, unsafe serialization, isolated runtime behavior, and deployment readiness
 - Interactive Testing, finding retests, evidence, exceptions, the mission ledger, and Deep Hunt
 
 > Only scan systems you own or are explicitly authorized to test. Active scan modes can change
@@ -347,7 +347,7 @@ continues to support standalone ShakerScan, but does not expose Fleet navigation
 capacity; a direct Fleet-page visit explains the Linux requirement. Standalone Linux installs also
 hide Fleet and remote placement until `fleet init` succeeds.
 
-ShakerScan can add digest-pinned worker VPSs to one control plane. The supported 0.7.0 production
+ShakerScan can add digest-pinned worker VPSs to one control plane. The supported 0.8.0 production
 transport is the outbound-only HTTPS broker. Broker workers receive no Redis, PostgreSQL, or
 object-store credentials:
 
@@ -362,8 +362,8 @@ shakerscan join https://scanner.example.com --token <join-token> --transport bro
 ```
 
 The built-in WireGuard workflow remains available as an operator preview for machines you own and
-trust, but it is excluded from the 0.7.0 production support boundary until its physical two-host
-acceptance passes in the next release cycle:
+trust, but it is excluded from the 0.8.0 production support boundary until its own physical
+two-host acceptance matrix passes in a future release cycle:
 
 ```bash
 # Control plane
@@ -590,7 +590,7 @@ Common fixes:
 - [Documentation index](https://github.com/andriyze/shakerscan/blob/main/docs/README.md)
 - [Full functionality reference](https://github.com/andriyze/shakerscan/blob/main/docs/functionality-reference.md)
 - [Release readiness checklist](https://github.com/andriyze/shakerscan/blob/main/docs/release-readiness.md)
-- [ShakerScan 0.7.0 release notes](https://github.com/andriyze/shakerscan/blob/main/docs/releases/0.7.0.md)
+- [ShakerScan 0.8.0 release notes](https://github.com/andriyze/shakerscan/blob/main/docs/releases/0.8.0.md)
 - [First-run walkthrough](https://github.com/andriyze/shakerscan/blob/main/WALKTHROUGH.md)
 - [Skill and agent guide](skills/README.md)
 - [Smart Scan Policy](https://github.com/andriyze/shakerscan/blob/main/docs/SMART_SCAN_POLICY.md)

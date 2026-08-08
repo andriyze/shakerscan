@@ -6,7 +6,7 @@ across `product-model.md` and `functionality-reference.md` §11.6 after the olde
 `autonomous-agent-architecture.md` was retired. User-facing vocabulary lives in
 [product-model.md](product-model.md); the exhaustive route/schema inventory is in
 [functionality-reference.md](functionality-reference.md); the shared local execution model is in
-[dast-asm-architecture.md](dast-asm-architecture.md); the post-0.7.0 acceptance backlog is
+[dast-asm-architecture.md](dast-asm-architecture.md); the future acceptance backlog is
 [proposed-next-steps.md](proposed-next-steps.md) §5.
 
 Code, schema, and tests remain authoritative when this document disagrees. Symbols (functions,
