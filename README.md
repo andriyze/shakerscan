@@ -361,6 +361,10 @@ shakerscan fleet join-token --ttl 24h --transport broker
 shakerscan join https://scanner.example.com --token <join-token> --transport broker
 ```
 
+If the public installer started a standalone stack on the worker VPS, a successful `join` stops
+only that standalone project and preserves its data volumes before starting the worker-only Fleet
+runtime. Unrelated Docker projects are not changed.
+
 The built-in WireGuard workflow remains available as an operator preview for machines you own and
 trust, but it is excluded from the 0.8.2 production support boundary until its own physical
 two-host acceptance matrix passes in a future release cycle:

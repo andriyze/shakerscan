@@ -1940,6 +1940,7 @@ def _start_broker_runtime(
         raise FleetCLIError("docker-compose.broker-worker.yml is missing from the runtime")
     if runtime_image is not None and not LOCAL_WORKER_IMAGE_RE.fullmatch(runtime_image):
         raise FleetCLIError("local broker worker image reference is invalid")
+    _stop_standalone_runtime_for_worker(paths)
     compose = _docker_compose_command()
     compose_env = paths.node / "compose.env"
     expected_image = validate_digest_image(str(response["worker_image_digest"]))
@@ -1966,6 +1967,51 @@ def _start_broker_runtime(
         removed = _prune_obsolete_local_broker_images(keep_image=runtime_image)
         if removed:
             print(f"Removed {len(removed)} obsolete local fleet image tag(s)")
+
+
+def _stop_standalone_runtime_for_worker(paths: RuntimePaths) -> None:
+    """Retire only this runtime's standalone project before worker-only startup."""
+    env = load_dotenv(paths.dotenv)
+    if str(os.environ.get("FLEET_NETWORK_BACKEND") or env.get("FLEET_NETWORK_BACKEND") or "").strip():
+        raise FleetCLIError("a fleet control plane cannot also join as a worker node")
+    project = str(os.environ.get("COMPOSE_PROJECT_NAME") or env.get("COMPOSE_PROJECT_NAME") or "shakerscan")
+    project = project.strip().lower()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", project):
+        raise FleetCLIError("COMPOSE_PROJECT_NAME is invalid for worker-only conversion")
+    running = _run(
+        [
+            "docker",
+            "ps",
+            "-a",
+            "--filter",
+            f"label=com.docker.compose.project={project}",
+            "--format",
+            "{{.ID}}",
+        ],
+        check=False,
+    )
+    if running.returncode != 0:
+        raise FleetCLIError("could not inspect the standalone Docker Compose project")
+    if not (running.stdout or "").strip():
+        return
+    compose_file = paths.root / "docker-compose.release.yml"
+    if not compose_file.is_file():
+        compose_file = paths.root / "docker-compose.yml"
+    if not compose_file.is_file():
+        raise FleetCLIError("standalone services are running but no Compose file is available to stop them")
+    compose = _docker_compose_command()
+    command = [
+        *compose,
+        "--project-name",
+        project,
+        "--project-directory",
+        str(paths.root),
+    ]
+    if paths.dotenv.is_file():
+        command.extend(["--env-file", str(paths.dotenv)])
+    command.extend(["-f", str(compose_file), "down", "--remove-orphans"])
+    print("Stopping standalone ShakerScan services for worker-only Fleet mode (data volumes are preserved)...")
+    _run(command, capture=False)
 
 
 def run_join_preflight(

@@ -607,10 +607,65 @@ def test_broker_runtime_forces_per_node_compose_project_and_skips_pull_for_local
         runtime_image="shakerscan-fleet-local:abc1234",
     )
 
-    assert len(calls) == 1
-    argv = calls[0][0]
+    assert len(calls) == 2
+    assert calls[0][0][:2] == ["docker", "ps"]
+    assert "-a" in calls[0][0]
+    argv = calls[1][0]
     assert argv[:4] == ["docker", "compose", "--project-name", "shakerscan-fleet-11111111"]
     assert "pull" not in argv
+
+
+def test_broker_runtime_stops_only_standalone_project_and_preserves_volumes(tmp_path, monkeypatch):
+    paths = fleet_cli.RuntimePaths(tmp_path)
+    paths.broker_worker_compose.write_text("services: {}\n", encoding="utf-8")
+    (tmp_path / "docker-compose.release.yml").write_text("services: {}\n", encoding="utf-8")
+    paths.dotenv.write_text("COMPOSE_PROJECT_NAME=custom-scan\n", encoding="utf-8")
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        if argv[:2] == ["docker", "ps"]:
+            return types.SimpleNamespace(returncode=0, stdout="standalone-id\n")
+        return types.SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr(fleet_cli, "_docker_compose_command", lambda: ["docker", "compose"])
+    monkeypatch.setattr(fleet_cli, "_run", fake_run)
+
+    fleet_cli._stop_standalone_runtime_for_worker(paths)
+
+    down = calls[1][0]
+    assert down[:4] == ["docker", "compose", "--project-name", "custom-scan"]
+    assert "down" in down
+    assert "--remove-orphans" in down
+    assert "--volumes" not in down
+    assert "-v" not in down
+
+
+def test_worker_only_conversion_honors_process_compose_project(tmp_path, monkeypatch):
+    paths = fleet_cli.RuntimePaths(tmp_path)
+    (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return types.SimpleNamespace(returncode=0, stdout="standalone-id\n")
+
+    monkeypatch.setenv("COMPOSE_PROJECT_NAME", "operator-project")
+    monkeypatch.setattr(fleet_cli, "_docker_compose_command", lambda: ["docker", "compose"])
+    monkeypatch.setattr(fleet_cli, "_run", fake_run)
+
+    fleet_cli._stop_standalone_runtime_for_worker(paths)
+
+    assert "label=com.docker.compose.project=operator-project" in calls[0][0]
+    assert calls[1][0][3] == "operator-project"
+
+
+def test_worker_only_conversion_rejects_control_plane_runtime(tmp_path):
+    paths = fleet_cli.RuntimePaths(tmp_path)
+    paths.dotenv.write_text("FLEET_NETWORK_BACKEND=broker\n", encoding="utf-8")
+
+    with pytest.raises(fleet_cli.FleetCLIError, match="control plane cannot also join"):
+        fleet_cli._stop_standalone_runtime_for_worker(paths)
 
 
 def test_persist_worker_runtime_template_captures_only_clone_allowlist(tmp_path, monkeypatch):

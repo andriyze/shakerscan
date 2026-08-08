@@ -124,7 +124,7 @@ curl -fsSL https://install.shakerscan.com | sh
 shakerscan fleet init --network wireguard
 shakerscan fleet join-token --role worker --ttl 24h
 
-# On each additional VPS
+# On each additional VPS (join retires the installer's standalone services and preserves its volumes)
 curl -fsSL https://install.shakerscan.com | sh
 shakerscan join <control-plane-url> --token <join-token>
 

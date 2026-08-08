@@ -341,10 +341,12 @@ and selectable in **New Scan**, but Fleet labels it **local test build** and kee
 count. This preserves development freedom without presenting unpublished code as a production-pinned
 or benchmark-safe worker.
 
-Do not run `./scanner.sh start` on a dedicated worker first. `join` starts the isolated worker and
-node-agent project itself; the worker host does not need its own API, UI, Redis, or PostgreSQL stack.
-Fleet Compose projects are forced to a per-node name so they cannot collide with a standalone
-`shakerscan` project that happens to exist on the same host.
+The public installer starts standalone ShakerScan so a new installation is immediately usable.
+When that host successfully joins a Fleet, `join` automatically stops only its standalone API, UI,
+Redis, PostgreSQL, signer, and local worker containers before starting the isolated worker and
+node-agent project. Standalone data volumes are preserved for recovery, and unrelated Docker
+projects are untouched. Fleet Compose projects use a per-node name so they cannot collide with the
+preserved standalone `shakerscan` project.
 
 For a private-CA endpoint, add `--ca-cert /path/to/ca.pem`. The node persists that CA and both the
 broker worker and its node agent use it. Without `--ca-cert`, broker mode explicitly uses the system
