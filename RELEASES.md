@@ -10,18 +10,18 @@ with a guessed tag commit.
 still downloads runtime docs/scripts from its configured raw source, so an image pin does not by
 itself pin those files.
 
-| Version | Git Commit | Scanner/Worker Image | API Image | UI Image |
-| --- | --- | --- | --- | --- |
-| 0.8.0 | pending candidate | `shakerscan/shakerscan-scanner:0.8.0` | `shakerscan/shakerscan-api:0.8.0` | `shakerscan/shakerscan-ui:0.8.0` |
-| 0.5.7 | `f27bbffda3451ce013aedfb250c7b018104f41d5` | `shakerscan/shakerscan-scanner:0.5.7` | not published separately | `shakerscan/shakerscan-ui:0.5.7` |
-| 0.5.6 | `e7f8dbde13d218d54c195a0be934c6b5bd459b1b` | `shakerscan/shakerscan-scanner:0.5.6` | not published separately | `shakerscan/shakerscan-ui:0.5.6` |
-| 0.5.5 | `53f3cb47ee88a90de7fc49346ac85497f4a6c1db` | `shakerscan/shakerscan-scanner:0.5.5` | not published separately | `shakerscan/shakerscan-ui:0.5.5` |
-| 0.4.2 | `5e1f484469cfc3a9aa1c031613df0b8aada65254` | `shakerscan/shakerscan-scanner:0.4.2` | not published separately | `shakerscan/shakerscan-ui:0.4.2` |
-| 0.4.1 | `65e87ba5a7d7f48982b7f2cb3fb3d9fe4ed53ef1` | `shakerscan/shakerscan-scanner:0.4.1` | not published separately | `shakerscan/shakerscan-ui:0.4.1` |
-| 0.4.0 | unverified legacy provenance | `shakerscan/shakerscan-scanner:0.4.0` | not published separately | `shakerscan/shakerscan-ui:0.4.0` |
-| 0.3.1 | `662d2f8e3618c25a1d29e1a1b62b3e740b54d143` | `shakerscan/shakerscan-scanner:0.3.1` | not published separately | `shakerscan/shakerscan-ui:0.3.1` |
-| 0.3.0 | `e0c100c79f0d8058973906ef082f2c5143c7bca7` | `shakerscan/shakerscan-scanner:0.3.0` | not published separately | `shakerscan/shakerscan-ui:0.3.0` |
-| 0.2.0 | `8e2d887b03e44921daf2b3ff9b87f4b2bff3ce04` | `shakerscan/shakerscan-scanner:0.2.0` | not published separately | `shakerscan/shakerscan-ui:0.2.0` |
+| Version | Git Commit | Scanner/Worker Image | API Image | UI Image | Model Intake Signer Image |
+| --- | --- | --- | --- | --- | --- |
+| 0.8.0 | pending candidate | `shakerscan/shakerscan-scanner:0.8.0` | `shakerscan/shakerscan-api:0.8.0` | `shakerscan/shakerscan-ui:0.8.0` | `shakerscan/shakerscan-model-intake-signer:0.8.0` |
+| 0.5.7 | `f27bbffda3451ce013aedfb250c7b018104f41d5` | `shakerscan/shakerscan-scanner:0.5.7` | not published separately | `shakerscan/shakerscan-ui:0.5.7` | not published separately |
+| 0.5.6 | `e7f8dbde13d218d54c195a0be934c6b5bd459b1b` | `shakerscan/shakerscan-scanner:0.5.6` | not published separately | `shakerscan/shakerscan-ui:0.5.6` | not published separately |
+| 0.5.5 | `53f3cb47ee88a90de7fc49346ac85497f4a6c1db` | `shakerscan/shakerscan-scanner:0.5.5` | not published separately | `shakerscan/shakerscan-ui:0.5.5` | not published separately |
+| 0.4.2 | `5e1f484469cfc3a9aa1c031613df0b8aada65254` | `shakerscan/shakerscan-scanner:0.4.2` | not published separately | `shakerscan/shakerscan-ui:0.4.2` | not published separately |
+| 0.4.1 | `65e87ba5a7d7f48982b7f2cb3fb3d9fe4ed53ef1` | `shakerscan/shakerscan-scanner:0.4.1` | not published separately | `shakerscan/shakerscan-ui:0.4.1` | not published separately |
+| 0.4.0 | unverified legacy provenance | `shakerscan/shakerscan-scanner:0.4.0` | not published separately | `shakerscan/shakerscan-ui:0.4.0` | not published separately |
+| 0.3.1 | `662d2f8e3618c25a1d29e1a1b62b3e740b54d143` | `shakerscan/shakerscan-scanner:0.3.1` | not published separately | `shakerscan/shakerscan-ui:0.3.1` | not published separately |
+| 0.3.0 | `e0c100c79f0d8058973906ef082f2c5143c7bca7` | `shakerscan/shakerscan-scanner:0.3.0` | not published separately | `shakerscan/shakerscan-ui:0.3.0` | not published separately |
+| 0.2.0 | `8e2d887b03e44921daf2b3ff9b87f4b2bff3ce04` | `shakerscan/shakerscan-scanner:0.2.0` | not published separately | `shakerscan/shakerscan-ui:0.2.0` | not published separately |
 
 Repository tags `v0.5.0` through `v0.5.4` exist, but their published image provenance was not
 recorded in this ledger. Verify Docker registry history and build metadata before adding them; a git
