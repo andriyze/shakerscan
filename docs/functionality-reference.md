@@ -1233,7 +1233,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Scanner wrapper commands | 27 | `scanner.sh` |
 | Make targets | 12 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
-| Runtime environment keys | 313 | Python sources + Compose manifests |
+| Runtime environment keys | 315 | Python sources + Compose manifests |
 | Scanner modules | 99 | `scanner/scanner_tools/` |
 | UI pages | 31 | `ui/src/app/` |
 | Skills | 6 | `skills/` |
@@ -1932,6 +1932,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `AWS_SESSION_TOKEN` | `api/evidence_storage.py` |
 | `BROKER_INGEST_QUEUE_NAME` | `api/api.py`, `api/worker.py` |
 | `BUILD_FINGERPRINT` | `api/worker.py` |
+| `COMPOSE_PROJECT_NAME` | `api/api.py` |
 | `COVERAGE_ALLOCATION_DEFAULT` | `api/parallel_scan.py` |
 | `DATABASE_URL` | `api/api.py`, `api/gungnir_worker.py`, `api/model_intake_signer_service.py`, `api/worker.py`, `scanner/gungnir_worker.py`, `scripts/model_intake_workflow_smoke.py`, `scripts/upgrade_schema_smoke.py` |
 | `DEFAULT_ASM_ENABLED` | `api/api.py` |
@@ -1987,7 +1988,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `HEARTBEAT_INTERVAL_SECONDS` | `api/worker.py` |
 | `HF_TOKEN` | `scanner/scanner_tools/model_intake.py` |
 | `HIBP_API_KEY` | `scanner/scanner.py` |
-| `HOSTNAME` | `api/broker_worker.py`, `api/worker.py` |
+| `HOSTNAME` | `api/api.py`, `api/broker_worker.py`, `api/worker.py` |
 | `HOST_RESULTS_PATH` | `api/api.py` |
 | `LOCAL_ENV_FILE` | `api/api.py` |
 | `MINIO_BUCKET` | `docker-compose.release.yml`, `docker-compose.yml` |
@@ -2116,6 +2117,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_BROKER_MAX_ARTIFACT_BYTES` | `api/api.py` |
 | `SHAKERSCAN_BROKER_MAX_RESULT_BYTES` | `api/api.py` |
 | `SHAKERSCAN_CANCEL_FILE` | `scanner/scanner_tools/cancellation.py`, `scanner/scanner_tools/common.py` |
+| `SHAKERSCAN_COMPOSE_PROJECT` | `api/api.py` |
 | `SHAKERSCAN_CORS_ALLOW_ORIGINS` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_CORS_ALLOW_ORIGIN_REGEX` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_CUSTOM_WORDLIST` | `scanner/scanner_tools/discovery.py` |
