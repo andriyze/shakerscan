@@ -16450,6 +16450,26 @@ def _require_model_intake_auto_runner_memory(memory_mib: int) -> dict[str, Any]:
     return plan
 
 
+_MODEL_INTAKE_AUTO_RUNNER_READINESS_GRACE = timedelta(minutes=2)
+
+
+def _model_intake_auto_runner_readiness_grace_active(
+    review: Mapping[str, Any],
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Retry a briefly unavailable runner without turning one probe into a terminal result."""
+    entered_at = review.get("updated_at")
+    if not isinstance(entered_at, datetime):
+        return False
+    if entered_at.tzinfo is None:
+        entered_at = entered_at.replace(tzinfo=timezone.utc)
+    checked_at = now or datetime.now(timezone.utc)
+    if checked_at.tzinfo is None:
+        checked_at = checked_at.replace(tzinfo=timezone.utc)
+    return checked_at - entered_at < _MODEL_INTAKE_AUTO_RUNNER_READINESS_GRACE
+
+
 async def _advance_model_intake_automatic_review(conn: Any, review: Any) -> None:
     """Advance exactly one durable step; every action is replay-safe at its state boundary."""
     state = str(review["state"])
@@ -16516,6 +16536,11 @@ async def _advance_model_intake_automatic_review(conn: Any, review: Any) -> None
     if state == "runner_prepare":
         readiness = await asyncio.to_thread(_model_intake_runner_readiness_snapshot)
         if readiness.get("ready") is not True or readiness.get("status") != "READY":
+            # The runner or its bridge can restart independently of the durable
+            # controller. Keep the review replayable through a short bounded
+            # outage; a continuously unavailable runner still fails closed.
+            if _model_intake_auto_runner_readiness_grace_active(review):
+                return
             await _update_model_intake_automatic_review(
                 conn, review, state="attention_required", current_step="microvm_unavailable",
                 progress=100, event="microvm_unavailable", technical_outcome="INCOMPLETE",

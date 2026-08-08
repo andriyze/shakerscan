@@ -1082,6 +1082,46 @@ def test_automatic_review_reports_unsupported_runtime_as_expected_incomplete():
     assert "Static reports and bills of materials remain useful" in source
 
 
+def test_automatic_review_retries_a_transient_runner_outage_but_keeps_a_bound():
+    now = datetime.now(timezone.utc)
+
+    assert api._model_intake_auto_runner_readiness_grace_active({
+        "updated_at": now - api.timedelta(seconds=30),
+    }, now=now) is True
+    assert api._model_intake_auto_runner_readiness_grace_active({
+        "updated_at": now - api.timedelta(minutes=3),
+    }, now=now) is False
+    assert api._model_intake_auto_runner_readiness_grace_active({}, now=now) is False
+
+    source = inspect.getsource(api._advance_model_intake_automatic_review)
+    retry_check = "_model_intake_auto_runner_readiness_grace_active(review)"
+    assert source.index(retry_check) < source.index('event="microvm_unavailable"')
+
+
+def test_automatic_review_does_not_terminally_fail_one_runner_health_miss(monkeypatch):
+    updates = []
+
+    async def capture_update(*args, **kwargs):
+        updates.append((args, kwargs))
+
+    monkeypatch.setattr(api, "_model_intake_runner_readiness_snapshot", lambda: {
+        "ready": False,
+        "status": "NOT_READY",
+    })
+    monkeypatch.setattr(api, "_update_model_intake_automatic_review", capture_update)
+    review = {
+        "id": uuid.uuid4(),
+        "state": "runner_prepare",
+        "scan_id": uuid.uuid4(),
+        "submission_id": uuid.uuid4(),
+        "updated_at": datetime.now(timezone.utc),
+    }
+
+    asyncio.run(api._advance_model_intake_automatic_review(object(), review))
+
+    assert updates == []
+
+
 def test_automatic_review_progress_never_moves_backward_after_conversion():
     source = inspect.getsource(api._advance_model_intake_automatic_review)
     checkpoints = {
