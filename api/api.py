@@ -10203,10 +10203,11 @@ def _worker_freshness_snapshot() -> dict:
             return None
 
         snap["available"] = True
+        compose_project = _local_compose_project_best_effort()
         for c in containers:
             names = c.get("Names", [])
             name = names[0].lstrip("/") if names else ""
-            if not _is_scan_worker_container_name(name):
+            if not _is_local_scan_worker_container(c, compose_project=compose_project):
                 continue
             snap["fleet_size"] += 1
             is_running = c.get("State") == "running"
@@ -55575,6 +55576,53 @@ def _is_scan_worker_container_name(name: str) -> bool:
     return "shakerscan" in normalized and "worker" in normalized and "gungnir" not in normalized
 
 
+def _local_compose_project_best_effort() -> str | None:
+    """Resolve the Compose project that owns this API container.
+
+    A host may run a standalone ShakerScan stack and one or more Fleet node
+    stacks at the same time. Container-name matching alone crosses that trust
+    boundary and makes standalone worker freshness/scale operations include
+    Fleet workers. Prefer an explicit project when one is passed through, then
+    inspect this API container's immutable Compose label through the mounted
+    Docker socket.
+    """
+    configured = str(
+        os.environ.get("COMPOSE_PROJECT_NAME")
+        or os.environ.get("SHAKERSCAN_COMPOSE_PROJECT")
+        or ""
+    ).strip()
+    if configured:
+        return configured
+    hostname = str(os.environ.get("HOSTNAME") or "").strip()
+    if not hostname:
+        return None
+    try:
+        status_code, container = docker_socket_request("GET", f"/containers/{hostname}/json")
+        if status_code != 200 or not isinstance(container, dict):
+            return None
+        labels = ((container.get("Config") or {}).get("Labels") or {})
+        project = str(labels.get("com.docker.compose.project") or "").strip()
+        return project or None
+    except Exception:
+        return None
+
+
+def _is_local_scan_worker_container(container: dict, *, compose_project: str | None) -> bool:
+    names = container.get("Names", []) if isinstance(container, dict) else []
+    name = names[0].lstrip("/") if names else ""
+    if not _is_scan_worker_container_name(name):
+        return False
+    if not compose_project:
+        # Compatibility fallback for environments/tests without Docker inspect
+        # authority. Production Compose deployments resolve the API label above.
+        return True
+    labels = container.get("Labels", {}) or {}
+    return (
+        labels.get("com.docker.compose.project") == compose_project
+        and labels.get("com.docker.compose.service") == "worker"
+    )
+
+
 def _running_scan_worker_count_best_effort() -> int | None:
     """Return running scanner worker count, or None when Docker is unavailable.
 
@@ -55596,11 +55644,12 @@ def _running_scan_worker_container_ids_best_effort() -> list[str] | None:
         )
         if status_code != 200 or not isinstance(containers, list):
             return None
+        compose_project = _local_compose_project_best_effort()
         worker_ids: list[str] = []
         for container in containers:
-            names = container.get("Names", [])
-            name = names[0].lstrip("/") if names else ""
-            if _is_scan_worker_container_name(name) and container.get("State") == "running":
+            if _is_local_scan_worker_container(
+                container, compose_project=compose_project
+            ) and container.get("State") == "running":
                 container_id = str(container.get("Id") or "").lower()
                 if container_id:
                     worker_ids.append(container_id)
@@ -55624,11 +55673,11 @@ def _stale_scan_worker_count_best_effort() -> int:
         )
         if status_code != 200 or not isinstance(containers, list):
             return 0
+        compose_project = _local_compose_project_best_effort()
         running = [
             c for c in containers
-            if _is_scan_worker_container_name(
-                (c.get("Names", [""])[0] if c.get("Names") else "").lstrip("/")
-            ) and c.get("State") == "running"
+            if _is_local_scan_worker_container(c, compose_project=compose_project)
+            and c.get("State") == "running"
         ]
         if not running:
             return 0
@@ -55922,13 +55971,15 @@ async def get_workers():
                     return info
             return None
 
-        # Filter and format worker containers (only shakerscan workers)
+        # Filter and format workers owned by this exact Compose stack. A host can
+        # simultaneously run standalone and Fleet stacks.
+        compose_project = _local_compose_project_best_effort()
         worker_list = []
         running_worker_ids: list[str] = []
         for c in containers:
             names = c.get('Names', [])
             name = names[0].lstrip('/') if names else 'unknown'
-            if _is_scan_worker_container_name(name):
+            if _is_local_scan_worker_container(c, compose_project=compose_project):
                 state = c.get('State', 'unknown')
                 if state == "running" and c.get("Id"):
                     running_worker_ids.append(str(c["Id"]))
@@ -56036,12 +56087,12 @@ async def scale_workers(request: WorkerScaleRequest):
         if status_code != 200:
             raise HTTPException(500, f"Failed to query containers: status {status_code}")
 
-        # Filter to shakerscan workers only (exclude gungnir-worker)
+        # Filter to workers owned by this exact Compose stack. Never scale a
+        # co-located Fleet node from the standalone worker control.
+        compose_project = _local_compose_project_best_effort()
         workers = []
         for c in containers if isinstance(containers, list) else []:
-            names = c.get('Names', [])
-            name = names[0].lstrip('/') if names else ''
-            if _is_scan_worker_container_name(name):
+            if _is_local_scan_worker_container(c, compose_project=compose_project):
                 workers.append(c)
 
         running = [c for c in workers if c.get('State') == 'running']

@@ -1224,6 +1224,45 @@ def test_scan_worker_container_name_filter_excludes_gungnir_worker():
     assert api_module._is_scan_worker_container_name("other-worker-1") is False
 
 
+def test_local_worker_scope_excludes_colocated_fleet_project():
+    standalone = {
+        "Names": ["/shakerscan-worker-1"],
+        "Labels": {
+            "com.docker.compose.project": "shakerscan",
+            "com.docker.compose.service": "worker",
+        },
+    }
+    fleet = {
+        "Names": ["/shakerscan-fleet-b6bd86a8-worker-1"],
+        "Labels": {
+            "com.docker.compose.project": "shakerscan-fleet-b6bd86a8",
+            "com.docker.compose.service": "worker",
+        },
+    }
+
+    assert api_module._is_local_scan_worker_container(
+        standalone, compose_project="shakerscan"
+    ) is True
+    assert api_module._is_local_scan_worker_container(
+        fleet, compose_project="shakerscan"
+    ) is False
+
+
+def test_local_compose_project_uses_api_container_label(monkeypatch):
+    monkeypatch.delenv("COMPOSE_PROJECT_NAME", raising=False)
+    monkeypatch.delenv("SHAKERSCAN_COMPOSE_PROJECT", raising=False)
+    monkeypatch.setenv("HOSTNAME", "api-container-id")
+
+    def _docker(method, path):
+        assert (method, path) == ("GET", "/containers/api-container-id/json")
+        return 200, {
+            "Config": {"Labels": {"com.docker.compose.project": "release-candidate"}}
+        }
+
+    monkeypatch.setattr(api_module, "docker_socket_request", _docker)
+    assert api_module._local_compose_project_best_effort() == "release-candidate"
+
+
 # ----- dashboard action center -------------------------------------------
 
 class _ActionCenterConn:
