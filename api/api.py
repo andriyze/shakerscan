@@ -16406,8 +16406,12 @@ async def _model_intake_auto_memory_mib(
     conn: Any,
     submission_id: str,
     bundle: dict[str, Any],
+    *,
+    operation: str,
 ) -> int:
     """Size a bounded guest for the exact artifact, without model allowlists."""
+    if operation not in {"conversion", "calibration", "runtime"}:
+        raise ValueError("unsupported automatic-review runner operation")
     artifact_sha = str(bundle.get("model_artifact_sha256") or "")
     size = await conn.fetchval(
         """SELECT size_bytes FROM model_intake_subjects
@@ -16417,14 +16421,16 @@ async def _model_intake_auto_memory_mib(
         artifact_sha,
     )
     artifact_mib = max(0, math.ceil(int(size or 0) / (1024 * 1024)))
-    # Conversion and embedding equivalence transiently materialize a state
-    # dictionary, model parameters, and inference buffers. Smaller defaults
-    # proved insufficient for multi-gigabyte model repositories under the real
-    # cgroup: Firecracker was OOM-killed before it could finalize evidence.
-    # Four artifact sizes plus a fixed 3 GiB envelope remains deterministic.
-    # The 13 GiB default keeps a two-GiB-plus host reserve on a 16 GiB runner
-    # while giving large unsafe-format conversions meaningful headroom.
-    requested = max(4096, 3072 + artifact_mib * 4)
+    # Conversion and embedding equivalence transiently materialize the source
+    # state dictionary, converted tensors, model parameters, and inference
+    # buffers. Smaller conversion defaults proved insufficient for real
+    # multi-gigabyte repositories. Calibration/runtime load only the converted
+    # exact subject and do not retain both serialization forms, so carrying the
+    # conversion multiplier into those jobs needlessly rejects an otherwise
+    # safe 16 GiB runner. Every operation remains cgroup-enforced and fails
+    # closed if its measured envelope is insufficient.
+    artifact_multiplier = 4 if operation == "conversion" else 2
+    requested = max(4096, 3072 + artifact_mib * artifact_multiplier)
     rounded = int(math.ceil(requested / 512) * 512)
     configured_cap = max(4096, min(262144, int(os.getenv(
         "MODEL_INTAKE_AUTO_MAX_MEMORY_MIB", "13312",
@@ -16432,7 +16438,7 @@ async def _model_intake_auto_memory_mib(
     if rounded > configured_cap:
         raise RuntimeError(
             "The exact model needs an estimated "
-            f"{rounded} MiB Firecracker envelope, above this runner's automatic-review cap "
+            f"{rounded} MiB Firecracker {operation} envelope, above this runner's automatic-review cap "
             f"of {configured_cap} MiB. Use a larger runner and raise "
             "MODEL_INTAKE_AUTO_MAX_MEMORY_MIB, then start a new review."
         )
@@ -16586,7 +16592,9 @@ async def _advance_model_intake_automatic_review(conn: Any, review: Any) -> None
             if not published.get("available"):
                 raise ValueError("The pinned model revision does not publish a usable embedding contract")
             conversion_bundle = _model_intake_auto_embedding_bundle(conversion, published)
-            memory_mib = await _model_intake_auto_memory_mib(conn, submission_id, conversion_bundle)
+            memory_mib = await _model_intake_auto_memory_mib(
+                conn, submission_id, conversion_bundle, operation="conversion",
+            )
             await asyncio.to_thread(_require_model_intake_auto_runner_memory, memory_mib)
             response = await create_model_intake_runner_job(
                 submission_id,
@@ -16654,7 +16662,9 @@ async def _advance_model_intake_automatic_review(conn: Any, review: Any) -> None
 
     bundle = _model_intake_json_object(review["deployment_bundle_json"])
     if state == "calibration_pending":
-        memory_mib = await _model_intake_auto_memory_mib(conn, submission_id, bundle)
+        memory_mib = await _model_intake_auto_memory_mib(
+            conn, submission_id, bundle, operation="calibration",
+        )
         await asyncio.to_thread(_require_model_intake_auto_runner_memory, memory_mib)
         response = await create_model_intake_runner_job(
             submission_id,
@@ -16694,7 +16704,9 @@ async def _advance_model_intake_automatic_review(conn: Any, review: Any) -> None
         return
 
     if state == "runtime_pending":
-        memory_mib = await _model_intake_auto_memory_mib(conn, submission_id, bundle)
+        memory_mib = await _model_intake_auto_memory_mib(
+            conn, submission_id, bundle, operation="runtime",
+        )
         await asyncio.to_thread(_require_model_intake_auto_runner_memory, memory_mib)
         response = await create_model_intake_runner_job(
             submission_id,

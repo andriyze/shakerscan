@@ -18,16 +18,42 @@ sys.path.insert(0, str(ROOT / "api"))
 import api  # noqa: E402
 
 
-def test_automatic_large_model_memory_envelope_gives_codesage_13_gib():
+def test_automatic_large_model_conversion_memory_envelope_is_13_gib():
     class Connection:
         async def fetchval(self, *_args):
             return 2_627_013_817
 
     memory_mib = asyncio.run(api._model_intake_auto_memory_mib(
         Connection(), str(uuid.uuid4()), {"model_artifact_sha256": "a" * 64},
+        operation="conversion",
     ))
 
     assert memory_mib == 13_312
+
+
+def test_automatic_large_model_runtime_does_not_retain_conversion_multiplier():
+    class Connection:
+        async def fetchval(self, *_args):
+            return 2_627_013_817
+
+    memory_mib = asyncio.run(api._model_intake_auto_memory_mib(
+        Connection(), str(uuid.uuid4()), {"model_artifact_sha256": "a" * 64},
+        operation="runtime",
+    ))
+
+    assert memory_mib == 8_192
+
+
+def test_automatic_memory_sizing_rejects_unknown_operation():
+    class Connection:
+        async def fetchval(self, *_args):
+            return 1
+
+    with pytest.raises(ValueError, match="unsupported automatic-review runner operation"):
+        asyncio.run(api._model_intake_auto_memory_mib(
+            Connection(), str(uuid.uuid4()), {"model_artifact_sha256": "a" * 64},
+            operation="unknown",
+        ))
 
 
 def test_automatic_review_payload_decodes_jsonb_for_browser_contract():
