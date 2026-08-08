@@ -1,17 +1,20 @@
 # ShakerScan Fields For JS Analysis
 
+Set `API_BASE` to the API URL printed by `./scanner.sh status`; it is normally
+`http://localhost:8080` for a loopback install.
+
 Use these fields first when a completed scan already exists.
 
 ## Pull Scan Context
 
 ```bash
-curl -s http://localhost:8080/scans/{scan_id}/result
+curl -s "$API_BASE/scans/{scan_id}/result"
 ```
 
 Useful jq snippets:
 
 ```bash
-curl -s http://localhost:8080/scans/{scan_id}/result | jq '{
+curl -s "$API_BASE/scans/{scan_id}/result" | jq '{
   endpoints: .discovery.browser_api_endpoints[:25],
   tech: .discovery.tech.items,
   browser_crawl: .discovery.browser_crawl,
@@ -68,7 +71,7 @@ Return a `custom_endpoints` block in the exact ShakerScan format:
 Also include a ready scan payload:
 
 ```bash
-curl -X POST http://localhost:8080/scans \
+curl -X POST "$API_BASE/scans" \
   -H "Content-Type: application/json" \
   -d '{
     "target": "https://example.com",

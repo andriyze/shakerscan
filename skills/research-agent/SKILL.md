@@ -1,6 +1,10 @@
 ---
 name: research-agent
-description: Run ShakerScan Deep Hunt: the current coding agent performs free-form, AI-driven exploration and bounded active exploitation through /agent/hunt/* while ShakerScan enforces target scope, approvals, budgets, evidence provenance, and deterministic finding verification. Use for “deep hunt”, “autonomous hunt”, or “investigate autonomously”; do not use for ordinary DAST scans.
+description: >-
+  Run ShakerScan Deep Hunt: the current coding agent performs free-form, AI-driven exploration and
+  bounded active exploitation through /agent/hunt/* while ShakerScan enforces target scope,
+  approvals, budgets, evidence provenance, and deterministic finding verification. Use for “deep
+  hunt”, “autonomous hunt”, or “investigate autonomously”; do not use for ordinary DAST scans.
 ---
 
 # Deep Hunt

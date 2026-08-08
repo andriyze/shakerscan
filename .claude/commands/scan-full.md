@@ -17,12 +17,12 @@ Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. Use 
 
 3. Check if scanner is running:
    ```bash
-   curl -s http://localhost:8080/health
+   curl -s "$API_BASE/health"
    ```
 
 4. Submit **full** assessment:
    ```bash
-   curl -X POST http://localhost:8080/scans \
+   curl -X POST "$API_BASE/scans" \
      -H "Content-Type: application/json" \
      -d '{"target": "$ARGUMENTS", "options": {"scan_type": "full"}}'
    ```
@@ -111,7 +111,7 @@ blocked, skipped, partial, or unattempted when its prerequisites or budget are u
 
 For maximum coverage (2+ hours), use aggressive mode:
 ```bash
-curl -X POST http://localhost:8080/scans \
+curl -X POST "$API_BASE/scans" \
   -H "Content-Type: application/json" \
   -d '{"target": "https://example.com", "options": {"scan_type": "aggressive"}}'
 ```

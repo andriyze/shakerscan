@@ -15,7 +15,7 @@ Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. Use 
 
 3. Check if scanner is running:
    ```bash
-   curl -s http://localhost:8080/health
+   curl -s "$API_BASE/health"
    ```
 
 4. If the user asks for pre-scan route seeding, JS route analysis, or custom endpoint coverage, run these helpers before the scan and feed their output into the payload:
@@ -26,7 +26,7 @@ Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. Use 
 
    Example:
    ```bash
-   curl -X POST http://localhost:8080/scans \
+   curl -X POST "$API_BASE/scans" \
      -H "Content-Type: application/json" \
      -d '{
        "target": "https://example.com",
@@ -42,7 +42,7 @@ Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. Use 
 
 5. Submit **smart** scan:
    ```bash
-   curl -X POST http://localhost:8080/scans \
+   curl -X POST "$API_BASE/scans" \
      -H "Content-Type: application/json" \
      -d '{"target": "$ARGUMENTS", "options": {"scan_type": "smart"}}'
    ```
@@ -69,7 +69,7 @@ Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. Use 
 
 ### With Authentication
 ```bash
-curl -X POST http://localhost:8080/scans \
+curl -X POST "$API_BASE/scans" \
   -H "Content-Type: application/json" \
   -d '{
     "target": "https://api.example.com",
@@ -82,7 +82,7 @@ curl -X POST http://localhost:8080/scans \
 
 ### Dual Auth for BOLA/IDOR Testing
 ```bash
-curl -X POST http://localhost:8080/scans \
+curl -X POST "$API_BASE/scans" \
   -H "Content-Type: application/json" \
   -d '{
     "target": "https://api.example.com",
@@ -96,7 +96,7 @@ curl -X POST http://localhost:8080/scans \
 
 ### Focused SQLi-only
 ```bash
-curl -X POST http://localhost:8080/scans \
+curl -X POST "$API_BASE/scans" \
   -H "Content-Type: application/json" \
   -d '{
     "target": "https://api.example.com",
@@ -110,7 +110,7 @@ curl -X POST http://localhost:8080/scans \
 
 ### Focused XSS-only
 ```bash
-curl -X POST http://localhost:8080/scans \
+curl -X POST "$API_BASE/scans" \
   -H "Content-Type: application/json" \
   -d '{
     "target": "https://example.com",
@@ -123,7 +123,7 @@ curl -X POST http://localhost:8080/scans \
 
 ### Thorough Mode (No Early Stop)
 ```bash
-curl -X POST http://localhost:8080/scans \
+curl -X POST "$API_BASE/scans" \
   -H "Content-Type: application/json" \
   -d '{
     "target": "https://example.com",

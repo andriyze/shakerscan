@@ -10,12 +10,12 @@ Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. Use 
 
 1. Check if scanner is running:
    ```bash
-   curl -s http://localhost:8080/health
+   curl -s "$API_BASE/health"
    ```
 
 2. If the user asks to list targets:
    ```bash
-   curl http://localhost:8080/ai/targets
+   curl "$API_BASE/ai/targets"
    ```
 
 3. If the user asks to create a target, gather or infer:
@@ -28,7 +28,7 @@ Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. Use 
 
    Example:
    ```bash
-   curl -X POST http://localhost:8080/ai/targets \
+   curl -X POST "$API_BASE/ai/targets" \
      -H "Content-Type: application/json" \
      -d '{
        "name": "Support bot",
@@ -45,7 +45,7 @@ Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. Use 
 
 4. If the user asks to scan an AI target:
    ```bash
-   curl -X POST http://localhost:8080/ai/targets/{target_id}/scan \
+   curl -X POST "$API_BASE/ai/targets/{target_id}/scan" \
      -H "Content-Type: application/json" \
      -d '{"probe_pack":"shaker-ai-smoke","scan_profile":"smoke","environment":"staging"}'
    ```
@@ -68,6 +68,6 @@ Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. Use 
 
 6. To review results later:
    ```bash
-   curl "http://localhost:8080/findings?source_type=ai_gate&status=active"
-   curl http://localhost:8080/ai/scans/{scan_id}/transcript
+   curl "$API_BASE/findings?source_type=ai_gate&status=active"
+   curl "$API_BASE/ai/scans/{scan_id}/transcript"
    ```

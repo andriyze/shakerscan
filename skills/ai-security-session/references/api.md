@@ -1,7 +1,9 @@
 # AI Security Session API Reference
 
 ## Base URL
-`http://localhost:8080`
+
+Set `API_BASE` to the API URL printed by `./scanner.sh status`; it is normally
+`http://localhost:8080` for a loopback install.
 
 ## Endpoints
 
@@ -111,7 +113,7 @@ Provide `title` and `severity` plus evidence-backed fields such as `description`
 
 Example:
 ```bash
-curl -X POST "http://localhost:8080/session/{id}/test-endpoint" \
+curl -X POST "$API_BASE/session/{id}/test-endpoint" \
   -H "Content-Type: application/json" \
   -d '{"endpoint":"/api/items/42","method":"GET","as_user":"user2"}'
 ```

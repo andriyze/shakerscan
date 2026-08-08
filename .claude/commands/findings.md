@@ -6,26 +6,29 @@ Show security findings from scans.
 
 ## Instructions
 
+Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. On a remote VPS, set it
+to the API URL printed by `./scanner.sh status`.
+
 1. Check if scanner is running:
    ```bash
-   curl -s http://localhost:8080/health
+   curl -s "$API_BASE/health"
    ```
 
 2. Fetch findings based on arguments:
 
    If no argument (show all active):
    ```bash
-   curl "http://localhost:8080/findings?status=active&limit=50"
+   curl "$API_BASE/findings?status=active&limit=50"
    ```
 
    If a source type is specified:
    ```bash
-   curl "http://localhost:8080/findings?source_type=$ARGUMENTS&status=active&limit=50"
+   curl "$API_BASE/findings?source_type=$ARGUMENTS&status=active&limit=50"
    ```
 
    If severity specified (critical, high, medium, low):
    ```bash
-   curl "http://localhost:8080/findings?severity=$ARGUMENTS&status=active&limit=50"
+   curl "$API_BASE/findings?severity=$ARGUMENTS&status=active&limit=50"
    ```
 
 3. Format output as a table:

@@ -10,7 +10,7 @@ Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. Use 
 
 1. Check if scanner is running:
    ```bash
-   curl -s http://localhost:8080/health 2>/dev/null
+   curl -s "$API_BASE/health" 2>/dev/null
    ```
 
 2. If not running, report:
@@ -22,8 +22,8 @@ Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. Use 
 
 3. If running, fetch stats:
    ```bash
-   curl -s http://localhost:8080/queue/stats
-   curl -s http://localhost:8080/dashboard
+   curl -s "$API_BASE/queue/stats"
+   curl -s "$API_BASE/dashboard"
    ```
 
 4. Report:

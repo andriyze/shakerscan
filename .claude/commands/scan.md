@@ -10,13 +10,13 @@ Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. Use 
 
 1. First check if the scanner is running:
    ```bash
-   curl -s http://localhost:8080/health
+   curl -s "$API_BASE/health"
    ```
    If not running, ask user if they want to start it with `./scanner.sh start`
 
 2. Submit a **quick** scan (default):
    ```bash
-   curl -X POST http://localhost:8080/scans \
+   curl -X POST "$API_BASE/scans" \
      -H "Content-Type: application/json" \
      -d '{"target": "$ARGUMENTS", "options": {"scan_type": "quick"}}'
    ```
@@ -91,14 +91,14 @@ Top Issues:
 
 ```bash
 # Get CSP details
-curl -s http://localhost:8080/scans/{id} | jq '.result.http.csp_evaluation'
+curl -s "$API_BASE/scans/{id}" | jq '.result.http.csp_evaluation'
 
 # Get security headers
-curl -s http://localhost:8080/scans/{id} | jq '.result.http.security_headers'
+curl -s "$API_BASE/scans/{id}" | jq '.result.http.security_headers'
 
 # Get TLS cert info
-curl -s http://localhost:8080/scans/{id} | jq '.result.tls.certificate'
+curl -s "$API_BASE/scans/{id}" | jq '.result.tls.certificate'
 
 # Get tech stack
-curl -s http://localhost:8080/scans/{id} | jq '.result.discovery.tech.items'
+curl -s "$API_BASE/scans/{id}" | jq '.result.discovery.tech.items'
 ```
