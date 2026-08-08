@@ -143,6 +143,14 @@ def test_full_acceptance_routes_scan_to_shared_remote_transport(monkeypatch):
 
     assert submitted[0]["options"]["placement"] == {"node_scope": "remote"}
     assert submitted[0]["options"]["scan_type"] == "quick"
+    assert submitted[0]["options"]["request_budget_mode"] == "default"
+    assert submitted[0]["options"]["custom_budget"] == {"request_max": 600}
+
+
+def test_acceptance_request_budget_stays_below_default_domain_cap():
+    assert fleet_acceptance._acceptance_request_max(1) == 100
+    assert fleet_acceptance._acceptance_request_max(6) == 600
+    assert fleet_acceptance._acceptance_request_max(12) == 900
 
 
 def test_scan_acceptance_requires_cross_node_context_dedupe_report_and_artifacts():

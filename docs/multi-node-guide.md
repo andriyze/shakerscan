@@ -601,7 +601,10 @@ fail-closed on any image drift.
 The acceptance runner verifies node/image health, heartbeats, artifact storage, public data-store
 isolation, lease loss/reclaim/ack behavior, cross-node shard execution, execution attribution,
 finding deduplication, and central result manifests. It writes a content-free receipt to
-`results/fleet-acceptance.json` by default.
+`results/fleet-acceptance.json` by default. Its passive transport scan keeps the normal domain-rate
+gate enabled but uses a bounded parent request ceiling (100 requests per shard, at most 900 total),
+so a fresh run cannot exhaust the default hourly reservation merely by leasing its own shards.
+Prior activity against the same root domain can still defer the run, as intended.
 
 The release gate defaults to passive `standard`. A development smoke test may use
 `--scan-type quick`; the selected depth is recorded in the receipt and does not replace the default

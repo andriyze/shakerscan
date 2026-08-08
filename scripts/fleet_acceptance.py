@@ -162,6 +162,21 @@ def _safe_parallel_endpoints(target: str, count: int) -> list[str]:
     return [urllib.parse.urljoin(f"{origin}/", path.lstrip("/")) for path in paths[:count]]
 
 
+def _acceptance_request_max(shard_count: int) -> int:
+    """Return a bounded parent budget for the transport acceptance scan.
+
+    The acceptance target is deliberately limited to one known endpoint per
+    shard. Reusing the ordinary ``standard`` ceiling (currently 1,866
+    requests) can consume the default 1,000-request hourly domain reservation
+    before every shard obtains a lease, leaving a fresh acceptance run waiting
+    on its own conservative reservations. Keep the safety gate enabled while
+    giving each shard enough room for the passive scanner setup around its one
+    assigned URL.
+    """
+    count = max(1, min(12, int(shard_count or 1)))
+    return min(900, count * 100)
+
+
 def _select_nodes(payload: dict[str, Any], requested: list[str]) -> list[dict[str, Any]]:
     nodes = [item for item in payload.get("nodes") or [] if isinstance(item, dict)]
     if requested:
@@ -470,6 +485,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         if not args.target or not args.authorized:
             raise AcceptanceError("full acceptance requires --target and --authorized")
         shard_count = max(4, min(12, len(healthy) * 3))
+        acceptance_request_max = _acceptance_request_max(shard_count)
         submitted = client.request(
             "POST",
             "/scans",
@@ -481,6 +497,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     "shards": shard_count,
                     "shard_strategy": "scope",
                     "custom_endpoints": _safe_parallel_endpoints(args.target, shard_count),
+                    "custom_budget": {"request_max": acceptance_request_max},
                     "request_budget_mode": args.request_budget_mode,
                     "require_current_workers": True,
                     # Keep the physical proof on the selected fleet transport. Without
@@ -529,6 +546,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "scan_id": scan_id,
         "target_sha256": _target_hash(args.target) if args.target else None,
         "scan_type": args.scan_type,
+        "request_budget_mode": args.request_budget_mode,
+        "request_budget_max": (
+            _acceptance_request_max(max(4, min(12, len(healthy) * 3)))
+            if not args.preflight_only
+            else None
+        ),
         "physical_fault": physical_fault,
         "preflight_only": bool(args.preflight_only),
         "build_mode": build_mode,
