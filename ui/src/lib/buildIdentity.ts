@@ -30,6 +30,21 @@ export function comparableBuildVersion(value?: string | null): string | undefine
   return value?.replace(/-dirty$/, '')
 }
 
+export function buildVersionsMatch(left?: string | null, right?: string | null): boolean {
+  const normalizedLeft = comparableBuildVersion(left)
+  const normalizedRight = comparableBuildVersion(right)
+  if (!normalizedLeft || !normalizedRight) return normalizedLeft === normalizedRight
+  if (normalizedLeft === normalizedRight) return true
+
+  // Different components may obtain the same Git identity through `git rev-parse --short`
+  // implementations configured for different abbreviation lengths. Treat unambiguous Git
+  // prefixes of at least seven hexadecimal characters as the same commit. Release labels and
+  // other human versions still require an exact match.
+  if (!/^[0-9a-f]+$/i.test(normalizedLeft) || !/^[0-9a-f]+$/i.test(normalizedRight)) return false
+  const sharedLength = Math.min(normalizedLeft.length, normalizedRight.length)
+  return sharedLength >= 7 && normalizedLeft.slice(0, sharedLength) === normalizedRight.slice(0, sharedLength)
+}
+
 export function deriveBuildIdentity(
   bakedVersion: string | undefined,
   health: HealthBuildIdentity | null,
@@ -52,7 +67,7 @@ export function deriveBuildIdentity(
     bakedVersion
       && bakedVersion !== 'dev'
       && apiVersion
-      && comparableBuildVersion(bakedVersion) !== comparableBuildVersion(apiVersion),
+      && !buildVersionsMatch(bakedVersion, apiVersion),
   )
   const workerSkew = Boolean(workerBuild?.available && !workerBuild.fleet_uniform)
   return {
@@ -71,7 +86,7 @@ export function formatBuildIdentity(identity: BuildIdentity): string {
   const knownVersionsMatch = Boolean(
     !identity.skew
       && componentVersions.length > 0
-      && comparableVersions.every((value) => value === comparableVersions[0]),
+      && comparableVersions.every((value) => buildVersionsMatch(value, comparableVersions[0])),
   )
   if (knownVersionsMatch) {
     const commonVersion = componentVersions.find((value) => value.endsWith('-dirty'))

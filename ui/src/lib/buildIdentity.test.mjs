@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { deriveBuildIdentity, formatBuildIdentity } from './buildIdentity.ts'
+import { buildVersionsMatch, deriveBuildIdentity, formatBuildIdentity } from './buildIdentity.ts'
 
 const uniformHealth = {
   scanner_version: 'abc1234',
@@ -18,6 +18,22 @@ const uniformHealth = {
 
 test('matching component identities collapse to one version', () => {
   assert.equal(formatBuildIdentity(deriveBuildIdentity('abc1234', uniformHealth)), 'Version abc1234')
+})
+
+test('different Git abbreviation lengths for the same commit do not create false skew', () => {
+  const identity = deriveBuildIdentity('0fdfe57c', {
+    ...uniformHealth,
+    scanner_version: '0fdfe57',
+    worker_build: { ...uniformHealth.worker_build, scanner_version: '0fdfe57' },
+  })
+  assert.equal(identity.skew, false)
+  assert.equal(formatBuildIdentity(identity), 'Version 0fdfe57')
+  assert.equal(buildVersionsMatch('0fdfe57c-dirty', '0fdfe57'), true)
+})
+
+test('short prefixes and non-Git version labels still require exact equality', () => {
+  assert.equal(buildVersionsMatch('abc123', 'abc1234'), false)
+  assert.equal(buildVersionsMatch('v0.7.0', 'v0.7'), false)
 })
 
 test('dirty UI retains its useful local-checkout marker without causing skew', () => {
