@@ -25,6 +25,7 @@ def _write_stage(runtime: Path, kernel: bytes, rootfs: bytes) -> Path:
     (stage / "rootfs.ext4").write_bytes(rootfs)
     manifest = {
         "schema_version": "model-intake-runner-stage/v1",
+        "rootfs_inputs_sha256": "rootfs-inputs",
         "artifacts": {
             "kernel": {"bytes": len(kernel), "sha256": _digest(kernel)},
             "rootfs": {"bytes": len(rootfs), "sha256": _digest(rootfs)},
@@ -38,6 +39,7 @@ def test_staged_inputs_require_manifest_and_both_exact_digests(tmp_path, monkeyp
     kernel = b"kernel"
     rootfs = b"rootfs"
     monkeypatch.setattr(runner_cli, "DEFAULT_KERNEL_SHA256", _digest(kernel))
+    monkeypatch.setattr(runner_cli, "_guest_rootfs_inputs_sha256", lambda _runtime: "rootfs-inputs")
     stage = _write_stage(tmp_path, kernel, rootfs)
 
     verified = runner_cli._staged_inputs(tmp_path)
@@ -54,6 +56,7 @@ def test_staged_inputs_reject_symlink_substitution(tmp_path, monkeypatch):
     kernel = b"kernel"
     rootfs = b"rootfs"
     monkeypatch.setattr(runner_cli, "DEFAULT_KERNEL_SHA256", _digest(kernel))
+    monkeypatch.setattr(runner_cli, "_guest_rootfs_inputs_sha256", lambda _runtime: "rootfs-inputs")
     stage = _write_stage(tmp_path, kernel, rootfs)
     outside = tmp_path / "outside.ext4"
     outside.write_bytes(rootfs)
@@ -63,6 +66,19 @@ def test_staged_inputs_reject_symlink_substitution(tmp_path, monkeypatch):
     rejected = runner_cli._staged_inputs(tmp_path)
     assert rejected["integrity_verified"] is False
     assert rejected["error"] == "symlink_rejected"
+
+
+def test_staged_inputs_reject_rootfs_built_from_stale_guest_inputs(tmp_path, monkeypatch):
+    kernel = b"kernel"
+    rootfs = b"rootfs"
+    monkeypatch.setattr(runner_cli, "DEFAULT_KERNEL_SHA256", _digest(kernel))
+    stage = _write_stage(tmp_path, kernel, rootfs)
+    monkeypatch.setattr(runner_cli, "_guest_rootfs_inputs_sha256", lambda _runtime: "new-inputs")
+
+    rejected = runner_cli._staged_inputs(tmp_path)
+
+    assert rejected["integrity_verified"] is False
+    assert rejected["error"] == "rootfs_inputs_changed"
 
 
 def test_upsert_runner_env_replaces_values_without_duplicates(tmp_path):

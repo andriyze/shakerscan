@@ -223,6 +223,33 @@ if "fastapi" not in sys.modules:
     sys.modules["fastapi.responses"] = responses_mod
 
 import api as api_module  # noqa: E402
+
+
+def test_model_intake_stage_manifest_is_bound_to_guest_build_inputs(tmp_path, monkeypatch):
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    kernel = stage / "vmlinux"
+    rootfs = stage / "rootfs.ext4"
+    kernel.write_bytes(b"kernel")
+    rootfs.write_bytes(b"rootfs")
+    kernel_sha = hashlib.sha256(b"kernel").hexdigest()
+    manifest = {
+        "schema_version": "model-intake-runner-stage/v1",
+        "rootfs_inputs_sha256": "old-inputs",
+        "artifacts": {
+            "kernel": {"bytes": 6, "sha256": kernel_sha},
+            "rootfs": {"bytes": 6, "sha256": hashlib.sha256(b"rootfs").hexdigest()},
+        },
+    }
+    (stage / "stage-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    monkeypatch.setattr(api_module, "MODEL_INTAKE_GUEST_KERNEL_SHA256", kernel_sha)
+    monkeypatch.setattr(
+        api_module,
+        "_model_intake_guest_rootfs_inputs_sha256",
+        lambda: "new-inputs",
+    )
+
+    assert api_module._model_intake_stage_manifest(stage) is None
 from evidence_storage import store_evidence_content  # noqa: E402
 from scan_verification_state import scan_time_verification_fields  # noqa: E402
 

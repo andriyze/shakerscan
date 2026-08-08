@@ -200,6 +200,26 @@ def _sha256_path(path: Path) -> str:
     return digest.hexdigest()
 
 
+GUEST_ROOTFS_INPUTS = (
+    "runner/guest/Dockerfile",
+    "runner/guest/requirements.lock",
+    "runner/guest/guest-init",
+    "runner/guest/guest_worker.py",
+)
+
+
+def _guest_rootfs_inputs_sha256(runtime: Path) -> str:
+    digest = hashlib.sha256()
+    for relative in GUEST_ROOTFS_INPUTS:
+        path = runtime / relative
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _staged_inputs(runtime: Path) -> dict:
     """What the UI's staging step already produced, if anything.
 
@@ -234,6 +254,9 @@ def _staged_inputs(runtime: Path) -> dict:
                 return result
         if result["kernel"]["sha256"] != DEFAULT_KERNEL_SHA256:
             result["error"] = "kernel_not_pinned"
+            return result
+        if manifest.get("rootfs_inputs_sha256") != _guest_rootfs_inputs_sha256(runtime):
+            result["error"] = "rootfs_inputs_changed"
             return result
         result["integrity_verified"] = True
     except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:

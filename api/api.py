@@ -14734,6 +14734,12 @@ MODEL_INTAKE_GUEST_KERNEL_URL = (
 MODEL_INTAKE_GUEST_KERNEL_SHA256 = (
     "27a8310b9a727517e9eb02044524b6ceb77de5728e3491b6974d5c846227ecc8"
 )
+MODEL_INTAKE_GUEST_ROOTFS_INPUTS = (
+    "runner/guest/Dockerfile",
+    "runner/guest/requirements.lock",
+    "runner/guest/guest-init",
+    "runner/guest/guest_worker.py",
+)
 
 
 def _model_intake_stage_dir() -> Path:
@@ -14757,6 +14763,18 @@ def _sha256_file(path: Path) -> str:
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _model_intake_guest_rootfs_inputs_sha256(workspace: Path = Path("/workspace")) -> str:
+    digest = hashlib.sha256()
+    for relative in MODEL_INTAKE_GUEST_ROOTFS_INPUTS:
+        path = workspace / relative
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
     return digest.hexdigest()
 
 
@@ -14784,6 +14802,8 @@ def _model_intake_stage_manifest(stage_dir: Path) -> dict[str, Any] | None:
                 return None
         if artifacts["kernel"]["sha256"] != MODEL_INTAKE_GUEST_KERNEL_SHA256:
             return None
+        if raw.get("rootfs_inputs_sha256") != _model_intake_guest_rootfs_inputs_sha256():
+            return None
         return raw
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         return None
@@ -14798,6 +14818,7 @@ def _write_model_intake_stage_manifest(stage_dir: Path, artifacts: dict[str, Any
             "sha256": MODEL_INTAKE_GUEST_KERNEL_SHA256,
         },
         "rootfs_builder": "scripts/build-model-intake-guest-rootfs.sh",
+        "rootfs_inputs_sha256": _model_intake_guest_rootfs_inputs_sha256(),
     }
     temporary = stage_dir / "stage-manifest.json.partial"
     temporary.write_text(
