@@ -14,6 +14,7 @@ from retest_contract import run_schema_migrations
 
 
 SURVIVOR_ID = "11111111-1111-4111-8111-111111111111"
+SURVIVOR_CANONICAL_KEY = "web:upgrade.example.test"
 SCAN_ID = "33333333-3333-4333-8333-333333333333"
 FINDING_ID = "44444444-4444-4444-8444-444444444444"
 
@@ -93,10 +94,11 @@ async def _assert_common(conn) -> None:
 
 async def _assert_dirty_merge(conn) -> None:
     rows = await conn.fetch(
-        "SELECT id::text, canonical_key FROM targets WHERE canonical_key = 'upgrade.example.test'"
+        "SELECT id::text, canonical_key FROM targets WHERE canonical_key = $1",
+        SURVIVOR_CANONICAL_KEY,
     )
     if [dict(row) for row in rows] != [
-        {"id": SURVIVOR_ID, "canonical_key": "upgrade.example.test"}
+        {"id": SURVIVOR_ID, "canonical_key": SURVIVOR_CANONICAL_KEY}
     ]:
         raise RuntimeError(f"canonical duplicate merge produced unexpected targets: {rows!r}")
 
