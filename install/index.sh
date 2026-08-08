@@ -349,7 +349,7 @@ if [ "$START_AFTER_INSTALL" != "1" ]; then
     exit 0
 fi
 
-say "Starting ShakerScan with latest Docker Hub images (the first pull may take several minutes)..."
+say "Starting ShakerScan with release Docker Hub images (the first pull may take several minutes)..."
 say ""
 cd "$INSTALL_DIR"
 start_rc=0

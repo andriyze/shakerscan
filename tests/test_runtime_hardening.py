@@ -137,6 +137,14 @@ def test_hosted_installer_packages_advertised_host_side_adapters():
     assert 'chmod +x "$INSTALL_DIR/scripts/provision-model-intake-firecracker.sh"' in installer
 
 
+def test_prebuilt_runtime_defaults_to_the_downloaded_release_version():
+    scanner = (ROOT / "scanner.sh").read_text()
+
+    assert 'release_version="$(get_release_version)"' in scanner
+    assert 'export SCANNER_IMAGE_TAG="$release_version"' in scanner
+    assert 'release_version" != "dev"' in scanner
+
+
 def test_minimal_installed_research_adapter_has_all_imports(tmp_path):
     runtime = tmp_path / "runtime"
     for relative_path in (

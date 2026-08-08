@@ -1302,6 +1302,9 @@ set_build_env() {
 
 configure_runtime_mode() {
     local command="$1"
+    local release_version
+
+    release_version="$(get_release_version)"
 
     if [ -n "${SCANNER_USE_PREBUILT:-}" ]; then
         RUNTIME_MODE_EXPLICIT=1
@@ -1325,8 +1328,16 @@ configure_runtime_mode() {
     export API_IMAGE_REPO="${API_IMAGE_REPO:-shakerscan/shakerscan-api}"
     export UI_IMAGE_REPO="${UI_IMAGE_REPO:-shakerscan/shakerscan-ui}"
     export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-shakerscan}"
-    export SCANNER_RELEASE_VERSION="$(get_release_version)"
-    export SCANNER_IMAGE_TAG="${SCANNER_IMAGE_TAG:-$DEFAULT_PREBUILT_IMAGE_TAG}"
+    export SCANNER_RELEASE_VERSION="$release_version"
+    if [ -z "${SCANNER_IMAGE_TAG:-}" ]; then
+        if [ -n "$release_version" ] && [ "$release_version" != "dev" ]; then
+            export SCANNER_IMAGE_TAG="$release_version"
+        else
+            export SCANNER_IMAGE_TAG="$DEFAULT_PREBUILT_IMAGE_TAG"
+        fi
+    else
+        export SCANNER_IMAGE_TAG
+    fi
 
     case "$command" in
         build|rebuild)
