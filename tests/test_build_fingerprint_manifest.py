@@ -34,5 +34,33 @@ def test_source_manifest_is_complete_and_hashable_from_checkout():
         "retest_contract.py",
         "workflow_experiment.py",
         "scanner_tools/access_control_checks.py",
+        "scanner_tools/model_intake_semgrep.yml",
+        "ai_gate/corpora/arcanum_evasions.json",
+        "wordlists/common.txt",
+        "runtime/requirements.lock",
+        "runtime/entrypoint.sh",
+        "model_intake_locks/firecracker-runtime.lock",
+        "model_intake_locks/semgrep.lock",
     } <= set(files)
     assert hash_source_files(files, require_all=True)
+
+
+def test_security_rule_and_guest_lock_changes_invalidate_fingerprint(tmp_path):
+    workspace = tmp_path / "workspace"
+    (workspace / "scanner" / "scanner_tools").mkdir(parents=True)
+    (workspace / "scanner" / "model_intake_tools").mkdir(parents=True)
+    (workspace / "runner" / "guest").mkdir(parents=True)
+    (workspace / "api").mkdir()
+    (workspace / "scanner" / "scanner.py").write_text("SCAN = 1\n", encoding="utf-8")
+    semgrep = workspace / "scanner" / "scanner_tools" / "model_intake_semgrep.yml"
+    semgrep.write_text("rules: []\n", encoding="utf-8")
+    guest_lock = workspace / "runner" / "guest" / "requirements.lock"
+    guest_lock.write_text("torch==2.13.0\n", encoding="utf-8")
+
+    before = hash_source_files(source_file_map(str(workspace)), require_all=True)
+    semgrep.write_text("rules: [changed]\n", encoding="utf-8")
+    after_rule = hash_source_files(source_file_map(str(workspace)), require_all=True)
+    guest_lock.write_text("torch==2.14.0\n", encoding="utf-8")
+    after_lock = hash_source_files(source_file_map(str(workspace)), require_all=True)
+
+    assert before and before != after_rule != after_lock

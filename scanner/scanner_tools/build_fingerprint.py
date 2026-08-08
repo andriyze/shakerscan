@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 from pathlib import Path
+
 # logical name, source-checkout relative path, container-runtime relative path
 FINGERPRINT_SOURCE_FILES: tuple[tuple[str, str, str], ...] = (
     ("scanner.py", "scanner/scanner.py", "scanner.py"),
@@ -32,13 +33,24 @@ FINGERPRINT_SOURCE_FILES: tuple[tuple[str, str, str], ...] = (
 )
 
 
-def source_file_map(workspace_root: str = "/workspace") -> dict[str, str]:
-    """Map every Python source copied into the API/worker image to its /app identity.
+def _is_runtime_source(path: Path) -> bool:
+    return "__pycache__" not in path.parts and path.suffix != ".pyc" and path.is_file()
 
-    Keeping a hand-picked detector list made freshness blind to Research Agent, migrations, and
-    orchestration edits. Mirror the Dockerfile's COPY layout instead: scanner top-level modules are
-    copied first, API top-level modules overwrite same-named files, and both package trees retain
-    their relative paths. New runtime modules are then covered without another manifest edit.
+
+def _add_tree(files: dict[str, str], root: Path, logical_root: str) -> None:
+    if not root.is_dir():
+        return
+    for path in sorted(root.rglob("*")):
+        if _is_runtime_source(path):
+            files[f"{logical_root}/{path.relative_to(root).as_posix()}"] = str(path)
+
+
+def source_file_map(workspace_root: str = "/workspace") -> dict[str, str]:
+    """Map deterministic source/config copied into the API/worker image.
+
+    Freshness must change for security rules, corpora, wordlists, dependency locks, and the fixed
+    Firecracker runtime as well as Python. Otherwise a worker can truthfully report current source
+    while executing stale scanner or model-runtime inputs.
     """
     root = Path(workspace_root)
     files: dict[str, str] = {}
@@ -53,10 +65,18 @@ def source_file_map(workspace_root: str = "/workspace") -> dict[str, str]:
     for package_root, logical_root in (
         (scanner_root / "scanner_tools", "scanner_tools"),
         (api_root / "ai_gate", "ai_gate"),
+        (scanner_root / "wordlists", "wordlists"),
     ):
-        if package_root.is_dir():
-            for path in sorted(package_root.rglob("*.py")):
-                files[f"{logical_root}/{path.relative_to(package_root).as_posix()}"] = str(path)
+        _add_tree(files, package_root, logical_root)
+    _add_tree(files, scanner_root / "model_intake_tools", "model_intake_locks")
+    auxiliary = (
+        ("runtime/requirements.lock", scanner_root / "requirements.lock"),
+        ("runtime/entrypoint.sh", scanner_root / "entrypoint.sh"),
+        ("model_intake_locks/firecracker-runtime.lock", root / "runner" / "guest" / "requirements.lock"),
+    )
+    for logical_name, path in auxiliary:
+        if path.is_file():
+            files[logical_name] = str(path)
     if files:
         return files
     return {
@@ -65,18 +85,29 @@ def source_file_map(workspace_root: str = "/workspace") -> dict[str, str]:
     }
 
 
-def runtime_file_map(runtime_root: str = "/app") -> dict[str, str]:
-    """Map the actual Python runtime layout using the same logical keys as source_file_map."""
+def runtime_file_map(
+    runtime_root: str = "/app",
+    model_intake_lock_root: str = "/opt/model-intake-locks",
+) -> dict[str, str]:
+    """Map the image runtime layout using the same logical keys as source_file_map."""
     root = Path(runtime_root)
     files: dict[str, str] = {}
     if root.is_dir():
         for path in sorted(root.glob("*.py")):
             files[path.name] = str(path)
-        for logical_root in ("scanner_tools", "ai_gate"):
+        for logical_root in ("scanner_tools", "ai_gate", "wordlists"):
             package_root = root / logical_root
-            if package_root.is_dir():
-                for path in sorted(package_root.rglob("*.py")):
-                    files[f"{logical_root}/{path.relative_to(package_root).as_posix()}"] = str(path)
+            _add_tree(files, package_root, logical_root)
+        lock_root = Path(model_intake_lock_root)
+        _add_tree(files, lock_root, "model_intake_locks")
+        auxiliary = (
+            ("runtime/requirements.lock", root / "requirements.lock"),
+            ("runtime/entrypoint.sh", root / "entrypoint.sh"),
+            ("model_intake_locks/firecracker-runtime.lock", lock_root / "firecracker-runtime.lock"),
+        )
+        for logical_name, path in auxiliary:
+            if path.is_file():
+                files[logical_name] = str(path)
     if files:
         return files
     return {
