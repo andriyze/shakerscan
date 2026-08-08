@@ -69,6 +69,45 @@ def test_dedupe_keeps_distinct_hosts():
     assert {r["id"] for r in out} == {"1", "2"}
 
 
+class _TargetBoundaryConn:
+    def __init__(self):
+        self.fetch_queries = []
+        self.fetchval_queries = []
+
+    async def fetch(self, query, *_args):
+        self.fetch_queries.append(" ".join(query.split()))
+        return []
+
+    async def fetchval(self, query, *_args):
+        self.fetchval_queries.append(" ".join(query.split()))
+        return 0
+
+
+def test_web_target_apis_exclude_model_intake_subjects_by_default(monkeypatch):
+    conn = _TargetBoundaryConn()
+    monkeypatch.setattr(api, "db_pool", _Pool(conn))
+
+    flat = asyncio.run(api.list_targets(include_inactive=False, limit=100, offset=0))
+    grouped = asyncio.run(api.list_targets_grouped(
+        include_inactive=False, search=None, discovery_source=None, grade=None,
+        has_findings=None, sort_by="root_domain", sort_order="asc",
+    ))
+    domains = asyncio.run(api.list_domains())
+
+    assert flat["total"] == 0 and grouped["total_targets"] == 0 and domains["domains"] == []
+    target_queries = [query for query in conn.fetch_queries if "FROM targets" in query]
+    assert target_queries
+    assert all("COALESCE(discovery_source, 'manual') <> 'model-intake'" in query or "COALESCE(t.discovery_source, 'manual') <> 'model-intake'" in query for query in target_queries)
+    assert all("COALESCE(discovery_source, 'manual') <> 'model-intake'" in query for query in conn.fetchval_queries)
+
+
+def test_target_dedupe_plan_excludes_model_intake_subjects():
+    conn = _TargetBoundaryConn()
+
+    assert asyncio.run(target_dedupe.plan_canonical_merges(conn)) == []
+    assert "WHERE COALESCE(discovery_source, 'manual') <> 'model-intake'" in conn.fetch_queries[0]
+
+
 class _BlockingMergeConn:
     def __init__(self, *, preview_id, preview_target_id):
         self.preview_id = preview_id

@@ -11612,6 +11612,65 @@ def _model_intake_finding_summary(value: Any) -> list[dict[str, Any]]:
     return summaries
 
 
+def _model_intake_safe_relative_path(value: Any) -> str | None:
+    text = str(value or "").strip().replace("\\", "/")
+    candidate = Path(text)
+    if not text or candidate.is_absolute() or not candidate.parts or ".." in candidate.parts:
+        return None
+    normalized = candidate.as_posix()
+    return normalized[:500] if normalized else None
+
+
+def _model_intake_safe_file_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    files: list[str] = []
+    seen: set[str] = set()
+    for item in value[:10_000]:
+        normalized = _model_intake_safe_relative_path(item)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            files.append(normalized)
+    return files
+
+
+def _model_intake_repository_manifest_summary(snapshot: Any) -> dict[str, Any]:
+    """Persist a bounded, content-free inventory of the exact reviewed files."""
+    snapshot = _model_intake_json_object(snapshot)
+    raw_files = snapshot.get("files") if isinstance(snapshot.get("files"), list) else []
+    files: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    invalid_entries = 0
+    for item in raw_files:
+        if not isinstance(item, dict):
+            invalid_entries += 1
+            continue
+        path = _model_intake_safe_relative_path(item.get("path"))
+        digest = str(item.get("sha256") or "").lower()
+        size = item.get("size_bytes")
+        if (
+            not path or path in seen or not re.fullmatch(r"[0-9a-f]{64}", digest)
+            or not isinstance(size, int) or isinstance(size, bool) or size < 0
+        ):
+            invalid_entries += 1
+            continue
+        seen.add(path)
+        if len(files) < 2_000:
+            files.append({"path": path, "sha256": digest, "size_bytes": size})
+    return {
+        "complete": snapshot.get("complete") is True,
+        "repository": str(snapshot.get("repository") or "")[:300] or None,
+        "revision": str(snapshot.get("revision") or "")[:200] or None,
+        "snapshot_sha256": snapshot.get("snapshot_sha256"),
+        "manifest_sha256": _model_intake_json_object(snapshot.get("repository_manifest")).get("manifest_sha256"),
+        "total_files": len(raw_files),
+        "reported_files": len(files),
+        "truncated": len(files) < len(raw_files) - invalid_entries,
+        "invalid_entries": invalid_entries,
+        "files": files,
+    }
+
+
 def _model_intake_scanner_result_summaries(generated_evidence: Any) -> list[dict[str, Any]]:
     """Normalize generated scanner output for both source and conversion scans."""
     generated = _model_intake_json_object(generated_evidence)
@@ -11622,6 +11681,7 @@ def _model_intake_scanner_result_summaries(generated_evidence: Any) -> list[dict
         scanner = item.get("scanner") if isinstance(item.get("scanner"), dict) else {}
         execution = item.get("execution") if isinstance(item.get("execution"), dict) else {}
         summary = item.get("summary") if isinstance(item.get("summary"), dict) else {}
+        subject = item.get("subject") if isinstance(item.get("subject"), dict) else {}
         normalized = {
             "name": str(scanner.get("name") or "unknown"),
             "version": scanner.get("version"),
@@ -11640,6 +11700,16 @@ def _model_intake_scanner_result_summaries(generated_evidence: Any) -> list[dict
                 or execution.get("database_sha256")
             ),
         }
+        subject_digest = str(subject.get("sha256") or "").lower()
+        subject_filename = _model_intake_safe_relative_path(subject.get("filename"))
+        subject_summary = {
+            "kind": str(subject.get("kind") or "")[:80] or None,
+            "filename": subject_filename,
+            "sha256": subject_digest if re.fullmatch(r"[0-9a-f]{64}", subject_digest) else None,
+            "complete": subject.get("complete") if isinstance(subject.get("complete"), bool) else None,
+        }
+        if any(value is not None for value in subject_summary.values()):
+            normalized["subject"] = subject_summary
         for key in (
             "target_scope", "adapter_kind", "duration_ms", "timeout_seconds", "exit_code",
             "reason", "license_scan_mode", "raw_result_digest",
@@ -11654,6 +11724,12 @@ def _model_intake_scanner_result_summaries(generated_evidence: Any) -> list[dict
         if execution_contract:
             normalized["execution_contract"] = execution_contract
         content_free_summary = _model_intake_content_free_coverage(summary)
+        scanned_files = _model_intake_safe_file_list(summary.get("scanned_files"))
+        skipped_files = _model_intake_safe_file_list(summary.get("skipped_files"))
+        if scanned_files:
+            content_free_summary["scanned_files"] = scanned_files
+        if skipped_files:
+            content_free_summary["skipped_files"] = skipped_files
         if content_free_summary:
             normalized["summary"] = content_free_summary
         summaries.append(normalized)
@@ -12253,6 +12329,16 @@ async def attach_model_intake_static_run(
         artifact_size_bytes = _model_intake_artifact_size_bytes(model_intake, summary)
         static_evidence_payload = {
             "schema_version": "model-intake-static-report-summary/v1",
+            "subject_identity": {
+                "artifact_sha256": artifact_sha,
+                "repository_snapshot_sha256": snapshot_sha or None,
+                "repository_manifest_sha256": summary.get("repository_manifest_sha256"),
+                "repository": snapshot.get("repository"),
+                "revision": snapshot.get("revision") or summary.get("revision"),
+                "artifact_name": summary.get("artifact_name"),
+            },
+            "repository_file_manifest": _model_intake_repository_manifest_summary(snapshot),
+            "scan_findings": _model_intake_finding_summary(findings),
             "required_static_checks": required_static_checks,
             "checks": (
                 model_intake.get("checks")
@@ -12814,6 +12900,29 @@ async def _register_and_rescan_converted_snapshot(
                 "checksum_verified": True,
             },
             "checks": generated.get("statuses") or {},
+            "subject_identity": {
+                "artifact_sha256": artifact_sha,
+                "repository_snapshot_sha256": snapshot_sha,
+                "repository_manifest_sha256": snapshot_sha,
+                "repository": materialized.get("profile_manifest", {}).get("repository"),
+                "revision": materialized.get("profile_manifest", {}).get("revision"),
+                "artifact_name": materialized.get("artifact_path"),
+                "converted": True,
+            },
+            "repository_file_manifest": _model_intake_repository_manifest_summary({
+                **_model_intake_json_object(materialized.get("profile_manifest")),
+                "complete": True,
+                "snapshot_sha256": snapshot_sha,
+            }),
+            "scan_findings": _model_intake_finding_summary(
+                [
+                    finding
+                    for scanner in generated.get("results") or []
+                    if isinstance(scanner, dict)
+                    for finding in scanner.get("findings") or []
+                    if isinstance(finding, dict)
+                ]
+            ),
             "scanner_results": _model_intake_scanner_result_summaries(generated),
             "runtime_dependencies": _model_intake_json_object(
                 generated.get("runtime_dependencies")
@@ -22286,7 +22395,7 @@ async def list_targets(
                     LIMIT 32
                 ) item
             ) origins ON true
-            WHERE 1=1
+            WHERE COALESCE(t.discovery_source, 'manual') <> 'model-intake'
         """
         params = []
         param_idx = 1
@@ -22299,7 +22408,8 @@ async def list_targets(
 
         rows = await conn.fetch(query, *params)
         total = await conn.fetchval(
-            "SELECT COUNT(*) FROM targets" + ("" if include_inactive else " WHERE is_active = true")
+            "SELECT COUNT(*) FROM targets WHERE COALESCE(discovery_source, 'manual') <> 'model-intake'"
+            + ("" if include_inactive else " AND is_active = true")
         )
 
     return {
@@ -22420,6 +22530,12 @@ async def list_targets_grouped(
 
         if not include_inactive:
             query += " AND t.is_active = true"
+
+        # Model Intake subjects have their own workflow and must not appear as
+        # web targets. Keep the explicit legacy source filter for API clients
+        # that need to inspect historical rows during migration.
+        if discovery_source != "model-intake":
+            query += " AND COALESCE(t.discovery_source, 'manual') <> 'model-intake'"
 
         if search:
             query += f" AND (t.url ILIKE '%' || ${param_idx} || '%' OR t.name ILIKE '%' || ${param_idx} || '%' OR t.root_domain ILIKE '%' || ${param_idx} || '%')"
@@ -22626,6 +22742,7 @@ async def list_domains():
             SELECT DISTINCT root_domain
             FROM targets
             WHERE root_domain IS NOT NULL AND is_active = true
+              AND COALESCE(discovery_source, 'manual') <> 'model-intake'
             ORDER BY root_domain
         """)
         ai_rows = await conn.fetch("""

@@ -530,7 +530,8 @@ async def plan_canonical_merges(conn) -> list[dict]:
     """Group targets by canonical key and, for each group with >1 member, pick a
     survivor (active > most findings > most scans > https) and list the merges."""
     rows = await conn.fetch(
-        "SELECT id, url, discovery_source, is_active, total_scans, active_findings_count FROM targets")
+        """SELECT id, url, discovery_source, is_active, total_scans, active_findings_count
+           FROM targets WHERE COALESCE(discovery_source, 'manual') <> 'model-intake'""")
     groups: dict[str, list] = {}
     for r in rows:
         groups.setdefault(canonical_target_key(r["url"], r.get("discovery_source")), []).append(r)

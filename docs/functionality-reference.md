@@ -669,6 +669,13 @@ references. OCI/MLflow use an operator gateway or signed HTTPS export bound to t
 and expected digest, so provider credentials never enter scanner output. Completed scans expose a
 content-free evidence export and durable admission lifecycle APIs.
 
+Model repositories and artifacts are Model Intake subjects, not web targets. They are therefore excluded
+from the default `/targets`, `/targets/grouped`, `/domains`, dashboard web-target totals, and target-dedupe
+surfaces. Existing internal target links remain readable for report and rescan compatibility, and Exposure
+continues to show them explicitly as `model_artifact` assets. The automatic HTML report identifies the pinned
+source/revision and digests, explains the controller stop reason and next action, shows a scanner coverage
+matrix, and lists the bounded content-free repository manifest plus per-scanner file coverage.
+
 Result shape: `model_intake.checks.*`, `aibom`, `supply_chain`, `summary` (with the `decision`), and
 `artifact`. Findings are stored with `tool = model_intake` and filter independently through
 `source_type=model_intake`; they are excluded from `source_type=dast`. Sensitive URL params and
@@ -734,7 +741,8 @@ Web target identity is host-level: scheme and port variants share one target rec
 security history, while each scan and hunt retains the exact concrete origin it executes against.
 The target APIs return `origins` ordered by recent DAST use. Deep Hunt start requests accept
 `origin_url`; the UI offers known origins and permits a new same-host origin. Cross-host origins are
-rejected. Model Intake artifact targets remain exact-subject identities.
+rejected. Model Intake subjects retain exact artifact/revision identity in the Model Intake evidence model;
+they do not appear in the normal web-target inventory.
 
 Natural-language routing treats an unqualified “scan” as Quick DAST, named scan types as DAST,
 “Deep Hunt” as this workflow, “verify this finding” as deterministic retest/verification, and manual

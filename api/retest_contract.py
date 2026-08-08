@@ -1369,7 +1369,7 @@ async def run_schema_migrations(pool) -> None:
             await conn.execute("""
                 CREATE OR REPLACE VIEW dashboard_metrics AS
                 SELECT
-                    (SELECT COUNT(*) FROM targets WHERE is_active = true) as total_targets,
+                    (SELECT COUNT(*) FROM targets WHERE is_active = true AND COALESCE(discovery_source, 'manual') <> 'model-intake') as total_targets,
                     (SELECT COUNT(*) FROM scans WHERE status = 'completed' AND (scan_role IS NULL OR scan_role <> 'shard')) as total_scans,
                     (SELECT COUNT(*) FROM scans WHERE status = 'running' AND (scan_role IS NULL OR scan_role <> 'shard')) as running_scans,
                     (SELECT COUNT(*) FROM findings WHERE status = 'active') as active_findings,

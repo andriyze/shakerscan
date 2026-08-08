@@ -18619,3 +18619,40 @@ def test_queue_delivery_prefers_durable_broker_reclaim_evidence():
     assert payload["queue_message_id"] == "123-0"
     assert payload["processing_queue"] == "scan_jobs:leased"
     assert payload["consumer"] == "broker-node-b"
+
+
+def test_model_intake_report_summary_preserves_only_safe_file_identity():
+    manifest = api_module._model_intake_repository_manifest_summary({
+        "complete": True,
+        "repository": "example/model",
+        "revision": "abc123",
+        "files": [
+            {"path": "modeling.py", "sha256": "a" * 64, "size_bytes": 12},
+            {"path": "../escape.py", "sha256": "b" * 64, "size_bytes": 9},
+            {"path": "/etc/passwd", "sha256": "c" * 64, "size_bytes": 20},
+        ],
+    })
+    generated = {
+        "results": [{
+            "scanner": {"name": "semgrep", "version": "test"},
+            "subject": {
+                "kind": "repository_snapshot", "filename": "repository",
+                "sha256": "d" * 64, "complete": True,
+            },
+            "execution": {"status": "PASS", "required": True},
+            "summary": {
+                "files_scanned": 2,
+                "scanned_files": ["modeling.py", "../escape.py", "/etc/passwd"],
+            },
+            "findings": [],
+        }],
+    }
+    scanner = api_module._model_intake_scanner_result_summaries(generated)[0]
+
+    assert manifest["total_files"] == 3
+    assert manifest["reported_files"] == 1
+    assert manifest["invalid_entries"] == 2
+    assert manifest["files"][0]["path"] == "modeling.py"
+    assert scanner["summary"]["files_scanned"] == 2
+    assert scanner["summary"]["scanned_files"] == ["modeling.py"]
+    assert scanner["subject"]["sha256"] == "d" * 64

@@ -596,6 +596,7 @@ def _scanner_result_detail(
         ][:100],
         "coverage": _json(item.get("coverage"), {}),
         "summary": _json(item.get("summary"), {}),
+        "subject": _json(item.get("subject"), {}),
         "version": item.get("version"),
         "rules_sha256": item.get("rules_sha256"),
         "database_sha256": item.get("database_sha256"),
@@ -669,6 +670,12 @@ def _static_check_detail(evidence: list[dict[str, Any]]) -> dict[str, Any]:
             )
             for item, evidence_stage, evidence_id in scanner_runs
         ],
+        "subject_identity": _json(payload.get("subject_identity"), {}),
+        "repository_file_manifest": _json(payload.get("repository_file_manifest"), {}),
+        "scan_findings": [
+            item for item in payload.get("scan_findings") or []
+            if isinstance(item, dict)
+        ][:100],
         "license_compliance": _json(payload.get("license_compliance"), {}),
         "runtime_dependencies": _json(payload.get("runtime_dependencies"), {}),
         "vulnerability_summary": _json(payload.get("vulnerability_summary"), {}),
@@ -917,6 +924,12 @@ def build_model_intake_report(
     subject_map = {str(row.get("subject_kind") or ""): row for row in subjects}
     artifact = subject_map.get("artifact")
     snapshot = subject_map.get("repository_snapshot")
+    subject_uri = str(
+        (snapshot.get("immutable_uri") if snapshot else None)
+        or (artifact.get("immutable_uri") if artifact else None)
+        or ""
+    )
+    safe_source_reference = subject_uri if subject_uri.startswith("hf://") else None
     source_status = (
         "PASS" if artifact and snapshot and _sha256(artifact.get("sha256")) and _sha256(snapshot.get("sha256"))
         else "INCOMPLETE"
@@ -1227,7 +1240,22 @@ def build_model_intake_report(
         for item in EXTERNAL_APPROVAL_REQUIREMENTS
     ]
     static_detail = _static_check_detail(evidence)
+    static_control = next((item for item in controls if item.get("id") == "static_analysis"), None)
+    aggregate_findings = [
+        finding for finding in static_detail.get("scan_findings") or []
+        if isinstance(finding, dict)
+        and (
+            static_control
+            and (
+                static_control.get("status") == "REVIEW"
+                or str(finding.get("severity") or "").lower() in {"critical", "high"}
+            )
+        )
+    ]
     attention_findings = [
+        {"scanner": "aggregate scan result", **finding}
+        for finding in aggregate_findings
+    ] + [
         {"scanner": item.get("name"), **finding}
         for item in static_detail.get("scanner_results") or []
         if item.get("status") in {"FAIL", "ERROR", "INCOMPLETE", "REVIEW"}
@@ -1238,7 +1266,6 @@ def build_model_intake_report(
         finding for finding in attention_findings
         if finding.get("id") != "license_file_missing"
     ]
-    static_control = next((item for item in controls if item.get("id") == "static_analysis"), None)
     if static_control and static_security_findings:
         labels: list[str] = []
         remediation_steps: list[str] = []
@@ -1271,8 +1298,9 @@ def build_model_intake_report(
                 action = f"Resolve {str(finding.get('message') or finding.get('call') or finding.get('id') or 'the scanner finding')}{location_label}, then rescan the new pinned revision."
             labels.append(label)
             remediation_steps.append(action)
+        result_label = "blocking or high-severity finding(s)" if static_control.get("status") == "FAIL" else "review item(s)"
         static_control["detail"] = (
-            f"{len(labels)} review item(s): " + "; ".join(labels[:5])
+            f"{len(labels)} {result_label}: " + "; ".join(labels[:5])
             + (f"; and {len(labels) - 5} more" if len(labels) > 5 else "")
         )
         static_control["remediation"] = " ".join(remediation_steps[:5])
@@ -1322,6 +1350,15 @@ def build_model_intake_report(
                 f"Exact registered subject for the {environment or 'unspecified'} environment"
                 + (f" until {admission_expiry}" if admission_expiry else "; no active admission expiry exists")
             ),
+            "subject_identity": {
+                "artifact_sha256": artifact.get("sha256") if artifact else None,
+                "repository_snapshot_sha256": snapshot.get("sha256") if snapshot else None,
+                "revision": (
+                    snapshot.get("source_revision") if snapshot else None
+                ) or (artifact.get("source_revision") if artifact else None),
+                "source_reference": safe_source_reference,
+                "requested_environment": environment or None,
+            },
             "scope_warning": (
                 "The result applies only to the pinned subject and checks evidenced by this run. "
                 "Deployment follow-up remains separate."
@@ -1423,6 +1460,7 @@ def apply_automatic_review_context(
     current_step = str(automatic_review.get("current_step") or "")
     automatic = {
         "id": str(automatic_review.get("id") or ""),
+        "source_label": automatic_review.get("source_label"),
         "state": automatic_review.get("state"),
         "current_step": current_step,
         "progress": _integer(automatic_review.get("progress")),
@@ -1505,9 +1543,26 @@ def apply_automatic_review_context(
         "BLOCK": "One or more technical checks found a condition that blocks use of this revision.",
         "INCOMPLETE": "The technical review did not collect all required evidence.",
     }.get(automatic_outcome, str(report.get("plain_language") or "Technical review results are available."))
+    if automatic_outcome == "INCOMPLETE" and pending:
+        first_pending = next((item for item in pending if isinstance(item, dict)), {})
+        pending_detail = str(first_pending.get("detail") or first_pending.get("status") or "required evidence is missing")
+        technical_statement = (
+            f"The technical review stopped at {current_step.replace('_', ' ') or 'an incomplete step'}: "
+            f"{pending_detail}."
+        )
     report["outcome"] = normalized_outcome
     report["plain_language"] = technical_statement
     executive = _json(report.get("executive_summary"), {})
+    detail = _json(report.get("detailed_review"), {})
+    static_detail = _json(detail.get("static_analysis_detail"), {})
+    scanner_results = [
+        item for item in static_detail.get("scanner_results") or []
+        if isinstance(item, dict)
+    ]
+    scanner_status_counts = {
+        status: sum(_normalize_status(item.get("status")) == status for item in scanner_results)
+        for status in sorted(CONTROL_STATUSES)
+    }
     executive.update({
         "shakerscan_decision": normalized_outcome,
         "deployable_under_configured_shakerscan_policy": False,
@@ -1521,6 +1576,22 @@ def apply_automatic_review_context(
             "current_step": current_step,
             "outcome": automatic.get("technical_outcome"),
             "pending_control_count": len(pending),
+            "pending_controls": pending[:8],
+        },
+        "subject_identity": {
+            **_json(executive.get("subject_identity"), {}),
+            **_json(static_detail.get("subject_identity"), {}),
+            "source_label": automatic.get("source_label"),
+            "requested_environment": _json(report.get("submission"), {}).get("requested_environment"),
+        },
+        "scanner_coverage": {
+            "total": len(scanner_results),
+            "passed": scanner_status_counts.get("PASS", 0),
+            "needs_attention": sum(
+                count for status, count in scanner_status_counts.items()
+                if status not in {"PASS", "NOT_APPLICABLE"}
+            ),
+            "not_applicable": scanner_status_counts.get("NOT_APPLICABLE", 0),
         },
         "coverage": {
             **_json(executive.get("coverage"), {}),
@@ -1552,7 +1623,6 @@ def apply_automatic_review_context(
         "checks_not_completed": [item.get("id") for item in not_completed],
         "checks_not_applicable": [item.get("id") for item in not_applicable],
     }
-    detail = _json(report.get("detailed_review"), {})
     detail.update({
         "control_matrix": technical_controls,
         "shakerscan_check_catalog": _check_catalog_with_evidence(
@@ -1710,6 +1780,27 @@ def render_model_intake_html(report: dict[str, Any]) -> str:
         item for item in static_detail.get("scanner_results") or []
         if isinstance(item, dict)
     ]
+
+    def first_metric(scanner: dict[str, Any], *keys: str) -> Any:
+        for source in (_json(scanner.get("summary"), {}), _json(scanner.get("coverage"), {})):
+            for key in keys:
+                if source.get(key) is not None:
+                    return source.get(key)
+        return "Not reported"
+
+    scanner_matrix_rows = "".join(
+        "<tr>"
+        f"<td>{esc(item.get('name'))}</td>"
+        f"<td class='status {esc(str(item.get('status') or '').lower())}'>{esc(item.get('status'))}</td>"
+        f"<td>{esc(item.get('target_scope') or item.get('applicability') or 'Not reported')}</td>"
+        f"<td>{esc(first_metric(item, 'files_scanned', 'files_analyzed', 'packages_scanned', 'subject_files'))}</td>"
+        f"<td>{esc(first_metric(item, 'files_skipped', 'skipped_files_count'))}</td>"
+        f"<td>{esc(item.get('finding_count') if item.get('finding_count') is not None else 'Not reported')}</td>"
+        f"<td>{esc(first_metric(item, 'error_count'))}</td>"
+        f"<td>{esc(str(item.get('duration_ms')) + ' ms' if item.get('duration_ms') is not None else 'Not reported')}</td>"
+        "</tr>"
+        for item in scanner_rows
+    ) or "<tr><td colspan='8'>No scanner-level execution evidence was recorded.</td></tr>"
     scanner_name_counts: dict[str, int] = {}
     for scanner in scanner_rows:
         scanner_key = str(scanner.get("name") or "unknown").casefold()
@@ -1752,6 +1843,13 @@ def render_model_intake_html(report: dict[str, Any]) -> str:
             ("Required by this review", bool(scanner.get("required"))),
             ("Tool version", scanner.get("version") or "Built into ShakerScan / not versioned separately"),
         ]
+        scanner_subject = _json(scanner.get("subject"), {})
+        if scanner_subject:
+            overview.extend((
+                ("Reviewed subject", scanner_subject.get("filename") or scanner_subject.get("kind") or "Not reported"),
+                ("Subject SHA-256", scanner_subject.get("sha256") or "Not reported"),
+                ("Subject acquisition complete", scanner_subject.get("complete")),
+            ))
         if scanner.get("adapter_kind"):
             overview.append(("Adapter kind", scanner.get("adapter_kind")))
         if scanner.get("rules_sha256"):
@@ -1788,6 +1886,27 @@ def render_model_intake_html(report: dict[str, Any]) -> str:
             + "</tr>"
             for label, value in overview
         )
+        scanned_files = [
+            value for value in _json(scanner.get("summary"), {}).get("scanned_files") or []
+            if isinstance(value, str)
+        ]
+        skipped_files = [
+            value for value in _json(scanner.get("summary"), {}).get("skipped_files") or []
+            if isinstance(value, str)
+        ]
+        file_coverage = ""
+        if scanned_files or skipped_files:
+            file_rows = "".join(
+                f"<tr><td><code>{esc(path)}</code></td><td>Scanned</td></tr>"
+                for path in scanned_files
+            ) + "".join(
+                f"<tr><td><code>{esc(path)}</code></td><td class='status review'>Skipped</td></tr>"
+                for path in skipped_files
+            )
+            file_coverage = (
+                f"<details><summary>File coverage ({len(scanned_files)} scanned, {len(skipped_files)} skipped)</summary>"
+                f"<table><thead><tr><th>Repository-relative file</th><th>Disposition</th></tr></thead><tbody>{file_rows}</tbody></table></details>"
+            )
         findings = [item for item in scanner.get("findings") or [] if isinstance(item, dict)]
         finding_rows = "".join(
             "<tr>"
@@ -1816,6 +1935,7 @@ def render_model_intake_html(report: dict[str, Any]) -> str:
             f"<span class='status {esc(status.lower())}'>{esc(status)}</span>"
             f"<span class='finding-total'>{esc(reported_count)} finding(s)</span></summary><div class='tool-body'>"
             f"<table class='tool-overview'><tbody>{overview_rows}</tbody></table>"
+            f"{file_coverage}"
             f"<h5>Findings ({esc(reported_count)})</h5><p class='meta'>Finding summaries omit matched source and secret values and are tied to this scanner run.{esc(bounded_note)}</p>"
             "<table><thead><tr><th>Severity</th><th>Rule / finding</th><th>What was found</th><th>File or package</th><th>Classification / scope</th></tr></thead>"
             f"<tbody>{finding_rows}</tbody></table><a class='back no-print' href='#contents'>Back to contents</a></div></details>"
@@ -1842,6 +1962,40 @@ def render_model_intake_html(report: dict[str, Any]) -> str:
         if isinstance(item, dict)
     ) or "<tr><td colspan='5'>No Python inference imports were discovered.</td></tr>"
     vulnerability_summary = _json(static_detail.get("vulnerability_summary"), {})
+    manifest = _json(static_detail.get("repository_file_manifest"), {})
+    manifest_rows = "".join(
+        "<tr>"
+        f"<td><code>{esc(item.get('path'))}</code></td>"
+        f"<td>{esc(item.get('size_bytes'))}</td>"
+        f"<td><code>{esc(item.get('sha256'))}</code></td>"
+        "</tr>"
+        for item in manifest.get("files") or []
+        if isinstance(item, dict)
+    ) or "<tr><td colspan='3'>No repository file manifest was preserved in this report.</td></tr>"
+    advisory_scanners = {
+        str(item.get("name") or "").casefold(): item for item in scanner_rows
+        if str(item.get("name") or "").casefold() in {"trivy", "osv-scanner", "pip-audit"}
+    }
+    dependency_scanners_complete = all(
+        name in advisory_scanners
+        and _normalize_status(advisory_scanners[name].get("status")) == "PASS"
+        for name in ("osv-scanner", "pip-audit")
+    )
+    packages_scanned = min(
+        (
+            int(first_metric(advisory_scanners[name], "packages_scanned"))
+            for name in ("osv-scanner", "pip-audit")
+            if name in advisory_scanners
+            and str(first_metric(advisory_scanners[name], "packages_scanned")).isdigit()
+        ),
+        default=0,
+    )
+    clean_advisory_conclusion = dependency_scanners_complete and packages_scanned > 0
+    vulnerability_empty_message = (
+        f"No known vulnerability was reported across {packages_scanned} exact resolved runtime package(s) by the completed OSV Scanner and pip-audit checks."
+        if clean_advisory_conclusion
+        else "No vulnerability inventory is available. This report does not claim the dependency set is clean because one or more advisory scanners did not complete or reported no package denominator."
+    )
     vulnerability_rows = "".join(
         "<tr>"
         f"<td>{esc(item.get('package'))}</td><td>{esc(item.get('installed_version'))}</td>"
@@ -1852,12 +2006,59 @@ def render_model_intake_html(report: dict[str, Any]) -> str:
         "</tr>"
         for item in static_detail.get("vulnerability_inventory") or []
         if isinstance(item, dict)
-    ) or "<tr><td colspan='6'>No known vulnerability was reported for the exact resolved runtime by the completed scanners.</td></tr>"
+    ) or f"<tr><td colspan='6'>{esc(vulnerability_empty_message)}</td></tr>"
+    automatic = _json(report.get("automatic_review"), {})
+    automatic_summary = _json(executive.get("automatic_technical_review"), {})
+    subject_identity = _json(executive.get("subject_identity"), {})
+    pending_controls = [
+        item for item in automatic_summary.get("pending_controls") or []
+        if isinstance(item, dict)
+    ]
+    pending_rows = "".join(
+        "<tr>"
+        f"<td>{esc(item.get('control') or 'unspecified')}</td>"
+        f"<td class='status {esc(str(item.get('status') or 'incomplete').lower())}'>{esc(item.get('status') or 'INCOMPLETE')}</td>"
+        f"<td>{esc(item.get('detail') or 'No detail recorded')}</td>"
+        f"<td>{esc(item.get('action') or 'Collect fresh authoritative evidence and rerun the review.')}</td>"
+        "</tr>"
+        for item in pending_controls
+    )
+    sbom_scanner = next(
+        (item for item in scanner_rows if str(item.get("name") or "").casefold() == "shakerscan-sbom"),
+        {},
+    )
+    repository_component_count = first_metric(sbom_scanner, "components_generated") if sbom_scanner else "Not reported"
+    repository_dependency_files = first_metric(sbom_scanner, "dependency_files_discovered") if sbom_scanner else "Not reported"
+    runtime_component_count = len(runtime_dependencies.get("resolved_components") or [])
+    inventory_note = (
+        f"The repository-manifest SBOM found {repository_component_count} component(s) from "
+        f"{repository_dependency_files} dependency file(s). The separately synthesized fixed-inference "
+        f"inventory resolved {runtime_component_count} exact runtime package(s). A zero repository SBOM "
+        "does not mean the inference runtime has zero dependencies."
+    )
+    scanner_coverage = _json(executive.get("scanner_coverage"), {})
+    identity_rows = "".join(
+        f"<tr><th>{esc(label)}</th><td><code>{esc(value or 'Not reported')}</code></td></tr>"
+        for label, value in (
+            ("Model / source", subject_identity.get("source_label") or automatic.get("source_label") or subject_identity.get("repository") or subject_identity.get("source_reference")),
+            ("Pinned revision", subject_identity.get("revision")),
+            ("Artifact SHA-256", subject_identity.get("artifact_sha256")),
+            ("Repository snapshot SHA-256", subject_identity.get("repository_snapshot_sha256")),
+            ("Requested environment", subject_identity.get("requested_environment")),
+        )
+    )
+    pending_section = (
+        "<h3>Why the review needs attention</h3>"
+        f"<p><strong>Controller step:</strong> {esc(automatic_summary.get('current_step') or automatic.get('current_step') or 'Not reported')}</p>"
+        "<table><thead><tr><th>Control</th><th>Status</th><th>Reason</th><th>Next action</th></tr></thead>"
+        f"<tbody>{pending_rows}</tbody></table>"
+        if pending_rows else ""
+    )
     return f"""<!doctype html>
 <html><head><meta charset="utf-8"><title>Model Intake {esc(report.get('outcome'))}</title>
 <style>
 html{{scroll-behavior:smooth}}body{{font:14px system-ui,sans-serif;margin:32px;color:#172033;line-height:1.45}}h1{{margin-bottom:4px}}h2{{margin-top:36px}}.meta{{color:#5b6475}}
-.verdict{{padding:18px;border:2px solid #555;border-radius:8px;margin:20px 0;font-size:16px}}.verdict strong{{font-size:19px}}.review-notes{{padding:12px 16px;background:#fffaf0;border-left:4px solid #9a6700;margin:18px 0}}.review-notes p{{margin:6px 0}}.stats{{display:flex;gap:10px;flex-wrap:wrap;margin:14px 0}}.stat{{padding:8px 12px;background:#f3f5f8;border-radius:6px}}table{{border-collapse:collapse;width:100%;margin:16px 0}}
+.verdict{{padding:18px;border:2px solid #555;border-radius:8px;margin:20px 0;font-size:16px}}.verdict strong{{font-size:19px}}.review-notes{{padding:12px 16px;background:#fffaf0;border-left:4px solid #9a6700;margin:18px 0}}.review-notes p{{margin:6px 0}}.stats{{display:flex;gap:10px;flex-wrap:wrap;margin:14px 0}}.stat{{padding:8px 12px;background:#f3f5f8;border-radius:6px}}.identity{{max-width:1000px}}.identity th{{width:240px;background:#f7f8fa}}table{{border-collapse:collapse;width:100%;margin:16px 0}}
 th,td{{border:1px solid #ccd2dc;padding:8px;vertical-align:top;text-align:left}}code{{white-space:pre-wrap;word-break:break-all;font-size:11px}}
 .status{{font-weight:700}}.pass{{color:#08783e}}.fail,.error,.crashed{{color:#b42318}}.review,.review_required,.warning,.incomplete,.not_run,.timeout,.unsupported{{color:#9a6700}}
 .status.critical{{color:#fff;background:#7a0019}}.status.high{{color:#b42318;background:#fee4e2}}.status.medium{{color:#b54708;background:#fffaeb}}.status.low{{color:#175cd3;background:#eff8ff}}.status.unknown,.status.info{{color:#475467;background:#f2f4f7}}
@@ -1868,13 +2069,15 @@ th,td{{border:1px solid #ccd2dc;padding:8px;vertical-align:top;text-align:left}}
 @media print{{.no-print{{display:none}}body{{margin:12mm}}.tool-run{{break-inside:auto}}details:not([open]) > *{{display:block!important}}details:not([open]) summary{{display:flex!important}}.toc{{break-inside:avoid}}a{{color:inherit;text-decoration:none}}}}
 </style></head><body>
 <button class="no-print" onclick="window.print()">Print / Save PDF</button>
-<h1>Model Intake review</h1><div class="meta">Submission {esc(report.get('submission', {}).get('id'))} · report sha256:{esc(report.get('report_sha256'))}</div>
+<h1>Model Intake review</h1><div class="meta">{esc(subject_identity.get('source_label') or automatic.get('source_label') or subject_identity.get('repository') or subject_identity.get('source_reference') or 'Pinned model subject')} · Submission {esc(report.get('submission', {}).get('id'))} · report sha256:{esc(report.get('report_sha256'))}</div>
+<table class="identity"><tbody>{identity_rows}</tbody></table>
 <section id="executive-summary"><h2>Executive summary</h2>
 <div class="verdict"><strong>{esc(presentation.get('decision') or report.get('outcome'))} — {esc(presentation.get('headline') or 'Review results available')}.</strong> {esc(executive.get('decision_statement') or report.get('plain_language'))}</div>
-<div class="stats"><span class="stat">{esc(presentation_counts.get('verified'))} verified</span><span class="stat">{esc(presentation_counts.get('needs_attention'))} need attention</span><span class="stat">{esc(presentation_counts.get('not_applicable'))} not applicable</span></div>
+<div class="stats"><span class="stat">Controls: {esc(presentation_counts.get('verified'))} passed</span><span class="stat">Controls: {esc(presentation_counts.get('needs_attention'))} need attention</span><span class="stat">Controls: {esc(presentation_counts.get('not_applicable'))} not applicable</span><span class="stat">Scanners: {esc(scanner_coverage.get('passed') or 0)}/{esc(scanner_coverage.get('total') or 0)} passed</span></div>
+{pending_section}
 </section>
 <nav class="toc" id="contents" aria-label="Report contents"><strong>Contents</strong><ul>
-<li><a href="#executive-summary">Executive summary</a></li><li><a href="#check-results">Check results</a></li><li><a href="#deployment-follow-up">Deployment follow-up</a></li><li><a href="#detailed-evidence">Detailed evidence</a></li><li><a href="#scanner-runs">Scanner runs</a></li><li><a href="#dependencies">Dependencies and vulnerabilities</a></li><li><a href="#firecracker-runtime">Firecracker runtime</a></li><li><a href="#control-evidence">Control evidence</a></li><li><a href="#limitations">Limitations</a></li>
+<li><a href="#executive-summary">Executive summary</a></li><li><a href="#check-results">Check results</a></li><li><a href="#deployment-follow-up">Deployment follow-up</a></li><li><a href="#detailed-evidence">Detailed evidence</a></li><li><a href="#scanner-runs">Scanner runs</a></li><li><a href="#reviewed-files">Reviewed files</a></li><li><a href="#dependencies">Dependencies and vulnerabilities</a></li><li><a href="#firecracker-runtime">Firecracker runtime</a></li><li><a href="#control-evidence">Control evidence</a></li><li><a href="#limitations">Limitations</a></li>
 </ul></nav>
 <section id="check-results"><h2>Check results</h2><p>Attention items are listed first. PASS means the check completed for this pinned revision; REVIEW and INCOMPLETE are not passes.</p>
 <table><thead><tr><th>Category</th><th>Check</th><th>Status</th><th>Result</th><th>Action / evidence</th></tr></thead><tbody>{check_rows}</tbody></table>
@@ -1884,11 +2087,14 @@ th,td{{border:1px solid #ccd2dc;padding:8px;vertical-align:top;text-align:left}}
 </section>
 <section id="detailed-evidence"><h2 class="page-break">Detailed evidence</h2><p>This section contains the tool output, dependency evidence, isolated-runtime phases, and evidence bindings behind the check-results table.</p></section>
 <section id="scanner-runs"><h3>Scanner runs</h3><p>Each tool is reported separately. The scope and coverage rows show what was actually examined; applicability never counts as execution. Select a tool to expand its evidence.</p>
+<table><thead><tr><th>Tool</th><th>Status</th><th>Scope</th><th>Files / packages scanned</th><th>Skipped</th><th>Findings</th><th>Errors</th><th>Duration</th></tr></thead><tbody>{scanner_matrix_rows}</tbody></table>
 <nav class="tool-index" aria-label="Scanner run index">{tool_index}</nav>
 {tool_execution_sections}
 </section>
+<section id="reviewed-files"><h3>Reviewed repository files</h3><p>The immutable repository manifest contained {esc(manifest.get('total_files') or 0)} file(s); {esc(manifest.get('reported_files') or 0)} safe, content-free file record(s) are shown. A manifest entry proves acquisition and identity; each scanner's file coverage above proves whether that tool examined it.</p><table><thead><tr><th>Repository-relative file</th><th>Bytes</th><th>SHA-256</th></tr></thead><tbody>{manifest_rows}</tbody></table><a class="back no-print" href="#contents">Back to contents</a></section>
 <section id="dependencies"><h3>Dependencies and known vulnerabilities</h3>
 <p><strong>Runtime profile:</strong> {esc(runtime_profile.get('id') or 'not resolved')} · <strong>Dependency resolution:</strong> {esc(runtime_dependencies.get('status') or 'NOT_RUN')} · <strong>Known advisories:</strong> {esc(vulnerability_summary.get('total') or 0)} across {esc(vulnerability_summary.get('packages_affected') or 0)} package(s).</p>
+<p class="review-notes"><strong>Inventory scope:</strong> {esc(inventory_note)}</p>
 <table><thead><tr><th>Package</th><th>Installed version</th><th>Advisory</th><th>Severity</th><th>Reported by</th><th>Fix</th></tr></thead><tbody>{vulnerability_rows}</tbody></table>
 <details><summary>Derived inference imports</summary><table><thead><tr><th>Import</th><th>Resolved package</th><th>Version</th><th>Evidence</th><th>Status</th></tr></thead><tbody>{inferred_rows}</tbody></table></details>
 <details><summary>Exact Firecracker runtime packages ({esc(len(runtime_dependencies.get('resolved_components') or []))})</summary><table><thead><tr><th>Package</th><th>Version</th><th>Package URL</th><th>Resolution</th></tr></thead><tbody>{dependency_rows}</tbody></table></details>

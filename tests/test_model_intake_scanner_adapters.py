@@ -13,7 +13,7 @@ def test_json_scanners_never_pass_empty_or_malformed_output():
         assert _parse_external_scanner(scanner, "not-json", "", 0)[0] == "INCOMPLETE"
 
 
-def test_semgrep_summary_reports_bounded_file_coverage_without_file_names():
+def test_semgrep_summary_reports_bounded_safe_file_coverage():
     output = {
         "results": [], "errors": [],
         "paths": {"scanned": ["modeling.py", "config.json"], "skipped": ["weights.bin"]},
@@ -25,7 +25,27 @@ def test_semgrep_summary_reports_bounded_file_coverage_without_file_names():
     assert findings == []
     assert summary["files_scanned"] == 2
     assert summary["files_skipped"] == 1
-    assert "modeling.py" not in json.dumps(summary)
+    assert summary["scanned_files"] == ["modeling.py", "config.json"]
+    assert summary["skipped_files"] == ["weights.bin"]
+
+
+def test_semgrep_summary_rejects_unsafe_or_unrelated_paths(tmp_path):
+    subject = tmp_path / "subject"
+    subject.mkdir()
+    output = {
+        "results": [], "errors": [],
+        "paths": {
+            "scanned": [str(subject / "modeling.py"), "/etc/passwd", "../escape.py"],
+            "skipped": [{"path": str(subject / "weights.bin")}],
+        },
+    }
+
+    _, _, summary = _parse_external_scanner(
+        "semgrep", json.dumps(output), "", 0, subject_path=subject,
+    )
+
+    assert summary["scanned_files"] == ["modeling.py"]
+    assert summary["skipped_files"] == ["weights.bin"]
 
 
 def test_osv_adapter_uses_explicit_packaged_database_and_go_runtime_boundary():

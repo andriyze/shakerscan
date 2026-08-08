@@ -426,6 +426,94 @@ def test_static_report_names_safe_finding_location_and_remediation():
     assert "torch</td><td>2.9.1+cpu" in rendered
 
 
+def test_automatic_html_names_subject_stop_reason_scanner_coverage_and_files():
+    rows = _rows(active_admission=False)
+    static = next(item for item in rows["evidence"] if item["evidence_type"] == "static_analysis")
+    static["status"] = "FAIL"
+    static["payload_json"].update({
+        "subject_identity": {
+            "artifact_sha256": DIGESTS["a"],
+            "repository_snapshot_sha256": DIGESTS["b"],
+            "revision": "revision-123",
+        },
+        "repository_file_manifest": {
+            "complete": True, "total_files": 2, "reported_files": 2,
+            "files": [
+                {"path": "modeling.py", "size_bytes": 123, "sha256": DIGESTS["c"]},
+                {"path": "config.json", "size_bytes": 45, "sha256": DIGESTS["d"]},
+            ],
+        },
+        "scan_findings": [{
+            "id": "unsafe_custom_code", "severity": "high", "path": "modeling.py",
+            "line": 9, "message": "custom code executes a shell command",
+        }],
+        "scanner_results": [{
+            "name": "semgrep", "status": "WARNING", "required": True,
+            "finding_count": 1, "target_scope": "repository",
+            "duration_ms": 14, "summary": {
+                "files_scanned": 1, "files_skipped": 1, "error_count": 0,
+                "scanned_files": ["modeling.py"], "skipped_files": ["config.json"],
+            },
+            "findings": [{
+                "rule_id": "review-file-write", "severity": "medium",
+                "path": "modeling.py", "line": 12, "message": "review writable file",
+            }],
+        }],
+    })
+    report = apply_automatic_review_context(
+        _report(rows),
+        {
+            "id": "review-report", "source_label": "codesage/codesage-large-v2@revision-123",
+            "state": "attention_required", "current_step": "runtime_execution_failed",
+            "progress": 90, "technical_outcome": "INCOMPLETE",
+            "pending_controls": [{
+                "control": "isolated_runtime", "status": "INCOMPLETE",
+                "detail": "guest model load exited before inference",
+                "action": "Inspect the runtime phase evidence and retry on a supported host.",
+            }],
+            "timeline_json": [],
+        },
+    )
+
+    static_control = _control(report, "static_analysis")
+    assert "blocking or high-severity finding" in static_control["detail"]
+    assert "custom code executes a shell command (modeling.py:9)" in static_control["detail"]
+    html = render_model_intake_html(report)
+    assert "codesage/codesage-large-v2@revision-123" in html
+    assert "guest model load exited before inference" in html
+    assert "Repository-relative file" in html
+    assert "modeling.py" in html and "config.json" in html
+    assert "File coverage (1 scanned, 1 skipped)" in html
+    assert "Scanners: 0/1 passed" in html
+
+
+def test_html_does_not_claim_clean_dependencies_without_completed_denominators():
+    rows = _rows(active_admission=False)
+    static = next(item for item in rows["evidence"] if item["evidence_type"] == "static_analysis")
+    static["payload_json"]["scanner_results"] = [{
+        "name": "osv-scanner", "status": "INCOMPLETE", "summary": {"packages_scanned": 0},
+    }]
+    static["payload_json"]["vulnerability_inventory"] = []
+
+    html = render_model_intake_html(_report(rows))
+
+    assert "does not claim the dependency set is clean" in html
+
+
+def test_passing_static_control_is_not_rewritten_by_nonblocking_aggregate_findings():
+    rows = _rows(active_admission=False)
+    static = next(item for item in rows["evidence"] if item["evidence_type"] == "static_analysis")
+    static["payload_json"]["scan_findings"] = [{
+        "id": "informational_observation", "severity": "medium",
+        "path": "modeling.py", "line": 3, "message": "review this optional behavior",
+    }]
+
+    report = _report(rows)
+
+    assert _control(report, "static_analysis")["status"] == "PASS"
+    assert "review this optional behavior" not in _control(report, "static_analysis")["detail"]
+
+
 def test_presentation_does_not_tell_engineers_to_repeat_passing_or_inapplicable_work():
     report = _report(_rows(active_admission=False))
 

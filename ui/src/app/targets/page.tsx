@@ -440,7 +440,7 @@ function TargetsContent() {
             onChange={(e) => setFilter('discovery_source', e.target.value || undefined)}
           >
             <option value="">All sources</option>
-            {DISCOVERY_SOURCES.map((source) => (
+            {DISCOVERY_SOURCES.filter((source) => source !== 'model-intake').map((source) => (
               <option key={source} value={source}>{source}</option>
             ))}
           </Select>

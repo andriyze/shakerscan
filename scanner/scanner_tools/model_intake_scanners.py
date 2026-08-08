@@ -729,8 +729,43 @@ def _pip_audit_findings(parsed: Any) -> tuple[list[dict[str, Any]], dict[str, An
     }
 
 
+def _safe_scanner_report_path(value: Any, subject_path: Path | None = None) -> str | None:
+    """Return a bounded repository-relative path suitable for persisted reports."""
+    if isinstance(value, dict):
+        value = value.get("path")
+    text = str(value or "").strip().replace("\\", "/")
+    if not text or len(text) > 4_096:
+        return None
+    candidate = Path(text)
+    if candidate.is_absolute():
+        if subject_path is None:
+            return None
+        try:
+            candidate = candidate.relative_to(subject_path.resolve())
+        except (OSError, ValueError):
+            return None
+    if not candidate.parts or ".." in candidate.parts:
+        return None
+    normalized = candidate.as_posix()
+    return normalized[:500] if normalized else None
+
+
+def _safe_scanner_report_paths(
+    values: list[Any], subject_path: Path | None = None,
+) -> list[str]:
+    paths: list[str] = []
+    seen: set[str] = set()
+    for value in values[:MAX_SOURCE_FILES]:
+        normalized = _safe_scanner_report_path(value, subject_path)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            paths.append(normalized)
+    return paths
+
+
 def _parse_external_scanner(
-    scanner: str, stdout: str, stderr: str, exit_code: int
+    scanner: str, stdout: str, stderr: str, exit_code: int,
+    subject_path: Path | None = None,
 ) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
     """Validate each tool's output contract; exit zero alone is never PASS."""
     if scanner in {"modelscan", "semgrep", "trivy", "osv-scanner", "pip-audit"}:
@@ -762,6 +797,12 @@ def _parse_external_scanner(
             scanned_paths = paths.get("scanned") if isinstance(paths.get("scanned"), list) else []
             skipped_paths = paths.get("skipped") if isinstance(paths.get("skipped"), list) else []
             findings = [_semgrep_finding(item) for item in candidates[:1000]]
+            for finding in findings:
+                normalized_path = _safe_scanner_report_path(finding.get("path"), subject_path)
+                if normalized_path:
+                    finding["path"] = normalized_path
+                else:
+                    finding.pop("path", None)
             blocking_count = sum(
                 1 for item in candidates
                 if isinstance(item, dict) and str((item.get("extra") or {}).get("severity") or "ERROR").upper() == "ERROR"
@@ -772,6 +813,8 @@ def _parse_external_scanner(
                 "error_count": len(errors),
                 "files_scanned": len(scanned_paths),
                 "files_skipped": len(skipped_paths),
+                "scanned_files": _safe_scanner_report_paths(scanned_paths, subject_path),
+                "skipped_files": _safe_scanner_report_paths(skipped_paths, subject_path),
                 "warning_only": bool(candidates) and blocking_count == 0,
             })
             if errors:
@@ -1150,7 +1193,10 @@ def run_external_scanner(spec: ScannerSpec, subject_path: Path, subject: dict[st
                 status, findings, summary = (
                     parser(result_output, stderr, completed.returncode)
                     if parser
-                    else _parse_external_scanner(spec.name, result_output, stderr, completed.returncode)
+                    else _parse_external_scanner(
+                        spec.name, result_output, stderr, completed.returncode,
+                        subject_path=subject_path,
+                    )
                 )
             except Exception as exc:
                 status, findings, summary = "CRASHED", [], {"error": f"parser_{type(exc).__name__}: {exc}"}

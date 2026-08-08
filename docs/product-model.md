@@ -19,6 +19,10 @@ Specialized scanners remain first-class:
 - **AI Gate** tests chat, RAG, agent, and MCP systems.
 - **Model Intake** checks model artifacts, provenance, signatures, and policy.
 
+The web **Targets** inventory contains HTTP(S) applications only. Model repositories and artifacts stay in
+Model Intake, where their exact revision and content digests are the identity. They may still appear in
+Exposure as model-artifact nodes, but never as DAST/ASM targets or domain-filter entries.
+
 ## Natural-language routing
 
 Agents must preserve these distinctions:
