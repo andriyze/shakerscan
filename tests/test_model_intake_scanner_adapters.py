@@ -389,7 +389,7 @@ def test_runtime_dependency_evidence_uses_fixed_profile_without_mutating_reposit
     assert inventory["profile"]["id"] == scanners.RUNTIME_PROFILE_ID
     assert len(inventory["components"]) == 41
     inferred = {item["import_name"]: item for item in inventory["inferred_requirements"]}
-    assert inferred["torch"]["version"] == "2.9.1+cpu"
+    assert inferred["torch"]["version"] == "2.13.0+cpu"
     assert inferred["sentence_transformers"]["required_for_fixed_loader"] is False
 
 
