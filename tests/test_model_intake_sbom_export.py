@@ -122,6 +122,37 @@ def test_a_quick_scan_says_it_has_no_dependency_inventory():
     assert "not an inventory of an installed serving image" in full["inventory_note"]
 
 
+def test_resolved_aibom_dependencies_keep_exact_package_identity_when_manifest_sbom_is_empty():
+    result = _scan_result()
+    generated = result["model_intake"]["generated_evidence"]["results"][0]["summary"]["sbom"]
+    generated["components"] = []
+    result["model_intake"]["aibom"]["components"].append({
+        "type": "runtime_dependency",
+        "name": "transformers",
+        "version": "5.5.0",
+        "purl": "pkg:pypi/transformers@5.5.0",
+        "hashes": [{"alg": "SHA-256", "content": "b" * 64}],
+        "profile_id": "shakerscan-firecracker-python312-cpu/v1",
+        "resolution": "hash_locked_runtime_profile",
+    })
+
+    document = build_model_intake_cyclonedx(result, scan_id="s-1")
+    dependency = next(item for item in document["components"] if item["name"] == "transformers")
+    completeness = model_intake_bom_completeness(document)
+
+    assert dependency["version"] == "5.5.0"
+    assert dependency["purl"] == "pkg:pypi/transformers@5.5.0"
+    assert dependency["bom-ref"] == dependency["purl"]
+    assert dependency["hashes"] == [{"alg": "SHA-256", "content": "b" * 64}]
+    assert {item["name"]: item["value"] for item in dependency["properties"]}.items() >= {
+        "shakerscan:aibom_type": "runtime_dependency",
+        "shakerscan:profile_id": "shakerscan-firecracker-python312-cpu/v1",
+        "shakerscan:resolution": "hash_locked_runtime_profile",
+    }.items()
+    assert completeness["dependency_inventory"] == "generated"
+    assert completeness["dependency_component_count"] == 1
+
+
 def test_a_scan_without_model_intake_evidence_is_rejected():
     for payload in ({}, {"model_intake": {}}, {"discovery": {}}):
         try:

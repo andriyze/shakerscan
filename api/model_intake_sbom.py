@@ -27,6 +27,7 @@ AIBOM_COMPONENT_TYPES = {
     "tokenizer": "data",
     "dataset": "data",
     "dependency": "library",
+    "runtime_dependency": "library",
 }
 
 
@@ -142,11 +143,20 @@ def _aibom_components(aibom: dict[str, Any]) -> list[dict[str, Any]]:
         name = str(item.get("name") or item.get("ref") or "").strip()
         if not name:
             continue
+        purl = str(item.get("purl") or "").strip()
+        version = str(item.get("version") or "").strip()
         component: dict[str, Any] = {
             "type": AIBOM_COMPONENT_TYPES.get(kind, "library"),
             "name": name,
-            "bom-ref": f"shakerscan:{kind or 'component'}:{name}",
+            # Resolved runtime dependencies already carry an exact package URL.
+            # Preserve it as both the standard identity and the BOM reference so
+            # downstream SCA tools do not receive a name-only component.
+            "bom-ref": purl or f"shakerscan:{kind or 'component'}:{name}",
         }
+        if version:
+            component["version"] = version
+        if purl:
+            component["purl"] = purl
         hashes = [
             {"alg": str(entry.get("alg") or "SHA-256"), "content": str(entry.get("content"))}
             for entry in (item.get("hashes") if isinstance(item.get("hashes"), list) else [])
@@ -167,7 +177,7 @@ def _aibom_components(aibom: dict[str, Any]) -> list[dict[str, Any]]:
             component["externalReferences"] = [{"type": "distribution", "url": str(item["ref"])}]
         properties = [
             {"name": f"shakerscan:{key}", "value": str(item[key])}
-            for key in ("format", "role")
+            for key in ("format", "role", "profile_id", "resolution")
             if item.get(key)
         ]
         if kind:
