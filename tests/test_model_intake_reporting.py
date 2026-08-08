@@ -527,6 +527,25 @@ def test_successful_runtime_phases_do_not_upgrade_incomplete_signed_evidence():
     assert _control(report, "firecracker_runtime")["status"] == "PASS"
 
 
+def test_local_pem_production_receipt_explains_trust_gap_without_rerunning_firecracker():
+    rows = _rows(active_admission=False)
+    rows["submission"]["requested_environment"] = "production"
+    runtime = next(item for item in rows["evidence"] if item["evidence_type"] == "runtime_execution")
+    runtime["status"] = "INCOMPLETE"
+    observations = rows["runner_jobs"][0]["result_json"]["payload"]["observations"]
+    observations["receipt_signer_trust"] = "non_production_local_pem"
+
+    report = _report(rows)
+    runtime_control = _control(report, "runtime_execution")
+
+    assert runtime_control["status"] == "INCOMPLETE"
+    assert "repeat inference passed in Firecracker" in runtime_control["detail"]
+    assert "local PEM signer" in runtime_control["detail"]
+    assert "KMS-backed runner signer" in runtime_control["remediation"]
+    assert "Run the exact deployment bundle" not in runtime_control["remediation"]
+    assert runtime_control["coverage"]["receipt_signer_trust"] == "non_production_local_pem"
+
+
 def test_network_report_bounds_repetitive_syscall_evidence():
     rows = _rows(active_admission=False)
     telemetry = rows["runner_jobs"][0]["result_json"]["payload"]["observations"]["network_telemetry"]

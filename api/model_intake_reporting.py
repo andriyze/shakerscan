@@ -980,9 +980,33 @@ def build_model_intake_report(
     if firecracker_control and runtime_evidence_control and runtime_evidence_control.get("status") != "NOT_RUN":
         execution_status = str(firecracker_control.get("status") or "INCOMPLETE")
         receipt_overall_status = str(runtime_evidence_control.get("status") or "INCOMPLETE")
+        latest_runtime_job = next(
+            (
+                item for item in reversed(runner_jobs)
+                if str(item.get("operation") or "") == "runtime"
+            ),
+            None,
+        )
+        runtime_observations = _runner_observations(latest_runtime_job) if latest_runtime_job else {}
+        receipt_signer_trust = str(runtime_observations.get("receipt_signer_trust") or "")
         if execution_status != "PASS":
             runtime_status = execution_status
             runtime_detail = "One or more fixed exact-subject runtime phases did not pass."
+        elif (
+            receipt_overall_status == "INCOMPLETE"
+            and receipt_signer_trust == "non_production_local_pem"
+            and environment == "production"
+        ):
+            runtime_status = "INCOMPLETE"
+            runtime_detail = (
+                "Exact-subject model load and repeat inference passed in Firecracker, and the receipt "
+                "is cryptographically signed. The default local PEM signer is intentionally not a "
+                "production trust authority."
+            )
+            runtime_evidence_control["remediation"] = (
+                "Runtime execution is complete. For production admission, configure an approved "
+                "KMS-backed runner signer and rerun; keep local PEM for technical, development, or test reviews."
+            )
         elif receipt_overall_status in {"INCOMPLETE", "ERROR", "REVIEW", "NOT_RUN"}:
             runtime_status = receipt_overall_status
             runtime_detail = (
@@ -1002,6 +1026,7 @@ def build_model_intake_report(
             **_json(runtime_evidence_control.get("coverage"), {}),
             "execution_status": execution_status,
             "receipt_overall_status": receipt_overall_status,
+            "receipt_signer_trust": receipt_signer_trust or None,
         }
     latest_manifest = manifests[-1] if manifests else None
     controls.append({
