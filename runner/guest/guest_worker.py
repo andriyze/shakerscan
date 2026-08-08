@@ -79,6 +79,11 @@ def _install_transformers_compatibility() -> None:
     the same empty per-instance mapping used before expansion. Models that call
     ``post_init`` replace it with the authoritative mapping; models that do not
     must still pass source/converted embedding equivalence below.
+
+    Transformers 5 also removed the legacy ``get_head_mask`` helper. Reviewed
+    remote models may still call it with the default ``head_mask=None``. Restore
+    only that identity-preserving default (one ``None`` per layer); a supplied
+    mask remains unsupported by the fixed ShakerScan harness and fails closed.
     """
     import transformers.modeling_utils as modeling_utils
     if not hasattr(modeling_utils, "Conv1D"):
@@ -95,6 +100,19 @@ def _install_transformers_compatibility() -> None:
 
         model_base.__init__ = compatibility_init
         model_base._shakerscan_legacy_post_init_compat = True
+    if not hasattr(model_base, "get_head_mask"):
+        def compatibility_get_head_mask(
+            self, head_mask, num_hidden_layers, is_attention_chunked=False,
+        ):
+            del self, is_attention_chunked
+            if head_mask is not None:
+                raise ValueError(
+                    "the fixed model-intake loader does not accept an explicit attention head mask"
+                )
+            return [None] * int(num_hidden_layers)
+
+        model_base.get_head_mask = compatibility_get_head_mask
+        model_base._shakerscan_legacy_head_mask_compat = True
 
 
 def _configure_deterministic_torch(torch) -> None:

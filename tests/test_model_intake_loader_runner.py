@@ -5,6 +5,8 @@ import os
 import sys
 import types
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
 
 from model_intake_loader_profiles import resolve_conversion_profile, resolve_loader_profile  # noqa: E402
@@ -272,12 +274,16 @@ def test_guest_installs_only_identity_preserving_transformers_compatibility(monk
     model = LegacyModel("reviewed")
     assert model.marker == "reviewed"
     assert model.all_tied_weights_keys == {}
+    assert model.get_head_mask(None, 3) == [None, None, None]
+    with pytest.raises(ValueError, match="explicit attention head mask"):
+        model.get_head_mask(object(), 3)
     assert LegacyModel.__init__ is not original_init
 
     # Repeated phases do not stack wrappers or replace a populated mapping.
     wrapped_init = LegacyModel.__init__
     guest_worker._install_transformers_compatibility()
     assert LegacyModel.__init__ is wrapped_init
+    assert LegacyModel.get_head_mask is model.get_head_mask.__func__
     model_with_mapping = LegacyModel("mapped")
     assert model_with_mapping.all_tied_weights_keys == {"decoder.weight": "encoder.weight"}
 
