@@ -181,7 +181,10 @@ app = FastAPI(title="ShakerScan Model Intake Firecracker Runner", lifespan=lifes
 
 
 @app.get("/health")
-async def health():
+def health():
+    # Digest verification may touch multi-gigabyte immutable components on the
+    # first call. A synchronous endpoint runs in FastAPI's worker pool instead
+    # of blocking job/status traffic on the service event loop.
     readiness = firecracker_readiness()
     return {**readiness, "service": "model-intake-firecracker-runner", "queue_depth": jobs.pending.qsize() if jobs else 0}
 

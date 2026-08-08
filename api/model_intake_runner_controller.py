@@ -11,15 +11,50 @@ import os
 from pathlib import Path
 import platform
 import shutil
+import threading
 from typing import Any
 
 
+_SHA256_CACHE_LOCK = threading.Lock()
+_SHA256_CACHE: dict[tuple[str, int, int, int, int, int], str] = {}
+
+
 def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    """Hash an immutable runner component once per exact filesystem identity."""
+    resolved = str(path.resolve())
+    with _SHA256_CACHE_LOCK:
+        stat = path.stat()
+        identity = (
+            resolved,
+            stat.st_dev,
+            stat.st_ino,
+            stat.st_size,
+            stat.st_mtime_ns,
+            stat.st_ctime_ns,
+        )
+        cached = _SHA256_CACHE.get(identity)
+        if cached is not None:
+            return cached
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        observed = digest.hexdigest()
+        after = path.stat()
+        after_identity = (
+            resolved,
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        )
+        if after_identity != identity:
+            raise RuntimeError(f"runner component changed while hashing: {path.name}")
+        for key in [value for value in _SHA256_CACHE if value[0] == resolved]:
+            _SHA256_CACHE.pop(key, None)
+        _SHA256_CACHE[identity] = observed
+        return observed
 
 
 def host_platform(environment: dict[str, str] | None = None) -> str:
@@ -101,12 +136,17 @@ def runner_memory_admission(readiness: dict[str, Any], requested_memory_mib: int
     total_mib = int(total_bytes) // (1024 * 1024) if isinstance(total_bytes, int) and total_bytes > 0 else None
     available_mib = int(available_bytes) // (1024 * 1024) if isinstance(available_bytes, int) and available_bytes > 0 else None
     reserve_mib = max(2048, int((total_mib or 0) * 0.15)) if total_mib else None
+    # MemAvailable moves with short-lived API/worker/page-cache activity. The
+    # total-capacity reserve remains authoritative; tolerate a small launch-time
+    # sample wobble rather than rejecting a guest that fit milliseconds earlier.
+    available_sample_tolerance_mib = 512
     total_sufficient = (
         None if total_mib is None
         else requested_memory_mib + int(reserve_mib or 0) <= total_mib
     )
     available_sufficient = (
-        None if available_mib is None else requested_memory_mib <= available_mib
+        None if available_mib is None
+        else requested_memory_mib <= available_mib + available_sample_tolerance_mib
     )
     sufficient = (
         False if False in {total_sufficient, available_sufficient}
@@ -121,7 +161,8 @@ def runner_memory_admission(readiness: dict[str, Any], requested_memory_mib: int
     elif available_sufficient is False:
         reason = (
             f"requested {requested_memory_mib} MiB guest exceeds {available_mib} MiB "
-            "currently available host memory"
+            f"currently available host memory beyond the {available_sample_tolerance_mib} MiB "
+            "sampling tolerance"
         )
     else:
         reason = None
@@ -130,6 +171,7 @@ def runner_memory_admission(readiness: dict[str, Any], requested_memory_mib: int
         "host_memory_total_mib": total_mib,
         "host_memory_available_mib": available_mib,
         "host_reserve_mib": reserve_mib,
+        "available_sample_tolerance_mib": available_sample_tolerance_mib,
         "sufficient": sufficient,
         "reason": reason,
     }

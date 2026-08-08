@@ -1,4 +1,6 @@
 from pathlib import Path
+import hashlib
+import inspect
 import os
 import sys
 import types
@@ -7,6 +9,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
 
 from model_intake_loader_profiles import resolve_conversion_profile, resolve_loader_profile  # noqa: E402
 import model_intake_firecracker_runner as firecracker_runner_module  # noqa: E402
+import model_intake_runner_controller as runner_controller  # noqa: E402
+import model_intake_runner_service as runner_service  # noqa: E402
 from model_intake_control_plane import canonical_bytes  # noqa: E402
 from model_intake_runner_controller import build_firecracker_config, firecracker_readiness  # noqa: E402
 from model_intake_firecracker_runner import (  # noqa: E402
@@ -325,6 +329,36 @@ def test_firecracker_readiness_has_no_local_container_fallback(tmp_path, monkeyp
     for readiness in (incomplete, unsupported):
         assert readiness["ready"] is False
         assert readiness["fallback_execution"] is False
+
+
+def test_runner_component_digest_cache_rehashes_when_file_identity_changes(tmp_path, monkeypatch):
+    component = tmp_path / "rootfs.ext4"
+    component.write_bytes(b"a" * (2 * 1024 * 1024))
+    original_sha256 = hashlib.sha256
+    calls = 0
+
+    def counted_sha256():
+        nonlocal calls
+        calls += 1
+        return original_sha256()
+
+    runner_controller._SHA256_CACHE.clear()
+    monkeypatch.setattr(runner_controller.hashlib, "sha256", counted_sha256)
+    first = runner_controller._sha256(component)
+    second = runner_controller._sha256(component)
+
+    assert first == second
+    assert calls == 1
+
+    component.write_bytes(b"b" * (2 * 1024 * 1024))
+    third = runner_controller._sha256(component)
+
+    assert third != first
+    assert calls == 2
+
+
+def test_runner_health_digest_work_does_not_block_the_service_event_loop():
+    assert inspect.iscoroutinefunction(runner_service.health) is False
 
 
 def test_network_trace_parser_records_attempt_phase_destination_and_overflow_state(tmp_path):
@@ -655,6 +689,10 @@ def test_runner_memory_admission_reserves_capacity_for_host_services():
         "host_memory_total_bytes": 16 * 1024**3,
         "host_memory_available_bytes": 12 * 1024**3,
     }}, 13_312)
+    jittering_host = runner_memory_admission({"resources": {
+        "host_memory_total_bytes": 16 * 1024**3,
+        "host_memory_available_bytes": 13_240 * 1024**2,
+    }}, 13_312)
 
     assert codesage["sufficient"] is True
     assert codesage["host_reserve_mib"] >= 2048
@@ -662,6 +700,8 @@ def test_runner_memory_admission_reserves_capacity_for_host_services():
     assert "exceeds" in oversized["reason"]
     assert busy_host["sufficient"] is False
     assert "currently available" in busy_host["reason"]
+    assert jittering_host["sufficient"] is True
+    assert jittering_host["available_sample_tolerance_mib"] == 512
 
 
 def test_locally_derived_loader_profiles_diverge_from_the_authoritative_one():
