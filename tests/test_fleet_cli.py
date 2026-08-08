@@ -621,7 +621,8 @@ def test_persist_worker_runtime_template_captures_only_clone_allowlist(tmp_path,
     state_path.chmod(0o600)
 
     def fake_run(argv, **_kwargs):
-        if argv[:3] == ["docker", "ps", "-a"]:
+        if argv[:2] == ["docker", "ps"]:
+            assert "-a" not in argv
             return types.SimpleNamespace(returncode=0, stdout="worker123\n")
         if argv[:2] == ["docker", "inspect"]:
             return types.SimpleNamespace(
@@ -629,10 +630,16 @@ def test_persist_worker_runtime_template_captures_only_clone_allowlist(tmp_path,
                 stdout=json.dumps([
                     {
                         "Config": {
-                            "Image": "shakerscan-fleet-local:abc1234",
+                            "Image": IMAGE,
                             "Cmd": ["python3", "/app/broker_worker.py"],
                             "Env": ["SAFE=1"],
-                            "Labels": {"com.docker.compose.project": "shakerscan-fleet-11111111"},
+                            "Labels": {
+                                "com.docker.compose.project": "shakerscan-fleet-11111111",
+                                "com.docker.compose.service": "worker",
+                                "com.docker.compose.container-number": "1",
+                                "com.shakerscan.node_id": NODE_ID,
+                                "com.shakerscan.fleet_managed": "true",
+                            },
                             "WorkingDir": "/app",
                         },
                         "HostConfig": {
@@ -657,6 +664,63 @@ def test_persist_worker_runtime_template_captures_only_clone_allowlist(tmp_path,
     assert persisted["Config"]["Cmd"] == ["python3", "/app/broker_worker.py"]
     assert persisted["HostConfig"]["Binds"] == ["/srv/results:/results:rw"]
     assert "Privileged" not in persisted["HostConfig"]
+
+
+def test_persist_worker_runtime_template_ignores_exited_replacements_and_accepts_scaled_workers(
+    tmp_path, monkeypatch
+):
+    paths = fleet_cli.RuntimePaths(tmp_path)
+    paths.node.mkdir(parents=True)
+    state_path = paths.node / "state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "node_id": NODE_ID,
+                "runtime_image_override": "shakerscan-fleet-local:abc1234",
+            }
+        ),
+        encoding="utf-8",
+    )
+    state_path.chmod(0o600)
+
+    def worker_item(container_number, marker):
+        return {
+            "Config": {
+                "Image": "shakerscan-fleet-local:abc1234",
+                "Cmd": ["python3", "/app/broker_worker.py"],
+                "Env": [f"WORKER_MARKER={marker}"],
+                "Labels": {
+                    "com.docker.compose.project": "shakerscan-fleet-11111111",
+                    "com.docker.compose.service": "worker",
+                    "com.docker.compose.container-number": str(container_number),
+                    "com.shakerscan.node_id": NODE_ID,
+                    "com.shakerscan.fleet_managed": "true",
+                },
+                "WorkingDir": "/app",
+            },
+            "HostConfig": {"NetworkMode": "fleet-test_default"},
+        }
+
+    def fake_run(argv, **_kwargs):
+        if argv[:2] == ["docker", "ps"]:
+            assert "-a" not in argv
+            return types.SimpleNamespace(returncode=0, stdout="worker5\nworker4\n")
+        if argv[:2] == ["docker", "inspect"]:
+            assert argv[2:] == ["worker5", "worker4"]
+            return types.SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps([worker_item(5, "later"), worker_item(4, "seed")]),
+            )
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(fleet_cli, "_run", fake_run)
+    fleet_cli._persist_worker_runtime_template(
+        paths,
+        {"node_id": NODE_ID, "worker_image_digest": IMAGE},
+    )
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["worker_runtime_template"]
+    assert "WORKER_MARKER=seed" in persisted["Config"]["Env"]
 
 
 def test_local_broker_image_cleanup_removes_only_obsolete_product_tags(monkeypatch):

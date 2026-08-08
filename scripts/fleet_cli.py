@@ -1743,12 +1743,12 @@ def _persist_worker_runtime_template(paths: RuntimePaths, response: dict[str, An
     state_path = paths.node / "state.json"
     if not state_path.is_file():
         return
+    state = _read_node_state(state_path)
     project = f"shakerscan-fleet-{str(response['node_id'])[:8]}"
     listed = _run(
         [
             "docker",
             "ps",
-            "-a",
             "--filter",
             f"label=com.docker.compose.project={project}",
             "--filter",
@@ -1758,17 +1758,44 @@ def _persist_worker_runtime_template(paths: RuntimePaths, response: dict[str, An
         ],
     )
     container_ids = [line.strip() for line in str(listed.stdout or "").splitlines() if line.strip()]
-    if len(container_ids) != 1:
+    if not container_ids:
         raise FleetCLIError(
-            f"expected one Compose worker while capturing recovery state, found {len(container_ids)}"
+            "expected at least one running Compose worker while capturing recovery state"
         )
-    inspected = _run(["docker", "inspect", container_ids[0]])
+    inspected = _run(["docker", "inspect", *container_ids])
     try:
         payload = json.loads(str(inspected.stdout or ""))
-        item = payload[0]
+        if not isinstance(payload, list) or len(payload) != len(container_ids):
+            raise ValueError("incomplete Docker inspection response")
+
+        allowed_images = {str(response["worker_image_digest"])}
+        runtime_override = str(state.get("runtime_image_override") or "").strip()
+        if runtime_override:
+            allowed_images.add(runtime_override)
+
+        candidates: list[tuple[int, dict[str, Any]]] = []
+        for inspected_item in payload:
+            inspected_config = inspected_item["Config"]
+            labels = inspected_config.get("Labels") or {}
+            if (
+                labels.get("com.docker.compose.project") != project
+                or labels.get("com.docker.compose.service") != "worker"
+                or labels.get("com.shakerscan.node_id") != str(response["node_id"])
+                or labels.get("com.shakerscan.fleet_managed") != "true"
+                or str(inspected_config.get("Image") or "") not in allowed_images
+            ):
+                raise ValueError("worker identity or image does not match the enrolled node")
+            number = str(labels.get("com.docker.compose.container-number") or "")
+            candidates.append((int(number) if number.isdigit() else 2**31 - 1, inspected_item))
+
+        # The node agent may already have scaled beyond the Compose seed worker,
+        # or Compose may leave an exited replacement behind during a rebuild.
+        # Every live candidate was identity/image checked above; choose the
+        # lowest stable Compose ordinal as the recovery template source.
+        item = min(candidates, key=lambda candidate: candidate[0])[1]
         config = item["Config"]
         host_config = item["HostConfig"]
-    except (json.JSONDecodeError, IndexError, KeyError, TypeError) as exc:
+    except (json.JSONDecodeError, IndexError, KeyError, TypeError, ValueError) as exc:
         raise FleetCLIError("could not capture the Compose worker recovery state") from exc
     allowed_host_keys = (
         "Binds",
@@ -1796,7 +1823,6 @@ def _persist_worker_runtime_template(paths: RuntimePaths, response: dict[str, An
             if key in host_config and host_config[key] is not None
         },
     }
-    state = _read_node_state(state_path)
     state["worker_runtime_template"] = template
     atomic_write(state_path, json.dumps(state, sort_keys=True, indent=2) + "\n", 0o600)
 
