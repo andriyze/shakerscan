@@ -9,17 +9,15 @@ on:
       version:
         description: "Release version, without v prefix"
         required: true
-      push_latest:
-        description: "Also tag Docker images as latest"
-        required: true
-        default: "false"
-        type: choice
-        options:
-          - "false"
-          - "true"
       candidate_sha:
         description: "Exact approved commit SHA (must be the selected main commit)"
         required: true
+
+# Serialize registry publication so two stable releases cannot race the mutable
+# convenience alias. Immutable version tags remain the source of truth.
+concurrency:
+  group: shakerscan-release-publication
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -60,7 +58,6 @@ jobs:
         run: |
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
             version="${{ inputs.version }}"
-            push_latest="${{ inputs.push_latest }}"
             candidate_sha="${{ inputs.candidate_sha }}"
             if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
               echo "Manual releases must run from refs/heads/main, got ${GITHUB_REF}" >&2
@@ -68,7 +65,6 @@ jobs:
             fi
           else
             version="${GITHUB_REF_NAME#v}"
-            push_latest="true"
             candidate_sha="${GITHUB_SHA}"
           fi
 
@@ -76,6 +72,36 @@ jobs:
             echo "Invalid version: $version" >&2
             exit 1
           fi
+
+          # Stable SemVer releases always promote their exact multi-arch
+          # manifests to `latest`; prereleases never do. This is derived, not
+          # an operator toggle, so a stable release cannot be published in a
+          # half-promoted state.
+          if [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            push_latest="true"
+          else
+            push_latest="false"
+          fi
+
+          python3 - "$version" <<'PY'
+          import re
+          import subprocess
+          import sys
+
+          candidate = sys.argv[1]
+          stable = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", candidate)
+          if stable:
+              candidate_key = tuple(map(int, stable.groups()))
+              published = []
+              for tag in subprocess.check_output(["git", "tag", "--list", "v*"], text=True).splitlines():
+                  match = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", tag)
+                  if match:
+                      published.append((tuple(map(int, match.groups())), tag))
+              if published and max(published)[0] > candidate_key:
+                  raise SystemExit(
+                      f"Refusing to move latest backward from {max(published)[1]} to v{candidate}"
+                  )
+          PY
 
           file_version="$(tr -d '[:space:]' < VERSION)"
           if [[ "$version" != "$file_version" ]]; then
@@ -388,6 +414,11 @@ jobs:
           docker buildx imagetools create $tags \
             $(printf "${SCANNER_IMAGE}@sha256:%s " *)
           docker buildx imagetools inspect "${SCANNER_IMAGE}:${VERSION}"
+          if [[ "$PUSH_LATEST" == "true" ]]; then
+            version_digest="$(docker buildx imagetools inspect "${SCANNER_IMAGE}:${VERSION}" | awk '$1 == "Digest:" {print $2; exit}')"
+            latest_digest="$(docker buildx imagetools inspect "${SCANNER_IMAGE}:latest" | awk '$1 == "Digest:" {print $2; exit}')"
+            [[ -n "$version_digest" && "$version_digest" == "$latest_digest" ]]
+          fi
 
       - name: Create API control-plane manifest list
         working-directory: /tmp/digests/api
@@ -403,6 +434,11 @@ jobs:
           docker buildx imagetools create $tags \
             $(printf "${API_IMAGE}@sha256:%s " *)
           docker buildx imagetools inspect "${API_IMAGE}:${VERSION}"
+          if [[ "$PUSH_LATEST" == "true" ]]; then
+            version_digest="$(docker buildx imagetools inspect "${API_IMAGE}:${VERSION}" | awk '$1 == "Digest:" {print $2; exit}')"
+            latest_digest="$(docker buildx imagetools inspect "${API_IMAGE}:latest" | awk '$1 == "Digest:" {print $2; exit}')"
+            [[ -n "$version_digest" && "$version_digest" == "$latest_digest" ]]
+          fi
 
       - name: Create UI manifest list
         working-directory: /tmp/digests/ui
@@ -418,6 +454,11 @@ jobs:
           docker buildx imagetools create $tags \
             $(printf "${UI_IMAGE}@sha256:%s " *)
           docker buildx imagetools inspect "${UI_IMAGE}:${VERSION}"
+          if [[ "$PUSH_LATEST" == "true" ]]; then
+            version_digest="$(docker buildx imagetools inspect "${UI_IMAGE}:${VERSION}" | awk '$1 == "Digest:" {print $2; exit}')"
+            latest_digest="$(docker buildx imagetools inspect "${UI_IMAGE}:latest" | awk '$1 == "Digest:" {print $2; exit}')"
+            [[ -n "$version_digest" && "$version_digest" == "$latest_digest" ]]
+          fi
 
       - name: Create Model Intake signer manifest list
         working-directory: /tmp/digests/signer
@@ -433,6 +474,11 @@ jobs:
           docker buildx imagetools create $tags \
             $(printf "${SIGNER_IMAGE}@sha256:%s " *)
           docker buildx imagetools inspect "${SIGNER_IMAGE}:${VERSION}"
+          if [[ "$PUSH_LATEST" == "true" ]]; then
+            version_digest="$(docker buildx imagetools inspect "${SIGNER_IMAGE}:${VERSION}" | awk '$1 == "Digest:" {print $2; exit}')"
+            latest_digest="$(docker buildx imagetools inspect "${SIGNER_IMAGE}:latest" | awk '$1 == "Digest:" {print $2; exit}')"
+            [[ -n "$version_digest" && "$version_digest" == "$latest_digest" ]]
+          fi
 
   github-release:
     name: Create GitHub Release

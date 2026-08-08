@@ -342,6 +342,21 @@ def load_dotenv(path: Path) -> dict[str, str]:
     return values
 
 
+def runtime_image_env(values: dict[str, str]) -> dict[str, str]:
+    """Overlay launcher-selected image settings on persisted fleet state.
+
+    ``scanner.sh`` selects the installed release tag in the process environment.
+    Fleet preflight previously read only ``.env``, so a fresh curl installation
+    silently fell back to the mutable ``latest`` worker tag.
+    """
+    merged = dict(values)
+    for key in ("SCANNER_IMAGE_REPO", "SCANNER_IMAGE_TAG", "FLEET_WORKER_IMAGE_DIGEST"):
+        value = str(os.environ.get(key) or "").strip()
+        if value:
+            merged[key] = value
+    return merged
+
+
 def local_api_url(paths: RuntimePaths, explicit: str | None = None) -> str:
     """Resolve the host-published API origin for control-plane CLI commands.
 
@@ -982,7 +997,7 @@ def run_init_preflight(paths: RuntimePaths, args: argparse.Namespace) -> dict[st
     """Validate a fleet conversion completely before any durable mutation."""
     checks: list[PreflightCheck] = []
     network_mode = str(getattr(args, "network", "wireguard") or "wireguard")
-    env = load_dotenv(paths.dotenv)
+    env = runtime_image_env(load_dotenv(paths.dotenv))
 
     _run_check(
         checks,

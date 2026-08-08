@@ -508,7 +508,7 @@ are in [`AI_TEST_WORKFLOWS.md`](AI_TEST_WORKFLOWS.md), and future hardening belo
 ### AI capability status quick read
 
 These implemented components were last reconciled against code on 2026-08-08. AI Gate remains a
-preview product surface for 0.8.1. Model Intake is release-gated for deterministic static review,
+preview product surface for 0.8.2. Model Intake is release-gated for deterministic static review,
 artifact and report generation, and its opt-in AMD64 Linux/KVM Firecracker tier; unsupported formats,
 incomplete evidence, missing required tools, and unavailable runtime qualification fail closed. The
 AI Gate policy/exception and deterministic-judge seams marked Planned in

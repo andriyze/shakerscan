@@ -1021,6 +1021,19 @@ def test_default_worker_image_resolves_without_cli_flag(monkeypatch):
     assert pinned == "shakerscan/shakerscan-scanner@sha256:" + "c" * 64
 
 
+def test_runtime_image_env_prefers_launcher_release_tag(monkeypatch):
+    monkeypatch.setenv("SCANNER_IMAGE_TAG", "0.8.2")
+    monkeypatch.setenv("SCANNER_IMAGE_REPO", "shakerscan/shakerscan-scanner")
+
+    values = fleet_cli.runtime_image_env({"SCANNER_IMAGE_TAG": "latest", "KEEP": "value"})
+
+    assert values == {
+        "SCANNER_IMAGE_TAG": "0.8.2",
+        "SCANNER_IMAGE_REPO": "shakerscan/shakerscan-scanner",
+        "KEEP": "value",
+    }
+
+
 def test_managed_gateway_caddyfile_only_exposes_worker_routes():
     secret = "g" * 48
     rendered = fleet_cli.render_managed_caddyfile("https://fleet.example.test", secret)

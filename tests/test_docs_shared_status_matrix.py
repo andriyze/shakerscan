@@ -41,7 +41,7 @@ def test_multi_node_doc_is_build_spec_and_honest_about_fleet_status():
     # to claiming that shipped Fleet layers are drafts or that deferred WireGuard is supported.
     assert "implementation complete; broker release-candidate physical acceptance passed" in text
     assert "WireGuard remains preview code" in text
-    assert "outside the 0.8.1 supported deployment boundary" in text
+    assert "outside the 0.8.2 supported deployment boundary" in text
     assert "Phase 1 implemented vertical-slice contract" in text
     assert "bounded enrollment" in text
     assert "single-use remains the default" in text
