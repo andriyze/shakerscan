@@ -5,10 +5,11 @@ official safetensors inspection, signed runner-receipt contracts, signer boundar
 verifiers, physical-runner service/orchestration, and bounded keyless planner are implemented. Model Intake scans remain non-deployable technical evidence; only the controlled
 submission/freeze/approval/policy/signing/promotion workflow may authorize deployment. The default UI path is
 now a durable one-link automatic technical review; the existing phased workflow remains available as
-Advanced/manual mode. Physical KVM acceptance of the three reference model paths was completed
-on a nested-virtualization EC2 host on 2026-08-04; every functional runtime/conversion phase passed, while the
-strict zero-network-attempt policy correctly kept all three signed receipts non-pass because the libraries
-attempted local/IPv6 socket operations. Remaining production acceptance requires organization-operated
+Advanced/manual mode. Physical KVM acceptance of representative safetensors and pickle-conversion paths was
+completed on a nested-virtualization EC2 host and rerun through the one-link UI, API, and agent paths; every
+functional runtime/conversion phase passed. Complete telemetry showed local IPC and unconnected IP socket
+setup but zero destination-bearing outbound attempts, zero DNS attempts, and zero lost events, so containment
+passed under the current receipt contract. Remaining production acceptance requires organization-operated
 trust/KMS, registry, benchmark, and data-plane systems. Kubernetes acceptance applies only when the organization
 chooses the already implemented webhook; Kubernetes is not required by ShakerScan or Firecracker.
 
@@ -209,12 +210,14 @@ The completed implementation and remaining validation order is:
    durable workflow events, idempotent evidence replay, and downstream admission/deployment invalidation.
 2. **Implemented and physically exercised:** deploy one disposable no-egress Firecracker/KVM loader for
    custom code, model construction, inference, known-answer embeddings, telemetry, and signed exact-bundle
-   receipts. A representative custom-code/safetensors run passed every functional phase and exact known-answer replay; strict
-   policy then blocked the receipt on measured socket attempts. No alternate runner is in scope.
+   receipts. A representative custom-code/safetensors run passed every functional phase, exact known-answer
+   replay, and the current containment rule: local IPC remained visible, while no outbound or DNS attempt was
+   observed. No alternate runner is in scope.
 3. **Implemented and physically exercised:** use that same Firecracker path to convert a representative pickle-backed embedding model to
    safetensors, prove tensor/embedding equivalence, register and rescan the new identity, then require a separate
-   safe-loader runtime job. The conversion achieved exact tensor/numeric/embedding equivalence, but its target
-   was deliberately not registered because the strict network-attempt gate made the signed receipt non-pass.
+   safe-loader runtime job. The conversion achieved exact tensor/numeric/embedding equivalence; its target was
+   registered only as a new quarantined identity, strictly rescanned, and runtime-qualified without approving
+   or promoting it.
    Do not admit the upstream pickle-capable artifact directly.
 4. A representative large pickle-backed model also completed exact conversion/equivalence inside a bounded
    memory envelope. Higher-resource candidates remain conditional and must be justified against the versioned
@@ -555,7 +558,7 @@ telemetry stream by digest instead of flooding the executive report with repetit
 | Built-in safetensors weights adapter | Official parser plus fail-closed defense-in-depth inspector implemented and enabled by format | A hash-locked safetensors 0.8.0 Rust binding is authoritative for format acceptance; ShakerScan independently checks shape/range/coverage, re-hashes the exact artifact, and vector-scans every F16/F32/F64/BF16 value through bounded NumPy memmap chunks. The release image runs non-skippable valid, hostile-metadata, non-finite, and truncated self-tests. Parser identity and full-value counts survive into evidence. | It still does not instantiate the model graph, tokenize, or generate embeddings; those belong to a loader profile in the disposable runner tier. |
 | Operator runtime adapter | Implemented integration contract | Can prove exact-digest model load and known-answer tests in the hardened container when an operator image/argv adapter is installed | Treat as staging evidence, not a substitute for the microVM tier |
 | Actual tokenizer/model load and inference in disposable microVM | Executable Firecracker/jailer host controller and fixed guest implemented | The controller verifies pinned binaries/kernel/rootfs, authoritative manifest members, loader profile, reviewed custom code, and runtime digest; creates immutable input and bounded output ext4 drives; starts one jailed no-NIC microVM with cgroup-v2 limits; executes fixed import/load/inference phases; hard-kills on timeout; and signs an exact-subject receipt. Fixed offline Transformers/safetensors and ONNX Runtime CPU profiles are implemented; GGUF runtime is explicitly unsupported. It has no container fallback or arbitrary guest command. The custom-code/safetensors and medium/large conversion paths were physically exercised on nested-virtualization KVM. | Operate the same digest-pinned runner with a production trust anchor and acceptance-test the ONNX profile on the release guest; the older VPS remains a valid `NOT_READY` no-KVM deployment |
-| Runtime behavior telemetry | Measured guest/host producer and strict receipt verifier implemented | Root-owned `strace` streams capture network/process/file syscalls by fixed phase; destination addresses are privacy-safe digests with ports/DNS flags; guest and host interface inventories, deny-all nft counter deltas, raw-trace digest, canonical telemetry digest, overflow/loss/completeness, cgroup limits/peaks, and no-NIC configuration digest are bound into the receipt. Any attempt, loss, overflow, contradiction, missing trace, extra interface, or digest mutation makes PASS impossible. Physical reference-model runs recorded complete telemetry and blocked on 58/44/44 attempted socket operations despite no NIC and zero firewall egress. | Retain deliberate-connect, timeout, crash, telemetry-loss, and signature-negative fixtures as recurring release tests |
+| Runtime behavior telemetry | Measured guest/host producer and strict receipt verifier implemented | Root-owned `strace` streams capture network/process/file syscalls by fixed phase; destination addresses are privacy-safe digests with ports/DNS flags; guest and host interface inventories, deny-all nft counter deltas, raw-trace digest, canonical telemetry digest, overflow/loss/completeness, cgroup limits/peaks, and no-NIC configuration digest are bound into the receipt. Any destination-bearing outbound/DNS attempt, loss, overflow, contradiction, missing trace, extra interface, or digest mutation makes PASS impossible. Physical acceptance recorded complete telemetry with local IPC and IP socket setup still visible, but zero outbound/DNS attempts and zero telemetry loss. | Retain deliberate-connect, timeout, crash, telemetry-loss, and signature-negative fixtures as recurring release tests |
 | Provider-neutral evaluation contract | Deterministic scorer plus automatic runner-derived embedding evaluation implemented | Public caller observations are `DECLARED` and fail closed. Every verified runtime receipt now automatically creates durable `GENERATED_EVALUATION` evidence from signed known-answer, output-shape, resource, and network measurements, without retaining vectors. Corporate retrieval/vector-store observations remain separately required `GENERATED_DATA_PLANE` evidence with connector/index/run identity. | Operate the corporate data-plane connector against the intended vector store; never infer that result from the model microVM |
 | Corporate benchmark and thresholds | Integration point implemented | No universal corpus can ship | Organization supplies/version-controls corpus; ShakerScan automates execution and scoring |
 | Typed non-scanner providers | Implemented and boundary-frozen | Sandbox execution, runner-derived embedding evaluation, source-bound embedded policy, and normalized report/signed-admission export are separate classes | OPA and additional provider frameworks are out of scope and are not advertised as product capabilities |
@@ -1645,9 +1648,10 @@ readability, tensor inventory/ranges, and sampled numeric finiteness. It does **
 code, instantiate the model graph, or generate an embedding; that statement applies only to static/preflight
 inspection. The Firecracker tier physically proved the
 exact import, tokenizer, model load, warmup, inference, known-answer replay, and teardown path for the pinned
-revision. Its signed receipt remained non-pass because 58 socket-related attempts were observed under the
-strict zero-attempt rule; no egress succeeded. A disposable microVM with independent telemetry remains
-required for the highest-risk custom-code tier. The corporation
+revision. The current receipt classified the observed AF_UNIX activity and unconnected IP socket setup as
+runtime baseline, not outbound traffic; containment passed because no destination-bearing outbound or DNS
+attempt occurred and telemetry was complete. A disposable microVM with independent telemetry remains
+required for the highest-risk custom-code tier. The organization
 must provide the exact runtime dependency inventory, manual code approval, representative corpus/thresholds,
 legal/privacy decisions, and deployment enforcement.
 
@@ -1683,9 +1687,9 @@ runtime bundle. A host without `/dev/kvm` cannot perform the conversion/runtime 
 nested-virtualization KVM host is required. A physical KVM run subsequently proved exact tensor, numeric,
 and embedding equivalence.
 The equivalent target is registered only as a new quarantined identity so it can be strictly rescanned and
-runtime-tested; that registration is not approval. Forty-four measured socket attempts still made the
-separate containment control and overall admission non-pass.
-The corporation owns manual approval, benchmark fitness, and production promotion.
+runtime-tested; that registration is not approval. The current rerun retained local socket activity in the
+signed evidence, recorded zero outbound/DNS attempts, and passed containment.
+The organization owns manual approval, benchmark fitness, and production promotion.
 
 Required evidence before a controlled pilot:
 
@@ -1713,8 +1717,9 @@ acquisition fits the product ceilings, but the ordinary PR path should not spend
 Phase 3/4 may run this profile only after the smaller candidate passes and only when the same Firecracker runner has an
 approved resource envelope large enough for it. Otherwise the result remains `INCOMPLETE`; a GPU-specific
 runner is outside this roadmap. The physical acceptance run completed exact conversion/equivalence in
-351.222 seconds and peaked at 12,391,227,392 of 12,884,901,888 allowed bytes, with no cgroup OOM event. Its
-44 observed socket attempts still made the signed receipt non-pass. The corporation must justify the larger model against its own quality,
+351.222 seconds and peaked at 12,391,227,392 of 12,884,901,888 allowed bytes, with no cgroup OOM event. A
+later current-contract rerun passed containment with zero outbound/DNS attempts and complete telemetry. The
+organization must justify the larger model against its own quality,
 capacity, cost, and data requirements.
 
 Perform every medium-model step against the exact pinned large-model revision and digest.
@@ -1802,7 +1807,9 @@ Each increment must be independently committed and leave required controls fail 
    profile uses `torch.load(weights_only=True)` only inside Firecracker, proves exact tensor inventory/dtype/
    shape/value equality plus source/target embedding equivalence, and exports a new content-addressed artifact
    and complete manifest. Verified output is registered and strictly rescanned under its target identity;
-   representative medium and large artifacts completed these phases on KVM. Strict network-attempt evidence still blocks promotion.
+   representative medium and large artifacts completed these phases on KVM. Any destination-bearing
+   outbound/DNS attempt or incomplete telemetry still blocks promotion; the current acceptance runs recorded
+   neither.
 5. **Control-plane and deployment hardening — implemented; external acceptance pending:** strengthen embedded policy tests, role separation, signer/KMS
    isolation, OCI push verification, CI/Kubernetes denial paths, revocation/cache behavior, storage quotas,
    restart/replay recovery, and first-screen reporting.
@@ -2026,13 +2033,15 @@ sufficient. The trusted runner producer must derive the claim from measured host
 guest telemetry; the receipt verifier must recompute the decision from signed fields rather than trust that
 boolean. Tests must cover successful denied `connect`, DNS, bind/listen, child-process attempts, telemetry
 tampering, wrong phase, collector crash, output truncation, event overflow, interface appearance, host-counter
-drift, and a clean zero-attempt run. Physical acceptance must additionally prove that the microVM has no
-network device and cannot reach a VPS-local service, metadata address, public address, or corporate route.
+drift, and a clean zero-outbound/DNS-attempt run. Physical acceptance must additionally prove that the
+microVM has no network device and cannot reach a VPS-local service, metadata address, public address, or
+corporate route.
 
 The report must distinguish:
 
-- **No attempt observed and collection complete** — eligible to pass this control.
-- **Attempt observed but blocked** — isolation worked, behavior control failed.
+- **No prohibited outbound/DNS attempt observed and collection complete** — eligible to pass this control;
+  local IPC and unconnected socket setup remain visible baseline telemetry.
+- **Outbound/DNS attempt observed but blocked** — isolation worked, behavior control failed.
 - **Communication succeeded** — critical isolation failure.
 - **Telemetry incomplete or contradictory** — `INCOMPLETE`; absence of evidence is not evidence of absence.
 
@@ -2332,7 +2341,12 @@ That distinction is intentional: “the scanner worked” does not mean “the m
 validation at checkout `2612f05` reported **2,862 passed, 0 failed** for the complete Python suite; the final
 report repairs added **106 passing focused Model Intake tests** before the final remote rebuild and rerun.
 
-#### 14.5.2 Physical Firecracker/KVM acceptance — 2026-08-04
+#### 14.5.2 Initial physical Firecracker/KVM acceptance — 2026-08-04 (superseded receipt semantics)
+
+This subsection preserves the first physical-run evidence and the then-current zero-any-socket-event
+classification for auditability. It is not the current policy or current acceptance result. Section 14.5.3
+records the corrected destination-bearing outbound/DNS classification and the complete rerun that supersedes
+the containment outcomes in the last column below.
 
 The branch was rebuilt from source on an AWS `m8i.xlarge` host with 4 vCPU, 16 GiB RAM, nested virtualization
 enabled, CPU VMX visible, and `/dev/kvm` available. The final model runs used Firecracker 1.16.1 and these
@@ -2358,8 +2372,9 @@ space, shutdown semantics, jailer/VM PID lifetime, cache placement, non-traversa
 legacy Transformers import compatibility, missing teardown evidence after failure, a failed-conversion
 receipt key error, restrictive nested-directory permissions, nondeterministic parallel inference comparison,
 and a fixed 1 GiB jailer file-size limit that killed valid large conversions. These were fixed as small,
-separate commits and then retested against the exact public artifacts. No security gate was weakened to make
-the models pass; the final receipts remain non-pass on the policy-relevant network attempts.
+separate commits and then retested against the exact public artifacts. The later receipt contract did not
+discard telemetry: it retained all socket events while correctly limiting the blocking network control to
+destination-bearing outbound/DNS attempts and incomplete or contradictory observation.
 
 This closes the physical implementation/model-path proof. It does **not** close production KMS operation,
 corporate retrieval/authorization benchmarks, legal/privacy approval, registry immutability, deployment
