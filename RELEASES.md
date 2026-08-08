@@ -12,7 +12,7 @@ itself pin those files.
 
 | Version | Git Commit | Scanner/Worker Image | API Image | UI Image | Model Intake Signer Image |
 | --- | --- | --- | --- | --- | --- |
-| 0.8.0 | pending candidate | `shakerscan/shakerscan-scanner:0.8.0` | `shakerscan/shakerscan-api:0.8.0` | `shakerscan/shakerscan-ui:0.8.0` | `shakerscan/shakerscan-model-intake-signer:0.8.0` |
+| 0.8.0 | `5cbcdb413df523a931775c5665de2d13408588d2` | `shakerscan/shakerscan-scanner:0.8.0` (`sha256:1c46a2985f38dee25a56b36b7bf75e7d8a7efa93e61716160ee22e94266d5102`) | `shakerscan/shakerscan-api:0.8.0` (`sha256:eb89f3eb25b25797d9191670791a572189013816879b955c52070a108171a627`) | `shakerscan/shakerscan-ui:0.8.0` (`sha256:75e4d83dbbfd98aed0644727302aeb8281e73ed6141c20a11af24834a44789a7`) | `shakerscan/shakerscan-model-intake-signer:0.8.0` (`sha256:42b052aeb93ad6fd531f8d52dcb594645866e64188725a6195cbc8fc9f4577af`) |
 | 0.5.7 | `f27bbffda3451ce013aedfb250c7b018104f41d5` | `shakerscan/shakerscan-scanner:0.5.7` | not published separately | `shakerscan/shakerscan-ui:0.5.7` | not published separately |
 | 0.5.6 | `e7f8dbde13d218d54c195a0be934c6b5bd459b1b` | `shakerscan/shakerscan-scanner:0.5.6` | not published separately | `shakerscan/shakerscan-ui:0.5.6` | not published separately |
 | 0.5.5 | `53f3cb47ee88a90de7fc49346ac85497f4a6c1db` | `shakerscan/shakerscan-scanner:0.5.5` | not published separately | `shakerscan/shakerscan-ui:0.5.5` | not published separately |
