@@ -1409,7 +1409,26 @@ auto_workers_for_memory_gb() {
     local memory_gb="${1:-0}"
     local platform_reserve_gb="${SHAKERSCAN_PLATFORM_MEMORY_RESERVE_GB:-7}"
     local per_worker_gb="${SHAKERSCAN_PER_WORKER_MEM_GB:-1}"
+    local auto_worker_max="${SHAKERSCAN_AUTO_WORKER_MAX:-}"
     local workers
+
+    # A developer laptop gains little from launching a server-sized fleet at every
+    # restart. Docker Desktop often exposes most of a large Mac's RAM, which used to
+    # turn the memory formula into 16-20 Python workers and made migrations/imports
+    # needlessly noisy. Linux servers keep the existing capacity-based ceiling; Mac
+    # operators can still opt in to more workers with --workers or this environment
+    # override.
+    if [ -z "$auto_worker_max" ]; then
+        if [ "$(uname -s 2>/dev/null || true)" = "Darwin" ]; then
+            auto_worker_max=5
+        else
+            auto_worker_max=20
+        fi
+    fi
+    if ! [[ "$auto_worker_max" =~ ^[0-9]+$ ]] || [ "$auto_worker_max" -lt 1 ]; then
+        auto_worker_max=20
+    fi
+    [ "$auto_worker_max" -gt 20 ] && auto_worker_max=20
 
     if ! [[ "$memory_gb" =~ ^[0-9]+$ ]] || [ "$memory_gb" -le 0 ]; then
         echo 5
@@ -1436,7 +1455,7 @@ auto_workers_for_memory_gb() {
         [ "$workers" -lt 5 ] && workers=5
     fi
 
-    [ "$workers" -gt 20 ] && workers=20
+    [ "$workers" -gt "$auto_worker_max" ] && workers="$auto_worker_max"
     echo "$workers"
 }
 

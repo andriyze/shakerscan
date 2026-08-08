@@ -382,6 +382,14 @@ def test_scanner_sh_worker_logs_aggregate_api_scaled_containers():
     assert "compose logs -f worker" in script
 
 
+def test_scanner_sh_caps_automatic_mac_worker_fleet_for_laptop_restarts():
+    script = (ROOT / "scanner.sh").read_text()
+    assert 'SHAKERSCAN_AUTO_WORKER_MAX' in script
+    assert '"$(uname -s 2>/dev/null || true)" = "Darwin"' in script
+    assert 'auto_worker_max=5' in script
+    assert '[ "$workers" -gt "$auto_worker_max" ]' in script
+
+
 def test_scanner_sh_restart_and_rebuild_recreate_api_scaled_workers():
     script = (ROOT / "scanner.sh").read_text()
 
