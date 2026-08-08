@@ -5377,10 +5377,10 @@ def _require_fleet_https(request: Request) -> None:
         raise HTTPException(status_code=400, detail="fleet enrollment and node secrets require HTTPS")
 
 
-def _fleet_bearer_credential(request: Request) -> str:
+def _fleet_bearer_credential(request: Request, *, principal: str = "node") -> str:
     scheme, separator, value = request.headers.get("authorization", "").partition(" ")
     if not separator or scheme.lower() != "bearer" or not value.strip():
-        raise HTTPException(status_code=401, detail="node bearer credential is required")
+        raise HTTPException(status_code=401, detail=f"{principal} bearer credential is required")
     return value.strip()
 
 
@@ -5418,7 +5418,7 @@ def _require_fleet_operator(request: Request) -> None:
     expected = os.environ.get("FLEET_OPERATOR_TOKEN", "")
     if len(expected) < 32:
         raise HTTPException(status_code=403, detail="fleet operator access is not enabled remotely")
-    presented = _fleet_bearer_credential(request)
+    presented = _fleet_bearer_credential(request, principal="fleet operator")
     if not secrets.compare_digest(presented, expected):
         raise HTTPException(status_code=403, detail="fleet operator authentication failed")
 

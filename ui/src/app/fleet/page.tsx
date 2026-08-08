@@ -115,6 +115,53 @@ function SummaryCard({ label, value, detail, tone = 'normal' }: {
   )
 }
 
+function OperatorAccessCard({
+  operatorToken,
+  showToken,
+  onTokenChange,
+  onToggleVisibility,
+}: {
+  operatorToken: string
+  showToken: boolean
+  onTokenChange: (value: string) => void
+  onToggleVisibility: () => void
+}) {
+  return (
+    <Card className="mb-6 p-4">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+        <div>
+          <div className="flex items-center gap-2 text-sm font-medium text-gray-200">
+            <ShieldCheck className="h-4 w-4 text-blue-400" aria-hidden="true" />
+            Operator access
+          </div>
+          <p className="mt-1 max-w-2xl text-xs text-gray-500">
+            Fleet init creates the operator token. Enter it to load nodes and enable fleet changes from this browser.
+            Remote access requires HTTPS or ShakerScan&apos;s verified Tailscale bind. The token stays in this browser tab only.
+          </p>
+        </div>
+        <div className="flex w-full gap-2 lg:w-[28rem]">
+          <Input
+            type={showToken ? 'text' : 'password'}
+            value={operatorToken}
+            onChange={(event) => onTokenChange(event.target.value)}
+            placeholder="Fleet operator token"
+            aria-label="Fleet operator token"
+            autoComplete="off"
+          />
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={onToggleVisibility}
+            aria-label={showToken ? 'Hide operator token' : 'Show operator token'}
+          >
+            {showToken ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+          </Button>
+        </div>
+      </div>
+    </Card>
+  )
+}
+
 export default function FleetPage() {
   const toast = useToast()
   const [nodes, setNodes] = useState<FleetNode[]>([])
@@ -161,7 +208,12 @@ export default function FleetPage() {
       setUpdatedAt(new Date())
       setError(null)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load fleet')
+      const message = err instanceof Error ? err.message : 'Failed to load fleet'
+      setError(
+        !operatorToken.trim() && /bearer credential is required/i.test(message)
+          ? 'Enter the fleet operator token to load remote nodes and controls.'
+          : message,
+      )
     } finally {
       setLoading(false)
       setRefreshing(false)
@@ -346,6 +398,30 @@ export default function FleetPage() {
       </div>
     )
   }
+  if (!loading && error && nodes.length === 0) {
+    return (
+      <div className="mx-auto max-w-7xl p-6">
+        <PageHeader
+          title="Fleet"
+          description="Operate every joined ShakerScan worker node from one control plane."
+          icon={<ServerCog className="h-7 w-7" />}
+          actions={
+            <Button variant="secondary" size="sm" onClick={() => void loadFleet(true)} loading={refreshing}>
+              <RefreshCw className="h-4 w-4" aria-hidden="true" />
+              Refresh
+            </Button>
+          }
+        />
+        <OperatorAccessCard
+          operatorToken={operatorToken}
+          showToken={showToken}
+          onTokenChange={changeOperatorToken}
+          onToggleVisibility={() => setShowToken((value) => !value)}
+        />
+        <ErrorState message={error} onRetry={() => void loadFleet()} />
+      </div>
+    )
+  }
 
   return (
     <div className="mx-auto max-w-7xl p-6">
@@ -400,37 +476,12 @@ export default function FleetPage() {
         />
       </div>
 
-      <Card className="mb-6 p-4">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
-          <div>
-            <div className="flex items-center gap-2 text-sm font-medium text-gray-200">
-              <ShieldCheck className="h-4 w-4 text-blue-400" aria-hidden="true" />
-              Operator access
-            </div>
-            <p className="mt-1 max-w-2xl text-xs text-gray-500">
-              Fleet init creates the operator token. Enter it for fleet reads and changes from this browser. Remote access requires HTTPS or ShakerScan&apos;s verified Tailscale bind; direct API loopback is the only tokenless exception. The token stays in this browser tab only.
-            </p>
-          </div>
-          <div className="flex w-full gap-2 lg:w-[28rem]">
-            <Input
-              type={showToken ? 'text' : 'password'}
-              value={operatorToken}
-              onChange={(event) => changeOperatorToken(event.target.value)}
-              placeholder="Fleet operator token"
-              aria-label="Fleet operator token"
-              autoComplete="off"
-            />
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => setShowToken((value) => !value)}
-              aria-label={showToken ? 'Hide operator token' : 'Show operator token'}
-            >
-              {showToken ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-            </Button>
-          </div>
-        </div>
-      </Card>
+      <OperatorAccessCard
+        operatorToken={operatorToken}
+        showToken={showToken}
+        onTokenChange={changeOperatorToken}
+        onToggleVisibility={() => setShowToken((value) => !value)}
+      />
 
       <Card className="mb-6 p-4">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">

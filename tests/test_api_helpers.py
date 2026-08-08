@@ -128,6 +128,16 @@ def test_stale_scan_cleanup_normalizes_raw_redis_job_replies():
     assert api_module._redis_text(f"job:{scan_id}".encode()).endswith(scan_id)
 
 
+def test_fleet_operator_missing_bearer_names_the_operator_boundary():
+    request = types.SimpleNamespace(headers={})
+
+    with pytest.raises(api_module.HTTPException) as exc:
+        api_module._fleet_bearer_credential(request, principal="fleet operator")
+
+    assert exc.value.status_code == 401
+    assert exc.value.detail == "fleet operator bearer credential is required"
+
+
 def _test_jwt(**claims):
     encode = lambda value: base64.urlsafe_b64encode(json.dumps(value).encode()).decode().rstrip("=")
     return f"{encode({'alg': 'none'})}.{encode(claims)}.signature"
