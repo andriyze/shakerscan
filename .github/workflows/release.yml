@@ -129,6 +129,10 @@ jobs:
         uses: actions/checkout@v6
         with:
           ref: ${{ needs.meta.outputs.candidate_sha }}
+          # The upgrade smoke loads the 0.5.7 schema from its historical
+          # commit. A depth-one checkout can resolve the frozen candidate but
+          # cannot provide that baseline tree.
+          fetch-depth: 0
 
       - name: Verify generated documentation
         run: python3 scripts/generate_capability_inventory.py --check
