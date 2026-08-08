@@ -951,10 +951,12 @@ def build_model_intake_report(
     )
     runner_controls = _runner_controls(timelines, conversion_required=conversion_required)
     controls.extend(runner_controls)
-    # A runtime receipt has one overall status that also covers network and
-    # resource containment. The report exposes those as independent controls,
-    # so derive the runtime-execution answer from the fixed guest phases rather
-    # than double-counting a containment failure as a model-load failure.
+    # A runtime receipt has one overall status that also covers network/resource
+    # containment and receipt trust. The report exposes containment independently,
+    # so a containment-only FAIL must not be double-counted as a model-load failure.
+    # An INCOMPLETE/ERROR/REVIEW receipt is different: it can mean the receipt is
+    # not admissibly trusted (for example, a production run signed by the local PEM
+    # development tier). Preserve that non-pass even when every guest phase ran.
     firecracker_control = next(
         (item for item in runner_controls if item.get("id") == "firecracker_runtime"),
         None,
@@ -965,14 +967,25 @@ def build_model_intake_report(
     )
     if firecracker_control and runtime_evidence_control and runtime_evidence_control.get("status") != "NOT_RUN":
         execution_status = str(firecracker_control.get("status") or "INCOMPLETE")
-        receipt_overall_status = runtime_evidence_control.get("status")
-        runtime_evidence_control["status"] = execution_status
-        runtime_evidence_control["detail"] = (
-            "Exact-subject model load, warmup, inference, and teardown passed; "
-            "runtime containment is reported by separate network and resource controls."
-            if execution_status == "PASS"
-            else "One or more fixed exact-subject runtime phases did not pass."
-        )
+        receipt_overall_status = str(runtime_evidence_control.get("status") or "INCOMPLETE")
+        if execution_status != "PASS":
+            runtime_status = execution_status
+            runtime_detail = "One or more fixed exact-subject runtime phases did not pass."
+        elif receipt_overall_status in {"INCOMPLETE", "ERROR", "REVIEW", "NOT_RUN"}:
+            runtime_status = receipt_overall_status
+            runtime_detail = (
+                f"Exact-subject runtime phases passed, but the signed runtime evidence is "
+                f"{receipt_overall_status}. Inspect receipt trust and completeness; network "
+                "and resource containment are reported separately."
+            )
+        else:
+            runtime_status = "PASS"
+            runtime_detail = (
+                "Exact-subject model load, warmup, inference, and teardown passed; "
+                "runtime containment is reported by separate network and resource controls."
+            )
+        runtime_evidence_control["status"] = runtime_status
+        runtime_evidence_control["detail"] = runtime_detail
         runtime_evidence_control["coverage"] = {
             **_json(runtime_evidence_control.get("coverage"), {}),
             "execution_status": execution_status,

@@ -510,6 +510,20 @@ def test_network_attempt_is_a_blocking_control_failure():
     assert "attempted_operations" not in network
 
 
+def test_successful_runtime_phases_do_not_upgrade_incomplete_signed_evidence():
+    rows = _rows(active_admission=False)
+    runtime = next(item for item in rows["evidence"] if item["evidence_type"] == "runtime_execution")
+    runtime["status"] = "INCOMPLETE"
+    report = _report(rows)
+
+    runtime_control = _control(report, "runtime_execution")
+    assert runtime_control["status"] == "INCOMPLETE"
+    assert runtime_control["coverage"]["execution_status"] == "PASS"
+    assert runtime_control["coverage"]["receipt_overall_status"] == "INCOMPLETE"
+    assert "receipt trust and completeness" in runtime_control["detail"]
+    assert _control(report, "firecracker_runtime")["status"] == "PASS"
+
+
 def test_network_report_bounds_repetitive_syscall_evidence():
     rows = _rows(active_admission=False)
     telemetry = rows["runner_jobs"][0]["result_json"]["payload"]["observations"]["network_telemetry"]
