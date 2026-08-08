@@ -504,6 +504,73 @@ def test_broker_join_local_build_skips_registry_runtime_and_persists_override(tm
     assert state["worker_image_digest"] == IMAGE
 
 
+def test_broker_resume_retires_local_override_after_control_plane_rollout(tmp_path, monkeypatch):
+    paths = fleet_cli.RuntimePaths(tmp_path)
+    paths.node.mkdir(parents=True)
+    paths.broker_worker_compose.write_text("services: {}\n", encoding="utf-8")
+    next_image = "registry.example/shakerscan@sha256:" + "b" * 64
+    state_path = paths.node / "state.json"
+    fleet_cli.atomic_write(
+        state_path,
+        json.dumps(
+            {
+                "node_id": NODE_ID,
+                "node_credential": "node-secret",
+                "control_plane_url": "https://fleet.example.test",
+                "worker_image_digest": IMAGE,
+                "tls_ca_mode": "system",
+                "transport": "broker",
+                "enrollment_url": "https://fleet.example.test",
+                "runtime_image_override": "shakerscan-fleet-local:abc1234",
+                "bootstrap": {
+                    "node_id": NODE_ID,
+                    "node_credential": "node-secret",
+                    "transport": "broker",
+                    "worker_image_digest": IMAGE,
+                },
+            }
+        ),
+        0o600,
+    )
+    starts = []
+
+    monkeypatch.setattr(fleet_cli, "_require_linux", lambda: None)
+    monkeypatch.setattr(fleet_cli, "_require_commands", lambda _names: None)
+    monkeypatch.setattr(fleet_cli, "_docker_compose_command", lambda: ["docker", "compose"])
+
+    def fake_api(_base, method, path, **kwargs):
+        assert method == "GET"
+        assert path == f"/fleet/nodes/{NODE_ID}/state"
+        assert kwargs["bearer"] == "node-secret"
+        return {"worker_image_digest": next_image, "rollout_in_progress": False}
+
+    monkeypatch.setattr(fleet_cli, "api_json", fake_api)
+    monkeypatch.setattr(
+        fleet_cli,
+        "_start_broker_runtime",
+        lambda _paths, response, **kwargs: starts.append(
+            (response["worker_image_digest"], kwargs.get("runtime_image"))
+        ),
+    )
+
+    fleet_cli.command_join(
+        paths,
+        types.SimpleNamespace(
+            control_plane_url="https://fleet.example.test",
+            token=None,
+            ca_cert=None,
+            transport="broker",
+            local_build=False,
+        ),
+    )
+
+    assert starts == [(next_image, None)]
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+    assert "runtime_image_override" not in persisted
+    assert persisted["worker_image_digest"] == IMAGE
+    assert persisted["bootstrap"]["worker_image_digest"] == next_image
+
+
 def test_worker_compose_env_separates_local_runtime_from_expected_digest(tmp_path):
     paths = fleet_cli.RuntimePaths(tmp_path)
     values = fleet_cli._worker_compose_env(

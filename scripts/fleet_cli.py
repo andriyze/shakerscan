@@ -2001,7 +2001,31 @@ def command_join(paths: RuntimePaths, args: argparse.Namespace) -> None:
             if getattr(args, "local_build", False):
                 runtime_image = _build_local_broker_worker_image(paths)
                 state["runtime_image_override"] = runtime_image
-                atomic_write(state_path, json.dumps(state, sort_keys=True, indent=2) + "\n", 0o600)
+            resume_ca = enrollment_ca
+            if resume_ca is None and str(state.get("tls_ca_mode") or "") == "file":
+                resume_ca = paths.node / "ca.crt"
+                if not resume_ca.is_file():
+                    raise FleetCLIError("existing broker node state requires its persisted enrollment CA")
+            desired_state = api_json(
+                public_url,
+                "GET",
+                f"/fleet/nodes/{response['node_id']}/state",
+                bearer=str(response["node_credential"]),
+                ca_file=resume_ca,
+            )
+            desired_image = validate_digest_image(str(desired_state.get("worker_image_digest") or ""))
+            enrolled_image = validate_digest_image(
+                str(state.get("worker_image_digest") or response["worker_image_digest"])
+            )
+            response["worker_image_digest"] = desired_image
+            state["bootstrap"] = response
+            if runtime_image and not getattr(args, "local_build", False) and (
+                desired_image != enrolled_image or bool(desired_state.get("rollout_in_progress"))
+            ):
+                runtime_image = None
+                state.pop("runtime_image_override", None)
+                print("Control-plane rollout superseded the local worker build override")
+            atomic_write(state_path, json.dumps(state, sort_keys=True, indent=2) + "\n", 0o600)
             _start_broker_runtime(paths, response, runtime_image=runtime_image)
             print(f"HTTPS broker node {response['node_id']} resumed")
             if runtime_image:

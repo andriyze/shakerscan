@@ -325,7 +325,10 @@ a full source checkout on the broker worker without publishing an image first, a
 This builds `scanner/Dockerfile` on the worker and skips the registry image pull. The node keeps the
 control plane's immutable production digest as its desired-image identity while recording the local
 runtime override explicitly; the node agent uses that override for local scaling. A later fleet image
-rollout replaces the development override with the selected registry digest. Local build mode is a
+rollout replaces the development override with the selected registry digest. Running the ordinary
+`shakerscan join <control-plane> --transport broker` resume command after that rollout refreshes the
+cached desired image and permanently retires the obsolete local override; passing `--local-build`
+again remains an explicit choice to rebuild and return the node to development mode. Local build mode is a
 broker development facility, not a production deployment mechanism, and the Docker build can still
 download base images and pinned tool dependencies. Keep at least 12 GiB free for a clean local
 build. Before and after a successful rebuild, ShakerScan removes only older unused
