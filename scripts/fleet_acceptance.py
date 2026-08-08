@@ -142,6 +142,39 @@ def _target_hash(target: str) -> str:
     return hashlib.sha256(target.encode("utf-8")).hexdigest()
 
 
+def _validate_external_acceptance_target(target: str, api_url: str, public_host: str | None) -> None:
+    """Refuse to use the Fleet control plane itself as a scan target."""
+    parsed_target = urllib.parse.urlsplit(target)
+    if parsed_target.scheme not in {"http", "https"}:
+        raise AcceptanceError("--target must be an HTTP(S) URL with a hostname")
+
+    def canonical_host(value: str) -> str:
+        host = str(value or "").strip().lower().rstrip(".")
+        if host == "localhost":
+            return "loopback"
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            return host
+        return "loopback" if address.is_loopback else str(address)
+
+    target_host = canonical_host(parsed_target.hostname or "")
+    api_host = canonical_host(urllib.parse.urlsplit(api_url).hostname or "")
+    public_name = str(public_host or "").strip()
+    if "://" in public_name:
+        public_name = urllib.parse.urlsplit(public_name).hostname or ""
+    else:
+        public_name = public_name.split(":", 1)[0]
+    public_name = canonical_host(public_name)
+    if not target_host:
+        raise AcceptanceError("--target must be an HTTP(S) URL with a hostname")
+    protected_hosts = {host for host in (api_host, public_name) if host}
+    if target_host in protected_hosts:
+        raise AcceptanceError(
+            "--target must be a separate authorized test application, not the Fleet control plane"
+        )
+
+
 def _safe_parallel_endpoints(target: str, count: int) -> list[str]:
     parsed = urllib.parse.urlsplit(target)
     origin = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
@@ -484,6 +517,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if not args.preflight_only:
         if not args.target or not args.authorized:
             raise AcceptanceError("full acceptance requires --target and --authorized")
+        _validate_external_acceptance_target(args.target, args.api_url, args.public_host)
         shard_count = max(4, min(12, len(healthy) * 3))
         acceptance_request_max = _acceptance_request_max(shard_count)
         submitted = client.request(

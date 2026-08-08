@@ -7004,6 +7004,11 @@ async def build_report(target: str,
             "security_txt": sec_txt,
             "evidence": {"screenshot": browser_res.get("screenshot_path") if browser_res else None, "page_title": browser_res.get("title") if browser_res else None},
             "browser_fetch_error": browser_fetch_error,
+            "interaction_safety": (
+                browser_res.get("interaction_safety")
+                if isinstance(browser_res, dict)
+                else None
+            ),
         },
         "discovery": discovery,
         "findings": []

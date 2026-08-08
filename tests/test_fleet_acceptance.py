@@ -26,6 +26,34 @@ def test_safe_parallel_endpoints_remain_same_origin_and_bounded():
     assert all("#" not in item for item in endpoints)
 
 
+def test_acceptance_target_must_not_be_the_control_plane():
+    for target in (
+        "http://100.121.87.22:3000",
+        "https://fleet.example.test/app",
+        "http://127.0.0.1:3000",
+    ):
+        try:
+            fleet_acceptance._validate_external_acceptance_target(
+                target,
+                (
+                    "http://localhost:8080"
+                    if "127.0.0.1" in target
+                    else "http://100.121.87.22:8080"
+                ),
+                "fleet.example.test",
+            )
+        except fleet_acceptance.AcceptanceError as exc:
+            assert "separate authorized test application" in str(exc)
+        else:
+            raise AssertionError("control-plane target was accepted")
+
+    fleet_acceptance._validate_external_acceptance_target(
+        "https://lab.example.test",
+        "http://100.121.87.22:8080",
+        "fleet.example.test",
+    )
+
+
 def test_node_selection_is_explicit_and_rejects_missing_identity():
     payload = {
         "nodes": [

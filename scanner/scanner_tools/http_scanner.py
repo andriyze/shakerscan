@@ -28,6 +28,77 @@ _BROWSER_CRAWL_STATIC_EXTS = {
     ".mov", ".zip", ".tar", ".gz", ".rar", ".7z", ".pdf",
 }
 
+_BROWSER_SAFE_INTERACTION_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+_BROWSER_SAFE_INTERACTION_SELECTORS = (
+    '[role="tab"]',
+    '[aria-haspopup="menu"]',
+    'button[aria-expanded][aria-controls]',
+    '[data-toggle="tab"]',
+    '[data-bs-toggle="tab"]',
+    '[data-toggle="dropdown"]',
+    '[data-bs-toggle="dropdown"]',
+    'nav a[href]',
+    '[role="navigation"] a[href]',
+    '.navbar a[href]',
+    '.nav-link[href]',
+    '[class*="sidebar"] a[href]',
+    '[class*="Sidebar"] a[href]',
+    '[class*="side-nav"] a[href]',
+    '[class*="sidenav"] a[href]',
+    'a[href^="/"]',
+)
+_BROWSER_RISKY_INTERACTION_KEYWORDS = (
+    "logout", "log out", "sign out", "signout",
+    "delete", "remove", "destroy", "erase",
+    "cancel", "deactivate", "disable", "revoke",
+    "reset", "clear all", "wipe", "start", "run", "launch",
+    "submit", "save", "create", "update", "approve", "reject",
+    "unsubscribe", "close account", "terminate",
+)
+
+
+def _browser_interaction_method_allowed(method: str) -> bool:
+    """Allow automated UI discovery to issue read-only HTTP methods only."""
+    return str(method or "").strip().upper() in _BROWSER_SAFE_INTERACTION_METHODS
+
+
+def _browser_interaction_element_is_safe(*values: Any) -> bool:
+    """Fail closed when a navigation control appears to represent an action."""
+    if not values:
+        return False
+    combined = " ".join(str(value or "").lower().strip() for value in values)
+    if not combined:
+        return False
+    return not any(
+        re.search(rf"\b{re.escape(keyword)}\b", combined)
+        for keyword in _BROWSER_RISKY_INTERACTION_KEYWORDS
+    )
+
+
+async def _guard_browser_interaction_request(route: Any, request: Any, guard: dict[str, Any]) -> None:
+    """Route one request while enforcing the passive interaction method boundary."""
+    method = str(request.method or "").upper()
+    if guard.get("active") and not _browser_interaction_method_allowed(method):
+        guard["blocked_count"] = int(guard.get("blocked_count") or 0) + 1
+        samples = guard.setdefault("blocked_samples", [])
+        if len(samples) < 20:
+            parsed = urllib.parse.urlsplit(str(request.url or ""))
+            samples.append({
+                "method": method,
+                "url": urllib.parse.urlunsplit((
+                    parsed.scheme,
+                    parsed.netloc,
+                    parsed.path,
+                    "",
+                    "",
+                )),
+            })
+        else:
+            guard["sample_truncated"] = True
+        await route.abort("blockedbyclient")
+        return
+    await route.continue_()
+
 
 def _redirect_chain_from_header_blocks(start_url: str, blocks: list[str]) -> list[str]:
     """Recover each concrete Location hop from curl's followed header blocks."""
@@ -339,6 +410,12 @@ async def browser_fetch(
             "websocket_endpoints": [],
             "page_urls": [url],
             "crawl_stats": None,
+            "interaction_safety": {
+                "unsafe_methods_blocked": 0,
+                "blocked_request_samples": [],
+                "sample_truncated": False,
+                "allowed_methods": sorted(_BROWSER_SAFE_INTERACTION_METHODS),
+            },
         }
 
     if no_browser:
@@ -383,6 +460,18 @@ async def browser_fetch(
                 except Exception:
                     pass
             page = await ctx.new_page()
+            interaction_guard: dict[str, Any] = {
+                "active": False,
+                "blocked_count": 0,
+                "blocked_samples": [],
+                "sample_truncated": False,
+            }
+
+            async def guard_interaction_request(route, request) -> None:
+                """Prevent passive UI discovery from mutating the target application."""
+                await _guard_browser_interaction_request(route, request, interaction_guard)
+
+            await ctx.route("**/*", guard_interaction_request)
             status_line = None
             http_version = "?"
             tech_stack: list[str] = []
@@ -499,98 +588,30 @@ async def browser_fetch(
                 return urllib.parse.urlunparse(parsed._replace(fragment=""))
 
             async def interactive_crawl(max_interactions: int = 40) -> int:
-                """Click through SPA elements to trigger API calls.
+                """Open bounded navigation/disclosure controls without mutating state.
 
                 Returns the number of successful interactions.
                 """
                 interactions = 0
 
-                # Selectors for clickable navigation elements
-                nav_selectors = [
-                    'nav a:not([href^="http"]):not([href^="mailto"])',
-                    'nav button',
-                    '[role="navigation"] a',
-                    '.navbar a', '.nav-link',
-                    '[data-testid*="nav"]', '[data-cy*="nav"]',
-                ]
-
-                # Selectors for dropdowns/menus
-                dropdown_selectors = [
-                    '[aria-haspopup="true"]',
-                    '.dropdown-toggle',
-                    '[data-toggle="dropdown"]',
-                    '[data-bs-toggle="dropdown"]',
-                ]
-
-                # Selectors for tabs/accordions
-                tab_selectors = [
-                    '[role="tab"]',
-                    '.tab', '.nav-tab',
-                    '[data-toggle="tab"]',
-                    '[data-bs-toggle="tab"]',
-                ]
-
-                # Selectors for buttons that might trigger API calls
-                action_selectors = [
-                    'button[type="button"]:not([disabled])',
-                    '[role="button"]:not([disabled])',
-                ]
-
-                # SPA-specific selectors (Material UI, Ant Design, etc.)
-                spa_selectors = [
-                    # Material UI (MUI)
-                    '.MuiListItem-root', '.MuiMenuItem-root', '.MuiTab-root',
-                    '.MuiButton-root:not([disabled])', '.MuiIconButton-root',
-                    '.MuiCard-root', '.MuiCardActionArea-root',
-                    # Ant Design
-                    '.ant-menu-item', '.ant-tabs-tab', '.ant-card',
-                    '.ant-btn:not([disabled])', '.ant-list-item',
-                    # Sidebar navigation
-                    '[class*="sidebar"] a', '[class*="Sidebar"] a',
-                    '[class*="side-nav"] a', '[class*="sidenav"] a',
-                    '.menu-item', '.menu-link',
-                    # Data tables and lists
-                    '[class*="table"] tr[data-row-key]',
-                    '[class*="list"] [class*="item"]',
-                    '.data-row', '.clickable-row',
-                    # Cards and tiles
-                    '[class*="card"]:not(.MuiCard-root):not(.ant-card)',
-                    '[class*="tile"]', '[class*="panel"]',
-                    # React Router / SPA Links
-                    'a[href^="/"]', '[class*="link"]',
-                ]
-
-                all_selectors = nav_selectors + dropdown_selectors + tab_selectors + action_selectors + spa_selectors
-
-                # Denylist for destructive/risky actions - skip elements matching these
-                risky_keywords = [
-                    "logout", "log out", "sign out", "signout",
-                    "delete", "remove", "destroy", "erase",
-                    "cancel", "deactivate", "disable", "revoke",
-                    "reset", "clear all", "wipe",
-                    "unsubscribe", "close account", "terminate",
-                ]
-
                 async def is_safe_to_click(element) -> bool:
-                    """Check if element is safe to click (not a destructive action)."""
+                    """Read semantic hints and fail closed if they cannot be inspected."""
                     try:
-                        # Get text content and attributes
                         text = (await element.text_content() or "").lower().strip()
                         aria_label = (await element.get_attribute("aria-label") or "").lower()
                         title = (await element.get_attribute("title") or "").lower()
                         data_action = (await element.get_attribute("data-action") or "").lower()
                         class_name = (await element.get_attribute("class") or "").lower()
-
-                        # Check all attributes for risky keywords
-                        all_text = f"{text} {aria_label} {title} {data_action} {class_name}"
-                        for keyword in risky_keywords:
-                            if keyword in all_text:
-                                return False
-                        return True
+                        href = (await element.get_attribute("href") or "").lower()
+                        if href and normalize_link(href, page.url) is None:
+                            return False
+                        return _browser_interaction_element_is_safe(
+                            text, aria_label, title, data_action, class_name, href
+                        )
                     except Exception:
-                        return True  # If we can't check, assume it's safe
+                        return False
 
-                for selector in all_selectors:
+                for selector in _BROWSER_SAFE_INTERACTION_SELECTORS:
                     if interactions >= max_interactions:
                         break
                     try:
@@ -608,14 +629,16 @@ async def browser_fetch(
                                 if not await is_safe_to_click(el):
                                     continue
 
-                                await el.click(timeout=2000)
-                                interactions += 1
-
-                                # Wait briefly for any API calls to trigger
                                 try:
-                                    await page.wait_for_load_state("networkidle", timeout=2000)
-                                except Exception:
-                                    await asyncio.sleep(0.3)
+                                    interaction_guard["active"] = True
+                                    await el.click(timeout=2000)
+                                    interactions += 1
+                                    try:
+                                        await page.wait_for_load_state("networkidle", timeout=2000)
+                                    except Exception:
+                                        await asyncio.sleep(0.3)
+                                finally:
+                                    interaction_guard["active"] = False
 
                             except Exception:
                                 continue
@@ -1168,6 +1191,12 @@ async def browser_fetch(
                 "websocket_endpoints": websocket_endpoints,
                 "page_urls": page_urls,
                 "crawl_stats": crawl_stats,
+                "interaction_safety": {
+                    "unsafe_methods_blocked": int(interaction_guard["blocked_count"]),
+                    "blocked_request_samples": list(interaction_guard["blocked_samples"]),
+                    "sample_truncated": bool(interaction_guard["sample_truncated"]),
+                    "allowed_methods": sorted(_BROWSER_SAFE_INTERACTION_METHODS),
+                },
             }
     except Exception as e:
         print(f"[browser_fetch] Exception occurred, falling back to curl: {type(e).__name__}: {e}", file=sys.stderr)
