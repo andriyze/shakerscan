@@ -264,7 +264,10 @@ test('one pasted Hugging Face link queues the complete technical review', () => 
   assert.match(page, /createModelIntakeAutomaticReview/)
   assert.match(page, /Advanced \/ manual/)
   assert.match(page, /Firecracker load \+ repeat inference/)
-  assert.match(page, /SBOM, AIBOM, License BOM, notices draft, JSON, HTML, SARIF/)
+  // The primary UI intentionally leads with the engineer-facing HTML report
+  // and AIBOM. Lower-value interchange formats remain available under More
+  // exports and are asserted individually below.
+  assert.match(page, /Clear HTML report \+ AIBOM, with machine exports when needed/)
   assert.match(page, /The controller keeps working if this page is closed or the API restarts/)
   assert.match(page, /Firecracker is ready\. Automatic reviews will include isolated load and repeat-inference evidence/)
   assert.match(page, /review\.source_label/)
