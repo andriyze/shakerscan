@@ -210,6 +210,53 @@ def test_local_build_remote_node_is_schedulable_but_not_image_current():
     )["total_available"] == 3
 
 
+def test_broker_concurrency_uses_remote_workers_not_control_plane_capacity():
+    nodes = [
+        {
+            "status": "healthy",
+            "drain": False,
+            "rollout_in_progress": False,
+            "state_current": True,
+            "image_current": True,
+            "active_worker_count": 2,
+            "labels": {"transport": "broker"},
+        },
+        {
+            "status": "healthy",
+            "drain": False,
+            "rollout_in_progress": False,
+            "state_current": True,
+            "image_current": False,
+            "local_build_active": True,
+            "active_worker_count": 3,
+            "labels": {"transport": "broker"},
+        },
+        {
+            "status": "healthy",
+            "drain": False,
+            "rollout_in_progress": False,
+            "state_current": True,
+            "image_current": True,
+            "active_worker_count": 7,
+            "labels": {"transport": "overlay"},
+        },
+        {
+            "status": "healthy",
+            "drain": True,
+            "rollout_in_progress": False,
+            "state_current": True,
+            "image_current": True,
+            "active_worker_count": 11,
+            "labels": {"transport": "broker"},
+        },
+    ]
+
+    assert api_module._compute_broker_active_scan_cap(nodes) == 5
+    assert api_module._compute_broker_active_scan_cap(nodes, override="3") == 3
+    assert api_module._compute_broker_active_scan_cap(nodes, override="20") == 5
+    assert api_module._compute_broker_active_scan_cap([], override="20") == 1
+
+
 def test_unexplained_image_drift_remote_node_is_not_schedulable():
     node = {
         "status": "healthy",

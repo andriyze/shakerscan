@@ -555,8 +555,12 @@ BROKER_INGEST_QUEUE_NAME = os.environ.get("BROKER_INGEST_QUEUE_NAME", "broker_in
 BROKER_LEASE_SECONDS = max(60, int(os.environ.get("SHAKERSCAN_BROKER_LEASE_SECONDS", "300")))
 BROKER_MAX_DELIVERY_ATTEMPTS = max(1, int(os.environ.get("SHAKERSCAN_QUEUE_MAX_DELIVERY_ATTEMPTS", "5")))
 BROKER_MAX_RESULT_BYTES = max(1_048_576, int(os.environ.get("SHAKERSCAN_BROKER_MAX_RESULT_BYTES", str(64 * 1024 * 1024))))
-BROKER_ACTIVE_SLOTS_KEY = "shakerscan:active_scan_slots"
-BROKER_MAX_ACTIVE_SCANS_KEY = "shakerscan:max_active_scans"
+# Broker execution happens on independently memory-bounded remote hosts. Keep
+# its admission semaphore separate from the control plane's local worker slots;
+# otherwise a small control plane serializes a large remote fleet (or one local
+# scan consumes remote capacity) even though no remote model/DAST workload runs
+# on the control-plane host.
+BROKER_ACTIVE_SLOTS_KEY = "shakerscan:broker:active_scan_slots"
 _BROKER_SLOT_LUA = """
 redis.call('ZREMRANGEBYSCORE', KEYS[1], 0, tonumber(ARGV[1]))
 if redis.call('ZSCORE', KEYS[1], ARGV[4]) then
@@ -9042,10 +9046,48 @@ def _broker_slot_id(stream_key: str, message_id: str) -> str:
     return f"broker:{hashlib.sha256(f'{stream_key}:{message_id}'.encode()).hexdigest()[:32]}"
 
 
-def _broker_take_or_refresh_slot(redis_client: Any, slot_id: str) -> bool:
+def _compute_broker_active_scan_cap(
+    nodes: list[Mapping[str, Any]],
+    *,
+    override: Any = None,
+) -> int:
+    """Bound broker concurrency by currently schedulable broker workers.
+
+    The optional environment override is a ceiling, never a capacity increase.
+    """
+    available = sum(
+        max(0, int(node.get("active_worker_count") or 0))
+        for node in nodes
+        if _fleet_node_is_schedulable(node)
+        and str(_broker_node_labels(node).get("transport") or "").strip().lower() == "broker"
+    )
+    cap = max(1, available)
+    if override not in (None, ""):
+        try:
+            cap = min(cap, max(1, int(override)))
+        except (TypeError, ValueError):
+            pass
+    return max(1, min(16_384, cap))
+
+
+async def _broker_active_scan_cap() -> int:
+    stale_after = max(60, _int_env("FLEET_HEARTBEAT_TIMEOUT_SECONDS", HEARTBEAT_TIMEOUT_MINUTES * 60))
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM nodes WHERE status <> 'disabled' ORDER BY created_at ASC")
+    nodes = [_public_fleet_node(row, stale_after_seconds=stale_after) for row in rows]
+    return _compute_broker_active_scan_cap(
+        nodes,
+        override=os.environ.get("SHAKERSCAN_BROKER_MAX_ACTIVE_SCANS"),
+    )
+
+
+def _broker_take_or_refresh_slot(redis_client: Any, slot_id: str, *, cap: int | None = None) -> bool:
     try:
-        raw_cap = redis_client.get(BROKER_MAX_ACTIVE_SCANS_KEY)
-        cap = max(1, int(raw_cap or os.environ.get("SHAKERSCAN_MAX_ACTIVE_SCANS") or 1))
+        if cap is None:
+            try:
+                cap = max(1, int(os.environ.get("SHAKERSCAN_BROKER_MAX_ACTIVE_SCANS") or 1))
+            except (TypeError, ValueError):
+                cap = 1
         return bool(redis_client.eval(
             _BROKER_SLOT_LUA,
             1,
@@ -9192,7 +9234,8 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
             return Response(status_code=204)
 
     slot_id = _broker_slot_id(str(lease.stream_key), str(lease.message_id))
-    if not _broker_take_or_refresh_slot(redis_client, slot_id):
+    broker_cap = await _broker_active_scan_cap()
+    if not _broker_take_or_refresh_slot(redis_client, slot_id, cap=broker_cap):
         enqueue_job(redis_client, str(payload.get("_base_queue_name") or QUEUE_NAME), payload)
         await asyncio.to_thread(acknowledge_lease, redis_client, lease)
         return Response(status_code=204)
