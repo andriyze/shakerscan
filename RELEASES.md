@@ -12,7 +12,7 @@ generated launcher also pins `SCANNER_IMAGE_TAG` to the downloaded version by de
 
 | Version | Git Commit | Scanner/Worker Image | API Image | UI Image | Model Intake Signer Image |
 | --- | --- | --- | --- | --- | --- |
-| 0.8.1 | pending candidate | `shakerscan/shakerscan-scanner:0.8.1` (pending) | `shakerscan/shakerscan-api:0.8.1` (pending) | `shakerscan/shakerscan-ui:0.8.1` (pending) | `shakerscan/shakerscan-model-intake-signer:0.8.1` (pending) |
+| 0.8.1 | `85cb9410efaf882588db86721bb8d7016d0ae20f` | `shakerscan/shakerscan-scanner:0.8.1` (`sha256:c5902123c036b8dc21cb39d9d3fd6396213d1ea230c20f6133aaadf5e8bfbbef`) | `shakerscan/shakerscan-api:0.8.1` (`sha256:f9cb8e4d24464ae6be77be65e23c4a2913ddc9884d0392129985a0ac1e296dcb`) | `shakerscan/shakerscan-ui:0.8.1` (`sha256:2af58d0ebb391f824ae2c0bdda4357cbe92a50f4cf0f5be65f5b8ae6a3216afb`) | `shakerscan/shakerscan-model-intake-signer:0.8.1` (`sha256:49a42e117c41b5b1c2e4a9af4a45345ba0ee58f3d58bdfba4a2b936b56505f68`) |
 | 0.8.0 | `5cbcdb413df523a931775c5665de2d13408588d2` | `shakerscan/shakerscan-scanner:0.8.0` (`sha256:1c46a2985f38dee25a56b36b7bf75e7d8a7efa93e61716160ee22e94266d5102`) | `shakerscan/shakerscan-api:0.8.0` (`sha256:eb89f3eb25b25797d9191670791a572189013816879b955c52070a108171a627`) | `shakerscan/shakerscan-ui:0.8.0` (`sha256:75e4d83dbbfd98aed0644727302aeb8281e73ed6141c20a11af24834a44789a7`) | `shakerscan/shakerscan-model-intake-signer:0.8.0` (`sha256:42b052aeb93ad6fd531f8d52dcb594645866e64188725a6195cbc8fc9f4577af`) |
 | 0.5.7 | `f27bbffda3451ce013aedfb250c7b018104f41d5` | `shakerscan/shakerscan-scanner:0.5.7` | not published separately | `shakerscan/shakerscan-ui:0.5.7` | not published separately |
 | 0.5.6 | `e7f8dbde13d218d54c195a0be934c6b5bd459b1b` | `shakerscan/shakerscan-scanner:0.5.6` | not published separately | `shakerscan/shakerscan-ui:0.5.6` | not published separately |
@@ -30,9 +30,9 @@ tag alone does not prove which commit produced an image.
 
 ## Release Workflow
 
-Version 0.8.1 is the current patch candidate. Complete
-[`docs/release-readiness.md`](docs/release-readiness.md), freeze its exact commit, and record its
-validation evidence before tagging.
+Version 0.8.1 is the current stable release. Complete
+[`docs/release-readiness.md`](docs/release-readiness.md), freeze the exact commit, and record its
+validation evidence before publishing a later release.
 
 1. Finish and validate changes on a feature branch.
 2. Correct release automation/metadata prerequisites, including Apache-2.0 image labels,
