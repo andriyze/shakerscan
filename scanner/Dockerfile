@@ -19,12 +19,16 @@ FROM golang:1.26.5-bookworm@sha256:6c5605ab3a9a9fb3c4eafe5b3d63cdbf3881caf113262
 # scanner versions stable while lifting compatible network parsers used on
 # attacker-controlled responses above their known-vulnerable dependency floors.
 # Cache mounts preserve completed downloads and compilations across retries and
-# subsequent builds. Separate installs are required because Go expects packages
-# in one `go install` invocation to share a module version.
+# subsequent builds. Compose builds the API, worker, and intake sandbox from
+# this Dockerfile concurrently, so the shared Go caches must be locked; an
+# unlocked mount can disappear underneath another build during cache cleanup.
+# Separate installs are required because Go expects packages in one `go install`
+# invocation to share a module version.
 ARG GO_INSTALL_ATTEMPTS=4
-RUN --mount=type=cache,target=/go/pkg/mod \
-    --mount=type=cache,target=/root/.cache/go-build \
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
+    --mount=type=cache,target=/root/.cache/go-build,sharing=locked \
     set -eu; \
+    mkdir -p /go/pkg/mod/cache /root/.cache/go-build; \
     build_tool() { \
       tool_name="$1"; \
       tool_package="$2"; \

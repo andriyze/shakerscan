@@ -447,8 +447,9 @@ def test_standalone_datastore_credentials_are_generated_and_compose_has_no_known
 def test_go_tool_builder_retries_transient_network_failures_with_buildkit_caches():
     dockerfile = (ROOT / "scanner" / "Dockerfile").read_text()
     assert "ARG GO_INSTALL_ATTEMPTS=4" in dockerfile
-    assert "--mount=type=cache,target=/go/pkg/mod" in dockerfile
-    assert "--mount=type=cache,target=/root/.cache/go-build" in dockerfile
+    assert "--mount=type=cache,target=/go/pkg/mod,sharing=locked" in dockerfile
+    assert "--mount=type=cache,target=/root/.cache/go-build,sharing=locked" in dockerfile
+    assert "mkdir -p /go/pkg/mod/cache /root/.cache/go-build" in dockerfile
     assert "until install_tools" in dockerfile
     assert "Go module download failed" in dockerfile
 
