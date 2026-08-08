@@ -1865,15 +1865,19 @@ show_logs() {
 }
 
 scan_worker_containers() {
-    docker ps -a --filter name=worker --format '{{.Names}}' 2>/dev/null |
-        awk 'BEGIN { IGNORECASE=1 } /shakerscan/ && /worker/ && !/gungnir/ { print }' |
-        sort
+    local project="${COMPOSE_PROJECT_NAME:-shakerscan}"
+    docker ps -a \
+        --filter "label=com.docker.compose.project=$project" \
+        --filter "label=com.docker.compose.service=worker" \
+        --format '{{.Names}}' 2>/dev/null | sort
 }
 
 running_scan_worker_containers() {
-    docker ps --filter name=worker --format '{{.Names}}' 2>/dev/null |
-        awk 'BEGIN { IGNORECASE=1 } /shakerscan/ && /worker/ && !/gungnir/ { print }' |
-        sort
+    local project="${COMPOSE_PROJECT_NAME:-shakerscan}"
+    docker ps \
+        --filter "label=com.docker.compose.project=$project" \
+        --filter "label=com.docker.compose.service=worker" \
+        --format '{{.Names}}' 2>/dev/null | sort
 }
 
 running_scan_worker_count() {

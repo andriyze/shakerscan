@@ -441,11 +441,46 @@ def test_scanner_sh_worker_logs_aggregate_api_scaled_containers():
     assert "show_worker_logs" in script
     assert "worker_log_containers" in script
     assert "scan_worker_containers" in script
-    assert "docker ps -a --filter name=worker" in script
-    assert "/shakerscan/ && /worker/ && !/gungnir/" in script
+    assert 'label=com.docker.compose.project=$project' in script
+    assert 'label=com.docker.compose.service=worker' in script
+    assert "--filter name=worker" not in script
     assert 'if [ "$SERVICE" = "worker" ] || [ "$SERVICE" = "workers" ]; then' in script
     assert 'awk -v name="$container"' in script
     assert "compose logs -f worker" in script
+
+
+def test_scanner_sh_worker_lifecycle_is_scoped_to_the_current_compose_project(tmp_path):
+    script = (ROOT / "scanner.sh").read_text()
+    functions = []
+    for name in ("scan_worker_containers", "running_scan_worker_containers"):
+        body = script.split(f"{name}() {{", 1)[1].split("\n}", 1)[0]
+        functions.append(f"{name}() {{{body}\n}}")
+    capture = tmp_path / "docker-args.txt"
+    harness = "\n".join([
+        "set -eu",
+        f"CAPTURE={capture}",
+        "docker() { printf '%s\\n' \"$*\" >> \"$CAPTURE\"; printf 'standalone-worker\\n'; }",
+        *functions,
+        "COMPOSE_PROJECT_NAME=standalone",
+        "scan_worker_containers >/dev/null",
+        "running_scan_worker_containers >/dev/null",
+    ])
+    result = subprocess.run(
+        ["bash", "-c", harness],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = capture.read_text().splitlines()
+    assert len(calls) == 2
+    for call in calls:
+        assert "label=com.docker.compose.project=standalone" in call
+        assert "label=com.docker.compose.service=worker" in call
+        assert "name=worker" not in call
 
 
 def test_scanner_sh_caps_automatic_mac_worker_fleet_for_laptop_restarts():
