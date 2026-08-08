@@ -455,8 +455,8 @@ function hasPersistedFindingRecord(finding: any, persistedKeys: Set<string>): bo
   return findingTrackingKeys(finding).some(key => persistedKeys.has(key))
 }
 
-// The scan already produces a CycloneDX dependency inventory and an AIBOM;
-// before this there was no way to get either out of ShakerScan.
+// Keep the engineer-facing AIBOM prominent; generic package-manager exports
+// remain available for downstream automation without dominating the UI.
 function ModelIntakeSbomDownload({ scanId }: { scanId: string }) {
   const [summary, setSummary] = useState<ModelIntakeSbomSummary | null>(null)
   const [busy, setBusy] = useState('')
@@ -499,53 +499,38 @@ function ModelIntakeSbomDownload({ scanId }: { scanId: string }) {
   return (
     <div className="text-right">
       <div className="flex flex-wrap items-center justify-end gap-2">
-        <button
-          type="button"
-          onClick={() => download('cyclonedx')}
-          disabled={busy === 'cyclonedx'}
-          className="inline-flex items-center gap-2 rounded border border-gray-600 px-3 py-1.5 text-sm text-gray-200 hover:bg-gray-700 disabled:opacity-50"
-        >
-          <Download className="h-4 w-4" />
-          {busy === 'cyclonedx' ? 'Exporting…' : `SBOM (CycloneDX ${summary.spec_version || '1.5'})`}
-        </button>
-        <button
-          type="button"
-          onClick={() => download('spdx')}
-          disabled={busy === 'spdx'}
-          className="inline-flex items-center gap-2 rounded border border-gray-600 px-3 py-1.5 text-sm text-gray-200 hover:bg-gray-700 disabled:opacity-50"
-        >
-          <Download className="h-4 w-4" />
-          {busy === 'spdx' ? 'Exporting…' : 'SBOM (SPDX 2.3)'}
-        </button>
         {summary.aibom_available && (
           <button
             type="button"
             onClick={() => download('aibom')}
             disabled={busy === 'aibom'}
-            className="inline-flex items-center gap-2 rounded border border-gray-600 px-3 py-1.5 text-sm text-gray-200 hover:bg-gray-700 disabled:opacity-50"
+            className="inline-flex items-center gap-2 rounded border border-cyan-700 px-3 py-1.5 text-sm font-semibold text-cyan-200 hover:bg-cyan-950/50 disabled:opacity-50"
           >
             <Download className="h-4 w-4" />
             {busy === 'aibom' ? 'Exporting…' : 'AIBOM'}
           </button>
         )}
-        <button
-          type="button"
-          onClick={() => downloadLicense('license-bom')}
-          disabled={busy === 'license-bom'}
-          className="inline-flex items-center gap-2 rounded border border-gray-600 px-3 py-1.5 text-sm text-gray-200 hover:bg-gray-700 disabled:opacity-50"
-        >
-          <Download className="h-4 w-4" />
-          {busy === 'license-bom' ? 'Exporting…' : 'License BOM'}
-        </button>
-        <button
-          type="button"
-          onClick={() => downloadLicense('third-party-notices')}
-          disabled={busy === 'third-party-notices'}
-          className="inline-flex items-center gap-2 rounded border border-gray-600 px-3 py-1.5 text-sm text-gray-200 hover:bg-gray-700 disabled:opacity-50"
-        >
-          <Download className="h-4 w-4" />
-          {busy === 'third-party-notices' ? 'Exporting…' : 'Notices draft'}
-        </button>
+        <details className="rounded border border-gray-600 px-3 py-1.5 text-left text-sm text-gray-200">
+          <summary className="cursor-pointer select-none">More inventory exports</summary>
+          <div className="mt-3 grid gap-2">
+            <button type="button" onClick={() => download('cyclonedx')} disabled={busy === 'cyclonedx'} className="inline-flex items-center gap-2 rounded border border-gray-600 px-3 py-1.5 hover:bg-gray-700 disabled:opacity-50">
+              <Download className="h-4 w-4" />
+              {busy === 'cyclonedx' ? 'Exporting…' : `SBOM (CycloneDX ${summary.spec_version || '1.5'})`}
+            </button>
+            <button type="button" onClick={() => download('spdx')} disabled={busy === 'spdx'} className="inline-flex items-center gap-2 rounded border border-gray-600 px-3 py-1.5 hover:bg-gray-700 disabled:opacity-50">
+              <Download className="h-4 w-4" />
+              {busy === 'spdx' ? 'Exporting…' : 'SBOM (SPDX 2.3)'}
+            </button>
+            <button type="button" onClick={() => downloadLicense('license-bom')} disabled={busy === 'license-bom'} className="inline-flex items-center gap-2 rounded border border-gray-600 px-3 py-1.5 hover:bg-gray-700 disabled:opacity-50">
+              <Download className="h-4 w-4" />
+              {busy === 'license-bom' ? 'Exporting…' : 'License BOM'}
+            </button>
+            <button type="button" onClick={() => downloadLicense('third-party-notices')} disabled={busy === 'third-party-notices'} className="inline-flex items-center gap-2 rounded border border-gray-600 px-3 py-1.5 hover:bg-gray-700 disabled:opacity-50">
+              <Download className="h-4 w-4" />
+              {busy === 'third-party-notices' ? 'Exporting…' : 'Notices draft'}
+            </button>
+          </div>
+        </details>
       </div>
       <div className={`mt-1 text-xs ${thin ? 'text-yellow-300' : 'text-gray-500'}`}>
         {summary.ai_component_count ?? 1} model-system component{summary.ai_component_count === 1 ? '' : 's'} · {' '}

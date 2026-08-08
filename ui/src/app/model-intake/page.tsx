@@ -1471,7 +1471,8 @@ function ModelIntakeSettingsContent() {
           </div>
           <p className="mt-1 text-sm text-gray-400">
             Paste one Hugging Face link and click Start. ShakerScan pins the revision, acquires and hashes the complete
-            model repository, runs every applicable built-in scanner, creates SBOM/AIBOM outputs, performs Firecracker
+            model repository, derives the exact inference runtime, runs every applicable scanner, creates the technical
+            report and AIBOM, performs Firecracker
             calibration and repeat inference, freezes the evidence, and prepares one technical report. The result clearly
             separates verified checks, issues to fix, and deployment follow-up.
           </p>
@@ -1513,9 +1514,9 @@ function ModelIntakeSettingsContent() {
         </div>
         <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-xs text-gray-500">
           <span>Complete artifact + repository</span>
-          <span>ModelScan, Fickling, Semgrep, Trivy</span>
+          <span>ModelScan, Fickling, Semgrep, Trivy, OSV, pip-audit</span>
           <span>Firecracker load + repeat inference</span>
-          <span>SBOM, AIBOM, License BOM, notices draft, JSON, HTML, SARIF</span>
+          <span>Clear HTML report + AIBOM, with machine exports when needed</span>
         </div>
         {runnerReadiness === null && (
           <div className="mt-4 flex items-center gap-2 rounded-lg border border-gray-800 bg-gray-900/50 p-3 text-sm text-gray-400">
@@ -1666,42 +1667,49 @@ function ModelIntakeSettingsContent() {
                     </details>
                   )}
                   <div className="mt-3 flex flex-wrap gap-2">
-                    <Link href={`/scans/${review.scan_id}`} className="rounded border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800">Static scan details</Link>
-                    {review.submission_id && (['cyclonedx', 'spdx', 'aibom'] as const).map((format) => (
+                    {review.submission_id && (
                       <button
-                        key={format}
                         type="button"
-                        onClick={() => exportAutomaticBom(review.scan_id, format)}
-                        disabled={automaticDownload === `${review.scan_id}:${format}`}
-                        className="rounded border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50"
+                        onClick={() => exportAutomaticReport(review.id, 'html')}
+                        disabled={automaticDownload === `${review.id}:html`}
+                        className="rounded bg-cyan-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-cyan-600 disabled:opacity-50"
                       >
-                        {automaticDownload === `${review.scan_id}:${format}` ? 'Preparing…' : format === 'aibom' ? 'AIBOM' : `${format === 'cyclonedx' ? 'CycloneDX' : 'SPDX'} SBOM`}
+                        {automaticDownload === `${review.id}:html` ? 'Preparing…' : 'HTML report'}
                       </button>
-                    ))}
-                    {review.submission_id && (['license-bom', 'third-party-notices'] as const).map((format) => (
+                    )}
+                    {review.submission_id && (
                       <button
-                        key={format}
                         type="button"
-                        onClick={() => exportAutomaticLicenseArtifact(review.scan_id, format)}
-                        disabled={automaticDownload === `${review.scan_id}:${format}`}
-                        className="rounded border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50"
+                        onClick={() => exportAutomaticBom(review.scan_id, 'aibom')}
+                        disabled={automaticDownload === `${review.scan_id}:aibom`}
+                        className="rounded border border-cyan-700 px-3 py-1.5 text-xs font-semibold text-cyan-200 hover:bg-cyan-950/50 disabled:opacity-50"
                       >
-                        {automaticDownload === `${review.scan_id}:${format}`
-                          ? 'Preparing…'
-                          : format === 'license-bom' ? 'License BOM' : 'Notices draft'}
+                        {automaticDownload === `${review.scan_id}:aibom` ? 'Preparing…' : 'AIBOM'}
                       </button>
-                    ))}
-                    {review.submission_id && (['json', 'html', 'sarif'] as const).map((format) => (
-                      <button
-                        key={format}
-                        type="button"
-                        onClick={() => exportAutomaticReport(review.id, format)}
-                        disabled={automaticDownload === `${review.id}:${format}`}
-                        className="rounded border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50"
-                      >
-                        {automaticDownload === `${review.id}:${format}` ? 'Preparing…' : `${format.toUpperCase()} report`}
-                      </button>
-                    ))}
+                    )}
+                    {review.submission_id && (
+                      <details className="relative rounded border border-gray-700 px-3 py-1.5 text-xs text-gray-300">
+                        <summary className="cursor-pointer select-none">More exports</summary>
+                        <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                          <Link href={`/scans/${review.scan_id}`} className="rounded border border-gray-700 px-3 py-1.5 text-center hover:bg-gray-800">Static scan details</Link>
+                          {(['cyclonedx', 'spdx'] as const).map((format) => (
+                            <button key={format} type="button" onClick={() => exportAutomaticBom(review.scan_id, format)} disabled={automaticDownload === `${review.scan_id}:${format}`} className="rounded border border-gray-700 px-3 py-1.5 hover:bg-gray-800 disabled:opacity-50">
+                              {automaticDownload === `${review.scan_id}:${format}` ? 'Preparing…' : `${format === 'cyclonedx' ? 'CycloneDX' : 'SPDX'} SBOM`}
+                            </button>
+                          ))}
+                          {(['license-bom', 'third-party-notices'] as const).map((format) => (
+                            <button key={format} type="button" onClick={() => exportAutomaticLicenseArtifact(review.scan_id, format)} disabled={automaticDownload === `${review.scan_id}:${format}`} className="rounded border border-gray-700 px-3 py-1.5 hover:bg-gray-800 disabled:opacity-50">
+                              {automaticDownload === `${review.scan_id}:${format}` ? 'Preparing…' : format === 'license-bom' ? 'License BOM' : 'Notices draft'}
+                            </button>
+                          ))}
+                          {(['json', 'sarif'] as const).map((format) => (
+                            <button key={format} type="button" onClick={() => exportAutomaticReport(review.id, format)} disabled={automaticDownload === `${review.id}:${format}`} className="rounded border border-gray-700 px-3 py-1.5 hover:bg-gray-800 disabled:opacity-50">
+                              {automaticDownload === `${review.id}:${format}` ? 'Preparing…' : `${format.toUpperCase()} report`}
+                            </button>
+                          ))}
+                        </div>
+                      </details>
+                    )}
                   </div>
                 </div>
               )
