@@ -219,12 +219,14 @@ export function RunnerInstallCard({
 
   useEffect(() => { void refreshStage() }, [refreshStage])
   useEffect(() => {
-    // Only poll while there is something to watch, so an idle Status tab does
-    // not sit in a request loop.
-    if (!staging) return
+    // Keep the visible setup panel authoritative even if the initial POST
+    // response is lost to a component refresh or the API completes between
+    // polls. A closed panel still issues no background requests.
+    if (!open) return
+    void refreshStage()
     const timer = setInterval(() => { void refreshStage() }, 3000)
     return () => clearInterval(timer)
-  }, [staging, refreshStage])
+  }, [open, refreshStage])
 
   async function beginStaging() {
     setStageError(null)

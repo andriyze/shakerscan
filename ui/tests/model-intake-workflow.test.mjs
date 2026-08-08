@@ -352,6 +352,10 @@ test('the microVM tier is offered as an opt-in install, not executed by the API'
   assert.doesNotMatch(shell, /\{!installed && plan && \(/)
   assert.match(shell, /Receipt signer/)
   assert.match(shell, /navigator\.clipboard\.writeText\(command\)/)
+  // While the operator is watching setup, reconcile with the durable staging
+  // state even if the initial POST response or one timer tick was missed.
+  assert.match(shell, /if \(!open\) return/)
+  assert.match(shell, /setInterval\(\(\) => \{ void refreshStage\(\) \}, 3000\)/)
   // An unsupported host gets the reason, never an install button it cannot use.
   assert.match(shell, /plan\.supported/)
   assert.match(shell, /Every other Model Intake check is unaffected/)
