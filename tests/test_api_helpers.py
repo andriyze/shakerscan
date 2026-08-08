@@ -114,6 +114,20 @@ def test_worker_capacity_defaults_to_five_below_sixteen_gb(monkeypatch):
     assert api_module._compute_max_allowed_workers() == 5
 
 
+def test_stale_scan_cleanup_normalizes_raw_redis_job_replies():
+    scan_id = "11111111-1111-4111-8111-111111111111"
+    decoded = api_module._decode_redis_hash({
+        b"scan_id": scan_id.encode(),
+        b"heartbeat": b"2026-08-08T06:00:00Z",
+    })
+
+    assert decoded == {
+        "scan_id": scan_id,
+        "heartbeat": "2026-08-08T06:00:00Z",
+    }
+    assert api_module._redis_text(f"job:{scan_id}".encode()).endswith(scan_id)
+
+
 def _test_jwt(**claims):
     encode = lambda value: base64.urlsafe_b64encode(json.dumps(value).encode()).decode().rstrip("=")
     return f"{encode({'alg': 'none'})}.{encode(claims)}.signature"

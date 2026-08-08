@@ -805,6 +805,19 @@ def get_redis():
     return redis.from_url(REDIS_URL, decode_responses=True)
 
 
+def _redis_text(value: Any) -> str:
+    """Normalize Redis replies across decoded clients, raw clients, and test doubles."""
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value).decode("utf-8", "replace")
+    return str(value)
+
+
+def _decode_redis_hash(raw: Any) -> dict[str, str]:
+    if not isinstance(raw, dict):
+        return {}
+    return {_redis_text(key): _redis_text(value) for key, value in raw.items()}
+
+
 def _asm_domain_rate_key(root_domain: str) -> str:
     return asm_inventory.domain_rate_key(root_domain)
 
@@ -2515,8 +2528,8 @@ async def cleanup_stale_scans(pool: asyncpg.Pool):
             heartbeat_found = False
 
             for key in job_keys:
-                job_data = r.hgetall(key)
-                if job_data.get('scan_id') == scan_id or key.endswith(scan_id):
+                job_data = _decode_redis_hash(r.hgetall(key))
+                if job_data.get('scan_id') == scan_id or _redis_text(key).endswith(scan_id):
                     heartbeat_str = job_data.get('heartbeat')
                     if heartbeat_str:
                         try:
@@ -2633,8 +2646,8 @@ async def cleanup_stale_scans(pool: asyncpg.Pool):
                 # Try to get last few log lines for debugging
                 last_logs = None
                 try:
-                    r = redis.from_url(REDIS_URL)
-                    log_lines = r.lrange(f"scan:{scan_id}:logs", -20, -1)
+                    log_redis = redis.from_url(REDIS_URL)
+                    log_lines = log_redis.lrange(f"scan:{scan_id}:logs", -20, -1)
                     if log_lines:
                         last_logs = "\n".join(line.decode() if isinstance(line, bytes) else line for line in log_lines)
                 except Exception:
