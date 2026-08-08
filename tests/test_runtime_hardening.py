@@ -139,10 +139,13 @@ def test_hosted_installer_packages_advertised_host_side_adapters():
 
 def test_prebuilt_runtime_defaults_to_the_downloaded_release_version():
     scanner = (ROOT / "scanner.sh").read_text()
+    installer = (ROOT / "install" / "index.sh").read_text()
 
     assert 'release_version="$(get_release_version)"' in scanner
     assert 'export SCANNER_IMAGE_TAG="$release_version"' in scanner
     assert 'release_version" != "dev"' in scanner
+    assert ': "\\${SCANNER_IMAGE_TAG:=$release_image_tag}"' in installer
+    assert '"$BIN_DIR/shakerscan" start -y' in installer
 
 
 def test_minimal_installed_research_adapter_has_all_imports(tmp_path):

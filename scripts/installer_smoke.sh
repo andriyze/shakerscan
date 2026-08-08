@@ -84,6 +84,10 @@ test -x "$SHAKERSCAN_HOME/scripts/build-model-intake-guest-rootfs.sh"
 test -x "$SHAKERSCAN_HOME/scripts/provision-model-intake-firecracker.sh"
 test -x "$SHAKERSCAN_HOME/.claude/hooks/session-start.sh"
 
+installed_version="$(tr -d '[:space:]' < "$SHAKERSCAN_HOME/VERSION")"
+grep -F ": \"\${SCANNER_IMAGE_TAG:=$installed_version}\"" "$SHAKERSCAN_BIN_DIR/shakerscan" >/dev/null
+grep -F 'export SCANNER_IMAGE_TAG' "$SHAKERSCAN_BIN_DIR/shakerscan" >/dev/null
+
 bash -n "$SHAKERSCAN_HOME/scanner.sh"
 bash -n "$SHAKERSCAN_HOME/scripts/build-model-intake-guest-rootfs.sh"
 bash -n "$SHAKERSCAN_HOME/scripts/provision-model-intake-firecracker.sh"

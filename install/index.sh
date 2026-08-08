@@ -167,10 +167,18 @@ install_path_profiles() {
 PATH_NEEDS_ACTIVATION=0
 
 install_command() {
+    release_image_tag="$(tr -d '[:space:]' < "$INSTALL_DIR/VERSION")"
+    case "$release_image_tag" in
+        ""|*[!A-Za-z0-9._-]*)
+            fail "downloaded VERSION is not a safe Docker image tag"
+            ;;
+    esac
     mkdir -p "$BIN_DIR"
     launcher="$BIN_DIR/shakerscan"
     cat > "$launcher" <<EOF
 #!/bin/sh
+: "\${SCANNER_IMAGE_TAG:=$release_image_tag}"
+export SCANNER_IMAGE_TAG
 exec "$INSTALL_DIR/scanner.sh" "\$@"
 EOF
     chmod +x "$launcher"
@@ -354,9 +362,9 @@ say ""
 cd "$INSTALL_DIR"
 start_rc=0
 if [ "$REMOTE_ACCESS" = "1" ]; then
-    bash "$INSTALL_DIR/scanner.sh" start -y --remote || start_rc=$?
+    "$BIN_DIR/shakerscan" start -y --remote || start_rc=$?
 else
-    bash "$INSTALL_DIR/scanner.sh" start -y || start_rc=$?
+    "$BIN_DIR/shakerscan" start -y || start_rc=$?
 fi
 
 if [ "$start_rc" -ne 0 ]; then
