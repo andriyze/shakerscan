@@ -2313,11 +2313,32 @@ submit_scan() {
     echo "View progress at: $(ui_base_url)/scans/$scan_id"
 }
 
+build_local_scanner_family() {
+    local no_cache="${1:-}"
+    local worker_image_id
+    local sandbox_image="${MODEL_INTAKE_SANDBOX_IMAGE:-shakerscan-model-intake-sandbox:local}"
+
+    # worker and model-intake-sandbox intentionally use the exact same image.
+    # Building them as separate Compose targets duplicates a multi-gigabyte
+    # export and can fill otherwise-supported source-build hosts. Build the
+    # scanner runtime once, bind the sandbox tag to that exact image, then
+    # build the API variant (the only variant that adds the Docker CLI).
+    compose build $no_cache worker
+    worker_image_id="$(compose images -q worker)"
+    if ! [[ "$worker_image_id" =~ ^(sha256:)?[0-9a-f]{64}$ ]]; then
+        echo -e "${RED}Error: could not resolve the newly built worker image.${NC}"
+        return 1
+    fi
+    docker image tag "$worker_image_id" "$sandbox_image"
+    compose build $no_cache api
+}
+
 build_images() {
     prepare_runtime_files
     set_build_env
     echo -e "${GREEN}Building Docker images...${NC}"
-    compose build
+    build_local_scanner_family
+    compose build ui model-intake-signer
     printf "local\n" > "$LOCAL_BUILD_MARKER"
     echo -e "${GREEN}Build complete${NC}"
     echo -e "${BLUE}Local-build mode recorded. Use './scanner.sh start' or './scanner.sh restart' to run these local images.${NC}"
@@ -2373,10 +2394,13 @@ rebuild_images() {
 
     existing_workers="$(running_scan_worker_count)"
 
-    if [ -n "$SERVICES" ]; then
-        compose build $NO_CACHE $SERVICES
+    if [ "$SERVICES" = "ui" ]; then
+        compose build $NO_CACHE ui
+    elif [ "$SERVICES" = "api worker" ]; then
+        build_local_scanner_family "$NO_CACHE"
     else
-        compose build $NO_CACHE
+        build_local_scanner_family "$NO_CACHE"
+        compose build $NO_CACHE ui model-intake-signer
     fi
 
     printf "local\n" > "$LOCAL_BUILD_MARKER"

@@ -333,6 +333,29 @@ def test_scanner_sh_records_local_build_mode_after_builds():
     assert "restart --prebuilt" in script
 
 
+def test_scanner_sh_builds_shared_worker_and_intake_sandbox_image_once():
+    script = (ROOT / "scanner.sh").read_text()
+    helper = script.split("build_local_scanner_family() {", 1)[1].split("\n}", 1)[0]
+    build_body = script.split("build_images() {", 1)[1].split("\n}", 1)[0]
+    rebuild_body = script.split("rebuild_images() {", 1)[1].split("\n}", 1)[0]
+
+    # Both services intentionally use the same scanner/Dockerfile without
+    # build arguments. Exporting each Compose target separately duplicates a
+    # multi-gigabyte image and can exhaust supported source-build hosts.
+    assert "compose build $no_cache worker" in helper
+    assert 'worker_image_id="$(compose images -q worker)"' in helper
+    assert 'docker image tag "$worker_image_id" "$sandbox_image"' in helper
+    assert "compose build $no_cache api" in helper
+    assert "compose build $no_cache model-intake-sandbox" not in helper
+
+    assert "build_local_scanner_family" in build_body
+    assert "compose build ui model-intake-signer" in build_body
+    assert "compose build\n" not in build_body
+    assert 'elif [ "$SERVICES" = "api worker" ]' in rebuild_body
+    assert 'build_local_scanner_family "$NO_CACHE"' in rebuild_body
+    assert "compose build $NO_CACHE ui model-intake-signer" in rebuild_body
+
+
 def test_scanner_sh_local_build_marker_controls_default_runtime_mode():
     script = (ROOT / "scanner.sh").read_text()
 
