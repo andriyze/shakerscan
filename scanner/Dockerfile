@@ -171,6 +171,9 @@ RUN pip install --no-cache-dir --break-system-packages --ignore-installed --requ
 # environments. Their dependency graphs cannot alter the API/worker runtime.
 COPY scanner/model_intake_tools /opt/model-intake-locks
 COPY runner/guest/requirements.lock /opt/model-intake-locks/firecracker-runtime.lock
+COPY runner/guest/guest_worker.py /opt/model-intake-locks/firecracker-guest-worker.py
+COPY runner/guest/guest-init /opt/model-intake-locks/firecracker-guest-init
+COPY runner/guest/Dockerfile /opt/model-intake-locks/firecracker-guest.Dockerfile
 RUN set -eu; \
     for tool in modelscan fickling semgrep safetensors pip-audit; do \
       python3 -m venv "/opt/model-intake-tools/${tool}"; \

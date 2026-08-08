@@ -73,6 +73,9 @@ def source_file_map(workspace_root: str = "/workspace") -> dict[str, str]:
         ("runtime/requirements.lock", scanner_root / "requirements.lock"),
         ("runtime/entrypoint.sh", scanner_root / "entrypoint.sh"),
         ("model_intake_locks/firecracker-runtime.lock", root / "runner" / "guest" / "requirements.lock"),
+        ("model_intake_locks/firecracker-guest-worker.py", root / "runner" / "guest" / "guest_worker.py"),
+        ("model_intake_locks/firecracker-guest-init", root / "runner" / "guest" / "guest-init"),
+        ("model_intake_locks/firecracker-guest.Dockerfile", root / "runner" / "guest" / "Dockerfile"),
     )
     for logical_name, path in auxiliary:
         if path.is_file():
@@ -104,6 +107,9 @@ def runtime_file_map(
             ("runtime/requirements.lock", root / "requirements.lock"),
             ("runtime/entrypoint.sh", root / "entrypoint.sh"),
             ("model_intake_locks/firecracker-runtime.lock", lock_root / "firecracker-runtime.lock"),
+            ("model_intake_locks/firecracker-guest-worker.py", lock_root / "firecracker-guest-worker.py"),
+            ("model_intake_locks/firecracker-guest-init", lock_root / "firecracker-guest-init"),
+            ("model_intake_locks/firecracker-guest.Dockerfile", lock_root / "firecracker-guest.Dockerfile"),
         )
         for logical_name, path in auxiliary:
             if path.is_file():
