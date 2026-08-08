@@ -648,6 +648,43 @@ def _osv_findings(parsed: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     }
 
 
+def _osv_input_packages(path: Path) -> set[tuple[str, str]]:
+    """Return the exact package subjects presented to OSV Scanner.
+
+    OSV Scanner v2 emits package rows for matches, not a complete inventory of
+    clean inputs.  Consequently, an empty ``results`` array can be a valid
+    clean result and must not be interpreted as "zero packages scanned".  The
+    generated lockfile is the authoritative coverage denominator.
+    """
+    if not path.is_file() or path.is_symlink() or path.stat().st_size > 5_000_000:
+        raise ValueError("osv_input_missing_or_oversized")
+    try:
+        parsed = json.loads(path.read_text("utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ValueError("osv_input_invalid_json") from exc
+    results = parsed.get("results") if isinstance(parsed, dict) else None
+    if not isinstance(results, list):
+        raise ValueError("osv_input_results_missing")
+    packages: set[tuple[str, str]] = set()
+    for result in results:
+        package_items = result.get("packages") if isinstance(result, dict) else None
+        if not isinstance(package_items, list):
+            raise ValueError("osv_input_packages_missing")
+        for package_item in package_items:
+            package = package_item.get("package") if isinstance(package_item, dict) else None
+            if not isinstance(package, dict):
+                raise ValueError("osv_input_package_invalid")
+            name = str(package.get("name") or "").strip()
+            version = str(package.get("version") or "").strip()
+            ecosystem = str(package.get("ecosystem") or "").strip()
+            if not name or not version or ecosystem != "PyPI":
+                raise ValueError("osv_input_package_identity_incomplete")
+            packages.add((_normalized_distribution_name(name), version))
+    if not packages:
+        raise ValueError("osv_input_has_no_packages")
+    return packages
+
+
 def _pip_audit_findings(parsed: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     dependencies = parsed.get("dependencies") if isinstance(parsed, dict) else None
     if not isinstance(dependencies, list):
@@ -1117,6 +1154,32 @@ def run_external_scanner(spec: ScannerSpec, subject_path: Path, subject: dict[st
                 )
             except Exception as exc:
                 status, findings, summary = "CRASHED", [], {"error": f"parser_{type(exc).__name__}: {exc}"}
+        if spec.name == "osv-scanner" and status not in {"CRASHED", "INCOMPLETE"}:
+            try:
+                input_path = subject_path / "osv-scanner.json"
+                input_packages = _osv_input_packages(input_path)
+                returned_packages = int(summary.get("packages_scanned") or 0)
+                unexpected_findings = [
+                    item for item in findings
+                    if (
+                        _normalized_distribution_name(str(item.get("package") or "")),
+                        str(item.get("installed_version") or ""),
+                    ) not in input_packages
+                ]
+                summary["packages_returned_with_results"] = returned_packages
+                summary["packages_scanned"] = len(input_packages)
+                summary["input_sha256"] = _hash_path(input_path)
+                if returned_packages > len(input_packages) or unexpected_findings:
+                    status, findings, summary = "INCOMPLETE", [], {
+                        **summary,
+                        "error": "osv_output_subject_mismatch",
+                        "unexpected_finding_count": len(unexpected_findings),
+                    }
+            except (OSError, TypeError, ValueError) as exc:
+                status, findings, summary = "INCOMPLETE", [], {
+                    **summary,
+                    "error": str(exc),
+                }
         return _scanner_result(
             name=spec.name,
             version=version,

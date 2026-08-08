@@ -78,6 +78,76 @@ def test_osv_and_pip_audit_normalize_exact_package_advisories():
     assert summary["severity_available"] is False
 
 
+def test_osv_clean_result_uses_generated_input_as_coverage_denominator(monkeypatch, tmp_path):
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    (evidence / "osv-scanner.json").write_text(json.dumps({
+        "results": [{
+            "source": {"path": "fixture", "type": "test"},
+            "packages": [
+                {"package": {"name": "requests", "version": "2.32.0", "ecosystem": "PyPI"}},
+                {"package": {"name": "urllib3", "version": "2.6.0", "ecosystem": "PyPI"}},
+            ],
+        }],
+    }))
+    monkeypatch.setattr(scanners, "_scanner_material_state", lambda _spec: {
+        "ready": True, "rules": None, "database": {"sha256": "d" * 64},
+    })
+    monkeypatch.setattr(scanners.shutil, "which", lambda _name: "/opt/tools/osv-scanner")
+    monkeypatch.setattr(scanners, "_tool_version", lambda *_args: "2.5.0")
+    monkeypatch.setattr(scanners, "_prepare_unprivileged_paths", lambda *_args: None)
+    monkeypatch.setattr(scanners, "_bounded_command", lambda executable, args: [executable, *args])
+
+    class Completed:
+        returncode = 0
+
+    def fake_run(_argv, **kwargs):
+        kwargs["stdout"].write(b'{"results":[]}')
+        return Completed()
+
+    monkeypatch.setattr(scanners.subprocess, "run", fake_run)
+    spec = next(item for item in scanners.EXTERNAL_SCANNERS if item.name == "osv-scanner")
+
+    result = scanners.run_external_scanner(
+        spec, evidence, {"kind": "dependency_evidence", "digest": "sha256:" + "a" * 64},
+    )
+
+    assert result["execution"]["status"] == "PASS"
+    assert result["summary"]["packages_scanned"] == 2
+    assert result["summary"]["packages_returned_with_results"] == 0
+    assert len(result["summary"]["input_sha256"]) == 64
+
+
+def test_osv_zero_package_input_fails_closed(monkeypatch, tmp_path):
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    (evidence / "osv-scanner.json").write_text('{"results":[{"packages":[]}]}')
+    monkeypatch.setattr(scanners, "_scanner_material_state", lambda _spec: {
+        "ready": True, "rules": None, "database": {"sha256": "d" * 64},
+    })
+    monkeypatch.setattr(scanners.shutil, "which", lambda _name: "/opt/tools/osv-scanner")
+    monkeypatch.setattr(scanners, "_tool_version", lambda *_args: "2.5.0")
+    monkeypatch.setattr(scanners, "_prepare_unprivileged_paths", lambda *_args: None)
+    monkeypatch.setattr(scanners, "_bounded_command", lambda executable, args: [executable, *args])
+
+    class Completed:
+        returncode = 0
+
+    def fake_run(_argv, **kwargs):
+        kwargs["stdout"].write(b'{"results":[]}')
+        return Completed()
+
+    monkeypatch.setattr(scanners.subprocess, "run", fake_run)
+    spec = next(item for item in scanners.EXTERNAL_SCANNERS if item.name == "osv-scanner")
+
+    result = scanners.run_external_scanner(
+        spec, evidence, {"kind": "dependency_evidence", "digest": "sha256:" + "b" * 64},
+    )
+
+    assert result["execution"]["status"] == "INCOMPLETE"
+    assert result["summary"]["error"] == "osv_input_has_no_packages"
+
+
 def test_trivy_license_adapter_preserves_inventory_and_requires_review():
     trivy = {"Results": [{
         "Target": "/snapshot/LICENSE.custom",
