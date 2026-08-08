@@ -1500,7 +1500,7 @@ function ModelIntakeSettingsContent() {
                 setResolverResult(null)
               }}
               className={inputClass}
-              placeholder="https://huggingface.co/nomic-ai/CodeRankEmbed"
+              placeholder="https://huggingface.co/organization/model-name"
             />
           </label>
           <label className={fieldClass}>

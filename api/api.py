@@ -16397,12 +16397,12 @@ async def _model_intake_auto_memory_mib(
     )
     artifact_mib = max(0, math.ceil(int(size or 0) / (1024 * 1024)))
     # Conversion and embedding equivalence transiently materialize a state
-    # dictionary, model parameters, and inference buffers.  Three artifact
-    # sizes proved insufficient for a 2.63 GB CodeSage model under the real
+    # dictionary, model parameters, and inference buffers. Smaller defaults
+    # proved insufficient for multi-gigabyte model repositories under the real
     # cgroup: Firecracker was OOM-killed before it could finalize evidence.
     # Four artifact sizes plus a fixed 3 GiB envelope remains deterministic.
     # The 13 GiB default keeps a two-GiB-plus host reserve on a 16 GiB runner
-    # while giving the 2.63 GB CodeSage conversion meaningful headroom.
+    # while giving large unsafe-format conversions meaningful headroom.
     requested = max(4096, 3072 + artifact_mib * 4)
     rounded = int(math.ceil(requested / 512) * 512)
     configured_cap = max(4096, min(262144, int(os.getenv(
