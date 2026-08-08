@@ -1230,7 +1230,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Scanner wrapper commands | 27 | `scanner.sh` |
 | Make targets | 12 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
-| Runtime environment keys | 310 | Python sources + Compose manifests |
+| Runtime environment keys | 312 | Python sources + Compose manifests |
 | Scanner modules | 99 | `scanner/scanner_tools/` |
 | UI pages | 31 | `ui/src/app/` |
 | Skills | 6 | `skills/` |
@@ -2003,6 +2003,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `MODEL_INTAKE_ALLOW_LEGACY_V1_VERIFICATION` | `api/api.py` |
 | `MODEL_INTAKE_ALLOW_LOCAL_FILES` | `scanner/scanner_tools/model_intake.py` |
 | `MODEL_INTAKE_ALLOW_PRIVATE_NETWORKS` | `scanner/scanner_tools/model_intake_acquisition.py` |
+| `MODEL_INTAKE_AUTO_MAX_MEMORY_MIB` | `api/api.py` |
 | `MODEL_INTAKE_CONTROL_PLANE_SIGNING_KEY_PEM` | `api/model_intake_signer_service.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_DEPLOYMENT_VERIFIER_TOKEN` | `api/model_intake_admission_webhook.py` |
 | `MODEL_INTAKE_OCI_REGISTRY_REPOSITORY` | `scripts/model_intake_push_oci.py` |
@@ -2125,6 +2126,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_MCP_ALLOW_REMOTE_API` | `scripts/shakerscan_mcp.py` |
 | `SHAKERSCAN_MCP_TIMEOUT_SECONDS` | `scripts/shakerscan_mcp.py` |
 | `SHAKERSCAN_MODEL_INTAKE_ADAPTER_SELF_TEST` | `scanner/scanner_tools/model_intake_scanners.py` |
+| `SHAKERSCAN_MODEL_INTAKE_RUNTIME_LOCK` | `scanner/scanner_tools/model_intake_scanners.py` |
 | `SHAKERSCAN_NODE_ID` | `api/artifact_storage.py`, `api/broker_worker.py`, `api/fleet_worker_entrypoint.py`, `api/worker.py` |
 | `SHAKERSCAN_NODE_LABELS_JSON` | `api/worker.py` |
 | `SHAKERSCAN_PAYLOAD_PACK_MAX` | `scanner/scanner_tools/active_checks.py` |

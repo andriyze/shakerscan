@@ -112,7 +112,7 @@ historical analysis or a rejected alternative, not backlog.
 Implement and harden:
 
 1. One authoritative admission workflow; the legacy scan path remains preflight/technical review only.
-2. The existing ModelScan, Fickling, Semgrep, and Trivy adapters plus ShakerScan's current built-in archive,
+2. The ModelScan, Fickling, Semgrep, Trivy, OSV Scanner, and pip-audit adapters plus ShakerScan's current built-in archive,
    pickle, Python AST, secret/malware-rule, SBOM, dependency, native-binary, safetensors, ONNX, and GGUF checks.
 3. One production execution backend: Firecracker with KVM and jailer. There is no production fallback. The
    executable host controller, fixed guest, provisioning/build scripts, and signed measured-telemetry path
@@ -134,7 +134,7 @@ Implement and harden:
 
 Do not implement:
 
-- additional scanners or scanner plug-ins, including CodeQL, Syft, Grype, OSV-Scanner, pip-audit, ClamAV,
+- additional scanners or scanner plug-ins beyond the six approved adapters, including CodeQL, Syft, Grype, ClamAV,
   Gitleaks, YARA, TruffleHog, Bandit, or ScanCode/ORT;
 - OPA or another policy engine;
 - Sigstore, Cosign, Rekor, or a new transparency-log service;
@@ -253,20 +253,24 @@ Implemented controls include:
 - Generated evidence contracts for pickle semantics, Python AST, secrets, malware rules, CycloneDX SBOM,
   dependencies/SCA adapters, native binaries, and licenses. Caller assertions remain `declared`; they are not
   silently promoted to generated evidence.
-- Normalized ModelScan, Semgrep, Fickling, and Trivy adapters. Missing binaries, bad schemas, empty output,
+- Normalized ModelScan, Semgrep, Fickling, Trivy, OSV Scanner, and pip-audit adapters. Missing binaries, bad schemas, empty output,
   timeout, crash, incomplete execution, explicit omission, `NOT_RUN`, and `REVIEW_REQUIRED` are non-pass when
-  required. ModelScan 0.8.8, Semgrep 1.172.0, Fickling 0.1.12, and Trivy 0.72.0 are bundled in isolated
-  hash-locked environments; Trivy's vulnerability and policy data is captured during the image build for
-  offline scans. No additional external scanner adapter will be added under this roadmap.
+  required. ModelScan 0.8.8, Semgrep 1.172.0, Fickling 0.1.12, Trivy 0.73.0, OSV Scanner 2.5.0,
+  and pip-audit 2.10.1 are bundled in isolated hash-locked environments; Trivy's vulnerability and policy data is captured during the image build for
+  offline scans. OSV Scanner uses a packaged PyPI advisory database. pip-audit never resolves or installs
+  repository-authored input: the release build audits the exact hash-locked Firecracker runtime and the
+  runtime adapter returns that result only when the scan-local component fingerprint matches. No further
+  external scanner adapter will be added under this roadmap.
 - The core bundle is selected from immutable repository facts, never a model-name allowlist: ModelScan for
   supported serialized artifacts, Fickling for raw pickle artifacts it can parse reliably, Semgrep for
-  repository code/config, and Trivy for every complete repository snapshot. Trivy dependency/CVE evidence is
+  repository code/config, Trivy for every complete repository snapshot and resolved runtime, OSV Scanner for
+  exact resolved Python components, and pip-audit for the matching fixed runtime profile. Trivy dependency/CVE evidence is
   meaningful when manifests or packages exist; its full source/text license mode still applies to a complete
   repository without a dependency manifest. Fickling is explicitly
   `NOT_APPLICABLE` to PyTorch ZIP checkpoints because extracting their ordinary tensor `data.pkl` stream
   produces high-volume reconstruction false positives; ModelScan and ShakerScan's archive-aware pickle
-  opcode analysis cover that family. Every worker image build runs all four on deterministic malicious
-  fixtures and fails if any tool cannot generate and normalize its expected finding.
+  opcode analysis cover that family. Every worker image build runs all six on deterministic malicious or
+  exact-runtime fixtures and fails if any tool cannot generate and normalize its expected result.
 - Atomic detached-signature trust decisions and offline DSSE/in-toto subject verification. Explicit key pins
   are enforced as an allowlist and cannot be widened by request-supplied keys. Transparency-log policy fails
   closed when no locally verified inclusion/checkpoint proof exists; native transparency integration is out
@@ -454,7 +458,7 @@ timed-out, crashed, unsupported, or stale check remains visible and cannot silen
 | `MI-05` | Unsafe serialization | ShakerScan `pickletools` semantic callable/opcode analysis, ModelScan for supported serialized models, and Fickling for applicable raw pickle | Pickle/serialized artifacts; expected framework reconstruction is distinguished from a proven dangerous callable but can still violate format policy |
 | `MI-06` | Repository source/configuration security | Built-in Python AST analysis plus the versioned Model Intake Semgrep ruleset | Code/config present; parse failure, large-file omission, rules staleness, timeout, or unresolved findings remain visible |
 | `MI-07` | Secrets, malware indicators, and native binaries | Built-in secret/malware rules, file-type facts, and native-binary inventory; Trivy adds applicable secret/misconfiguration evidence | Complete subject material exists; this is bounded detection, not a guarantee that no novel malware exists |
-| `MI-08` | SBOM, dependencies, CVEs, and misconfiguration | Native CycloneDX SBOM/dependency facts plus offline Trivy vulnerability, secret, and misconfiguration results with database identity/freshness | Trivy scans every complete repository; package/CVE coverage is applicable only when package or manifest facts exist, and missing lock/runtime identity remains visible |
+| `MI-08` | SBOM, dependencies, CVEs, and misconfiguration | Native AST import inference maps repository code and model-card examples to the exact hash-locked Firecracker runtime; Trivy scans repository plus synthesized exact requirements, OSV Scanner checks the packaged PyPI advisory database, and build-captured pip-audit independently checks the identical runtime fingerprint | No model-authored requirement is installed or resolved. Required imports absent from the fixed runtime are `INCOMPLETE`; model-card-only gaps require review. Reports deduplicate aliases while retaining scanner agreement, exact package/version, fixes, database identities, and freshness |
 | `MI-09` | License evidence, policy, and notices | Trivy `--license-full`, native fingerprints, publisher/dependency/dataset/use-term reconciliation, deterministic corporate policy, SPDX declarations, License BOM, and Third-Party Notices draft | Every complete repository; PASS means no automated legal-review trigger was detected, never legal approval. Unknown/custom/reciprocal/dataset/use-dependent terms require a distinct legal review |
 | `MI-10` | Provenance, signature, attestation, lineage, and AIBOM | Exact digest verification, configured signer/trust pins, offline DSSE/in-toto subject checks, model/base/dataset declarations, and CycloneDX AI/ML metadata | Required by policy or supplied by source; presence is not trust, and publisher declarations remain declared evidence |
 | `MI-11` | Exact model runtime in Firecracker | Fixed no-shell guest executes import, tokenizer, model construction/load, warmup, inference, and teardown for the exact deployment bundle | Controlled admission requiring runtime qualification; KVM or loader unavailability is `INCOMPLETE`, with no fallback |
@@ -465,7 +469,7 @@ timed-out, crashed, unsupported, or stale check remains visible and cannot silen
 | `MI-16` | Vector-store and knowledge-graph security | Trusted data-plane observations cover ACL leakage, tenant/graph/cache boundaries, poisoning, deletion, and model/index compatibility | Intended integration is available; model microVM success does not imply data-plane success |
 | `MI-17` | Evidence, policy, approval, and deployment admission | Freeze exact evidence; verify freshness/subject binding; identity-separated approvals; deterministic server policy; isolated signing; active-registry and exact-component parity; reassessment/revocation | Controlled workflow only; a preflight scan cannot authorize deployment |
 
-The external scanner set remains frozen to **ModelScan, Fickling, Semgrep, and Trivy**. ShakerScan does not
+The external scanner set is now frozen to **ModelScan, Fickling, Semgrep, Trivy, OSV Scanner, and pip-audit**. ShakerScan does not
 claim that installing a binary proves applicability, freshness, execution, or coverage. The check catalog is
 included in JSON/UI/HTML only as a capability reference; the per-submission control and scanner evidence is
 the authority for what actually ran. This is consistent with [Hugging Face's pickle guidance](https://huggingface.co/docs/hub/security-pickle),
@@ -548,7 +552,7 @@ telemetry stream by digest instead of flooding the executive report with repetit
 | SSRF-resistant acquisition and complete quarantine | Implemented | Available when complete acquisition is enabled and storage is configured; strict saved profiles force it | Maintain provider/redirect contract tests and controlled egress |
 | Repository manifests, archives, custom code, safe-format checks | Implemented mechanism | Provider-authoritative pinned HF inventory, containment, recursive archive/config inspection, and explicit truncation are enforced | Other providers remain artifact-only unless they later supply an equivalent authoritative snapshot API |
 | Built-in semantic, source, secret, malware-rule, SBOM, binary, and license checks | Implemented | Yes | Improve detection depth and rule updates |
-| ModelScan, Semgrep, Fickling, and Trivy core adapters | Packaged and self-testing | **Yes in a newly rebuilt source worker image.** Hash-locked Python environments, checksum-pinned Trivy, offline DB/policy cache, bounded execution, strict parsers, rule/DB digests, age limits, and malicious-fixture receipts are exposed by `/model-intake/scanners/readiness` | Operate recurring image/data refresh and reassessment within the enforced age limits |
+| ModelScan, Semgrep, Fickling, Trivy, OSV Scanner, and pip-audit core adapters | Packaged and self-testing | **Yes in a newly rebuilt source worker image.** Hash-locked Python environments, checksum-pinned native scanners, offline DB/policy or exact-runtime audit caches, bounded execution, strict parsers, rule/DB digests, age limits, and malicious/vulnerable-fixture receipts are exposed by `/model-intake/scanners/readiness` | Operate recurring image/data refresh and reassessment within the enforced age limits |
 | Corporate license evidence and policy | Implemented with existing Trivy plus native reconciliation | Complete snapshots use Trivy full-license mode; scan/report/admission surfaces expose one outcome, reason codes, SPDX declarations, License BOM, notices draft, and legal-review role gate | Legal/release owners must complete exact notices and approve custom, reciprocal, dataset, intended-use, conflicting, or unknown terms |
 | Additional external scanner adapters | Out of scope | Existing unshipped compatibility contracts cannot satisfy policy | Do not package or expand them; remove them from presets and future-roadmap claims |
 | Isolated semantic sandbox | Implemented container boundary | Request/subject/evidence binding, isolation/seccomp gating, broker-worker service, and per-job limits are present | Treat it as bounded staging evidence, not a substitute for host-independent execution isolation |
@@ -562,6 +566,13 @@ telemetry stream by digest instead of flooding the executive report with repetit
 | Signed admission statement and lifecycle registry | Exact-bundle v2 control plane and isolated signer implemented | Workers emit only unsigned non-deployable candidates. The signer has a dedicated minimal hash-locked image, isolated internal network, separate least-privilege database role, shipped AWS KMS client, request idempotency lock, and initiating-operator audit identity. Frozen evidence, approvals, exact component verification, latest-manifest checks, and evidence-change invalidation are durable. | Prove production KMS rotation/failure paths and remaining revocation/recovery negative paths |
 | Saved Model Intake policy profiles | Implemented server-owned admission expansion | Admission uses the operator-selected server default; caller booleans/subsets/exceptions cannot weaken it; mutations require operator auth | Add organization-specific required scanner/runtime/benchmark fields |
 | Engineer-first summary and detailed report | Implemented across UI/JSON/HTML/SARIF with compatibility schema `model-intake-corporate-report/v2` | The first screen shows one result plus verified/attention/not-applicable groups. Licensing is summarized once. Admission-stage and organization items are excluded from technical failure counts and appear once in a collapsed deployment-follow-up appendix. The detailed section preserves enriched controls, scanner summaries, operation-versus-containment results, bounded Firecracker network/resource timelines, the evidence-backed 27-check catalog, and 14 owner/evidence follow-up items. Raw telemetry remains in signed evidence. | Add organization-specific policy/remediation text only when useful; it may not hide or relabel a non-pass |
+
+The automatic-review UI treats the printable HTML report and AIBOM as the two primary artifacts. CycloneDX,
+SPDX, License BOM, notices draft, machine JSON, and SARIF remain available under **More exports** for build,
+legal, or automation consumers. The HTML detailed section lists each derived inference import, its exact fixed
+runtime package/version, unresolved status, every reconciled known advisory, scanner agreement, and reported
+fix version. The AIBOM carries the same exact runtime components and vulnerability reconciliation rather than
+an empty placeholder inventory.
 | Deployment by exact approved digest | Pure v2 verifier, explicit observation endpoint, configured OCI publisher, and namespace/object-scoped Kubernetes webhook installer implemented | `oras` performs one fixed HTTPS registry copy and verifies the remote descriptor; cert-manager injects the webhook CA; immutable image configuration and rollout are validated. No live corporate registry/cluster acceptance has been run. | Run digest-variant, outage, expiry, revocation, and recovery acceptance against the organization-operated registry and cluster; add no other orchestrator |
 | Legal, privacy, data provenance, and risk acceptance | Recorded as governance evidence | Organization-dependent | Keep human-owned; enforce required owner, approval, scope, and expiry |
 
@@ -592,7 +603,7 @@ code defects, not operator inputs:
 | **P1** | Generated SBOM/malware evidence did not satisfy its own governance gates or bind snapshot digest | **Fixed** in `102cf94` | Generated evidence is eligible and snapshot malware evidence compares to snapshot subject |
 | **P1** | Attestation pins/transparency policy failed open and crypto-missing path could crash | **Fixed** in `84c5fd0` | Pin allowlist enforced, no-bundle transparency requirement blocks, imports fail cleanly |
 | **P1** | Sandbox peer absent from broker workers | **Fixed** in `de3bbe4` | Broker compose includes the same no-egress service |
-| **P1** | Third-party scanner binaries and databases are not shipped | **Core bundle fixed** in `f406f55` | ModelScan/Semgrep/Fickling/Trivy are pinned, packaged, offline-capable, bounded, and functionally self-tested; optional engines and recurring freshness/rebuild policy remain |
+| **P1** | Third-party scanner binaries and databases are not shipped | **Core bundle fixed and extended** | ModelScan/Semgrep/Fickling/Trivy/OSV Scanner/pip-audit are pinned, packaged, offline-capable, bounded, and functionally self-tested; optional engines remain out of scope and recurring freshness/rebuild policy remains operational work |
 | **P0** | Caller could choose/omit the admission policy and inject inline exceptions | **Fixed** in `df8df46` | Admission uses a server-owned profile; request exceptions are discarded; only durable approved unexpired exceptions are eligible; preflight cannot issue allow |
 | **P0** | Policy-profile mutations had no Model Intake operator boundary | **Fixed** in `df8df46` | Create/update/delete require operator auth; the UI supports an operator token held only in browser session storage |
 | **P1** | Broad pickle opcode/global rules called ordinary PyTorch state dictionaries malicious | **Fixed** in `0ee4aed` | Semantic classes distinguish proven dangerous callables, expected framework reconstruction, unknown review, and mere executable-format capability |
@@ -1089,11 +1100,13 @@ discipline as the model loader.
 
 ### 7.7 P1 — Generate SBOMs and perform SCA
 
-**Delivery status: built-in generation and packaged Trivy filesystem SCA are implemented; complete runtime
-construction and freshness enforcement remain.** Trivy 0.72.0 is checksum-pinned, its vulnerability and
-misconfiguration data is captured at image build, and runtime scans disable updates and external dependency
-lookups. No complementary SCA engine will be added. Complete locked-environment construction, freshness
-policy, and recurring database-driven Trivy rescans remain target work.
+**Delivery status: exact fixed-runtime construction plus packaged Trivy, OSV Scanner, and pip-audit evidence
+are implemented.** Trivy is checksum-pinned; its vulnerability and misconfiguration data is captured at
+image build. OSV Scanner is checksum-pinned and uses a packaged PyPI advisory snapshot. pip-audit runs during
+the release-image build against a synthesized, exact version list derived from the reviewed Firecracker lock;
+at scan time a no-network wrapper emits that result only for the identical component-set digest. None of the
+three tools installs or resolves model-authored requirements. Database age/digest and the runtime lock digest
+are evidence and reassessment inputs. Recurring image/database rebuild operations remain required.
 
 Model weights do not have CVEs in the same way as conventional packages. SCA applies to custom model code,
 Python packages, native libraries, base images, GPU runtimes, model servers, and supporting services.
@@ -1103,7 +1116,7 @@ The frozen tool set is:
 | Purpose | Primary tool | Complement | Required output |
 |---|---|---|---|
 | Repository/runtime SBOM | ShakerScan built-in generator | Trivy SBOM | CycloneDX JSON, subject digest, and generator identity |
-| Package vulnerability match | Trivy | ShakerScan dependency facts | Vulnerabilities with package evidence and DB identity/freshness |
+| Package vulnerability match | OSV Scanner | pip-audit and Trivy | Deduplicated advisories with exact package/version, aliases, severity source, fixes, scanner agreement, and DB identity/freshness |
 | Source/lock/container scan | Trivy | ShakerScan source/config checks | Vulnerability, secret, misconfiguration, and license results |
 | License inventory | ShakerScan built-in inventory | Trivy license scan | License expressions, files, and obligations |
 
@@ -1920,12 +1933,13 @@ Remaining operations:
 - Document object-store sizing, backup, tenant quotas, and cleanup for operators.
 - Run scheduled real-model acquisitions outside ordinary PR jobs.
 
-### Phase 2 — Generated static evidence — **scanner set frozen and product hardening complete**
+### Phase 2 — Generated static evidence — **six-adapter set frozen and product hardening complete**
 
 Delivered: built-in semantic/source/secret/malware/SBOM/SCA/binary/license checks; normalized fail-closed
-contracts and packaged execution for ModelScan, Semgrep, Fickling, and Trivy; evidence provenance and digest
+contracts and packaged execution for ModelScan, Semgrep, Fickling, Trivy, OSV Scanner, and pip-audit; evidence provenance and digest
 binding; hash-locked/checksum-pinned
-installation; offline Trivy data; bounded execution; readiness API/UI; and image-build malicious-fixture tests.
+installation; offline Trivy/OSV data and an exact-runtime pip-audit snapshot; bounded execution; readiness
+API/UI; and image-build malicious/exact-runtime fixture tests.
 
 Implemented hardening:
 
@@ -1972,10 +1986,10 @@ Implemented hardening:
   timed-out, incomplete, skipped, review-required, and warning results cannot satisfy a required scanner;
   a fact-derived `NOT_APPLICABLE` remains explicit and justified instead of becoming a fabricated pass.
 - **Implemented scanner-boundary freeze:** catalog, readiness, planning, and parsers expose only ModelScan,
-  Semgrep, Fickling, and Trivy. Legacy optional names are unknown required adapters and fail as `UNSUPPORTED`;
+  Semgrep, Fickling, Trivy, OSV Scanner, and pip-audit. Legacy optional names are unknown required adapters and fail as `UNSUPPORTED`;
   they cannot look installed or silently reduce coverage.
 
-Operator/corporate work: approve the four scanner versions and licenses, update the existing vulnerability
+Operator/corporate work: approve the six scanner versions and licenses, update the existing vulnerability
 and rule data, supply organization Semgrep rules where needed, and define severity/freshness/exception policy.
 
 ### Phase 3 — Disposable model execution and runtime telemetry — **implementation and reference-model KVM acceptance complete**
@@ -2309,7 +2323,7 @@ rebuilt branch on a Linux/KVM host; direct API calls and mocked browser tests do
 |---|---|---|
 | Automatic | `nomic-ai/CodeRankEmbed` / safetensors plus custom Python | Paste only the Hugging Face link, start once, observe durable progress through complete static acquisition and Firecracker runtime, then open the executive/detailed report and download JSON, HTML, SARIF, CycloneDX, SPDX, AIBOM, License BOM, and Third-Party Notices draft. Verify custom-code findings, known-answer result, network/resource result, license outcome, and remaining corporate controls are distinct. |
 | Automatic | `codesage/codesage-base-v2` / PyTorch `.bin` | Paste only the link. Verify unsafe serialization triggers the fixed conversion, exact target identity, tensor/numeric/embedding equivalence, strict target rescan, safe-loader runtime, and report wording that separates conversion correctness from containment. |
-| Automatic | `codesage/codesage-large-v2` / large PyTorch `.bin` | Exercise the same path under the 12 GiB envelope; verify complete 2.6 GB acquisition, conversion/runtime resource measurements, no hidden truncation, and an honest non-pass if the host cannot qualify it. |
+| Automatic | `codesage/codesage-large-v2` / large PyTorch `.bin` | Exercise the same path under the calculated 13 GiB envelope; verify complete 2.6 GB acquisition, conversion/runtime resource measurements, no hidden truncation, and an honest `INCOMPLETE` result before launch when the configured cap or KVM host reserve cannot qualify it. |
 | Automatic | `typeof/all-MiniLM-L6-v2-onnx` / ONNX | Verify the exact `model.onnx` is selected and the fixed offline CPU ONNX Runtime profile—not Transformers weight loading—performs tokenizer, graph execution, pooled embedding, repeat known-answer, and telemetry phases. |
 | Automatic | A small pinned public GGUF repository | Verify static GGUF structure and generic scanner/SBOM artifacts are useful, while runtime qualification is clearly `INCOMPLETE` because no GGUF loader is implemented. No four-byte/header check may appear as end-to-end approval. |
 | Advanced/manual | At least one safetensors/custom-code model and one `.bin` model | Select Source, Full preflight, bind that exact scan with **Use in admission**, inspect seeded immutable bundle facts, exercise applicable runner/conversion controls, freeze evidence, and open the same normalized report/artifact set. No scan UUID or digest should need manual copying when the UI already generated it. |
@@ -2533,7 +2547,7 @@ every decision relying on the affected scanner image/rules digest as requiring r
 | Unsafe PyTorch serialization | Built-in semantics, Fickling/ModelScan, sandbox load prohibition, and fixed Firecracker conversion/equivalence/rescan | Physical conversion proof requires KVM and only the fixed supported `.bin` shape is eligible | Run the implemented conversion on KVM; unsupported layouts remain incomplete | P0 |
 | Malicious custom runtime behavior | Exact custom-code identity, AST/Semgrep, no-NIC Firecracker execution, independent syscall/network/resource telemetry | Current designated VPS cannot physically execute KVM acceptance | Operate and acceptance-test the implemented KVM runner | P0 |
 | Model evaluation evidence supplied by caller | Declared observations cannot pass; Firecracker runtime generates signed evidence and derived embedding evaluation | Corporate vector-store/data-plane evidence remains organization-specific | Use the signed data-plane contract with real principals/index/application or remain incomplete | P0 |
-| Dependency CVEs | Generated SBOM/SCA plus packaged offline Trivy | Runtime may not be locked; DB ages between image rebuilds | Locked runtime builder, freshness gate, recurring rescans | P1 |
+| Dependency CVEs | Exact Firecracker runtime lock, native import inference, packaged offline Trivy + OSV Scanner, and hash-bound build-captured pip-audit; aliases are reconciled in AIBOM/HTML | Advisory data ages between image rebuilds; repository imports can exceed the fixed profile; native system libraries still require the actual release-image SBOM | Enforce freshness/rebuilds, keep unresolved required imports fail-closed, and rescan every runtime-image revision | P1 |
 | Malware/secrets | Built-in checks plus packaged Semgrep/Trivy | Detection depth and rule freshness vary | Improve existing rules and enforce freshness/reassessment gates | P1 |
 | Retrieval/ACL leakage | Evaluation schema for ACL/tenant/graph/cache/deletion controls | No universal live data-plane connector or corporate fixture | Bounded connectors plus organization-provided principals/data | P1 |
 | Embedding poisoning/inversion | Mandatory bounded smoke suite plus deterministic organization-benchmark contract | Shipped smoke inputs are not a corporate adversarial/relevance corpus | Supply a versioned corporate corpus through the existing bounded contract | P1 |
@@ -2591,9 +2605,9 @@ Owners must decide and record:
   from the technical `PASS`/`REVIEW_REQUIRED`/`INCOMPLETE`/`BLOCK` outcome. Advanced/manual mode retains every
   source, trust, conversion, approval, policy, and promotion control. Automatic mode has no authority to
   approve, except, sign an admission, or promote a model.
-- [x] The core ModelScan/Semgrep/Fickling/Trivy adapters are pinned, isolated, packaged, functionally
+- [x] The ModelScan/Semgrep/Fickling/Trivy/OSV Scanner/pip-audit adapters are pinned, isolated, packaged, functionally
   self-tested, and expose rule/database/readiness identity.
-- [x] The external scanner set is frozen to ModelScan/Semgrep/Fickling/Trivy; unsupported optional adapter
+- [x] The external scanner set is frozen to ModelScan/Semgrep/Fickling/Trivy/OSV Scanner/pip-audit; unsupported optional adapter
   contracts do not count as installed coverage and are not future implementation work.
 - [x] The disposable Firecracker/KVM+jailer implementation executes fixed import/tokenizer/load/warmup/
   inference/teardown and conversion/equivalence phases and produces signed runtime telemetry, with no
