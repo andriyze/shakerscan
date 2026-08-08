@@ -30,6 +30,8 @@ jobs:
       REDIS_PASSWORD: ci-redis-credential-000000000000000001
       MODEL_INTAKE_SIGNER_DATABASE_PASSWORD: ci-model-intake-signer-db-password-00000001
       MODEL_INTAKE_SIGNER_INTERNAL_TOKEN: ci-model-intake-signer-token-000000000000001
+      MODEL_INTAKE_OPERATOR_TOKEN: ci-model-intake-operator-token-00000000000001
+      SHAKERSCAN_E2E_MODEL_INTAKE_OPERATOR_TOKEN: ci-model-intake-operator-token-00000000000001
     steps:
       - uses: actions/checkout@v6
         with:
