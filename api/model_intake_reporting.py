@@ -604,7 +604,8 @@ def _static_check_detail(evidence: list[dict[str, Any]]) -> dict[str, Any]:
                         for key in (
                             "id", "rule_id", "severity", "classification", "call",
                             "path", "line", "message", "package", "installed_version",
-                            "severity_source", "import_name", "evidence_class",
+                            "severity_source", "import_name", "evidence_class", "operator",
+                            "license", "tool_severity", "evidence_scope",
                         )
                         if finding.get(key) is not None
                     }
@@ -612,9 +613,20 @@ def _static_check_detail(evidence: list[dict[str, Any]]) -> dict[str, Any]:
                     if isinstance(finding, dict)
                 ][:100],
                 "coverage": _json(item.get("coverage"), {}),
+                "summary": _json(item.get("summary"), {}),
                 "version": item.get("version"),
                 "rules_sha256": item.get("rules_sha256"),
                 "database_sha256": item.get("database_sha256"),
+                "target_scope": item.get("target_scope"),
+                "adapter_kind": item.get("adapter_kind"),
+                "duration_ms": item.get("duration_ms"),
+                "timeout_seconds": item.get("timeout_seconds"),
+                "exit_code": item.get("exit_code"),
+                "reason": item.get("reason"),
+                "error": item.get("error"),
+                "license_scan_mode": item.get("license_scan_mode"),
+                "raw_result_digest": item.get("raw_result_digest"),
+                "execution_contract": [str(value) for value in item.get("execution_contract") or []][:30],
             }
             for item in scanner_results if isinstance(item, dict)
         ],
@@ -1566,6 +1578,135 @@ def render_model_intake_html(report: dict[str, Any]) -> str:
         for job in report.get("runner_timelines", []) for phase in job.get("phases", [])
     ) or "<tr><td colspan='5'>No Firecracker phase evidence recorded.</td></tr>"
     static_detail = _json(detail.get("static_analysis_detail"), {})
+
+    tool_purposes = {
+        "modelscan": "Known unsafe or malicious operations in serialized model artifacts; the model is inspected without loading it.",
+        "semgrep": "Model-repository code and configuration against ShakerScan's rules for unsafe deserialization, process execution, network access, dynamic imports, and risky file operations.",
+        "fickling": "Semantic safety of pickle-based model serialization, including suspicious or executable pickle behavior.",
+        "trivy": "Repository and resolved runtime packages for known vulnerabilities, secrets, misconfiguration, and licenses using the packaged offline database.",
+        "osv-scanner": "Exact resolved Python inference packages against the packaged offline OSV advisory database.",
+        "pip-audit": "Exact resolved Python inference packages against pip-audit's packaged offline advisory data.",
+        "python-pickletools": "Pickle opcodes, callable references, executable constructs, and parse completeness without deserializing the model.",
+        "python-ast-security": "Repository Python syntax trees for executable custom code and security-sensitive calls.",
+        "shakerscan-secret-rules": "Repository text for bounded built-in secret patterns; opaque model weights are excluded from text matching.",
+        "shakerscan-malware-rules": "Acquired files for ShakerScan's bounded known-malware and download/execute markers.",
+        "shakerscan-sbom": "Dependency and component manifests used to build the generated software and AI bills of materials.",
+        "shakerscan-native-binary-inventory": "Native executable and shared-library files for inventory and downstream component review.",
+        "shakerscan-license-inventory": "Repository license files, package license declarations, and missing attribution sources.",
+        "shakerscan-runtime-dependencies": "Imports used by the fixed inference path and their resolution to exact packaged runtime components.",
+        "subject-materialization": "Whether the immutable acquired subject could be safely materialized for scanner execution.",
+        "subject-selection": "Whether the selected model artifact resolves to a safe path inside the immutable repository snapshot.",
+    }
+
+    def metric_label(value: Any) -> str:
+        return str(value or "").replace("_", " ").strip().capitalize()
+
+    def metric_value(value: Any) -> str:
+        if value is True:
+            return "Yes"
+        if value is False:
+            return "No"
+        if value is None or value == "":
+            return "Not reported"
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, sort_keys=True, default=str)
+        return str(value)
+
+    def finding_target(finding: dict[str, Any]) -> str:
+        path = str(finding.get("path") or "")
+        if path and finding.get("line"):
+            return f"{path}:{finding.get('line')}"
+        if path:
+            return path
+        package = str(finding.get("package") or finding.get("import_name") or "")
+        version = str(finding.get("installed_version") or "")
+        return f"{package}@{version}" if package and version else package or "—"
+
+    def finding_description(finding: dict[str, Any]) -> str:
+        return str(
+            finding.get("message") or finding.get("call") or finding.get("operator")
+            or finding.get("license") or finding.get("classification")
+            or finding.get("id") or finding.get("rule_id") or "Finding reported"
+        )
+
+    tool_sections: list[str] = []
+    for scanner in static_detail.get("scanner_results") or []:
+        if not isinstance(scanner, dict):
+            continue
+        name = str(scanner.get("name") or "unknown")
+        status = str(scanner.get("status") or "NOT_RUN")
+        purpose = tool_purposes.get(
+            name.casefold(),
+            "Bounded scanner execution over the applicable immutable Model Intake subject.",
+        )
+        overview: list[tuple[str, Any]] = [
+            ("What this tool tested", purpose),
+            ("Result", status),
+            ("Applied to", scanner.get("target_scope") or scanner.get("applicability") or "Not reported"),
+            ("Applicability rule", scanner.get("applicability") or "Not reported"),
+            ("Required by this review", bool(scanner.get("required"))),
+            ("Tool version", scanner.get("version") or "Built into ShakerScan / not versioned separately"),
+        ]
+        if scanner.get("adapter_kind"):
+            overview.append(("Adapter kind", scanner.get("adapter_kind")))
+        if scanner.get("rules_sha256"):
+            overview.append(("Rules SHA-256", scanner.get("rules_sha256")))
+        if scanner.get("database_sha256"):
+            overview.append(("Advisory database SHA-256", scanner.get("database_sha256")))
+        if scanner.get("license_scan_mode"):
+            overview.append(("License scan mode", scanner.get("license_scan_mode")))
+        if scanner.get("duration_ms") is not None:
+            overview.append(("Execution duration", f"{scanner.get('duration_ms')} ms"))
+        if scanner.get("timeout_seconds") is not None:
+            overview.append(("Execution time limit", f"{scanner.get('timeout_seconds')} seconds"))
+        if scanner.get("exit_code") is not None:
+            overview.append(("Tool exit code", scanner.get("exit_code")))
+        if scanner.get("execution_contract"):
+            overview.append(("Bounded execution contract", " ".join(str(value) for value in scanner["execution_contract"])))
+        if scanner.get("raw_result_digest"):
+            overview.append(("Raw result SHA-256", scanner.get("raw_result_digest")))
+        if scanner.get("reason"):
+            overview.append(("Applicability / execution note", scanner.get("reason")))
+        if scanner.get("error"):
+            overview.append(("Execution error", scanner.get("error")))
+        for key, value in sorted(_json(scanner.get("coverage"), {}).items()):
+            overview.append((f"Coverage — {metric_label(key)}", metric_value(value)))
+        for key, value in sorted(_json(scanner.get("summary"), {}).items()):
+            overview.append((f"Observed — {metric_label(key)}", metric_value(value)))
+        overview_rows = "".join(
+            "<tr>"
+            f"<th scope='row'>{esc(label)}</th>"
+            + (
+                f"<td class='status {esc(status.lower())}'>{esc(metric_value(value))}</td>"
+                if label == "Result" else f"<td>{esc(metric_value(value))}</td>"
+            )
+            + "</tr>"
+            for label, value in overview
+        )
+        findings = [item for item in scanner.get("findings") or [] if isinstance(item, dict)]
+        finding_rows = "".join(
+            "<tr>"
+            f"<td class='status {esc(str(item.get('severity') or 'review').lower())}'>{esc(item.get('severity') or 'review')}</td>"
+            f"<td><code>{esc(item.get('rule_id') or item.get('id') or 'unnamed')}</code></td>"
+            f"<td>{esc(finding_description(item))}</td>"
+            f"<td><code>{esc(finding_target(item))}</code></td>"
+            f"<td>{esc(item.get('classification') or item.get('evidence_scope') or item.get('severity_source') or '—')}</td>"
+            "</tr>"
+            for item in findings
+        ) or "<tr><td colspan='5'>No finding was reported by this tool.</td></tr>"
+        reported_count = scanner.get("finding_count") if scanner.get("finding_count") is not None else len(findings)
+        bounded_note = (
+            f" Showing the first {len(findings)} bounded finding summaries."
+            if int(reported_count or 0) > len(findings) else ""
+        )
+        tool_sections.append(
+            f"<section class='tool-run'><h4>{esc(name)}</h4>"
+            f"<table class='tool-overview'><tbody>{overview_rows}</tbody></table>"
+            f"<h5>Findings ({esc(reported_count)})</h5><p class='meta'>Each row is content-free and tied to this scanner run.{esc(bounded_note)}</p>"
+            "<table><thead><tr><th>Severity</th><th>Rule / finding</th><th>What was found</th><th>File or package</th><th>Classification / scope</th></tr></thead>"
+            f"<tbody>{finding_rows}</tbody></table></section>"
+        )
+    tool_execution_sections = "".join(tool_sections) or "<p>No scanner-level execution evidence was recorded.</p>"
     runtime_dependencies = _json(static_detail.get("runtime_dependencies"), {})
     runtime_profile = _json(runtime_dependencies.get("profile"), {})
     dependency_rows = "".join(
@@ -1603,8 +1744,10 @@ def render_model_intake_html(report: dict[str, Any]) -> str:
 body{{font:14px system-ui,sans-serif;margin:32px;color:#172033}}h1{{margin-bottom:4px}}.meta{{color:#5b6475}}
 .verdict{{padding:16px;border:2px solid #555;border-radius:8px;margin:20px 0}}.warning{{padding:12px;background:#fff6d8;border-left:4px solid #9a6700;margin:12px 0}}.stats{{display:flex;gap:10px;flex-wrap:wrap}}.stat{{padding:8px 12px;background:#f3f5f8;border-radius:6px}}table{{border-collapse:collapse;width:100%;margin:16px 0}}
 th,td{{border:1px solid #ccd2dc;padding:8px;vertical-align:top;text-align:left}}code{{white-space:pre-wrap;word-break:break-all;font-size:11px}}
-.status{{font-weight:700}}.pass{{color:#08783e}}.fail,.error{{color:#b42318}}.review,.incomplete,.not_run{{color:#9a6700}}
-.no-print{{margin-right:8px}}.page-break{{break-before:page}}@media print{{.no-print{{display:none}}body{{margin:12mm}}}}
+.status{{font-weight:700}}.pass{{color:#08783e}}.fail,.error,.crashed{{color:#b42318}}.review,.review_required,.warning,.incomplete,.not_run,.timeout,.unsupported{{color:#9a6700}}
+.no-print{{margin-right:8px}}.page-break{{break-before:page}}.tool-run{{border-top:2px solid #d8dde6;padding-top:8px;margin-top:24px;break-inside:avoid-page}}
+.tool-run h4{{font-size:18px;margin-bottom:6px}}.tool-run h5{{font-size:15px;margin-bottom:0}}.tool-overview th{{width:230px;background:#f7f8fa}}
+@media print{{.no-print{{display:none}}body{{margin:12mm}}.tool-run{{break-inside:auto}}}}
 </style></head><body>
 <button class="no-print" onclick="window.print()">Print / Save PDF</button>
 <h1>Model Intake review</h1><div class="meta">Submission {esc(report.get('submission', {}).get('id'))} · report sha256:{esc(report.get('report_sha256'))}</div>
@@ -1619,6 +1762,8 @@ th,td{{border:1px solid #ccd2dc;padding:8px;vertical-align:top;text-align:left}}
 <h2 class="page-break">Deployment follow-up</h2><p>These items are not scan failures and are excluded from the technical result above.</p><table><thead><tr><th>Category</th><th>Control</th><th>Status</th><th>Current state</th><th>Next step</th></tr></thead><tbody>{deployment_rows}</tbody></table>
 <details><summary>Organization checklist ({esc(presentation_counts.get('organization_checklist_items'))} items)</summary><p>Use this optional checklist when preparing the model for a specific deployment.</p><table><thead><tr><th>ID</th><th>Category</th><th>Follow-up</th><th>Typical owner</th><th>Expected evidence</th></tr></thead><tbody>{external_rows}</tbody></table></details>
 <h2 class="page-break">Detailed technical review</h2>
+<h3>Tool execution details</h3><p>Each tool is reported separately. The scope and coverage rows show what was actually examined; applicability never counts as execution.</p>
+{tool_execution_sections}
 <h3>Inference dependencies and known vulnerabilities</h3>
 <p><strong>Runtime profile:</strong> {esc(runtime_profile.get('id') or 'not resolved')} · <strong>Dependency resolution:</strong> {esc(runtime_dependencies.get('status') or 'NOT_RUN')} · <strong>Known advisories:</strong> {esc(vulnerability_summary.get('total') or 0)} across {esc(vulnerability_summary.get('packages_affected') or 0)} package(s).</p>
 <table><thead><tr><th>Package</th><th>Installed version</th><th>Advisory</th><th>Severity</th><th>Reported by</th><th>Fix</th></tr></thead><tbody>{vulnerability_rows}</tbody></table>

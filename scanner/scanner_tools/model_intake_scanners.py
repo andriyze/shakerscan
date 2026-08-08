@@ -489,6 +489,28 @@ def _external_finding(scanner: str, item: Any, severity: str = "high") -> dict[s
     }
 
 
+def _modelscan_finding(item: Any) -> dict[str, Any]:
+    """Keep ModelScan's actionable classification without copying pickle payload data."""
+    normalized = _external_finding("modelscan", item, "critical")
+    if not isinstance(item, dict):
+        return normalized
+    operator = str(item.get("operator") or item.get("opcode") or "").strip()
+    module = str(item.get("module") or "").strip()
+    function = str(item.get("function") or item.get("name") or "").strip()
+    message = str(item.get("message") or item.get("description") or "").strip()
+    path = str(item.get("path") or item.get("file") or "").strip().replace("\\", "/")
+    if operator:
+        normalized["operator"] = operator[:120]
+    if module or function:
+        normalized["call"] = ".".join(value for value in (module, function) if value)[:300]
+    if message:
+        normalized["message"] = re.sub(r"\s+", " ", message)[:500]
+    if path and not path.startswith("/") and ".." not in path.split("/"):
+        normalized["path"] = path[:500]
+    normalized["classification"] = "unsafe_serialization_primitive"
+    return normalized
+
+
 def _trivy_vulnerability_finding(item: Any) -> dict[str, Any]:
     if not isinstance(item, dict):
         return _external_finding("trivy", item)
@@ -692,13 +714,16 @@ def _parse_external_scanner(
             )
             if not isinstance(candidates, list):
                 return "INCOMPLETE", [], {"error": "modelscan_findings_shape_invalid"}
-            findings = [_external_finding(scanner, item, "critical") for item in candidates[:1000]]
+            findings = [_modelscan_finding(item) for item in candidates[:1000]]
             summary["finding_count"] = len(candidates)
         elif scanner == "semgrep":
             if not isinstance(parsed, dict) or not isinstance(parsed.get("results"), list):
                 return "INCOMPLETE", [], {"error": "semgrep_results_missing"}
             errors = parsed.get("errors") if isinstance(parsed.get("errors"), list) else []
             candidates = parsed["results"]
+            paths = parsed.get("paths") if isinstance(parsed.get("paths"), dict) else {}
+            scanned_paths = paths.get("scanned") if isinstance(paths.get("scanned"), list) else []
+            skipped_paths = paths.get("skipped") if isinstance(paths.get("skipped"), list) else []
             findings = [_semgrep_finding(item) for item in candidates[:1000]]
             blocking_count = sum(
                 1 for item in candidates
@@ -708,6 +733,8 @@ def _parse_external_scanner(
                 "finding_count": len(candidates),
                 "blocking_finding_count": blocking_count,
                 "error_count": len(errors),
+                "files_scanned": len(scanned_paths),
+                "files_skipped": len(skipped_paths),
                 "warning_only": bool(candidates) and blocking_count == 0,
             })
             if errors:
@@ -780,6 +807,7 @@ def _parse_external_scanner(
                     elif normalized_category in {"reciprocal", "unknown"}:
                         warning = True
             summary.update(counts)
+            summary["targets_scanned"] = len(results)
             summary["license_class_counts"] = dict(sorted(license_class_counts.items()))
             summary["license_inventory"] = normalized_licenses
             summary["license_inventory_truncated"] = counts["licenses"] > len(normalized_licenses)

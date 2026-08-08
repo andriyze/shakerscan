@@ -1004,13 +1004,19 @@ def test_conversion_rescan_uses_same_actionable_scanner_summary_shape():
         "scanner": {
             "name": "semgrep", "version": "1.2.3", "rules_sha256": "a" * 64,
         },
-        "execution": {"status": "WARNING", "required": True, "applicability": "repository_code"},
+        "execution": {
+            "status": "WARNING", "required": True, "applicability": "repository_code",
+            "target_scope": "repository", "adapter_kind": "evidence_scanner",
+            "duration_ms": 142, "timeout_seconds": 300, "exit_code": 1,
+            "argv_contract": ["semgrep", "scan", "{subject}"],
+        },
         "findings": [{
             "rule_id": "unsafe-load", "path": "modeling.py", "line": 12,
             "severity": "medium", "message": "Set weights_only=True",
             "matched_source": "must not be copied",
         }],
         "coverage": {"files_scanned": 4, "sample_path": "must not be copied"},
+        "summary": {"finding_count": 1, "warning_only": True, "raw_text": "must not be copied"},
     }]})
 
     assert summaries == [{
@@ -1019,8 +1025,15 @@ def test_conversion_rescan_uses_same_actionable_scanner_summary_shape():
         "status": "WARNING",
         "required": True,
         "applicability": "repository_code",
+        "target_scope": "repository",
+        "adapter_kind": "evidence_scanner",
+        "duration_ms": 142,
+        "timeout_seconds": 300,
+        "exit_code": 1,
+        "execution_contract": ["semgrep", "scan", "{subject}"],
         "finding_count": 1,
         "coverage": {"files_scanned": 4},
+        "summary": {"finding_count": 1, "warning_only": True},
         "findings": [{
             "rule_id": "unsafe-load", "severity": "medium", "path": "modeling.py",
             "line": 12, "message": "Set weights_only=True",

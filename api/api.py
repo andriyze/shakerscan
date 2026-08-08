@@ -11536,6 +11536,7 @@ def _model_intake_finding_summary(value: Any) -> list[dict[str, Any]]:
         for key in (
             "id", "rule_id", "severity", "classification", "call", "package",
             "installed_version", "severity_source", "import_name", "evidence_class",
+            "operator", "license", "tool_severity", "evidence_scope",
         ):
             text = str(item.get(key) or "").strip()
             if text:
@@ -11557,28 +11558,49 @@ def _model_intake_finding_summary(value: Any) -> list[dict[str, Any]]:
 def _model_intake_scanner_result_summaries(generated_evidence: Any) -> list[dict[str, Any]]:
     """Normalize generated scanner output for both source and conversion scans."""
     generated = _model_intake_json_object(generated_evidence)
-    return [
-        {
-            "name": str((item.get("scanner") or {}).get("name") or "unknown"),
-            "version": (item.get("scanner") or {}).get("version"),
-            "status": (item.get("execution") or {}).get("status"),
-            "required": bool((item.get("execution") or {}).get("required")),
-            "applicability": (item.get("execution") or {}).get("applicability"),
+    summaries: list[dict[str, Any]] = []
+    for item in generated.get("results") or []:
+        if not isinstance(item, dict):
+            continue
+        scanner = item.get("scanner") if isinstance(item.get("scanner"), dict) else {}
+        execution = item.get("execution") if isinstance(item.get("execution"), dict) else {}
+        summary = item.get("summary") if isinstance(item.get("summary"), dict) else {}
+        normalized = {
+            "name": str(scanner.get("name") or "unknown"),
+            "version": scanner.get("version"),
+            "status": execution.get("status"),
+            "required": bool(execution.get("required")),
+            "applicability": execution.get("applicability"),
             "finding_count": len(item.get("findings") or []),
             "coverage": _model_intake_content_free_coverage(item.get("coverage")),
             "findings": _model_intake_finding_summary(item.get("findings")),
             "rules_sha256": (
-                (item.get("scanner") or {}).get("rules_sha256")
-                or (item.get("execution") or {}).get("rules_sha256")
+                scanner.get("rules_sha256")
+                or execution.get("rules_sha256")
             ),
             "database_sha256": (
-                (item.get("scanner") or {}).get("database_sha256")
-                or (item.get("execution") or {}).get("database_sha256")
+                scanner.get("database_sha256")
+                or execution.get("database_sha256")
             ),
         }
-        for item in generated.get("results") or []
-        if isinstance(item, dict)
-    ]
+        for key in (
+            "target_scope", "adapter_kind", "duration_ms", "timeout_seconds", "exit_code",
+            "reason", "license_scan_mode", "raw_result_digest",
+        ):
+            if execution.get(key) is not None:
+                normalized[key] = execution.get(key)
+        if execution.get("error"):
+            normalized["error"] = str(execution["error"])[:500]
+        execution_contract = [
+            str(value)[:500] for value in execution.get("argv_contract") or []
+        ][:30]
+        if execution_contract:
+            normalized["execution_contract"] = execution_contract
+        content_free_summary = _model_intake_content_free_coverage(summary)
+        if content_free_summary:
+            normalized["summary"] = content_free_summary
+        summaries.append(normalized)
+    return summaries
 
 
 def _model_intake_attention_items(static_payload: Any) -> list[dict[str, Any]]:

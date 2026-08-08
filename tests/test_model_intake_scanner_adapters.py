@@ -13,6 +13,21 @@ def test_json_scanners_never_pass_empty_or_malformed_output():
         assert _parse_external_scanner(scanner, "not-json", "", 0)[0] == "INCOMPLETE"
 
 
+def test_semgrep_summary_reports_bounded_file_coverage_without_file_names():
+    output = {
+        "results": [], "errors": [],
+        "paths": {"scanned": ["modeling.py", "config.json"], "skipped": ["weights.bin"]},
+    }
+
+    status, findings, summary = _parse_external_scanner("semgrep", json.dumps(output), "", 0)
+
+    assert status == "PASS"
+    assert findings == []
+    assert summary["files_scanned"] == 2
+    assert summary["files_skipped"] == 1
+    assert "modeling.py" not in json.dumps(summary)
+
+
 def test_osv_adapter_uses_explicit_packaged_database_and_go_runtime_boundary():
     spec = next(item for item in scanners.EXTERNAL_SCANNERS if item.name == "osv-scanner")
 
@@ -105,7 +120,10 @@ def test_modelscan_adapter_is_fail_closed():
         "Scanning /tmp/model.pkl using PickleUnsafeOpScan model scan\n"
         '{"issues":[{"operator":"GLOBAL"}],"errors":[]}'
     )
-    assert _parse_external_scanner("modelscan", modelscan_preamble, "", 1)[0] == "FAIL"
+    status, findings, _ = _parse_external_scanner("modelscan", modelscan_preamble, "", 1)
+    assert status == "FAIL"
+    assert findings[0]["operator"] == "GLOBAL"
+    assert findings[0]["classification"] == "unsafe_serialization_primitive"
     assert _parse_external_scanner("modelscan", "untrusted preamble\n{\"issues\":[]}", "", 0)[0] == "INCOMPLETE"
     assert _parse_external_scanner("modelscan", '{}', "", 0)[0] == "INCOMPLETE"
     assert _parse_external_scanner("modelscan", '{"issues":[{"operator":"GLOBAL"}]}', "", 1)[0] == "FAIL"
