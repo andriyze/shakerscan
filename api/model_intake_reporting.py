@@ -1542,9 +1542,14 @@ def render_model_intake_html(report: dict[str, Any]) -> str:
         [item for item in controls if str(item.get("id") or "") not in DEPLOYMENT_FOLLOW_UP_CONTROL_IDS]
         if report.get("automatic_review") else controls
     )
-    verified_rows = control_rows(_json(groups.get("verified"), []), empty="No technical check recorded a passing result.")
-    attention_rows = control_rows(_json(groups.get("needs_attention"), []), empty="No technical check needs attention.")
-    not_applicable_rows = control_rows(_json(groups.get("not_applicable"), []), empty="No checks were marked not applicable.")
+    check_rows = control_rows(
+        [
+            *_json(groups.get("needs_attention"), []),
+            *_json(groups.get("verified"), []),
+            *_json(groups.get("not_applicable"), []),
+        ],
+        empty="No technical check results were recorded.",
+    )
     rows = "".join(
         "<tr>"
         f"<td>{esc(item.get('category'))}</td><td>{esc(item.get('question'))}</td>"
@@ -1636,11 +1641,19 @@ def render_model_intake_html(report: dict[str, Any]) -> str:
         )
 
     tool_sections: list[str] = []
+    tool_index_links: list[str] = []
     for scanner in static_detail.get("scanner_results") or []:
         if not isinstance(scanner, dict):
             continue
         name = str(scanner.get("name") or "unknown")
         status = str(scanner.get("status") or "NOT_RUN")
+        tool_anchor = "tool-" + "".join(
+            character if character.isalnum() else "-" for character in name.casefold()
+        ).strip("-")
+        tool_index_links.append(
+            f"<a href='#{esc(tool_anchor)}'>{esc(name)} "
+            f"<span class='status {esc(status.lower())}'>{esc(status)}</span></a>"
+        )
         purpose = tool_purposes.get(
             name.casefold(),
             "Bounded scanner execution over the applicable immutable Model Intake subject.",
@@ -1705,14 +1718,18 @@ def render_model_intake_html(report: dict[str, Any]) -> str:
             f" Showing the first {len(findings)} bounded finding summaries."
             if int(reported_count or 0) > len(findings) else ""
         )
+        open_attribute = " open" if status not in {"PASS", "NOT_APPLICABLE"} else ""
         tool_sections.append(
-            f"<section class='tool-run'><h4>{esc(name)}</h4>"
+            f"<details class='tool-run' id='{esc(tool_anchor)}'{open_attribute}>"
+            f"<summary><h4>{esc(name)}</h4><span class='status {esc(status.lower())}'>{esc(status)}</span>"
+            f"<span class='finding-total'>{esc(reported_count)} finding(s)</span></summary><div class='tool-body'>"
             f"<table class='tool-overview'><tbody>{overview_rows}</tbody></table>"
             f"<h5>Findings ({esc(reported_count)})</h5><p class='meta'>Finding summaries omit matched source and secret values and are tied to this scanner run.{esc(bounded_note)}</p>"
             "<table><thead><tr><th>Severity</th><th>Rule / finding</th><th>What was found</th><th>File or package</th><th>Classification / scope</th></tr></thead>"
-            f"<tbody>{finding_rows}</tbody></table></section>"
+            f"<tbody>{finding_rows}</tbody></table><a class='back no-print' href='#contents'>Back to contents</a></div></details>"
         )
     tool_execution_sections = "".join(tool_sections) or "<p>No scanner-level execution evidence was recorded.</p>"
+    tool_index = " · ".join(tool_index_links) or "No scanner runs recorded."
     runtime_dependencies = _json(static_detail.get("runtime_dependencies"), {})
     runtime_profile = _json(runtime_dependencies.get("profile"), {})
     dependency_rows = "".join(
@@ -1747,39 +1764,48 @@ def render_model_intake_html(report: dict[str, Any]) -> str:
     return f"""<!doctype html>
 <html><head><meta charset="utf-8"><title>Model Intake {esc(report.get('outcome'))}</title>
 <style>
-body{{font:14px system-ui,sans-serif;margin:32px;color:#172033}}h1{{margin-bottom:4px}}.meta{{color:#5b6475}}
-.verdict{{padding:16px;border:2px solid #555;border-radius:8px;margin:20px 0}}.warning{{padding:12px;background:#fff6d8;border-left:4px solid #9a6700;margin:12px 0}}.stats{{display:flex;gap:10px;flex-wrap:wrap}}.stat{{padding:8px 12px;background:#f3f5f8;border-radius:6px}}table{{border-collapse:collapse;width:100%;margin:16px 0}}
+html{{scroll-behavior:smooth}}body{{font:14px system-ui,sans-serif;margin:32px;color:#172033;line-height:1.45}}h1{{margin-bottom:4px}}h2{{margin-top:36px}}.meta{{color:#5b6475}}
+.verdict{{padding:18px;border:2px solid #555;border-radius:8px;margin:20px 0;font-size:16px}}.verdict strong{{font-size:19px}}.review-notes{{padding:12px 16px;background:#fffaf0;border-left:4px solid #9a6700;margin:18px 0}}.review-notes p{{margin:6px 0}}.stats{{display:flex;gap:10px;flex-wrap:wrap;margin:14px 0}}.stat{{padding:8px 12px;background:#f3f5f8;border-radius:6px}}table{{border-collapse:collapse;width:100%;margin:16px 0}}
 th,td{{border:1px solid #ccd2dc;padding:8px;vertical-align:top;text-align:left}}code{{white-space:pre-wrap;word-break:break-all;font-size:11px}}
 .status{{font-weight:700}}.pass{{color:#08783e}}.fail,.error,.crashed{{color:#b42318}}.review,.review_required,.warning,.incomplete,.not_run,.timeout,.unsupported{{color:#9a6700}}
-.no-print{{margin-right:8px}}.page-break{{break-before:page}}.tool-run{{border-top:2px solid #d8dde6;padding-top:8px;margin-top:24px;break-inside:avoid-page}}
-.tool-run h4{{font-size:18px;margin-bottom:6px}}.tool-run h5{{font-size:15px;margin-bottom:0}}.tool-overview th{{width:230px;background:#f7f8fa}}
-@media print{{.no-print{{display:none}}body{{margin:12mm}}.tool-run{{break-inside:auto}}}}
+.status.critical{{color:#fff;background:#7a0019}}.status.high{{color:#b42318;background:#fee4e2}}.status.medium{{color:#b54708;background:#fffaeb}}.status.low{{color:#175cd3;background:#eff8ff}}.status.unknown,.status.info{{color:#475467;background:#f2f4f7}}
+.toc{{background:#f7f8fa;border:1px solid #d8dde6;border-radius:8px;padding:14px 18px;margin:20px 0}}.toc strong{{display:block;margin-bottom:6px}}.toc ul{{columns:2;margin:6px 0;padding-left:22px}}.toc li{{margin:5px 0}}a{{color:#175cd3;text-decoration:none}}a:hover{{text-decoration:underline}}.back{{display:inline-block;margin:8px 0 18px}}
+.no-print{{margin-right:8px}}.page-break{{break-before:page}}.tool-index{{line-height:2;margin:12px 0 20px}}.tool-index a{{display:inline-block;white-space:nowrap}}
+.tool-run{{border:1px solid #d8dde6;border-radius:8px;margin:14px 0;break-inside:avoid-page}}.tool-run summary{{cursor:pointer;display:flex;align-items:center;gap:14px;padding:12px 14px;background:#f7f8fa}}.tool-run summary h4{{font-size:17px;margin:0}}.finding-total{{color:#5b6475}}.tool-body{{padding:0 14px 14px}}.tool-run h5{{font-size:15px;margin-bottom:0}}.tool-overview th{{width:230px;background:#f7f8fa}}
+@media (max-width:800px){{body{{margin:18px}}.toc ul{{columns:1}}table{{display:block;overflow-x:auto}}}}
+@media print{{.no-print{{display:none}}body{{margin:12mm}}.tool-run{{break-inside:auto}}details:not([open]) > *{{display:block!important}}details:not([open]) summary{{display:flex!important}}.toc{{break-inside:avoid}}a{{color:inherit;text-decoration:none}}}}
 </style></head><body>
 <button class="no-print" onclick="window.print()">Print / Save PDF</button>
 <h1>Model Intake review</h1><div class="meta">Submission {esc(report.get('submission', {}).get('id'))} · report sha256:{esc(report.get('report_sha256'))}</div>
-<h2>Summary</h2>
-<div class="verdict"><strong>{esc(presentation.get('headline') or 'Review results available')}</strong><p>{esc(executive.get('decision_statement') or report.get('plain_language'))}</p><p><strong>Result:</strong> {esc(presentation.get('decision') or report.get('outcome'))}</p><p><strong>Scope:</strong> {esc(executive.get('authorization_scope'))}</p></div>
-<div class="warning"><strong>Review boundary</strong><p>{esc(presentation.get('review_boundary'))}</p></div>
-<div class="warning"><strong>Licensing and attribution</strong><p>{esc(presentation.get('license_note'))}</p></div>
+<section id="executive-summary"><h2>Executive summary</h2>
+<div class="verdict"><strong>{esc(presentation.get('decision') or report.get('outcome'))} — {esc(presentation.get('headline') or 'Review results available')}.</strong> {esc(executive.get('decision_statement') or report.get('plain_language'))}</div>
 <div class="stats"><span class="stat">{esc(presentation_counts.get('verified'))} verified</span><span class="stat">{esc(presentation_counts.get('needs_attention'))} need attention</span><span class="stat">{esc(presentation_counts.get('not_applicable'))} not applicable</span></div>
-<h3>Checks that need attention</h3><table><thead><tr><th>Category</th><th>Control</th><th>Status</th><th>Result</th><th>Next step</th></tr></thead><tbody>{attention_rows}</tbody></table>
-<h3>Verified checks</h3><table><thead><tr><th>Category</th><th>Control</th><th>Status</th><th>Result</th><th>Evidence / next step</th></tr></thead><tbody>{verified_rows}</tbody></table>
-<h3>Checks not applicable</h3><table><thead><tr><th>Category</th><th>Control</th><th>Status</th><th>Result</th><th>Reason/next step</th></tr></thead><tbody>{not_applicable_rows}</tbody></table>
-<h2 class="page-break">Deployment follow-up</h2><p>These items are not scan failures and are excluded from the technical result above.</p><table><thead><tr><th>Category</th><th>Control</th><th>Status</th><th>Current state</th><th>Next step</th></tr></thead><tbody>{deployment_rows}</tbody></table>
+</section>
+<nav class="toc" id="contents" aria-label="Report contents"><strong>Contents</strong><ul>
+<li><a href="#executive-summary">Executive summary</a></li><li><a href="#check-results">Check results</a></li><li><a href="#deployment-follow-up">Deployment follow-up</a></li><li><a href="#detailed-evidence">Detailed evidence</a></li><li><a href="#scanner-runs">Scanner runs</a></li><li><a href="#dependencies">Dependencies and vulnerabilities</a></li><li><a href="#firecracker-runtime">Firecracker runtime</a></li><li><a href="#control-evidence">Control evidence</a></li><li><a href="#limitations">Limitations</a></li>
+</ul></nav>
+<section id="check-results"><h2>Check results</h2><p>Attention items are listed first. PASS means the check completed for this pinned revision; REVIEW and INCOMPLETE are not passes.</p>
+<table><thead><tr><th>Category</th><th>Check</th><th>Status</th><th>Result</th><th>Action / evidence</th></tr></thead><tbody>{check_rows}</tbody></table>
+<div class="review-notes"><strong>Review notes</strong><p><strong>Scope:</strong> {esc(executive.get('authorization_scope'))}</p><p><strong>Boundary:</strong> {esc(presentation.get('review_boundary'))}</p><p><strong>Licensing:</strong> {esc(presentation.get('license_note'))}</p></div><a class="back no-print" href="#contents">Back to contents</a></section>
+<section id="deployment-follow-up"><h2 class="page-break">Deployment follow-up</h2><p>These items are not scan failures and are excluded from the technical result above.</p><table><thead><tr><th>Category</th><th>Control</th><th>Status</th><th>Current state</th><th>Next step</th></tr></thead><tbody>{deployment_rows}</tbody></table>
 <details><summary>Organization checklist ({esc(presentation_counts.get('organization_checklist_items'))} items)</summary><p>Use this optional checklist when preparing the model for a specific deployment.</p><table><thead><tr><th>ID</th><th>Category</th><th>Follow-up</th><th>Typical owner</th><th>Expected evidence</th></tr></thead><tbody>{external_rows}</tbody></table></details>
-<h2 class="page-break">Detailed technical review</h2>
-<h3>Tool execution details</h3><p>Each tool is reported separately. The scope and coverage rows show what was actually examined; applicability never counts as execution.</p>
+</section>
+<section id="detailed-evidence"><h2 class="page-break">Detailed evidence</h2><p>This section contains the tool output, dependency evidence, isolated-runtime phases, and evidence bindings behind the check-results table.</p></section>
+<section id="scanner-runs"><h3>Scanner runs</h3><p>Each tool is reported separately. The scope and coverage rows show what was actually examined; applicability never counts as execution. Select a tool to expand its evidence.</p>
+<nav class="tool-index" aria-label="Scanner run index">{tool_index}</nav>
 {tool_execution_sections}
-<h3>Inference dependencies and known vulnerabilities</h3>
+</section>
+<section id="dependencies"><h3>Dependencies and known vulnerabilities</h3>
 <p><strong>Runtime profile:</strong> {esc(runtime_profile.get('id') or 'not resolved')} · <strong>Dependency resolution:</strong> {esc(runtime_dependencies.get('status') or 'NOT_RUN')} · <strong>Known advisories:</strong> {esc(vulnerability_summary.get('total') or 0)} across {esc(vulnerability_summary.get('packages_affected') or 0)} package(s).</p>
 <table><thead><tr><th>Package</th><th>Installed version</th><th>Advisory</th><th>Severity</th><th>Reported by</th><th>Fix</th></tr></thead><tbody>{vulnerability_rows}</tbody></table>
 <details><summary>Derived inference imports</summary><table><thead><tr><th>Import</th><th>Resolved package</th><th>Version</th><th>Evidence</th><th>Status</th></tr></thead><tbody>{inferred_rows}</tbody></table></details>
 <details><summary>Exact Firecracker runtime packages ({esc(len(runtime_dependencies.get('resolved_components') or []))})</summary><table><thead><tr><th>Package</th><th>Version</th><th>Package URL</th><th>Resolution</th></tr></thead><tbody>{dependency_rows}</tbody></table></details>
-<h3>Control evidence matrix</h3><table><thead><tr><th>Category</th><th>Question</th><th>Status</th><th>Answer</th><th>Method</th><th>Coverage/evidence</th></tr></thead><tbody>{rows}</tbody></table>
-<h2>Firecracker phase timeline</h2><table><thead><tr><th>Operation</th><th>Phase</th><th>Status</th><th>Duration ms</th><th>Detail</th></tr></thead><tbody>{phases}</tbody></table>
-<details><summary>Full ShakerScan check catalog</summary><p>Each row states what happened for this submission. Applicability alone is never treated as proof that a check ran.</p><table><thead><tr><th>ID</th><th>Category</th><th>Check</th><th>Result</th><th>Evidence summary</th><th>Implementation</th><th>Applicability</th></tr></thead><tbody>{catalog_rows}</tbody></table></details>
-<details><summary>Evidence and authority bindings</summary><pre>{esc(json.dumps(report.get('authority_bindings') or {}, indent=2, sort_keys=True, default=str))}</pre></details>
-<h2>Limitations</h2><ul>{''.join(f'<li>{esc(item)}</li>' for item in report.get('limitations', []))}</ul>
+<a class="back no-print" href="#contents">Back to contents</a></section>
+<section id="firecracker-runtime"><h3>Firecracker runtime phases</h3><table><thead><tr><th>Operation</th><th>Phase</th><th>Status</th><th>Duration ms</th><th>Detail</th></tr></thead><tbody>{phases}</tbody></table><a class="back no-print" href="#contents">Back to contents</a></section>
+<section id="control-evidence"><h3>Control evidence matrix</h3><table><thead><tr><th>Category</th><th>Question</th><th>Status</th><th>Answer</th><th>Method</th><th>Coverage/evidence</th></tr></thead><tbody>{rows}</tbody></table>
+<details id="check-catalog"><summary>Full ShakerScan check catalog</summary><p>Each row states what happened for this submission. Applicability alone is never treated as proof that a check ran.</p><table><thead><tr><th>ID</th><th>Category</th><th>Check</th><th>Result</th><th>Evidence summary</th><th>Implementation</th><th>Applicability</th></tr></thead><tbody>{catalog_rows}</tbody></table></details>
+<details id="authority-bindings"><summary>Evidence and authority bindings</summary><pre>{esc(json.dumps(report.get('authority_bindings') or {}, indent=2, sort_keys=True, default=str))}</pre></details><a class="back no-print" href="#contents">Back to contents</a></section>
+<section id="limitations"><h2>Limitations</h2><ul>{''.join(f'<li>{esc(item)}</li>' for item in report.get('limitations', []))}</ul><a class="back no-print" href="#contents">Back to contents</a></section>
 </body></html>"""
 
 

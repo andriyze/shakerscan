@@ -358,7 +358,9 @@ def test_automatic_report_keeps_deployment_follow_up_out_of_technical_result():
     html = render_model_intake_html(report)
     assert "Technical checks completed" in html
     assert "Organization checklist" in html
-    assert "No data plane evaluation evidence is attached" not in html.split("Detailed technical review", 1)[1]
+    assert "No data plane evaluation evidence is attached" not in html.split(
+        '<section id="detailed-evidence"', 1,
+    )[1]
 
 
 def test_static_report_names_safe_finding_location_and_remediation():
@@ -419,6 +421,7 @@ def test_static_report_names_safe_finding_location_and_remediation():
     rendered = render_model_intake_html(report)
     assert "shakerscan-firecracker-python312-cpu/v1" in rendered
     assert "CVE-2026-12345" in rendered
+    assert "class='status high'>high</td>" in rendered
     assert "osv-scanner, pip-audit" in rendered
     assert "torch</td><td>2.9.1+cpu" in rendered
 
@@ -628,14 +631,20 @@ def test_html_is_escaped_printable_and_sarif_preserves_normalized_failures():
     assert "Model Intake review" in rendered
     assert "Deployment follow-up" in rendered
     assert "Organization checklist" in rendered
-    assert "Detailed technical review" in rendered
-    assert "Tool execution details" in rendered
+    assert "Detailed evidence" in rendered
+    assert "Scanner runs" in rendered
     assert "What this tool tested" in rendered
     assert "No finding was reported by this tool." in rendered
     assert "Finding summaries omit matched source and secret values" in rendered
     assert "NOT_DETERMINED_BY_SHAKERSCAN" not in rendered
     assert "Full corporate approval" not in rendered
-    assert "Checks that need attention" in rendered
+    assert "Check results" in rendered
+    assert rendered.index("Executive summary") < rendered.index("Contents") < rendered.index("Check results")
+    assert rendered.index("Check results") < rendered.index("Detailed evidence")
+    assert 'href="#scanner-runs"' in rendered
+    assert 'id="firecracker-runtime"' in rendered
+    assert ".status.critical{color:#fff;background:#7a0019}" in rendered
+    assert ".status.high{color:#b42318;background:#fee4e2}" in rendered
     assert "<script>alert(1)</script>" not in rendered
     assert "model-intake-corporate-report/v2" == sarif["runs"][0]["properties"]["schemaVersion"]
     assert sarif["runs"][0]["properties"]["reportSha256"] == report["report_sha256"]
@@ -694,6 +703,9 @@ def test_html_reports_each_tool_scope_coverage_execution_and_findings_separately
     assert "modeling.py:42" in rendered
     assert "torch.load should use weights_only=True" in rendered
     assert "No finding was reported by this tool." in rendered
+    assert "id='tool-semgrep' open" in rendered
+    assert "id='tool-modelscan' open" not in rendered
+    assert "href='#tool-semgrep'" in rendered
 
 
 def test_html_explains_native_binary_and_missing_license_findings_in_plain_language():
