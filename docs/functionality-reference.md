@@ -507,9 +507,11 @@ are in [`AI_TEST_WORKFLOWS.md`](AI_TEST_WORKFLOWS.md), and future hardening belo
 
 ### AI capability status quick read
 
-These implemented components were last reconciled against code on 2026-07-21. AI Gate and Model
-Intake remain preview product surfaces for 0.7.0. Their deterministic PR smoke matrix is implemented,
-but the policy/exception and deterministic-judge seams marked Planned in
+These implemented components were last reconciled against code on 2026-08-08. AI Gate remains a
+preview product surface for 0.8.0. Model Intake is release-gated for deterministic static review,
+artifact and report generation, and its opt-in AMD64 Linux/KVM Firecracker tier; unsupported formats,
+incomplete evidence, missing required tools, and unavailable runtime qualification fail closed. The
+AI Gate policy/exception and deterministic-judge seams marked Planned in
 [`E2E_TEST_PLAN.md`](E2E_TEST_PLAN.md) are not yet release-gated. "Partial" means the capability runs
 but the listed caveat applies — treat the caveat as load-bearing, not cosmetic.
 

@@ -124,8 +124,8 @@ requested count as successfully queued when the response is partial.
   development/test/staging. The command verifies the staged kernel/rootfs, refreshes the service and API,
   and registers the purpose-scoped runner trust anchor. Installing takes root on the host: never run it
   yourself, and never route it through the API or the Docker socket.
-- Model names such as CodeRankEmbed and CodeSage are conformance examples, never allowlist branches. Resolve
-  any supported Hugging Face/HTTP/cloud/OCI/MLflow source through the same format- and fact-selected controls.
+- Named model examples are conformance cases, never allowlist branches. Resolve any supported
+  Hugging Face/HTTP/cloud/OCI/MLflow source through the same format- and fact-selected controls.
 - After queueing a preflight scan or runner job, report its ID and stop unless the user explicitly asked to
   monitor or complete an end-to-end admission run.
 - Read `skills/shakerscan/references/model-intake.md` for exact endpoints, authority boundaries, bounded
@@ -158,10 +158,10 @@ Host-side `shakerscan fleet` commands resolve the API bind persisted by `scanner
 loopback after a Tailscale-only `--remote` start unless the operator explicitly overrides
 `--local-api`.
 
-For the 0.7.0 release boundary, initialize and join production fleets with `--network broker` and
-`--transport broker`. WireGuard fleet transport is implemented preview code but is not a supported
-0.7.0 production topology; do not present it as release-accepted until its deferred two-host
-physical matrix passes in the next release cycle.
+For the 0.8.0 release boundary, initialize and join production fleets with `--network broker` and
+`--transport broker`. The outbound-only HTTPS broker transport has passed physical multi-host
+acceptance. WireGuard fleet transport is implemented preview code but is not a supported 0.8.0
+production topology; do not present it as release-accepted until its separate physical matrix passes.
 
 Use node-level placement, not a worker-container identity. `node_id=local` selects control-plane
 workers; a Fleet UUID selects any healthy replica on that remote node. Keep automatic placement as
