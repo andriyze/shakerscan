@@ -1230,7 +1230,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Scanner wrapper commands | 27 | `scanner.sh` |
 | Make targets | 12 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
-| Runtime environment keys | 312 | Python sources + Compose manifests |
+| Runtime environment keys | 313 | Python sources + Compose manifests |
 | Scanner modules | 99 | `scanner/scanner_tools/` |
 | UI pages | 31 | `ui/src/app/` |
 | Skills | 6 | `skills/` |
@@ -2109,6 +2109,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_BIND_HOST` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_BROKER_LEASE` | `api/broker_worker.py`, `api/worker.py` |
 | `SHAKERSCAN_BROKER_LEASE_SECONDS` | `api/api.py` |
+| `SHAKERSCAN_BROKER_MAX_ACTIVE_SCANS` | `api/api.py` |
 | `SHAKERSCAN_BROKER_MAX_ARTIFACT_BYTES` | `api/api.py` |
 | `SHAKERSCAN_BROKER_MAX_RESULT_BYTES` | `api/api.py` |
 | `SHAKERSCAN_CANCEL_FILE` | `scanner/scanner_tools/cancellation.py`, `scanner/scanner_tools/common.py` |

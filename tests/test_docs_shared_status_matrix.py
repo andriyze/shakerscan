@@ -37,15 +37,15 @@ def test_execution_architecture_is_consolidated_and_current():
 
 def test_multi_node_doc_is_build_spec_and_honest_about_fleet_status():
     text = _flat(FLEET_DOC)
-    # The implementation is complete, while a physical release-topology receipt remains an
-    # operational acceptance gate. Do not regress to claiming that shipped fleet layers are drafts.
-    assert "implementation complete; broker release-candidate physical acceptance in progress" in text
+    # The implementation and broker physical release-topology receipt are complete. Do not regress
+    # to claiming that shipped Fleet layers are drafts or that deferred WireGuard is supported.
+    assert "implementation complete; broker release-candidate physical acceptance passed" in text
     assert "WireGuard remains preview code" in text
-    assert "outside the 0.7.0 supported deployment boundary" in text
+    assert "outside the 0.8.0 supported deployment boundary" in text
     assert "Phase 1 implemented vertical-slice contract" in text
     assert "bounded enrollment" in text
     assert "single-use remains the default" in text
-    assert "final frozen-SHA receipt" in text
+    assert "retained exact-SHA receipt" in text
     assert "different node to reclaim" in text
     assert "pre-overlay bootstrap contract" in text
     assert "worker cannot call an overlay URL before it has an overlay" in text
