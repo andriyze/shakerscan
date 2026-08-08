@@ -632,6 +632,7 @@ def test_html_is_escaped_printable_and_sarif_preserves_normalized_failures():
     assert "Tool execution details" in rendered
     assert "What this tool tested" in rendered
     assert "No finding was reported by this tool." in rendered
+    assert "Finding summaries omit matched source and secret values" in rendered
     assert "NOT_DETERMINED_BY_SHAKERSCAN" not in rendered
     assert "Full corporate approval" not in rendered
     assert "Checks that need attention" in rendered
@@ -693,3 +694,20 @@ def test_html_reports_each_tool_scope_coverage_execution_and_findings_separately
     assert "modeling.py:42" in rendered
     assert "torch.load should use weights_only=True" in rendered
     assert "No finding was reported by this tool." in rendered
+
+
+def test_html_explains_native_binary_and_missing_license_findings_in_plain_language():
+    rows = _rows(active_admission=False)
+    static = next(item for item in rows["evidence"] if item["evidence_type"] == "static_analysis")
+    static["payload_json"]["scanner_results"] = [{
+        "name": "shakerscan-binary-inventory", "status": "PASS", "required": True,
+        "finding_count": 0, "findings": [], "coverage": {"native_binaries": 0},
+    }, {
+        "name": "shakerscan-license-inventory", "status": "REVIEW", "required": True,
+        "finding_count": 1, "findings": [{"id": "license_file_missing", "severity": "medium"}],
+    }]
+
+    rendered = render_model_intake_html(_report(rows))
+
+    assert "Native executable and shared-library files" in rendered
+    assert "No repository license or NOTICE source file was found." in rendered

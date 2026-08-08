@@ -1591,6 +1591,7 @@ def render_model_intake_html(report: dict[str, Any]) -> str:
         "shakerscan-secret-rules": "Repository text for bounded built-in secret patterns; opaque model weights are excluded from text matching.",
         "shakerscan-malware-rules": "Acquired files for ShakerScan's bounded known-malware and download/execute markers.",
         "shakerscan-sbom": "Dependency and component manifests used to build the generated software and AI bills of materials.",
+        "shakerscan-binary-inventory": "Native executable and shared-library files for inventory and downstream component review.",
         "shakerscan-native-binary-inventory": "Native executable and shared-library files for inventory and downstream component review.",
         "shakerscan-license-inventory": "Repository license files, package license declarations, and missing attribution sources.",
         "shakerscan-runtime-dependencies": "Imports used by the fixed inference path and their resolution to exact packaged runtime components.",
@@ -1623,10 +1624,15 @@ def render_model_intake_html(report: dict[str, Any]) -> str:
         return f"{package}@{version}" if package and version else package or "—"
 
     def finding_description(finding: dict[str, Any]) -> str:
+        known_descriptions = {
+            "license_file_missing": "No repository license or NOTICE source file was found.",
+            "modelscan_finding": "ModelScan detected an unsafe serialization primitive.",
+        }
+        finding_id = str(finding.get("id") or finding.get("rule_id") or "")
         return str(
             finding.get("message") or finding.get("call") or finding.get("operator")
             or finding.get("license") or finding.get("classification")
-            or finding.get("id") or finding.get("rule_id") or "Finding reported"
+            or known_descriptions.get(finding_id) or finding_id or "Finding reported"
         )
 
     tool_sections: list[str] = []
@@ -1702,7 +1708,7 @@ def render_model_intake_html(report: dict[str, Any]) -> str:
         tool_sections.append(
             f"<section class='tool-run'><h4>{esc(name)}</h4>"
             f"<table class='tool-overview'><tbody>{overview_rows}</tbody></table>"
-            f"<h5>Findings ({esc(reported_count)})</h5><p class='meta'>Each row is content-free and tied to this scanner run.{esc(bounded_note)}</p>"
+            f"<h5>Findings ({esc(reported_count)})</h5><p class='meta'>Finding summaries omit matched source and secret values and are tied to this scanner run.{esc(bounded_note)}</p>"
             "<table><thead><tr><th>Severity</th><th>Rule / finding</th><th>What was found</th><th>File or package</th><th>Classification / scope</th></tr></thead>"
             f"<tbody>{finding_rows}</tbody></table></section>"
         )
