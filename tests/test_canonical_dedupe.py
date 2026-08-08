@@ -224,6 +224,9 @@ def test_merge_target_group_reassigns_deep_hunt_credentials_and_evidence_before_
         assert table in sql
     assert sql.index("UPDATE agent_hunt_runs") < sql.index("DELETE FROM targets")
     assert sql.index("UPDATE evidence_instances") < sql.index("DELETE FROM targets")
+    assert sql.index("DELETE FROM evidence_objects evidence") < \
+        sql.index("UPDATE evidence_objects child SET finding_id")
+    assert "PARTITION BY ranked.keep_id, evidence.object_type" in sql
     assert sql.index("UPDATE evidence_objects child SET finding_id") < sql.index("DELETE FROM findings")
     assert sql.index("UPDATE asm_endpoint_attempts child SET endpoint_id") < \
         sql.index("DELETE FROM target_endpoints")

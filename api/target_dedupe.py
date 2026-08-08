@@ -178,6 +178,42 @@ async def _merge_findings(conn, survivor_id, dupe_ids: list) -> None:
     if not await _table_exists(conn, "findings"):
         return
     all_ids = [survivor_id, *dupe_ids]
+    if await _table_exists(conn, "evidence_objects"):
+        # A finding owns at most one durable evidence object of each type. Two
+        # canonical-target variants can nevertheless have produced the same finding
+        # independently, so moving both objects directly to the surviving finding
+        # violates evidence_objects_finding_type_unique and blocks startup. Collapse
+        # only those exact (surviving finding, object type) collisions before the
+        # generic child re-parenting below. Prefer evidence already attached to the
+        # finding we keep, then the newest object. The surrounding target-merge
+        # transaction and retention-preview guard make this atomic and fail closed.
+        await conn.execute(
+            """
+            WITH ranked_findings AS (
+                SELECT id,
+                       FIRST_VALUE(id) OVER (
+                           PARTITION BY fingerprint
+                           ORDER BY (target_id=$2) DESC, updated_at DESC, id DESC
+                       ) AS keep_id
+                FROM findings WHERE target_id=ANY($1::uuid[])
+            ), ranked_objects AS (
+                SELECT evidence.id,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY ranked.keep_id, evidence.object_type
+                           ORDER BY (evidence.finding_id=ranked.keep_id) DESC,
+                                    evidence.created_at DESC,
+                                    evidence.id DESC
+                       ) AS rn
+                FROM evidence_objects evidence
+                JOIN ranked_findings ranked ON ranked.id=evidence.finding_id
+            )
+            DELETE FROM evidence_objects evidence
+            USING ranked_objects ranked
+            WHERE evidence.id=ranked.id AND ranked.rn>1
+            """,
+            all_ids,
+            survivor_id,
+        )
     child_tables = (
         "evidence_instances",
         "evidence_objects",
