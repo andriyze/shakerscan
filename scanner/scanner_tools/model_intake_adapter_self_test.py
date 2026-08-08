@@ -18,6 +18,10 @@ EXPECTED_STATUSES = {
     "fickling": "FAIL",
     "semgrep": "FAIL",
     "trivy": "FAIL",
+    "osv-scanner": "FAIL",
+    # Advisory data changes between release-image builds. The fixed runtime may
+    # be clean or may carry review/block findings, but it must always complete.
+    "pip-audit": "COMPLETE",
 }
 
 
@@ -51,11 +55,29 @@ def run_self_test() -> dict[str, object]:
         vulnerable_repo = root / "vulnerable-repository"
         vulnerable_repo.mkdir()
         (vulnerable_repo / "requirements.txt").write_text("requests==2.19.0\n", encoding="utf-8")
+        dependency_evidence = root / "dependency-evidence"
+        dependency_evidence.mkdir()
+        (dependency_evidence / "requirements.txt").write_text("requests==2.19.0\n", encoding="utf-8")
+        (dependency_evidence / "osv-scanner.json").write_text(json.dumps({
+            "results": [{
+                "source": {"path": "adapter-self-test", "type": "shakerscan-runtime-profile"},
+                "packages": [{"package": {
+                    "ecosystem": "PyPI", "name": "requests", "version": "2.19.0",
+                }}],
+            }],
+        }), encoding="utf-8")
+        pip_cache = json.loads(Path("/opt/pip-audit-cache/runtime-audit.json").read_text("utf-8"))
+        (dependency_evidence / "runtime-components.json").write_text(json.dumps({
+            "profile": {"id": pip_cache["profile_id"]},
+            "components": pip_cache["components"],
+        }), encoding="utf-8")
         targets = {
             "modelscan": unsafe_pickle,
             "fickling": unsafe_pickle,
             "semgrep": unsafe_source,
             "trivy": vulnerable_repo,
+            "osv-scanner": dependency_evidence,
+            "pip-audit": dependency_evidence,
         }
         for name, expected in EXPECTED_STATUSES.items():
             spec = dataclasses.replace(specs[name], required=True)
@@ -76,11 +98,14 @@ def run_self_test() -> dict[str, object]:
                         "passed": variant_actual == variant_expected,
                         "evidence_sha256": variant_result.get("evidence_sha256"),
                     })
+            passed = actual == expected
+            if expected == "COMPLETE":
+                passed = actual in {"PASS", "WARNING", "FAIL"}
             checks.append({
                 "name": name,
                 "expected_status": expected,
                 "actual_status": actual,
-                "passed": actual == expected and all(bool(item["passed"]) for item in variants),
+                "passed": passed and all(bool(item["passed"]) for item in variants),
                 "version": result.get("scanner", {}).get("version"),
                 "evidence_sha256": result.get("evidence_sha256"),
                 "variants": variants,

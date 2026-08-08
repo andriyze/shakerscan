@@ -21,6 +21,7 @@ def test_authoritative_catalog_names_every_promised_model_intake_check():
         "Source resolution and revision pinning", "Complete acquisition", "SHA-256 integrity",
         "Repository completeness", "Format identification", "Safetensors validation",
         "Pickle analysis", "Archive safety", "ModelScan", "Fickling", "Semgrep", "Trivy",
+        "Inference dependency resolution", "OSV Scanner", "pip-audit",
         "Native Python AST analysis", "Dependency inventory", "SBOM and AIBOM generation",
         "License and governance metadata", "Signature and attestation verification",
         "Unsafe-format conversion", "Conversion equivalence", "Isolated model loading",
@@ -196,7 +197,7 @@ def test_complete_exact_subject_report_allows_only_with_matching_active_admissio
     assert report["presentation"]["counts"]["deployment_follow_up"] == 4
     assert report["detailed_review"]["static_analysis_detail"]["scanner_results"][0]["name"] == "semgrep"
     catalog = report["detailed_review"]["shakerscan_check_catalog"]
-    assert len(catalog) == 27
+    assert len(catalog) == 30
     assert all(item.get("execution_status") in {
         "PASS", "FAIL", "REVIEW", "INCOMPLETE", "ERROR", "NOT_RUN", "NOT_APPLICABLE",
     } for item in catalog)
@@ -379,6 +380,24 @@ def test_static_report_names_safe_finding_location_and_remediation():
             }],
         },
     ]
+    static["payload_json"]["runtime_dependencies"] = {
+        "status": "PASS",
+        "profile": {"id": "shakerscan-firecracker-python312-cpu/v1"},
+        "inferred_requirements": [{
+            "import_name": "torch", "distribution": "torch", "version": "2.9.1+cpu",
+            "required_for_fixed_loader": True, "resolution_status": "RESOLVED",
+        }],
+        "resolved_components": [{
+            "name": "torch", "version": "2.9.1+cpu",
+            "purl": "pkg:pypi/torch@2.9.1%2Bcpu", "source": "hash_locked_direct_wheel",
+        }],
+    }
+    static["payload_json"]["vulnerability_summary"] = {"total": 1, "packages_affected": 1}
+    static["payload_json"]["vulnerability_inventory"] = [{
+        "id": "CVE-2026-12345", "package": "torch", "installed_version": "2.9.1",
+        "severity": "high", "sources": ["osv-scanner", "pip-audit"],
+        "fixed_versions": ["2.9.2"],
+    }]
     report = apply_automatic_review_context(
         _report(rows),
         {
@@ -397,6 +416,11 @@ def test_static_report_names_safe_finding_location_and_remediation():
     )
     scanner = report["detailed_review"]["static_analysis_detail"]["scanner_results"][0]
     assert scanner["findings"][0]["path"] == "modeling.py"
+    rendered = render_model_intake_html(report)
+    assert "shakerscan-firecracker-python312-cpu/v1" in rendered
+    assert "CVE-2026-12345" in rendered
+    assert "osv-scanner, pip-audit" in rendered
+    assert "torch</td><td>2.9.1+cpu" in rendered
 
 
 def test_presentation_does_not_tell_engineers_to_repeat_passing_or_inapplicable_work():

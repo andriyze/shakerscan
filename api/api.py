@@ -11531,7 +11531,10 @@ def _model_intake_finding_summary(value: Any) -> list[dict[str, Any]]:
         if not isinstance(item, dict):
             continue
         summary: dict[str, Any] = {}
-        for key in ("id", "rule_id", "severity", "classification", "call"):
+        for key in (
+            "id", "rule_id", "severity", "classification", "call", "package",
+            "installed_version", "severity_source", "import_name", "evidence_class",
+        ):
             text = str(item.get(key) or "").strip()
             if text:
                 summary[key] = text[:240]
@@ -12176,6 +12179,16 @@ async def attach_model_intake_static_run(
                 else {}
             ),
             "scanner_results": _model_intake_scanner_result_summaries(generated_evidence),
+            "runtime_dependencies": _model_intake_json_object(
+                generated_evidence.get("runtime_dependencies")
+            ),
+            "vulnerability_summary": _model_intake_json_object(
+                generated_evidence.get("vulnerability_summary")
+            ),
+            "vulnerability_inventory": [
+                item for item in generated_evidence.get("vulnerability_inventory") or []
+                if isinstance(item, dict)
+            ][:1000],
             "license_compliance": {
                 "outcome": license_compliance.get("outcome"),
                 "policy_status": license_compliance.get("policy_status"),
@@ -12721,6 +12734,16 @@ async def _register_and_rescan_converted_snapshot(
             },
             "checks": generated.get("statuses") or {},
             "scanner_results": _model_intake_scanner_result_summaries(generated),
+            "runtime_dependencies": _model_intake_json_object(
+                generated.get("runtime_dependencies")
+            ),
+            "vulnerability_summary": _model_intake_json_object(
+                generated.get("vulnerability_summary")
+            ),
+            "vulnerability_inventory": [
+                item for item in generated.get("vulnerability_inventory") or []
+                if isinstance(item, dict)
+            ][:1000],
             # Conversion changes the weight serialization, not the repository
             # terms. Preserve the source policy result while the converted
             # snapshot's native license scanner still contributes findings.

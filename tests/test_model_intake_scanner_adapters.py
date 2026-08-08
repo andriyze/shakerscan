@@ -8,14 +8,59 @@ from scanner.scanner_tools.model_intake_scanners import _parse_external_scanner
 
 
 def test_json_scanners_never_pass_empty_or_malformed_output():
-    for scanner in ("modelscan", "semgrep", "trivy"):
+    for scanner in ("modelscan", "semgrep", "trivy", "osv-scanner", "pip-audit"):
         assert _parse_external_scanner(scanner, "", "", 0)[0] == "INCOMPLETE"
         assert _parse_external_scanner(scanner, "not-json", "", 0)[0] == "INCOMPLETE"
 
 
+def test_osv_adapter_uses_explicit_packaged_database_and_go_runtime_boundary():
+    spec = next(item for item in scanners.EXTERNAL_SCANNERS if item.name == "osv-scanner")
+
+    assert ("--local-db-path", "/opt/osv-cache") == (
+        spec.args[spec.args.index("--local-db-path")],
+        spec.args[spec.args.index("--local-db-path") + 1],
+    )
+    command = scanners._bounded_command("/opt/tools/osv-scanner", ["--version"])
+    assert "--no-address-space-limit" in command
+
+
 def test_trivy_sca_adapter_validates_schema_and_findings():
-    trivy = {"Results": [{"Vulnerabilities": [{"VulnerabilityID": "CVE-TEST", "Severity": "HIGH"}]}]}
-    assert _parse_external_scanner("trivy", json.dumps(trivy), "", 0)[0] == "FAIL"
+    trivy = {"Results": [{"Vulnerabilities": [{
+        "VulnerabilityID": "CVE-TEST", "Severity": "HIGH", "PkgName": "demo",
+        "InstalledVersion": "1.0", "FixedVersion": "1.1",
+    }]}]}
+    status, findings, _ = _parse_external_scanner("trivy", json.dumps(trivy), "", 0)
+    assert status == "FAIL"
+    assert findings[0]["package"] == "demo"
+    assert findings[0]["fixed_versions"] == ["1.1"]
+
+
+def test_osv_and_pip_audit_normalize_exact_package_advisories():
+    osv = {"results": [{"packages": [{
+        "package": {"name": "requests", "version": "2.19.0"},
+        "groups": [{
+            "ids": ["GHSA-test"], "aliases": ["CVE-2024-0001"], "max_severity": 9.1,
+        }],
+        "vulnerabilities": [{
+            "id": "GHSA-test", "aliases": ["CVE-2024-0001"],
+            "affected": [{"ranges": [{"type": "ECOSYSTEM", "events": [{"fixed": "2.32.0"}]}]}],
+        }],
+    }]}]}
+    status, findings, summary = _parse_external_scanner("osv-scanner", json.dumps(osv), "", 1)
+    assert status == "FAIL"
+    assert findings[0]["id"] == "CVE-2024-0001"
+    assert findings[0]["fixed_versions"] == ["2.32.0"]
+    assert summary["packages_scanned"] == 1
+
+    pip_audit = {"dependencies": [{
+        "name": "requests", "version": "2.19.0", "vulns": [{
+            "id": "PYSEC-1", "aliases": ["CVE-2024-0001"], "fix_versions": ["2.32.0"],
+        }],
+    }], "fixes": []}
+    status, findings, summary = _parse_external_scanner("pip-audit", json.dumps(pip_audit), "", 1)
+    assert status == "WARNING"
+    assert findings[0]["severity_source"] == "not_reported"
+    assert summary["severity_available"] is False
 
 
 def test_trivy_license_adapter_preserves_inventory_and_requires_review():
@@ -187,12 +232,14 @@ def test_requested_but_inapplicable_adapter_is_explicit_not_applicable_not_requi
 
 def test_adapter_catalog_separates_provider_kind_and_policy():
     catalog = {item["name"]: item for item in scanners.scanner_adapter_catalog()}
-    assert set(catalog) == {"modelscan", "semgrep", "fickling", "trivy"}
+    assert set(catalog) == {"modelscan", "semgrep", "fickling", "trivy", "osv-scanner", "pip-audit"}
     assert catalog["modelscan"]["adapter_kind"] == "evidence_scanner"
     assert catalog["semgrep"]["applicability"] == "repository_code"
     assert catalog["fickling"]["target_scope"] == "artifact"
     assert catalog["trivy"]["required_profiles"] == ["strict"]
     assert catalog["trivy"]["applicability"] == "repository_compliance"
+    assert catalog["osv-scanner"]["target_scope"] == "dependency_evidence"
+    assert catalog["pip-audit"]["applicability"] == "resolved_python_dependencies"
 
 
 def test_readiness_requires_functional_self_test_for_default_adapters(tmp_path, monkeypatch):
@@ -202,7 +249,7 @@ def test_readiness_requires_functional_self_test_for_default_adapters(tmp_path, 
         "receipt_sha256": "a" * 64,
         "checks": [
             {"name": name, "passed": True, "actual_status": "FAIL"}
-            for name in ("modelscan", "semgrep", "fickling", "trivy")
+            for name in ("modelscan", "semgrep", "fickling", "trivy", "osv-scanner", "pip-audit")
         ],
     }
     receipt_path = tmp_path / "self-test.json"
@@ -223,8 +270,70 @@ def test_readiness_requires_functional_self_test_for_default_adapters(tmp_path, 
     by_name = {item["name"]: item for item in readiness["adapters"]}
 
     assert readiness["self_test"]["status"] == "PASS"
-    assert all(by_name[name]["ready"] for name in ("modelscan", "semgrep", "fickling", "trivy"))
+    assert all(by_name[name]["ready"] for name in ("modelscan", "semgrep", "fickling", "trivy", "osv-scanner", "pip-audit"))
     assert by_name["modelscan"]["last_self_test"]["passed"] is True
+
+
+def test_runtime_dependency_evidence_uses_fixed_profile_without_mutating_repository(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "helpers.py").write_text("VALUE = 1\n")
+    (repo / "modeling.py").write_text(
+        "import torch\nfrom transformers import AutoModel\nimport regex\nfrom . import helpers\n"
+    )
+    (repo / "README.md").write_text(
+        "```python\nfrom sentence_transformers import SentenceTransformer\n```\n"
+    )
+    before = sorted(path.relative_to(repo).as_posix() for path in repo.rglob("*"))
+
+    result, evidence = scanners.materialize_runtime_dependency_evidence(
+        repo, tmp_path / "evidence", {"digest": "sha256:" + "a" * 64, "complete": True},
+    )
+
+    after = sorted(path.relative_to(repo).as_posix() for path in repo.rglob("*"))
+    assert before == after
+    assert result["execution"]["status"] == "WARNING"
+    assert result["execution"]["network_used"] is False
+    assert {path.name for path in evidence.iterdir()} == {
+        "requirements.txt", "runtime-components.json", "osv-scanner.json",
+    }
+    inventory = json.loads((evidence / "runtime-components.json").read_text())
+    assert inventory["profile"]["id"] == scanners.RUNTIME_PROFILE_ID
+    assert len(inventory["components"]) == 41
+    inferred = {item["import_name"]: item for item in inventory["inferred_requirements"]}
+    assert inferred["torch"]["version"] == "2.9.1+cpu"
+    assert inferred["sentence_transformers"]["required_for_fixed_loader"] is False
+
+
+def test_unknown_runtime_import_fails_closed(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "modeling.py").write_text("import definitely_not_in_fixed_runtime\n")
+    result, _ = scanners.materialize_runtime_dependency_evidence(
+        repo, tmp_path / "evidence", {"digest": "sha256:" + "b" * 64, "complete": True},
+    )
+    assert result["execution"]["status"] == "INCOMPLETE"
+    assert result["coverage"]["unresolved_required"] == ["definitely_not_in_fixed_runtime"]
+
+
+def test_vulnerability_reconciliation_preserves_sources_and_severity():
+    results = [
+        {"scanner": {"name": "osv-scanner"}, "execution": {"status": "FAIL"}, "findings": [{
+            "id": "CVE-2024-0001", "aliases": ["GHSA-test"], "severity": "high",
+            "package": "Requests", "installed_version": "2.19.0", "fixed_versions": ["2.32.0"],
+            "evidence_sha256": "a" * 64,
+        }]},
+        {"scanner": {"name": "pip-audit"}, "execution": {"status": "WARNING"}, "findings": [{
+            "id": "CVE-2024-0001", "aliases": ["PYSEC-1"], "severity": "medium",
+            "severity_source": "not_reported", "package": "requests", "installed_version": "2.19.0",
+            "fixed_versions": ["2.31.0"], "evidence_sha256": "b" * 64,
+        }]},
+    ]
+    reconciled = scanners.reconcile_vulnerability_evidence(results)
+    assert reconciled["summary"]["total"] == 1
+    assert reconciled["summary"]["multi_scanner_agreement"] == 1
+    assert reconciled["vulnerabilities"][0]["sources"] == ["osv-scanner", "pip-audit"]
+    assert reconciled["vulnerabilities"][0]["severity"] == "high"
 
 
 def test_scanner_material_freshness_is_measured_and_bounded(tmp_path, monkeypatch):

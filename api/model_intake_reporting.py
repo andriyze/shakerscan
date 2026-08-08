@@ -122,6 +122,9 @@ SHAKERSCAN_CHECK_CATALOG: list[dict[str, Any]] = [
     {"id": "MI-10", "category": "Scanner", "check": "Fickling", "description": "Perform semantic analysis of applicable pickle artifacts.", "implementation": "Fickling adapter", "applies_when": "Fickling supports the pickle artifact", "evidence_controls": ["static_analysis"], "scanner_name": "fickling"},
     {"id": "MI-11", "category": "Scanner", "check": "Semgrep", "description": "Review repository code for deserialization, execution, network, imports, and risky file access.", "implementation": "versioned Semgrep rules", "applies_when": "repository code is present", "evidence_controls": ["static_analysis"], "scanner_name": "semgrep"},
     {"id": "MI-12", "category": "Scanner", "check": "Trivy", "description": "Check dependencies and repository content with the packaged offline vulnerability and license data.", "implementation": "offline Trivy adapter", "applies_when": "complete repository or dependency manifests are present", "evidence_controls": ["static_analysis", "license_compliance"], "scanner_name": "trivy"},
+    {"id": "MI-12A", "category": "Dependencies", "check": "Inference dependency resolution", "description": "Derive Python imports from repository code and model-card examples, then map them to the exact hash-locked Firecracker runtime without installing model-authored input.", "implementation": "native AST + reviewed runtime lock", "applies_when": "complete Python model repository", "evidence_controls": ["static_analysis"], "scanner_name": "shakerscan-runtime-dependencies"},
+    {"id": "MI-12B", "category": "Scanner", "check": "OSV Scanner", "description": "Check exact resolved Python packages against a packaged offline OSV database.", "implementation": "offline OSV Scanner adapter", "applies_when": "resolved runtime dependency evidence exists", "evidence_controls": ["static_analysis"], "scanner_name": "osv-scanner"},
+    {"id": "MI-12C", "category": "Scanner", "check": "pip-audit", "description": "Audit the exact fixed Firecracker Python runtime using a release-build-captured pip-audit result; never resolve or install model-authored requirements.", "implementation": "hash-bound offline pip-audit adapter", "applies_when": "resolved runtime dependency evidence matches the fixed profile", "evidence_controls": ["static_analysis"], "scanner_name": "pip-audit"},
     {"id": "MI-13", "category": "Source", "check": "Native Python AST analysis", "description": "Identify executable custom code, suspicious imports, calls, templates, and load-time behavior.", "implementation": "native AST parser", "applies_when": "Python code is present", "evidence_controls": ["static_analysis"], "scanner_name": "python-ast-security"},
     {"id": "MI-14", "category": "Dependencies", "check": "Dependency inventory", "description": "Discover declared runtime packages and assess reproducible custom-code dependency coverage.", "implementation": "native manifest reconciliation", "applies_when": "dependency declarations or custom code are present", "evidence_controls": ["static_analysis"], "reported_check": "sbom_dependencies"},
     {"id": "MI-15", "category": "Inventory", "check": "SBOM and AIBOM generation", "description": "Produce CycloneDX, SPDX, and AI inventories with explicit completeness.", "implementation": "native evidence composer", "applies_when": "scan evidence exists", "evidence_controls": ["static_analysis"], "scanner_name": "shakerscan-sbom"},
@@ -600,7 +603,8 @@ def _static_check_detail(evidence: list[dict[str, Any]]) -> dict[str, Any]:
                         key: finding.get(key)
                         for key in (
                             "id", "rule_id", "severity", "classification", "call",
-                            "path", "line", "message",
+                            "path", "line", "message", "package", "installed_version",
+                            "severity_source", "import_name", "evidence_class",
                         )
                         if finding.get(key) is not None
                     }
@@ -615,6 +619,12 @@ def _static_check_detail(evidence: list[dict[str, Any]]) -> dict[str, Any]:
             for item in scanner_results if isinstance(item, dict)
         ],
         "license_compliance": _json(payload.get("license_compliance"), {}),
+        "runtime_dependencies": _json(payload.get("runtime_dependencies"), {}),
+        "vulnerability_summary": _json(payload.get("vulnerability_summary"), {}),
+        "vulnerability_inventory": [
+            item for item in payload.get("vulnerability_inventory") or []
+            if isinstance(item, dict)
+        ],
         "note": (
             "Per-check static evidence is available and content-free."
             if payload
@@ -1542,6 +1552,38 @@ def render_model_intake_html(report: dict[str, Any]) -> str:
         f"<tr><td>{esc(job.get('operation'))}</td><td>{esc(phase.get('phase'))}</td><td>{esc(phase.get('status'))}</td><td>{esc(phase.get('duration_ms'))}</td><td>{esc(phase.get('detail'))}</td></tr>"
         for job in report.get("runner_timelines", []) for phase in job.get("phases", [])
     ) or "<tr><td colspan='5'>No Firecracker phase evidence recorded.</td></tr>"
+    static_detail = _json(detail.get("static_analysis_detail"), {})
+    runtime_dependencies = _json(static_detail.get("runtime_dependencies"), {})
+    runtime_profile = _json(runtime_dependencies.get("profile"), {})
+    dependency_rows = "".join(
+        "<tr>"
+        f"<td>{esc(item.get('name'))}</td><td>{esc(item.get('version'))}</td>"
+        f"<td><code>{esc(item.get('purl'))}</code></td><td>{esc(item.get('source'))}</td>"
+        "</tr>"
+        for item in runtime_dependencies.get("resolved_components") or []
+        if isinstance(item, dict)
+    ) or "<tr><td colspan='4'>No exact runtime component inventory was produced.</td></tr>"
+    inferred_rows = "".join(
+        "<tr>"
+        f"<td>{esc(item.get('import_name'))}</td><td>{esc(item.get('distribution'))}</td>"
+        f"<td>{esc(item.get('version'))}</td><td>{esc('required' if item.get('required_for_fixed_loader') else 'model-card example')}</td>"
+        f"<td class='status {esc(str(item.get('resolution_status') or '').lower())}'>{esc(item.get('resolution_status'))}</td>"
+        "</tr>"
+        for item in runtime_dependencies.get("inferred_requirements") or []
+        if isinstance(item, dict)
+    ) or "<tr><td colspan='5'>No Python inference imports were discovered.</td></tr>"
+    vulnerability_summary = _json(static_detail.get("vulnerability_summary"), {})
+    vulnerability_rows = "".join(
+        "<tr>"
+        f"<td>{esc(item.get('package'))}</td><td>{esc(item.get('installed_version'))}</td>"
+        f"<td><code>{esc(item.get('id'))}</code></td>"
+        f"<td class='status {esc(str(item.get('severity') or '').lower())}'>{esc(item.get('severity'))}</td>"
+        f"<td>{esc(', '.join(str(value) for value in item.get('sources') or []))}</td>"
+        f"<td>{esc(', '.join(str(value) for value in item.get('fixed_versions') or []) or 'No fixed version reported')}</td>"
+        "</tr>"
+        for item in static_detail.get("vulnerability_inventory") or []
+        if isinstance(item, dict)
+    ) or "<tr><td colspan='6'>No known vulnerability was reported for the exact resolved runtime by the completed scanners.</td></tr>"
     return f"""<!doctype html>
 <html><head><meta charset="utf-8"><title>Model Intake {esc(report.get('outcome'))}</title>
 <style>
@@ -1564,6 +1606,11 @@ th,td{{border:1px solid #ccd2dc;padding:8px;vertical-align:top;text-align:left}}
 <h2 class="page-break">Deployment follow-up</h2><p>These items are not scan failures and are excluded from the technical result above.</p><table><thead><tr><th>Category</th><th>Control</th><th>Status</th><th>Current state</th><th>Next step</th></tr></thead><tbody>{deployment_rows}</tbody></table>
 <details><summary>Organization checklist ({esc(presentation_counts.get('organization_checklist_items'))} items)</summary><p>Use this optional checklist when preparing the model for a specific deployment.</p><table><thead><tr><th>ID</th><th>Category</th><th>Follow-up</th><th>Typical owner</th><th>Expected evidence</th></tr></thead><tbody>{external_rows}</tbody></table></details>
 <h2 class="page-break">Detailed technical review</h2>
+<h3>Inference dependencies and known vulnerabilities</h3>
+<p><strong>Runtime profile:</strong> {esc(runtime_profile.get('id') or 'not resolved')} · <strong>Dependency resolution:</strong> {esc(runtime_dependencies.get('status') or 'NOT_RUN')} · <strong>Known advisories:</strong> {esc(vulnerability_summary.get('total') or 0)} across {esc(vulnerability_summary.get('packages_affected') or 0)} package(s).</p>
+<table><thead><tr><th>Package</th><th>Installed version</th><th>Advisory</th><th>Severity</th><th>Reported by</th><th>Fix</th></tr></thead><tbody>{vulnerability_rows}</tbody></table>
+<details><summary>Derived inference imports</summary><table><thead><tr><th>Import</th><th>Resolved package</th><th>Version</th><th>Evidence</th><th>Status</th></tr></thead><tbody>{inferred_rows}</tbody></table></details>
+<details><summary>Exact Firecracker runtime packages ({esc(len(runtime_dependencies.get('resolved_components') or []))})</summary><table><thead><tr><th>Package</th><th>Version</th><th>Package URL</th><th>Resolution</th></tr></thead><tbody>{dependency_rows}</tbody></table></details>
 <h3>Control evidence matrix</h3><table><thead><tr><th>Category</th><th>Question</th><th>Status</th><th>Answer</th><th>Method</th><th>Coverage/evidence</th></tr></thead><tbody>{rows}</tbody></table>
 <h2>Firecracker phase timeline</h2><table><thead><tr><th>Operation</th><th>Phase</th><th>Status</th><th>Duration ms</th><th>Detail</th></tr></thead><tbody>{phases}</tbody></table>
 <details><summary>Full ShakerScan check catalog</summary><p>Each row states what happened for this submission. Applicability alone is never treated as proof that a check ran.</p><table><thead><tr><th>ID</th><th>Category</th><th>Check</th><th>Result</th><th>Evidence summary</th><th>Implementation</th><th>Applicability</th></tr></thead><tbody>{catalog_rows}</tbody></table></details>

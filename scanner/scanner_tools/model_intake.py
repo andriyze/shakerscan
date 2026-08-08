@@ -3319,6 +3319,7 @@ async def run_model_intake_scan(
                 ))
 
             if subject_path is not None:
+                dependency_evidence_path: Path | None = None
                 selected_snapshot_path = None
                 if subject_path.is_dir() and metadata.get("huggingface_file"):
                     try:
@@ -3359,6 +3360,19 @@ async def run_model_intake_scan(
                     _model_intake_scanners.run_builtin_license_inventory,
                 ):
                     scanner_results.append(await asyncio.to_thread(builtin_scanner, subject_path, subject))
+                if subject_path.is_dir() and subject.get("complete") is True:
+                    try:
+                        runtime_result, dependency_evidence_path = await asyncio.to_thread(
+                            _model_intake_scanners.materialize_runtime_dependency_evidence,
+                            subject_path,
+                            Path(subject_tmp) / "runtime-dependencies",
+                            subject,
+                        )
+                    except Exception as exc:
+                        runtime_result = _model_intake_scanners.runtime_dependency_failure_result(
+                            subject, exc,
+                        )
+                    scanner_results.append(runtime_result)
                 requested_scanners = options.get("generated_scanner_names")
                 requested_names = {
                     str(item).strip()
@@ -3408,14 +3422,61 @@ async def run_model_intake_scan(
                         ))
                         continue
                     scan_target = artifact_scan_path if spec.target_scope == "artifact" else subject_path
-                    scanner_results.append(
-                        await asyncio.to_thread(
+                    repository_result = await asyncio.to_thread(
+                        _model_intake_scanners.run_external_scanner,
+                        spec,
+                        scan_target,
+                        subject,
+                    )
+                    if spec.name == "trivy" and dependency_evidence_path is not None:
+                        runtime_result = await asyncio.to_thread(
                             _model_intake_scanners.run_external_scanner,
                             spec,
-                            scan_target,
+                            dependency_evidence_path,
                             subject,
                         )
+                        repository_result = _model_intake_scanners.combine_trivy_repository_and_runtime(
+                            repository_result, runtime_result, subject,
+                        )
+                    scanner_results.append(repository_result)
+                if dependency_evidence_path is not None:
+                    dependency_plan = _model_intake_scanners.resolve_scanner_plan(
+                        dependency_evidence_path,
+                        requested_names=requested_names,
+                        profile="strict" if strict_governance else "baseline",
+                        evidence_scope="dependency_evidence",
                     )
+                    for planned in dependency_plan:
+                        spec = planned["spec"]
+                        scanner_results.append(await asyncio.to_thread(
+                            _model_intake_scanners.run_external_scanner,
+                            spec,
+                            dependency_evidence_path,
+                            subject,
+                        ))
+                elif requested_names:
+                    dependency_specs = {
+                        spec.name: spec
+                        for spec in _model_intake_scanners.EXTERNAL_SCANNERS
+                        if spec.target_scope == "dependency_evidence"
+                    }
+                    for scanner_name in sorted(requested_names & dependency_specs.keys()):
+                        spec = dependency_specs[scanner_name]
+                        scanner_results.append(_model_intake_scanners._scanner_result(
+                            name=spec.name,
+                            version=None,
+                            status="INCOMPLETE",
+                            subject=subject,
+                            started_at=datetime.now(timezone.utc).isoformat(),
+                            finished_at=datetime.now(timezone.utc).isoformat(),
+                            execution={
+                                "required": True,
+                                "reason": "complete_repository_dependency_evidence_required",
+                                "adapter_kind": spec.adapter_kind,
+                                "applicability": spec.applicability,
+                                "target_scope": spec.target_scope,
+                            },
+                        ))
         generated_summary = _model_intake_scanners.generated_evidence_summary(scanner_results)
         required_non_pass_results = [
             item for item in scanner_results
@@ -3650,6 +3711,44 @@ async def run_model_intake_scan(
         {"alg": "SHA-256", "content": aibom_hash, "provenance_class": "shakerscan_generated", "scope": "full_artifact"}
         if aibom_hash else None
     )
+    runtime_dependencies = (
+        generated_evidence.get("runtime_dependencies")
+        if isinstance(generated_evidence.get("runtime_dependencies"), dict) else {}
+    )
+    resolved_runtime_components = (
+        runtime_dependencies.get("resolved_components")
+        if isinstance(runtime_dependencies.get("resolved_components"), list) else []
+    )
+    if resolved_runtime_components:
+        aibom["components"].extend({
+            "type": "runtime_dependency",
+            "name": item.get("name"),
+            "version": item.get("version"),
+            "purl": item.get("purl"),
+            "hashes": item.get("hashes") or [],
+            "resolution": item.get("source"),
+            "profile_id": (runtime_dependencies.get("profile") or {}).get("id"),
+        } for item in resolved_runtime_components if isinstance(item, dict))
+        fields = aibom.get("completeness", {}).get("fields")
+        if isinstance(fields, dict):
+            fields["dependencies"] = True
+            aibom["completeness"]["score"] = round(
+                sum(1 for present in fields.values() if present) / len(fields), 3
+            )
+            aibom["completeness"]["missing"] = [key for key, present in fields.items() if not present]
+    aibom["runtime_dependency_evidence"] = {
+        "status": runtime_dependencies.get("status") or "NOT_RUN",
+        "profile": runtime_dependencies.get("profile"),
+        "coverage_class": runtime_dependencies.get("coverage_class"),
+        "component_count": len(resolved_runtime_components),
+        "inferred_requirements": runtime_dependencies.get("inferred_requirements") or [],
+        "evidence_sha256": runtime_dependencies.get("evidence_sha256"),
+    }
+    aibom["known_vulnerabilities"] = {
+        "summary": generated_evidence.get("vulnerability_summary") or {},
+        "items": generated_evidence.get("vulnerability_inventory") or [],
+        "meaning": "Deduplicated exact-package advisories reported by the completed offline scanners; absence is not proof that no vulnerability exists.",
+    }
 
     if metadata_fetch_meta.get("error"):
         findings.append(_finding(

@@ -17,6 +17,7 @@ import sys
 import tempfile
 import time
 import tomllib
+import urllib.parse
 import zipfile
 
 import yaml
@@ -57,6 +58,25 @@ ADAPTER_SELF_TEST_PATH = os.getenv(
 )
 DEFAULT_MAX_RULE_AGE_DAYS = 90
 DEFAULT_MAX_DATABASE_AGE_DAYS = 14
+DEFAULT_RUNTIME_PROFILE_LOCK = os.getenv(
+    "SHAKERSCAN_MODEL_INTAKE_RUNTIME_LOCK",
+    "/opt/model-intake-locks/firecracker-runtime.lock",
+)
+RUNTIME_PROFILE_ID = "shakerscan-firecracker-python312-cpu/v1"
+IMPORT_DISTRIBUTION_NAMES = {
+    "cv2": "opencv-python",
+    "huggingface_hub": "huggingface-hub",
+    "pil": "Pillow",
+    "regex": "regex",
+    "safetensors": "safetensors",
+    "sentence_transformers": "sentence-transformers",
+    "sentencepiece": "sentencepiece",
+    "sklearn": "scikit-learn",
+    "torch": "torch",
+    "tokenizers": "tokenizers",
+    "transformers": "transformers",
+    "yaml": "PyYAML",
+}
 
 
 @dataclass(frozen=True)
@@ -108,6 +128,27 @@ EXTERNAL_SCANNERS: tuple[ScannerSpec, ...] = (
         applicability="repository_compliance", enabled_by_default=True, required_profiles=("strict",),
         database_path="/opt/trivy-cache/db/metadata.json",
     ),
+    ScannerSpec(
+        "osv-scanner", "osv-scanner",
+        (
+            "scan", "source", "--offline", "--format", "json",
+            # v2.5.0's CLI passes its hidden local-db-path flag directly to
+            # the offline matcher; relying only on the older documented
+            # environment variable makes an existing database look absent.
+            "--local-db-path", "/opt/osv-cache",
+            "--lockfile", "osv-scanner:{subject}/osv-scanner.json",
+        ),
+        applicability="resolved_python_dependencies", target_scope="dependency_evidence",
+        enabled_by_default=True, required_profiles=("strict",),
+        database_path="/opt/osv-cache/metadata.json",
+    ),
+    ScannerSpec(
+        "pip-audit", "pip-audit-offline",
+        ("--input", "{subject}/runtime-components.json", "--format", "json"),
+        applicability="resolved_python_dependencies", target_scope="dependency_evidence",
+        enabled_by_default=True, required_profiles=("strict",),
+        database_path="/opt/pip-audit-cache/metadata.json",
+    ),
 )
 BUILTIN_SCANNER_NAMES = {
     "python-pickletools",
@@ -117,6 +158,7 @@ BUILTIN_SCANNER_NAMES = {
     "shakerscan-sbom",
     "shakerscan-native-binary-inventory",
     "shakerscan-license-inventory",
+    "shakerscan-runtime-dependencies",
 }
 
 SERIALIZED_MODEL_EXTENSIONS = {
@@ -181,6 +223,11 @@ def scanner_applicability(spec: ScannerSpec, subject_path: Path) -> dict[str, An
     elif spec.applicability == "python_dependency_repository":
         applicable = subject_path.is_dir() and bool(names & PYTHON_DEPENDENCY_FILENAMES)
         reason = "python_dependency_manifest_present" if applicable else "no_python_dependency_manifest"
+    elif spec.applicability == "resolved_python_dependencies":
+        applicable = subject_path.is_dir() and {
+            "requirements.txt", "runtime-components.json", "osv-scanner.json",
+        }.issubset(names)
+        reason = "resolved_fixed_runtime_evidence" if applicable else "resolved_runtime_evidence_missing"
     return {
         "applicable": applicable,
         "reason": reason,
@@ -194,11 +241,17 @@ def resolve_scanner_plan(
     *,
     requested_names: set[str] | None = None,
     profile: str = "baseline",
+    evidence_scope: str = "repository",
 ) -> list[dict[str, Any]]:
     """Build a non-weakenable, applicability-aware external scanner plan."""
     strict = profile == "strict"
     plan: list[dict[str, Any]] = []
     for spec in EXTERNAL_SCANNERS:
+        dependency_adapter = spec.target_scope == "dependency_evidence"
+        if evidence_scope == "dependency_evidence" and not dependency_adapter:
+            continue
+        if evidence_scope != "dependency_evidence" and dependency_adapter:
+            continue
         applicability = scanner_applicability(spec, subject_path)
         requested = requested_names is not None and spec.name in requested_names
         required = bool(applicability["applicable"]) and (requested or (
@@ -274,7 +327,12 @@ def _scanner_result(
 
 def _bounded_command(executable: str, args: tuple[str, ...] | list[str]) -> list[str]:
     launcher = Path(__file__).with_name("bounded_exec.py")
-    options = ["--no-address-space-limit"] if Path(executable).name in {"semgrep", "trivy"} else []
+    # Go and OCaml adapters reserve large sparse virtual address ranges. Their
+    # resident memory remains bounded by the worker cgroup; RLIMIT_AS would
+    # otherwise make OSV's local ZIP-backed advisory database look absent.
+    options = ["--no-address-space-limit"] if Path(executable).name in {
+        "semgrep", "trivy", "osv-scanner",
+    } else []
     return [sys.executable, str(launcher), *options, "--", executable, *args]
 
 
@@ -287,6 +345,7 @@ def _safe_environment(scratch: Path) -> dict[str, str]:
         "LC_ALL": "C.UTF-8",
         "NO_PROXY": "*",
         "no_proxy": "*",
+        "OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY": "/opt/osv-cache",
     }
 
 
@@ -430,6 +489,29 @@ def _external_finding(scanner: str, item: Any, severity: str = "high") -> dict[s
     }
 
 
+def _trivy_vulnerability_finding(item: Any) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        return _external_finding("trivy", item)
+    aliases = sorted({
+        str(value) for value in [
+            item.get("VulnerabilityID"),
+            *(item.get("Aliases") if isinstance(item.get("Aliases"), list) else []),
+        ] if str(value or "").strip()
+    })
+    normalized = {
+        "id": _canonical_vulnerability_id(aliases),
+        "severity": str(item.get("Severity") or "unknown").lower(),
+        "package": str(item.get("PkgName") or item.get("PkgID") or "unknown")[:300],
+        "installed_version": str(item.get("InstalledVersion") or "unknown")[:100],
+        "fixed_versions": [str(item["FixedVersion"])[:100]] if item.get("FixedVersion") else [],
+        "aliases": aliases,
+        "source": "trivy",
+        "classification": "known_package_vulnerability",
+    }
+    normalized["evidence_sha256"] = _sha256_json(normalized)
+    return normalized
+
+
 def _semgrep_finding(item: Any) -> dict[str, Any]:
     """Keep actionable, content-free Semgrep coordinates in normalized evidence."""
     if not isinstance(item, dict):
@@ -455,11 +537,144 @@ def _semgrep_finding(item: Any) -> dict[str, Any]:
     return {key: value for key, value in normalized.items() if value is not None}
 
 
+def _canonical_vulnerability_id(ids: list[str]) -> str:
+    values = sorted({str(item).strip() for item in ids if str(item).strip()})
+    return next((item for item in values if item.startswith("CVE-")), values[0] if values else "UNKNOWN")
+
+
+def _cvss_severity(value: Any) -> str:
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return "medium"
+    if score >= 9.0:
+        return "critical"
+    if score >= 7.0:
+        return "high"
+    if score >= 4.0:
+        return "medium"
+    return "low"
+
+
+def _osv_findings(parsed: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    results = parsed.get("results") if isinstance(parsed, dict) else None
+    if not isinstance(results, list):
+        raise ValueError("osv_results_missing")
+    findings: list[dict[str, Any]] = []
+    packages_scanned = 0
+    for result in results:
+        packages = result.get("packages") if isinstance(result, dict) else None
+        if not isinstance(packages, list):
+            continue
+        for package_item in packages:
+            if not isinstance(package_item, dict):
+                continue
+            package = package_item.get("package") if isinstance(package_item.get("package"), dict) else {}
+            name = str(package.get("name") or "unknown")[:300]
+            version = str(package.get("version") or "unknown")[:100]
+            packages_scanned += 1
+            vulnerabilities = package_item.get("vulnerabilities") if isinstance(package_item.get("vulnerabilities"), list) else []
+            fixed_versions: dict[str, set[str]] = {}
+            for vulnerability in vulnerabilities:
+                if not isinstance(vulnerability, dict):
+                    continue
+                aliases = [str(vulnerability.get("id") or ""), *[str(item) for item in vulnerability.get("aliases") or []]]
+                canonical = _canonical_vulnerability_id(aliases)
+                fixed = fixed_versions.setdefault(canonical, set())
+                for affected in vulnerability.get("affected") or []:
+                    if not isinstance(affected, dict):
+                        continue
+                    for range_item in affected.get("ranges") or []:
+                        if not isinstance(range_item, dict) or str(range_item.get("type") or "") != "ECOSYSTEM":
+                            continue
+                        for event in range_item.get("events") or []:
+                            if isinstance(event, dict) and event.get("fixed"):
+                                fixed.add(str(event["fixed"])[:100])
+            groups = package_item.get("groups") if isinstance(package_item.get("groups"), list) else []
+            for group in groups:
+                if not isinstance(group, dict):
+                    continue
+                aliases = sorted({
+                    str(item) for item in [*(group.get("ids") or []), *(group.get("aliases") or [])]
+                    if str(item).strip()
+                })
+                canonical = _canonical_vulnerability_id(aliases)
+                severity = _cvss_severity(group.get("max_severity"))
+                normalized = {
+                    "id": canonical,
+                    "severity": severity,
+                    "package": name,
+                    "installed_version": version,
+                    "aliases": aliases,
+                    "fixed_versions": sorted(fixed_versions.get(canonical, set())),
+                    "source": "osv-scanner",
+                    "classification": "known_package_vulnerability",
+                }
+                normalized["evidence_sha256"] = _sha256_json(normalized)
+                findings.append(normalized)
+    unique = {
+        (item["package"].lower(), item["installed_version"], item["id"]): item for item in findings
+    }
+    normalized_findings = [unique[key] for key in sorted(unique)]
+    return normalized_findings, {
+        "packages_scanned": packages_scanned,
+        "vulnerability_count": len(normalized_findings),
+        "critical": sum(1 for item in normalized_findings if item["severity"] == "critical"),
+        "high": sum(1 for item in normalized_findings if item["severity"] == "high"),
+        "medium": sum(1 for item in normalized_findings if item["severity"] == "medium"),
+        "low": sum(1 for item in normalized_findings if item["severity"] == "low"),
+    }
+
+
+def _pip_audit_findings(parsed: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    dependencies = parsed.get("dependencies") if isinstance(parsed, dict) else None
+    if not isinstance(dependencies, list):
+        raise ValueError("pip_audit_dependencies_missing")
+    findings: list[dict[str, Any]] = []
+    for dependency in dependencies:
+        if not isinstance(dependency, dict):
+            continue
+        name = str(dependency.get("name") or "unknown")[:300]
+        version = str(dependency.get("version") or "unknown")[:100]
+        for vulnerability in dependency.get("vulns") or []:
+            if not isinstance(vulnerability, dict):
+                continue
+            aliases = sorted({
+                str(item) for item in [str(vulnerability.get("id") or ""), *(vulnerability.get("aliases") or [])]
+                if str(item).strip()
+            })
+            normalized = {
+                "id": _canonical_vulnerability_id(aliases),
+                # pip-audit does not publish severity in its JSON contract.
+                # Preserve that limitation rather than inventing a score; the
+                # OSV/Trivy aliases are reconciled later for severity.
+                "severity": "medium",
+                "severity_source": "not_reported",
+                "package": name,
+                "installed_version": version,
+                "aliases": aliases,
+                "fixed_versions": sorted({str(item) for item in vulnerability.get("fix_versions") or []}),
+                "source": "pip-audit",
+                "classification": "known_python_package_vulnerability",
+            }
+            normalized["evidence_sha256"] = _sha256_json(normalized)
+            findings.append(normalized)
+    unique = {
+        (item["package"].lower(), item["installed_version"], item["id"]): item for item in findings
+    }
+    normalized_findings = [unique[key] for key in sorted(unique)]
+    return normalized_findings, {
+        "packages_scanned": len(dependencies),
+        "vulnerability_count": len(normalized_findings),
+        "severity_available": False,
+    }
+
+
 def _parse_external_scanner(
     scanner: str, stdout: str, stderr: str, exit_code: int
 ) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
     """Validate each tool's output contract; exit zero alone is never PASS."""
-    if scanner in {"modelscan", "semgrep", "trivy"}:
+    if scanner in {"modelscan", "semgrep", "trivy", "osv-scanner", "pip-audit"}:
         try:
             parsed = _modelscan_json_output(stdout) if scanner == "modelscan" else _json_output(stdout)
         except (ValueError, json.JSONDecodeError) as exc:
@@ -513,7 +728,11 @@ def _parse_external_scanner(
                     counts[label] += len(items)
                     for item in items[:1000 - len(findings)]:
                         severity = str(item.get("Severity") or "high").lower() if isinstance(item, dict) else "high"
-                        if key == "Secrets" or severity in {"critical", "high"}:
+                        if key == "Vulnerabilities":
+                            findings.append(_trivy_vulnerability_finding(item))
+                            if severity in {"medium", "low", "unknown"}:
+                                warning = True
+                        elif key == "Secrets" or severity in {"critical", "high"}:
                             findings.append(_external_finding(scanner, item, "critical" if severity == "critical" else "high"))
                         elif severity in {"medium", "low", "unknown"}:
                             warning = True
@@ -564,7 +783,26 @@ def _parse_external_scanner(
             summary["license_class_counts"] = dict(sorted(license_class_counts.items()))
             summary["license_inventory"] = normalized_licenses
             summary["license_inventory_truncated"] = counts["licenses"] > len(normalized_licenses)
-            summary["warning_only"] = warning and not findings
+            summary["warning_only"] = warning and not any(
+                str(item.get("severity") or "").lower() in {"critical", "high"}
+                for item in findings if isinstance(item, dict)
+            )
+        elif scanner == "osv-scanner":
+            try:
+                findings, osv_summary = _osv_findings(parsed)
+            except ValueError as exc:
+                return "INCOMPLETE", [], {"error": str(exc)}
+            summary.update(osv_summary)
+            summary["warning_only"] = bool(findings) and not any(
+                item.get("severity") in {"critical", "high"} for item in findings
+            )
+        elif scanner == "pip-audit":
+            try:
+                findings, pip_summary = _pip_audit_findings(parsed)
+            except ValueError as exc:
+                return "INCOMPLETE", [], {"error": str(exc)}
+            summary.update(pip_summary)
+            summary["warning_only"] = bool(findings)
         if exit_code not in {0, 1}:
             return "CRASHED", findings, {**summary, "error": (stderr or "unexpected exit code")[:1000]}
         if summary.get("warning_only"):
@@ -878,6 +1116,75 @@ def run_external_scanner(spec: ScannerSpec, subject_path: Path, subject: dict[st
             },
             summary=summary,
         )
+
+
+def combine_trivy_repository_and_runtime(
+    repository_result: dict[str, Any],
+    runtime_result: dict[str, Any],
+    subject: dict[str, Any],
+) -> dict[str, Any]:
+    """Compose two bounded Trivy passes into one policy-facing adapter result."""
+    precedence = {
+        "CRASHED": 9, "TIMEOUT": 8, "UNSUPPORTED": 7, "INCOMPLETE": 6,
+        "FAIL": 5, "WARNING": 4, "REVIEW_REQUIRED": 3, "PASS": 2,
+        "NOT_APPLICABLE": 1,
+    }
+    statuses = [
+        str(repository_result.get("execution", {}).get("status") or "INCOMPLETE"),
+        str(runtime_result.get("execution", {}).get("status") or "INCOMPLETE"),
+    ]
+    status = max(statuses, key=lambda item: precedence.get(item, 10))
+    findings: list[dict[str, Any]] = []
+    for scope, result in (("repository", repository_result), ("resolved_runtime", runtime_result)):
+        for finding in result.get("findings") or []:
+            if isinstance(finding, dict):
+                findings.append({**finding, "evidence_scope": scope})
+    repository_summary = repository_result.get("summary") if isinstance(repository_result.get("summary"), dict) else {}
+    runtime_summary = runtime_result.get("summary") if isinstance(runtime_result.get("summary"), dict) else {}
+    summary: dict[str, Any] = {
+        "scopes": {
+            "repository": {
+                "status": statuses[0], "evidence_sha256": repository_result.get("evidence_sha256"),
+                "summary": repository_summary,
+            },
+            "resolved_runtime": {
+                "status": statuses[1], "evidence_sha256": runtime_result.get("evidence_sha256"),
+                "summary": runtime_summary,
+            },
+        },
+    }
+    for key in ("vulnerabilities", "secrets", "misconfigurations", "licenses"):
+        summary[key] = int(repository_summary.get(key) or 0) + int(runtime_summary.get(key) or 0)
+    summary["license_inventory"] = [
+        *list(repository_summary.get("license_inventory") or []),
+        *list(runtime_summary.get("license_inventory") or []),
+    ][:10_000]
+    summary["license_inventory_truncated"] = bool(
+        repository_summary.get("license_inventory_truncated")
+        or runtime_summary.get("license_inventory_truncated")
+        or len(list(repository_summary.get("license_inventory") or []))
+        + len(list(runtime_summary.get("license_inventory") or [])) > 10_000
+    )
+    return _scanner_result(
+        name="trivy",
+        version=str(repository_result.get("scanner", {}).get("version") or runtime_result.get("scanner", {}).get("version") or "") or None,
+        status=status,
+        subject=subject,
+        started_at=str(repository_result.get("execution", {}).get("started_at") or _utc_iso()),
+        finished_at=str(runtime_result.get("execution", {}).get("finished_at") or _utc_iso()),
+        findings=findings[:1000],
+        coverage={"repository_pass": True, "resolved_runtime_pass": True},
+        execution={
+            "required": bool(repository_result.get("execution", {}).get("required")),
+            "adapter_kind": "evidence_scanner",
+            "applicability": "repository_and_resolved_runtime",
+            "target_scope": "repository+dependency_evidence",
+            "repository_result_sha256": repository_result.get("evidence_sha256"),
+            "runtime_result_sha256": runtime_result.get("evidence_sha256"),
+            "database_sha256": repository_result.get("execution", {}).get("database_sha256"),
+        },
+        summary=summary,
+    )
 
 
 def scanner_adapter_catalog() -> list[dict[str, Any]]:
@@ -1711,6 +2018,344 @@ def _requirement_components(path: Path) -> tuple[list[dict[str, Any]], list[str]
     return [], []
 
 
+def _normalized_distribution_name(value: str) -> str:
+    return re.sub(r"[-_.]+", "-", str(value).strip()).lower()
+
+
+def _runtime_lock_path() -> Path:
+    configured = Path(DEFAULT_RUNTIME_PROFILE_LOCK)
+    if configured.is_file():
+        return configured
+    # Source-checkout fallback. The release image copies this same reviewed
+    # lock to DEFAULT_RUNTIME_PROFILE_LOCK, so tests and production use one
+    # dependency identity rather than separate hand-maintained inventories.
+    return Path(__file__).resolve().parents[2] / "runner" / "guest" / "requirements.lock"
+
+
+def _direct_url_version(name: str, url: str) -> str | None:
+    filename = urllib.parse.unquote(Path(urllib.parse.urlsplit(url).path).name)
+    match = re.match(rf"{re.escape(name)}-(?P<version>.+?)-(?:cp|py)\d", filename, re.IGNORECASE)
+    return match.group("version") if match else None
+
+
+def _parse_runtime_profile_lock(path: Path) -> tuple[list[dict[str, Any]], list[str]]:
+    """Parse the reviewed pip-compile lock without invoking Python packaging."""
+    try:
+        lines = path.read_text("utf-8").splitlines()
+    except OSError as exc:
+        return [], [f"runtime_lock_unreadable:{type(exc).__name__}"]
+    components: list[dict[str, Any]] = []
+    errors: list[str] = []
+    current: dict[str, Any] | None = None
+    for raw in lines:
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        hash_match = re.match(r"--hash=sha256:([0-9a-f]{64})", stripped.rstrip(" \\"))
+        if hash_match and current is not None:
+            current.setdefault("hashes", []).append({"alg": "SHA-256", "content": hash_match.group(1)})
+            continue
+        if raw[:1].isspace():
+            continue
+        requirement = stripped.rstrip(" \\")
+        direct = re.match(r"(?P<name>[A-Za-z0-9._-]+)\s+@\s+(?P<url>\S+)", requirement)
+        exact = re.match(r"(?P<name>[A-Za-z0-9._-]+)==(?P<version>[^\s;]+)", requirement)
+        if direct:
+            name = direct.group("name")
+            version = _direct_url_version(name, direct.group("url"))
+            if not version:
+                errors.append(f"runtime_lock_direct_url_version_unknown:{name}")
+                current = None
+                continue
+            current = _component("pypi", name, version)
+            current["source"] = "hash_locked_direct_wheel"
+            current["advisory_version"] = version.split("+", 1)[0]
+            current["download_url_sha256"] = urllib.parse.parse_qs(
+                urllib.parse.urlsplit(direct.group("url")).fragment
+            ).get("sha256", [None])[0]
+            components.append(current)
+        elif exact:
+            current = _component("pypi", exact.group("name"), exact.group("version"))
+            current["source"] = "hash_locked_runtime_profile"
+            current["advisory_version"] = str(exact.group("version")).split("+", 1)[0]
+            components.append(current)
+        else:
+            errors.append(f"runtime_lock_entry_unparsed:{requirement[:120]}")
+            current = None
+    unique = {
+        _normalized_distribution_name(str(item["name"])): item
+        for item in components if item.get("name") and item.get("version")
+    }
+    return [unique[key] for key in sorted(unique)], errors
+
+
+def _local_python_modules(root: Path) -> set[str]:
+    modules: set[str] = set()
+    for path in root.rglob("*.py"):
+        modules.add(path.stem)
+        try:
+            relative = path.relative_to(root)
+        except ValueError:
+            continue
+        if relative.parts:
+            modules.add(relative.parts[0])
+    return modules
+
+
+def _imports_from_python(text: str, source: str, *, required: bool) -> tuple[list[dict[str, Any]], str | None]:
+    try:
+        tree = ast.parse(text, filename=source)
+    except SyntaxError as exc:
+        return [], f"{source}:{exc.lineno or 0}:parse_error"
+    imports: list[dict[str, Any]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                continue
+            names = [node.module] if node.module else []
+        else:
+            continue
+        for name in names:
+            top_level = str(name or "").split(".", 1)[0].strip()
+            if top_level:
+                imports.append({
+                    "import_name": top_level,
+                    "source": source,
+                    "line": int(getattr(node, "lineno", 0) or 0),
+                    "required_for_fixed_loader": required,
+                    "evidence_class": "repository_code" if required else "model_card_example",
+                })
+    return imports, None
+
+
+def _model_card_python_blocks(path: Path) -> list[tuple[str, int]]:
+    try:
+        if path.stat().st_size > MAX_SOURCE_FILE_BYTES:
+            return []
+        text = path.read_text("utf-8", errors="replace")
+    except OSError:
+        return []
+    blocks: list[tuple[str, int]] = []
+    for index, match in enumerate(re.finditer(r"```(?:python|py)\s*\n(.*?)```", text, re.IGNORECASE | re.DOTALL), 1):
+        blocks.append((match.group(1), index))
+    return blocks
+
+
+def materialize_runtime_dependency_evidence(
+    snapshot_root: Path,
+    output_root: Path,
+    subject: dict[str, Any],
+) -> tuple[dict[str, Any], Path]:
+    """Create immutable, scan-local dependency evidence for the fixed loader.
+
+    Nothing is written into the acquired repository. The generated inputs are
+    derived from the pinned snapshot and ShakerScan's reviewed Firecracker
+    lock, and their digests are retained in the scanner receipt.
+    """
+    started_at = _utc_iso()
+    root = snapshot_root.resolve(strict=True)
+    output = output_root.resolve()
+    output.mkdir(parents=True, exist_ok=False)
+    lock_path = _runtime_lock_path()
+    components, lock_errors = _parse_runtime_profile_lock(lock_path)
+    by_name = {_normalized_distribution_name(str(item["name"])): item for item in components}
+    local_modules = _local_python_modules(root)
+    import_evidence: list[dict[str, Any]] = []
+    parse_errors: list[str] = []
+    python_paths = sorted(root.rglob("*.py"))[:MAX_SOURCE_FILES]
+    all_python_count = sum(1 for _ in root.rglob("*.py"))
+    for path in python_paths:
+        relative = path.relative_to(root).as_posix()
+        try:
+            if path.stat().st_size > MAX_SOURCE_FILE_BYTES:
+                parse_errors.append(f"{relative}:file_too_large")
+                continue
+            parsed, error = _imports_from_python(
+                path.read_text("utf-8", errors="replace"), relative, required=True,
+            )
+        except OSError as exc:
+            parsed, error = [], f"{relative}:{type(exc).__name__}"
+        import_evidence.extend(parsed)
+        if error:
+            parse_errors.append(error)
+    for card_name in ("README.md", "MODEL_CARD.md", "model-card.md"):
+        card = root / card_name
+        if not card.is_file():
+            continue
+        for block, index in _model_card_python_blocks(card):
+            parsed, _ = _imports_from_python(block, f"{card_name}#python-{index}", required=False)
+            import_evidence.extend(parsed)
+
+    stdlib = {name.lower() for name in getattr(sys, "stdlib_module_names", set())}
+    grouped: dict[tuple[str, bool], dict[str, Any]] = {}
+    for evidence in import_evidence:
+        import_name = str(evidence["import_name"])
+        lowered = import_name.lower()
+        if lowered in stdlib or import_name in local_modules or lowered in {item.lower() for item in local_modules}:
+            continue
+        required = bool(evidence["required_for_fixed_loader"])
+        key = (lowered, required)
+        item = grouped.setdefault(key, {
+            "import_name": import_name,
+            "required_for_fixed_loader": required,
+            "evidence_class": evidence["evidence_class"],
+            "sources": [],
+        })
+        if len(item["sources"]) < 50:
+            item["sources"].append({"path": evidence["source"], "line": evidence["line"]})
+
+    inferred: list[dict[str, Any]] = []
+    unresolved_required: list[str] = []
+    unresolved_optional: list[str] = []
+    for (_, required), item in sorted(grouped.items()):
+        import_name = str(item["import_name"])
+        distribution = IMPORT_DISTRIBUTION_NAMES.get(import_name.lower())
+        candidates = [distribution] if distribution else [import_name, import_name.replace("_", "-")]
+        resolved = next(
+            (by_name[_normalized_distribution_name(candidate)] for candidate in candidates if candidate and _normalized_distribution_name(candidate) in by_name),
+            None,
+        )
+        item["distribution"] = str(resolved["name"]) if resolved else distribution
+        item["resolution_status"] = "RESOLVED" if resolved else "UNRESOLVED"
+        item["version"] = str(resolved["version"]) if resolved else None
+        item["purl"] = str(resolved["purl"]) if resolved else None
+        inferred.append(item)
+        if not resolved:
+            (unresolved_required if required else unresolved_optional).append(import_name)
+
+    requirements = "".join(
+        f"{item['name']}=={item.get('advisory_version') or item['version']}\n" for item in components
+    )
+    requirements_path = output / "requirements.txt"
+    requirements_path.write_text(requirements, encoding="utf-8")
+    osv_path = output / "osv-scanner.json"
+    osv_path.write_text(json.dumps({
+        "results": [{
+            "source": {"path": RUNTIME_PROFILE_ID, "type": "shakerscan-runtime-profile"},
+            "packages": [{
+                "package": {
+                    "name": str(item["name"]),
+                    "version": str(item.get("advisory_version") or item["version"]),
+                    "ecosystem": "PyPI",
+                }
+            } for item in components],
+        }],
+    }, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+    inventory = {
+        "schema_version": "model-intake-runtime-dependencies/v1",
+        "profile": {
+            "id": RUNTIME_PROFILE_ID,
+            "python": "3.12",
+            "platform": "linux_x86_64_manylinux_2_28",
+            "source_lock_sha256": _hash_path(lock_path) if lock_path.is_file() else None,
+        },
+        "subject_digest": subject.get("digest"),
+        "evidence_classes": ["INFERRED", "RESOLVED"],
+        "inferred_requirements": inferred,
+        # Canonical component array consumed by the bounded offline adapters.
+        "components": components,
+        "resolved_components": components,
+        "coverage": {
+            "python_files_discovered": all_python_count,
+            "python_files_analyzed": len(python_paths) - len(parse_errors),
+            "required_imports": sum(1 for item in inferred if item["required_for_fixed_loader"]),
+            "optional_model_card_imports": sum(1 for item in inferred if not item["required_for_fixed_loader"]),
+            "unresolved_required": sorted(set(unresolved_required)),
+            "unresolved_optional": sorted(set(unresolved_optional)),
+            "parse_errors": parse_errors[:100],
+            "runtime_components": len(components),
+        },
+    }
+    inventory_path = output / "runtime-components.json"
+    inventory_path.write_text(json.dumps(inventory, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+    artifacts = {
+        path.name: {"sha256": _hash_path(path), "size_bytes": path.stat().st_size}
+        for path in (requirements_path, osv_path, inventory_path)
+    }
+    truncated = all_python_count > len(python_paths)
+    status = (
+        "INCOMPLETE" if lock_errors or parse_errors or truncated or unresolved_required
+        else "WARNING" if unresolved_optional
+        else "PASS"
+    )
+    findings = [
+        {
+            "id": "runtime_dependency_unresolved",
+            "severity": "high",
+            "import_name": name,
+            "evidence_class": "repository_code",
+        }
+        for name in sorted(set(unresolved_required))
+    ] + [
+        {
+            "id": "optional_model_card_dependency_unresolved",
+            "severity": "low",
+            "import_name": name,
+            "evidence_class": "model_card_example",
+        }
+        for name in sorted(set(unresolved_optional))
+    ]
+    result = _scanner_result(
+        name="shakerscan-runtime-dependencies",
+        version="1",
+        status=status,
+        subject=subject,
+        started_at=started_at,
+        finished_at=_utc_iso(),
+        findings=findings[:1000],
+        coverage={**inventory["coverage"], "inventory_truncated": truncated},
+        execution={
+            "required": True,
+            "profile_id": RUNTIME_PROFILE_ID,
+            "generated_artifacts": artifacts,
+            "lock_errors": lock_errors,
+            "network_used": False,
+            "repository_mutated": False,
+        },
+        summary={
+            "profile": inventory["profile"],
+            "inferred_requirements": inferred,
+            "resolved_components": components,
+            "requirements_sha256": artifacts["requirements.txt"]["sha256"],
+            "osv_input_sha256": artifacts["osv-scanner.json"]["sha256"],
+            "inventory_sha256": artifacts["runtime-components.json"]["sha256"],
+            "coverage_class": (
+                "resolved_fixed_runtime" if status == "PASS" else "resolved_with_optional_gap"
+                if status == "WARNING" else "incomplete"
+            ),
+        },
+    )
+    return result, output
+
+
+def runtime_dependency_failure_result(subject: dict[str, Any], exc: Exception) -> dict[str, Any]:
+    """Convert materialization defects into explicit fail-closed evidence."""
+    now = _utc_iso()
+    return _scanner_result(
+        name="shakerscan-runtime-dependencies",
+        version="1",
+        status="INCOMPLETE",
+        subject=subject,
+        started_at=now,
+        finished_at=now,
+        findings=[{
+            "id": "runtime_dependency_evidence_failed",
+            "severity": "high",
+            "error_class": type(exc).__name__,
+        }],
+        coverage={"complete": False},
+        execution={
+            "required": True,
+            "error": f"{type(exc).__name__}: {str(exc)[:500]}",
+            "profile_id": RUNTIME_PROFILE_ID,
+            "network_used": False,
+            "repository_mutated": False,
+        },
+    )
+
+
 def run_builtin_sbom_scan(subject_path: Path, subject: dict[str, Any]) -> dict[str, Any]:
     started_at = _utc_iso()
     root = subject_path if subject_path.is_dir() else subject_path.parent
@@ -1935,6 +2580,76 @@ def materialize_snapshot_tree(snapshot: dict[str, Any], quarantine_dir: Path, de
     return destination
 
 
+def reconcile_vulnerability_evidence(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Deduplicate package advisories while preserving scanner agreement."""
+    severity_rank = {"unknown": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+    groups: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for result in results:
+        scanner_name = str(result.get("scanner", {}).get("name") or "unknown")
+        if scanner_name not in {"trivy", "osv-scanner", "pip-audit"}:
+            continue
+        for finding in result.get("findings") or []:
+            if not isinstance(finding, dict) or not finding.get("package"):
+                continue
+            identifiers = [str(finding.get("id") or ""), *[str(item) for item in finding.get("aliases") or []]]
+            canonical = _canonical_vulnerability_id(identifiers)
+            package = _normalized_distribution_name(str(finding.get("package") or "unknown"))
+            version = str(finding.get("installed_version") or "unknown")
+            key = (package, version, canonical)
+            entry = groups.setdefault(key, {
+                "id": canonical,
+                "package": package,
+                "installed_version": version,
+                "severity": "unknown",
+                "severity_source": None,
+                "aliases": set(),
+                "fixed_versions": set(),
+                "sources": set(),
+                "source_evidence_sha256": {},
+            })
+            severity = str(finding.get("severity") or "unknown").lower()
+            if severity_rank.get(severity, 0) > severity_rank.get(str(entry["severity"]), 0):
+                entry["severity"] = severity
+                entry["severity_source"] = (
+                    scanner_name if finding.get("severity_source") != "not_reported" else None
+                )
+            entry["aliases"].update(item for item in identifiers if item)
+            entry["fixed_versions"].update(str(item) for item in finding.get("fixed_versions") or [] if str(item))
+            entry["sources"].add(scanner_name)
+            if finding.get("evidence_sha256"):
+                entry["source_evidence_sha256"][scanner_name] = finding["evidence_sha256"]
+    inventory: list[dict[str, Any]] = []
+    for key in sorted(groups):
+        item = groups[key]
+        normalized = {
+            **item,
+            "aliases": sorted(item["aliases"]),
+            "fixed_versions": sorted(item["fixed_versions"]),
+            "sources": sorted(item["sources"]),
+            "source_evidence_sha256": dict(sorted(item["source_evidence_sha256"].items())),
+        }
+        normalized["agreement"] = len(normalized["sources"])
+        normalized["evidence_sha256"] = _sha256_json(normalized)
+        inventory.append(normalized)
+    return {
+        "vulnerabilities": inventory,
+        "summary": {
+            "total": len(inventory),
+            "critical": sum(1 for item in inventory if item["severity"] == "critical"),
+            "high": sum(1 for item in inventory if item["severity"] == "high"),
+            "medium": sum(1 for item in inventory if item["severity"] == "medium"),
+            "low": sum(1 for item in inventory if item["severity"] == "low"),
+            "packages_affected": len({item["package"] for item in inventory}),
+            "multi_scanner_agreement": sum(1 for item in inventory if item["agreement"] > 1),
+            "sources_completed": sorted({
+                str(item.get("scanner", {}).get("name")) for item in results
+                if item.get("scanner", {}).get("name") in {"trivy", "osv-scanner", "pip-audit"}
+                and item.get("execution", {}).get("status") in {"PASS", "WARNING", "FAIL"}
+            }),
+        },
+    }
+
+
 def generated_evidence_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
     statuses = {
         str(item.get("scanner", {}).get("name") or "unknown"): str(item.get("execution", {}).get("status") or "CRASHED")
@@ -1957,6 +2672,12 @@ def generated_evidence_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
             "actual_status": status,
             "satisfied": status in acceptable,
         })
+    vulnerabilities = reconcile_vulnerability_evidence(results)
+    runtime_result = next((
+        item for item in results
+        if item.get("scanner", {}).get("name") == "shakerscan-runtime-dependencies"
+    ), {})
+    runtime_summary = runtime_result.get("summary") if isinstance(runtime_result.get("summary"), dict) else {}
     return {
         "schema_version": "model-intake-generated-evidence/v1",
         "provenance_class": "shakerscan_generated",
@@ -1972,6 +2693,16 @@ def generated_evidence_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
                 False,
             )
         ],
+        "runtime_dependencies": {
+            "status": runtime_result.get("execution", {}).get("status") if runtime_result else "NOT_RUN",
+            "profile": runtime_summary.get("profile"),
+            "coverage_class": runtime_summary.get("coverage_class"),
+            "inferred_requirements": runtime_summary.get("inferred_requirements") or [],
+            "resolved_components": runtime_summary.get("resolved_components") or [],
+            "evidence_sha256": runtime_result.get("evidence_sha256") if runtime_result else None,
+        },
+        "vulnerability_summary": vulnerabilities["summary"],
+        "vulnerability_inventory": vulnerabilities["vulnerabilities"],
         "evidence_sha256": _sha256_json(results),
     }
 
@@ -2012,32 +2743,52 @@ def scan_materialized_snapshot(
         run_builtin_binary_inventory(root, subject),
         run_builtin_license_inventory(root, subject),
     ]
-    for planned in resolve_scanner_plan(root, profile=profile):
-        spec = planned["spec"]
-        if not planned["applicable"]:
-            now = datetime.now(timezone.utc).isoformat()
-            results.append(_scanner_result(
-                name=spec.name,
-                version=None,
-                status="NOT_APPLICABLE",
-                subject=subject,
-                started_at=now,
-                finished_at=now,
-                coverage={"files_considered": planned["files_considered"]},
-                execution={
-                    "required": False,
-                    "reason": planned["reason"],
-                    "adapter_kind": spec.adapter_kind,
-                    "applicability": spec.applicability,
-                    "target_scope": spec.target_scope,
-                },
-            ))
-            continue
-        results.append(run_external_scanner(
-            spec,
-            artifact if spec.target_scope == "artifact" else root,
-            subject,
-        ))
+    with tempfile.TemporaryDirectory(prefix="model-intake-runtime-dependencies-") as dependency_tmp:
+        try:
+            runtime_result, dependency_root = materialize_runtime_dependency_evidence(
+                root, Path(dependency_tmp) / "evidence", subject,
+            )
+        except Exception as exc:
+            runtime_result = runtime_dependency_failure_result(subject, exc)
+            dependency_root = None
+        results.append(runtime_result)
+        for planned in resolve_scanner_plan(root, profile=profile):
+            spec = planned["spec"]
+            if not planned["applicable"]:
+                now = datetime.now(timezone.utc).isoformat()
+                results.append(_scanner_result(
+                    name=spec.name,
+                    version=None,
+                    status="NOT_APPLICABLE",
+                    subject=subject,
+                    started_at=now,
+                    finished_at=now,
+                    coverage={"files_considered": planned["files_considered"]},
+                    execution={
+                        "required": False,
+                        "reason": planned["reason"],
+                        "adapter_kind": spec.adapter_kind,
+                        "applicability": spec.applicability,
+                        "target_scope": spec.target_scope,
+                    },
+                ))
+                continue
+            repository_result = run_external_scanner(
+                spec,
+                artifact if spec.target_scope == "artifact" else root,
+                subject,
+            )
+            if spec.name == "trivy" and dependency_root is not None:
+                runtime_trivy = run_external_scanner(spec, dependency_root, subject)
+                repository_result = combine_trivy_repository_and_runtime(
+                    repository_result, runtime_trivy, subject,
+                )
+            results.append(repository_result)
+        if dependency_root is not None:
+            for planned in resolve_scanner_plan(
+                dependency_root, profile=profile, evidence_scope="dependency_evidence",
+            ):
+                results.append(run_external_scanner(planned["spec"], dependency_root, subject))
     summary = generated_evidence_summary(results)
     severity = {
         str(finding.get("severity") or "").lower()
