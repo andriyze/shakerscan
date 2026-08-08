@@ -727,6 +727,55 @@ def test_html_reports_each_tool_scope_coverage_execution_and_findings_separately
     assert "href='#tool-semgrep'" in rendered
 
 
+def test_converted_report_preserves_source_and_target_scanner_runs():
+    rows = _rows(active_admission=False)
+    current = next(item for item in rows["evidence"] if item["evidence_type"] == "static_analysis")
+    current["payload_json"]["source_static_evidence_id"] = "evidence-source"
+    current["payload_json"]["scanner_results"] = [{
+        "name": "modelscan",
+        "version": "0.8.8",
+        "status": "NOT_APPLICABLE",
+        "required": False,
+        "applicability": "serialized_model",
+        "finding_count": 0,
+        "reason": "no_supported_serialized_model_artifact",
+        "findings": [],
+    }]
+    rows["evidence"].insert(0, {
+        "id": "evidence-source",
+        "evidence_type": "static_analysis",
+        "status": "PASS",
+        "payload_json": {
+            "scanner_results": [{
+                "name": "modelscan",
+                "version": "0.8.8",
+                "status": "PASS",
+                "required": True,
+                "applicability": "serialized_model",
+                "finding_count": 0,
+                "coverage": {"files_considered": 1},
+                "findings": [],
+            }],
+        },
+    })
+
+    report = _report(rows)
+    modelscan_runs = [
+        item for item in report["detailed_review"]["static_analysis_detail"]["scanner_results"]
+        if item["name"] == "modelscan"
+    ]
+    rendered = render_model_intake_html(report)
+
+    assert [(item["evidence_stage"], item["status"]) for item in modelscan_runs] == [
+        ("source_artifact_scan", "PASS"),
+        ("converted_target_rescan", "NOT_APPLICABLE"),
+    ]
+    assert "modelscan <span class='run-stage'>· Source artifact scan</span>" in rendered
+    assert "modelscan <span class='run-stage'>· Converted target rescan</span>" in rendered
+    assert "id='tool-modelscan-source-artifact-scan'" in rendered
+    assert "id='tool-modelscan-converted-target-rescan'" in rendered
+
+
 def test_html_explains_native_binary_and_missing_license_findings_in_plain_language():
     rows = _rows(active_admission=False)
     static = next(item for item in rows["evidence"] if item["evidence_type"] == "static_analysis")

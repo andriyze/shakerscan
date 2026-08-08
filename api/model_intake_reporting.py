@@ -567,15 +567,86 @@ def _enrich_control(control: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _scanner_result_detail(
+    item: dict[str, Any],
+    *,
+    evidence_stage: str,
+    evidence_record_id: str,
+) -> dict[str, Any]:
+    return {
+        "name": str(item.get("name") or "unknown"),
+        "status": _normalize_status(item.get("status")),
+        "raw_status": item.get("status"),
+        "required": bool(item.get("required")),
+        "applicability": item.get("applicability"),
+        "finding_count": _integer(item.get("finding_count")),
+        "findings": [
+            {
+                key: finding.get(key)
+                for key in (
+                    "id", "rule_id", "severity", "classification", "call",
+                    "path", "line", "message", "package", "installed_version",
+                    "severity_source", "import_name", "evidence_class", "operator",
+                    "license", "tool_severity", "evidence_scope",
+                )
+                if finding.get(key) is not None
+            }
+            for finding in item.get("findings") or []
+            if isinstance(finding, dict)
+        ][:100],
+        "coverage": _json(item.get("coverage"), {}),
+        "summary": _json(item.get("summary"), {}),
+        "version": item.get("version"),
+        "rules_sha256": item.get("rules_sha256"),
+        "database_sha256": item.get("database_sha256"),
+        "target_scope": item.get("target_scope"),
+        "adapter_kind": item.get("adapter_kind"),
+        "duration_ms": item.get("duration_ms"),
+        "timeout_seconds": item.get("timeout_seconds"),
+        "exit_code": item.get("exit_code"),
+        "reason": item.get("reason"),
+        "error": item.get("error"),
+        "license_scan_mode": item.get("license_scan_mode"),
+        "raw_result_digest": item.get("raw_result_digest"),
+        "execution_contract": [str(value) for value in item.get("execution_contract") or []][:30],
+        "evidence_stage": evidence_stage,
+        "evidence_record_id": evidence_record_id,
+    }
+
+
 def _static_check_detail(evidence: list[dict[str, Any]]) -> dict[str, Any]:
     record = _latest(evidence, "evidence_type", "static_analysis")
     payload = _json(record.get("payload_json"), {}) if record else {}
     required = _json(payload.get("required_static_checks"), {})
     checks = _json(payload.get("checks"), {})
-    scanner_results = payload.get("scanner_results") if isinstance(payload.get("scanner_results"), list) else []
+    record_id = str(record.get("id") or "") if record else ""
+    source_record_id = str(payload.get("source_static_evidence_id") or "")
+    source_record = next(
+        (
+            item for item in evidence
+            if str(item.get("evidence_type") or "") == "static_analysis"
+            and str(item.get("id") or "") == source_record_id
+        ),
+        None,
+    )
+    source_payload = _json(source_record.get("payload_json"), {}) if source_record else {}
+    scanner_runs: list[tuple[dict[str, Any], str, str]] = []
+    if source_payload:
+        scanner_runs.extend(
+            (item, "source_artifact_scan", source_record_id)
+            for item in source_payload.get("scanner_results") or []
+            if isinstance(item, dict)
+        )
+    current_stage = "converted_target_rescan" if source_payload else "current_subject_scan"
+    scanner_runs.extend(
+        (item, current_stage, record_id)
+        for item in payload.get("scanner_results") or []
+        if isinstance(item, dict)
+    )
     return {
         "available": bool(payload),
-        "evidence_record_id": str(record.get("id") or "") if record else None,
+        "evidence_record_id": record_id or None,
+        "source_static_evidence_id": source_record_id or None,
         "required_checks": [
             {
                 "id": str(name),
@@ -591,44 +662,12 @@ def _static_check_detail(evidence: list[dict[str, Any]]) -> dict[str, Any]:
             for name, value in sorted(checks.items())
         ],
         "scanner_results": [
-            {
-                "name": str(item.get("name") or "unknown"),
-                "status": _normalize_status(item.get("status")),
-                "raw_status": item.get("status"),
-                "required": bool(item.get("required")),
-                "applicability": item.get("applicability"),
-                "finding_count": _integer(item.get("finding_count")),
-                "findings": [
-                    {
-                        key: finding.get(key)
-                        for key in (
-                            "id", "rule_id", "severity", "classification", "call",
-                            "path", "line", "message", "package", "installed_version",
-                            "severity_source", "import_name", "evidence_class", "operator",
-                            "license", "tool_severity", "evidence_scope",
-                        )
-                        if finding.get(key) is not None
-                    }
-                    for finding in item.get("findings") or []
-                    if isinstance(finding, dict)
-                ][:100],
-                "coverage": _json(item.get("coverage"), {}),
-                "summary": _json(item.get("summary"), {}),
-                "version": item.get("version"),
-                "rules_sha256": item.get("rules_sha256"),
-                "database_sha256": item.get("database_sha256"),
-                "target_scope": item.get("target_scope"),
-                "adapter_kind": item.get("adapter_kind"),
-                "duration_ms": item.get("duration_ms"),
-                "timeout_seconds": item.get("timeout_seconds"),
-                "exit_code": item.get("exit_code"),
-                "reason": item.get("reason"),
-                "error": item.get("error"),
-                "license_scan_mode": item.get("license_scan_mode"),
-                "raw_result_digest": item.get("raw_result_digest"),
-                "execution_contract": [str(value) for value in item.get("execution_contract") or []][:30],
-            }
-            for item in scanner_results if isinstance(item, dict)
+            _scanner_result_detail(
+                item,
+                evidence_stage=evidence_stage,
+                evidence_record_id=evidence_id,
+            )
+            for item, evidence_stage, evidence_id in scanner_runs
         ],
         "license_compliance": _json(payload.get("license_compliance"), {}),
         "runtime_dependencies": _json(payload.get("runtime_dependencies"), {}),
@@ -1667,16 +1706,36 @@ def render_model_intake_html(report: dict[str, Any]) -> str:
 
     tool_sections: list[str] = []
     tool_index_links: list[str] = []
-    for scanner in static_detail.get("scanner_results") or []:
+    scanner_rows = [
+        item for item in static_detail.get("scanner_results") or []
+        if isinstance(item, dict)
+    ]
+    scanner_name_counts: dict[str, int] = {}
+    for scanner in scanner_rows:
+        scanner_key = str(scanner.get("name") or "unknown").casefold()
+        scanner_name_counts[scanner_key] = scanner_name_counts.get(scanner_key, 0) + 1
+    stage_labels = {
+        "source_artifact_scan": "Source artifact scan",
+        "converted_target_rescan": "Converted target rescan",
+        "current_subject_scan": "Current subject scan",
+    }
+    for scanner in scanner_rows:
         if not isinstance(scanner, dict):
             continue
         name = str(scanner.get("name") or "unknown")
         status = str(scanner.get("status") or "NOT_RUN")
-        tool_anchor = "tool-" + "".join(
+        evidence_stage = str(scanner.get("evidence_stage") or "current_subject_scan")
+        stage_label = stage_labels.get(evidence_stage, evidence_stage.replace("_", " ").title())
+        base_anchor = "tool-" + "".join(
             character if character.isalnum() else "-" for character in name.casefold()
         ).strip("-")
+        tool_anchor = (
+            f"{base_anchor}-{evidence_stage.replace('_', '-')}"
+            if scanner_name_counts.get(name.casefold(), 0) > 1
+            else base_anchor
+        )
         tool_index_links.append(
-            f"<a href='#{esc(tool_anchor)}'>{esc(name)} "
+            f"<a href='#{esc(tool_anchor)}'>{esc(name)} · {esc(stage_label)} "
             f"<span class='status {esc(status.lower())}'>{esc(status)}</span></a>"
         )
         purpose = tool_purposes.get(
@@ -1685,6 +1744,8 @@ def render_model_intake_html(report: dict[str, Any]) -> str:
         )
         overview: list[tuple[str, Any]] = [
             ("What this tool tested", purpose),
+            ("Evidence stage", stage_label),
+            ("Evidence record", scanner.get("evidence_record_id") or "Not reported"),
             ("Result", status),
             ("Applied to", scanner.get("target_scope") or scanner.get("applicability") or "Not reported"),
             ("Applicability rule", scanner.get("applicability") or "Not reported"),
@@ -1744,9 +1805,15 @@ def render_model_intake_html(report: dict[str, Any]) -> str:
             if int(reported_count or 0) > len(findings) else ""
         )
         open_attribute = " open" if status not in {"PASS", "NOT_APPLICABLE"} else ""
+        heading_stage = (
+            f" <span class='run-stage'>· {esc(stage_label)}</span>"
+            if scanner_name_counts.get(name.casefold(), 0) > 1
+            else ""
+        )
         tool_sections.append(
             f"<details class='tool-run' id='{esc(tool_anchor)}'{open_attribute}>"
-            f"<summary><h4>{esc(name)}</h4><span class='status {esc(status.lower())}'>{esc(status)}</span>"
+            f"<summary><h4>{esc(name)}{heading_stage}</h4>"
+            f"<span class='status {esc(status.lower())}'>{esc(status)}</span>"
             f"<span class='finding-total'>{esc(reported_count)} finding(s)</span></summary><div class='tool-body'>"
             f"<table class='tool-overview'><tbody>{overview_rows}</tbody></table>"
             f"<h5>Findings ({esc(reported_count)})</h5><p class='meta'>Finding summaries omit matched source and secret values and are tied to this scanner run.{esc(bounded_note)}</p>"
@@ -1796,7 +1863,7 @@ th,td{{border:1px solid #ccd2dc;padding:8px;vertical-align:top;text-align:left}}
 .status.critical{{color:#fff;background:#7a0019}}.status.high{{color:#b42318;background:#fee4e2}}.status.medium{{color:#b54708;background:#fffaeb}}.status.low{{color:#175cd3;background:#eff8ff}}.status.unknown,.status.info{{color:#475467;background:#f2f4f7}}
 .toc{{background:#f7f8fa;border:1px solid #d8dde6;border-radius:8px;padding:14px 18px;margin:20px 0}}.toc strong{{display:block;margin-bottom:6px}}.toc ul{{columns:2;margin:6px 0;padding-left:22px}}.toc li{{margin:5px 0}}a{{color:#175cd3;text-decoration:none}}a:hover{{text-decoration:underline}}.back{{display:inline-block;margin:8px 0 18px}}
 .no-print{{margin-right:8px}}.page-break{{break-before:page}}.tool-index{{line-height:2;margin:12px 0 20px}}.tool-index a{{display:inline-block;white-space:nowrap}}
-.tool-run{{border:1px solid #d8dde6;border-radius:8px;margin:14px 0;break-inside:avoid-page}}.tool-run summary{{cursor:pointer;display:flex;align-items:center;gap:14px;padding:12px 14px;background:#f7f8fa}}.tool-run summary h4{{font-size:17px;margin:0}}.finding-total{{color:#5b6475}}.tool-body{{padding:0 14px 14px}}.tool-run h5{{font-size:15px;margin-bottom:0}}.tool-overview th{{width:230px;background:#f7f8fa}}
+.tool-run{{border:1px solid #d8dde6;border-radius:8px;margin:14px 0;break-inside:avoid-page}}.tool-run summary{{cursor:pointer;display:flex;align-items:center;gap:14px;padding:12px 14px;background:#f7f8fa}}.tool-run summary h4{{font-size:17px;margin:0}}.run-stage{{color:#5b6475;font-size:14px;font-weight:500}}.finding-total{{color:#5b6475}}.tool-body{{padding:0 14px 14px}}.tool-run h5{{font-size:15px;margin-bottom:0}}.tool-overview th{{width:230px;background:#f7f8fa}}
 @media (max-width:800px){{body{{margin:18px}}.toc ul{{columns:1}}table{{display:block;overflow-x:auto}}}}
 @media print{{.no-print{{display:none}}body{{margin:12mm}}.tool-run{{break-inside:auto}}details:not([open]) > *{{display:block!important}}details:not([open]) summary{{display:flex!important}}.toc{{break-inside:avoid}}a{{color:inherit;text-decoration:none}}}}
 </style></head><body>
