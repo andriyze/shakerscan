@@ -179,6 +179,18 @@ test('queueing a preflight scan hands off to admission instead of navigating awa
   assert.match(api, /listRecentModelIntakeScans/)
 })
 
+test('using generated evidence carries the selected scan subject into admission', () => {
+  // The button previously changed only the scan UUID. If Source still named a
+  // different model, Admission retained that stale URL and hid the selected
+  // scan from its exact-subject picker.
+  assert.match(page, /const scan = intakeScans\.find\(\(item\) => item\.id === scanId\)/)
+  assert.match(page, /setArtifactUrl\(scan\.target_url\)/)
+  assert.match(page, /setExpectedSha256\(scan\.expected_sha256 \|\| ''\)/)
+  assert.match(page, /setPlatform\(scan\.source_kind\)/)
+  assert.match(page, /!scan\.complete_artifact/)
+  assert.match(api, /complete_artifact: Boolean\(options\.complete_artifact_download\)/)
+})
+
 test('binding generated evidence is a picker over completed scans', () => {
   assert.match(workflow, /attachableScans/)
   assert.match(workflow, /scan\.status === 'completed'/)

@@ -451,7 +451,7 @@ export function PreflightScanTracker({
       <div className="mt-3 grid gap-2">
         {scans.map((scan) => {
           const terminal = isTerminalScanStatus(scan.status)
-          const attachable = scan.status === 'completed'
+          const attachable = scan.status === 'completed' && scan.complete_artifact
           return (
             <div key={scan.id} className="grid min-w-0 gap-2 rounded border border-gray-800 bg-gray-900 p-3 sm:grid-cols-[minmax(0,1fr)_auto]">
               <div className="min-w-0">
@@ -511,6 +511,7 @@ export function PreflightScanTracker({
                 <button
                   type="button"
                   disabled={!attachable}
+                  title={!attachable && scan.status === 'completed' ? 'A complete artifact download is required for admission' : undefined}
                   onClick={() => onUseInAdmission(scan.id)}
                   className="inline-flex items-center gap-1.5 rounded border border-cyan-700 bg-cyan-950/40 px-2 py-1 text-xs text-cyan-100 hover:bg-cyan-900/40 disabled:cursor-not-allowed disabled:border-gray-700 disabled:bg-transparent disabled:text-gray-600"
                 >

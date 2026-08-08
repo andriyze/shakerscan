@@ -4204,7 +4204,10 @@ export interface ModelIntakeScanSummary {
   current_phase?: string
   grade?: string
   findings_count?: number
+  complete_artifact: boolean
   complete_snapshot: boolean
+  expected_sha256?: string
+  source_kind: ModelIntakePlatform
 }
 
 // Feeds the preflight -> admission handoff: the controlled workflow needs a
@@ -4215,21 +4218,33 @@ export async function listRecentModelIntakeScans(limit = 25): Promise<ModelIntak
   const { scans } = await getScans({ limit })
   return scans
     .filter((scan) => scan.scan_type === 'model_intake')
-    .map((scan) => ({
-      id: scan.id,
-      status: scan.status,
-      target_url: scan.target_url,
-      created_at: scan.created_at,
-      progress: scan.progress,
-      current_phase: scan.current_phase,
-      grade: scan.grade,
-      findings_count: scan.findings_count,
-      // Only a complete artifact subject can be attached to a controlled
-      // submission, so surface that rather than letting the attach fail later.
-      complete_snapshot: Boolean(
-        (scan.options as Record<string, unknown> | null | undefined)?.complete_repository_snapshot
-      ),
-    }))
+    .map((scan) => {
+      const options = (scan.options || {}) as Record<string, unknown>
+      const metadata = options.metadata_json && typeof options.metadata_json === 'object'
+        ? options.metadata_json as Record<string, unknown>
+        : {}
+      const providerResolution = metadata.provider_resolution && typeof metadata.provider_resolution === 'object'
+        ? metadata.provider_resolution as Record<string, unknown>
+        : {}
+      const rawProvider = String(providerResolution.provider || '').trim()
+      const sourceKind: ModelIntakePlatform = (
+        ['huggingface', 'http', 's3', 'gcs', 'azure', 'oci', 'mlflow'] as string[]
+      ).includes(rawProvider) ? rawProvider as ModelIntakePlatform : 'auto'
+      return {
+        id: scan.id,
+        status: scan.status,
+        target_url: scan.target_url,
+        created_at: scan.created_at,
+        progress: scan.progress,
+        current_phase: scan.current_phase,
+        grade: scan.grade,
+        findings_count: scan.findings_count,
+        complete_artifact: Boolean(options.complete_artifact_download),
+        complete_snapshot: Boolean(options.complete_repository_snapshot),
+        expected_sha256: typeof options.expected_sha256 === 'string' ? options.expected_sha256 : undefined,
+        source_kind: sourceKind,
+      }
+    })
 }
 
 export interface ModelIntakeOperatorCredential {

@@ -691,6 +691,19 @@ function ModelIntakeSettingsContent() {
   }
 
   function useScanInAdmission(scanId: string) {
+    const scan = intakeScans.find((item) => item.id === scanId)
+    if (!scan || scan.status !== 'completed' || !scan.complete_artifact) {
+      toast.error('Only a completed, fully acquired artifact can be used in admission')
+      return
+    }
+    // The selected scan is the authority for the admission subject. Carry its
+    // immutable URL, digest pin, and provider together so a stale Source form
+    // can never silently turn "use this scan" into a different submission.
+    setResolverResult(null)
+    setArtifactUrl(scan.target_url)
+    setSourceRef(scan.target_url)
+    setExpectedSha256(scan.expected_sha256 || '')
+    setPlatform(scan.source_kind)
     setStaticScanId(scanId)
     setPhase('admission')
     window.scrollTo({ top: 0, behavior: 'smooth' })
