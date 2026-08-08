@@ -47,6 +47,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
         with:
+          # Manual publication validates and builds the explicitly approved
+          # candidate, even when main has moved on with workflow-only fixes.
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.ref }}
           # Full history is required for the "candidate is on main" ancestor
           # check; a shallow clone truncates merge-base and can falsely fail.
           fetch-depth: 0
