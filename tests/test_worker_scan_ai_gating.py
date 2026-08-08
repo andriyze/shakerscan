@@ -2178,6 +2178,87 @@ def test_parallel_shard_waits_when_domain_endpoint_budget_exhausted(monkeypatch)
     assert worker._parallel_shard_slot_key("55555555-5555-5555-5555-555555555555") not in redis.values
 
 
+def test_broker_shard_result_ingest_never_reclaims_execution_slots_or_budget(monkeypatch):
+    redis = _FakeJobRedis()
+
+    class BrokerIngestConn(_FakeAsmConn):
+        async def fetchval(self, query, *args):
+            assert "SELECT created_at FROM broker_job_leases" in query
+            return datetime(2026, 7, 6, tzinfo=timezone.utc)
+
+    conn = BrokerIngestConn(child_status="running", parent_status="running")
+    calls = {"load": 0, "run": 0, "persist": 0}
+
+    def forbidden_slot(*args, **kwargs):
+        raise AssertionError("broker result ingestion must not claim an execution slot")
+
+    async def forbidden_reserve(*args, **kwargs):
+        raise AssertionError("broker result ingestion must not reserve request budget")
+
+    async def forbidden_run(*args, **kwargs):
+        calls["run"] += 1
+        raise AssertionError("broker result ingestion must not execute the scanner")
+
+    async def load_result(job_data, scan_id):
+        calls["load"] += 1
+        assert job_data["_broker_result_id"] == "77777777-7777-4777-8777-777777777777"
+        assert scan_id == "22222222-2222-4222-8222-222222222222"
+        return {
+            "target": "https://example.test",
+            "result": {"score": 100, "grade": "A"},
+            "findings": [],
+        }
+
+    async def persist_result(*args, **kwargs):
+        calls["persist"] += 1
+        return "/tmp/broker-result.json"
+
+    async def no_progress(*args, **kwargs):
+        return None
+
+    async def no_merge(*args, **kwargs):
+        return False
+
+    monkeypatch.setattr(worker, "db_pool", _FakeAsmPool(conn))
+    monkeypatch.setattr(worker, "get_redis", lambda: redis)
+    monkeypatch.setattr(worker, "_try_acquire_parallel_shard_slot", forbidden_slot)
+    monkeypatch.setattr(worker, "_reserve_target_domain_endpoint_budget", forbidden_reserve)
+    monkeypatch.setattr(worker, "run_scan", forbidden_run)
+    monkeypatch.setattr(worker, "_load_broker_result", load_result)
+    monkeypatch.setattr(worker, "persist_result_artifact", persist_result)
+    monkeypatch.setattr(worker, "update_scan_progress", no_progress)
+    monkeypatch.setattr(worker, "send_heartbeats", lambda *args, **kwargs: None)
+    monkeypatch.setattr(worker.parallel_scan, "reconcile_parallel_parent", no_merge)
+
+    asyncio.run(
+        worker.process_scan_shard_job(
+            {
+                "job_id": "job-broker-ingest",
+                "scan_id": "22222222-2222-4222-8222-222222222222",
+                "parent_scan_id": "55555555-5555-4555-8555-555555555555",
+                "target_id": "33333333-3333-4333-8333-333333333333",
+                "target": "https://example.test",
+                "options": {
+                    "scan_type": "smart",
+                    "custom_endpoints": ["GET /bounded"],
+                    "request_budget_mode": "enforce",
+                    "custom_budget": {"request_max": 1},
+                },
+                "shard_label": "scope[0]",
+                "shard_index": 0,
+                "shard_count": 1,
+                "_broker_result_id": "77777777-7777-4777-8777-777777777777",
+                "_broker_lease_id": "88888888-8888-4888-8888-888888888888",
+            }
+        )
+    )
+
+    assert calls == {"load": 1, "run": 0, "persist": 1}
+    assert not redis.pushed
+    assert worker._parallel_shard_slot_key("55555555-5555-4555-8555-555555555555") not in redis.values
+    assert any(mapping.get("status") == "completed" for _key, _args, mapping in redis.hashes)
+
+
 def test_hydrate_ai_gate_options_loads_secrets_only_in_worker(monkeypatch):
     target_id = "00000000-0000-0000-0000-000000000001"
     monkeypatch.setattr(worker, "db_pool", _FakeCredentialPool())

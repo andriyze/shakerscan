@@ -7249,7 +7249,11 @@ async def process_scan_job(job_data: dict):
             target_id = str(row['target_id']) if row['target_id'] else None
             ai_target_id = str(row['ai_target_id']) if row['ai_target_id'] else None
 
-    reserve_amount = _standalone_scan_rate_reservation_amount(options)
+    # A broker ingest job carries immutable output from execution that already
+    # happened on the remote node. It must not reserve execution budget again:
+    # doing so can strand a submitted result behind its own still-live broker
+    # reservation and can requeue trusted ingestion as executable work.
+    reserve_amount = 0 if broker_ingest else _standalone_scan_rate_reservation_amount(options)
     enforcing_request_budget = _effective_request_budget_mode(options) == "enforce"
     if reserve_amount > 0 and target_id:
         try:
@@ -8639,6 +8643,7 @@ async def process_scan_shard_job(job_data: dict):
     target_id = job_data.get('target_id')
     target = job_data.get('target')
     options = job_data.get('options', {}) or {}
+    broker_ingest = bool(job_data.get("_broker_result_id"))
     label = job_data.get('shard_label', 'shard')
     idx = job_data.get('shard_index')
     total = job_data.get('shard_count')
@@ -8693,10 +8698,19 @@ async def process_scan_shard_job(job_data: dict):
                 print(f"[{job_id[:8]}] merge reconcile error after cancelled shard skip: {e}", flush=True)
         return
 
-    slot_acquired, shard_limit = _try_acquire_parallel_shard_slot(
-        r, parent_id, options, slot_id=job_id
-    )
-    if not slot_acquired:
+    # Broker result ingestion is persistence/verification work on the control
+    # plane, not a second shard execution. The remote execution already held the
+    # broker admission slot and its request-budget reservation. Claiming either
+    # a local shard slot or domain budget here can deadlock an already-submitted
+    # result and incorrectly requeue it onto an executable queue.
+    if broker_ingest:
+        slot_acquired = False
+        shard_limit = _parallel_shard_concurrency_limit(r, options)
+    else:
+        slot_acquired, shard_limit = _try_acquire_parallel_shard_slot(
+            r, parent_id, options, slot_id=job_id
+        )
+    if not broker_ingest and not slot_acquired:
         wait_cycles = int(job_data.get('shard_slot_wait_cycles') or 0) + 1
         requeued = dict(job_data)
         requeued['shard_slot_wait_cycles'] = wait_cycles
@@ -8719,7 +8733,7 @@ async def process_scan_shard_job(job_data: dict):
         await asyncio.sleep(PARALLEL_SHARD_REQUEUE_DELAY_SECONDS)
         return
 
-    endpoint_count = _known_endpoint_count(options)
+    endpoint_count = 0 if broker_ingest else _known_endpoint_count(options)
     if endpoint_count > 0:
         try:
             async with db_pool.acquire() as conn:
