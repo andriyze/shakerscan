@@ -2316,6 +2316,7 @@ submit_scan() {
 build_local_scanner_family() {
     local no_cache="${1:-}"
     local worker_image_id
+    local worker_image="${COMPOSE_PROJECT_NAME:-shakerscan}-worker:latest"
     local sandbox_image="${MODEL_INTAKE_SANDBOX_IMAGE:-shakerscan-model-intake-sandbox:local}"
 
     # worker and model-intake-sandbox intentionally use the exact same image.
@@ -2324,7 +2325,11 @@ build_local_scanner_family() {
     # scanner runtime once, bind the sandbox tag to that exact image, then
     # build the API variant (the only variant that adds the Docker CLI).
     compose build $no_cache worker
-    worker_image_id="$(compose images -q worker)"
+    # `compose images -q worker` reports the image used by an already-running
+    # worker container. Immediately after a rebuild that can be the retired
+    # image ID, not the newly tagged build, and Docker may already have removed
+    # it. Resolve the deterministic Compose build tag instead.
+    worker_image_id="$(docker image inspect --format '{{.Id}}' "$worker_image" 2>/dev/null || true)"
     if ! [[ "$worker_image_id" =~ ^(sha256:)?[0-9a-f]{64}$ ]]; then
         echo -e "${RED}Error: could not resolve the newly built worker image.${NC}"
         return 1

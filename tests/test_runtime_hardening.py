@@ -343,7 +343,9 @@ def test_scanner_sh_builds_shared_worker_and_intake_sandbox_image_once():
     # build arguments. Exporting each Compose target separately duplicates a
     # multi-gigabyte image and can exhaust supported source-build hosts.
     assert "compose build $no_cache worker" in helper
-    assert 'worker_image_id="$(compose images -q worker)"' in helper
+    assert 'worker_image="${COMPOSE_PROJECT_NAME:-shakerscan}-worker:latest"' in helper
+    assert "docker image inspect --format '{{.Id}}' \"$worker_image\"" in helper
+    assert helper.count("compose images -q worker") == 1  # explanatory comment only
     assert 'docker image tag "$worker_image_id" "$sandbox_image"' in helper
     assert "compose build $no_cache api" in helper
     assert "compose build $no_cache model-intake-sandbox" not in helper
@@ -354,6 +356,47 @@ def test_scanner_sh_builds_shared_worker_and_intake_sandbox_image_once():
     assert 'elif [ "$SERVICES" = "api worker" ]' in rebuild_body
     assert 'build_local_scanner_family "$NO_CACHE"' in rebuild_body
     assert "compose build $NO_CACHE ui model-intake-signer" in rebuild_body
+
+
+def test_scanner_sh_retags_the_fresh_build_not_a_running_workers_retired_image():
+    script = (ROOT / "scanner.sh").read_text()
+    helper = script.split("build_local_scanner_family() {", 1)[1].split("\n}", 1)[0]
+    image_id = "sha256:" + ("a" * 64)
+    harness = f"""
+set -eu
+RED=''
+NC=''
+compose() {{ printf 'compose:%s\\n' "$*"; }}
+docker() {{
+  if [ "$1 $2" = 'image inspect' ]; then
+    [ "${{@: -1}}" = 'release-candidate-worker:latest' ] || return 91
+    printf '{image_id}\\n'
+  elif [ "$1 $2" = 'image tag' ]; then
+    printf 'tag:%s:%s\\n' "$3" "$4"
+  else
+    return 92
+  fi
+}}
+build_local_scanner_family() {{
+{helper}
+}}
+COMPOSE_PROJECT_NAME=release-candidate
+MODEL_INTAKE_SANDBOX_IMAGE=release-sandbox:test
+build_local_scanner_family
+"""
+    result = subprocess.run(
+        ["bash", "-c", harness],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "compose:build worker" in result.stdout
+    assert f"tag:{image_id}:release-sandbox:test" in result.stdout
+    assert "compose:build api" in result.stdout
 
 
 def test_scanner_sh_local_build_marker_controls_default_runtime_mode():
