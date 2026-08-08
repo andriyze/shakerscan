@@ -2575,15 +2575,15 @@ Owners must decide and record:
   GGUF remains explicitly static-only. All three reference-model paths were physically exercised on
   nested-virtualization KVM, and ONNX physical/UI acceptance is required by Section 14.5.0.
 - [x] Receipt v2 requires independently measured, complete guest/host network-attempt telemetry; any
-  prohibited attempt, telemetry loss, overflow, contradiction, missing no-device proof, or digest mutation
-  is non-pass. The physical reference-model receipts proved that attempted operations override otherwise
-  passing functional phases; explicit negative fixtures remain part of every release gate.
+  outbound/DNS attempt, telemetry loss, overflow, contradiction, missing no-device proof, or digest mutation
+  is non-pass. Local IPC and unconnected IP socket setup remain visible but are not mislabeled as outbound
+  traffic. Explicit outbound, DNS, telemetry-loss, and overflow fixtures remain part of every release gate.
 - [x] A verified exact-subject runtime receipt automatically produces separate durable embedding-evaluation
   evidence from its signed known-answer digest, output shape, resource limits, and network telemetry. Raw
   vectors are not retained, and this does not impersonate the separately required corporate data-plane run.
 - [x] The UI/JSON report has an executive decision/scope/coverage/action section and a separate detailed
   control/scanner/evidence section; it explicitly says full corporate approval is not determined by
-  ShakerScan, lists 17 implemented check capabilities and 14 external requirements, and preserves normalized
+  ShakerScan, lists 30 implemented check capabilities and 14 external requirements, and preserves normalized
   status, coverage, evidence references, remediation, and phase timelines. Printable HTML/browser-PDF, SARIF,
   stable digest parity, expiry handling, and active-admission/current-record parity use the same authoritative
   `model-intake-corporate-report/v2` builder.
@@ -2607,13 +2607,14 @@ Owners must decide and record:
 - [x] The optional keyless Codex planner exposes only five typed bounded advisory actions, has no admission,
   promotion, evidence-writing, or arbitrary-execution authority, and durably enforces iteration/action budgets.
   Physical and UI cross-surface acceptance remains part of the release run below.
-- [x] The exact release branch is rebuilt on the designated VPS and complete public preflight runs for
-  private custom-code/safetensors, medium pickle-backed, and large pickle-backed fixtures retain accurate
-  API/UI evidence and outcomes.
+- [x] The release branch is rebuilt on the designated Linux/KVM host and complete public runs for
+  custom-code/safetensors, medium pickle-backed, and large pickle-backed cases retain accurate API/UI
+  evidence and outcomes. The frozen-candidate rerun is recorded in the release-readiness evidence.
 - [x] Physical Firecracker import/load/inference/conversion runs completed for those exact subjects on a
-  designated Linux/KVM runner. Every functional phase passed; each signed outer receipt correctly remained
-  non-pass because strict policy recorded prohibited socket attempts. The older VPS still correctly reports
-  `NOT_READY` without fallback.
+  designated Linux/KVM runner. Every functional phase passed; complete containment telemetry recorded no
+  outbound or DNS attempt and no loss. The default PEM signer proves cryptographic receipt handling but
+  intentionally leaves production receipt trust `INCOMPLETE`; production uses an approved KMS signer. A
+  non-KVM VPS still correctly reports `NOT_READY` without fallback.
 
 ### 19.2 Per-model admission-run checklist
 

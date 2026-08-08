@@ -646,8 +646,9 @@ Checks include:
 - **Generated evidence** — normalized fail-closed adapters for model/pickle scanners, Python AST, secrets,
   malware, CycloneDX SBOM/SCA, native binaries, licenses, plus explicit tool/rules/version/coverage status.
 - **Packaged core adapter bundle** — rebuilt worker images install hash-locked ModelScan 0.8.8, Semgrep
-  1.172.0, and Fickling 0.1.12 environments plus checksum-pinned Trivy 0.72.0 with build-captured offline
-  data. The image build fails unless all four detect deterministic malicious fixtures. `GET
+  1.172.0, Fickling 0.1.12, Trivy 0.73.0, OSV Scanner 2.5.0, and a hash-bound offline
+  pip-audit 2.10.1 result. The image build fails unless the deterministic functional receipt matches
+  the safe, review, and malicious fixtures expected for the applicable adapters. `GET
   /model-intake/scanners/readiness` exposes versions, applicability, rules/database identity, and the last
   functional receipt.
 - **Typed non-scanner providers** — `GET /model-intake/providers/readiness` separately reports sandbox
