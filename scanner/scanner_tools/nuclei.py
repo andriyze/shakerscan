@@ -1288,11 +1288,11 @@ async def _run_nuclei_wave(
         if err:
             result["error_detail"] = err[:500]
 
-    if tags and result["templates_executed"] == 0 and not result.get("blocked_by_request_budget"):
-        # Nuclei stats may be absent on wave timeout or no-finding runs. Record a
-        # best-effort count so coverage does not say Nuclei never executed after
-        # a timed wave, but flag it as estimated: templates_loaded can exceed
-        # what a timed-out wave actually ran, so this is not an exact measure.
+    if rc == 0 and tags and result["templates_executed"] == 0:
+        # A successful no-finding wave can omit stats, so retain a clearly marked
+        # estimate in that one case. Never infer execution after a timeout, crash,
+        # parse failure, or request-budget denial: doing so turns a failed control
+        # into misleading positive coverage.
         result["templates_executed"] = max(result["templates_loaded"], len(tags))
         result["templates_executed_estimated"] = True
 

@@ -28,6 +28,13 @@ from typing import Any
 import asyncpg
 import redis
 
+try:
+    from release_identity import build_fingerprint as release_build_fingerprint
+    from release_identity import published_scanner_version
+except ModuleNotFoundError:
+    from scanner.release_identity import build_fingerprint as release_build_fingerprint
+    from scanner.release_identity import published_scanner_version
+
 from retest_contract import (
     AI_ONLY_RETEST_TYPES,
     DEFAULT_REPLAY_PAYLOADS,
@@ -1345,9 +1352,10 @@ def get_redis():
 
 
 def _published_scanner_version() -> str | None:
-    """Real deployed build label published by the API from the live checkout
-    (/workspace git). Prefer it over this worker's baked SCANNER_VERSION env, which
-    is frozen at image build and goes stale under volume-mount-restart deploys."""
+    """Development build label published by the API from its live checkout.
+
+    Official images ignore this fallback in favor of their baked release manifest.
+    """
     try:
         v = get_redis().get("shakerscan:scanner_version")
         if v:
@@ -11185,7 +11193,7 @@ async def async_main():
 def _worker_build_fingerprint() -> str | None:
     """Source-tree checksum of this worker's runtime (keyed by basename so it
     matches the API's host-checkout fingerprint when the code is current)."""
-    return hash_source_files(runtime_file_map(), require_all=True)
+    return release_build_fingerprint(hash_source_files(runtime_file_map(), require_all=True))
 
 
 def _worker_runtime_identity() -> str:
@@ -11242,7 +11250,7 @@ def _worker_build_report_payload() -> tuple[str, str]:
     hostname = _worker_build_hostname()
     payload = json.dumps({
         "build_fingerprint": _worker_build_fingerprint(),
-        "scanner_version": _published_scanner_version() or os.environ.get("SCANNER_VERSION") or os.environ.get("GIT_COMMIT") or "dev",
+        "scanner_version": published_scanner_version(_published_scanner_version()),
         "node_id": os.environ.get("SHAKERSCAN_NODE_ID") or os.environ.get("FLEET_NODE_ID") or None,
         "reported_at": utc_now_iso(),
     })

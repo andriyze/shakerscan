@@ -59,6 +59,11 @@ configure_dns
 export PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 
+# Verify the image-layer identity before any development bind mounts are synced.
+# Runtime environment variables may declare what a deployment expects, but they
+# cannot rewrite the version/revision baked into the release manifest.
+python3 /app/release_identity.py --verify
+
 # Dev source consistency: when the host source trees are bind-mounted as
 # DIRECTORIES (/app/_src/{scanner,api}), COPY their files over the baked /app
 # copies so the running code uses the live host source. We COPY (not symlink)

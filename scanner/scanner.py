@@ -86,6 +86,8 @@ from scanner_tools.request_meter import (
     install_async_client_metering,
 )
 from scanner_tools.build_fingerprint import hash_source_files, runtime_file_map
+from release_identity import build_fingerprint as release_build_fingerprint
+from release_identity import published_scanner_version
 from scanner_tools.exposure_markers import exposure_severity
 from scanner_tools.adaptive_throttle import configure_throttle, get_throttle
 from scanner_tools.har_discovery import (
@@ -111,7 +113,7 @@ except ImportError:
         _check_registry = None
 
 REPORT_SCHEMA_VERSION = "2026-01-28"
-SCANNER_VERSION = os.environ.get("SCANNER_VERSION") or os.environ.get("GIT_COMMIT") or "dev"
+SCANNER_VERSION = published_scanner_version()
 
 
 def _compute_source_fingerprint(file_map: dict[str, str]) -> str | None:
@@ -131,7 +133,9 @@ def _compute_source_fingerprint(file_map: dict[str, str]) -> str | None:
 # (constants/findings/grading/reporting) so a stale worker image is flagged for the
 # whole class of bugs that change scan behavior or output, not just the detectors.
 SCANNER_FINGERPRINT_FILES = runtime_file_map()
-SCANNER_BUILD_FINGERPRINT = _compute_source_fingerprint(SCANNER_FINGERPRINT_FILES)
+SCANNER_BUILD_FINGERPRINT = release_build_fingerprint(
+    _compute_source_fingerprint(SCANNER_FINGERPRINT_FILES)
+)
 CHECKPOINT_FILE = os.environ.get("SCAN_CHECKPOINT_FILE")
 
 

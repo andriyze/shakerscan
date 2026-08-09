@@ -79,7 +79,13 @@ FROM mcr.microsoft.com/playwright/python:v1.62.0-noble@sha256:aa81288e738725378b
 # receive no operator-authored environment file; without the baked default a
 # released remote worker stamped every scan as "dev".
 ARG SCANNER_VERSION=dev
+ARG SCANNER_SOURCE_REVISION=unknown
 ENV SCANNER_VERSION=${SCANNER_VERSION}
+ENV SHAKERSCAN_BUILD_VERSION=${SCANNER_VERSION}
+ENV SHAKERSCAN_SOURCE_REVISION=${SCANNER_SOURCE_REVISION}
+RUN mkdir -p /opt/shakerscan && \
+    python3 -c 'import json, os, pathlib; p=pathlib.Path("/opt/shakerscan/release-manifest.json"); p.write_text(json.dumps({"schema_version":"shakerscan-release-identity/v1","version":os.environ["SHAKERSCAN_BUILD_VERSION"],"source_revision":os.environ["SHAKERSCAN_SOURCE_REVISION"]},sort_keys=True)+"\n")' && \
+    chmod 0444 /opt/shakerscan/release-manifest.json
 
 # System deps for network tooling and additional scanners
 RUN apt-get update && apt-get install -y --no-install-recommends \

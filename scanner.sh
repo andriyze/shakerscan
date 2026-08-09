@@ -1518,6 +1518,16 @@ prepare_runtime_files() {
     if [ "$sandbox_uid" = "0" ]; then
         sandbox_uid=10001
         sandbox_gid=10001
+    elif [ -d results/model-intake-sandbox ] && [ ! -L results/model-intake-sandbox ]; then
+        # Preserve the durable private-queue identity across an upgrade launched
+        # by a different host account (notably old root-run installs using 10001).
+        local existing_sandbox_uid existing_sandbox_gid
+        existing_sandbox_uid="$(stat -c '%u' results/model-intake-sandbox 2>/dev/null || stat -f '%u' results/model-intake-sandbox 2>/dev/null || true)"
+        existing_sandbox_gid="$(stat -c '%g' results/model-intake-sandbox 2>/dev/null || stat -f '%g' results/model-intake-sandbox 2>/dev/null || true)"
+        if [ -n "$existing_sandbox_uid" ] && [ "$existing_sandbox_uid" != "0" ]; then
+            sandbox_uid="$existing_sandbox_uid"
+            sandbox_gid="$existing_sandbox_gid"
+        fi
     fi
     export MODEL_INTAKE_SANDBOX_UID="$sandbox_uid"
     export MODEL_INTAKE_SANDBOX_GID="$sandbox_gid"
@@ -1815,6 +1825,27 @@ reload_services() {
 }
 
 show_status() {
+    local broker_state="$SCRIPT_DIR/.shakerscan-fleet/node/state.json"
+    local broker_env="$SCRIPT_DIR/.shakerscan-fleet/node/compose.env"
+    if [ -f "$broker_state" ] && [ "$(jq -r '.transport // empty' "$broker_state" 2>/dev/null)" = "broker" ]; then
+        local node_id control_plane project_name
+        node_id="$(jq -r '.node_id // "unknown"' "$broker_state")"
+        control_plane="$(jq -r '.control_plane_url // "unknown"' "$broker_state")"
+        project_name="$(awk -F= '$1 == "FLEET_COMPOSE_PROJECT_NAME" {print $2}' "$broker_env" 2>/dev/null | tail -1)"
+        echo -e "${BLUE}Service Status:${NC}"
+        echo -e "Runtime Role: ${GREEN}Fleet broker worker node${NC}"
+        echo "  Node ID:       $node_id"
+        echo "  Control plane: $control_plane"
+        if [ -n "$project_name" ]; then
+            echo ""
+            docker ps --filter "label=com.docker.compose.project=$project_name" \
+                --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
+        fi
+        echo ""
+        echo "Local API/UI: not installed on an outbound-only broker node (expected)"
+        return 0
+    fi
+
     local api_url
     api_url="$(api_probe_url)"
     echo -e "${BLUE}Service Status:${NC}"

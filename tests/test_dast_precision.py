@@ -41,7 +41,7 @@ def test_scanner_unraisablehook_filters_asyncio_subprocess_shutdown_noise():
     assert scanner_main._is_asyncio_subprocess_shutdown_unraisable(real_error) is False
 
 
-def test_nuclei_wave_counts_attempted_tags_when_stats_are_absent(monkeypatch):
+def test_nuclei_wave_does_not_inflate_coverage_when_process_times_out(monkeypatch):
     async def fake_run(cmd, timeout=60):
         return "", "timeout after 1s", 124
 
@@ -53,7 +53,24 @@ def test_nuclei_wave_counts_attempted_tags_when_stats_are_absent(monkeypatch):
     )
 
     assert result["scan_completed"] is False
-    assert result["templates_executed"] == 3
+    assert result["templates_executed"] == 0
+    assert "templates_executed_estimated" not in result
+
+
+def test_nuclei_wave_estimates_only_successful_no_stats_run(monkeypatch):
+    async def fake_run(cmd, timeout=60):
+        return "", "", 0
+
+    monkeypatch.setattr(nuclei_module, "run", fake_run)
+    monkeypatch.setattr(nuclei_module.os.path, "isdir", lambda path: True)
+
+    result = asyncio.run(
+        nuclei_module._run_nuclei_wave("https://example.com", ["cve", "rce"], timeout=1)
+    )
+
+    assert result["scan_completed"] is True
+    assert result["templates_executed"] == 2
+    assert result["templates_executed_estimated"] is True
 
 
 def test_nuclei_wave_reports_enforced_budget_block_without_fake_coverage(monkeypatch):

@@ -130,7 +130,7 @@ def test_broker_heartbeat_survives_a_blocked_scanner_event_loop(tmp_path, monkey
     lock = threading.Lock()
     failures = []
 
-    def fake_request(_state, method, path, payload):
+    def fake_request(_state, method, path, payload, **_kwargs):
         calls.append((method, path, payload))
         return {"cancel_requested": False}
 
@@ -167,3 +167,80 @@ def test_broker_heartbeat_survives_a_blocked_scanner_event_loop(tmp_path, monkey
     assert calls[1][2]["log_lines"] == []
     assert failures == []
     assert cancelled == []
+
+
+def test_broker_heartbeat_retries_transient_5xx_and_preserves_logs(tmp_path, monkeypatch):
+    calls = []
+    cancelled = []
+    done = threading.Event()
+    live = {"phase": "scan", "progress": 20, "log_lines": ["still working"]}
+    failures = []
+
+    def fake_request(_state, _method, _path, payload, **_kwargs):
+        calls.append(payload)
+        if len(calls) == 1:
+            raise broker_worker.BrokerHTTPError(503, "maintenance")
+        done.set()
+        return {"cancel_requested": False}
+
+    monkeypatch.setattr(broker_worker, "api_request", fake_request)
+    monkeypatch.setattr(broker_worker, "RESULTS_DIR", tmp_path)
+    monkeypatch.setattr(broker_worker, "_signal_scanner_cancel_file", cancelled.append)
+
+    broker_worker._heartbeat_lease_until_done(
+        {}, node_id=NODE_ID, lease_id="lease", lease_token="token", scan_id="scan",
+        heartbeat_interval=0.005, failure_grace_seconds=0.1, request_timeout=1,
+        done=done, live=live, live_lock=threading.Lock(), lease_failed=failures,
+    )
+
+    assert len(calls) == 2
+    assert calls[1]["log_lines"] == ["still working"]
+    assert failures == []
+    assert cancelled == []
+
+
+def test_broker_heartbeat_fails_closed_on_lost_authority(tmp_path, monkeypatch):
+    cancelled = []
+    failures = []
+
+    def rejected(*_args, **_kwargs):
+        raise broker_worker.BrokerHTTPError(409, "lease no longer active")
+
+    monkeypatch.setattr(broker_worker, "api_request", rejected)
+    monkeypatch.setattr(broker_worker, "RESULTS_DIR", tmp_path)
+    monkeypatch.setattr(broker_worker, "_signal_scanner_cancel_file", cancelled.append)
+
+    broker_worker._heartbeat_lease_until_done(
+        {}, node_id=NODE_ID, lease_id="lease", lease_token="token", scan_id="scan",
+        heartbeat_interval=0.001, failure_grace_seconds=1, request_timeout=1,
+        done=threading.Event(), live={}, live_lock=threading.Lock(), lease_failed=failures,
+    )
+
+    assert len(failures) == 1
+    assert failures[0].startswith("terminal:")
+    assert cancelled == [str(tmp_path / "scan_cancel")]
+
+
+def test_broker_heartbeat_honors_control_plane_cancel(tmp_path, monkeypatch):
+    cancelled = []
+    done = threading.Event()
+    calls = {"count": 0}
+
+    def cancel_requested(*_args, **_kwargs):
+        calls["count"] += 1
+        if calls["count"] > 1:
+            done.set()
+            return {"cancel_requested": False}
+        return {"cancel_requested": True}
+
+    monkeypatch.setattr(broker_worker, "api_request", cancel_requested)
+    monkeypatch.setattr(broker_worker, "RESULTS_DIR", tmp_path)
+    monkeypatch.setattr(broker_worker, "_signal_scanner_cancel_file", cancelled.append)
+
+    broker_worker._heartbeat_lease_until_done(
+        {}, node_id=NODE_ID, lease_id="lease", lease_token="token", scan_id="scan",
+        heartbeat_interval=0.001, failure_grace_seconds=1, request_timeout=1,
+        done=done, live={}, live_lock=threading.Lock(), lease_failed=[],
+    )
+
+    assert cancelled == [str(tmp_path / "scan_cancel")]
