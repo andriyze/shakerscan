@@ -4,9 +4,9 @@ This guide explains how to operate one ShakerScan control plane with worker node
 hosts. For the trust model and implementation details, see
 [Multi-Node Architecture](multi-node-architecture.md).
 
-> **0.8.7 support boundary:** production Fleet support is the outbound-only HTTPS `broker`
+> **0.8.8 support boundary:** production Fleet support is the outbound-only HTTPS `broker`
 > transport. The `wireguard` workflow is an operator preview and has not yet passed its required
-> physical two-host acceptance. Do not use WireGuard mode for a 0.8.7
+> physical two-host acceptance. Do not use WireGuard mode for a 0.8.8
 > production deployment.
 
 ## What You Are Building
@@ -67,10 +67,10 @@ capacity. `GET /health` and `GET /workers` expose the same non-secret `fleet` ca
 
 | Transport | Use it when | Worker receives | Network requirement |
 |---|---|---|---|
-| `broker` | Supported in 0.8.7; use for owned or customer-hosted workers | A node credential and one job-scoped lease at a time; no database, Redis, or object-store credentials | Worker needs outbound HTTPS only |
+| `broker` | Supported in 0.8.8; use for owned or customer-hosted workers | A node credential and one job-scoped lease at a time; no database, Redis, or object-store credentials | Worker needs outbound HTTPS only |
 | `wireguard` | Preview only; owned/trusted worker hosts | Scoped private Redis/PostgreSQL and artifact credentials | Worker must reach the control plane's WireGuard UDP port |
 
-Broker mode is the supported 0.8.7 path and has the smaller worker trust boundary. WireGuard is the
+Broker mode is the supported 0.8.8 path and has the smaller worker trust boundary. WireGuard is the
 planned high-throughput owned-fleet path after its physical acceptance is complete. Both modes use
 digest-pinned worker images, authenticated node identities, leased jobs, centralized artifacts,
 and control-plane admission limits, but implementation presence does not make the preview transport
@@ -202,6 +202,12 @@ profile, obtains a public certificate, and then verifies both public health and 
 It also verifies central artifact storage. If any step fails, ShakerScan restores the previous
 configuration and runtime. Broker mode does not create a WireGuard overlay or distribute data-store
 credentials.
+
+Managed Caddy stores its ACME account and certificates in the Compose volumes `caddy-data` and
+`caddy-config`. The installer, normal upgrades, restarts, and `docker compose down` preserve those
+volumes. Do not use `docker compose down -v`, `shakerscan reset`, or manually delete the volumes as
+part of an ordinary reinstall. Losing them forces new certificate issuance and repeated destructive
+lab rebuilds can hit the public CA's duplicate-certificate limit even when DNS and ports are correct.
 
 ### Private-CA public URL
 
@@ -639,6 +645,7 @@ again. Do not copy shared credentials or weaken the delivery gate.
 | WireGuard join times out after enrollment | Read the endpoint/handshake/interface diagnostics printed by `join`; allow inbound UDP and run `shakerscan fleet reconcile` if automatic reconciliation was disabled. The Fleet UI marks nodes awaiting their first WireGuard connection. |
 | `fleet CA is not configured` | Overlay state must contain the enrolled CA at `.shakerscan-fleet/node/ca.crt`. Do not switch it to system trust; revoke and rejoin if state is incomplete. |
 | Broker reports certificate verification failure | Confirm the public certificate chain and hostname. Supply the correct private CA with `--ca-cert` when applicable. Never disable TLS verification. |
+| Managed HTTPS suddenly hits an ACME duplicate-certificate limit | Restore the preserved `caddy-data` and `caddy-config` volumes or wait until the CA's stated retry time. Ordinary upgrades do not remove them; repeated `down -v`, reset, or manual volume deletion does. Do not disable TLS verification as a workaround. |
 | Broker preflight expects HTTP 401 | The proxy does not publish the protected node route or the API cannot authenticate its HTTPS signal. Use managed HTTPS or configure the external proxy trust secret described above. |
 | Join token is expired, revoked, or exhausted | Mint a fresh token. For a multi-worker rollout, verify `--max-uses` matches the intended host count and revoke any superseded token ID. |
 | Node is `stale` | Check the node-agent container, host clock, DNS/network reachability, and its `last_error`. A stale node is excluded from fleet-wide scaling. |

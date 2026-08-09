@@ -76,17 +76,17 @@ triaged, filtered, and reported through the same workflow.
 │  background loops: stale_scan_checker, schedule_runner,        │
 │  asm_dispatcher                                                │
 └──────────────────────────────────────────────────────────────┘
-        │ RPUSH scan_jobs / retest_jobs           ▲ findings, scans
+        │ Redis Stream enqueue / consumer lease   ▲ findings, scans
         ▼                                          │ (dedup at DB)
 ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
-│  Worker 1    │  │  Worker 2    │  │  Worker N    │  (1–20, BLPOP loop)
+│  Worker 1    │  │  Worker 2    │  │  Worker N    │  (1–20, leased Stream loop)
 │  → scanner   │  │  → scanner   │  │  → scanner   │  subprocess per job
 └──────────────┘  └──────────────┘  └──────────────┘
         │                 │                 │
         ▼                 ▼                 ▼
 ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
-│  PostgreSQL  │  │    Redis     │  │ ./results    │
-│ (persistent) │  │   (queue)    │  │ (JSON files) │
+│  PostgreSQL  │  │    Redis     │  │  Artifacts   │
+│ (persistent) │  │ queue/leases │  │ local or S3  │
 └──────────────┘  └──────────────┘  └──────────────┘
 ```
 
@@ -516,7 +516,7 @@ are in [`AI_TEST_WORKFLOWS.md`](AI_TEST_WORKFLOWS.md), and future hardening belo
 ### AI capability status quick read
 
 These implemented components were last reconciled against code on 2026-08-08. AI Gate remains a
-preview product surface for 0.8.7. Model Intake is release-gated for deterministic static review,
+preview product surface for 0.8.8. Model Intake is release-gated for deterministic static review,
 artifact and report generation, and its opt-in AMD64 Linux/KVM Firecracker tier; unsupported formats,
 incomplete evidence, missing required tools, and unavailable runtime qualification fail closed. The
 AI Gate policy/exception and deterministic-judge seams marked Planned in
