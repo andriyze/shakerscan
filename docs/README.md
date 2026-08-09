@@ -1,6 +1,6 @@
 # Documentation Index
 
-**Reconciled:** 2026-08-08. This directory contains maintained product references, operating policy,
+**Reconciled:** 2026-08-09. This directory contains maintained product references, operating policy,
 release material, and active architecture. Point-in-time audits, completed prompts, implementation
 ledgers, and obsolete screenshots are kept in Git history rather than copied into the release docs.
 Code, database schemas, runtime receipts, and tests remain authoritative when a document disagrees.
@@ -25,6 +25,7 @@ Code, database schemas, runtime receipts, and tests remain authoritative when a 
 | [`release-readiness.md`](release-readiness.md) | Single release scope, stop-ship, validation, publishing, installer, and documentation checklist |
 | [`upgrade-and-rollback.md`](upgrade-and-rollback.md) | Backup, upgrade, verification, and rollback runbook for source and installer deployments |
 | [`multi-node-guide.md`](multi-node-guide.md) | Set up and operate WireGuard or outbound-HTTPS multi-node fleets |
+| [`releases/0.8.16.md`](releases/0.8.16.md) | ShakerScan 0.8.16 release candidate notes and supported product boundary |
 | [`releases/0.8.15.md`](releases/0.8.15.md) | Published ShakerScan 0.8.15 patch-release notes and supported product boundary |
 | [`releases/0.8.14.md`](releases/0.8.14.md) | Failed, unpublished ShakerScan 0.8.14 candidate notes |
 | [`releases/0.8.13.md`](releases/0.8.13.md) | Published ShakerScan 0.8.13 release notes and supported product boundary |
