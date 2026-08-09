@@ -1,16 +1,28 @@
-# ShakerScan 0.8.5 Release Readiness
+# ShakerScan 0.8.6 Release Readiness
 
-**Status (2026-08-09):** 0.8.5 published and stable-channel promotion in progress. Clean 0.8.4 post-publication acceptance
-found two fail-closed scanner-image defects: ModelScan lacked its HDF5 dependency, and enforced Fleet
-request budgets mislabeled Nuclei as unavailable. The 0.8.5 candidate packages ModelScan's `h5py`
-extra, functionally self-tests a representative Keras HDF5 model during image construction, and
-separates Nuclei's local availability probe from its still-fail-closed unmetered target execution.
-The patch has passed 3,108 backend tests, 89 UI tests, the production UI build, all 14 named release
-gates, generated-inventory validation, locked Python and production npm audits, installer and schema
-upgrade smokes, scanner/API/signer builds, and the fixed guest conversion self-test. Release workflow
-`31299029125` published the exact tagged commit for native `linux/amd64` and `linux/arm64`; independent
-inspection verified the four versioned manifests and exact `latest` digest equality. Clean hosted-
-installer acceptance remains pending and is not implied by registry publication.
+**Status (2026-08-09):** candidate fix implemented, not published. Literal clean 0.8.5 installs on
+the control and worker VPSs selected only the published images and reached healthy standalone and
+broker-Fleet state. Exact-node Smart coverage acceptance then exposed a broker allocator defect: the
+first child reserved the entire default per-domain request allowance and left its siblings at
+`waiting_for_request_budget` for the reservation TTL. The 0.8.6 candidate fairly divides only the
+still-unreserved domain headroom among pending siblings while preserving the same atomic cap and
+fail-closed behavior. The complete backend suite passes 3,109 tests after the fix. The stable
+installer remains pinned to immutable 0.8.5 until the exact 0.8.6 candidate passes frozen gates,
+native multi-architecture publication, and repeated clean acceptance.
+
+### 0.8.5 post-publish evidence motivating this patch
+
+- The literal hosted installer populated empty homes on both VPSs from immutable `v0.8.5` runtime
+  files, pulled only 0.8.5 images, and reached healthy API, UI, PostgreSQL, Redis, signer, sandbox,
+  and current local-worker state.
+- Managed HTTPS Fleet initialization at `m.shakerscan.com` succeeded, and a short-lived single-use
+  token enrolled the clean worker without installing Redis, PostgreSQL, or object-store credentials.
+- The joined node reached healthy, current, non-local-build state on the exact published scanner
+  digest and reconciled from one to three active remote workers.
+- Exact-node Smart coverage submission created its discovery child, global backbone, and three
+  endpoint children. The backbone leased the remote node, but its 1,000-request reservation consumed
+  the whole default domain cap; the other children remained queued. The parent and all four children
+  cancelled cleanly. This is a release blocker, not accepted parallel evidence.
 
 ### 0.8.4 post-publish evidence motivating this patch
 
@@ -39,7 +51,7 @@ regressions but do not satisfy a frozen-candidate gate.
 
 ## Supported product boundary
 
-ShakerScan 0.8.5 is a trusted-operator, self-hosted security scanner.
+ShakerScan 0.8.6 is a trusted-operator, self-hosted security scanner.
 
 - Localhost is the default. Remote UI/API access must remain behind Tailscale, a VPN, a firewall, or
   an operator-managed authenticated reverse proxy. Direct public exposure is unsupported.
@@ -55,7 +67,7 @@ ShakerScan 0.8.5 is a trusted-operator, self-hosted security scanner.
   required tools, or missing runtime qualification fail closed. Technical review does not replace
   publisher trust, privacy, legal, business, or deployed-data-plane approval.
 - Fleet production support is the outbound-only HTTPS `broker` transport. Built-in WireGuard remains
-  preview code outside the 0.8.5 support boundary until it passes a separate physical acceptance
+  preview code outside the 0.8.6 support boundary until it passes a separate physical acceptance
   matrix.
 - AI Gate remains preview in this release.
 
@@ -83,7 +95,7 @@ production dependency findings.
 
 ## Frozen-candidate validation
 
-Run every item against the exact commit intended for `v0.8.5`.
+Run every item against the exact commit intended for `v0.8.6`.
 
 ### Code, dependencies, and builds
 
@@ -149,9 +161,9 @@ Run every item against the exact commit intended for `v0.8.5`.
 
 After all frozen-candidate gates are green:
 
-1. Confirm `VERSION`, `docs/releases/0.8.5.md`, and the pending `RELEASES.md` row agree.
+1. Confirm `VERSION`, `docs/releases/0.8.6.md`, and the pending `RELEASES.md` row agree.
 2. Merge the exact candidate to `main` without adding an untested merge-only change.
-3. Wait for required `main` checks, then create annotated tag `v0.8.5` on that exact commit.
+3. Wait for required `main` checks, then create annotated tag `v0.8.6` on that exact commit.
 4. Push the tag and require the Release workflow to build/publish scanner, API, UI, and signer for
    `linux/amd64` and `linux/arm64`.
 5. Verify manifest architectures, OCI labels, source revision, image digests, API Docker CLI,
@@ -163,7 +175,7 @@ After all frozen-candidate gates are green:
 
 - [ ] Deploy and verify the hosted installer separately; repository/image publication does not
       update `install.shakerscan.com`.
-- [ ] Clean-install `0.8.5` into an empty home and verify doctor, status, UI/API, MCP, agent launch,
+- [ ] Clean-install `0.8.6` into an empty home and verify doctor, status, UI/API, MCP, agent launch,
       skills, one Quick scan, and Model Intake readiness.
 - [ ] Upgrade a stateful installation and verify preserved targets, scans, findings, settings,
       evidence, and Fleet credentials.
