@@ -1,7 +1,7 @@
-# ShakerScan 0.8.8 Release Readiness
+# ShakerScan 0.8.9 Release Readiness
 
 **Status (2026-08-09):** patch candidate in preparation; 0.8.7 remains the immutable stable channel
-until 0.8.8 is published and independently verified. The exact 0.8.7 candidate passed frozen gates,
+until 0.8.9 is published and independently verified. The exact 0.8.7 candidate passed frozen gates,
 CodeQL, multi-architecture publication, manifest/label checks, and literal clean installation on the
 control and worker VPSs. Managed public HTTPS enrollment, current-build reconciliation, exact-node
 placement, and three concurrent remote worker replicas then ran successfully. That live scan exposed
@@ -9,11 +9,24 @@ one remaining route-lifecycle race: the final acknowledgement could prune an emp
 consumer group while another broker worker was already reclaiming or blocking on the same qualified
 route. Redis returned `NOGROUP`, which escaped as an opaque HTTP 500 on the lease endpoint.
 
-The 0.8.8 candidate handles only that expected Redis response, refreshes durable groups, discards an
+The 0.8.9 candidate handles only that expected Redis response, refreshes durable groups, discards an
 already-pruned route, and returns bounded no-work. Other Redis failures remain visible. Deterministic
 tests cover both `XAUTOCLAIM` and `XREADGROUP` timing plus unrelated-error propagation; a disposable
-real Redis 7.4 run passed 40 forced prune/poll iterations. Full frozen-candidate gates and repeated
-clean published-image acceptance remain required before advancing `install/STABLE_VERSION`.
+real Redis 7.4 run passed 40 forced prune/poll iterations. It also carries a bounded clean-build retry
+after 0.8.8 stopped before publication on a registry connection reset while pulling Playwright's
+checksum-pinned base layer. Full frozen-candidate gates and repeated clean published-image acceptance
+remain required before advancing `install/STABLE_VERSION`.
+
+### 0.8.8 unpublished-candidate evidence motivating the build hardening
+
+- Metadata resolution, source checkout, generated documentation, and the frozen installer smoke
+  passed on exact candidate `0edc1b720dc98a49c90ff12b4fded0e347f7bb66`.
+- The clean scanner build downloaded only 5 MiB of Playwright's 821 MiB checksum-pinned base layer
+  over 23 minutes before the registry connection reset. The build exited nonzero; API/UI/signer
+  builds, audits, publication, GitHub Release, and stable promotion did not run.
+- The 0.8.9 workflow retries only whole deterministic build commands, retaining successful BuildKit
+  layers between attempts. Four exhausted attempts still stop publication, and image contents,
+  source revision, and base-image digest remain unchanged.
 
 ### 0.8.7 post-publish evidence motivating this patch
 
@@ -70,7 +83,7 @@ regressions but do not satisfy a frozen-candidate gate.
 
 ## Supported product boundary
 
-ShakerScan 0.8.8 is a trusted-operator, self-hosted security scanner.
+ShakerScan 0.8.9 is a trusted-operator, self-hosted security scanner.
 
 - Localhost is the default. Remote UI/API access must remain behind Tailscale, a VPN, a firewall, or
   an operator-managed authenticated reverse proxy. Direct public exposure is unsupported.
@@ -86,7 +99,7 @@ ShakerScan 0.8.8 is a trusted-operator, self-hosted security scanner.
   required tools, or missing runtime qualification fail closed. Technical review does not replace
   publisher trust, privacy, legal, business, or deployed-data-plane approval.
 - Fleet production support is the outbound-only HTTPS `broker` transport. Built-in WireGuard remains
-  preview code outside the 0.8.8 support boundary until it passes a separate physical acceptance
+  preview code outside the 0.8.9 support boundary until it passes a separate physical acceptance
   matrix.
 - AI Gate remains preview in this release.
 
@@ -114,7 +127,7 @@ production dependency findings.
 
 ## Frozen-candidate validation
 
-Run every item against the exact commit intended for `v0.8.8`.
+Run every item against the exact commit intended for `v0.8.9`.
 
 ### Code, dependencies, and builds
 
@@ -180,9 +193,9 @@ Run every item against the exact commit intended for `v0.8.8`.
 
 After all frozen-candidate gates are green:
 
-1. Confirm `VERSION`, `docs/releases/0.8.8.md`, and the pending `RELEASES.md` row agree.
+1. Confirm `VERSION`, `docs/releases/0.8.9.md`, and the pending `RELEASES.md` row agree.
 2. Merge the exact candidate to `main` without adding an untested merge-only change.
-3. Wait for required `main` checks, then create annotated tag `v0.8.8` on that exact commit.
+3. Wait for required `main` checks, then create annotated tag `v0.8.9` on that exact commit.
 4. Push the tag and require the Release workflow to build/publish scanner, API, UI, and signer for
    `linux/amd64` and `linux/arm64`.
 5. Verify manifest architectures, OCI labels, source revision, image digests, API Docker CLI,
@@ -194,7 +207,7 @@ After all frozen-candidate gates are green:
 
 - [ ] Deploy and verify the hosted installer separately; repository/image publication does not
       update `install.shakerscan.com`.
-- [ ] Clean-install `0.8.8` into an empty home and verify doctor, status, UI/API, MCP, agent launch,
+- [ ] Clean-install `0.8.9` into an empty home and verify doctor, status, UI/API, MCP, agent launch,
       skills, one Quick scan, and Model Intake readiness.
 - [ ] Upgrade a stateful installation and verify preserved targets, scans, findings, settings,
       evidence, and Fleet credentials.
