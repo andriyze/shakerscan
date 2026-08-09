@@ -517,7 +517,7 @@ export default function NewScanPage() {
                 const available = node.status === 'healthy' && node.state_current && (node.image_current || node.local_build_active) && !node.drain && node.active_worker_count > 0
                 return (
                   <option key={node.id} value={node.id} disabled={!available}>
-                    {node.name} · {available ? `${node.active_worker_count} workers available${node.local_build_active ? ' · local test build' : ''}` : node.status}
+                    {node.name} · {available ? `${node.active_worker_count} ${node.active_worker_count === 1 ? 'worker' : 'workers'} available${node.local_build_active ? ' · local test build' : ''}` : node.status}
                   </option>
                 )
               })}

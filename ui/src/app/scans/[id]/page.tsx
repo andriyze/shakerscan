@@ -1030,7 +1030,13 @@ function ShardCard({ shard }: { shard: any }) {
         />
       </div>
       <div className="mt-2 flex items-center justify-between text-xs text-gray-500">
-        <span>{shard.current_phase || 'queued'}</span>
+        <span>
+          {shard.current_phase && shard.current_phase !== shard.status
+            ? shard.current_phase
+            : shard.executing_node_id
+              ? `node ${String(shard.executing_node_id).slice(0, 8)}`
+              : 'queued'}
+        </span>
         <span>{shard.findings_count || 0} findings</span>
       </div>
       <div className="mt-3 grid grid-cols-2 gap-2 text-xs">

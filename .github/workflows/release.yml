@@ -179,17 +179,24 @@ jobs:
             mcr.microsoft.com/playwright/python:v1.62.0-noble@sha256:aa81288e738725378becba5b3e06cb0f3a7f012a610e87e8d767a090ea3f740d
 
       - name: Build locked scanner image
-        run: scripts/retry-command.sh docker build -f scanner/Dockerfile -t shakerscan-scanner:release-candidate .
+        run: >-
+          scripts/retry-command.sh docker build
+          --build-arg SCANNER_VERSION=${{ needs.meta.outputs.version }}
+          -f scanner/Dockerfile -t shakerscan-scanner:release-candidate .
 
       - name: Build and verify locked API control-plane image
         run: |
-          scripts/retry-command.sh docker build --build-arg INSTALL_DOCKER_CLI=1 \
+          scripts/retry-command.sh docker build \
+            --build-arg SCANNER_VERSION=${{ needs.meta.outputs.version }} \
+            --build-arg INSTALL_DOCKER_CLI=1 \
             -f scanner/Dockerfile -t shakerscan-api:release-candidate .
           docker run --rm --entrypoint sh shakerscan-scanner:release-candidate -ceu \
             'if command -v docker >/dev/null 2>&1; then echo "worker image must not contain Docker" >&2; exit 1; fi'
           docker run --rm --entrypoint docker shakerscan-api:release-candidate --version
           docker run --rm --entrypoint sh shakerscan-api:release-candidate -ceu \
             'if docker buildx version >/dev/null 2>&1; then echo "runtime API must not carry Buildx" >&2; exit 1; fi'
+          test "$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' shakerscan-scanner:release-candidate | awk -F= '$1 == "SCANNER_VERSION" {print $2}')" = "${{ needs.meta.outputs.version }}"
+          test "$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' shakerscan-api:release-candidate | awk -F= '$1 == "SCANNER_VERSION" {print $2}')" = "${{ needs.meta.outputs.version }}"
 
       - name: Build and smoke-test locked Model Intake signer image
         run: |
@@ -280,6 +287,8 @@ jobs:
           context: .
           file: scanner/Dockerfile
           platforms: ${{ matrix.platform }}
+          build-args: |
+            SCANNER_VERSION=${{ needs.meta.outputs.version }}
           labels: |
             org.opencontainers.image.title=ShakerScan Scanner
             org.opencontainers.image.description=Open-source DAST scanner API, worker, and security tooling image
@@ -302,6 +311,7 @@ jobs:
           file: scanner/Dockerfile
           platforms: ${{ matrix.platform }}
           build-args: |
+            SCANNER_VERSION=${{ needs.meta.outputs.version }}
             INSTALL_DOCKER_CLI=1
           labels: |
             org.opencontainers.image.title=ShakerScan API Control Plane
@@ -360,6 +370,22 @@ jobs:
             org.opencontainers.image.licenses=Apache-2.0
             org.opencontainers.image.vendor=ShakerScan
           outputs: type=image,name=${{ env.SIGNER_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Verify baked scanner release identity
+        shell: bash
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+          SCANNER_DIGEST: ${{ steps.scanner.outputs.digest }}
+          API_DIGEST: ${{ steps.api.outputs.digest }}
+        run: |
+          for image in "${SCANNER_IMAGE}@${SCANNER_DIGEST}" "${API_IMAGE}@${API_DIGEST}"; do
+            docker pull "$image"
+            baked_version="$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$image" | awk -F= '$1 == "SCANNER_VERSION" {print $2}')"
+            if [[ "$baked_version" != "$VERSION" ]]; then
+              echo "$image baked SCANNER_VERSION=$baked_version; expected $VERSION" >&2
+              exit 1
+            fi
+          done
 
       - name: Export digests
         shell: bash

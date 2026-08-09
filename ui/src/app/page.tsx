@@ -306,7 +306,7 @@ export default function Dashboard() {
               {workersKnown ? totalAvailable : '--'}
             </span>
             <span className="hidden text-xs text-gray-500 sm:inline">available</span>
-            <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] font-medium text-gray-300" title={`${workerCount ?? 0} local workers running`}>
+            <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] font-medium text-gray-300" title={`${workerCount ?? 0} local ${(workerCount ?? 0) === 1 ? 'worker' : 'workers'} running`}>
               {localAvailable} local
             </span>
             {staleCount > 0 && (

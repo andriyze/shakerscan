@@ -60,6 +60,13 @@ def test_multi_node_doc_is_build_spec_and_honest_about_fleet_status():
     assert "continuous-asm-architecture.md" not in text
 
 
+def test_fleet_guide_operator_helper_supports_source_and_curl_installs():
+    guide = _flat(ROOT / "docs" / "multi-node-guide.md")
+    assert "docker-compose.release.yml" in guide
+    assert "FLEET_COMPOSE_FILE=docker-compose.yml" in guide
+    assert 'docker compose -p shakerscan -f "$FLEET_COMPOSE_FILE" exec -T api curl' in guide
+
+
 def test_multi_node_doc_states_semaphore_failure_posture():
     # Joined nodes fail closed while standalone installs preserve compatibility.
     text = _flat(FLEET_DOC)

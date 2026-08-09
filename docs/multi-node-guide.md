@@ -389,19 +389,27 @@ On the control plane:
 shakerscan status
 
 # Run fleet-operator API examples through the API container's actual loopback.
+# Curl installations ship docker-compose.release.yml; source checkouts use
+# docker-compose.yml. The explicit project name matches scanner.sh in both.
+if [ -f docker-compose.release.yml ]; then
+  FLEET_COMPOSE_FILE=docker-compose.release.yml
+else
+  FLEET_COMPOSE_FILE=docker-compose.yml
+fi
 fleet_api() {
-  docker compose exec -T api curl -sS "$@"
+  docker compose -p shakerscan -f "$FLEET_COMPOSE_FILE" exec -T api curl -sS "$@"
 }
 
 fleet_api http://127.0.0.1:8080/fleet/nodes | jq
 fleet_api http://127.0.0.1:8080/workers | jq
 ```
 
-The `fleet_api` helper is used by the operator examples below. It reaches the API from the API
-container's actual loopback without copying an operator secret into command arguments. A host-side
-request to a Docker-published port is not necessarily seen as a loopback peer. Other non-loopback
-API calls must use HTTPS and the `FLEET_OPERATOR_TOKEN` generated in the control plane's owner-only
-`.env`. Node credentials cannot perform operator actions.
+The `fleet_api` helper is used by the operator examples below and works from either the installed
+runtime directory (`~/.shakerscan`) or a source checkout. It reaches the API from the API container's
+actual loopback without copying an operator secret into command arguments. A host-side request to a
+Docker-published port is not necessarily seen as a loopback peer. Other non-loopback API calls must
+use HTTPS and the `FLEET_OPERATOR_TOKEN` generated in the control plane's owner-only `.env`. Node
+credentials cannot perform operator actions.
 
 In the UI, open **Fleet**. If the browser reaches the API through a non-loopback path, enter the fleet
 operator token in **Operator access**. It is kept in browser session storage and is cleared when the
