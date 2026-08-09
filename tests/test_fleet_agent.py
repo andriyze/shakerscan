@@ -80,6 +80,38 @@ class FakeDocker:
         raise AssertionError((method, path, body))
 
 
+def test_rollout_clone_drops_old_runtime_identity_for_new_image():
+    client = FakeDocker()
+    inspect = {
+        "Config": {
+            "Image": "registry/shakerscan@sha256:" + "a" * 64,
+            "Cmd": ["python3", "/app/worker.py"],
+            "Env": [
+                "REDIS_URL=redis://control",
+                "SCANNER_VERSION=0.8.15",
+                "GIT_COMMIT=image:0.8.15",
+                "FLEET_WORKER_IMAGE_DIGEST=registry/shakerscan@sha256:" + "a" * 64,
+            ],
+            "Labels": {
+                "com.docker.compose.project": "fleet-test",
+                "com.docker.compose.service": "worker",
+                "com.docker.compose.container-number": "1",
+                "com.shakerscan.node_id": NODE_ID,
+            },
+        },
+        "HostConfig": {"Binds": ["/srv/results:/results:rw"]},
+    }
+    next_image = "registry/shakerscan@sha256:" + "b" * 64
+
+    fleet_agent._clone_worker_from_inspect(client, inspect, 2, NODE_ID, image=next_image)
+
+    create = next(call for call in client.calls if call[0] == "POST" and call[1].startswith("/containers/create?"))
+    environment = create[2]["Env"]
+    assert "REDIS_URL=redis://control" in environment
+    assert f"FLEET_WORKER_IMAGE_DIGEST={next_image}" in environment
+    assert not any(item.startswith(("SCANNER_VERSION=", "GIT_COMMIT=")) for item in environment)
+
+
 def test_state_file_must_be_owner_only(tmp_path):
     state_path = tmp_path / "state.json"
     state_path.write_text(json.dumps({"node_id": NODE_ID}), encoding="utf-8")

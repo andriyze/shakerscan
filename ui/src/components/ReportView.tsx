@@ -3525,9 +3525,11 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
             {smart_coverage.parameters && (
               <div className="bg-gray-900 rounded-lg p-4">
                 <div className="flex items-center justify-between mb-2">
-                  <h3 className="text-sm font-semibold text-gray-400">Parameter Coverage</h3>
+                  <h3 className="text-sm font-semibold text-gray-400">Parameter Testing</h3>
                   <span className="text-lg font-bold text-white">
-                    {Math.round((smart_coverage.parameters.coverage || 0) * 100)}%
+                    {(smart_coverage.parameters.discovered || 0) > 0
+                      ? `${Math.round((smart_coverage.parameters.coverage || 0) * 100)}%`
+                      : '—'}
                   </span>
                 </div>
                 <div className="w-full bg-gray-700 rounded-full h-2 mb-2">
@@ -3537,7 +3539,9 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                   />
                 </div>
                 <p className="text-xs text-gray-500">
-                  {smart_coverage.parameters.tested || 0} tested / {smart_coverage.parameters.discovered || 0} discovered
+                  {(smart_coverage.parameters.discovered || 0) > 0
+                    ? `${smart_coverage.parameters.tested || 0} probe attempts across ${smart_coverage.parameters.discovered} discovered parameters`
+                    : `${smart_coverage.parameters.tested || 0} active parameter probes · no parameters inventoried`}
                 </p>
               </div>
             )}

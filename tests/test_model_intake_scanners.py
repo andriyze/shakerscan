@@ -499,6 +499,53 @@ def test_materialized_converted_snapshot_is_rescanned_as_exact_safe_subject(monk
     )
 
 
+def test_materialized_snapshot_scans_legacy_alternates_when_safetensors_is_selected(monkeypatch, tmp_path):
+    snapshot = tmp_path / "mixed"
+    snapshot.mkdir()
+    (snapshot / "model.safetensors").write_bytes(b"safe")
+    # Protocol 0 is a small, valid pickle stream and proves the built-in scan
+    # receives the repository rather than only the preferred safetensors file.
+    (snapshot / "pytorch_model.bin").write_bytes(b"(dp0\nVweight\np1\nI1\ns.")
+    modelscan = next(spec for spec in scanners.EXTERNAL_SCANNERS if spec.name == "modelscan")
+    observed_paths = []
+
+    def fake_plan(path, **kwargs):
+        if kwargs.get("evidence_scope") == "dependency_evidence":
+            return []
+        return [{
+            "spec": modelscan,
+            "applicable": True,
+            "files_considered": 2,
+            "reason": "serialized_model_artifact_present",
+        }]
+
+    def fake_external(spec, path, subject):
+        observed_paths.append(path)
+        now = scanners._utc_iso()
+        return scanners._scanner_result(
+            name=spec.name,
+            version="test",
+            status="PASS",
+            subject=subject,
+            started_at=now,
+            finished_at=now,
+            execution={"required": False},
+        )
+
+    monkeypatch.setattr(scanners, "resolve_scanner_plan", fake_plan)
+    monkeypatch.setattr(scanners, "run_external_scanner", fake_external)
+
+    result = scanners.scan_materialized_snapshot(
+        snapshot,
+        artifact_relative_path="model.safetensors",
+        snapshot_sha256="c" * 64,
+        profile="baseline",
+    )
+
+    assert observed_paths == [snapshot.resolve()]
+    assert result["statuses"]["python-pickletools"] == "PASS"
+
+
 def test_materialized_converted_snapshot_rescan_blocks_unchanged_dangerous_code(monkeypatch, tmp_path):
     snapshot = tmp_path / "converted"
     snapshot.mkdir()

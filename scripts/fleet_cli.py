@@ -1991,7 +1991,13 @@ def _build_local_broker_worker_image(paths: RuntimePaths) -> str:
             "if it runs out of space, remove Docker build cache or expand the worker disk."
         )
     _run(
-        ["docker", "build", "--tag", image, "--file", str(dockerfile), str(paths.root)],
+        [
+            "docker", "build",
+            "--build-arg", f"SCANNER_VERSION={suffix}",
+            "--tag", image,
+            "--file", str(dockerfile),
+            str(paths.root),
+        ],
         capture=False,
     )
     return image

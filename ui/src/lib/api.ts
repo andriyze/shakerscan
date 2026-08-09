@@ -4017,6 +4017,7 @@ export async function getScans(params?: {
   created_within_days?: number
   include_shards?: boolean
   include_internal?: boolean
+  include_model_intake?: boolean
 }): Promise<{ scans: Scan[]; total: number; limit: number; offset: number }> {
   const searchParams = new URLSearchParams()
   if (params?.status) searchParams.set('status', params.status)
@@ -4027,6 +4028,7 @@ export async function getScans(params?: {
   if (params?.created_within_days) searchParams.set('created_within_days', params.created_within_days.toString())
   if (params?.include_shards) searchParams.set('include_shards', 'true')
   if (params?.include_internal) searchParams.set('include_internal', 'true')
+  if (params?.include_model_intake) searchParams.set('include_model_intake', 'true')
 
   const res = await fetch(`${API_URL}/scans?${searchParams}`)
   if (!res.ok) throw new Error('Failed to fetch scans')
@@ -4227,7 +4229,7 @@ export interface ModelIntakeScanSummary {
 // operator to copy a UUID between two halves of the same page was the seam
 // where the flow fell apart.
 export async function listRecentModelIntakeScans(limit = 25): Promise<ModelIntakeScanSummary[]> {
-  const { scans } = await getScans({ limit })
+  const { scans } = await getScans({ limit, include_model_intake: true })
   return scans
     .filter((scan) => scan.scan_type === 'model_intake')
     .map((scan) => {

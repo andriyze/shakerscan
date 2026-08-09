@@ -778,6 +778,46 @@ def test_scan_list_internal_flags_reveal_requested_implementation_rows():
     assert api_module._hidden_scan_roles_for_list(include_shards=True, include_internal=True) == []
 
 
+def test_scan_list_hides_model_intake_by_default_and_can_opt_in(monkeypatch):
+    class Conn:
+        def __init__(self):
+            self.queries = []
+
+        async def fetch(self, query, *_args):
+            self.queries.append(query)
+            return []
+
+        async def fetchval(self, query, *_args):
+            self.queries.append(query)
+            return 0
+
+    class Pool:
+        def __init__(self, conn):
+            self.conn = conn
+
+        def acquire(self):
+            return _FakeAcquire(self.conn)
+
+    hidden = Conn()
+    monkeypatch.setattr(api_module, "db_pool", Pool(hidden))
+    asyncio.run(api_module.list_scans(
+        status=None, target=None, root_domain=None, created_within_days=None,
+        include_shards=False, include_internal=False, include_model_intake=False,
+        limit=50, offset=0,
+    ))
+    assert all("COALESCE(s.run_kind, '') <> 'model_intake'" in query for query in hidden.queries)
+    assert all("COALESCE(s.scan_type, '') <> 'model_intake'" in query for query in hidden.queries)
+
+    included = Conn()
+    monkeypatch.setattr(api_module, "db_pool", Pool(included))
+    asyncio.run(api_module.list_scans(
+        status=None, target=None, root_domain=None, created_within_days=None,
+        include_shards=False, include_internal=False, include_model_intake=True,
+        limit=50, offset=0,
+    ))
+    assert all("COALESCE(s.run_kind, '') <> 'model_intake'" not in query for query in included.queries)
+
+
 class _FakeAcquire:
     def __init__(self, conn):
         self.conn = conn

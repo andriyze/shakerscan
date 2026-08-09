@@ -19771,6 +19771,8 @@ async def dashboard():
                     scan_type, run_kind, findings_count, created_at, completed_at
                 FROM scans
                 WHERE (scan_role IS NULL OR scan_role <> 'shard')
+                  AND COALESCE(run_kind, '') <> 'model_intake'
+                  AND COALESCE(scan_type, '') <> 'model_intake'
                 ORDER BY
                     COALESCE(
                         'target:' || target_id::text,
@@ -21459,14 +21461,16 @@ async def list_scans(
     created_within_days: Optional[int] = Query(None, ge=1),
     include_shards: bool = False,
     include_internal: bool = False,
+    include_model_intake: bool = False,
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0)
 ):
     """List scans with optional filtering.
 
-    Child shard rows and Continuous ASM implementation rows are hidden by
-    default so the Scans page shows logical user actions. Use include_shards
-    and include_internal for debugging or administrative views.
+    Child shard rows, Continuous ASM implementation rows, and Model Intake
+    evidence scans are hidden by default so the DAST scan list stays a web
+    testing surface. Model Intake remains available from its dedicated API/UI;
+    use include_model_intake for administrative or evidence-selection views.
     """
     async with db_pool.acquire() as conn:
         query = """
@@ -21495,6 +21499,14 @@ async def list_scans(
             role_filter = f" AND (s.scan_role IS NULL OR s.scan_role NOT IN ({role_values}))"
             query += role_filter
             count_query += role_filter
+
+        if not include_model_intake:
+            product_filter = """
+                AND COALESCE(s.run_kind, '') <> 'model_intake'
+                AND COALESCE(s.scan_type, '') <> 'model_intake'
+            """
+            query += product_filter
+            count_query += product_filter
 
         params = []
         count_params = []

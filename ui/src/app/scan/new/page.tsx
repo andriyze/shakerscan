@@ -484,7 +484,10 @@ export default function NewScanPage() {
             >
               <div className="font-medium text-white">Control plane (local)</div>
               <div className="mt-1 text-xs text-gray-500">
-                {workerStats?.execution_capacity?.local_available ?? workerStats?.count ?? '—'} local workers available
+                {(() => {
+                  const count = workerStats?.execution_capacity?.local_available ?? workerStats?.count
+                  return `${count ?? '—'} local ${count === 1 ? 'worker' : 'workers'} available`
+                })()}
               </div>
             </button>
             <button
@@ -495,7 +498,10 @@ export default function NewScanPage() {
             >
               <div className="font-medium text-white">Remote fleet</div>
               <div className="mt-1 text-xs text-gray-500">
-                {workerStats?.execution_capacity?.remote_available ?? '—'} remote workers available
+                {(() => {
+                  const count = workerStats?.execution_capacity?.remote_available
+                  return `${count ?? '—'} remote ${count === 1 ? 'worker' : 'workers'} available`
+                })()}
               </div>
             </button>
           </div>

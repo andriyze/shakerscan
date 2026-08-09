@@ -168,8 +168,10 @@ curl http://localhost:8080/scans/{scan_id}
 curl "http://localhost:8080/scans?limit=10"
 curl "http://localhost:8080/scans?status=completed&root_domain=example.com&limit=50"
 
-# The scan list hides implementation rows by default. Use these only for debugging:
+# The DAST scan list hides shards, internal ASM rows, and Model Intake evidence
+# scans by default. Use these only for debugging or evidence selection:
 curl "http://localhost:8080/scans?include_shards=true&include_internal=true&limit=50"
+curl "http://localhost:8080/scans?include_model_intake=true&limit=50"
 
 # Get full result JSON
 curl http://localhost:8080/scans/{scan_id}/result

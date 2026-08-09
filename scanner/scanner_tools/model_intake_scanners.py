@@ -2887,7 +2887,11 @@ def scan_materialized_snapshot(
         "complete": True,
     }
     results = [
-        run_builtin_pickle_scan(artifact, subject),
+        # The selected deployment artifact can be safetensors while the same
+        # immutable repository still ships a legacy .bin/.pt/.pkl alternate.
+        # Serialization coverage must inspect the complete snapshot, not only
+        # the preferred artifact.
+        run_builtin_pickle_scan(root, subject),
         run_builtin_source_scan(root, subject),
         run_builtin_secret_scan(root, subject),
         run_builtin_malware_scan(root, subject),
@@ -2925,11 +2929,14 @@ def scan_materialized_snapshot(
                     },
                 ))
                 continue
-            repository_result = run_external_scanner(
-                spec,
-                artifact if spec.target_scope == "artifact" else root,
-                subject,
+            # ModelScan accepts a directory and must inspect every serialized
+            # alternate in the immutable snapshot. Limiting it to the selected
+            # safetensors artifact produced an unexplained exit-code error and,
+            # more importantly, skipped a co-published legacy pickle model.
+            scanner_subject = root if spec.name == "modelscan" else (
+                artifact if spec.target_scope == "artifact" else root
             )
+            repository_result = run_external_scanner(spec, scanner_subject, subject)
             if spec.name == "trivy" and dependency_root is not None:
                 runtime_trivy = run_external_scanner(spec, dependency_root, subject)
                 repository_result = combine_trivy_repository_and_runtime(

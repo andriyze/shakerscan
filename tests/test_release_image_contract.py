@@ -47,4 +47,14 @@ def test_official_and_manual_publishers_ship_native_multiarch_api_image():
 
     assert 'API_REPO="${API_IMAGE_REPO:-shakerscan/shakerscan-api}"' in publisher
     assert '--build-arg "INSTALL_DOCKER_CLI=1"' in publisher
+    assert 'SCANNER_BUILD_ARGS=(--build-arg "SCANNER_VERSION=$VERSION_LABEL")' in publisher
     assert 'API_TAGS=(-t "$API_REPO:$TAG")' in publisher
+
+
+def test_scanner_image_bakes_release_identity_for_broker_workers():
+    dockerfile = (ROOT / "scanner" / "Dockerfile").read_text()
+    compose = (ROOT / "docker-compose.yml").read_text()
+
+    assert "ARG SCANNER_VERSION=dev" in dockerfile
+    assert "ENV SCANNER_VERSION=${SCANNER_VERSION}" in dockerfile
+    assert compose.count("SCANNER_VERSION: ${SCANNER_VERSION:-dev}") >= 5

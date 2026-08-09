@@ -2671,6 +2671,13 @@ start_agent() {
     local agent="${1:-}"
     local candidates=()
 
+    if [ "$agent" = "-h" ] || [ "$agent" = "--help" ] || [ "$agent" = "help" ]; then
+        echo "Usage: $0 agent [codex|claude|opencode]"
+        echo "Starts a supported coding agent inside the ShakerScan runtime directory."
+        echo "With no name, the first installed supported agent is selected."
+        return 0
+    fi
+
     if [ -n "$agent" ]; then
         candidates=("$agent")
     else

@@ -77,6 +77,19 @@ start_agent codex
     ]
 
 
+def test_agent_launcher_has_non_mutating_help():
+    functions = SCANNER_SH.read_text(encoding="utf-8").rsplit("# Parse arguments", 1)[0]
+    result = subprocess.run(
+        ["bash", "-c", functions + "\nstart_agent --help\n"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=True,
+    )
+    assert "Usage:" in result.stdout
+    assert "codex|claude|opencode" in result.stdout
+
+
 def test_manual_agent_guidance_exports_remote_urls():
     functions = SCANNER_SH.read_text(encoding="utf-8").rsplit("# Parse arguments", 1)[0]
     command = functions + """

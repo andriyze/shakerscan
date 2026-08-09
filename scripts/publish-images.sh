@@ -189,6 +189,7 @@ if [[ -z "$PLATFORM" ]]; then
 fi
 
 BUILD_ARGS=(--platform "$PLATFORM")
+SCANNER_BUILD_ARGS=(--build-arg "SCANNER_VERSION=$VERSION_LABEL")
 OUTPUT_ARGS=()
 if [[ "$PUSH" -eq 1 ]]; then
     OUTPUT_ARGS+=(--push)
@@ -238,6 +239,7 @@ fi
 
 docker buildx build \
     "${BUILD_ARGS[@]}" \
+    "${SCANNER_BUILD_ARGS[@]}" \
     "${OUTPUT_ARGS[@]}" \
     "${COMMON_LABELS[@]}" \
     --label "org.opencontainers.image.title=ShakerScan Scanner" \
@@ -248,6 +250,7 @@ docker buildx build \
 
 docker buildx build \
     "${BUILD_ARGS[@]}" \
+    "${SCANNER_BUILD_ARGS[@]}" \
     "${OUTPUT_ARGS[@]}" \
     "${COMMON_LABELS[@]}" \
     --label "org.opencontainers.image.title=ShakerScan API Control Plane" \

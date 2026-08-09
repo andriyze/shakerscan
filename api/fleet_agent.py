@@ -305,7 +305,13 @@ def _clone_worker_from_inspect(
     environment = list(config.get("Env") or [])
     selected_image = image or config.get("Image")
     if image:
-        environment = [entry for entry in environment if not str(entry).startswith("FLEET_WORKER_IMAGE_DIGEST=")]
+        # Let the replacement image's baked release identity win. Copying the
+        # old container's SCANNER_VERSION would make a successful digest
+        # rollout report the previous release forever.
+        environment = [
+            entry for entry in environment
+            if not str(entry).startswith(("FLEET_WORKER_IMAGE_DIGEST=", "SCANNER_VERSION=", "GIT_COMMIT="))
+        ]
         environment.append(f"FLEET_WORKER_IMAGE_DIGEST={image}")
     body = {
         "Image": selected_image,

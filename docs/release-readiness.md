@@ -1,7 +1,10 @@
-# ShakerScan 0.8.15 Release Readiness
+# ShakerScan 0.8.16 Release Readiness
 
-**Status (2026-08-09):** 0.8.15 is published and promoted to the immutable stable channel; complete
-clean two-VPS post-publication acceptance is in progress.
+**Status (2026-08-09):** 0.8.15 is published and promoted to the immutable stable channel. Its clean
+two-VPS post-publication acceptance completed broker enrollment, three-way exact-node parallel DAST,
+worker-loss reclaim, centralized results/artifacts, and a bounded public-model review. That audit
+found release-truth and product-separation defects now assigned to the pending 0.8.16 candidate;
+0.8.16 is not published or promoted yet.
 Version 0.8.9 passed CodeQL, all frozen gates, dependency audits, clean/dirty upgrade smokes,
 multi-architecture publication, and independent manifest checks. Its bounded clean-build retry also
 recovered the registry boundary that stopped 0.8.8. The stable channel was deliberately not advanced:
@@ -35,6 +38,16 @@ No 0.8.14 images were published. Version 0.8.15 carries the Fleet fix, validates
 against its published ledger row instead of a fixed version, still fails closed on a genuinely
 unavailable bundled or external S3 plane, and covers both a transient HTTP failure and a not-ready
 probe response.
+
+The 0.8.15 clean acceptance proved the managed broker control plane and MinIO readiness fix under a
+literal hosted-installer deployment. It also exposed three defects that unit-only release gates did
+not make visible: broker scan reports used the fallback `dev` label, a safetensors-selected Model
+Intake review ran ModelScan against only that preferred artifact while the immutable snapshot also
+contained a legacy PyTorch `.bin`, and the default DAST scan list still displayed Model Intake
+evidence rows. Version 0.8.16 bakes the release identity into scanner images, scans every serialized
+alternate in the snapshot, and separates the default DAST and Model Intake lists while preserving an
+explicit API opt-in for evidence workflows. Post-publication acceptance must repeat the same clean
+physical checks before the stable channel advances.
 
 ### 0.8.8 unpublished-candidate evidence motivating the build hardening
 
