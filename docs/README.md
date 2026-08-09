@@ -25,7 +25,7 @@ Code, database schemas, runtime receipts, and tests remain authoritative when a 
 | [`release-readiness.md`](release-readiness.md) | Single release scope, stop-ship, validation, publishing, installer, and documentation checklist |
 | [`upgrade-and-rollback.md`](upgrade-and-rollback.md) | Backup, upgrade, verification, and rollback runbook for source and installer deployments |
 | [`multi-node-guide.md`](multi-node-guide.md) | Set up and operate WireGuard or outbound-HTTPS multi-node fleets |
-| [`releases/0.8.3.md`](releases/0.8.3.md) | Current ShakerScan 0.8.3 patch-release notes and supported product boundary |
+| [`releases/0.8.4.md`](releases/0.8.4.md) | Pending ShakerScan 0.8.4 patch-release notes and supported product boundary |
 | [`releases/0.8.2.md`](releases/0.8.2.md) | ShakerScan 0.8.2 patch-release notes and supported product boundary |
 | [`releases/0.8.0.md`](releases/0.8.0.md) | ShakerScan 0.8.0 release notes and supported product boundary |
 | [`SMART_SCAN_POLICY.md`](SMART_SCAN_POLICY.md) | Smart-scan budget, proof, safety, and release policy |
