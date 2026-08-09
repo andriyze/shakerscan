@@ -639,6 +639,19 @@ def test_worker_result_directory_preparation_repairs_docker_created_sandbox(tmp_
     assert sandbox.stat().st_mode & 0o777 == 0o700
 
 
+def test_sandbox_queue_owner_uses_os_chown_for_root(monkeypatch, tmp_path):
+    queue = tmp_path / "queue"
+    queue.mkdir()
+    calls = []
+    monkeypatch.setattr(fleet_cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(fleet_cli.os, "chown", lambda path, uid, gid: calls.append((path, uid, gid)))
+
+    assert fleet_cli._sandbox_runtime_identity() == (10001, 10001)
+    fleet_cli._set_sandbox_queue_owner(queue, 10001, 10001)
+
+    assert calls == [(queue, 10001, 10001)]
+
+
 def test_worker_result_directory_preparation_rejects_symlink(tmp_path):
     paths = fleet_cli.RuntimePaths(tmp_path)
     outside = tmp_path / "outside"

@@ -1735,11 +1735,7 @@ def _worker_compose_env(
 ) -> dict[str, str]:
     expected_image = str(response["worker_image_digest"])
     selected_image = str(runtime_image or expected_image)
-    sandbox_uid = os.geteuid()
-    sandbox_gid = os.getegid()
-    if sandbox_uid == 0:
-        sandbox_uid = 10001
-        sandbox_gid = 10001
+    sandbox_uid, sandbox_gid = _sandbox_runtime_identity()
     return {
         "FLEET_COMPOSE_PROJECT_NAME": f"shakerscan-fleet-{str(response['node_id'])[:8]}",
         "FLEET_NODE_ID": str(response["node_id"]),
@@ -1751,6 +1747,19 @@ def _worker_compose_env(
         "MODEL_INTAKE_SANDBOX_UID": str(sandbox_uid),
         "MODEL_INTAKE_SANDBOX_GID": str(sandbox_gid),
     }
+
+
+def _sandbox_runtime_identity() -> tuple[int, int]:
+    """Return the host bind owner and matching non-root container identity."""
+    uid = os.geteuid()
+    gid = os.getegid()
+    return (10001, 10001) if uid == 0 else (uid, gid)
+
+
+def _set_sandbox_queue_owner(path: Path, uid: int, gid: int) -> None:
+    """Set the private queue owner when the launcher has host root authority."""
+    if os.geteuid() == 0:
+        os.chown(path, uid, gid)
 
 
 def _prepare_worker_result_directories(paths: RuntimePaths) -> None:
@@ -1767,19 +1776,15 @@ def _prepare_worker_result_directories(paths: RuntimePaths) -> None:
         (paths.root / "results" / "model-intake-quarantine", 0o755),
         (paths.root / "results" / "model-intake-sandbox", 0o700),
     )
-    sandbox_uid = os.geteuid()
-    sandbox_gid = os.getegid()
-    if sandbox_uid == 0:
-        sandbox_uid = 10001
-        sandbox_gid = 10001
+    sandbox_uid, sandbox_gid = _sandbox_runtime_identity()
     sandbox_path = paths.root / "results" / "model-intake-sandbox"
     for path, mode in directories:
         if path.is_symlink():
             raise FleetCLIError(f"worker result directory must not be a symlink: {path}")
         try:
             path.mkdir(parents=True, exist_ok=True, mode=mode)
-            if path == sandbox_path and os.geteuid() == 0:
-                path.chown(sandbox_uid, sandbox_gid)
+            if path == sandbox_path:
+                _set_sandbox_queue_owner(path, sandbox_uid, sandbox_gid)
             path.chmod(mode)
         except OSError as exc:
             raise FleetCLIError(f"could not prepare worker result directory {path}: {exc}") from exc
