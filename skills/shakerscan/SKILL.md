@@ -161,9 +161,9 @@ Host-side `shakerscan fleet` commands resolve the API bind persisted by `scanner
 loopback after a Tailscale-only `--remote` start unless the operator explicitly overrides
 `--local-api`.
 
-For the 0.8.16 release boundary, initialize and join production fleets with `--network broker` and
+For the 0.8.17 release boundary, initialize and join production fleets with `--network broker` and
 `--transport broker`. The outbound-only HTTPS broker transport has passed physical multi-host
-acceptance. WireGuard fleet transport is implemented preview code but is not a supported 0.8.16
+acceptance. WireGuard fleet transport is implemented preview code but is not a supported 0.8.17
 production topology; do not present it as release-accepted until its separate physical matrix passes.
 
 Use node-level placement, not a worker-container identity. `node_id=local` selects control-plane

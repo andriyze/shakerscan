@@ -1,10 +1,15 @@
-# ShakerScan 0.8.16 Release Readiness
+# ShakerScan 0.8.17 Release Readiness
 
-**Status (2026-08-09):** 0.8.16 is published and promoted to the immutable stable channel from exact
-candidate `93f5bb2ad2b469bec979792a5f9213756427b1d3`. CodeQL, the frozen full-stack E2E,
-complete release validation, multi-architecture builds, manifest verification, and independent
-`latest`/OCI-label checks passed. Literal clean two-VPS post-publication acceptance is now running;
-its result determines whether 0.8.16 remains accepted or a follow-up patch is required.
+**Status (2026-08-09):** 0.8.17 is a pending corrective candidate. The literal clean 0.8.16
+two-VPS acceptance proved broker enrollment, three-way shard execution, physical worker loss and
+reclaim, central artifacts, and datastore isolation, but exposed that official scanner/API builds
+did not pass the release version into the Dockerfile. A completed scan therefore reported
+`scanner dev`. Version 0.8.17 must pass CodeQL, the frozen full-stack E2E, complete release
+validation, native multi-architecture publication, independent manifest/label checks, and a second
+literal clean two-VPS acceptance before the stable channel advances.
+That acceptance also found a long-running broker Model Intake scan could starve its asyncio
+heartbeat task and be reaped after five minutes despite a healthy worker. The candidate now uses a
+dedicated native lease-heartbeat thread and includes a blocking-work regression test.
 Version 0.8.9 passed CodeQL, all frozen gates, dependency audits, clean/dirty upgrade smokes,
 multi-architecture publication, and independent manifest checks. Its bounded clean-build retry also
 recovered the registry boundary that stopped 0.8.8. The stable channel was deliberately not advanced:
@@ -44,10 +49,11 @@ literal hosted-installer deployment. It also exposed three defects that unit-onl
 not make visible: broker scan reports used the fallback `dev` label, a safetensors-selected Model
 Intake review ran ModelScan against only that preferred artifact while the immutable snapshot also
 contained a legacy PyTorch `.bin`, and the default DAST scan list still displayed Model Intake
-evidence rows. Version 0.8.16 bakes the release identity into scanner images, scans every serialized
-alternate in the snapshot, and separates the default DAST and Model Intake lists while preserving an
-explicit API opt-in for evidence workflows. Post-publication acceptance must repeat the same clean
-physical checks before the stable channel advances.
+evidence rows. Version 0.8.16 added the correct Dockerfile identity input, scanned every serialized
+alternate in the snapshot, and separated the default DAST and Model Intake lists while preserving
+an explicit API opt-in for evidence workflows. Its clean acceptance then proved the latter changes
+and exposed the missing official build argument. Version 0.8.17 supplies that argument to both
+scanner and API images and reads it back from every native release artifact before publication.
 
 ### 0.8.8 unpublished-candidate evidence motivating the build hardening
 
@@ -115,7 +121,7 @@ regressions but do not satisfy a frozen-candidate gate.
 
 ## Supported product boundary
 
-ShakerScan 0.8.16 is a trusted-operator, self-hosted security scanner.
+ShakerScan 0.8.17 is a trusted-operator, self-hosted security scanner.
 
 - Localhost is the default. Remote UI/API access must remain behind Tailscale, a VPN, a firewall, or
   an operator-managed authenticated reverse proxy. Direct public exposure is unsupported.
@@ -131,7 +137,7 @@ ShakerScan 0.8.16 is a trusted-operator, self-hosted security scanner.
   required tools, or missing runtime qualification fail closed. Technical review does not replace
   publisher trust, privacy, legal, business, or deployed-data-plane approval.
 - Fleet production support is the outbound-only HTTPS `broker` transport. Built-in WireGuard remains
-  preview code outside the 0.8.16 support boundary until it passes a separate physical acceptance
+  preview code outside the 0.8.17 support boundary until it passes a separate physical acceptance
   matrix.
 - AI Gate remains preview in this release.
 
@@ -159,7 +165,7 @@ production dependency findings.
 
 ## Frozen-candidate validation
 
-Run every item against the exact commit intended for `v0.8.16`.
+Run every item against the exact commit intended for `v0.8.17`.
 
 ### Code, dependencies, and builds
 
@@ -225,9 +231,9 @@ Run every item against the exact commit intended for `v0.8.16`.
 
 After all frozen-candidate gates are green:
 
-1. Confirm `VERSION`, `docs/releases/0.8.16.md`, and the pending `RELEASES.md` row agree.
+1. Confirm `VERSION`, `docs/releases/0.8.17.md`, and the pending `RELEASES.md` row agree.
 2. Merge the exact candidate to `main` without adding an untested merge-only change.
-3. Wait for required `main` checks, then create annotated tag `v0.8.16` on that exact commit.
+3. Wait for required `main` checks, then create annotated tag `v0.8.17` on that exact commit.
 4. Push the tag and require the Release workflow to build/publish scanner, API, UI, and signer for
    `linux/amd64` and `linux/arm64`.
 5. Verify manifest architectures, OCI labels, source revision, image digests, API Docker CLI,
@@ -239,7 +245,7 @@ After all frozen-candidate gates are green:
 
 - [ ] Deploy and verify the hosted installer separately; repository/image publication does not
       update `install.shakerscan.com`.
-- [ ] Clean-install `0.8.16` into an empty home and verify doctor, status, UI/API, MCP, agent launch,
+- [ ] Clean-install `0.8.17` into an empty home and verify doctor, status, UI/API, MCP, agent launch,
       skills, one Quick scan, and Model Intake readiness.
 - [ ] Upgrade a stateful installation and verify preserved targets, scans, findings, settings,
       evidence, and Fleet credentials.

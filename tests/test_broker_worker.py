@@ -3,6 +3,8 @@ import inspect
 import json
 import os
 import sys
+import threading
+import time
 import types
 from pathlib import Path
 
@@ -118,3 +120,50 @@ def test_broker_execution_uses_https_checkpoint_upload_not_local_database_manife
 
     assert "persist_checkpoint_artifacts=False" in source
     assert 'artifact_type="checkpoint"' in source
+
+
+def test_broker_heartbeat_survives_a_blocked_scanner_event_loop(tmp_path, monkeypatch):
+    calls = []
+    cancelled = []
+    done = threading.Event()
+    live = {"phase": "model_intake", "progress": 5, "log_lines": ["acquiring"]}
+    lock = threading.Lock()
+    failures = []
+
+    def fake_request(_state, method, path, payload):
+        calls.append((method, path, payload))
+        return {"cancel_requested": False}
+
+    monkeypatch.setattr(broker_worker, "api_request", fake_request)
+    monkeypatch.setattr(broker_worker, "RESULTS_DIR", tmp_path)
+    monkeypatch.setattr(broker_worker, "_signal_scanner_cancel_file", cancelled.append)
+    thread = threading.Thread(
+        target=broker_worker._heartbeat_lease_until_done,
+        kwargs={
+            "state": {},
+            "node_id": NODE_ID,
+            "lease_id": "lease-id",
+            "lease_token": "lease-token",
+            "scan_id": "scan-id",
+            "heartbeat_interval": 0.01,
+            "done": done,
+            "live": live,
+            "live_lock": lock,
+            "lease_failed": failures,
+        },
+    )
+    thread.start()
+
+    # Model Intake and parser work can block the asyncio thread. A native heartbeat
+    # thread must continue renewing authority during that interval.
+    time.sleep(0.045)
+    done.set()
+    thread.join(timeout=1)
+
+    assert not thread.is_alive()
+    assert len(calls) >= 2
+    assert calls[0][2]["phase"] == "model_intake"
+    assert calls[0][2]["log_lines"] == ["acquiring"]
+    assert calls[1][2]["log_lines"] == []
+    assert failures == []
+    assert cancelled == []

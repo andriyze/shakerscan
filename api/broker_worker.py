@@ -17,6 +17,7 @@ import os
 import socket
 import ssl
 import sys
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -35,6 +36,53 @@ from worker import (
 
 class BrokerWorkerError(RuntimeError):
     pass
+
+
+def _heartbeat_lease_until_done(
+    state: dict[str, Any],
+    *,
+    node_id: str,
+    lease_id: str,
+    lease_token: str,
+    scan_id: str,
+    heartbeat_interval: float,
+    done: threading.Event,
+    live: dict[str, Any],
+    live_lock: threading.Lock,
+    lease_failed: list[str],
+) -> None:
+    """Keep broker ownership alive independently of scanner event-loop health.
+
+    Several scanners legitimately perform long blocking parser or subprocess work.
+    An asyncio heartbeat task on the same loop can therefore be starved long enough
+    for both the queue lease and the API stale-scan watchdog to expire.  The ordinary
+    worker already uses a dedicated heartbeat thread for this reason; broker workers
+    need the same failure posture.
+    """
+    while not done.wait(heartbeat_interval):
+        with live_lock:
+            log_lines = list(live.get("log_lines") or [])
+            live["log_lines"] = []
+            phase = live.get("phase")
+            progress = live.get("progress")
+        try:
+            response = api_request(
+                state,
+                "POST",
+                f"/fleet/broker/nodes/{node_id}/leases/{lease_id}/heartbeat",
+                {
+                    "lease_token": lease_token,
+                    "phase": phase,
+                    "progress": progress,
+                    "log_lines": log_lines,
+                },
+            )
+            if response and response.get("cancel_requested"):
+                _signal_scanner_cancel_file(str(RESULTS_DIR / f"{scan_id}_cancel"))
+        except Exception as exc:
+            lease_failed.append(str(exc))
+            _signal_scanner_cancel_file(str(RESULTS_DIR / f"{scan_id}_cancel"))
+            return
 
 
 def load_state(path: Path) -> dict[str, Any]:
@@ -215,50 +263,40 @@ async def execute_lease(state: dict[str, Any], lease: dict[str, Any]) -> None:
     lease_token = str(lease.get("lease_token") or "")
     heartbeat_interval = max(5, int(lease.get("heartbeat_interval_seconds") or 30))
     lease_failed: list[str] = []
-    done = asyncio.Event()
+    done = threading.Event()
     live: dict[str, Any] = {"phase": "broker_execution", "progress": 5, "log_lines": []}
+    live_lock = threading.Lock()
 
     def progress_callback(event: dict[str, Any]) -> None:
-        if event.get("phase") is not None:
-            live["phase"] = str(event["phase"])
-        if event.get("progress") is not None:
-            live["progress"] = int(event["progress"])
-        line = str(event.get("line") or "")
-        if line:
-            lines = live.setdefault("log_lines", [])
-            lines.append(line[:2000])
-            del lines[:-20]
+        with live_lock:
+            if event.get("phase") is not None:
+                live["phase"] = str(event["phase"])
+            if event.get("progress") is not None:
+                live["progress"] = int(event["progress"])
+            line = str(event.get("line") or "")
+            if line:
+                lines = live.setdefault("log_lines", [])
+                lines.append(line[:2000])
+                del lines[:-20]
 
-    async def heartbeat() -> None:
-        while not done.is_set():
-            try:
-                await asyncio.wait_for(done.wait(), timeout=heartbeat_interval)
-                return
-            except asyncio.TimeoutError:
-                pass
-            try:
-                log_lines = list(live.get("log_lines") or [])
-                live["log_lines"] = []
-                response = await asyncio.to_thread(
-                    api_request,
-                    state,
-                    "POST",
-                    f"/fleet/broker/nodes/{node_id}/leases/{lease_id}/heartbeat",
-                    {
-                        "lease_token": lease_token,
-                        "phase": live.get("phase"),
-                        "progress": live.get("progress"),
-                        "log_lines": log_lines,
-                    },
-                )
-                if response and response.get("cancel_requested"):
-                    _signal_scanner_cancel_file(str(RESULTS_DIR / f"{scan_id}_cancel"))
-            except Exception as exc:
-                lease_failed.append(str(exc))
-                _signal_scanner_cancel_file(str(RESULTS_DIR / f"{scan_id}_cancel"))
-                return
-
-    heartbeat_task = asyncio.create_task(heartbeat())
+    heartbeat_thread = threading.Thread(
+        target=_heartbeat_lease_until_done,
+        kwargs={
+            "state": state,
+            "node_id": node_id,
+            "lease_id": lease_id,
+            "lease_token": lease_token,
+            "scan_id": scan_id,
+            "heartbeat_interval": heartbeat_interval,
+            "done": done,
+            "live": live,
+            "live_lock": live_lock,
+            "lease_failed": lease_failed,
+        },
+        name=f"broker-heartbeat-{scan_id[:8]}",
+        daemon=True,
+    )
+    heartbeat_thread.start()
     busy_marker = _fleet_busy_marker(job)
     try:
         try:
@@ -340,7 +378,7 @@ async def execute_lease(state: dict[str, Any], lease: dict[str, Any]) -> None:
         )
     finally:
         done.set()
-        await asyncio.gather(heartbeat_task, return_exceptions=True)
+        heartbeat_thread.join(timeout=heartbeat_interval + 45)
         _clear_fleet_busy_marker(busy_marker)
 
 
