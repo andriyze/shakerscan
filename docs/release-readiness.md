@@ -1,13 +1,38 @@
 # ShakerScan 0.8.4 Release Readiness
 
 **Status (2026-08-09):** published from frozen commit
-`fe7966ca21038f02c820c0b72f267d4e6a1d459f`; post-publish clean-install acceptance is in progress.
+`fe7966ca21038f02c820c0b72f267d4e6a1d459f`; the hosted stable channel and clean-install acceptance
+completed on two Linux VPS hosts. That acceptance found two fail-closed coverage defects in the
+published scanner image: ModelScan lacks its HDF5 dependency, and enforced Fleet request budgets
+mislabel Nuclei as unavailable. Both are fixed and regression-gated after the frozen tag, so they
+require a patch release rather than a mutation of `v0.8.4`.
 Parallel DAST acceptance passed on
 implementation commit `b86177f0`; the candidate source tree passed an exact-source rebuild/restart,
 3,106 backend tests, 89 UI tests, the production UI build, all 14 named safety gates, locked
 production dependency audits, generated-inventory validation, installer smoke, and browser QA.
 The frozen release workflow passed, and the four published multi-architecture manifests were
 independently verified before the stable installer channel advanced to 0.8.4.
+
+### Post-publish acceptance evidence
+
+- The literal hosted installer command populated empty ShakerScan homes on control-plane and worker
+  VPS hosts, selected `0.8.4`, pulled only the published images, and reached healthy API, UI,
+  PostgreSQL, Redis, and current-worker state.
+- Broker Fleet enrollment over managed HTTPS joined one remote node without distributing datastore
+  credentials. Scaling reached three current remote workers; exact remote placement exercised three
+  concurrent shard workers; removing one worker container caused bounded agent reconciliation back
+  to desired capacity. This is control-plane-plus-one-node evidence, not the separate two-remote-node
+  matrix required by **FLEET-01**.
+- Automatic Model Intake completely acquired the pinned public
+  `hf-internal-testing/tiny-random-bert` revision, persisted centralized artifacts and findings, and
+  produced JSON, HTML, and SARIF reports. Runtime qualification correctly remained `INCOMPLETE` on
+  a host without hardware virtualization. The static report exposed ModelScan's missing `h5py`
+  extra on the repository's TensorFlow HDF5 artifact instead of falsely passing it.
+- A bounded Smart coverage scan of the authorized Honey target ran its backbone and two endpoint
+  shards concurrently on three distinct broker workers and merged their results centrally. Its
+  deliberate two-minute budget produced an honest partial outcome. The run also exposed the Nuclei
+  availability-message defect; actual unmetered Nuclei traffic remained blocked by the enforced
+  request budget.
 
 This is the single live release checklist. Code, migrations, generated inventories, runtime
 receipts, and fresh test output are authoritative. Earlier branch results are useful for finding

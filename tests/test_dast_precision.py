@@ -56,6 +56,23 @@ def test_nuclei_wave_counts_attempted_tags_when_stats_are_absent(monkeypatch):
     assert result["templates_executed"] == 3
 
 
+def test_nuclei_wave_reports_enforced_budget_block_without_fake_coverage(monkeypatch):
+    async def fake_run(cmd, timeout=60):
+        return "", "unmetered network tool is disabled by the request budget", 75
+
+    monkeypatch.setattr(nuclei_module, "run", fake_run)
+    monkeypatch.setattr(nuclei_module.os.path, "isdir", lambda path: True)
+
+    result = asyncio.run(
+        nuclei_module._run_nuclei_wave("https://example.com", ["cve", "rce"], timeout=1)
+    )
+
+    assert result["scan_completed"] is False
+    assert result["blocked_by_request_budget"] is True
+    assert result["templates_executed"] == 0
+    assert "enforced request budget" in result["error"]
+
+
 def _healthy_grade_report(findings):
     return {
         "tls": {

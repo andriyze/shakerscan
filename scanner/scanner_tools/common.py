@@ -276,7 +276,17 @@ async def run(
                 continue
             bounded_cmd.append(value)
         cmd = bounded_cmd
-    if tool_basename in unmetered_network_tools:
+    # Version/help probes are local process checks, not target traffic. Treating
+    # ``nuclei -version`` as an unmetered network invocation made every
+    # enforced Fleet scan claim that Nuclei was not installed before the real
+    # scan command was even considered. Keep the exception deliberately
+    # narrow: only a two-argument, known local probe bypasses the network-tool
+    # guard; the actual scanner invocation still fails closed in enforce mode.
+    local_tool_probe = (
+        len(cmd) == 2
+        and cmd[1] in {"-version", "--version", "version", "-h", "--help"}
+    )
+    if tool_basename in unmetered_network_tools and not local_tool_probe:
         try:
             meter.record_unmetered_tool(tool=tool_basename, target_url=request_url)
         except RequestBudgetExceeded:

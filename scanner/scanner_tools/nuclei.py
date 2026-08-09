@@ -591,6 +591,13 @@ async def nuclei_scan(
                 except json.JSONDecodeError:
                     continue
         results["templates_used"] = template_count
+    elif rc == 75 and "request budget" in err.lower():
+        results["error"] = "Nuclei blocked by the enforced request budget"
+        results["blocked_by_request_budget"] = True
+    else:
+        results["error"] = f"Nuclei scan failed with return code {rc}"
+        if err:
+            results["error_detail"] = err[:500]
 
     # Sort by severity
     severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4, "unknown": 5}
@@ -787,7 +794,11 @@ async def nuclei_comprehensive_scan(
         if request_count > 0:
             results["statistics"]["requests_made"] = request_count
     elif rc != 0:
-        results["errors"].append(f"Nuclei scan failed with return code {rc}")
+        if rc == 75 and "request budget" in err.lower():
+            results["errors"].append("Nuclei blocked by the enforced request budget")
+            results["blocked_by_request_budget"] = True
+        else:
+            results["errors"].append(f"Nuclei scan failed with return code {rc}")
         if err:
             results["errors"].append(f"Error output: {err[:500]}")
 
@@ -1108,6 +1119,13 @@ async def smart_nuclei_scan(
 
         results["templates_used"] = template_count
         print(f"[nuclei] Scan complete: {template_count} findings in {scan_duration}s", file=sys.stderr)
+    elif rc == 75 and "request budget" in err.lower():
+        results["error"] = "Nuclei blocked by the enforced request budget"
+        results["blocked_by_request_budget"] = True
+    else:
+        results["error"] = f"Nuclei scan failed with return code {rc}"
+        if err:
+            results["error_detail"] = err[:500]
 
     # Sort by severity
     severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4, "unknown": 5}
@@ -1262,7 +1280,15 @@ async def _run_nuclei_wave(
             if result["templates_executed"] == 0 and matched_templates:
                 result["templates_executed"] = len(matched_templates)
 
-    if tags and result["templates_executed"] == 0:
+    elif rc == 75 and "request budget" in err.lower():
+        result["error"] = "Nuclei blocked by the enforced request budget"
+        result["blocked_by_request_budget"] = True
+    else:
+        result["error"] = f"Nuclei wave failed with return code {rc}"
+        if err:
+            result["error_detail"] = err[:500]
+
+    if tags and result["templates_executed"] == 0 and not result.get("blocked_by_request_budget"):
         # Nuclei stats may be absent on wave timeout or no-finding runs. Record a
         # best-effort count so coverage does not say Nuclei never executed after
         # a timed wave, but flag it as estimated: templates_loaded can exceed
@@ -1517,6 +1543,12 @@ async def staged_nuclei_scan(
         auth_session=auth_session,
         max_targets=max_targets,
     )
+
+    if wave1.get("blocked_by_request_budget"):
+        results["error"] = wave1.get("error")
+        results["blocked_by_request_budget"] = True
+        results["total_duration_seconds"] = round(time.time() - total_start, 2)
+        return results
 
     all_findings.extend(wave1["findings"])
     signals = _update_signals(signals, wave1["findings"])

@@ -1,1 +1,1 @@
-modelscan==0.8.8
+modelscan[h5py]==0.8.8

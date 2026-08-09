@@ -97,6 +97,29 @@ def test_unmetered_network_tool_fails_closed_only_in_enforce_mode():
     assert meter.snapshot()["rejected_requests"] == 1
 
 
+def test_local_network_tool_version_probe_does_not_consume_or_reject_budget(monkeypatch):
+    meter = configure_request_meter(
+        limit=10, target_host="app.test", mode="enforce", planned=10, reserved=10
+    )
+
+    class FakeProcess:
+        returncode = 0
+
+        async def communicate(self, input=None):
+            return b"nuclei v3", b""
+
+    async def fake_exec(*cmd, **kwargs):
+        assert cmd == ("nuclei", "-version")
+        return FakeProcess()
+
+    monkeypatch.setattr(common.asyncio, "create_subprocess_exec", fake_exec)
+    out, error, rc = asyncio.run(common.run(["nuclei", "-version"]))
+
+    assert (out, error, rc) == ("nuclei v3", "", 0)
+    assert meter.snapshot()["rejected_requests"] == 0
+    assert meter.snapshot()["unmetered_tool_invocations"] == 0
+
+
 def test_enforcing_curl_disables_hidden_redirect_requests(monkeypatch):
     captured = {}
     configure_request_meter(

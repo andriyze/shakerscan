@@ -6,6 +6,8 @@ import argparse
 import dataclasses
 import hashlib
 import json
+import shutil
+import subprocess
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -38,6 +40,30 @@ def run_self_test() -> dict[str, object]:
         root = Path(raw)
         unsafe_pickle = root / "unsafe.pkl"
         unsafe_pickle.write_bytes(b"\x80\x04cposix\nsystem\nq\x00.")
+        # ModelScan advertises HDF5 coverage only when its h5py extra is
+        # packaged. Keep a functional build-time proof so a bare ModelScan
+        # install cannot silently turn common TensorFlow repositories into
+        # incomplete scans again.
+        safe_h5 = root / "safe.h5"
+        modelscan_executable = shutil.which(specs["modelscan"].executable)
+        if not modelscan_executable:
+            raise RuntimeError("ModelScan executable is unavailable for its HDF5 self-test")
+        modelscan_python = Path(modelscan_executable).resolve().with_name("python")
+        subprocess.run(
+            [
+                str(modelscan_python),
+                "-c",
+                (
+                    "import h5py,sys; "
+                    "f=h5py.File(sys.argv[1], 'w'); "
+                    "f.attrs['model_config']='{\"class_name\":\"Sequential\","
+                    "\"config\":{\"layers\":[]}}'; f.close()"
+                ),
+                str(safe_h5),
+            ],
+            check=True,
+            timeout=15,
+        )
         unsafe_source = root / "unsafe.py"
         unsafe_source.write_text('import os\nos.system("id")\n', encoding="utf-8")
         safe_source = root / "safe.py"
@@ -98,6 +124,16 @@ def run_self_test() -> dict[str, object]:
                         "passed": variant_actual == variant_expected,
                         "evidence_sha256": variant_result.get("evidence_sha256"),
                     })
+            if name == "modelscan":
+                h5_result = run_external_scanner(spec, safe_h5, subject)
+                h5_actual = str(h5_result.get("execution", {}).get("status") or "CRASHED")
+                variants.append({
+                    "name": "safe_hdf5",
+                    "expected_status": "PASS",
+                    "actual_status": h5_actual,
+                    "passed": h5_actual == "PASS",
+                    "evidence_sha256": h5_result.get("evidence_sha256"),
+                })
             passed = actual == expected
             if expected == "COMPLETE":
                 passed = actual in {"PASS", "WARNING", "FAIL"}
@@ -118,7 +154,12 @@ def run_self_test() -> dict[str, object]:
     receipt: dict[str, object] = {
         "schema_version": "model-intake-adapter-self-test/v1",
         "tested_at": datetime.now(timezone.utc).isoformat(),
-        "fixture_sha256": _sha256_json({"revision": 2, "expected": EXPECTED_STATUSES, "semgrep_variants": ["safe", "review"]}),
+        "fixture_sha256": _sha256_json({
+            "revision": 3,
+            "expected": EXPECTED_STATUSES,
+            "modelscan_variants": ["safe_hdf5"],
+            "semgrep_variants": ["safe", "review"],
+        }),
         "status": "PASS" if all(bool(item["passed"]) for item in checks) else "FAIL",
         "checks": checks,
     }
