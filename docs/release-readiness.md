@@ -1,6 +1,6 @@
-# ShakerScan 0.8.0 Release Readiness
+# ShakerScan 0.8.3 Release Readiness
 
-**Status (2026-08-08):** candidate preparation is active on `pre8`. The release is not ready until
+**Status (2026-08-08):** candidate preparation is active on `main`. The release is not ready until
 every applicable gate below passes on one frozen commit, that exact commit is merged to `main`, and
 the published multi-architecture images are verified.
 
@@ -10,7 +10,7 @@ regressions but do not satisfy a frozen-candidate gate.
 
 ## Supported product boundary
 
-ShakerScan 0.8.0 is a trusted-operator, self-hosted security scanner.
+ShakerScan 0.8.3 is a trusted-operator, self-hosted security scanner.
 
 - Localhost is the default. Remote UI/API access must remain behind Tailscale, a VPN, a firewall, or
   an operator-managed authenticated reverse proxy. Direct public exposure is unsupported.
@@ -26,7 +26,7 @@ ShakerScan 0.8.0 is a trusted-operator, self-hosted security scanner.
   required tools, or missing runtime qualification fail closed. Technical review does not replace
   publisher trust, privacy, legal, business, or deployed-data-plane approval.
 - Fleet production support is the outbound-only HTTPS `broker` transport. Built-in WireGuard remains
-  preview code outside the 0.8.0 support boundary until it passes a separate physical acceptance
+  preview code outside the 0.8.3 support boundary until it passes a separate physical acceptance
   matrix.
 - AI Gate remains preview in this release.
 
@@ -54,7 +54,7 @@ production dependency findings.
 
 ## Frozen-candidate validation
 
-Run every item against the exact commit intended for `v0.8.0`.
+Run every item against the exact commit intended for `v0.8.3`.
 
 ### Code, dependencies, and builds
 
@@ -120,9 +120,9 @@ Run every item against the exact commit intended for `v0.8.0`.
 
 After all frozen-candidate gates are green:
 
-1. Confirm `VERSION`, `docs/releases/0.8.0.md`, and the pending `RELEASES.md` row agree.
+1. Confirm `VERSION`, `docs/releases/0.8.3.md`, and the pending `RELEASES.md` row agree.
 2. Merge the exact candidate to `main` without adding an untested merge-only change.
-3. Wait for required `main` checks, then create annotated tag `v0.8.0` on that exact commit.
+3. Wait for required `main` checks, then create annotated tag `v0.8.3` on that exact commit.
 4. Push the tag and require the Release workflow to build/publish scanner, API, UI, and signer for
    `linux/amd64` and `linux/arm64`.
 5. Verify manifest architectures, OCI labels, source revision, image digests, API Docker CLI,
@@ -134,7 +134,7 @@ After all frozen-candidate gates are green:
 
 - [ ] Deploy and verify the hosted installer separately; repository/image publication does not
       update `install.shakerscan.com`.
-- [ ] Clean-install `0.8.0` into an empty home and verify doctor, status, UI/API, MCP, agent launch,
+- [ ] Clean-install `0.8.3` into an empty home and verify doctor, status, UI/API, MCP, agent launch,
       skills, one Quick scan, and Model Intake readiness.
 - [ ] Upgrade a stateful installation and verify preserved targets, scans, findings, settings,
       evidence, and Fleet credentials.
