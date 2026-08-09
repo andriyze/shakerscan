@@ -90,6 +90,22 @@ def test_agent_launcher_has_non_mutating_help():
     assert "codex|claude|opencode" in result.stdout
 
 
+def test_wrapper_subcommand_help_is_non_mutating_and_informative():
+    for command, expected in (
+        ("mcp", "read-only Command Arsenal MCP"),
+        ("research", "existing episode"),
+        ("reset", "Usage: ./scanner.sh [command] [options]"),
+    ):
+        result = subprocess.run(
+            ["bash", str(SCANNER_SH), command, "--help"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+        assert expected in result.stdout
+
+
 def test_manual_agent_guidance_exports_remote_urls():
     functions = SCANNER_SH.read_text(encoding="utf-8").rsplit("# Parse arguments", 1)[0]
     command = functions + """

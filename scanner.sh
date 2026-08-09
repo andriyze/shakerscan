@@ -2867,18 +2867,42 @@ fi
 
 configure_runtime_mode "$COMMAND"
 
-# Dependency preflight for command execution
+# Help must never mutate state. Commands with their own parser keep their
+# detailed help; simple wrapper commands are handled here before dependency
+# checks or Docker operations.
 COMMAND_HELP_ONLY=0
-case "$COMMAND" in
-    scan|scan-full|scan-smart)
-        for arg in "${ARGS[@]}"; do
-            if [ "$arg" = "--help" ] || [ "$arg" = "-h" ]; then
-                COMMAND_HELP_ONLY=1
-                break
-            fi
-        done
-        ;;
-esac
+for arg in "${ARGS[@]}"; do
+    if [ "$arg" = "--help" ] || [ "$arg" = "-h" ]; then
+        COMMAND_HELP_ONLY=1
+        break
+    fi
+done
+
+if [ "$COMMAND_HELP_ONLY" -eq 1 ]; then
+    case "$COMMAND" in
+        scan|scan-full|scan-smart|agent|ai|fleet|join|model-intake-runner)
+            # Forward to the command's own help implementation below.
+            ;;
+        mcp)
+            echo "Usage: ./scanner.sh mcp"
+            echo "Starts the read-only Command Arsenal MCP stdio adapter."
+            exit 0
+            ;;
+        research)
+            echo "Usage: ./scanner.sh research <episode-id> [max-decisions]"
+            echo "Runs bounded compatibility research decisions for an existing episode."
+            exit 0
+            ;;
+        gungnir)
+            gungnir_cmd --help
+            exit 0
+            ;;
+        *)
+            print_help
+            exit 0
+            ;;
+    esac
+fi
 
 case $COMMAND in
     help|--help|-h|install-deps|doctor|env|agent|ai)
