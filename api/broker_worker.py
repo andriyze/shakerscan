@@ -268,6 +268,12 @@ async def execute_lease(state: dict[str, Any], lease: dict[str, Any]) -> None:
                 scan_id=scan_id,
                 job_id=job_id,
                 progress_callback=progress_callback,
+                # Broker workers have no PostgreSQL connection by design.
+                # scanner.py still writes the local checkpoint, and this
+                # runtime uploads it through the lease-scoped HTTPS endpoint
+                # below after execution. Do not ask the shared worker path to
+                # create a database-backed artifact manifest locally.
+                persist_checkpoint_artifacts=False,
             )
         except Exception as exc:
             result = {

@@ -2031,6 +2031,7 @@ async def run_scan(
     scan_id: str | None = None,
     job_id: str | None = None,
     progress_callback: Any = None,
+    persist_checkpoint_artifacts: bool = True,
 ) -> dict:
     """Execute scanner and return results."""
     if options.get("run_kind") in MODEL_INTAKE_RUN_KINDS:
@@ -2507,7 +2508,7 @@ async def run_scan(
 
     async def _upload_checkpoint_if_changed(*, force: bool = False) -> bool:
         nonlocal checkpoint_signature
-        if not checkpoint_file or not scan_id:
+        if not persist_checkpoint_artifacts or not checkpoint_file or not scan_id:
             return False
         try:
             stat = await asyncio.to_thread(checkpoint_file.stat)

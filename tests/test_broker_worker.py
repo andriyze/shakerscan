@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import os
 import sys
@@ -110,3 +111,10 @@ def test_broker_compose_has_no_redis_or_postgres_configuration():
     assert "DATABASE_URL" not in text
     assert "postgres:" not in text
     assert "redis:" not in text
+
+
+def test_broker_execution_uses_https_checkpoint_upload_not_local_database_manifest():
+    source = inspect.getsource(broker_worker.execute_lease)
+
+    assert "persist_checkpoint_artifacts=False" in source
+    assert 'artifact_type="checkpoint"' in source
