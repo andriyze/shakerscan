@@ -1,8 +1,9 @@
 # ShakerScan 0.8.3 Release Readiness
 
-**Status (2026-08-08):** candidate preparation is active on `main`. The release is not ready until
-every applicable gate below passes on one frozen commit, that exact commit is merged to `main`, and
-the published multi-architecture images are verified.
+**Status (2026-08-08):** published from frozen commit
+`22da7b9f8ff91f31f03fdf9087e977df05f27a1b`. The release workflow passed its exact-candidate gates,
+published verified `linux/amd64` and `linux/arm64` manifests, and created the GitHub release. The
+stable installer channel was advanced only after those manifests were verified.
 
 This is the single live release checklist. Code, migrations, generated inventories, runtime
 receipts, and fresh test output are authoritative. Earlier branch results are useful for finding
