@@ -611,7 +611,7 @@ Source-checkout fleets intentionally report image drift because their local work
 fleet's pinned production digest. To validate physical behavior without weakening that production
 signal, add `--allow-local-build`. The command then requires every selected node to run the same
 safe `shakerscan-fleet-local:*` image and labels the receipt `local-build-development`; that receipt
-is development evidence, not a production release gate. Without the flag, acceptance remains
+is development evidence, not production operational evidence. Without the flag, acceptance remains
 fail-closed on any image drift.
 
 The acceptance runner verifies node/image health, heartbeats, artifact storage, public data-store
@@ -622,9 +622,8 @@ gate enabled but uses a bounded parent request ceiling (100 requests per shard, 
 so a fresh run cannot exhaust the default hourly reservation merely by leasing its own shards.
 Prior activity against the same root domain can still defer the run, as intended.
 
-The release gate defaults to passive `standard`. A development smoke test may use
-`--scan-type quick`; the selected depth is recorded in the receipt and does not replace the default
-release-candidate run.
+Operational acceptance defaults to passive `standard`. A development smoke test may use
+`--scan-type quick`; the selected depth is recorded in the receipt.
 
 For a controlled failure-injection test, see `shakerscan fleet accept --help`; it can drain a chosen
 node and kill the exact worker executing a shard over non-interactive SSH.
