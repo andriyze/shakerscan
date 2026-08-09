@@ -1058,6 +1058,36 @@ def test_broker_init_uses_private_ca_for_public_health_checks(tmp_path, monkeypa
     assert env["COMPOSE_PROFILES"] == "artifacts"
 
 
+def test_wait_for_artifact_store_retries_transient_startup_failures(tmp_path, monkeypatch):
+    paths = fleet_cli.RuntimePaths(tmp_path)
+    attempts = iter(
+        [
+            fleet_cli.FleetCLIError("control plane returned HTTP 503: HTTPError"),
+            {"status": "error", "backend": "s3", "error": "HTTPError"},
+            {"status": "ok", "backend": "s3", "write_probe": True},
+        ]
+    )
+    calls = []
+
+    def fake_api(base, method, path, **kwargs):
+        calls.append((base, method, path, kwargs.get("timeout")))
+        result = next(attempts)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(fleet_cli, "api_json", fake_api)
+    monkeypatch.setattr(fleet_cli.time, "sleep", lambda _seconds: None)
+
+    fleet_cli._wait_for_artifact_store(paths, timeout=1)
+
+    assert calls == [
+        ("http://127.0.0.1:8080", "GET", "/artifacts/storage/health?probe=true", 15),
+        ("http://127.0.0.1:8080", "GET", "/artifacts/storage/health?probe=true", 15),
+        ("http://127.0.0.1:8080", "GET", "/artifacts/storage/health?probe=true", 15),
+    ]
+
+
 def test_fleet_artifact_environment_preserves_external_s3():
     updates, bundled = fleet_cli._fleet_artifact_environment(
         "10.77.0.1",

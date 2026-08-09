@@ -1334,6 +1334,40 @@ def _wait_for_healthy_api(public_url: str, ca_file: Path | None, timeout: float 
     raise FleetCLIError(f"public HTTPS did not become healthy within {int(timeout)}s: {last_error}")
 
 
+def _wait_for_artifact_store(paths: RuntimePaths, timeout: float = 120.0) -> None:
+    """Wait for the configured artifact plane to accept a real write probe.
+
+    The API can become healthy a moment before the bundled MinIO initializer
+    creates its bucket. Treat that bounded startup window like the public API
+    readiness window instead of rolling a valid fleet conversion back on the
+    first transient NoSuchBucket/HTTP 503 response. External S3 endpoints get
+    the same bounded retry and still fail closed when the deadline expires.
+    """
+    deadline = time.monotonic() + timeout
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            result = api_json(
+                local_api_url(paths),
+                "GET",
+                "/artifacts/storage/health?probe=true",
+                timeout=15,
+            )
+            if result.get("status") == "ok":
+                return
+            last_error = FleetCLIError(
+                "artifact store probe returned "
+                f"status={result.get('status')!r}, backend={result.get('backend')!r}, "
+                f"error={result.get('error')!r}"
+            )
+        except FleetCLIError as exc:
+            last_error = exc
+        time.sleep(2)
+    raise FleetCLIError(
+        f"artifact store did not become writable within {int(timeout)}s: {last_error}"
+    )
+
+
 def _verify_managed_gateway_isolation(public_url: str, ca_file: Path | None) -> None:
     _require_public_fleet_auth_boundary(public_url, ca_file)
     for path in ("/", "/targets", "/fleet/nodes", "/docs"):
@@ -1417,14 +1451,7 @@ def command_init(paths: RuntimePaths, args: argparse.Namespace) -> None:
                 _verify_managed_gateway_isolation(public_url, enrollment_ca)
             else:
                 _require_public_fleet_auth_boundary(public_url, enrollment_ca)
-            artifact_health = api_json(
-                local_api_url(paths),
-                "GET",
-                "/artifacts/storage/health?probe=true",
-                timeout=15,
-            )
-            if artifact_health.get("status") != "ok":
-                raise FleetCLIError("artifact store write probe did not pass")
+            _wait_for_artifact_store(paths)
         except Exception as exc:
             print("Fleet initialization failed; restoring the previous runtime configuration...", file=sys.stderr)
             stop_error: Exception | None = None
