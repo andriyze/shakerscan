@@ -1,14 +1,18 @@
-# ShakerScan 0.8.6 Release Readiness
+# ShakerScan 0.8.7 Release Readiness
 
 **Status (2026-08-09):** candidate fix implemented, not published. Literal clean 0.8.5 installs on
 the control and worker VPSs selected only the published images and reached healthy standalone and
 broker-Fleet state. Exact-node Smart coverage acceptance then exposed a broker allocator defect: the
 first child reserved the entire default per-domain request allowance and left its siblings at
-`waiting_for_request_budget` for the reservation TTL. The 0.8.6 candidate fairly divides only the
+`waiting_for_request_budget` for the reservation TTL. The candidate fairly divides only the
 still-unreserved domain headroom among pending siblings while preserving the same atomic cap and
-fail-closed behavior. The complete backend suite passes 3,109 tests after the fix. The stable
-installer remains pinned to immutable 0.8.5 until the exact 0.8.6 candidate passes frozen gates,
-native multi-architecture publication, and repeated clean acceptance.
+fail-closed behavior. Tagged candidate `v0.8.6` correctly stopped before publication when the schema
+smoke caught a PostgreSQL startup race: `pg_isready` observed the image's temporary initialization
+server immediately before its intentional shutdown. The 0.8.7 candidate additionally waits for the
+final `postgres` PID 1 before migration work. The complete backend suite passes 3,110 tests, and the
+clean/dirty upgrade smoke passes from the historical 0.5.7 schema. The stable installer remains
+pinned to immutable 0.8.5 until the exact 0.8.7 candidate passes frozen gates, native multi-
+architecture publication, and repeated clean acceptance.
 
 ### 0.8.5 post-publish evidence motivating this patch
 
@@ -51,7 +55,7 @@ regressions but do not satisfy a frozen-candidate gate.
 
 ## Supported product boundary
 
-ShakerScan 0.8.6 is a trusted-operator, self-hosted security scanner.
+ShakerScan 0.8.7 is a trusted-operator, self-hosted security scanner.
 
 - Localhost is the default. Remote UI/API access must remain behind Tailscale, a VPN, a firewall, or
   an operator-managed authenticated reverse proxy. Direct public exposure is unsupported.
@@ -67,7 +71,7 @@ ShakerScan 0.8.6 is a trusted-operator, self-hosted security scanner.
   required tools, or missing runtime qualification fail closed. Technical review does not replace
   publisher trust, privacy, legal, business, or deployed-data-plane approval.
 - Fleet production support is the outbound-only HTTPS `broker` transport. Built-in WireGuard remains
-  preview code outside the 0.8.6 support boundary until it passes a separate physical acceptance
+  preview code outside the 0.8.7 support boundary until it passes a separate physical acceptance
   matrix.
 - AI Gate remains preview in this release.
 
@@ -95,7 +99,7 @@ production dependency findings.
 
 ## Frozen-candidate validation
 
-Run every item against the exact commit intended for `v0.8.6`.
+Run every item against the exact commit intended for `v0.8.7`.
 
 ### Code, dependencies, and builds
 
@@ -161,9 +165,9 @@ Run every item against the exact commit intended for `v0.8.6`.
 
 After all frozen-candidate gates are green:
 
-1. Confirm `VERSION`, `docs/releases/0.8.6.md`, and the pending `RELEASES.md` row agree.
+1. Confirm `VERSION`, `docs/releases/0.8.7.md`, and the pending `RELEASES.md` row agree.
 2. Merge the exact candidate to `main` without adding an untested merge-only change.
-3. Wait for required `main` checks, then create annotated tag `v0.8.6` on that exact commit.
+3. Wait for required `main` checks, then create annotated tag `v0.8.7` on that exact commit.
 4. Push the tag and require the Release workflow to build/publish scanner, API, UI, and signer for
    `linux/amd64` and `linux/arm64`.
 5. Verify manifest architectures, OCI labels, source revision, image digests, API Docker CLI,
@@ -175,7 +179,7 @@ After all frozen-candidate gates are green:
 
 - [ ] Deploy and verify the hosted installer separately; repository/image publication does not
       update `install.shakerscan.com`.
-- [ ] Clean-install `0.8.6` into an empty home and verify doctor, status, UI/API, MCP, agent launch,
+- [ ] Clean-install `0.8.7` into an empty home and verify doctor, status, UI/API, MCP, agent launch,
       skills, one Quick scan, and Model Intake readiness.
 - [ ] Upgrade a stateful installation and verify preserved targets, scans, findings, settings,
       evidence, and Fleet credentials.
