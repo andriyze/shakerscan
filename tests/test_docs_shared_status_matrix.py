@@ -3,6 +3,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+CURRENT_VERSION = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
 EXECUTION_DOC = ROOT / "docs" / "dast-asm-architecture.md"
 FLEET_DOC = ROOT / "docs" / "multi-node-architecture.md"
 DEEP_HUNT_DOC = ROOT / "docs" / "deep-hunt-architecture.md"
@@ -39,9 +40,9 @@ def test_multi_node_doc_is_build_spec_and_honest_about_fleet_status():
     text = _flat(FLEET_DOC)
     # The implementation is complete, while a Fleet-affecting patch correctly renews its physical
     # release receipt. Do not regress to calling shipped layers drafts or WireGuard supported.
-    assert "implementation complete; 0.8.15 broker physical-acceptance renewal pending" in text
+    assert f"implementation complete; {CURRENT_VERSION} broker physical-acceptance renewal pending" in text
     assert "WireGuard remains preview code" in text
-    assert "outside the 0.8.15 supported deployment boundary" in text
+    assert f"outside the {CURRENT_VERSION} supported deployment boundary" in text
     assert "Phase 1 implemented vertical-slice contract" in text
     assert "bounded enrollment" in text
     assert "single-use remains the default" in text
