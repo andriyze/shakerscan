@@ -1940,6 +1940,15 @@ class _FakePlanConn:
             self.inserted_children.append(args)
         return "UPDATE 1"
 
+    def transaction(self):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
 
 class _FakePlanPool:
     def __init__(self, conn):
@@ -1953,6 +1962,149 @@ class _FakePlanPool:
 
     async def __aexit__(self, exc_type, exc, tb):
         return False
+
+
+def test_scan_plan_queues_placed_discovery_without_running_target_traffic_locally(monkeypatch):
+    parent_id = "51515151-5151-5151-5151-515151515151"
+    target_id = uuid.UUID("31313131-3131-3131-3131-313131313131")
+    conn = _FakePlanConn(parent_id, target_id, uuid.uuid4())
+    redis = _FakeJobRedis()
+
+    async def forbidden_run(*args, **kwargs):
+        raise AssertionError("the control-plane planner must not scan the target")
+
+    monkeypatch.setattr(worker, "db_pool", _FakePlanPool(conn))
+    monkeypatch.setattr(worker, "get_redis", lambda: redis)
+    monkeypatch.setattr(worker, "run_scan", forbidden_run)
+
+    asyncio.run(worker.process_scan_plan_job({
+        "job_id": "parent-discovery-job",
+        "scan_id": parent_id,
+        "target": "https://example.test",
+        "parallel_worker_count": 3,
+        "options": {
+            "scan_type": "smart",
+            "parallel": True,
+            "shard_strategy": "coverage",
+            "placement": {"node_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"},
+        },
+    }))
+
+    jobs = [json.loads(payload) for _, payload in redis.pushed]
+    assert len(jobs) == 1
+    discovery = jobs[0]
+    assert discovery["type"] == worker.parallel_scan.SHARD_JOB_TYPE
+    assert discovery["parallel_discovery"] is True
+    assert discovery["options"]["placement"] == {
+        "node_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    }
+    budget = discovery["options"]["custom_budget"]
+    assert budget["active_max_seconds"] == 0
+    assert budget["phase4_max_seconds"] == 0
+    assert budget["browser_max_pages"] == 0
+    assert any(
+        args[-1] == worker.parallel_scan.PARALLEL_DISCOVERY_ROLE
+        for query, args in conn.executions if "INSERT INTO scans" in query
+    )
+
+
+def test_scan_plan_continuation_fans_out_from_durable_discovery_result(monkeypatch):
+    parent_id = "52525252-5252-5252-5252-525252525252"
+    discovery_id = "62626262-6262-4262-8262-626262626262"
+    target_id = uuid.UUID("32323232-3232-4232-8232-323232323232")
+
+    class DiscoveryPlanConn(_FakePlanConn):
+        async def fetchrow(self, query, *args):
+            if "SELECT id, status, result, error_message" in query:
+                return {
+                    "id": uuid.UUID(discovery_id),
+                    "status": "completed",
+                    "result": {
+                        "active_checks": {"active_worklist": [
+                            "GET /api/a?id=1", "GET /api/b?id=1",
+                            "GET /api/c?id=1", "GET /api/d?id=1",
+                        ]}
+                    },
+                    "error_message": None,
+                }
+            return await super().fetchrow(query, *args)
+
+    conn = DiscoveryPlanConn(parent_id, target_id, uuid.uuid4())
+    redis = _FakeJobRedis()
+    monkeypatch.setattr(worker, "db_pool", _FakePlanPool(conn))
+    monkeypatch.setattr(worker, "get_redis", lambda: redis)
+
+    asyncio.run(worker.process_scan_plan_job({
+        "job_id": "parent-continuation-job",
+        "scan_id": parent_id,
+        "target": "https://example.test",
+        "plan_stage": "fanout",
+        "discovery_scan_id": discovery_id,
+        "options": {
+            "scan_type": "smart",
+            "parallel": True,
+            "shard_strategy": "coverage",
+            "coverage_per_shard_cap": 2,
+        },
+    }))
+
+    jobs = [json.loads(payload) for _, payload in redis.pushed]
+    assert len(jobs) == 3
+    assert jobs[0]["shard_label"] == "global-backbone"
+    assigned = [
+        endpoint
+        for job in jobs[1:]
+        for endpoint in job["options"]["custom_endpoints"]
+    ]
+    assert sorted(assigned) == sorted([
+        "GET /api/a?id=1", "GET /api/b?id=1",
+        "GET /api/c?id=1", "GET /api/d?id=1",
+    ])
+
+
+def test_scan_plan_failed_discovery_fails_parent_without_empty_fanout(monkeypatch):
+    parent_id = "53535353-5353-4353-8353-535353535353"
+    discovery_id = "63636363-6363-4363-8363-636363636363"
+    target_id = uuid.UUID("33333333-3333-4333-8333-333333333333")
+
+    class FailedDiscoveryPlanConn(_FakePlanConn):
+        async def fetchrow(self, query, *args):
+            if "SELECT id, status, result, error_message" in query:
+                return {
+                    "id": uuid.UUID(discovery_id),
+                    "status": "failed",
+                    "result": {"error": "Exceeded bounded discovery duration"},
+                    "error_message": "Exceeded bounded discovery duration",
+                }
+            return await super().fetchrow(query, *args)
+
+    conn = FailedDiscoveryPlanConn(parent_id, target_id, uuid.uuid4())
+    redis = _FakeJobRedis()
+    monkeypatch.setattr(worker, "db_pool", _FakePlanPool(conn))
+    monkeypatch.setattr(worker, "get_redis", lambda: redis)
+
+    asyncio.run(worker.process_scan_plan_job({
+        "job_id": "parent-failed-discovery-job",
+        "scan_id": parent_id,
+        "target": "https://example.test",
+        "plan_stage": "fanout",
+        "discovery_scan_id": discovery_id,
+        "options": {
+            "scan_type": "smart",
+            "parallel": True,
+            "shard_strategy": "coverage",
+        },
+    }))
+
+    assert redis.pushed == []
+    failure_updates = [
+        args for query, args in conn.executions
+        if "current_phase='parallel_discovery_failed'" in query
+    ]
+    assert len(failure_updates) == 1
+    assert "Exceeded bounded discovery duration" in failure_updates[0][1]
+    assert redis.hashes[-1][2]["status"] == "failed"
+    assert redis.hashes[-1][2]["current_phase"] == "parallel_discovery_failed"
 
 
 def test_parallel_shard_slots_enforce_parent_concurrency(monkeypatch):
@@ -2573,6 +2725,7 @@ def test_run_scan_maps_skip_global_checks_flag(monkeypatch):
             "skip_global_checks": True,
             "focused_endpoints_only": True,
             "zero_rediscovery": True,
+            "parallel_discovery": True,
         },
     ))
 
@@ -2580,6 +2733,7 @@ def test_run_scan_maps_skip_global_checks_flag(monkeypatch):
     assert "--skip-global-checks" in captured["cmd"]
     assert "--focused-endpoints-only" in captured["cmd"]
     assert "--zero-rediscovery" in captured["cmd"]
+    assert "--discovery-manifest-only" in captured["cmd"]
 
 
 def test_run_scan_maps_active_worklist_budget_flag(monkeypatch):
@@ -2901,7 +3055,7 @@ def test_scan_merge_all_failed_shards_sets_parent_error_message(monkeypatch):
     assert redis.deleted == [worker.parallel_scan.shards_remaining_key(parent_id)]
 
 
-def test_scan_plan_dynamic_coverage_enqueues_campaign_batch_children(monkeypatch):
+def test_scan_plan_dynamic_request_uses_self_contained_broker_shards(monkeypatch):
     parent_id = "55555555-5555-5555-5555-555555555555"
     target_id = uuid.UUID("33333333-3333-3333-3333-333333333333")
     campaign_id = uuid.UUID("44444444-4444-4444-4444-444444444444")
@@ -2938,39 +3092,51 @@ def test_scan_plan_dynamic_coverage_enqueues_campaign_batch_children(monkeypatch
                     "shard_strategy": "coverage",
                     "coverage_allocation": "dynamic",
                     "coverage_dynamic_batch_size": 2,
+                    "coverage_per_shard_cap": 2,
+                    "custom_endpoints": [
+                        "GET /api/a?id=1", "GET /api/b?id=1",
+                        "GET /api/c?id=1", "GET /api/d?id=1",
+                    ],
                 },
             }
         )
     )
 
     child_jobs = [json.loads(payload) for _, payload in redis.pushed]
-    assert len(child_jobs) == 2
-    assert {job["type"] for job in child_jobs} == {worker.asm_inventory.EXPLOIT_BATCH_JOB_TYPE}
-    for job in child_jobs:
+    assert len(child_jobs) == 3
+    assert {job["type"] for job in child_jobs} == {worker.parallel_scan.SHARD_JOB_TYPE}
+    assert child_jobs[0]["shard_label"] == "global-backbone"
+    assert child_jobs[0]["options"]["parallel_backbone"] is True
+    for job in child_jobs[1:]:
         assert job["parent_scan_id"] == parent_id
-        assert job["campaign_id"] == str(campaign_id)
+        assert job["campaign_id"] is None
         assert job["target_id"] == str(target_id)
-        assert job["batch_size"] == 2
-        assert job["stale_days"] == 0
-        assert job["campaign_only"] is True
-        assert job["finish_campaign_on_complete"] is False
-        assert job["options"]["coverage_dynamic_worker"] is True
         assert job["options"]["zero_rediscovery"] is True
         assert job["options"]["custom_budget"]["phase4_max_seconds"] == 0
-        assert "custom_endpoints" not in job["options"]
+        assert len(job["options"]["custom_endpoints"]) == 2
     assert redis.sets[0][0] == worker.parallel_scan.shards_remaining_key(parent_id)
-    assert redis.sets[0][1] == 2
+    assert redis.sets[0][1] == 3
     parent_update = [
         args for query, args in conn.executions
-        if "UPDATE scans SET status = 'running'" in query and "shard_count" in query
+        if "UPDATE scans SET status='running'" in query and "shard_count" in query
     ][0]
     parent_options = json.loads(parent_update[3])
     assert parent_options["parallel_strategy"] == "coverage"
-    assert parent_options["coverage_allocation"] == "dynamic"
-    assert parent_options["campaign_id"] == str(campaign_id)
+    assert parent_options["coverage_allocation"] == "static"
+    assert parent_options[worker.parallel_scan.PARALLEL_EXPECTED_SHARDS_KEY] == 3
+    request_budgets = [
+        int((job["options"].get("resolved_budget") or worker.resolve_scan_budget(
+            job["options"].get("scan_type") or "smart",
+            job["options"].get("budget_profile"),
+            job["options"].get("custom_budget"),
+        ))["request_max"])
+        for job in child_jobs
+    ]
+    assert parent_options["parallel_planned_request_budget"] == sum(request_budgets)
+    assert parent_options["parallel_backbone_request_budget"] == request_budgets[0]
 
 
-def test_scan_plan_coverage_defaults_to_dynamic_allocation(monkeypatch):
+def test_scan_plan_coverage_defaults_to_self_contained_allocation(monkeypatch):
     parent_id = "56565656-5656-5656-5656-565656565656"
     target_id = uuid.UUID("34343434-3434-3434-3434-343434343434")
     campaign_id = uuid.UUID("45454545-4545-4545-4545-454545454545")
@@ -3008,22 +3174,26 @@ def test_scan_plan_coverage_defaults_to_dynamic_allocation(monkeypatch):
                     "parallel": True,
                     "shard_strategy": "coverage",
                     "coverage_dynamic_batch_size": 2,
+                    "coverage_per_shard_cap": 2,
+                    "custom_endpoints": [
+                        "GET /api/a?id=1", "GET /api/b?id=1",
+                        "GET /api/c?id=1", "GET /api/d?id=1",
+                    ],
                 },
             }
         )
     )
 
     child_jobs = [json.loads(payload) for _, payload in redis.pushed]
-    assert len(child_jobs) == 2
-    assert {job["type"] for job in child_jobs} == {worker.asm_inventory.EXPLOIT_BATCH_JOB_TYPE}
-    assert all(job["options"]["coverage_dynamic_worker"] is True for job in child_jobs)
+    assert len(child_jobs) == 3
+    assert {job["type"] for job in child_jobs} == {worker.parallel_scan.SHARD_JOB_TYPE}
+    assert child_jobs[0]["options"]["parallel_backbone"] is True
     parent_update = [
         args for query, args in conn.executions
-        if "UPDATE scans SET status = 'running'" in query and "shard_count" in query
+        if "UPDATE scans SET status='running'" in query and "shard_count" in query
     ][0]
     parent_options = json.loads(parent_update[3])
-    assert parent_options["coverage_allocation"] == "dynamic"
-    assert parent_options["campaign_id"] == str(campaign_id)
+    assert parent_options["coverage_allocation"] == "static"
 
 
 def test_scan_plan_coverage_family_uses_static_family_shards(monkeypatch):
@@ -3064,16 +3234,21 @@ def test_scan_plan_coverage_family_uses_static_family_shards(monkeypatch):
                     "coverage_allocation": "static",
                     "coverage_max_shards": 6,
                     "coverage_per_shard_cap": 2,
+                    "custom_endpoints": [
+                        "GET /api/a?id=1", "GET /api/b?id=1",
+                        "GET /api/c?id=1", "GET /api/d?id=1",
+                    ],
                 },
             }
         )
     )
 
     child_jobs = [json.loads(payload) for _, payload in redis.pushed]
-    assert len(child_jobs) == 6
+    assert len(child_jobs) == 7
     assert {job["type"] for job in child_jobs} == {worker.parallel_scan.SHARD_JOB_TYPE}
     assert {job["campaign_id"] for job in child_jobs} == {None}
-    assert [job["shard_label"] for job in child_jobs] == [
+    assert child_jobs[0]["shard_label"] == "global-backbone"
+    assert [job["shard_label"] for job in child_jobs[1:]] == [
         "coverage[0]:broad",
         "coverage[0]:sqli",
         "coverage[0]:xss",
@@ -3081,12 +3256,12 @@ def test_scan_plan_coverage_family_uses_static_family_shards(monkeypatch):
         "coverage[1]:sqli",
         "coverage[1]:xss",
     ]
-    assert child_jobs[1]["options"]["asm_check_family"] == "sqli"
-    assert child_jobs[2]["options"]["asm_check_family"] == "xss"
-    assert all(job["options"]["zero_rediscovery"] is True for job in child_jobs)
+    assert child_jobs[2]["options"]["asm_check_family"] == "sqli"
+    assert child_jobs[3]["options"]["asm_check_family"] == "xss"
+    assert all(job["options"]["zero_rediscovery"] is True for job in child_jobs[1:])
     parent_update = [
         args for query, args in conn.executions
-        if "UPDATE scans SET status = 'running'" in query and "shard_count" in query
+        if "UPDATE scans SET status='running'" in query and "shard_count" in query
     ][0]
     parent_options = json.loads(parent_update[3])
     assert parent_options["parallel_strategy"] == "coverage_family"
@@ -3094,7 +3269,7 @@ def test_scan_plan_coverage_family_uses_static_family_shards(monkeypatch):
     assert "campaign_id" not in parent_options
 
 
-def test_scan_plan_coverage_family_dynamic_uses_family_aware_batches(monkeypatch):
+def test_scan_plan_coverage_family_dynamic_request_uses_self_contained_family_shards(monkeypatch):
     parent_id = "58585858-5858-5858-5858-585858585858"
     target_id = uuid.UUID("36363636-3636-3636-3636-363636363636")
     campaign_id = uuid.UUID("47474747-4747-4747-4747-474747474747")
@@ -3132,41 +3307,37 @@ def test_scan_plan_coverage_family_dynamic_uses_family_aware_batches(monkeypatch
                     "coverage_allocation": "dynamic",
                     "coverage_dynamic_batch_size": 2,
                     "coverage_dynamic_max_batches": 6,
+                    "coverage_per_shard_cap": 2,
+                    "coverage_max_shards": 6,
+                    "custom_endpoints": [
+                        "GET /api/a?id=1", "GET /api/b?id=1",
+                        "GET /api/c?id=1", "GET /api/d?id=1",
+                    ],
                 },
             }
         )
     )
 
     child_jobs = [json.loads(payload) for _, payload in redis.pushed]
-    assert len(child_jobs) == 6
-    assert {job["type"] for job in child_jobs} == {worker.asm_inventory.EXPLOIT_BATCH_JOB_TYPE}
-    assert {job["campaign_id"] for job in child_jobs} == {str(campaign_id)}
-    assert [job["shard_label"] for job in child_jobs] == [
-        "coverage-dynamic[0]:anonymous:broad",
-        "coverage-dynamic[0]:anonymous:sqli",
-        "coverage-dynamic[0]:anonymous:xss",
-        "coverage-dynamic[1]:anonymous:broad",
-        "coverage-dynamic[1]:anonymous:sqli",
-        "coverage-dynamic[1]:anonymous:xss",
+    assert len(child_jobs) == 7
+    assert {job["type"] for job in child_jobs} == {worker.parallel_scan.SHARD_JOB_TYPE}
+    assert {job["campaign_id"] for job in child_jobs} == {None}
+    assert child_jobs[0]["shard_label"] == "global-backbone"
+    assert [job["shard_label"] for job in child_jobs[1:]] == [
+        "coverage[0]:broad", "coverage[0]:sqli", "coverage[0]:xss",
+        "coverage[1]:broad", "coverage[1]:sqli", "coverage[1]:xss",
     ]
-    assert [job["check_family"] for job in child_jobs[:3]] == ["all", "sqli", "xss"]
-    assert child_jobs[1]["options"]["coverage_attempt_family"] == "sqli"
-    assert child_jobs[1]["options"]["asm_check_family"] == "sqli"
-    assert child_jobs[2]["options"]["coverage_attempt_family"] == "xss"
-    assert child_jobs[2]["options"]["asm_check_family"] == "xss"
-    assert all(job["options"]["custom_budget"]["phase4_max_seconds"] == 0 for job in child_jobs)
-    assert all(job["options"]["coverage_family_aware"] is True for job in child_jobs)
-    assert all(job["campaign_only"] is True for job in child_jobs)
+    assert child_jobs[2]["options"]["asm_check_family"] == "sqli"
+    assert child_jobs[3]["options"]["asm_check_family"] == "xss"
     parent_update = [
         args for query, args in conn.executions
-        if "UPDATE scans SET status = 'running'" in query and "shard_count" in query
+        if "UPDATE scans SET status='running'" in query and "shard_count" in query
     ][0]
     parent_options = json.loads(parent_update[3])
     assert parent_options["parallel_strategy"] == "coverage_family"
-    assert parent_options["coverage_allocation"] == "dynamic"
+    assert parent_options["coverage_allocation"] == "static"
     assert parent_options["coverage_check_families"] == ["all", "sqli", "xss"]
     assert parent_options["coverage_expected_attempts"] == 12
-    assert parent_options["campaign_id"] == str(campaign_id)
 
 
 def test_scan_plan_coverage_family_dynamic_respects_explicit_bola_focus(monkeypatch):
@@ -3214,46 +3385,40 @@ def test_scan_plan_coverage_family_dynamic_respects_explicit_bola_focus(monkeypa
                     "auth_header": "Bearer user1",
                     "user2_header": "Bearer user2",
                     "exploit_depth": True,
+                    "coverage_per_shard_cap": 2,
+                    "custom_endpoints": [
+                        "GET /api/a?id=1", "GET /api/b?id=1",
+                        "GET /api/c?id=1", "GET /api/d?id=1",
+                    ],
                 },
             }
         )
     )
 
-    assert len(recon_calls) == 1
-    assert "check_family" not in recon_calls[0]
-    assert "asm_check_family" not in recon_calls[0]
-    assert "coverage_attempt_family" not in recon_calls[0]
-    assert "coverage_family_aware" not in recon_calls[0]
-    assert "sqli" not in recon_calls[0]
-    assert "xss" not in recon_calls[0]
+    assert recon_calls == []
     child_jobs = [json.loads(payload) for _, payload in redis.pushed]
-    assert len(child_jobs) == 2
-    assert {job["type"] for job in child_jobs} == {worker.asm_inventory.EXPLOIT_BATCH_JOB_TYPE}
-    assert [job["shard_label"] for job in child_jobs] == [
-        "coverage-dynamic[0]:user1:bola",
-        "coverage-dynamic[1]:user1:bola",
+    assert len(child_jobs) == 3
+    assert {job["type"] for job in child_jobs} == {worker.parallel_scan.SHARD_JOB_TYPE}
+    assert child_jobs[0]["shard_label"] == "global-backbone"
+    assert [job["shard_label"] for job in child_jobs[1:]] == [
+        "coverage[0]:bola", "coverage[1]:bola",
     ]
-    assert {job["check_family"] for job in child_jobs} == {"bola"}
-    assert {job["options"]["coverage_attempt_family"] for job in child_jobs} == {"bola"}
-    assert {job["options"]["asm_check_family"] for job in child_jobs} == {"bola"}
-    assert all(job["options"]["auth_header"] == "Bearer user1" for job in child_jobs)
-    assert all(job["options"]["user2_header"] == "Bearer user2" for job in child_jobs)
-    assert all(job["options"]["sqli"] is False and job["options"]["xss"] is False for job in child_jobs)
+    assert all(job["options"]["auth_header"] == "Bearer user1" for job in child_jobs[1:])
+    assert all(job["options"]["user2_header"] == "Bearer user2" for job in child_jobs[1:])
     assert all(
         job["options"]["custom_budget"]["phase4_max_seconds"]
         == worker.parallel_scan.BOLA_DYNAMIC_PHASE4_SECONDS
-        for job in child_jobs
+        for job in child_jobs[1:]
     )
     parent_update = [
         args for query, args in conn.executions
-        if "UPDATE scans SET status = 'running'" in query and "shard_count" in query
+        if "UPDATE scans SET status='running'" in query and "shard_count" in query
     ][0]
     parent_options = json.loads(parent_update[3])
     assert parent_options["parallel_strategy"] == "coverage_family"
-    assert parent_options["coverage_allocation"] == "dynamic"
+    assert parent_options["coverage_allocation"] == "static"
     assert parent_options["coverage_check_families"] == ["bola"]
     assert parent_options["coverage_expected_attempts"] == 4
-    assert parent_options["campaign_id"] == str(campaign_id)
 
 
 def test_exploit_batch_without_endpoint_telemetry_marks_partial_not_tested(monkeypatch):

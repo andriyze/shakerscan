@@ -48,18 +48,33 @@ def test_auto_strategy_honors_explicit_family():
     assert p.resolve_auto_strategy({"scan_type": "smart"}, "smart", "family") == "family"
 
 
-def test_coverage_recon_budget_runs_bounded_global_backbone():
-    # Recon is the global/DOM/verification backbone (runs once): bounded active +
-    # phase-4 so it finds DOM-XSS/exposure/BFLA that zero-rediscovery shards skip,
-    # while still skipping nuclei + per-URL param discovery and staying time-bounded.
+def test_coverage_recon_budget_is_discovery_only_and_bounded():
     budget = p.RECON_DISCOVERY_BUDGET
-    assert budget["active_max_endpoints"] == 20
-    assert budget["active_max_seconds"] == 200
-    assert budget["api_probe_limit"] == 250
+    assert budget["active_max_endpoints"] == 1
+    assert budget["active_max_seconds"] == 0
+    assert budget["api_probe_limit"] == 100
     assert budget["param_discovery_url_limit"] == 0
     assert budget["nuclei_max_targets"] == 0
-    assert budget["phase4_max_seconds"] == 300
-    assert budget["max_duration_minutes"] <= 18
+    assert budget["phase4_max_seconds"] == 0
+    assert budget["browser_max_pages"] == 0
+    assert budget["max_urls"] == 500
+    assert budget["discovery_depth"] == 1
+    assert budget["max_duration_minutes"] <= 3
+
+
+def test_coverage_backbone_preserves_smart_contract_concurrently():
+    endpoint_plan = p.plan_coverage_shards(
+        {"scan_type": "smart", "active": True},
+        ["GET /a?id=1", "GET /b?id=1"],
+        per_shard_cap=1,
+    )
+    plan = p.with_coverage_backbone(endpoint_plan, {"scan_type": "smart", "active": True})
+    assert plan.shard_count == 3
+    assert plan.shards[0].label == "global-backbone"
+    assert plan.shards[0].options["parallel_backbone"] is True
+    assert plan.shards[0].options["active"] is True
+    assert "zero_rediscovery" not in plan.shards[0].options
+    assert all(s.options["skip_global_checks"] is True for s in plan.shards[1:])
 
 
 # --------------------------- coverage partition ---------------------------
@@ -97,6 +112,34 @@ def test_coverage_runs_global_checks_once_per_plan():
     assert [s.options["custom_budget"].get("nuclei_max_targets") for s in plan.shards] == [0, 0, 0]
     assert [s.options["resolved_budget"].get("nuclei_max_targets") for s in plan.shards] == [0, 0, 0]
     assert any("zero-rediscovery shards skip" in n for n in plan.notes)
+
+
+def test_coverage_endpoint_shards_do_not_repeat_parent_backbone_or_full_request_budget():
+    eps = [f"GET /api/x{i}?id=1" for i in range(16)]
+    parent = {
+        "scan_type": "smart",
+        "custom_budget": {
+            "browser_max_pages": 8,
+            "nuclei_max_targets": 30,
+            "phase4_max_seconds": 45,
+            "active_max_endpoints": 12,
+            "request_max": 700,
+        },
+    }
+
+    endpoint_plan = p.plan_coverage_shards(parent, eps, per_shard_cap=8)
+    full_plan = p.with_coverage_backbone(endpoint_plan, parent)
+
+    assert full_plan.shards[0].options["custom_budget"]["request_max"] == 700
+    assert full_plan.shards[0].options["custom_budget"]["browser_max_pages"] == 8
+    for shard in full_plan.shards[1:]:
+        budget = shard.options["custom_budget"]
+        assert budget["browser_max_pages"] == 0
+        assert budget["nuclei_max_targets"] == 0
+        assert budget["phase4_max_seconds"] == 0
+        assert budget["active_max_endpoints"] == 8
+        assert budget["request_max"] == 400
+        assert shard.options["resolved_budget"]["request_max"] == 400
 
 
 def test_exhaustive_coverage_shards_get_deeper_active_budget():
@@ -206,7 +249,7 @@ def test_coverage_family_multiplies_endpoint_buckets_by_family_lanes():
     assert sorted(set(endpoint_appearances)) == sorted(eps)
     assert len(endpoint_appearances) == len(eps) * 3
     assert [s.options.get("skip_global_checks") for s in plan.shards] == [False, True, True, True, True, True]
-    assert any("coverage_allocation=dynamic" in n for n in plan.notes)
+    assert any("self-contained endpoint buckets" in n for n in plan.notes)
 
 
 def test_coverage_family_total_shard_cap_limits_family_lanes():
@@ -560,11 +603,11 @@ def test_auth_state_noop_without_credentials():
     assert any("no credentials" in n for n in plan.notes)
 
 
-def test_coverage_allocation_mode_defaults_to_dynamic(monkeypatch):
+def test_coverage_allocation_mode_defaults_to_self_contained_static(monkeypatch):
     monkeypatch.delenv("COVERAGE_ALLOCATION_DEFAULT", raising=False)
     monkeypatch.delenv("FULL_COVERAGE_ALLOCATION_DEFAULT", raising=False)
 
-    assert p.coverage_allocation_mode({}) == "dynamic"
+    assert p.coverage_allocation_mode({}) == "static"
 
 
 def test_coverage_allocation_mode_accepts_dynamic_aliases(monkeypatch):

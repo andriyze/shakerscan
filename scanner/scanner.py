@@ -3755,6 +3755,7 @@ async def build_report(target: str,
                        skip_global_checks: bool=False,
                        focused_endpoints_only: bool=False,
                        zero_rediscovery: bool=False,
+                       discovery_manifest_only: bool=False,
                        # Smart scan mode
                        smart_mode: bool=False,
                        # Smart scan tuning
@@ -3831,6 +3832,7 @@ async def build_report(target: str,
     registry_jwt_testing = bool(
         (smart_mode or (complete_mode and complete_tier in ("full", "aggressive")))
         and not focused_active_family
+        and not zero_rediscovery
     )
     check_family_scope = build_check_family_scope(
         active_checks,
@@ -4884,6 +4886,26 @@ async def build_report(target: str,
         httpx_task = asyncio.create_task(pd_httpx_probe(host, port))
         if public_only and quick_mode:
             katana_task = asyncio.create_task(_focused_async_value([]))
+        elif zero_rediscovery_scope:
+            assigned_urls = [
+                str(endpoint.get("url"))
+                for endpoint in (manual_endpoints_norm or [])
+                if endpoint.get("url")
+            ]
+            katana_task = asyncio.create_task(_focused_async_value({
+                "all_urls": assigned_urls,
+                "api_endpoints": [
+                    item for item in assigned_urls
+                    if "/api/" in urllib.parse.urlparse(item).path.lower()
+                    or "/rest/" in urllib.parse.urlparse(item).path.lower()
+                ],
+                "recursive_paths": [],
+                "probed_endpoints": [],
+                "endpoints_with_params": [],
+                "forms": [],
+                "config": {"zero_rediscovery": True},
+                "stats": {"assigned_endpoints": len(assigned_urls)},
+            }))
         elif smart_mode:
             katana_task = asyncio.create_task(
                 smart_discovery(
@@ -4906,22 +4928,30 @@ async def build_report(target: str,
             await auth_session.refresh_if_needed()
 
         browser_seed_urls = list(seed_entry_urls)
-        if smart_mode and not no_browser:
+        if smart_mode and not no_browser and not zero_rediscovery_scope:
             browser_seed_urls = await discover_browser_seed_urls(
                 base_url,
                 seed_entry_urls,
             )
 
-        browser_task = asyncio.create_task(browser_fetch(
-            base_url,
-            "/tmp",
-            no_browser or focused_manual_active_scope,
-            auth_session=auth_session,
-            crawl=enable_browser_crawl,
-            max_pages=crawl_limits["max_pages"],
-            max_depth=crawl_limits["max_depth"],
-            seed_urls=browser_seed_urls if browser_seed_urls else None,
-        ))
+        if zero_rediscovery_scope:
+            browser_task = asyncio.create_task(_focused_async_value({
+                "page_urls": [],
+                "api_endpoints": [],
+                "websocket_endpoints": [],
+                "crawl_stats": {"pages_visited": 0, "depth_reached": 0},
+            }))
+        else:
+            browser_task = asyncio.create_task(browser_fetch(
+                base_url,
+                "/tmp",
+                no_browser or focused_manual_active_scope,
+                auth_session=auth_session,
+                crawl=enable_browser_crawl,
+                max_pages=crawl_limits["max_pages"],
+                max_depth=crawl_limits["max_depth"],
+                seed_urls=browser_seed_urls if browser_seed_urls else None,
+            ))
 
         httpx_meta = await httpx_task
         katana_result = await katana_task
@@ -5021,7 +5051,9 @@ async def build_report(target: str,
     schemathesis_schema_url: str | None = None
 
     # New advanced vulnerability checks (smart/full/aggressive only)
-    advanced_scan = (smart_mode or (complete_mode and complete_tier in ("full", "aggressive"))) and not focused_active_family
+    advanced_scan = (
+        smart_mode or (complete_mode and complete_tier in ("full", "aggressive"))
+    ) and not focused_active_family and not discovery_manifest_only and not zero_rediscovery_scope
     jwt_results: dict[str, Any] = {
         "vulnerable": False,
         "issues": [],
@@ -5700,7 +5732,7 @@ async def build_report(target: str,
         if auth_session:
             await auth_session.refresh_if_needed()
 
-        if nuclei_target_limit <= 0:
+        if zero_rediscovery_scope or nuclei_target_limit <= 0:
             print("[nuclei] Skipping nuclei: target budget is 0", file=sys.stderr)
             nuclei_results = {
                 "vulnerabilities": [],
@@ -5846,6 +5878,7 @@ async def build_report(target: str,
         and smart_discovery_data
         and nuclei_signals
         and not focused_manual_active_scope
+        and not discovery_manifest_only
         and not smart_discovery_data.get("spa_catch_all")
     ):
         try:
@@ -9153,6 +9186,7 @@ async def build_report(target: str,
             nonlocal active_block, run_xss, run_sqli
             nonlocal smart_succeeded, post_active_budget_exhausted, endpoints
             nonlocal nosql_results
+            nonlocal schemathesis_task, schemathesis_schema_url
             enabled_active_families = {
                 str(row.get("name") or "").strip().lower()
                 for row in family_rows
@@ -9636,7 +9670,11 @@ async def build_report(target: str,
                                     print(f"[scanner] Added {get_count} GET and {post_count} POST endpoints from OpenAPI", file=sys.stderr)
 
                                 # Smart mode: optionally kick off Schemathesis when OpenAPI is found
-                                if schemathesis_task is None and not public_only:
+                                if (
+                                    not discovery_manifest_only
+                                    and schemathesis_task is None
+                                    and not public_only
+                                ):
                                     schema_url = openapi_url
                                     if not schema_url:
                                         for schema in openapi_sources:
@@ -13798,6 +13836,8 @@ async def cli_main():
                     help="Keep all findings regardless of verification status")
     ap.add_argument("--skip-global-checks", action="store_true",
                     help="Skip duplicate global exposure/posture checks in a parallel child shard")
+    ap.add_argument("--discovery-manifest-only", action="store_true",
+                    help="Build a bounded Smart endpoint manifest without adaptive post-template refinement")
 
     # Category convenience flags (enable groups of checks)
     ap.add_argument("--vuln-auth", action="store_true", help="Enable all auth/access checks (CSRF, IDOR, Rate Limiting, 2FA, Password Reset, Session, Default Creds)")
@@ -14609,6 +14649,10 @@ async def cli_main():
         args.nuclei = True
         args.js_dependency_scanning = True
 
+    # Preserve whether authentication automation was explicitly requested before
+    # Smart's convenience preset enables it by default.
+    explicit_auto_auth = bool(args.auto_auth)
+
     # --smart enables adaptive intelligent scanning
     # Note: staged nuclei and recursive discovery are handled via smart_mode flag
     # and DISCOVERY_CONFIG["smart"] profile respectively
@@ -14636,6 +14680,26 @@ async def cli_main():
         args.options_method_discovery = True
         args.grpc_discovery = True
         args.max_active = 50
+
+    # Parallel discovery needs Smart's endpoint graph, while zero-rediscovery
+    # shards need only the assigned-endpoint active engine. Neither should run a
+    # second copy of Smart's generic auth, posture, browser, infrastructure, or
+    # phase-4 families: the concurrent backbone owns those capabilities once.
+    if args.discovery_manifest_only or args.zero_rediscovery:
+        args.nuclei = False
+        args.vuln_auth = False
+        args.vuln_injection = False
+        args.vuln_web = False
+        args.exposure_client = False
+        args.exposure_infra = False
+        args.threat_intel = False
+        args.js_dependency_scanning = False
+        args.js_secret_scanning = False
+        args.websocket_testing = False
+        args.enhanced_dns = False
+        args.deep_discovery = False
+        args.grpc_discovery = False
+        args.auto_auth = explicit_auto_auth
 
     # Enforce active checks for smart/full/aggressive scan types
     # These scan types require active testing - public-only mode is incompatible
@@ -14873,6 +14937,7 @@ async def cli_main():
         skip_global_checks=args.skip_global_checks,
         focused_endpoints_only=getattr(args, "focused_endpoints_only", False),
         zero_rediscovery=getattr(args, "zero_rediscovery", False),
+        discovery_manifest_only=getattr(args, "discovery_manifest_only", False),
         # Smart scan mode
         smart_mode=getattr(args, 'smart_mode', False),
         # Smart scan tuning

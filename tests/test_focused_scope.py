@@ -31,6 +31,12 @@ def test_scanner_zero_rediscovery_flag_guards_discovery_branches():
     assert "zero_rediscovery=getattr(args, \"zero_rediscovery\", False)" in source
     assert "zero_rediscovery_scope = bool(zero_rediscovery and focused_manual_active_scope)" in source
     assert "zero_rediscovery=zero_rediscovery_scope" in source
+    assert "elif zero_rediscovery_scope:\n            assigned_urls = [" in source
+    assert "if zero_rediscovery_scope or nuclei_target_limit <= 0:" in source
+    assert "if args.discovery_manifest_only or args.zero_rediscovery:" in source
+    assert "args.auto_auth = explicit_auto_auth" in source
+    assert "and not zero_rediscovery\n    )" in source
+    assert "and not zero_rediscovery_scope" in source
     assert '"recon",\n        {"legacy_discovery": run_legacy_discovery}' in source
     assert "recon_dispatch_receipts = await recon_phase_task" in source
     assert "elif smart_mode and not zero_rediscovery_scope:\n        js_urls =" in source

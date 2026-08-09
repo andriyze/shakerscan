@@ -1232,6 +1232,8 @@ export interface Scan {
     total: number
     completed: number
     failed: number
+    cancelled?: number
+    partial?: number
     running: number
     pending: number
     terminal: number
@@ -1277,6 +1279,14 @@ export interface Scan {
       per_endpoint_telemetry?: boolean
     }
   }>
+  parallel_discovery?: {
+    id: string
+    status: string
+    progress?: number
+    current_phase?: string
+    executing_node_id?: string | null
+    worker_id?: string | null
+  }
 }
 
 export interface ModelIntakeScanRequest {
@@ -2142,6 +2152,8 @@ export interface QueueStats {
   pending: number
   queued: number
   running: number
+  work_pending?: number
+  work_running?: number
   completed: number
   failed: number
 }

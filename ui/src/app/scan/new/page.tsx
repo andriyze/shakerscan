@@ -208,7 +208,7 @@ export default function NewScanPage() {
           .map(([key, value]) => [key, Number.parseInt(value, 10)])
           .filter(([, value]) => Number.isFinite(value as number))
       )
-      // Coverage breadth (test every endpoint) is decoupled from depth. Standard
+      // Coverage breadth (distribute the harvested endpoint worklist) is decoupled from depth. Standard
       // coverage stays broad-but-sane; Deep adds exhaustive budget + exploit-depth.
       const isDeepCoverage = isCoverageMode && coverageDepth === 'deep'
       const coverageBudgetPayload = isCoverageMode
@@ -537,7 +537,7 @@ export default function NewScanPage() {
               ['auto', 'Auto', 'Use the global auto-sharding setting.'],
               ['normal', 'Normal', 'Force one worker.'],
               ['parallel', 'Parallel', 'Force shard fan-out.'],
-              ['coverage', 'Full Coverage', 'Discover once, test every endpoint — heaviest mode.']
+              ['coverage', 'Full Coverage', 'Discover once, distribute endpoint testing — heaviest mode.']
             ] as const).map(([value, label, description]) => (
               <button
                 key={value}
@@ -556,7 +556,8 @@ export default function NewScanPage() {
           </div>
 
           <p className="mt-3 text-xs text-gray-500">
-            Auto follows Settings. Full Coverage is the high-budget path for Smart, Full, and Aggressive scans.
+            Auto follows Settings. Full Coverage runs one complete capability-preserving scan alongside
+            endpoint shards. Its final report states whether the harvested worklist completed or was partial.
           </p>
 
           {(executionMode === 'parallel' || executionMode === 'coverage') && (

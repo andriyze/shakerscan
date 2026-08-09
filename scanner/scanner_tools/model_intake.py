@@ -46,13 +46,26 @@ from .model_intake_runtime import DTYPE_SIZES as _SAFETENSORS_DTYPE_SIZES
 from .model_intake_sandbox import request_sandbox_analysis as _request_sandbox_analysis
 
 if __package__ == "scanner_tools":
-    from redaction import (
-        SENSITIVE_KEYS,
-        SENSITIVE_KEY_FRAGMENTS,
-        is_sensitive_key,
-        redact_sensitive,
-        redact_url_credentials,
-    )
+    try:
+        # Container layout: /app/redaction.py is a top-level module.
+        from redaction import (
+            SENSITIVE_KEYS,
+            SENSITIVE_KEY_FRAGMENTS,
+            is_sensitive_key,
+            redact_sensitive,
+            redact_url_credentials,
+        )
+    except ModuleNotFoundError:
+        # Source/test layout can expose scanner_tools as a top-level package
+        # while redaction still lives under scanner. Keep imports independent
+        # of test order and PYTHONPATH shape.
+        from scanner.redaction import (
+            SENSITIVE_KEYS,
+            SENSITIVE_KEY_FRAGMENTS,
+            is_sensitive_key,
+            redact_sensitive,
+            redact_url_credentials,
+        )
 else:
     from ..redaction import (
         SENSITIVE_KEYS,

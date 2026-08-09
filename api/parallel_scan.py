@@ -137,34 +137,27 @@ STATIC_ASSET_EXTENSIONS = frozenset({
     ".woff", ".woff2",
 })
 
-# Budget for the coverage "discover-once" recon pass. The recon enumerates the
-# endpoint worklist for the shards AND serves as the GLOBAL-CHECK backbone: the
-# zero-rediscovery shards run no browser crawl and only a fragmented global pass,
-# so detections that DON'T scale with endpoint count — DOM-XSS (browser), exposure
-# (/metrics, /ftp), and forced-browsing/BFLA (phase-4) — must run here once and be
-# unioned into the merge (see process_scan_plan_job recon-findings stash). Per-
-# endpoint SQLi/XSS depth stays on the shards (bounded active_max_endpoints here),
-# so this stays a bounded one-time cost, not a full re-scan before fan-out.
+# Budget for the coverage discovery stage. This stage exists only to produce a
+# bounded endpoint manifest. Browser/global/active checks belong to the parallel
+# backbone shard; running them here serializes most of a Smart scan before fan-out.
 RECON_DISCOVERY_BUDGET = {
-    # Bounded active budget: enough to run DOM-XSS on hash routes + active checks on
-    # the highest-priority handful of endpoints, NOT the full per-endpoint sweep
-    # (that is the shards' job). Keeps recon's one-time global detections without
-    # turning planning into a second full scan.
-    "active_max_endpoints": 20,
-    "active_max_seconds": 200,
+    "active_max_endpoints": 1,
+    "active_max_seconds": 0,
     "nuclei_max_targets": 0,
-    "max_urls": 3000,            # worklist breadth is cheap; depth was the cost
-    "api_probe_limit": 250,       # keep speculative API fan-out bounded in planning
-    "browser_max_pages": 25,
-    "browser_max_depth": 3,
-    "discovery_depth": 3,
-    "param_discovery_url_limit": 0,   # skip per-URL param discovery in recon
+    "max_urls": 500,
+    "api_probe_limit": 100,
+    "browser_max_pages": 0,
+    "browser_max_depth": 1,
+    "discovery_depth": 1,
+    "param_discovery_url_limit": 0,
     "param_discovery_max_params": 0,
-    "phase4_max_seconds": 300,        # global phase-4 once (exposure/BFLA/...): enough to
-                                      # RELIABLY finish; 180s left exposure/BFLA flaky on
-                                      # rich apps, dropping /metrics + /api/Users run-to-run.
-    "max_duration_minutes": 18,       # hard bound so planning can't run away
+    "phase4_max_seconds": 0,
+    "max_duration_minutes": 3,
 }
+
+PARALLEL_DISCOVERY_ROLE = "parallel_discovery"
+PARALLEL_FANOUT_COMPLETE_KEY = "parallel_fanout_complete"
+PARALLEL_EXPECTED_SHARDS_KEY = "parallel_expected_shards"
 
 # Auth fields that establish the primary (user1) authenticated identity.
 _PRIMARY_AUTH_KEYS = (
@@ -634,6 +627,35 @@ def _coverage_child_options(parent_options: dict[str, Any], slice_eps: list[str]
             "smart_bola_max_endpoints": cnt,
         },
     )
+    # These modules belong to the complete backbone. Parent caps describe the
+    # logical assessment, not permission to repeat crawl, browser, Nuclei, or
+    # phase-4 work in every endpoint slice.
+    child_budget = dict(opts.get("custom_budget") or {})
+    try:
+        parent_request_max = max(1, int(child_budget.get("request_max") or 1))
+    except (TypeError, ValueError):
+        parent_request_max = 1
+    endpoint_request_cap = max(cnt, 50 * cnt)
+    try:
+        requested_active_cap = max(0, int(child_budget.get("active_max_endpoints") or cnt))
+    except (TypeError, ValueError):
+        requested_active_cap = cnt
+    _merge_custom_budget(
+        opts,
+        {
+            "browser_max_pages": 0,
+            "browser_max_depth": 1,
+            "api_probe_limit": 0,
+            "param_discovery_url_limit": 0,
+            "param_discovery_max_params": 0,
+            "nuclei_max_targets": 0,
+            "phase4_max_seconds": 0,
+            "active_max_endpoints": min(cnt, requested_active_cap),
+            # A payload is bounded independently and never inherits the entire
+            # parent's request ceiling.
+            "request_max": min(parent_request_max, endpoint_request_cap),
+        },
+    )
     return opts
 
 
@@ -1096,6 +1118,13 @@ def plan_coverage_family_shards(
                 opts["thorough_params"] = True
                 if (opts.get("budget_profile") or "balanced") in ("fast", "balanced"):
                     opts["budget_profile"] = "thorough"
+            if attempt_family == "bola":
+                # BOLA proof is implemented in phase 4. The generic endpoint
+                # child disables phase 4, so explicitly restore the bounded
+                # proof window for this authorized, credential-gated lane.
+                _merge_custom_budget(
+                    opts, {"phase4_max_seconds": BOLA_DYNAMIC_PHASE4_SECONDS}
+                )
             shards.append(
                 ShardSpec(
                     index=len(shards),
@@ -1112,8 +1141,7 @@ def plan_coverage_family_shards(
         global_checks_once=True,
     )
     notes.append(
-        "coverage_family: static endpoint buckets multiplied by broad/focused family lanes; "
-        "use coverage_allocation=dynamic for allocator-backed endpoint+family pulls"
+        "coverage_family: self-contained endpoint buckets multiplied by broad/focused family lanes"
     )
     notes.append("coverage_family: zero-rediscovery shards skip crawl, parameter discovery, and nuclei")
     return ParallelPlan(strategy="coverage_family", shards=shards, notes=notes)
@@ -1122,10 +1150,9 @@ def plan_coverage_family_shards(
 def coverage_allocation_mode(parent_options: dict[str, Any]) -> str:
     """Resolve Full Coverage allocation mode.
 
-    ``static`` keeps the shipped round-robin endpoint slices. ``dynamic`` uses
-    campaign-scoped inventory claims so child jobs pull work at execution time.
-    Dynamic is the default for Full Coverage; operators can set
-    ``COVERAGE_ALLOCATION_DEFAULT=static`` to force the older static default.
+    ``static`` creates self-contained endpoint slices that run identically on
+    local and outbound-only broker workers. Legacy ``dynamic`` requests remain
+    recognizable so the planner can explain their compatibility conversion.
     """
     raw = str(parent_options.get("coverage_allocation") or "").strip().lower()
     if not raw and parent_options.get("dynamic_coverage_allocation") is not None:
@@ -1134,11 +1161,49 @@ def coverage_allocation_mode(parent_options: dict[str, Any]) -> str:
         raw = str(
             os.environ.get("COVERAGE_ALLOCATION_DEFAULT")
             or os.environ.get("FULL_COVERAGE_ALLOCATION_DEFAULT")
-            or "dynamic"
+            or "static"
         ).strip().lower()
     if raw in {"dynamic", "pull", "allocator", "campaign"}:
         return "dynamic"
     return "static"
+
+
+def with_coverage_backbone(plan: ParallelPlan, parent_options: dict[str, Any]) -> ParallelPlan:
+    """Add one capability-preserving Smart/global shard to endpoint coverage.
+
+    Endpoint shards deliberately use zero rediscovery and skip browser/global
+    checks. The backbone runs the original scan contract concurrently, so Full
+    Coverage adds endpoint breadth without silently removing Smart detections.
+    """
+    backbone_options = _base_child_options(parent_options)
+    for key in (
+        "custom_endpoints",
+        "coverage_dynamic_worker",
+        "coverage_dynamic_campaign_only",
+        "coverage_attempt_family",
+        "asm_check_family",
+        "focused_endpoints_only",
+        "zero_rediscovery",
+        "skip_global_checks",
+    ):
+        backbone_options.pop(key, None)
+    backbone_options["parallel_backbone"] = True
+    backbone_options["parallel_stage"] = "global_backbone"
+
+    shards = [ShardSpec(index=0, label="global-backbone", options=backbone_options)]
+    for shard in plan.shards:
+        options = dict(shard.options)
+        options["skip_global_checks"] = True
+        options["parallel_stage"] = "endpoint_coverage"
+        shards.append(
+            ShardSpec(index=len(shards), label=shard.label, options=options)
+        )
+    notes = list(plan.notes)
+    notes.append(
+        "coverage: global browser/posture/Smart backbone runs concurrently with "
+        f"{len(plan.shards)} endpoint shard(s)"
+    )
+    return ParallelPlan(strategy=plan.strategy, shards=shards, notes=notes)
 
 
 def _coverage_dynamic_batch_size(parent_options: dict[str, Any]) -> int:
@@ -1619,6 +1684,10 @@ def merge_guard_key(parent_id: str) -> str:
     return f"scan:{parent_id}:merge:enqueued"
 
 
+def discovery_continue_guard_key(parent_id: str) -> str:
+    return f"scan:{parent_id}:discovery:continuation:enqueued"
+
+
 def merge_job(parent_id: str) -> dict[str, Any]:
     """Build the scan_merge job payload for a parent scan."""
     return {
@@ -1668,7 +1737,7 @@ def aggregate_shard_coverage(strategy: str | None, shard_records: list[dict[str,
             continue
         all_assigned.update(endpoints)
         assigned_attempts += len(endpoints)
-        if record.get("status") == "completed":
+        if record.get("status") == "completed" and not record.get("partial"):
             completed_assigned.update(endpoints)
             completed_attempts += len(endpoints)
 
@@ -1713,7 +1782,7 @@ def aggregate_shard_coverage(strategy: str | None, shard_records: list[dict[str,
     for record in records:
         options = record.get("options") if isinstance(record.get("options"), dict) else {}
         state = options.get("auth_state")
-        if record.get("status") == "completed" and state:
+        if record.get("status") == "completed" and not record.get("partial") and state:
             auth_state_values.add(str(state))
     auth_states = sorted(auth_state_values)
     sources = sorted({
@@ -1742,22 +1811,43 @@ async def reconcile_parallel_parent(conn, parent_id: str, redis_client, queue_na
     this call enqueued the merge.
     """
     pid = uuid.UUID(parent_id)
-    parent_status = await conn.fetchval("SELECT status FROM scans WHERE id = $1", pid)
+    parent = await conn.fetchrow(
+        "SELECT status, shard_count, options FROM scans WHERE id = $1", pid
+    )
+    if not parent:
+        return False
+    parent_status = str(parent.get("status") or "")
     if parent_status == "cancelled":
         try:
             redis_client.set(merge_guard_key(parent_id), "cancelled", nx=True, ex=86400)
         except Exception:
             pass
         return False
-    total = await conn.fetchval(
-        "SELECT count(*) FROM scans WHERE parent_scan_id = $1", pid
+    parent_options = parent.get("options") or {}
+    if isinstance(parent_options, str):
+        try:
+            parent_options = json.loads(parent_options)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            parent_options = {}
+    if not isinstance(parent_options, dict) or not parent_options.get(PARALLEL_FANOUT_COMPLETE_KEY):
+        return False
+    expected = int(
+        parent_options.get(PARALLEL_EXPECTED_SHARDS_KEY)
+        or parent.get("shard_count")
+        or 0
     )
-    if not total:
+    if expected < 1:
+        return False
+    total = await conn.fetchval(
+        "SELECT count(*) FROM scans WHERE parent_scan_id = $1 AND scan_role = 'shard'", pid
+    )
+    if int(total or 0) != expected:
         return False
     non_terminal = await conn.fetchval(
         """
         SELECT count(*) FROM scans
-        WHERE parent_scan_id = $1 AND status NOT IN ('completed', 'failed', 'cancelled')
+        WHERE parent_scan_id = $1 AND scan_role = 'shard'
+          AND status NOT IN ('completed', 'failed', 'cancelled')
         """,
         pid,
     )

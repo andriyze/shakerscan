@@ -87,11 +87,13 @@ def test_parallel_parent_rollup_derives_progress_from_shards():
 
     api_module._attach_parallel_shard_rollup(result, shards)
 
-    assert result["progress"] == 60
+    assert result["progress"] == 62
     assert result["shard_rollup"] == {
         "total": 3,
         "completed": 1,
-        "failed": 0,
+            "failed": 0,
+            "cancelled": 0,
+            "partial": 0,
         "running": 1,
         "pending": 1,
         "terminal": 1,
@@ -194,7 +196,7 @@ def test_parallel_parent_rollup_keeps_unfinished_parent_below_complete():
 
     api_module._attach_parallel_shard_rollup(result, shards)
 
-    assert result["progress"] == 99
+    assert result["progress"] == 90
 
 
 class _FakeAsmRedis:
@@ -762,6 +764,7 @@ def test_default_scan_list_hides_shards_and_asm_activity_rows():
         "shard",
         api_module.asm_inventory.ASM_BATCH_ROLE,
         api_module.asm_inventory.ASM_RECON_ROLE,
+        api_module.parallel_scan.PARALLEL_DISCOVERY_ROLE,
     ]
 
 
@@ -769,6 +772,7 @@ def test_scan_list_internal_flags_reveal_requested_implementation_rows():
     assert api_module._hidden_scan_roles_for_list(include_shards=True) == [
         api_module.asm_inventory.ASM_BATCH_ROLE,
         api_module.asm_inventory.ASM_RECON_ROLE,
+        api_module.parallel_scan.PARALLEL_DISCOVERY_ROLE,
     ]
     assert api_module._hidden_scan_roles_for_list(include_internal=True) == ["shard"]
     assert api_module._hidden_scan_roles_for_list(include_shards=True, include_internal=True) == []

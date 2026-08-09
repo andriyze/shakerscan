@@ -347,10 +347,22 @@ def test_max_shards_ceiling():
 class _FakeConn:
     """Minimal asyncpg-conn stand-in for reconcile_parallel_parent."""
 
-    def __init__(self, total, non_terminal, parent_status="running"):
+    def __init__(self, total, non_terminal, parent_status="running", *, expected=None, fanout_complete=True):
         self._total = total
         self._non_terminal = non_terminal
         self._parent_status = parent_status
+        self._expected = total if expected is None else expected
+        self._fanout_complete = fanout_complete
+
+    async def fetchrow(self, query, *args):
+        return {
+            "status": self._parent_status,
+            "shard_count": self._expected,
+            "options": {
+                parallel_scan.PARALLEL_FANOUT_COMPLETE_KEY: self._fanout_complete,
+                parallel_scan.PARALLEL_EXPECTED_SHARDS_KEY: self._expected,
+            },
+        }
 
     async def fetchval(self, query, *args):
         if "SELECT status" in query:
@@ -418,6 +430,22 @@ def test_reconcile_waits_while_shards_pending():
     r = _FakeRedis()
     enqueued = _run(reconcile_parallel_parent(conn, pid, r, "scan_jobs"))
     assert enqueued is False
+    assert r.pushed == []
+
+
+def test_reconcile_waits_until_fanout_is_complete():
+    pid = str(uuid.uuid4())
+    conn = _FakeConn(total=1, non_terminal=0, expected=3, fanout_complete=False)
+    r = _FakeRedis()
+    assert _run(reconcile_parallel_parent(conn, pid, r, "scan_jobs")) is False
+    assert r.pushed == []
+
+
+def test_reconcile_requires_exact_expected_child_count():
+    pid = str(uuid.uuid4())
+    conn = _FakeConn(total=1, non_terminal=0, expected=3, fanout_complete=True)
+    r = _FakeRedis()
+    assert _run(reconcile_parallel_parent(conn, pid, r, "scan_jobs")) is False
     assert r.pushed == []
 
 

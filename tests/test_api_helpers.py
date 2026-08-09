@@ -18640,6 +18640,172 @@ def test_queue_delivery_prefers_durable_broker_reclaim_evidence():
     assert payload["consumer"] == "broker-node-b"
 
 
+def test_parallel_recovery_requeues_terminal_discovery_continuation(monkeypatch):
+    parent_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
+    discovery_id = uuid.UUID("22222222-2222-4222-8222-222222222222")
+
+    class Conn:
+        async def fetch(self, query, *args):
+            if "JOIN LATERAL" in query:
+                return [{
+                    "id": parent_id,
+                    "job_id": "parent-job",
+                    "target_url": "https://example.test",
+                    "options": {"scan_type": "smart", "shard_strategy": "coverage"},
+                    "discovery_id": discovery_id,
+                    "discovery_status": "completed",
+                }]
+            return []
+
+    class Redis:
+        def set(self, *_args, **_kwargs):
+            return True
+
+        def delete(self, *_args):
+            return None
+
+    queued = []
+    monkeypatch.setattr(api_module, "get_redis", lambda: Redis())
+    monkeypatch.setattr(
+        api_module,
+        "enqueue_job",
+        lambda _redis, _queue, payload: queued.append(payload),
+    )
+
+    repaired = asyncio.run(api_module.recover_parallel_orchestration(_FakePool(Conn())))
+
+    assert repaired == 1
+    assert len(queued) == 1
+    submitted_at = queued[0].pop("submitted_at")
+    assert datetime.fromisoformat(submitted_at)
+    assert queued[0] == {
+        "type": api_module.parallel_scan.PLAN_JOB_TYPE,
+        "job_id": "parent-job",
+        "scan_id": str(parent_id),
+        "target": "https://example.test",
+        "options": {"scan_type": "smart", "shard_strategy": "coverage"},
+        "plan_stage": "fanout",
+        "discovery_scan_id": str(discovery_id),
+        "parallel_worker_count": 0,
+        "placement": {"node_scope": "local"},
+        "attempt": 1,
+        "plan_version": api_module.parallel_scan.PLAN_VERSION,
+    }
+
+
+def test_parallel_recovery_opens_complete_fanout_after_marking_unconfirmed_handoff(monkeypatch):
+    parent_id = uuid.UUID("33333333-3333-4333-8333-333333333333")
+    stale_started = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+
+    class Conn:
+        def __init__(self):
+            self.executions = []
+            self.fetch_calls = 0
+
+        async def fetch(self, query, *args):
+            self.fetch_calls += 1
+            if "JOIN LATERAL" in query:
+                return []
+            if "options->>'parallel_stage'='fanout'" in query:
+                return [{
+                    "id": parent_id,
+                    "shard_count": 2,
+                    "options": {
+                        "parallel_stage": "fanout",
+                        "parallel_fanout_started_at": stale_started,
+                        api_module.parallel_scan.PARALLEL_FANOUT_COMPLETE_KEY: False,
+                        api_module.parallel_scan.PARALLEL_EXPECTED_SHARDS_KEY: 2,
+                    },
+                }]
+            return [
+                {"id": uuid.uuid4(), "status": "pending", "options": {"queue_handoff_confirmed": False}},
+                {"id": uuid.uuid4(), "status": "queued", "options": {"queue_handoff_confirmed": True}},
+            ]
+
+        async def execute(self, query, *args):
+            self.executions.append((query, args))
+            return "UPDATE 1"
+
+    class Redis:
+        pass
+
+    reconciled = []
+
+    async def reconcile(conn, scan_id, _redis, queue_name):
+        reconciled.append((conn, scan_id, queue_name))
+        return True
+
+    conn = Conn()
+    monkeypatch.setattr(api_module, "get_redis", lambda: Redis())
+    monkeypatch.setattr(api_module.parallel_scan, "reconcile_parallel_parent", reconcile)
+
+    repaired = asyncio.run(api_module.recover_parallel_orchestration(_FakePool(conn)))
+
+    assert repaired == 1
+    assert any("queue_handoff_failed" in query for query, _args in conn.executions)
+    parent_updates = [args for query, args in conn.executions if "current_phase='parallel_execution'" in query]
+    assert len(parent_updates) == 1
+    recovered_options = json.loads(parent_updates[0][1])
+    assert recovered_options[api_module.parallel_scan.PARALLEL_FANOUT_COMPLETE_KEY] is True
+    assert recovered_options["parallel_stage"] == "execution"
+    assert reconciled == [(conn, str(parent_id), api_module.QUEUE_NAME)]
+
+
+def test_queue_stats_counts_logical_scans_and_reaps_orphaned_running_hashes(monkeypatch):
+    class Conn:
+        async def fetch(self, _query, *_args):
+            return [
+                {"job_id": "parent-job", "status": "running", "scan_role": "parent"},
+                {"job_id": "shard-job", "status": "running", "scan_role": "shard"},
+                {"job_id": "asm-job", "status": "running", "scan_role": "asm_batch"},
+            ]
+
+    class Redis:
+        def __init__(self):
+            self.jobs = {
+                "job:parent-job": {"status": "running"},
+                "job:shard-job": {"status": "running"},
+                "job:asm-job": {"status": "running"},
+                "job:stale-job": {"status": "running"},
+            }
+
+        def get(self, _key):
+            return None
+
+        def set(self, *_args, **_kwargs):
+            return True
+
+        def scan_iter(self, pattern):
+            return list(self.jobs) if pattern == "job:*" else []
+
+        def hgetall(self, key):
+            return dict(self.jobs.get(key) or {})
+
+        def hset(self, key, field=None, value=None, mapping=None):
+            self.jobs.setdefault(key, {})
+            if mapping:
+                self.jobs[key].update(mapping)
+            elif field is not None:
+                self.jobs[key][field] = value
+
+        def expire(self, *_args):
+            return True
+
+    redis = Redis()
+    monkeypatch.setattr(api_module, "db_pool", _FakePool(Conn()))
+    monkeypatch.setattr(api_module, "get_redis", lambda: redis)
+    monkeypatch.setattr(api_module, "queue_payloads", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(api_module, "pending_depth", lambda *_args, **_kwargs: 0)
+
+    result = asyncio.run(api_module.queue_stats())
+
+    assert result["running"] == 1
+    assert result["work_running"] == 3
+    assert result["pending"] == 0
+    assert result["queue_consistency"]["stale_running_job_hashes"] == 1
+    assert redis.jobs["job:stale-job"]["status"] == "orphaned"
+
+
 def test_model_intake_report_summary_preserves_only_safe_file_identity():
     manifest = api_module._model_intake_repository_manifest_summary({
         "complete": True,

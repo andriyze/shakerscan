@@ -871,6 +871,7 @@ function ParallelShardRollup({ scan }: { scan: any }) {
   }
 
   const shards = Array.isArray(scan?.shards) ? scan.shards : []
+  const discovery = scan?.parallel_discovery
   const strategy = scan.options?.parallel_strategy || scan.options?.shard_strategy
   const strategyBadge = strategy ? (
     <span className="px-2 py-1 rounded bg-blue-500/10 text-xs text-blue-300">
@@ -878,20 +879,18 @@ function ParallelShardRollup({ scan }: { scan: any }) {
     </span>
   ) : null
 
-  // Pre-fan-out window: a parent has no shards yet while the plan stage runs
-  // (notably the `coverage` strategy's discover-once recon pass). Show a clear
-  // planning state instead of a confusing "0/0 terminal".
+  // Discovery is an actual placed execution stage, not invisible planner time.
   if (shards.length === 0) {
     if (['running', 'pending', 'queued'].includes(scan.status)) {
       return (
         <Card className="p-4 mb-6">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <h2 className="text-sm font-semibold text-gray-300">Parallel Shards</h2>
+              <h2 className="text-sm font-semibold text-gray-300">Parallel execution</h2>
               <p className="text-xs text-gray-500 mt-0.5">
-                {strategy === 'coverage'
-                  ? 'Discovering endpoints once, then sharding the worklist across the fleet…'
-                  : 'Planning shards…'}
+                {discovery
+                  ? `Discovery ${String(discovery.status || 'pending')} · ${Number(discovery.progress || 0)}%${discovery.worker_id ? ` · ${String(discovery.worker_id)}` : ''}`
+                  : 'Preparing execution stages…'}
               </p>
             </div>
             {strategyBadge}
@@ -903,6 +902,8 @@ function ParallelShardRollup({ scan }: { scan: any }) {
   }
 
   const rollup = scan.shard_rollup || {}
+  const plannedRequestBudget = Number(scan.options?.parallel_planned_request_budget || 0)
+  const backboneRequestBudget = Number(scan.options?.parallel_backbone_request_budget || 0)
   return (
     <Card className="p-4 mb-6">
       <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
@@ -911,7 +912,8 @@ function ParallelShardRollup({ scan }: { scan: any }) {
           <p className="text-xs text-gray-500 mt-0.5">
             {rollup.terminal || 0}/{rollup.total || scan.shards.length} terminal,
             {' '}{rollup.completed || 0} completed,
-            {' '}{rollup.failed || 0} failed
+            {' '}{rollup.failed || 0} failed,
+            {' '}{rollup.cancelled || 0} cancelled
           </p>
         </div>
         {scan.options?.parallel_strategy && (
@@ -920,6 +922,21 @@ function ParallelShardRollup({ scan }: { scan: any }) {
           </span>
         )}
       </div>
+      {discovery && (
+        <div className="mb-3 rounded border border-gray-800 bg-gray-950/50 p-3 text-xs text-gray-400">
+          <span className="font-medium text-gray-200">Discovery</span>
+          {' · '}{String(discovery.status || 'unknown')}
+          {discovery.executing_node_id ? ` · node ${String(discovery.executing_node_id).slice(0, 8)}` : ''}
+          {discovery.worker_id ? ` · ${String(discovery.worker_id)}` : ''}
+        </div>
+      )}
+      {plannedRequestBudget > 0 && (
+        <div className="mb-3 text-xs text-gray-500">
+          Planned request budgets: {plannedRequestBudget.toLocaleString()} aggregate
+          {backboneRequestBudget > 0 ? ` · ${backboneRequestBudget.toLocaleString()} backbone` : ''}.
+          Actual traffic remains subject to per-target rate limits and completion budgets.
+        </div>
+      )}
       <ShardContributionRollup rollup={rollup} />
       <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
         {scan.shards.map((shard: any) => (
@@ -949,7 +966,7 @@ function ShardContributionRollup({ rollup }: { rollup: any }) {
       <div className="rounded border border-gray-800 bg-gray-950/50 p-3">
         <div className="text-gray-500">Endpoint work</div>
         <div className="mt-1 text-gray-200">
-          {attempted || selected || 0}{assigned ? ` / ${assigned} assigned` : ''}
+          {attempted || selected || 0} attempted{assigned ? ` · ${assigned} assigned` : ''}
         </div>
         {statusSummary && <div className="mt-1 text-gray-500">{statusSummary}</div>}
       </div>

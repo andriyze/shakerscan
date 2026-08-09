@@ -389,9 +389,12 @@ over time."
 
 ### Parallel scanning
 
-One logical scan can fan out across the worker fleet via a **parent → plan → shard → merge** model on
-the Redis queue (`api/parallel_scan.py`, worker job types `scan_plan`/`scan_shard`/`scan_merge`).
-Findings dedupe automatically at the DB; attack-chain/AI correlation runs once at merge.
+One logical scan can fan out across the worker fleet via a durable **parent → placed discovery →
+fan-out barrier → shard → merge** model on the Redis queue (`api/parallel_scan.py`, worker job types
+`scan_plan`/`scan_shard`/`scan_merge`). Discovery is an ordinary placed job, so a broker-only target
+is never probed accidentally from the control plane. The complete child set is committed before any
+queue handoff and merge is blocked until that exact set is terminal. Findings dedupe automatically at
+the DB; attack-chain/AI correlation runs once at merge.
 
 Strategies (`options.shard_strategy`):
 
@@ -400,18 +403,23 @@ Strategies (`options.shard_strategy`):
 | `auto` | scope when ≥2 `custom_endpoints` are present; otherwise coverage for Smart/Full/Aggressive active scans |
 | `scope` | partition `custom_endpoints` across shards — genuine speed-up for APIs |
 | `family` | broad + deeper SQLi-focused + XSS-focused shards (capped at 3) — more depth |
-| `coverage` | discover once, harvest the full endpoint worklist, partition it across auto-sized shards — maximum breadth (UI: **Full Coverage**) |
+| `coverage` | discover once, harvest a bounded endpoint worklist, partition it across auto-sized shards, and run a complete capability-preserving backbone concurrently (UI: **Full Coverage**) |
 | `coverage_family` | advanced: coverage × broad/SQLi/XSS lanes; explicit focused requests such as BOLA/Auth stay single-family |
 
-Full Coverage uses **dynamic pull-based allocation** by default (workers claim campaign-scoped
-endpoint batches from the allocator); `coverage_allocation=static` keeps the legacy round-robin
-slices as a fallback. Coverage children run in zero-rediscovery mode (no re-crawl). The parent appears
-as one row on the Scans page; shard rows are hidden unless `include_shards=true`.
+Full Coverage uses **self-contained endpoint shards**. Each queue payload carries its own immutable
+endpoint slice, so local and outbound-only broker workers execute the same contract without control-
+plane database access. `coverage_allocation=dynamic` is accepted for compatibility but resolves to
+this broker-safe mode. Endpoint shards run in zero-rediscovery mode while the concurrent backbone
+retains browser, DOM-XSS, posture, and global Smart-scan capabilities. `coverage_per_shard_cap`
+controls slice size. Discovery runs as a separately placed, durable, three-minute passive job; a
+failed discovery fails the parent rather than silently fanning out empty endpoint shards.
 
-Automatic broad active coverage uses smaller endpoint batches by default so workers can keep claiming
-new work instead of leaving one large straggler: 50 endpoints per dynamic batch for normal active
-mixes, 35 for exploit-depth/exhaustive scans. Focused SQLi/XSS lanes and explicit caller overrides can
-still use larger batches through `coverage_per_shard_cap` or `coverage_dynamic_batch_size`.
+The parent appears as one row on the Scans page; discovery and shard rows are hidden unless internal
+rows are explicitly requested. Parent progress is stage-based and monotonic. A failed, cancelled, or
+partial shard produces `technical_outcome: INCOMPLETE`, an unreliable grade marker, and a deployment
+decision that requires review. The merged report retains per-shard node/worker identity, timing,
+skipped-check context, and scanner execution receipts. Worklist caps and incomplete assignments stay
+visible; Full Coverage does not claim that every possible application endpoint was discovered.
 
 Current execution design: [`docs/dast-asm-architecture.md`](dast-asm-architecture.md).
 
@@ -1237,7 +1245,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 13 | `api/command_arsenal.py` |
 | Local-agent adapters | 4 | `api/command_arsenal.py` |
-| Scanner CLI flags | 158 | `scanner/scanner.py` |
+| Scanner CLI flags | 159 | `scanner/scanner.py` |
 | Scanner wrapper commands | 27 | `scanner.sh` |
 | Make targets | 12 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
@@ -1748,6 +1756,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `--deep-domxss` | - | Enable dalfox deep DOM XSS (spawns headless browser; heavy) |
 | `--default-creds-testing` | - | Test for default credentials (safe mode) |
 | `--deserialization-testing` | - | Test for insecure deserialization (detection only) |
+| `--discovery-manifest-only` | - | Build a bounded Smart endpoint manifest without adaptive post-template refinement |
 | `--dkim-enumeration` | - | Enumerate DKIM selectors |
 | `--dkim-selectors` | - | Comma-separated DKIM selectors to check (e.g., default,google) |
 | `--dom-xss-max-files` | - | - |

@@ -2167,6 +2167,8 @@ async def run_scan(
         cmd.append('--focused-endpoints-only')
     if options.get('zero_rediscovery'):
         cmd.append('--zero-rediscovery')
+    if options.get('parallel_discovery'):
+        cmd.append('--discovery-manifest-only')
 
     # Smart scan tuning options
     if options.get('no_early_stop'):
@@ -8032,24 +8034,50 @@ def _recompute_focused_parent_result(
     return score, grade
 
 
+def _parallel_result_is_partial(result: dict[str, Any] | None) -> bool:
+    if not isinstance(result, dict):
+        return True
+    meta = result.get('scan_metadata') if isinstance(result.get('scan_metadata'), dict) else {}
+    if any(meta.get(key) is True for key in ('partial', 'degraded', 'timed_out', 'cancelled')):
+        return True
+    result_block = result.get('result') if isinstance(result.get('result'), dict) else {}
+    if result_block.get('grade_reliable') is False:
+        return True
+    coverage = result.get('smart_coverage') if isinstance(result.get('smart_coverage'), dict) else {}
+    status = str(coverage.get('status') or '').strip().lower()
+    if status in {'partial', 'incomplete', 'failed', 'timed_out', 'cancelled'}:
+        return True
+    return False
+
+
 def _mark_parallel_parent_degraded(
     merged: dict[str, Any],
     *,
     failed_count: int,
     total_count: int,
+    cancelled_count: int = 0,
+    partial_count: int = 0,
 ) -> bool:
-    """Mark a merged parent report as partial when any shard failed."""
-    if failed_count <= 0 or total_count <= 0:
+    """Mark a merged parent incomplete when any required shard is not complete."""
+    incomplete_count = max(0, failed_count) + max(0, cancelled_count) + max(0, partial_count)
+    if incomplete_count <= 0 or total_count <= 0:
         return False
-    completed_count = max(0, total_count - failed_count)
+    completed_count = max(0, total_count - incomplete_count)
+    details = ", ".join(
+        item for item in (
+            f"{failed_count} failed" if failed_count else "",
+            f"{cancelled_count} cancelled" if cancelled_count else "",
+            f"{partial_count} partial" if partial_count else "",
+        ) if item
+    )
     if completed_count:
         reason = (
-            f"Parallel scan completed with {failed_count}/{total_count} failed shard(s); "
+            f"Parallel scan has incomplete execution ({details}; {incomplete_count}/{total_count} shard(s)); "
             "grade is not reliable for full shard coverage"
         )
     else:
         reason = (
-            f"Parallel scan had {failed_count}/{total_count} failed shard(s) and no completed shards; "
+            f"Parallel scan has no fully completed shard ({details}); "
             "grade is not reliable"
         )
 
@@ -8064,6 +8092,8 @@ def _mark_parallel_parent_degraded(
         meta["degraded"] = True
         meta["grade_reliable"] = False
         meta["parallel_shards_failed"] = failed_count
+        meta["parallel_shards_cancelled"] = cancelled_count
+        meta["parallel_shards_partial"] = partial_count
         meta["parallel_shards_total"] = total_count
 
     result = merged.setdefault("result", {})
@@ -8211,6 +8241,43 @@ async def _create_full_coverage_campaign(
     )
 
 
+def _enqueue_parallel_discovery_continuation(
+    redis_client,
+    *,
+    parent_id: str,
+    parent_job_id: str,
+    discovery_scan_id: str,
+    target: str,
+    options: dict[str, Any],
+    parallel_worker_count: int = 0,
+) -> bool:
+    """Wake the local planner exactly once after placed discovery is durable."""
+    guard = parallel_scan.discovery_continue_guard_key(parent_id)
+    claimed = redis_client.set(guard, "1", nx=True, ex=86400)
+    if not claimed:
+        return False
+    payload = {
+        'type': parallel_scan.PLAN_JOB_TYPE,
+        'job_id': parent_job_id,
+        'scan_id': parent_id,
+        'target': target,
+        'options': options,
+        'plan_stage': 'fanout',
+        'discovery_scan_id': discovery_scan_id,
+        'parallel_worker_count': int(parallel_worker_count or 0),
+        'placement': {'node_scope': 'local'},
+        'attempt': 1,
+        'plan_version': parallel_scan.PLAN_VERSION,
+        'submitted_at': utc_now_iso(),
+    }
+    try:
+        enqueue_job(redis_client, QUEUE_NAME, payload)
+    except Exception:
+        redis_client.delete(guard)
+        raise
+    return True
+
+
 async def process_scan_plan_job(job_data: dict):
     """Plan stage: decompose a parent scan into shard jobs (or fall back to a
     standalone scan when there is nothing to parallelize)."""
@@ -8262,64 +8329,221 @@ async def process_scan_plan_job(job_data: dict):
         scan_type,
         options.get('shard_strategy') or 'auto',
     )
+    plan_stage = str(job_data.get('plan_stage') or 'start')
+
+    # Coverage discovery is executable target traffic, so it must honor the
+    # user's placement. Create one ordinary shard job first; broker nodes can run
+    # it without database access. Its durable result then wakes a local-only
+    # continuation that performs pure planning and fan-out.
+    if (
+        requested_strategy in {'coverage', 'coverage_family'}
+        and plan_stage == 'start'
+        and not options.get('custom_endpoints')
+    ):
+        async with db_pool.acquire() as conn:
+            existing_discovery = await conn.fetchrow(
+                """
+                SELECT id, job_id, status FROM scans
+                WHERE parent_scan_id=$1 AND scan_role=$2
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                uuid.UUID(parent_id), parallel_scan.PARALLEL_DISCOVERY_ROLE,
+            )
+        if existing_discovery:
+            existing_status = str(existing_discovery.get('status') or '')
+            if existing_status in {'completed', 'failed'}:
+                _enqueue_parallel_discovery_continuation(
+                    r,
+                    parent_id=parent_id,
+                    parent_job_id=parent_job_id,
+                    discovery_scan_id=str(existing_discovery['id']),
+                    target=target_url,
+                    options=options,
+                    parallel_worker_count=int(job_data.get('parallel_worker_count') or 0),
+                )
+            print(
+                f"[{parent_id[:8]}] discovery stage already {existing_status or 'present'}; duplicate plan skipped",
+                flush=True,
+            )
+            return
+        discovery_id = str(uuid.uuid4())
+        discovery_job_id = str(uuid.uuid4())
+        discovery_opts = parallel_scan._base_child_options(options)
+        discovery_opts['scan_type'] = 'smart'
+        discovery_opts['parallel_discovery'] = True
+        discovery_opts['parallel_stage'] = 'discovery'
+        discovery_opts['skip_global_checks'] = True
+        discovery_opts.pop('custom_endpoints', None)
+        for key in (
+            'check_family', 'asm_check_family', 'coverage_attempt_family',
+            'coverage_family_aware', 'sqli', 'xss',
+        ):
+            discovery_opts.pop(key, None)
+        parallel_scan._merge_custom_budget(
+            discovery_opts, dict(parallel_scan.RECON_DISCOVERY_BUDGET)
+        )
+        discovery_opts['queue_handoff_confirmed'] = False
+        parent_options = dict(options)
+        parent_options['parallel_strategy'] = requested_strategy
+        parent_options['parallel_stage'] = 'discovery'
+        parent_options[parallel_scan.PARALLEL_FANOUT_COMPLETE_KEY] = False
+        parent_options[parallel_scan.PARALLEL_EXPECTED_SHARDS_KEY] = 0
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                updated = await conn.execute(
+                    """
+                    UPDATE scans SET status='running', started_at=COALESCE(started_at, $1),
+                        current_phase='parallel_discovery', progress=GREATEST(progress, 2),
+                        options=$2
+                    WHERE id=$3 AND status <> 'cancelled'
+                    """,
+                    now, json.dumps(parent_options), uuid.UUID(parent_id),
+                )
+                if updated.endswith('0'):
+                    return
+                await conn.execute(
+                    """
+                    INSERT INTO scans (
+                        id, target_id, target_url, job_id, status, options, scan_type,
+                        parent_scan_id, scan_role, shard_index
+                    ) VALUES ($1,$2,$3,$4,'pending',$5,$6,$7,$8,-1)
+                    """,
+                    uuid.UUID(discovery_id),
+                    uuid.UUID(target_id) if target_id else None,
+                    target_url,
+                    discovery_job_id,
+                    json.dumps(discovery_opts),
+                    scan_type,
+                    uuid.UUID(parent_id),
+                    parallel_scan.PARALLEL_DISCOVERY_ROLE,
+                )
+        discovery_payload = {
+            'type': parallel_scan.SHARD_JOB_TYPE,
+            'job_id': discovery_job_id,
+            'scan_id': discovery_id,
+            'parent_scan_id': parent_id,
+            'target_id': target_id,
+            'target': target_url,
+            'options': discovery_opts,
+            'parallel_discovery': True,
+            'parent_job_id': parent_job_id,
+            'parent_options': options,
+            'parallel_worker_count': int(job_data.get('parallel_worker_count') or 0),
+            'shard_label': 'discovery',
+            'shard_index': -1,
+            'shard_count': 0,
+            'attempt': 1,
+            'plan_version': parallel_scan.PLAN_VERSION,
+            'submitted_at': utc_now_iso(),
+        }
+        try:
+            enqueue_job(r, QUEUE_NAME, discovery_payload)
+        except Exception as exc:
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE scans SET status='failed', progress=100,
+                        current_phase='queue_handoff_failed', completed_at=NOW(),
+                        error_message=$2
+                    WHERE id=$1
+                    """,
+                    uuid.UUID(discovery_id),
+                    f"Parallel discovery queue handoff failed: {exc}"[:1000],
+                )
+            raise
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE scans SET status='queued',
+                    options=jsonb_set(options, '{queue_handoff_confirmed}', 'true'::jsonb, true)
+                WHERE id=$1 AND status='pending'
+                """,
+                uuid.UUID(discovery_id),
+            )
+        r.hset(
+            f"job:{discovery_job_id}",
+            mapping={'status': 'queued', 'target': target_url, 'current_phase': 'discovery'},
+        )
+        r.hset(
+            f"job:{parent_job_id}",
+            mapping={'status': 'running', 'progress': '2', 'current_phase': 'parallel_discovery'},
+        )
+        print(
+            f"[{parent_id[:8]}] queued placed discovery stage {discovery_id[:8]}",
+            flush=True,
+        )
+        return
+
     coverage_auth_states: list[str] = []
     coverage_allocation = 'static'
     harvested: list[str] = []
     harvest_meta: dict[str, Any] | None = None
     precreated_campaign_id: str | None = None
     if requested_strategy in {'coverage', 'coverage_family'}:
-        # Discover-once: run a discovery-focused recon pass (active disabled),
-        # harvest the endpoint worklist, then partition it across shards so the
-        # union approaches full endpoint coverage. Full discovery runs once
-        # here; shards then run zero-rediscovery active checks over their
-        # assigned endpoint slice.
-        async with db_pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE scans SET status = 'running', started_at = $1, current_phase = 'recon', progress = 3 WHERE id = $2",
-                now, uuid.UUID(parent_id),
-            )
-        recon_opts = parallel_scan._base_child_options(options)
-        recon_opts['scan_type'] = 'smart'
-        recon_opts.pop('custom_endpoints', None)
-        # Recon is only the discover-once harvest for coverage planning. Do
-        # not inherit focused active families from the parent, or planning can
-        # run the real BOLA/Auth/SQLi/XSS pass before fan-out.
-        for key in (
-            'check_family',
-            'asm_check_family',
-            'coverage_attempt_family',
-            'coverage_family_aware',
-            'sqli',
-            'xss',
-        ):
-            recon_opts.pop(key, None)
-        # Lean enumeration budget so "planning" finishes fast (overrides any
-        # heavy discovery knobs inherited from the parent/coverage payload).
-        parallel_scan._merge_custom_budget(recon_opts, dict(parallel_scan.RECON_DISCOVERY_BUDGET))
-        print(f"[{parent_id[:8]}] coverage: running discover-once recon", flush=True)
-        # The discover-once recon can run for minutes; keep the plan job's heartbeat
-        # fresh (run_scan does not heartbeat on its own) so the queue heartbeat check
-        # does not reap the now-running plan job mid-discovery.
-        _recon_hb_stop = threading.Event()
-        _recon_hb = threading.Thread(
-            target=send_heartbeats,
-            args=(parent_job_id, _recon_hb_stop),
-            name=f"plan-recon-hb-{parent_job_id[:8]}",
-            daemon=True,
-        )
-        _recon_hb.start()
-        try:
-            # Use the DB-normalized target_url (scheme-full), not the raw queued
-            # target which can be scheme-less when the user submitted without a
-            # scheme — a scheme-less target makes the scanner exit with no JSON.
-            runtime_recon_opts = await _hydrate_managed_scan_credentials(recon_opts, parent_id)
-            recon_result = await run_scan(target_url, runtime_recon_opts, scan_id=parent_id, job_id=parent_job_id)
-        except Exception as e:
+        # The placed discovery shard already executed target traffic. This
+        # continuation only reads its durable result and plans self-contained
+        # endpoint shards on the control plane.
+        discovery_scan_id = str(job_data.get('discovery_scan_id') or '').strip()
+        if discovery_scan_id:
+            async with db_pool.acquire() as conn:
+                discovery = await conn.fetchrow(
+                    """
+                    SELECT id, status, result, error_message
+                    FROM scans
+                    WHERE id=$1 AND parent_scan_id=$2 AND scan_role=$3
+                    """,
+                    uuid.UUID(discovery_scan_id),
+                    uuid.UUID(parent_id),
+                    parallel_scan.PARALLEL_DISCOVERY_ROLE,
+                )
+            if not discovery or str(discovery.get('status') or '') not in {'completed', 'failed'}:
+                print(f"[{parent_id[:8]}] discovery continuation arrived before terminal result", flush=True)
+                return
+            discovery_status = str(discovery.get('status') or '')
+            if discovery_status == 'failed':
+                discovery_error = str(
+                    discovery.get('error_message')
+                    or 'Parallel endpoint discovery failed before producing a durable worklist'
+                )[:1000]
+                parent_error = f"Parallel discovery failed: {discovery_error}"[:1000]
+                failure_result = {
+                    'technical_outcome': 'INCOMPLETE',
+                    'error': parent_error,
+                    'parallel': {
+                        'strategy': requested_strategy,
+                        'stage': 'discovery',
+                        'degraded': True,
+                        'discovery_scan_id': discovery_scan_id,
+                    },
+                }
+                async with db_pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        UPDATE scans SET status='failed', progress=100,
+                            current_phase='parallel_discovery_failed', completed_at=NOW(),
+                            error_message=$2, result=$3
+                        WHERE id=$1 AND status <> 'cancelled'
+                        """,
+                        uuid.UUID(parent_id), parent_error, json.dumps(failure_result),
+                    )
+                r.hset(
+                    f"job:{parent_job_id}",
+                    mapping={
+                        'status': 'failed',
+                        'progress': '100',
+                        'current_phase': 'parallel_discovery_failed',
+                        'error': parent_error,
+                    },
+                )
+                r.expire(f"job:{parent_job_id}", 86400)
+                print(f"[{parent_id[:8]}] {parent_error}", flush=True)
+                return
+            recon_result = _as_report_dict(discovery.get('result')) or {}
+        else:
+            # Explicit endpoint scope can fan out immediately without target
+            # discovery. This is the lowest-latency parallel path.
             recon_result = {}
-            print(f"[{parent_id[:8]}] coverage recon error: {e}", flush=True)
-        finally:
-            _recon_hb_stop.set()
-            _recon_hb.join(timeout=max(1.0, HEARTBEAT_INTERVAL_SECONDS / 2))
+        recon_opts = parallel_scan._base_child_options(options)
         try:
             harvest_limit = int(
                 ((options.get('custom_budget') or {}).get('active_worklist_max'))
@@ -8338,100 +8562,40 @@ async def process_scan_plan_job(job_data: dict):
                   f"{harvest_meta['raw_discovered']} endpoints, testing only "
                   f"{harvest_meta['cap']} (cap). Raise custom_budget.active_worklist_max "
                   f"for full coverage.", flush=True)
-        # Drop spec/OPTIONS-derived phantom endpoints (declared but 404) before they
-        # feed the shard plan and the ASM inventory. Filter recon-discovered only;
-        # user-supplied custom_endpoints are always kept.
         _raw_harvested = len(harvested)
-        harvested = await asm_inventory.filter_reachable_worklist(
-            target_url,  # DB-normalized (scheme-full); raw target may be scheme-less
-            harvested,
-            options,
-            max_probe=max(2000, min(harvest_limit, 6000)),
-            concurrency=48,
-            timeout=3,
-        )
         harvested = parallel_scan._normalize_endpoint_list(
             list(options.get('custom_endpoints') or []) + harvested
         )
         print(f"[{parent_id[:8]}] coverage: harvested {len(harvested)} endpoints from recon "
-              f"({_raw_harvested} pre-reachability-filter)", flush=True)
-        # The coverage shards run zero-rediscovery with no browser crawl and only a
-        # single global-checks pass, so the recon's browser/DOM-XSS findings and
-        # global findings (exposure, BFLA, etc.) — and any the recon already
-        # browser-PROVED — would otherwise be thrown away (we only harvest its
-        # endpoints). Stash them so the merge can union them: this is what keeps
-        # parallel coverage on par with a single smart scan's detection.
-        try:
-            recon_findings = (recon_result or {}).get('findings') or []
-            if recon_findings:
-                r.set(
-                    f"coverage:recon_findings:{parent_id}",
-                    json.dumps(recon_findings, default=str),
-                    ex=86400,
-                )
-                print(f"[{parent_id[:8]}] coverage: stashed {len(recon_findings)} recon "
-                      f"findings for merge", flush=True)
-        except Exception as e:
-            print(f"[{parent_id[:8]}] coverage: recon-findings stash error: {e}", flush=True)
-        coverage_allocation = parallel_scan.coverage_allocation_mode(options)
+              f"({_raw_harvested} discovered)", flush=True)
+        requested_allocation = parallel_scan.coverage_allocation_mode(options)
+        if requested_allocation == 'dynamic':
+            print(
+                f"[{parent_id[:8]}] coverage: database-pull allocation replaced by "
+                "self-contained shards for broker/fleet correctness",
+                flush=True,
+            )
+        coverage_allocation = 'static'
         coverage_auth_states = (
             parallel_scan.available_auth_states(options)
             if options.get('auth_state_shards')
             else [asm_inventory.auth_state_from_options(options)]
         )
-        if coverage_allocation == 'dynamic' and target_id and harvested:
-            planned = (
-                parallel_scan.plan_dynamic_coverage_family_shards(
-                    options,
-                    len(harvested),
-                    auth_state_count=len(coverage_auth_states),
-                    auth_states=coverage_auth_states,
-                    worker_count=int(job_data.get('parallel_worker_count') or 0),
-                )
-                if requested_strategy == 'coverage_family'
-                else parallel_scan.plan_dynamic_coverage_shards(
-                    options,
-                    len(harvested),
-                    auth_state_count=len(coverage_auth_states),
-                    auth_states=coverage_auth_states,
-                )
-            )
-            planned_families = sorted({
-                asm_inventory.normalize_check_family(s.options.get('coverage_attempt_family') or 'all')
-                for s in planned.shards
-            }) if requested_strategy == 'coverage_family' else ['all']
-            async with db_pool.acquire() as conn:
-                precreated_campaign_id = await _create_full_coverage_campaign(
-                    conn,
-                    target_id=target_id,
-                    parent_scan_id=parent_id,
-                    options=options,
-                    shard_count=planned.shard_count,
-                    harvested_count=len(harvested),
-                    coverage_auth_states=coverage_auth_states,
-                    allocation_mode='dynamic',
-                    strategy=requested_strategy,
-                    check_families=planned_families,
-                )
         # Continuous ASM: the recon worklist is the richest endpoint source —
         # persist the whole thing into the per-target inventory (docs §16).
         if target_id and harvested:
             try:
                 async with db_pool.acquire() as conn:
-                    upsert_states = (
-                        coverage_auth_states
-                        if coverage_allocation == 'dynamic' and precreated_campaign_id
-                        else [asm_inventory.auth_state_from_options(recon_opts)]
-                    )
+                    upsert_states = coverage_auth_states
                     n = 0
                     for auth_state in upsert_states:
                         n += await asm_inventory.upsert_endpoints(
                             conn,
                             target_id,
                             harvested,
-                            source='coverage_recon' if coverage_allocation == 'dynamic' else 'recon',
+                            source='coverage_discovery',
                             auth_state=auth_state,
-                            campaign_id=precreated_campaign_id if coverage_allocation == 'dynamic' else None,
+                            campaign_id=None,
                             scan_id=parent_id,
                         )
                 print(
@@ -8440,34 +8604,11 @@ async def process_scan_plan_job(job_data: dict):
                 )
             except Exception as e:
                 print(f"[{parent_id[:8]}] ASM inventory error: {e}", flush=True)
-        if coverage_allocation == 'dynamic' and target_id and harvested:
-            plan = (
-                parallel_scan.plan_dynamic_coverage_family_shards(
-                    options,
-                    len(harvested),
-                    auth_state_count=len(coverage_auth_states),
-                    auth_states=coverage_auth_states,
-                    worker_count=int(job_data.get('parallel_worker_count') or 0),
-                )
-                if requested_strategy == 'coverage_family'
-                else parallel_scan.plan_dynamic_coverage_shards(
-                    options,
-                    len(harvested),
-                    auth_state_count=len(coverage_auth_states),
-                    auth_states=coverage_auth_states,
-                )
-            )
-        elif requested_strategy == 'coverage_family':
-            coverage_allocation = 'static'
+        if requested_strategy == 'coverage_family':
             plan = parallel_scan.plan_coverage_family_shards(options, harvested)
         else:
-            if coverage_allocation == 'dynamic':
-                print(
-                    f"[{parent_id[:8]}] coverage: dynamic allocation unavailable; falling back to static slices",
-                    flush=True,
-                )
-            coverage_allocation = 'static'
             plan = parallel_scan.plan_coverage_shards(options, harvested)
+        plan = parallel_scan.with_coverage_backbone(plan, options)
     else:
         plan = parallel_scan.plan_shards(
             options,
@@ -8517,112 +8658,135 @@ async def process_scan_plan_job(job_data: dict):
         if harvested and coverage_auth_states:
             planned_families = {
                 asm_inventory.normalize_check_family(s.options.get('coverage_attempt_family') or 'all')
-                for s in plan.shards
-            } if plan.strategy == 'coverage_family' and coverage_allocation == 'dynamic' else {'all'}
+                for s in plan.shards if not s.options.get('parallel_backbone')
+            } if plan.strategy == 'coverage_family' else {'all'}
             parent_options['coverage_check_families'] = sorted(planned_families)
             family_multiplier = max(1, len(planned_families))
             parent_options['coverage_expected_attempts'] = len(harvested) * max(1, len(coverage_auth_states)) * family_multiplier
-    async with db_pool.acquire() as conn:
-        campaign_id = precreated_campaign_id
-        if plan.strategy in {'coverage', 'coverage_family'} and coverage_allocation == 'dynamic' and target_id:
-            if not coverage_auth_states:
-                coverage_auth_states = (
-                    parallel_scan.available_auth_states(options)
-                    if options.get('auth_state_shards')
-                    else [asm_inventory.auth_state_from_options(options)]
-                )
-            if not campaign_id:
-                planned_families = sorted({
-                    asm_inventory.normalize_check_family(s.options.get('coverage_attempt_family') or 'all')
-                    for s in plan.shards
-                }) if plan.strategy == 'coverage_family' else ['all']
-                campaign_id = await _create_full_coverage_campaign(
-                    conn,
-                    target_id=target_id,
-                    parent_scan_id=parent_id,
-                    options=options,
-                    shard_count=plan.shard_count,
-                    harvested_count=len(harvested) if requested_strategy in {'coverage', 'coverage_family'} else 0,
-                    coverage_auth_states=coverage_auth_states,
-                    allocation_mode=coverage_allocation,
-                    strategy=plan.strategy,
-                    check_families=planned_families,
-                )
-            parent_options['campaign_id'] = campaign_id
-        update_result = await conn.execute("""
-            UPDATE scans SET status = 'running', started_at = $1,
-                current_phase = $2, progress = 5, shard_count = $3,
-                options = $4, campaign_id = COALESCE($5, campaign_id)
-            WHERE id = $6
-              AND status <> 'cancelled'
-        """, now, f'sharded:{plan.strategy}', plan.shard_count,
-             json.dumps(parent_options),
-             uuid.UUID(campaign_id) if campaign_id else None,
-             uuid.UUID(parent_id))
-        if update_result.endswith("0"):
-            print(f"[{parent_id[:8]}] parent scan cancelled before fan-out; plan job skipped", flush=True)
-            if campaign_id:
-                await asm_inventory.finish_campaign(conn, campaign_id, status='cancelled')
-            r.hset(
-                f"job:{parent_job_id}",
-                mapping={'status': 'cancelled', 'progress': '100', 'current_phase': 'cancelled'},
+    campaign_id = None
+    parent_options['parallel_stage'] = 'fanout'
+    parent_options['parallel_fanout_started_at'] = utc_now_iso()
+    parent_options[parallel_scan.PARALLEL_FANOUT_COMPLETE_KEY] = False
+    parent_options[parallel_scan.PARALLEL_EXPECTED_SHARDS_KEY] = plan.shard_count
+    planned_request_budget = 0
+    backbone_request_budget = 0
+    for planned_shard in plan.shards:
+        resolved = planned_shard.options.get('resolved_budget')
+        if not isinstance(resolved, dict):
+            resolved = resolve_scan_budget(
+                planned_shard.options.get('scan_type') or scan_type,
+                planned_shard.options.get('budget_profile'),
+                planned_shard.options.get('custom_budget')
+                if isinstance(planned_shard.options.get('custom_budget'), dict) else None,
             )
-            r.expire(f"job:{parent_job_id}", 86400)
-            return
+        try:
+            request_budget = max(0, int(resolved.get('request_max') or 0))
+        except (TypeError, ValueError):
+            request_budget = 0
+        planned_request_budget += request_budget
+        if planned_shard.options.get('parallel_backbone'):
+            backbone_request_budget += request_budget
+    parent_options['parallel_planned_request_budget'] = planned_request_budget
+    parent_options['parallel_backbone_request_budget'] = backbone_request_budget
+    child_jobs: list[tuple[str, str, dict[str, Any], dict[str, Any]]] = []
+    for shard in plan.shards:
+        child_id = str(uuid.uuid4())
+        child_job_id = str(uuid.uuid4())
+        child_options = dict(shard.options)
+        child_options['queue_handoff_confirmed'] = False
+        payload = {
+            'type': parallel_scan.SHARD_JOB_TYPE,
+            'job_id': child_job_id,
+            'scan_id': child_id,
+            'parent_scan_id': parent_id,
+            'campaign_id': None,
+            'target_id': target_id,
+            'target': target_url,
+            'options': child_options,
+            'shard_label': shard.label,
+            'shard_index': shard.index,
+            'shard_count': plan.shard_count,
+            'attempt': 1,
+            'plan_version': parallel_scan.PLAN_VERSION,
+            'submitted_at': utc_now_iso(),
+        }
+        child_jobs.append((child_id, child_job_id, child_options, payload))
 
-        for shard in plan.shards:
-            child_id = str(uuid.uuid4())
-            child_job_id = str(uuid.uuid4())
-            await conn.execute("""
-                INSERT INTO scans (id, target_id, target_url, job_id, status, options,
-                                   scan_type, parent_scan_id, scan_role, shard_index, shard_count,
-                                   campaign_id)
-                VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, 'shard', $8, $9, $10)
-            """, uuid.UUID(child_id),
-                 uuid.UUID(target_id) if target_id else None,
-                 target_url, child_job_id, json.dumps(shard.options), scan_type,
-                 uuid.UUID(parent_id), shard.index, plan.shard_count,
-                 uuid.UUID(campaign_id) if campaign_id else None)
-            enqueue_job(r, QUEUE_NAME, {
-                'type': asm_inventory.EXPLOIT_BATCH_JOB_TYPE if shard.options.get('coverage_dynamic_worker') else parallel_scan.SHARD_JOB_TYPE,
-                'job_id': child_job_id,
-                'scan_id': child_id,
-                'parent_scan_id': parent_id,
-                'campaign_id': campaign_id,
-                'target_id': target_id,
-                # Children must scan the DB-normalized target_url (scheme-full), not
-                # the raw queued target — a scheme-less target makes every shard's
-                # scanner exit with no JSON, failing the whole parent merge.
-                'target': target_url,
-                'options': shard.options,
-                'shard_label': shard.label,
-                'shard_index': shard.index,
-                'shard_count': plan.shard_count,
-                'attempt': 1,
-                'plan_version': parallel_scan.PLAN_VERSION,
-                'batch_size': shard.options.get('coverage_dynamic_batch_size') or options.get('coverage_dynamic_batch_size') or options.get('coverage_per_shard_cap') or parallel_scan.COVERAGE_DYNAMIC_BATCH_SIZE,
-                'stale_days': shard.options.get('coverage_stale_days', 0),
-                'exploit_depth': bool(options.get('exploit_depth')),
-                'check_family': shard.options.get('coverage_attempt_family') or shard.options.get('asm_check_family') or 'all',
-                'campaign_only': bool(shard.options.get('coverage_dynamic_campaign_only')),
-                'finish_campaign_on_complete': False,
-                'coverage_dynamic_worker': bool(shard.options.get('coverage_dynamic_worker')),
-                'submitted_at': utc_now_iso(),
-            })
-            r.hset(f"job:{child_job_id}", mapping={'status': 'queued', 'target': target})
+    # Publish barrier part 1: make the complete expected child set durable in one
+    # transaction before any worker can observe a queue message.
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            update_result = await conn.execute("""
+                UPDATE scans SET status='running', started_at=COALESCE(started_at, $1),
+                    current_phase=$2, progress=GREATEST(progress, 20), shard_count=$3,
+                    options=$4
+                WHERE id=$5 AND status <> 'cancelled'
+            """, now, f'fanout:{plan.strategy}', plan.shard_count,
+                 json.dumps(parent_options), uuid.UUID(parent_id))
+            if update_result.endswith("0"):
+                print(f"[{parent_id[:8]}] parent scan cancelled before fan-out; plan job skipped", flush=True)
+                r.hset(
+                    f"job:{parent_job_id}",
+                    mapping={'status': 'cancelled', 'progress': '100', 'current_phase': 'cancelled'},
+                )
+                r.expire(f"job:{parent_job_id}", 86400)
+                return
+            for child_id, child_job_id, child_options, payload in child_jobs:
+                await conn.execute("""
+                    INSERT INTO scans (id, target_id, target_url, job_id, status, options,
+                                       scan_type, parent_scan_id, scan_role, shard_index, shard_count)
+                    VALUES ($1,$2,$3,$4,'pending',$5,$6,$7,'shard',$8,$9)
+                """, uuid.UUID(child_id),
+                     uuid.UUID(target_id) if target_id else None,
+                     target_url, child_job_id, json.dumps(child_options), scan_type,
+                     uuid.UUID(parent_id), payload['shard_index'], plan.shard_count)
 
     r.set(parallel_scan.shards_remaining_key(parent_id), plan.shard_count, ex=86400)
-    _dyn_shards = sum(1 for s in plan.shards if s.options.get('coverage_dynamic_worker'))
-    _static_shards = plan.shard_count - _dyn_shards
-    if _dyn_shards and not _static_shards:
-        _allocation = 'dynamic'
-    elif _static_shards and not _dyn_shards:
-        _allocation = 'static'
-    else:
-        _allocation = 'mixed'
+    enqueue_failures = 0
+    for child_id, child_job_id, child_options, payload in child_jobs:
+        try:
+            enqueue_job(r, QUEUE_NAME, payload)
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE scans SET status='queued',
+                        options=jsonb_set(options, '{queue_handoff_confirmed}', 'true'::jsonb, true)
+                    WHERE id=$1 AND status='pending'
+                    """,
+                    uuid.UUID(child_id),
+                )
+            r.hset(f"job:{child_job_id}", mapping={'status': 'queued', 'target': target_url})
+        except Exception as exc:
+            enqueue_failures += 1
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE scans SET status='failed', progress=100,
+                        current_phase='queue_handoff_failed', completed_at=NOW(),
+                        error_message=$2
+                    WHERE id=$1 AND status='pending'
+                    """,
+                    uuid.UUID(child_id),
+                    f"Shard queue handoff failed: {exc}"[:1000],
+                )
+
+    # Publish barrier part 2: only now may reconciliation observe a complete
+    # fan-out. Fast children cannot merge a prefix of the planned set.
+    parent_options['parallel_stage'] = 'execution'
+    parent_options[parallel_scan.PARALLEL_FANOUT_COMPLETE_KEY] = True
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE scans SET current_phase=$2, progress=GREATEST(progress, 20), options=$3
+            WHERE id=$1 AND status <> 'cancelled'
+            """,
+            uuid.UUID(parent_id), f'sharded:{plan.strategy}', json.dumps(parent_options),
+        )
+        await parallel_scan.reconcile_parallel_parent(conn, parent_id, r, QUEUE_NAME)
+
     print(
         f"[{parent_id[:8]}] fanned out {plan.shard_count} '{plan.strategy}' shards "
-        f"(allocation={_allocation}, dynamic_pull_workers={_dyn_shards}, static_slices={_static_shards})",
+        f"(allocation=self-contained, queue_failures={enqueue_failures})",
         flush=True,
     )
     # Planning is done and the shards are enqueued: free the plan job so it no longer
@@ -8645,6 +8809,9 @@ async def process_scan_shard_job(job_data: dict):
     target = job_data.get('target')
     options = job_data.get('options', {}) or {}
     broker_ingest = bool(job_data.get("_broker_result_id"))
+    parallel_discovery = bool(
+        job_data.get('parallel_discovery') or options.get('parallel_discovery')
+    )
     label = job_data.get('shard_label', 'shard')
     idx = job_data.get('shard_index')
     total = job_data.get('shard_count')
@@ -8818,6 +8985,9 @@ async def process_scan_shard_job(job_data: dict):
         grade = result.get('result', {}).get('grade')
         findings = result.get('findings', [])
         error = result.get('error')
+        partial = bool(
+            not error and not parallel_discovery and _parallel_result_is_partial(result)
+        )
         filepath = await persist_result_artifact(
             result,
             job_id,
@@ -8846,20 +9016,23 @@ async def process_scan_shard_job(job_data: dict):
                 await conn.execute("""
                     UPDATE scans SET status = 'completed', result = $1, score = $2,
                         grade = $3, findings_count = $4, completed_at = $5,
-                        duration_seconds = $6, progress = 100, current_phase = 'completed'
-                    WHERE id = $7
+                        duration_seconds = $6, progress = 100, current_phase = $7
+                    WHERE id = $8
                 """, json.dumps(result), score, grade, len(findings),
-                     completed_at, duration, uuid.UUID(scan_id))
+                     completed_at, duration, 'partial' if partial else 'completed',
+                     uuid.UUID(scan_id))
 
         final_status = 'failed' if error else 'completed'
+        final_phase = 'failed' if error else ('partial' if partial else 'completed')
         if current and current['status'] in ('failed', 'cancelled'):
             final_status = current['status']
+            final_phase = current['status']
         r.hset(f"job:{job_id}", mapping={
             'status': final_status,
             'result_path': filepath,
             'completed_at': completed_at.isoformat(),
             'progress': '100',
-            'current_phase': final_status,
+            'current_phase': final_phase,
         })
         r.expire(f"job:{job_id}", 86400)
         print(f"[{job_id[:8]}] Shard '{label}' done | findings: {len(findings)} | error: {bool(error)}", flush=True)
@@ -8868,10 +9041,29 @@ async def process_scan_shard_job(job_data: dict):
         heartbeat_thread.join(timeout=max(1.0, HEARTBEAT_INTERVAL_SECONDS / 2))
         if slot_acquired:
             _release_parallel_shard_slot(r, parent_id, job_id)
-        # Barrier + merge trigger. The DB all-terminal check in
-        # reconcile_parallel_parent is the source of truth (robust to a shard
-        # that crashed before reaching here and was failed by the stale checker).
-        if parent_id:
+        # Discovery wakes a local-only continuation. Normal shards enter the
+        # all-terminal barrier. Both paths are idempotent under redelivery.
+        if parallel_discovery and parent_id:
+            try:
+                continued = _enqueue_parallel_discovery_continuation(
+                    r,
+                    parent_id=parent_id,
+                    parent_job_id=str(job_data.get('parent_job_id') or parent_id),
+                    discovery_scan_id=scan_id,
+                    target=target,
+                    options=dict(job_data.get('parent_options') or {}),
+                    parallel_worker_count=int(job_data.get('parallel_worker_count') or 0),
+                )
+                if continued:
+                    print(
+                        f"[{job_id[:8]}] discovery durable -> enqueued fan-out continuation",
+                        flush=True,
+                    )
+            except Exception as e:
+                print(f"[{job_id[:8]}] discovery continuation enqueue error: {e}", flush=True)
+        elif parent_id:
+            # Barrier + merge trigger. The DB all-terminal check in
+            # reconcile_parallel_parent is the source of truth.
             try:
                 r.decr(parallel_scan.shards_remaining_key(parent_id))
             except Exception:
@@ -8916,8 +9108,11 @@ async def process_scan_merge_job(job_data: dict):
             return
         children = await conn.fetch("""
             SELECT id, status, result, score, grade, findings_count, shard_index,
-                   options, started_at, completed_at, campaign_id, error_message
-            FROM scans WHERE parent_scan_id = $1 ORDER BY shard_index
+                   options, started_at, completed_at, campaign_id, error_message,
+                   current_phase, executing_node_id, worker_id
+            FROM scans
+            WHERE parent_scan_id = $1 AND scan_role='shard'
+            ORDER BY shard_index
         """, uuid.UUID(parent_id))
 
     target_id = str(parent['target_id']) if parent['target_id'] else None
@@ -8933,6 +9128,7 @@ async def process_scan_merge_job(job_data: dict):
     base_section_count = -1
     shard_summaries = []
     shard_coverage_records: list[dict] = []
+    shard_execution_evidence: list[dict[str, Any]] = []
     shard_worklists_by_auth: dict[str, list] = {}  # ASM: union per auth identity
     min_score = None
     min_score_grade = None
@@ -8940,18 +9136,31 @@ async def process_scan_merge_job(job_data: dict):
         cres = _as_report_dict(ch['result'])
         status = ch['status']
         child_options = _as_report_dict(ch['options']) or {}
+        child_partial = bool(
+            str(ch.get('current_phase') or '') == 'partial'
+            or (status == 'completed' and _parallel_result_is_partial(cres))
+        )
         sc = cres.get('smart_coverage') if isinstance(cres, dict) else None
         shard_coverage_records.append({
             'status': status,
             'options': child_options,
             'smart_coverage': sc if isinstance(sc, dict) else {},
+            'partial': child_partial,
         })
         shard_summaries.append({
+            'scan_id': str(ch['id']),
             'shard_index': ch['shard_index'],
             'status': status,
             'score': ch['score'],
             'grade': ch['grade'],
             'findings_count': ch['findings_count'],
+            'partial': child_partial,
+            'stage': child_options.get('parallel_stage'),
+            'node_id': str(ch.get('executing_node_id')) if ch.get('executing_node_id') else None,
+            'worker_id': ch.get('worker_id'),
+            'started_at': ch.get('started_at').isoformat() if ch.get('started_at') else None,
+            'completed_at': ch.get('completed_at').isoformat() if ch.get('completed_at') else None,
+            'error': ch.get('error_message'),
         })
         if status == 'completed' and ch['score'] is not None:
             if min_score is None or ch['score'] < min_score:
@@ -8959,11 +9168,28 @@ async def process_scan_merge_job(job_data: dict):
                 min_score_grade = ch['grade']
         if not cres:
             continue
+        shard_execution_evidence.append({
+            'scan_id': str(ch['id']),
+            'shard_index': ch['shard_index'],
+            'stage': child_options.get('parallel_stage'),
+            'checks_skipped': cres.get('checks_skipped')
+                if isinstance(cres.get('checks_skipped'), list)
+                else ((_as_report_dict(cres.get('scan_metadata')) or {}).get('checks_skipped') or []),
+            'scanner_execution_receipts': cres.get('scanner_execution_receipts')
+                if isinstance(cres.get('scanner_execution_receipts'), list)
+                else [],
+        })
         wl = (cres.get('active_checks') or {}).get('active_worklist')
         if wl:
             auth_state = asm_inventory.auth_state_from_options(child_options)
             shard_worklists_by_auth.setdefault(auth_state, []).extend(wl)
-        if status == 'completed':
+        if status == 'completed' and child_options.get('parallel_backbone'):
+            # The backbone carries the complete single-Smart report contract.
+            # Endpoint shards enrich it; they must never replace its browser,
+            # posture, discovery, and execution-receipt sections.
+            base_section_count = 10**9
+            base_result = cres
+        elif status == 'completed':
             section_count = len(cres.get('result', {}) or {})
             if section_count > base_section_count:
                 base_section_count = section_count
@@ -9127,13 +9353,29 @@ async def process_scan_merge_job(job_data: dict):
 
     completed_n = sum(1 for c in children if c['status'] == 'completed')
     failed_n = sum(1 for c in children if c['status'] == 'failed')
+    cancelled_n = sum(1 for c in children if c['status'] == 'cancelled')
+    partial_n = sum(
+        1 for c in children
+        if c['status'] == 'completed' and (
+            str(c.get('current_phase') or '') == 'partial'
+            or _parallel_result_is_partial(_as_report_dict(c.get('result')))
+        )
+    )
     strategy = parent_options.get('parallel_strategy')
     merged['parallel'] = {
         'strategy': strategy,
+        'planned_request_budget': parent_options.get('parallel_planned_request_budget'),
+        'backbone_request_budget': parent_options.get('parallel_backbone_request_budget'),
         'shards': shard_summaries,
+        # Keep every child's execution proof without replacing the backbone's
+        # top-level report contract. This makes the merged report auditable while
+        # preserving the normal single-scan sections consumers already expect.
+        'execution_evidence_by_shard': shard_execution_evidence,
         'shards_total': len(children),
         'shards_completed': completed_n,
         'shards_failed': failed_n,
+        'shards_cancelled': cancelled_n,
+        'shards_partial': partial_n,
     }
 
     # Coverage-aware merge: the parent must reflect the whole fan-out, not just
@@ -9153,10 +9395,18 @@ async def process_scan_merge_job(job_data: dict):
         agg_cov['coverage_reports_from_shards'] = coverage_merge.get('coverage_reports_from_shards', 0)
         merged['smart_coverage'] = agg_cov  # top-level report section
 
-    if _mark_parallel_parent_degraded(merged, failed_count=failed_n, total_count=len(children)):
+    if _mark_parallel_parent_degraded(
+        merged,
+        failed_count=failed_n,
+        cancelled_count=cancelled_n,
+        partial_count=partial_n,
+        total_count=len(children),
+    ):
         if isinstance(merged.get('result'), dict):
             agg_grade = merged['result'].get('grade', agg_grade)
             agg_score = merged['result'].get('score', agg_score)
+    technically_incomplete = bool(failed_n or cancelled_n or partial_n)
+    merged['technical_outcome'] = 'INCOMPLETE' if technically_incomplete else 'COMPLETE'
 
     # Correct the report's target identity to the actual scanned target (guards
     # against any stale per-shard input drift). `input` is a top-level section.
@@ -9239,7 +9489,8 @@ async def process_scan_merge_job(job_data: dict):
             WHERE id = $10
         """, parent_status, json.dumps(merged), agg_score, agg_grade,
              len(union_findings), completed_at, duration,
-             'completed' if parent_status == 'completed' else 'failed',
+             ('completed_partial' if technically_incomplete else 'completed')
+             if parent_status == 'completed' else 'failed',
              parent_error_message,
              uuid.UUID(parent_id))
 

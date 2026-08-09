@@ -790,6 +790,11 @@ def _attach_parallel_shard_rollup(result: dict[str, Any], shards: list[dict[str,
         'total': len(shards),
         'completed': sum(1 for s in shards if s.get('status') == 'completed'),
         'failed': sum(1 for s in shards if s.get('status') == 'failed'),
+        'cancelled': sum(1 for s in shards if s.get('status') == 'cancelled'),
+        'partial': sum(
+            1 for s in shards
+            if s.get('status') == 'completed' and s.get('current_phase') == 'partial'
+        ),
         'running': sum(1 for s in shards if s.get('status') == 'running'),
         'pending': sum(1 for s in shards if s.get('status') == 'pending'),
         'terminal': sum(1 for s in shards if s.get('status') in terminal),
@@ -799,9 +804,10 @@ def _attach_parallel_shard_rollup(result: dict[str, Any], shards: list[dict[str,
     if contribution_rollup:
         result['shard_rollup']['contribution'] = contribution_rollup
     if shards and result.get('status') in {'pending', 'running'}:
-        current = int(result.get('progress') or 0)
-        # Keep unfinished parents below 100; the merge job owns completion.
-        result['progress'] = min(99, max(current, average_progress))
+        # Execution owns 20-90% of logical progress. Child-local scanners may
+        # report 0-100, but must never drive the parent to 94% before fan-out or
+        # make it regress when the stage changes.
+        result['progress'] = min(90, 20 + int(round(average_progress * 0.70)))
 
 
 def get_redis():
@@ -1863,7 +1869,11 @@ def _hidden_scan_roles_for_list(*, include_shards: bool = False, include_interna
     if not include_shards:
         hidden.append("shard")
     if not include_internal:
-        hidden.extend([asm_inventory.ASM_BATCH_ROLE, asm_inventory.ASM_RECON_ROLE])
+        hidden.extend([
+            asm_inventory.ASM_BATCH_ROLE,
+            asm_inventory.ASM_RECON_ROLE,
+            parallel_scan.PARALLEL_DISCOVERY_ROLE,
+        ])
     return hidden
 
 
@@ -2806,12 +2816,122 @@ async def cleanup_stale_parents(pool: asyncpg.Pool):
                 print(f"[cleanup] stale-parent reconcile error for {parent_id[:8]}: {e}", flush=True)
 
 
+async def recover_parallel_orchestration(pool: asyncpg.Pool) -> int:
+    """Recover the DB->queue seams of staged parallel execution.
+
+    Discovery results and the complete fan-out set are durable in Postgres. A
+    process/Redis restart may lose the small continuation or confirmation window;
+    this recreates it without rerunning target traffic or duplicating shards.
+    """
+    r = get_redis()
+    repaired = 0
+    async with pool.acquire() as conn:
+        discoveries = await conn.fetch(
+            """
+            SELECT p.id, p.job_id, p.target_url, p.options,
+                   d.id AS discovery_id, d.status AS discovery_status
+            FROM scans p
+            JOIN LATERAL (
+                SELECT id, status FROM scans
+                WHERE parent_scan_id=p.id AND scan_role=$1
+                ORDER BY created_at DESC LIMIT 1
+            ) d ON true
+            WHERE p.scan_role='parent' AND p.status='running'
+              AND p.options->>'parallel_stage'='discovery'
+              AND d.status IN ('completed','failed')
+            """,
+            parallel_scan.PARALLEL_DISCOVERY_ROLE,
+        )
+        for row in discoveries:
+            parent_id = str(row['id'])
+            guard = parallel_scan.discovery_continue_guard_key(parent_id)
+            if not r.set(guard, '1', nx=True, ex=86400):
+                continue
+            options = parse_json_field(row.get('options')) or {}
+            payload = {
+                'type': parallel_scan.PLAN_JOB_TYPE,
+                'job_id': str(row.get('job_id') or parent_id),
+                'scan_id': parent_id,
+                'target': str(row.get('target_url') or ''),
+                'options': options,
+                'plan_stage': 'fanout',
+                'discovery_scan_id': str(row['discovery_id']),
+                'parallel_worker_count': int(options.get('worker_fleet_size_at_submit') or 0),
+                'placement': {'node_scope': 'local'},
+                'attempt': 1,
+                'plan_version': parallel_scan.PLAN_VERSION,
+                'submitted_at': utc_now_iso(),
+            }
+            try:
+                enqueue_job(r, QUEUE_NAME, payload)
+                repaired += 1
+            except Exception:
+                r.delete(guard)
+                logger.exception("Failed to recover parallel discovery continuation for %s", parent_id)
+
+        # A crash after child-row commit but before the final fan-out marker
+        # leaves a complete, inspectable set. After a short grace period, fail
+        # only unconfirmed handoffs and open the merge barrier.
+        fanouts = await conn.fetch(
+            """
+            SELECT id, shard_count, options FROM scans
+            WHERE scan_role='parent' AND status='running'
+              AND options->>'parallel_stage'='fanout'
+              AND options->>'parallel_fanout_complete'='false'
+            """
+        )
+        now = utc_now()
+        for parent in fanouts:
+            options = parse_json_field(parent.get('options')) or {}
+            started = _parse_iso_datetime(options.get('parallel_fanout_started_at'))
+            if started is None or (now.replace(tzinfo=timezone.utc) - started).total_seconds() < 120:
+                continue
+            expected = int(
+                options.get(parallel_scan.PARALLEL_EXPECTED_SHARDS_KEY)
+                or parent.get('shard_count')
+                or 0
+            )
+            children = await conn.fetch(
+                """
+                SELECT id, status, options FROM scans
+                WHERE parent_scan_id=$1 AND scan_role='shard'
+                """,
+                parent['id'],
+            )
+            if expected < 1 or len(children) != expected:
+                continue
+            for child in children:
+                child_options = parse_json_field(child.get('options')) or {}
+                if child['status'] == 'pending' and child_options.get('queue_handoff_confirmed') is False:
+                    await conn.execute(
+                        """
+                        UPDATE scans SET status='failed', progress=100,
+                            current_phase='queue_handoff_failed', completed_at=NOW(),
+                            error_message='Shard queue handoff was not confirmed before recovery deadline'
+                        WHERE id=$1 AND status='pending'
+                        """,
+                        child['id'],
+                    )
+            options[parallel_scan.PARALLEL_FANOUT_COMPLETE_KEY] = True
+            options['parallel_stage'] = 'execution'
+            await conn.execute(
+                "UPDATE scans SET options=$2, current_phase='parallel_execution' WHERE id=$1",
+                parent['id'], json.dumps(options),
+            )
+            await parallel_scan.reconcile_parallel_parent(
+                conn, str(parent['id']), r, QUEUE_NAME
+            )
+            repaired += 1
+    return repaired
+
+
 async def stale_scan_checker(pool: asyncpg.Pool):
     """Background task to periodically check for stale scans."""
     print("[cleanup] Stale scan checker started", flush=True)
     while True:
         try:
             await asyncio.sleep(STALE_CHECK_INTERVAL_SECONDS)
+            await recover_parallel_orchestration(pool)
             await cleanup_stale_scans(pool)
             await cleanup_stale_parents(pool)
         except asyncio.CancelledError:
@@ -6200,7 +6320,23 @@ def _deployment_gate_required_evidence_missing(
     result: dict[str, Any], product: str, *, strict_model_intake: bool = False
 ) -> list[dict[str, Any]]:
     missing: list[dict[str, Any]] = []
-    if product == "ai_gate":
+    if product == "dast":
+        meta = result.get("scan_metadata") if isinstance(result.get("scan_metadata"), dict) else {}
+        result_block = result.get("result") if isinstance(result.get("result"), dict) else {}
+        incomplete = bool(
+            result.get("technical_outcome") == "INCOMPLETE"
+            or meta.get("partial")
+            or meta.get("degraded")
+            or meta.get("grade_reliable") is False
+            or result_block.get("grade_reliable") is False
+        )
+        if incomplete:
+            missing.append({
+                "id": "dast_complete_execution",
+                "label": "Complete DAST execution",
+                "status": "incomplete",
+            })
+    elif product == "ai_gate":
         ai_gate = result.get("ai_gate") if isinstance(result.get("ai_gate"), dict) else {}
         execution_plan = ai_gate.get("execution_plan") if isinstance(ai_gate.get("execution_plan"), dict) else {}
         quality_gate = execution_plan.get("judging_quality_gate") if isinstance(execution_plan.get("judging_quality_gate"), dict) else {}
@@ -21463,9 +21599,22 @@ async def get_scan(scan_id: str, verified_only: bool = False):
                 WHERE parent_scan_id = $1
                 ORDER BY shard_index
         """, uuid.UUID(scan_id))
-        shards = [row_to_dict(row) for row in shard_rows]
+        child_rows = [row_to_dict(row) for row in shard_rows]
+        discovery_rows = [
+            row for row in child_rows
+            if row.get('scan_role') == parallel_scan.PARALLEL_DISCOVERY_ROLE
+        ]
+        shards = [row for row in child_rows if row.get('scan_role') == 'shard']
         for shard in shards:
             shard['execution_context'] = _json_object(shard.get('execution_context'))
+        for discovery in discovery_rows:
+            discovery['execution_context'] = _json_object(discovery.get('execution_context'))
+        if discovery_rows:
+            discovery = discovery_rows[-1]
+            result['parallel_discovery'] = _public_parallel_shard(discovery)
+            if not shards and result.get('status') in {'pending', 'running'}:
+                discovery_progress = int(discovery.get('progress') or 0)
+                result['progress'] = min(15, max(2, int(round(discovery_progress * 0.15))))
         _attach_parallel_shard_rollup(result, shards)
     return result
 
@@ -57323,14 +57472,34 @@ async def queue_stats():
         else:
             malformed_queue_entries += 1
     async with db_pool.acquire() as conn:
-        active_scan_job_ids = {
-            str(row["job_id"])
-            for row in await conn.fetch(
-                "SELECT job_id FROM scans WHERE status IN ('pending','queued') AND job_id IS NOT NULL"
-            )
-        }
+        active_rows = await conn.fetch(
+            """
+            SELECT job_id, status, scan_role FROM scans
+            WHERE status IN ('pending','queued','running') AND job_id IS NOT NULL
+            """
+        )
+    active_scan_job_ids = {
+        str(row["job_id"])
+        for row in active_rows
+        if row["status"] in {"pending", "queued"}
+    }
+    active_running_job_ids = {
+        str(row["job_id"])
+        for row in active_rows
+        if row["status"] == "running"
+    }
+    hidden_roles = set(_hidden_scan_roles_for_list())
+    logical_pending = sum(
+        1 for row in active_rows
+        if row["status"] in {"pending", "queued"} and str(row.get("scan_role") or "") not in hidden_roles
+    )
+    logical_running = sum(
+        1 for row in active_rows
+        if row["status"] == "running" and str(row.get("scan_role") or "") not in hidden_roles
+    )
     reconciled_queued_job_ids = queued_job_ids & active_scan_job_ids
     stale_queued_job_hashes = 0
+    stale_running_job_hashes = 0
 
     for key in r.scan_iter("job:*"):
         job_data = r.hgetall(key)
@@ -57341,6 +57510,15 @@ async def queue_stats():
         status_str = job_data.get('status', '')
 
         if status_str == 'running':
+            job_id = str(key).split("job:", 1)[-1]
+            if job_id not in active_running_job_ids:
+                stale_running_job_hashes += 1
+                r.hset(key, mapping={
+                    "status": "orphaned",
+                    "error": "Running job hash has no matching running scan",
+                })
+                r.expire(key, 86400)
+                continue
             heartbeat = job_data.get('heartbeat', '')
             if heartbeat:
                 try:
@@ -57399,9 +57577,14 @@ async def queue_stats():
             retest_failed += 1
 
     result = {
-        'pending': pending_depth(r, QUEUE_NAME),
+        # Dashboard/CLI headline counts are logical user-visible scans. Parallel
+        # discovery, shards, and ASM implementation rows are work units, not
+        # extra scans. Keep both views explicit for operations and diagnostics.
+        'pending': logical_pending,
         'queued': queued,
-        'running': running,
+        'running': logical_running,
+        'work_pending': pending_depth(r, QUEUE_NAME),
+        'work_running': running,
         'completed': completed,
         'failed': failed,
         'retest_pending': pending_depth(r, RETEST_QUEUE_NAME),
@@ -57411,11 +57594,12 @@ async def queue_stats():
         'retest_completed': retest_completed,
         'retest_failed': retest_failed,
         'queue_consistency': {
-            'reconciled': not malformed_queue_entries and not (queued_job_ids - active_scan_job_ids) and not (active_scan_job_ids - queued_job_ids) and not stale_queued_job_hashes,
+            'reconciled': not malformed_queue_entries and not (queued_job_ids - active_scan_job_ids) and not (active_scan_job_ids - queued_job_ids) and not stale_queued_job_hashes and not stale_running_job_hashes,
             'malformed_entries': malformed_queue_entries,
             'queue_without_active_scan': len(queued_job_ids - active_scan_job_ids),
             'active_scan_without_queue_entry': len(active_scan_job_ids - queued_job_ids),
             'stale_queued_job_hashes': stale_queued_job_hashes,
+            'stale_running_job_hashes': stale_running_job_hashes,
         },
     }
     try:

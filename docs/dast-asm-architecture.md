@@ -1,7 +1,7 @@
 # DAST Execution and Continuous ASM Architecture
 
-**Status (reconciled 2026-07-21):** current implementation reference. This document describes the
-shipped local execution model and its safety boundaries. Future fleet work belongs in
+**Status (reconciled 2026-08-09):** current implementation reference. This document describes the
+shipped local and broker execution model and its safety boundaries. Future fleet work belongs in
 [`multi-node-architecture.md`](multi-node-architecture.md); release gates belong in
 [`release-readiness.md`](release-readiness.md).
 
@@ -34,18 +34,20 @@ their own bounded concurrency.
 Eligible active scans can use the shipped local scatter/gather path:
 
 1. The **parent** represents the user-visible logical scan.
-2. A **plan** resolves scope, budgets, inventory, families, and shard assignments.
-3. **Shard** jobs claim disjoint work and run concurrently on available workers.
-4. The **merge** job combines evidence, receipts, findings, coverage, and failure state into the
+2. A placed **discovery** job runs on the selected local or broker node and persists its result.
+3. A local-only **plan** resolves budgets and commits the complete child set before queue publication.
+4. A capability-preserving **backbone** and self-contained endpoint **shards** run concurrently.
+5. The **merge** job combines evidence, receipts, findings, coverage, and failure state into the
    parent result.
 
 Child implementation rows are hidden from normal scan lists. Scan detail exposes logical progress
 and shard rollups. A parent cannot report stronger completion or coverage than its children support:
 failed, cancelled, partial, stale, missing, or malformed shard telemetry degrades the rollup.
 
-Coverage mode is for breadth across workers. It is not the preferred DAST-quality benchmark because
-zero-rediscovery shards intentionally skip some global browser and posture work. Use one Smart scan
-for benchmark scorecards unless a test explicitly evaluates scatter/gather behavior.
+Coverage mode adds breadth across workers without deleting Smart-scan capabilities: the backbone
+retains browser, DOM-XSS, posture, and global checks, while endpoint shards avoid repeating them.
+Use one Smart scan for stable benchmark comparisons; use Full Coverage when the acceptance target is
+scatter/gather correctness, endpoint breadth, or multi-node execution.
 
 ## Continuous ASM loop
 
@@ -96,8 +98,15 @@ Every path resolves bounded time, endpoint, parameter, payload, redirect, respon
 controls where the adapter supports them. Receipts report enforcement and metering quality rather
 than implying exactness where only an estimate or adapter-reported value exists.
 
-Parallel work divides a parent budget; it does not multiply it by the shard count. The merge uses
-the aggregate receipts and fails conservatively when consumption or completion cannot be trusted.
+Full Coverage discovery is a separate placed job with a three-minute passive budget. It must finish
+and persist a non-empty manifest before fan-out; a failed discovery fails the parent visibly instead
+of creating empty endpoint shards.
+
+Scope sharding partitions the parent's request ceiling across disjoint children. Full Coverage is an
+explicit compound workload: one complete backbone plus separately bounded endpoint slices. Endpoint
+children never inherit the full parent request ceiling and do not repeat crawl/browser/Nuclei work;
+the parent records the planned aggregate and backbone request budgets. The merge uses aggregate
+receipts and fails conservatively when consumption or completion cannot be trusted.
 ASM uses smaller target-scoped batches and applies scheduler limits such as active-work exclusion,
 minimum interval, daily caps, allowed windows, and stale-worker rejection.
 
@@ -128,10 +137,10 @@ Workers advertise a build fingerprint. Release and benchmark submissions can req
 current fleet. Scan records stamp the expected fingerprint and stale-worker count at submission so
 results cannot later be mistaken for current-build evidence.
 
-The local queue model is not a multi-node lease protocol. Redis claim semantics and local evidence
-paths are sufficient for the supported single-host deployment, but remote fleets require explicit
-leases, acknowledgement, fencing, artifact transfer, placement, and partition behavior. Those
-requirements are defined in [`multi-node-architecture.md`](multi-node-architecture.md).
+Broker fleets add authenticated leases, acknowledgement, fencing, artifact transfer, placement, and
+partition behavior around the same self-contained shard contract. Discovery follows placement;
+fan-out and merge remain local-only control-plane work. Those requirements are defined in
+[`multi-node-architecture.md`](multi-node-architecture.md).
 
 ## User-facing surfaces
 
