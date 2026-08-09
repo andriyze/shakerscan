@@ -613,6 +613,37 @@ def test_broker_runtime_forces_per_node_compose_project_and_skips_pull_for_local
     argv = calls[1][0]
     assert argv[:4] == ["docker", "compose", "--project-name", "shakerscan-fleet-11111111"]
     assert "pull" not in argv
+    result_root = tmp_path / "results"
+    assert result_root.is_dir()
+    assert result_root.stat().st_mode & 0o777 == 0o755
+    quarantine = result_root / "model-intake-quarantine"
+    assert quarantine.is_dir()
+    assert quarantine.stat().st_mode & 0o777 == 0o755
+    sandbox = result_root / "model-intake-sandbox"
+    assert sandbox.is_dir()
+    assert sandbox.stat().st_mode & 0o777 == 0o777
+
+
+def test_worker_result_directory_preparation_repairs_docker_created_sandbox(tmp_path):
+    paths = fleet_cli.RuntimePaths(tmp_path)
+    sandbox = tmp_path / "results" / "model-intake-sandbox"
+    sandbox.mkdir(parents=True, mode=0o755)
+    sandbox.chmod(0o755)
+
+    fleet_cli._prepare_worker_result_directories(paths)
+
+    assert sandbox.stat().st_mode & 0o777 == 0o777
+
+
+def test_worker_result_directory_preparation_rejects_symlink(tmp_path):
+    paths = fleet_cli.RuntimePaths(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    results = tmp_path / "results"
+    results.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(fleet_cli.FleetCLIError, match="must not be a symlink"):
+        fleet_cli._prepare_worker_result_directories(paths)
 
 
 def test_broker_runtime_stops_only_standalone_project_and_preserves_volumes(tmp_path, monkeypatch):
@@ -965,6 +996,10 @@ def test_broker_init_uses_private_ca_for_public_health_checks(tmp_path, monkeypa
         "-----BEGIN CERTIFICATE-----\nZmFrZQ==\n-----END CERTIFICATE-----\n",
         encoding="utf-8",
     )
+    paths.dotenv.write_text(
+        "SHAKERSCAN_BIND_HOST=100.121.87.22\nSHAKERSCAN_API_PORT=9080\n",
+        encoding="utf-8",
+    )
     calls = []
 
     def fake_api(base, _method, path, **kwargs):
@@ -999,6 +1034,8 @@ def test_broker_init_uses_private_ca_for_public_health_checks(tmp_path, monkeypa
     public_checks = [item for item in calls if item[0] == "https://fleet.internal.example"]
     assert len(public_checks) == 2
     assert all(item[2] == ca_path.resolve() for item in public_checks)
+    artifact_checks = [item for item in calls if item[1].startswith("/artifacts/storage/health")]
+    assert [item[0] for item in artifact_checks] == ["http://100.121.87.22:9080"]
     env = fleet_cli.load_dotenv(paths.dotenv)
     assert env["EVIDENCE_S3_ENDPOINT_URL"] == "http://minio:9000"
     assert env["COMPOSE_PROFILES"] == "artifacts"

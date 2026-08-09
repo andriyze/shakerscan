@@ -1418,7 +1418,7 @@ def command_init(paths: RuntimePaths, args: argparse.Namespace) -> None:
             else:
                 _require_public_fleet_auth_boundary(public_url, enrollment_ca)
             artifact_health = api_json(
-                "http://127.0.0.1:8080",
+                local_api_url(paths),
                 "GET",
                 "/artifacts/storage/health?probe=true",
                 timeout=15,
@@ -1746,6 +1746,36 @@ def _worker_compose_env(
     }
 
 
+def _prepare_worker_result_directories(paths: RuntimePaths) -> None:
+    """Create bind-mount directories before Docker can create them as root.
+
+    The isolated Model Intake service runs as the unprivileged ``scanner``
+    account.  On a fresh worker, Compose otherwise creates its host bind path
+    as root:root/0755, leaving the service unable to publish its heartbeat or
+    results.  The standalone launcher already applies these modes; fleet joins
+    must provide the same first-run contract independently.
+    """
+    directories = (
+        (paths.root / "results", 0o755, 0o005),
+        (paths.root / "results" / "model-intake-quarantine", 0o755, 0o005),
+        (paths.root / "results" / "model-intake-sandbox", 0o777, 0o007),
+    )
+    for path, mode, required_other_bits in directories:
+        if path.is_symlink():
+            raise FleetCLIError(f"worker result directory must not be a symlink: {path}")
+        try:
+            path.mkdir(parents=True, exist_ok=True, mode=mode)
+            path.chmod(mode)
+        except OSError as exc:
+            raise FleetCLIError(f"could not prepare worker result directory {path}: {exc}") from exc
+        actual_mode = path.stat().st_mode & 0o777
+        if actual_mode & required_other_bits != required_other_bits:
+            raise FleetCLIError(
+                f"worker result directory {path} has mode {actual_mode:o}; "
+                f"mode {mode:o} is required for the isolated scanner service"
+            )
+
+
 def _write_compose_env(path: Path, values: dict[str, str]) -> None:
     for value in values.values():
         if any(ch in value for ch in "\r\n"):
@@ -1852,6 +1882,7 @@ def _persist_worker_runtime_template(paths: RuntimePaths, response: dict[str, An
 def _start_worker_runtime(paths: RuntimePaths, response: dict[str, Any]) -> None:
     if not paths.worker_compose.is_file():
         raise FleetCLIError("docker-compose.worker.yml is missing from the runtime")
+    _prepare_worker_result_directories(paths)
     compose = _docker_compose_command()
     compose_env = paths.node / "compose.env"
     compose_values = _worker_compose_env(paths, response)
@@ -1947,6 +1978,7 @@ def _start_broker_runtime(
         raise FleetCLIError("docker-compose.broker-worker.yml is missing from the runtime")
     if runtime_image is not None and not LOCAL_WORKER_IMAGE_RE.fullmatch(runtime_image):
         raise FleetCLIError("local broker worker image reference is invalid")
+    _prepare_worker_result_directories(paths)
     _stop_standalone_runtime_for_worker(paths)
     compose = _docker_compose_command()
     compose_env = paths.node / "compose.env"
