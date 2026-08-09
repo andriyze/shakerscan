@@ -1,10 +1,10 @@
 # ShakerScan 0.8.16 Release Readiness
 
-**Status (2026-08-09):** 0.8.15 is published and promoted to the immutable stable channel. Its clean
-two-VPS post-publication acceptance completed broker enrollment, three-way exact-node parallel DAST,
-worker-loss reclaim, centralized results/artifacts, and a bounded public-model review. That audit
-found release-truth and product-separation defects now assigned to the pending 0.8.16 candidate;
-0.8.16 is not published or promoted yet.
+**Status (2026-08-09):** 0.8.16 is published and promoted to the immutable stable channel from exact
+candidate `93f5bb2ad2b469bec979792a5f9213756427b1d3`. CodeQL, the frozen full-stack E2E,
+complete release validation, multi-architecture builds, manifest verification, and independent
+`latest`/OCI-label checks passed. Literal clean two-VPS post-publication acceptance is now running;
+its result determines whether 0.8.16 remains accepted or a follow-up patch is required.
 Version 0.8.9 passed CodeQL, all frozen gates, dependency audits, clean/dirty upgrade smokes,
 multi-architecture publication, and independent manifest checks. Its bounded clean-build retry also
 recovered the registry boundary that stopped 0.8.8. The stable channel was deliberately not advanced:
