@@ -519,7 +519,7 @@ are in [`AI_TEST_WORKFLOWS.md`](AI_TEST_WORKFLOWS.md), and future hardening belo
 ### AI capability status quick read
 
 These implemented components were last reconciled against code on 2026-08-08. AI Gate remains a
-preview product surface for 0.8.11. Model Intake is release-gated for deterministic static review,
+preview product surface for 0.8.12. Model Intake is release-gated for deterministic static review,
 artifact and report generation, and its opt-in AMD64 Linux/KVM Firecracker tier; unsupported formats,
 incomplete evidence, missing required tools, and unavailable runtime qualification fail closed. The
 AI Gate policy/exception and deterministic-judge seams marked Planned in
@@ -1252,7 +1252,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Scanner wrapper commands | 27 | `scanner.sh` |
 | Make targets | 12 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
-| Runtime environment keys | 317 | Python sources + Compose manifests |
+| Runtime environment keys | 319 | Python sources + Compose manifests |
 | Scanner modules | 99 | `scanner/scanner_tools/` |
 | UI pages | 31 | `ui/src/app/` |
 | Skills | 6 | `skills/` |
@@ -2044,6 +2044,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `MODEL_INTAKE_RUNNER_QUEUE_LIMIT` | `api/model_intake_runner_service.py` |
 | `MODEL_INTAKE_RUNNER_STAGE_DIR` | `api/api.py` |
 | `MODEL_INTAKE_RUNNER_URL` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `MODEL_INTAKE_SANDBOX_GID` | `docker-compose.broker-worker.yml`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_SANDBOX_IMAGE` | `docker-compose.yml` |
 | `MODEL_INTAKE_SANDBOX_NETWORK_MODE` | `scanner/scanner_tools/model_intake_sandbox.py` |
 | `MODEL_INTAKE_SANDBOX_NO_NEW_PRIVILEGES` | `scanner/scanner_tools/model_intake_sandbox.py` |
@@ -2051,6 +2052,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `MODEL_INTAKE_SANDBOX_READ_ONLY` | `scanner/scanner_tools/model_intake_sandbox.py` |
 | `MODEL_INTAKE_SANDBOX_RUNTIME_ADAPTERS_JSON` | `docker-compose.broker-worker.yml`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml`, `scanner/scanner_tools/model_intake_providers.py`, `scanner/scanner_tools/model_intake_sandbox.py` |
 | `MODEL_INTAKE_SANDBOX_RUNTIME_TIMEOUT_SECONDS` | `docker-compose.broker-worker.yml`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
+| `MODEL_INTAKE_SANDBOX_UID` | `docker-compose.broker-worker.yml`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_SIGNER_ALLOW_LOCAL_PEM` | `api/model_intake_signer_service.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_SIGNER_AWS_KMS_KEY_ID` | `api/model_intake_signer_service.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_SIGNER_AWS_REGION` | `api/model_intake_signer_service.py`, `docker-compose.release.yml`, `docker-compose.yml` |

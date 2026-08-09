@@ -1509,6 +1509,20 @@ prepare_runtime_files() {
     detect_platform
     export SHAKERSCAN_HOST_PLATFORM="$PLATFORM"
     write_dotenv_value SHAKERSCAN_HOST_PLATFORM "$SHAKERSCAN_HOST_PLATFORM"
+    local sandbox_uid sandbox_gid
+    sandbox_uid="$(id -u)"
+    sandbox_gid="$(id -g)"
+    # Root-run Linux installs still execute the isolated service as the image's
+    # unprivileged scanner account. Non-root and Docker Desktop installs use the
+    # host operator identity so the bind mount never needs world-write access.
+    if [ "$sandbox_uid" = "0" ]; then
+        sandbox_uid=10001
+        sandbox_gid=10001
+    fi
+    export MODEL_INTAKE_SANDBOX_UID="$sandbox_uid"
+    export MODEL_INTAKE_SANDBOX_GID="$sandbox_gid"
+    write_dotenv_value MODEL_INTAKE_SANDBOX_UID "$MODEL_INTAKE_SANDBOX_UID"
+    write_dotenv_value MODEL_INTAKE_SANDBOX_GID "$MODEL_INTAKE_SANDBOX_GID"
     mkdir -p results
     mkdir -p results/model-intake-quarantine results/model-intake-sandbox
     mkdir -p .shakerscan-model-intake-runner-stage
@@ -1518,7 +1532,10 @@ prepare_runtime_files() {
     # host user fails -- and an unguarded failure here aborted every later
     # scanner.sh invocation, including start, restart, and rebuild.
     ensure_directory_mode results/model-intake-quarantine 755
-    ensure_directory_mode results/model-intake-sandbox 777
+    if [ "$(id -u)" = "0" ]; then
+        chown "$MODEL_INTAKE_SANDBOX_UID:$MODEL_INTAKE_SANDBOX_GID" results/model-intake-sandbox
+    fi
+    ensure_directory_mode results/model-intake-sandbox 700
     # Only the API stages trusted runner inputs here. Workers never mount this
     # directory, so model-controlled scan output cannot replace a staged guest.
     ensure_directory_mode .shakerscan-model-intake-runner-stage 700

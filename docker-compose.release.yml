@@ -395,7 +395,7 @@ services:
   model-intake-sandbox:
     init: true
     image: ${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}:${SCANNER_IMAGE_TAG:-latest}
-    user: scanner
+    user: "${MODEL_INTAKE_SANDBOX_UID:-10001}:${MODEL_INTAKE_SANDBOX_GID:-10001}"
     network_mode: none
     read_only: true
     cap_drop:

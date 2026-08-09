@@ -1735,6 +1735,11 @@ def _worker_compose_env(
 ) -> dict[str, str]:
     expected_image = str(response["worker_image_digest"])
     selected_image = str(runtime_image or expected_image)
+    sandbox_uid = os.geteuid()
+    sandbox_gid = os.getegid()
+    if sandbox_uid == 0:
+        sandbox_uid = 10001
+        sandbox_gid = 10001
     return {
         "FLEET_COMPOSE_PROJECT_NAME": f"shakerscan-fleet-{str(response['node_id'])[:8]}",
         "FLEET_NODE_ID": str(response["node_id"]),
@@ -1743,37 +1748,53 @@ def _worker_compose_env(
         "FLEET_WORKER_ENV_FILE": str(paths.node / "worker.env"),
         "FLEET_RUNTIME_DIR": str(paths.node),
         "FLEET_RESULTS_DIR": str(paths.root / "results"),
+        "MODEL_INTAKE_SANDBOX_UID": str(sandbox_uid),
+        "MODEL_INTAKE_SANDBOX_GID": str(sandbox_gid),
     }
 
 
 def _prepare_worker_result_directories(paths: RuntimePaths) -> None:
     """Create bind-mount directories before Docker can create them as root.
 
-    The isolated Model Intake service runs as the unprivileged ``scanner``
-    account.  On a fresh worker, Compose otherwise creates its host bind path
-    as root:root/0755, leaving the service unable to publish its heartbeat or
-    results.  The standalone launcher already applies these modes; fleet joins
-    must provide the same first-run contract independently.
+    The isolated Model Intake service runs as an unprivileged identity that
+    owns its private queue. On a fresh worker, Compose would otherwise create
+    the bind path as root:root/0755. Making the queue world-writable solves the
+    availability problem but lets another local host account forge or disrupt
+    sandbox evidence, so Fleet establishes an explicit owner and mode 0700.
     """
     directories = (
-        (paths.root / "results", 0o755, 0o005),
-        (paths.root / "results" / "model-intake-quarantine", 0o755, 0o005),
-        (paths.root / "results" / "model-intake-sandbox", 0o777, 0o007),
+        (paths.root / "results", 0o755),
+        (paths.root / "results" / "model-intake-quarantine", 0o755),
+        (paths.root / "results" / "model-intake-sandbox", 0o700),
     )
-    for path, mode, required_other_bits in directories:
+    sandbox_uid = os.geteuid()
+    sandbox_gid = os.getegid()
+    if sandbox_uid == 0:
+        sandbox_uid = 10001
+        sandbox_gid = 10001
+    sandbox_path = paths.root / "results" / "model-intake-sandbox"
+    for path, mode in directories:
         if path.is_symlink():
             raise FleetCLIError(f"worker result directory must not be a symlink: {path}")
         try:
             path.mkdir(parents=True, exist_ok=True, mode=mode)
+            if path == sandbox_path and os.geteuid() == 0:
+                path.chown(sandbox_uid, sandbox_gid)
             path.chmod(mode)
         except OSError as exc:
             raise FleetCLIError(f"could not prepare worker result directory {path}: {exc}") from exc
         actual_mode = path.stat().st_mode & 0o777
-        if actual_mode & required_other_bits != required_other_bits:
+        if actual_mode != mode:
             raise FleetCLIError(
                 f"worker result directory {path} has mode {actual_mode:o}; "
                 f"mode {mode:o} is required for the isolated scanner service"
             )
+    sandbox_stat = sandbox_path.stat()
+    if sandbox_stat.st_uid != sandbox_uid or sandbox_stat.st_gid != sandbox_gid:
+        raise FleetCLIError(
+            f"worker sandbox queue {sandbox_path} must be owned by "
+            f"{sandbox_uid}:{sandbox_gid}; found {sandbox_stat.st_uid}:{sandbox_stat.st_gid}"
+        )
 
 
 def _write_compose_env(path: Path, values: dict[str, str]) -> None:

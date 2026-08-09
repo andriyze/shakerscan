@@ -874,6 +874,9 @@ pinned manifest, set ceilings from that manifest plus controlled headroom, and r
 
 The sandbox proves that its bounded inspector ran in a non-root, no-egress, read-only, capability-free,
 seccomp-filtered container and returned request/nonce/evidence/subject-bound output under service-side limits.
+Its host bind queue is mode `0700` and owned by that exact non-root runtime identity; standalone and
+Fleet launchers establish the owner before Compose starts, so another local host account cannot read,
+forge, or disrupt request/response evidence through a shared writable directory.
 It validates safetensors structure, performs bounded ONNX checks, identifies GGUF, and refuses executable
 serialization such as `.pkl`, `.pickle`, `.joblib`, `.pt`, `.pth`, `.ckpt`, `.bin`, and `.mar`. A static parse
 returns `UNSUPPORTED`, not `PASS`, when no runtime adapter exists.

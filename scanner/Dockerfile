@@ -306,7 +306,7 @@ RUN PYTHONPATH=/app/scanner_tools \
 
 # The adapter harness always drops tool subprocesses to this account, including
 # during the image's functional self-test.
-RUN useradd -m scanner
+RUN useradd --uid 10001 --user-group --create-home scanner
 
 # Fail image builds where the scanner/import graph is inconsistent.
 RUN python3 /app/scanner.py --help >/dev/null && \

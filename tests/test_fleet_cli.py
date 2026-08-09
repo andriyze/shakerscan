@@ -580,6 +580,10 @@ def test_worker_compose_env_separates_local_runtime_from_expected_digest(tmp_pat
     )
     assert values["FLEET_WORKER_IMAGE"] == "shakerscan-fleet-local:abc1234"
     assert values["FLEET_EXPECTED_WORKER_IMAGE_DIGEST"] == IMAGE
+    expected_uid = 10001 if os.geteuid() == 0 else os.geteuid()
+    expected_gid = 10001 if os.geteuid() == 0 else os.getegid()
+    assert values["MODEL_INTAKE_SANDBOX_UID"] == str(expected_uid)
+    assert values["MODEL_INTAKE_SANDBOX_GID"] == str(expected_gid)
 
 
 def test_broker_runtime_forces_per_node_compose_project_and_skips_pull_for_local_image(
@@ -621,7 +625,7 @@ def test_broker_runtime_forces_per_node_compose_project_and_skips_pull_for_local
     assert quarantine.stat().st_mode & 0o777 == 0o755
     sandbox = result_root / "model-intake-sandbox"
     assert sandbox.is_dir()
-    assert sandbox.stat().st_mode & 0o777 == 0o777
+    assert sandbox.stat().st_mode & 0o777 == 0o700
 
 
 def test_worker_result_directory_preparation_repairs_docker_created_sandbox(tmp_path):
@@ -632,7 +636,7 @@ def test_worker_result_directory_preparation_repairs_docker_created_sandbox(tmp_
 
     fleet_cli._prepare_worker_result_directories(paths)
 
-    assert sandbox.stat().st_mode & 0o777 == 0o777
+    assert sandbox.stat().st_mode & 0o777 == 0o700
 
 
 def test_worker_result_directory_preparation_rejects_symlink(tmp_path):

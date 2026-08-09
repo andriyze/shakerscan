@@ -348,7 +348,7 @@ continues to support standalone ShakerScan, but does not expose Fleet navigation
 capacity; a direct Fleet-page visit explains the Linux requirement. Standalone Linux installs also
 hide Fleet and remote placement until `fleet init` succeeds.
 
-ShakerScan can add digest-pinned worker VPSs to one control plane. The supported 0.8.11 production
+ShakerScan can add digest-pinned worker VPSs to one control plane. The supported 0.8.12 production
 transport is the outbound-only HTTPS broker. Broker workers receive no Redis, PostgreSQL, or
 object-store credentials:
 
@@ -367,7 +367,7 @@ only that standalone project and preserves its data volumes before starting the 
 runtime. Unrelated Docker projects are not changed.
 
 The built-in WireGuard workflow remains available as an operator preview for machines you own and
-trust, but it is excluded from the 0.8.11 production support boundary until its own physical
+trust, but it is excluded from the 0.8.12 production support boundary until its own physical
 two-host acceptance matrix passes in a future release cycle:
 
 ```bash
@@ -598,7 +598,7 @@ Common fixes:
 - [Documentation index](https://github.com/andriyze/shakerscan/blob/main/docs/README.md)
 - [Full functionality reference](https://github.com/andriyze/shakerscan/blob/main/docs/functionality-reference.md)
 - [Release readiness checklist](https://github.com/andriyze/shakerscan/blob/main/docs/release-readiness.md)
-- [ShakerScan 0.8.11 release notes](https://github.com/andriyze/shakerscan/blob/main/docs/releases/0.8.11.md)
+- [ShakerScan 0.8.12 release notes](https://github.com/andriyze/shakerscan/blob/main/docs/releases/0.8.12.md)
 - [ShakerScan 0.8.10 release notes](https://github.com/andriyze/shakerscan/blob/main/docs/releases/0.8.10.md)
 - [ShakerScan 0.8.9 release notes](https://github.com/andriyze/shakerscan/blob/main/docs/releases/0.8.9.md)
 - [ShakerScan 0.8.4 release notes](https://github.com/andriyze/shakerscan/blob/main/docs/releases/0.8.4.md)

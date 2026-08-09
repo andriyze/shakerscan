@@ -458,6 +458,26 @@ def test_runtime_records_host_platform_for_fleet_ui_capabilities():
         assert "SHAKERSCAN_HOST_PLATFORM=${SHAKERSCAN_HOST_PLATFORM:-unknown}" in compose
 
 
+def test_model_intake_sandbox_queue_is_private_and_runs_as_its_owner():
+    script = (ROOT / "scanner.sh").read_text()
+    prepare_body = script.split("prepare_runtime_files() {", 1)[1].split("\n}", 1)[0]
+    assert "MODEL_INTAKE_SANDBOX_UID" in prepare_body
+    assert "MODEL_INTAKE_SANDBOX_GID" in prepare_body
+    assert "ensure_directory_mode results/model-intake-sandbox 700" in prepare_body
+    assert "ensure_directory_mode results/model-intake-sandbox 777" not in prepare_body
+    for compose_name in (
+        "docker-compose.yml",
+        "docker-compose.release.yml",
+        "docker-compose.worker.yml",
+        "docker-compose.broker-worker.yml",
+    ):
+        compose = (ROOT / compose_name).read_text()
+        assert 'user: "${MODEL_INTAKE_SANDBOX_UID:-10001}:${MODEL_INTAKE_SANDBOX_GID:-10001}"' in compose
+
+    dockerfile = (ROOT / "scanner" / "Dockerfile").read_text()
+    assert "useradd --uid 10001 --user-group --create-home scanner" in dockerfile
+
+
 def test_scanner_sh_worker_logs_aggregate_api_scaled_containers():
     script = (ROOT / "scanner.sh").read_text()
 
