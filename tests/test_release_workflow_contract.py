@@ -32,3 +32,19 @@ def test_manual_release_records_candidate_and_workflow_provenance():
     assert text.count("com.shakerscan.release.workflow-revision=${{ needs.meta.outputs.workflow_sha }}") == 4
     assert "Candidate source commit" in text
     assert "Release workflow commit" in text
+
+
+def test_clean_release_build_retries_pinned_base_downloads_without_weakening_digests():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    dockerfile = (ROOT / "scanner" / "Dockerfile").read_text(encoding="utf-8")
+    pinned_bases = [
+        line.removeprefix("FROM ").split(" AS ", 1)[0]
+        for line in dockerfile.splitlines()
+        if line.startswith("FROM golang:") or line.startswith("FROM mcr.microsoft.com/playwright/")
+    ]
+
+    assert len(pinned_bases) == 2
+    assert all("@sha256:" in image for image in pinned_bases)
+    assert all(image in workflow for image in pinned_bases)
+    assert workflow.count("scripts/retry-command.sh docker build") == 3
+    assert "scripts/retry-command.sh scripts/selftest-model-intake-guest.sh" in workflow
