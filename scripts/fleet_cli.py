@@ -1797,11 +1797,18 @@ def _persist_worker_runtime_template(paths: RuntimePaths, response: dict[str, An
                 or labels.get("com.docker.compose.service") != "worker"
                 or labels.get("com.shakerscan.node_id") != str(response["node_id"])
                 or labels.get("com.shakerscan.fleet_managed") != "true"
-                or str(inspected_config.get("Image") or "") not in allowed_images
             ):
-                raise ValueError("worker identity or image does not match the enrolled node")
+                raise ValueError("worker identity does not match the enrolled node")
+            # Old and new digests legitimately coexist during a rolling update.
+            # Ignore non-current images and capture a matching live template;
+            # fail only when no enrolled/current candidate remains.
+            if str(inspected_config.get("Image") or "") not in allowed_images:
+                continue
             number = str(labels.get("com.docker.compose.container-number") or "")
             candidates.append((int(number) if number.isdigit() else 2**31 - 1, inspected_item))
+
+        if not candidates:
+            raise ValueError("no current enrolled worker image is available for recovery capture")
 
         # The node agent may already have scaled beyond the Compose seed worker,
         # or Compose may leave an exited replacement behind during a rebuild.

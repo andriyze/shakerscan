@@ -6,6 +6,7 @@ from scanner.scanner_tools.http_scanner import (
     _BROWSER_SAFE_INTERACTION_SELECTORS,
     _browser_interaction_element_is_safe,
     _browser_interaction_method_allowed,
+    _browser_navigation_url_is_safe,
     _guard_browser_interaction_request,
     browser_fetch,
 )
@@ -36,6 +37,12 @@ def test_passive_browser_element_filter_fails_closed_and_rejects_actions():
     assert not _browser_interaction_element_is_safe("Start model review")
     assert not _browser_interaction_element_is_safe("Save settings")
     assert not _browser_interaction_element_is_safe("Delete target")
+    assert not _browser_interaction_element_is_safe("Manage", "deleteAccount")
+    assert not _browser_interaction_element_is_safe("Manage", "delete_all")
+    assert not _browser_interaction_element_is_safe("", "", "", "", "", "")
+    assert not _browser_navigation_url_is_safe("https://app.example.test/logoutUser")
+    assert not _browser_navigation_url_is_safe("https://app.example.test/account/delete_all")
+    assert _browser_navigation_url_is_safe("https://app.example.test/reports/create")
 
 
 def test_passive_browser_route_aborts_mutations_and_redacts_query_values():
@@ -54,7 +61,7 @@ def test_passive_browser_route_aborts_mutations_and_redacts_query_values():
         url = "https://app.example.test/api/start?token=secret#fragment"
 
     route = Route()
-    guard = {"active": True, "blocked_count": 0, "blocked_samples": []}
+    guard = {"active": False, "blocked_count": 0, "blocked_samples": []}
     asyncio.run(_guard_browser_interaction_request(route, Request(), guard))
 
     assert route.aborted == "blockedbyclient"

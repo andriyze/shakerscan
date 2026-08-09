@@ -165,7 +165,10 @@ def runner_memory_admission(readiness: dict[str, Any], requested_memory_mib: int
             "sampling tolerance"
         )
     else:
-        reason = None
+        reason = (
+            "runner host memory capacity or availability could not be verified"
+            if sufficient is None else None
+        )
     return {
         "requested_guest_memory_mib": requested_memory_mib,
         "host_memory_total_mib": total_mib,
@@ -212,6 +215,7 @@ def firecracker_readiness(
         "network_namespace_tool": shutil.which("ip") is not None,
         "firewall_tool": shutil.which("nft") is not None,
         "filesystem_tool": shutil.which("mkfs.ext4") is not None and shutil.which("debugfs") is not None,
+        "rootfs_inputs_identity": len(env.get("MODEL_INTAKE_ROOTFS_INPUTS_SHA256", "")) == 64,
     }
     identities: dict[str, str] = {}
     resources = host_memory_resources()
@@ -271,6 +275,7 @@ def firecracker_readiness(
             "unsupported_reason": reason_code,
             "checks": checks,
             "verified_component_sha256": identities,
+            "rootfs_inputs_sha256": env.get("MODEL_INTAKE_ROOTFS_INPUTS_SHA256") or None,
             "resources": resources,
             "fallback_execution": False,
         }
@@ -282,6 +287,7 @@ def firecracker_readiness(
         "executor": "firecracker-jailer",
         "checks": checks,
         "verified_component_sha256": identities,
+        "rootfs_inputs_sha256": env.get("MODEL_INTAKE_ROOTFS_INPUTS_SHA256") or None,
         "resources": resources,
         "fallback_execution": False,
     }

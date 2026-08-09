@@ -55,6 +55,27 @@ _BROWSER_RISKY_INTERACTION_KEYWORDS = (
     "submit", "save", "create", "update", "approve", "reject",
     "unsubscribe", "close account", "terminate",
 )
+_BROWSER_RISKY_NAVIGATION_KEYWORDS = (
+    "logout", "log out", "sign out", "signout",
+    "delete", "remove", "destroy", "erase", "deactivate", "disable",
+    "revoke", "reset", "clear all", "wipe", "unsubscribe",
+    "close account", "terminate",
+)
+
+
+def _browser_semantic_text(*values: Any) -> str:
+    """Normalize camelCase and separators so action words cannot hide in identifiers."""
+    combined = " ".join(str(value or "") for value in values)
+    combined = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", combined)
+    return re.sub(r"[^A-Za-z0-9]+", " ", combined).strip().lower()
+
+
+def _browser_contains_risky_keyword(values: tuple[Any, ...], keywords: tuple[str, ...]) -> bool:
+    combined = _browser_semantic_text(*values)
+    if not combined:
+        return False
+    padded = f" {combined} "
+    return any(f" {_browser_semantic_text(keyword)} " in padded for keyword in keywords)
 
 
 def _browser_interaction_method_allowed(method: str) -> bool:
@@ -66,19 +87,23 @@ def _browser_interaction_element_is_safe(*values: Any) -> bool:
     """Fail closed when a navigation control appears to represent an action."""
     if not values:
         return False
-    combined = " ".join(str(value or "").lower().strip() for value in values)
+    combined = _browser_semantic_text(*values)
     if not combined:
         return False
-    return not any(
-        re.search(rf"\b{re.escape(keyword)}\b", combined)
-        for keyword in _BROWSER_RISKY_INTERACTION_KEYWORDS
+    return not _browser_contains_risky_keyword(values, _BROWSER_RISKY_INTERACTION_KEYWORDS)
+
+
+def _browser_navigation_url_is_safe(value: str) -> bool:
+    parsed = urllib.parse.urlsplit(str(value or ""))
+    return not _browser_contains_risky_keyword(
+        (parsed.path, parsed.fragment), _BROWSER_RISKY_NAVIGATION_KEYWORDS,
     )
 
 
 async def _guard_browser_interaction_request(route: Any, request: Any, guard: dict[str, Any]) -> None:
     """Route one request while enforcing the passive interaction method boundary."""
     method = str(request.method or "").upper()
-    if guard.get("active") and not _browser_interaction_method_allowed(method):
+    if guard.get("enabled", True) and not _browser_interaction_method_allowed(method):
         guard["blocked_count"] = int(guard.get("blocked_count") or 0) + 1
         samples = guard.setdefault("blocked_samples", [])
         if len(samples) < 20:
@@ -461,6 +486,7 @@ async def browser_fetch(
                     pass
             page = await ctx.new_page()
             interaction_guard: dict[str, Any] = {
+                "enabled": True,
                 "active": False,
                 "blocked_count": 0,
                 "blocked_samples": [],
@@ -579,6 +605,8 @@ async def browser_fetch(
                 parsed = urllib.parse.urlparse(resolved)
                 if parsed.netloc and parsed.netloc != base_netloc:
                     return None
+                if not _browser_navigation_url_is_safe(resolved):
+                    return None
                 if os.path.splitext(parsed.path.lower())[1] in _BROWSER_CRAWL_STATIC_EXTS:
                     return None
                 # Preserve fragment for hash routes
@@ -629,16 +657,12 @@ async def browser_fetch(
                                 if not await is_safe_to_click(el):
                                     continue
 
+                                await el.click(timeout=2000)
+                                interactions += 1
                                 try:
-                                    interaction_guard["active"] = True
-                                    await el.click(timeout=2000)
-                                    interactions += 1
-                                    try:
-                                        await page.wait_for_load_state("networkidle", timeout=2000)
-                                    except Exception:
-                                        await asyncio.sleep(0.3)
-                                finally:
-                                    interaction_guard["active"] = False
+                                    await page.wait_for_load_state("networkidle", timeout=2000)
+                                except Exception:
+                                    await asyncio.sleep(0.3)
 
                             except Exception:
                                 continue
@@ -700,7 +724,6 @@ async def browser_fetch(
                             () => {
                                 const links = new Set();
                                 document.querySelectorAll('a[href]').forEach(a => links.add(a.getAttribute('href')));
-                                document.querySelectorAll('form[action]').forEach(f => links.add(f.getAttribute('action')));
                                 return Array.from(links);
                             }
                             """
@@ -1712,7 +1735,7 @@ async def interactive_browser_crawl(
     url: str,
     auth_session: Any | None = None,
     max_pages: int = 20,
-    interaction_level: str = "medium",
+    interaction_level: str = "low",
     screenshot_dir: str = "/tmp",
 ) -> dict[str, Any]:
     """
@@ -1804,6 +1827,17 @@ async def interactive_browser_crawl(
                     pass
 
             page = await ctx.new_page()
+            interaction_guard: dict[str, Any] = {
+                "enabled": True,
+                "blocked_count": 0,
+                "blocked_samples": [],
+                "sample_truncated": False,
+            }
+
+            async def guard_interactive_request(route, request) -> None:
+                await _guard_browser_interaction_request(route, request, interaction_guard)
+
+            await ctx.route("**/*", guard_interactive_request)
 
             # Set up network capture
             def handle_request(request):

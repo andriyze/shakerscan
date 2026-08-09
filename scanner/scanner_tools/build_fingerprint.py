@@ -77,12 +77,14 @@ def source_file_map(workspace_root: str = "/workspace") -> dict[str, str]:
         (scanner_root / "scanner_tools", "scanner_tools"),
         (api_root / "ai_gate", "ai_gate"),
         (scanner_root / "wordlists", "wordlists"),
+        (scanner_root / "payloads", "payloads"),
     ):
         _add_tree(files, package_root, logical_root)
     _add_tree(files, scanner_root / "model_intake_tools", "model_intake_locks")
     auxiliary = (
         ("runtime/requirements.lock", scanner_root / "requirements.lock"),
         ("runtime/entrypoint.sh", scanner_root / "entrypoint.sh"),
+        ("runtime/scanner.Dockerfile", scanner_root / "Dockerfile"),
         ("model_intake_locks/firecracker-runtime.lock", root / "runner" / "guest" / "requirements.lock"),
         ("model_intake_locks/firecracker-guest-worker.py", root / "runner" / "guest" / "guest_worker.py"),
         ("model_intake_locks/firecracker-guest-init", root / "runner" / "guest" / "guest-init"),
@@ -97,6 +99,7 @@ def source_file_map(workspace_root: str = "/workspace") -> dict[str, str]:
 def runtime_file_map(
     runtime_root: str = "/app",
     model_intake_lock_root: str = "/opt/model-intake-locks",
+    build_input_root: str = "/opt/build-inputs",
 ) -> dict[str, str]:
     """Map the image runtime layout using the same logical keys as source_file_map."""
     root = Path(runtime_root)
@@ -104,7 +107,7 @@ def runtime_file_map(
     if root.is_dir():
         for path in sorted(root.glob("*.py")):
             files[path.name] = str(path)
-        for logical_root in ("scanner_tools", "ai_gate", "wordlists"):
+        for logical_root in ("scanner_tools", "ai_gate", "wordlists", "payloads"):
             package_root = root / logical_root
             _add_tree(files, package_root, logical_root)
         lock_root = Path(model_intake_lock_root)
@@ -112,6 +115,7 @@ def runtime_file_map(
         auxiliary = (
             ("runtime/requirements.lock", root / "requirements.lock"),
             ("runtime/entrypoint.sh", root / "entrypoint.sh"),
+            ("runtime/scanner.Dockerfile", Path(build_input_root) / "scanner.Dockerfile"),
             ("model_intake_locks/firecracker-runtime.lock", lock_root / "firecracker-runtime.lock"),
             ("model_intake_locks/firecracker-guest-worker.py", lock_root / "firecracker-guest-worker.py"),
             ("model_intake_locks/firecracker-guest-init", lock_root / "firecracker-guest-init"),

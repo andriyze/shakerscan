@@ -106,6 +106,9 @@ def _rows(*, artifact_uri: str = "hf://example/model/model.safetensors", active_
                         "lost_events": 0,
                         "guest_interfaces": ["lo"],
                         "host_interfaces": ["lo"],
+                        "no_network_device": True,
+                        "network_interface_config_count": 0,
+                        "tap_device_count": 0,
                         "host_firewall_drop_count": 0,
                         "telemetry_sha256": DIGESTS["a"],
                     },
@@ -335,7 +338,7 @@ def test_automatic_report_keeps_deployment_follow_up_out_of_technical_result():
     assert report["outcome"] == "REVIEW"
     assert report["plain_language"].startswith("Technical checks completed")
     assert report["presentation"]["headline"] == "Review findings before use"
-    assert report["presentation"]["decision"] == "REVIEW_REQUIRED"
+    assert report["presentation"]["decision"] == "REVIEW"
     assert report["executive_summary"]["deployable_under_configured_shakerscan_policy"] is False
     assert report["executive_summary"]["coverage"]["total_controls"] == 10
     assert all(
@@ -411,7 +414,7 @@ def test_static_report_names_safe_finding_location_and_remediation():
 
     static_control = _control(report, "static_analysis")
     assert "torch.load should use weights_only=True (modeling.py:42)" in static_control["detail"]
-    assert "Resolve torch.load should use weights_only=True at modeling.py:42" in static_control["remediation"]
+    assert "Review torch.load should use weights_only=True at modeling.py:42" in static_control["remediation"]
     assert "modeling.py:42" in next(
         item["action"] for item in report["executive_summary"]["required_actions"]
         if item["control_id"] == "static_analysis"
@@ -476,7 +479,8 @@ def test_automatic_html_names_subject_stop_reason_scanner_coverage_and_files():
     )
 
     static_control = _control(report, "static_analysis")
-    assert "blocking or high-severity finding" in static_control["detail"]
+    assert "blocking high/critical finding" in static_control["detail"]
+    assert "review warning" in static_control["detail"]
     assert "custom code executes a shell command (modeling.py:9)" in static_control["detail"]
     html = render_model_intake_html(report)
     assert "codesage/codesage-large-v2@revision-123" in html
@@ -613,6 +617,45 @@ def test_successful_runtime_phases_do_not_upgrade_incomplete_signed_evidence():
     assert runtime_control["coverage"]["receipt_overall_status"] == "INCOMPLETE"
     assert "receipt trust and completeness" in runtime_control["detail"]
     assert _control(report, "firecracker_runtime")["status"] == "PASS"
+
+
+def test_successful_runtime_phases_do_not_upgrade_failed_signed_evidence():
+    rows = _rows(active_admission=False)
+    runtime = next(item for item in rows["evidence"] if item["evidence_type"] == "runtime_execution")
+    runtime["status"] = "FAIL"
+
+    report = _report(rows)
+
+    assert _control(report, "runtime_execution")["status"] == "FAIL"
+    assert report["outcome"] == "BLOCK"
+
+
+def test_runtime_requires_every_fixed_phase_before_reporting_pass():
+    rows = _rows(active_admission=False)
+    phases = rows["runner_jobs"][0]["result_json"]["payload"]["observations"]["phases"]
+    phases.pop("inference")
+
+    report = _report(rows)
+
+    runtime = _control(report, "firecracker_runtime")
+    assert runtime["status"] == "INCOMPLETE"
+    assert runtime["coverage"]["missing_phases"] == ["inference"]
+
+
+def test_network_isolation_rejects_unexpected_interfaces_and_tap_devices():
+    rows = _rows(active_admission=False)
+    telemetry = rows["runner_jobs"][0]["result_json"]["payload"]["observations"]["network_telemetry"]
+    telemetry.update({
+        "guest_interfaces": ["lo", "eth0"],
+        "host_interfaces": ["lo", "tap0"],
+        "no_network_device": False,
+        "tap_device_count": 1,
+    })
+
+    report = _report(rows)
+
+    assert _control(report, "network_isolation")["status"] == "FAIL"
+    assert report["outcome"] == "BLOCK"
 
 
 def test_local_pem_production_receipt_explains_trust_gap_without_rerunning_firecracker():
@@ -752,6 +795,8 @@ def test_html_is_escaped_printable_and_sarif_preserves_normalized_failures():
     assert 'id="firecracker-runtime"' in rendered
     assert ".status.critical{color:#fff;background:#7a0019}" in rendered
     assert ".status.high{color:#b42318;background:#fee4e2}" in rendered
+    assert 'aria-label="Known vulnerability counts by severity"' in rendered
+    assert "severity-critical" in rendered
     assert "<script>alert(1)</script>" not in rendered
     assert "model-intake-corporate-report/v2" == sarif["runs"][0]["properties"]["schemaVersion"]
     assert sarif["runs"][0]["properties"]["reportSha256"] == report["report_sha256"]

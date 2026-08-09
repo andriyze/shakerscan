@@ -211,11 +211,11 @@ export function RunnerInstallCard({
 
   const refreshStage = useCallback(async () => {
     try {
-      setStage(await getModelIntakeRunnerStage())
+      setStage(await getModelIntakeRunnerStage(operatorToken))
     } catch {
       /* staging state is advisory; the install command works regardless */
     }
-  }, [])
+  }, [operatorToken])
 
   useEffect(() => { void refreshStage() }, [refreshStage])
   useEffect(() => {

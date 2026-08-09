@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -106,7 +107,7 @@ class DurableRunnerQueue:
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         resource_plan = runner_memory_admission(firecracker_readiness(), request.memory_mib)
-        if resource_plan.get("sufficient") is False:
+        if resource_plan.get("sufficient") is not True:
             raise HTTPException(status_code=422, detail={
                 "code": "insufficient_runner_memory",
                 "message": resource_plan.get("reason"),
@@ -181,10 +182,11 @@ app = FastAPI(title="ShakerScan Model Intake Firecracker Runner", lifespan=lifes
 
 
 @app.get("/health")
-def health():
+def health(x_shakerscan_runner_token: str | None = Header(default=None)):
     # Digest verification may touch multi-gigabyte immutable components on the
     # first call. A synchronous endpoint runs in FastAPI's worker pool instead
     # of blocking job/status traffic on the service event loop.
+    _authorize(x_shakerscan_runner_token)
     readiness = firecracker_readiness()
     return {**readiness, "service": "model-intake-firecracker-runner", "queue_depth": jobs.pending.qsize() if jobs else 0}
 
@@ -194,7 +196,7 @@ async def submit_job(request: RunnerJobRequest, x_shakerscan_runner_token: str |
     _authorize(x_shakerscan_runner_token)
     if jobs is None:
         raise HTTPException(status_code=503, detail="runner queue is unavailable")
-    job = jobs.submit(request)
+    job = await asyncio.to_thread(jobs.submit, request)
     return {key: job[key] for key in ("id", "state", "created_at")}
 
 

@@ -9,6 +9,7 @@ KERNEL_URL="${MODEL_INTAKE_KERNEL_URL:-}"
 KERNEL_SHA256="${MODEL_INTAKE_KERNEL_SHA256:-}"
 ROOTFS_SOURCE="${MODEL_INTAKE_ROOTFS_SOURCE:-}"
 ROOTFS_SHA256="${MODEL_INTAKE_ROOTFS_SHA256:-}"
+ROOTFS_INPUTS_SHA256="${MODEL_INTAKE_ROOTFS_INPUTS_SHA256:-}"
 # The API reaches the runner over HTTP. It runs in a container, so a loopback
 # bind is unreachable from it; the installer passes the Docker bridge address.
 # The deny-all egress policy and the internal token are what keep that safe.
@@ -37,6 +38,10 @@ if [[ -z "$ROOTFS_SOURCE" || ! -f "$ROOTFS_SOURCE" || -L "$ROOTFS_SOURCE" ]]; th
 fi
 if [[ ! "$ROOTFS_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
     echo "MODEL_INTAKE_ROOTFS_SHA256 must integrity-bind the guest rootfs" >&2
+    exit 1
+fi
+if [[ ! "$ROOTFS_INPUTS_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "MODEL_INTAKE_ROOTFS_INPUTS_SHA256 must bind the exact guest source inputs" >&2
     exit 1
 fi
 if [[ "$SHARED_RESULTS_ROOT" != /* ]]; then
@@ -127,6 +132,7 @@ MODEL_INTAKE_KERNEL_IMAGE=$INSTALL_ROOT/kernel/vmlinux
 MODEL_INTAKE_KERNEL_SHA256=$(sha256sum "$INSTALL_ROOT/kernel/vmlinux" | awk '{print $1}')
 MODEL_INTAKE_ROOTFS_IMAGE=$INSTALL_ROOT/rootfs/rootfs.ext4
 MODEL_INTAKE_ROOTFS_SHA256=$(sha256sum "$INSTALL_ROOT/rootfs/rootfs.ext4" | awk '{print $1}')
+MODEL_INTAKE_ROOTFS_INPUTS_SHA256=$ROOTFS_INPUTS_SHA256
 MODEL_INTAKE_RUNNER_EGRESS_POLICY=deny-all
 EOF
 for preserved in \
@@ -187,6 +193,7 @@ MODEL_INTAKE_KERNEL_IMAGE=$INSTALL_ROOT/kernel/vmlinux
 MODEL_INTAKE_KERNEL_SHA256=$(sha256sum "$INSTALL_ROOT/kernel/vmlinux" | awk '{print $1}')
 MODEL_INTAKE_ROOTFS_IMAGE=$INSTALL_ROOT/rootfs/rootfs.ext4
 MODEL_INTAKE_ROOTFS_SHA256=$(sha256sum "$INSTALL_ROOT/rootfs/rootfs.ext4" | awk '{print $1}')
+MODEL_INTAKE_ROOTFS_INPUTS_SHA256=$ROOTFS_INPUTS_SHA256
 MODEL_INTAKE_RUNNER_EGRESS_POLICY=deny-all
 EOF
 

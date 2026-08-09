@@ -1241,7 +1241,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Scanner wrapper commands | 27 | `scanner.sh` |
 | Make targets | 12 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
-| Runtime environment keys | 315 | Python sources + Compose manifests |
+| Runtime environment keys | 316 | Python sources + Compose manifests |
 | Scanner modules | 99 | `scanner/scanner_tools/` |
 | UI pages | 31 | `ui/src/app/` |
 | Skills | 6 | `skills/` |
@@ -1940,7 +1940,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `AWS_SESSION_TOKEN` | `api/evidence_storage.py` |
 | `BROKER_INGEST_QUEUE_NAME` | `api/api.py`, `api/worker.py` |
 | `BUILD_FINGERPRINT` | `api/worker.py` |
-| `COMPOSE_PROJECT_NAME` | `api/api.py` |
+| `COMPOSE_PROJECT_NAME` | `api/api.py`, `scripts/fleet_cli.py` |
 | `COVERAGE_ALLOCATION_DEFAULT` | `api/parallel_scan.py` |
 | `DATABASE_URL` | `api/api.py`, `api/gungnir_worker.py`, `api/model_intake_signer_service.py`, `api/worker.py`, `scanner/gungnir_worker.py`, `scripts/model_intake_workflow_smoke.py`, `scripts/upgrade_schema_smoke.py` |
 | `DEFAULT_ASM_ENABLED` | `api/api.py` |
@@ -1975,6 +1975,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `FLEET_GATEWAY_PROXY_SECRET` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_HEARTBEAT_TIMEOUT_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_JOIN_RATE_LIMIT_PER_MINUTE` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `FLEET_NETWORK_BACKEND` | `scripts/fleet_cli.py` |
 | `FLEET_NODE_ID` | `api/worker.py`, `docker-compose.broker-worker.yml`, `docker-compose.worker.yml` |
 | `FLEET_OPERATOR_TOKEN` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scripts/fleet_acceptance.py` |
 | `FLEET_OVERLAY_CIDR` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |

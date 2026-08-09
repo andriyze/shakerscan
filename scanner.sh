@@ -2444,6 +2444,10 @@ rebuild_images() {
 
 refresh_workers_after_rebuild() {
     local desired_count="${1:-0}"
+    # The sandbox shares the rebuilt worker image tag but is not part of the
+    # worker scale set. Recreate it explicitly so it cannot keep executing the
+    # pre-rebuild image ID behind the updated tag.
+    compose up --no-build -d --force-recreate model-intake-sandbox
     if [ "$desired_count" -lt 1 ]; then
         remove_scan_worker_containers "Removing stale stopped worker containers after rebuild..."
         return 0

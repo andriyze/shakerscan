@@ -203,6 +203,30 @@ def _component_hashes(component: dict[str, Any]) -> set[str]:
     }
 
 
+def _merge_component_evidence(target: dict[str, Any], source: dict[str, Any]) -> None:
+    """Keep one package identity without discarding richer AIBOM evidence."""
+    for key in ("version", "purl"):
+        if source.get(key) and not target.get(key):
+            target[key] = source[key]
+    for key in ("hashes", "licenses", "properties", "externalReferences"):
+        existing = target.get(key) if isinstance(target.get(key), list) else []
+        incoming = source.get(key) if isinstance(source.get(key), list) else []
+        if not incoming:
+            continue
+        merged: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in [*existing, *incoming]:
+            if not isinstance(item, dict):
+                continue
+            identity = json.dumps(item, sort_keys=True, separators=(",", ":"), default=str)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            merged.append(item)
+        if merged:
+            target[key] = merged
+
+
 def build_model_intake_cyclonedx(scan_result: Any, *, scan_id: str = "") -> dict[str, Any]:
     """Compose one CycloneDX 1.5 document from a completed Model Intake scan."""
     model_intake = _object(_object(scan_result).get("model_intake"))
@@ -241,6 +265,7 @@ def build_model_intake_cyclonedx(scan_result: Any, *, scan_id: str = "") -> dict
     # AIBOM knows. Deduplicate on bom-ref so a package listed in both appears once.
     components: list[dict[str, Any]] = []
     seen: set[str] = set()
+    by_ref: dict[str, dict[str, Any]] = {}
     for item in generated.get("components") if isinstance(generated.get("components"), list) else []:
         if not isinstance(item, dict) or not item.get("name"):
             continue
@@ -266,6 +291,7 @@ def build_model_intake_cyclonedx(scan_result: Any, *, scan_id: str = "") -> dict
         if licenses:
             component["licenses"] = [item for item in licenses if item]
         components.append(component)
+        by_ref[ref] = component
     for component in _aibom_components(aibom):
         ref = str(component["bom-ref"])
         # The document metadata component is the authoritative top-level model
@@ -280,10 +306,14 @@ def build_model_intake_cyclonedx(scan_result: Any, *, scan_id: str = "") -> dict
             )
             if same_name or same_hash:
                 continue
-        if ref in seen or ref == root["bom-ref"]:
+        if ref in seen:
+            _merge_component_evidence(by_ref[ref], component)
+            continue
+        if ref == root["bom-ref"]:
             continue
         seen.add(ref)
         components.append(component)
+        by_ref[ref] = component
 
     document: dict[str, Any] = {
         "bomFormat": "CycloneDX",
@@ -333,7 +363,9 @@ def model_intake_bom_completeness(document: dict[str, Any]) -> dict[str, Any]:
     dependency_components = [item for item in components if isinstance(item, dict) and item.get("purl")]
     ai_components = [
         item for item in components
-        if isinstance(item, dict) and _component_property(item, "shakerscan:aibom_type")
+        if isinstance(item, dict)
+        and _component_property(item, "shakerscan:aibom_type")
+        not in {"", "dependency", "runtime_dependency"}
     ]
     composition = next(
         (item for item in document.get("compositions") or [] if isinstance(item, dict)), {}

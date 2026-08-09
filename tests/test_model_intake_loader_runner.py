@@ -719,6 +719,7 @@ def test_runner_memory_admission_reserves_capacity_for_host_services():
         "host_memory_total_bytes": 16 * 1024**3,
         "host_memory_available_bytes": 13_240 * 1024**2,
     }}, 13_312)
+    unknown_host = runner_memory_admission({}, 4_096)
 
     assert codesage["sufficient"] is True
     assert codesage["host_reserve_mib"] >= 2048
@@ -728,6 +729,8 @@ def test_runner_memory_admission_reserves_capacity_for_host_services():
     assert "currently available" in busy_host["reason"]
     assert jittering_host["sufficient"] is True
     assert jittering_host["available_sample_tolerance_mib"] == 512
+    assert unknown_host["sufficient"] is None
+    assert "could not be verified" in unknown_host["reason"]
 
 
 def test_locally_derived_loader_profiles_diverge_from_the_authoritative_one():

@@ -178,6 +178,7 @@ COPY runner/guest/requirements.lock /opt/model-intake-locks/firecracker-runtime.
 COPY runner/guest/guest_worker.py /opt/model-intake-locks/firecracker-guest-worker.py
 COPY runner/guest/guest-init /opt/model-intake-locks/firecracker-guest-init
 COPY runner/guest/Dockerfile /opt/model-intake-locks/firecracker-guest.Dockerfile
+COPY scanner/Dockerfile /opt/build-inputs/scanner.Dockerfile
 RUN set -eu; \
     for tool in modelscan fickling semgrep safetensors pip-audit; do \
       python3 -m venv "/opt/model-intake-tools/${tool}"; \
@@ -283,6 +284,7 @@ RUN CHROME_PATH=$(find /ms-playwright -name "chrome" -type f 2>/dev/null | head 
 COPY scanner/*.py /app/
 COPY scanner/scanner_tools /app/scanner_tools
 COPY scanner/wordlists /app/wordlists
+COPY scanner/payloads /app/payloads
 
 # Copy API/worker files used by prebuilt images.
 # Globbed (like the scanner modules above) so the image can't drift from the
@@ -294,7 +296,7 @@ COPY api/*.py /app/
 COPY api/ai_gate /app/ai_gate
 
 # Ensure scanner files are readable
-RUN chmod -R 755 /app/scanner_tools /app/wordlists
+RUN chmod -R 755 /app/scanner_tools /app/wordlists /app/payloads
 
 # The official Rust parser boundary is a release-image gate, not an optional
 # test dependency or a monkeypatched unit-test seam.

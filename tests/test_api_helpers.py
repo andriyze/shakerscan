@@ -501,7 +501,7 @@ def test_broker_result_ingest_drops_remote_execution_placement():
     ingest = api_module._control_plane_broker_ingest_payload(original)
 
     assert "placement" not in ingest
-    assert "_base_queue_name" not in ingest
+    assert ingest["_base_queue_name"] == api_module.BROKER_INGEST_QUEUE_NAME
     assert "placement" not in ingest["options"]
     assert ingest["options"]["scan_type"] == "quick"
     assert ingest["options"]["custom_budget"] == {"max_requests": 100}

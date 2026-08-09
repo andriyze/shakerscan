@@ -209,6 +209,13 @@ export default function FleetPage() {
       setError(null)
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to load fleet'
+      // Never leave lifecycle controls attached to a stale successful read.
+      // A failed refresh means current authorization/health is unknown.
+      setNodes([])
+      setSummary(EMPTY_SUMMARY)
+      setStaleAfterSeconds(0)
+      setReconciliationMode('automatic')
+      setUpdatedAt(null)
       setError(
         !operatorToken.trim() && /bearer credential is required/i.test(message)
           ? 'Enter the fleet operator token to load remote nodes and controls.'

@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
 
+import model_intake_runner_service as runner_service  # noqa: E402
 from model_intake_runner_service import DurableRunnerQueue, RunnerJobRequest, _authorize  # noqa: E402
 
 
@@ -42,6 +43,15 @@ def test_runner_service_authentication_is_fail_closed(monkeypatch):
     with pytest.raises(Exception) as denied:
         _authorize("wrong")
     assert denied.value.status_code == 403
+
+
+def test_runner_health_requires_the_internal_token(monkeypatch):
+    monkeypatch.setenv("MODEL_INTAKE_RUNNER_INTERNAL_TOKEN", "x" * 40)
+    monkeypatch.setattr(runner_service, "firecracker_readiness", lambda: {"ready": True})
+    with pytest.raises(Exception) as denied:
+        runner_service.health(None)
+    assert denied.value.status_code == 403
+    assert runner_service.health("x" * 40)["ready"] is True
 
 
 def test_runner_restart_fails_interrupted_jobs_without_reexecution(tmp_path, monkeypatch):

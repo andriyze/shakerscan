@@ -56,6 +56,53 @@ def test_automatic_memory_sizing_rejects_unknown_operation():
         ))
 
 
+def test_automatic_memory_sizing_rejects_missing_artifact_size():
+    class Connection:
+        async def fetchval(self, *_args):
+            return None
+
+    with pytest.raises(RuntimeError, match="artifact size is unavailable"):
+        asyncio.run(api._model_intake_auto_memory_mib(
+            Connection(), str(uuid.uuid4()), {"model_artifact_sha256": "a" * 64},
+            operation="runtime",
+        ))
+
+
+def test_automatic_memory_sizing_rejects_malformed_cap(monkeypatch):
+    class Connection:
+        async def fetchval(self, *_args):
+            return 1_000_000
+
+    monkeypatch.setenv("MODEL_INTAKE_AUTO_MAX_MEMORY_MIB", "24GB")
+    with pytest.raises(RuntimeError, match="integer number of MiB"):
+        asyncio.run(api._model_intake_auto_memory_mib(
+            Connection(), str(uuid.uuid4()), {"model_artifact_sha256": "a" * 64},
+            operation="runtime",
+        ))
+
+
+def test_runner_stage_status_requires_operator_and_caches_disk_recovery(monkeypatch):
+    calls = {"auth": 0, "manifest": 0}
+
+    def authorize(_request):
+        calls["auth"] += 1
+
+    def manifest(_stage_dir):
+        calls["manifest"] += 1
+        return None
+
+    monkeypatch.setattr(api, "_require_model_intake_operator", authorize)
+    monkeypatch.setattr(api, "_model_intake_stage_manifest", manifest)
+    api._MODEL_INTAKE_STAGE_STATE.clear()
+    api._MODEL_INTAKE_STAGE_STATE.update({"status": "idle"})
+
+    first = asyncio.run(api.model_intake_runner_stage_status(object()))
+    second = asyncio.run(api.model_intake_runner_stage_status(object()))
+
+    assert first["status"] == second["status"] == "not_staged"
+    assert calls == {"auth": 2, "manifest": 1}
+
+
 def test_automatic_review_payload_decodes_jsonb_for_browser_contract():
     review_id = uuid.uuid4()
     scan_id = uuid.uuid4()
@@ -1058,6 +1105,8 @@ def test_conversion_rescan_uses_same_actionable_scanner_summary_shape():
         "exit_code": 1,
         "execution_contract": ["semgrep", "scan", "{subject}"],
         "finding_count": 1,
+        "findings_reported_count": 1,
+        "findings_truncated": False,
         "coverage": {"files_scanned": 4},
         "summary": {"finding_count": 1, "warning_only": True},
         "findings": [{
@@ -1122,6 +1171,27 @@ def test_automatic_review_retries_a_transient_runner_outage_but_keeps_a_bound():
     source = inspect.getsource(api._advance_model_intake_automatic_review)
     retry_check = "_model_intake_auto_runner_readiness_grace_active(review)"
     assert source.index(retry_check) < source.index('event="microvm_unavailable"')
+
+
+def test_automatic_memory_admission_retries_sample_pressure_but_rejects_fixed_capacity(monkeypatch):
+    now = datetime.now(timezone.utc)
+    review = {"updated_at": now}
+    monkeypatch.setattr(api, "_model_intake_runner_readiness_snapshot", lambda: {
+        "resources": {
+            "host_memory_total_bytes": 16 * 1024**3,
+            "host_memory_available_bytes": 4 * 1024**3,
+        },
+    })
+    assert asyncio.run(api._model_intake_auto_runner_memory_ready(review, 8192)) is False
+
+    monkeypatch.setattr(api, "_model_intake_runner_readiness_snapshot", lambda: {
+        "resources": {
+            "host_memory_total_bytes": 8 * 1024**3,
+            "host_memory_available_bytes": 8 * 1024**3,
+        },
+    })
+    with pytest.raises(RuntimeError, match="verified memory"):
+        asyncio.run(api._model_intake_auto_runner_memory_ready(review, 8192))
 
 
 def test_automatic_review_does_not_terminally_fail_one_runner_health_miss(monkeypatch):

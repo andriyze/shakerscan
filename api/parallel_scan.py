@@ -1408,10 +1408,12 @@ def _plan_scope(
         parent_request_max = 1
     n = min(requested, len(endpoints), parent_request_max)
     if n < 2:
-        notes.append(
-            f"scope strategy needs >=2 endpoints to fan out; got {len(endpoints)} "
-            "- falling back to a single shard"
+        reason = (
+            f"parent request_max={parent_request_max} permits only one shard"
+            if len(endpoints) >= 2 and parent_request_max < 2
+            else f"scope strategy needs >=2 endpoints to fan out; got {len(endpoints)}"
         )
+        notes.append(f"{reason} - falling back to a single shard")
     # Keep a resource collection and its ``/{id}`` children on the same shard so a
     # cross-principal BOLA differential can still harvest producer ids and replay
     # them as the second principal (plain round-robin would split them).
@@ -1430,6 +1432,11 @@ def _plan_scope(
     shards: list[ShardSpec] = []
     assigned_endpoint_count = 0
     total_endpoint_count = max(1, sum(len(bucket) for bucket in buckets))
+    # Every child needs at least one request. Since n is already clamped to the
+    # parent ceiling, reserve that minimum first and partition only the
+    # remainder by endpoint weight. This keeps the exact sum <= request_max even
+    # when affinity buckets are very uneven.
+    distributable_request_budget = max(0, parent_request_max - len(buckets))
     for i, slice_eps in enumerate(buckets):
         opts = _base_child_options(parent_options)
         opts["custom_endpoints"] = slice_eps
@@ -1437,10 +1444,10 @@ def _plan_scope(
         # Trim discovery and active breadth unless the caller provided stricter
         # custom caps. This is the raw speed path for known API endpoints.
         endpoint_count = max(1, len(slice_eps))
-        request_start = (parent_request_max * assigned_endpoint_count) // total_endpoint_count
+        request_start = (distributable_request_budget * assigned_endpoint_count) // total_endpoint_count
         assigned_endpoint_count += len(slice_eps)
-        request_end = (parent_request_max * assigned_endpoint_count) // total_endpoint_count
-        shard_request_max = max(1, request_end - request_start)
+        request_end = (distributable_request_budget * assigned_endpoint_count) // total_endpoint_count
+        shard_request_max = 1 + request_end - request_start
         budget_defaults = {
             "max_duration_minutes": max(5, min(10, 4 + (2 * endpoint_count))),
             "max_urls": 150,

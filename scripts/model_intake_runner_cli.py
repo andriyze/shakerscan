@@ -739,6 +739,7 @@ def cmd_install(args, runtime: Path) -> int:
         "MODEL_INTAKE_KERNEL_SHA256": args.kernel_sha256,
         "MODEL_INTAKE_ROOTFS_SOURCE": str(rootfs),
         "MODEL_INTAKE_ROOTFS_SHA256": rootfs_sha256,
+        "MODEL_INTAKE_ROOTFS_INPUTS_SHA256": _guest_rootfs_inputs_sha256(runtime),
         "MODEL_INTAKE_RUNNER_BIND_HOST": bind_host,
         "MODEL_INTAKE_RUNNER_BIND_PORT": str(args.bind_port),
         # Compose bind-mounts <runtime>/results at /results. Firecracker runs

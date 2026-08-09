@@ -5,7 +5,8 @@
 set -eu
 
 INSTALL_URL="https://install.shakerscan.com"
-REPO_RAW_BASE="${SHAKERSCAN_RAW_BASE:-https://raw.githubusercontent.com/andriyze/shakerscan/main}"
+CHANNEL_RAW_BASE="https://raw.githubusercontent.com/andriyze/shakerscan/main"
+REPO_RAW_BASE="${SHAKERSCAN_RAW_BASE:-}"
 INSTALL_DIR="${SHAKERSCAN_HOME:-$HOME/.shakerscan}"
 BIN_DIR="${SHAKERSCAN_BIN_DIR:-$HOME/.local/bin}"
 START_AFTER_INSTALL="${SHAKERSCAN_START:-1}"
@@ -243,14 +244,28 @@ print_next_steps() {
     say ""
 }
 
+install_bootstrap_deps
+
+# The stable install channel advances only after every release image exists.
+# Runtime files are then downloaded from the matching immutable tag, avoiding
+# both unpublished-image windows and main-vs-image source skew. A custom raw
+# base remains an explicit development/testing escape hatch.
+if [ -z "$REPO_RAW_BASE" ]; then
+    stable_raw="$(curl -fsSL "$CHANNEL_RAW_BASE/install/STABLE_VERSION")" || \
+        fail "failed to resolve the stable ShakerScan release channel"
+    stable_version="$(printf '%s' "$stable_raw" | tr -d '[:space:]')"
+    case "$stable_version" in
+        ""|*[!0-9A-Za-z._-]*) fail "stable release channel returned an unsafe version" ;;
+    esac
+    REPO_RAW_BASE="https://raw.githubusercontent.com/andriyze/shakerscan/v${stable_version}"
+fi
+
 say "ShakerScan installer"
 say ""
 say "Install directory: $INSTALL_DIR"
 say "Command path:      $BIN_DIR/shakerscan"
 say "Source:            $REPO_RAW_BASE"
 say ""
-
-install_bootstrap_deps
 
 mkdir -p "$INSTALL_DIR/db" "$INSTALL_DIR/results" "$INSTALL_DIR/scripts" "$INSTALL_DIR/api"
 mkdir -p "$INSTALL_DIR/runner/guest" "$INSTALL_DIR/runner/host"

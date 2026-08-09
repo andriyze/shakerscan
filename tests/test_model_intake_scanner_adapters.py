@@ -217,6 +217,16 @@ def test_modelscan_adapter_is_fail_closed():
     assert _parse_external_scanner("modelscan", "untrusted preamble\n{\"issues\":[]}", "", 0)[0] == "INCOMPLETE"
     assert _parse_external_scanner("modelscan", '{}', "", 0)[0] == "INCOMPLETE"
     assert _parse_external_scanner("modelscan", '{"issues":[{"operator":"GLOBAL"}]}', "", 1)[0] == "FAIL"
+    error_status, error_findings, error_summary = _parse_external_scanner(
+        "modelscan",
+        '{"issues":[],"errors":[{"description":"unsupported format"}]}',
+        "",
+        1,
+    )
+    assert error_status == "INCOMPLETE"
+    assert error_findings == []
+    assert error_summary["error"] == "modelscan_incomplete_coverage"
+    assert error_summary["error_count"] == 1
 
 
 def test_fickling_requires_semantic_output():

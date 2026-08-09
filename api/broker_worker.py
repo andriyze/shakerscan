@@ -203,6 +203,8 @@ async def centralize_result_artifacts(
 
 async def execute_lease(state: dict[str, Any], lease: dict[str, Any]) -> None:
     job = lease.get("job") if isinstance(lease.get("job"), dict) else {}
+    if job.get("_broker_result_id"):
+        raise BrokerWorkerError("trusted broker-result ingestion cannot execute on a fleet node")
     target = str(job.get("target") or "").strip()
     scan_id = str(job.get("scan_id") or "").strip()
     job_id = str(job.get("job_id") or "").strip()

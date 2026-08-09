@@ -76,6 +76,7 @@ sync_dev_sources() {
     done
     [ -d /app/_src/scanner/scanner_tools ] && cp -rf /app/_src/scanner/scanner_tools/. /app/scanner_tools/ 2>/dev/null || true
     [ -d /app/_src/scanner/wordlists ] && cp -rf /app/_src/scanner/wordlists/. /app/wordlists/ 2>/dev/null || true
+    [ -d /app/_src/scanner/payloads ] && cp -rf /app/_src/scanner/payloads/. /app/payloads/ 2>/dev/null || true
     [ -d /app/_src/api/ai_gate ] && cp -rf /app/_src/api/ai_gate/. /app/ai_gate/ 2>/dev/null || true
 }
 sync_dev_sources

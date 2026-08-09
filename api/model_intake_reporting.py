@@ -380,6 +380,9 @@ def _network_summary(network: dict[str, Any]) -> dict[str, Any]:
         "lost_events": network.get("lost_events"),
         "guest_interfaces": network.get("guest_interfaces"),
         "host_interfaces": network.get("host_interfaces"),
+        "no_network_device": network.get("no_network_device"),
+        "network_interface_config_count": network.get("network_interface_config_count"),
+        "tap_device_count": network.get("tap_device_count"),
         "host_firewall_drop_count": network.get("host_firewall_drop_count"),
         "telemetry_sha256": network.get("telemetry_sha256"),
     }
@@ -468,10 +471,22 @@ def _runner_controls(
     else:
         phases = runtime.get("phases") or []
         state_status = _normalize_status(runtime.get("state"))
-        phase_statuses = {str(item.get("status")) for item in phases}
+        phase_by_name = {
+            str(item.get("phase") or ""): str(item.get("status") or "")
+            for item in phases
+            if isinstance(item, dict) and item.get("phase")
+        }
+        required_runtime_phases = {
+            "import", "tokenizer", "model_load", "warmup", "inference", "teardown",
+        }
+        missing_runtime_phases = sorted(required_runtime_phases - set(phase_by_name))
+        failed_runtime_phases = sorted(
+            phase for phase in required_runtime_phases
+            if phase_by_name.get(phase) not in {None, "PASS"}
+        )
         runtime_status = (
             "ERROR" if state_status in {"FAIL", "ERROR"}
-            else "PASS" if phases and phase_statuses <= {"PASS"}
+            else "PASS" if not missing_runtime_phases and not failed_runtime_phases
             else "INCOMPLETE"
         )
         ref = [{"kind": "runner_job", "id": runtime["job_id"]}]
@@ -479,8 +494,23 @@ def _runner_controls(
             "id": "firecracker_runtime",
             "label": "Firecracker runtime execution",
             "status": runtime_status,
-            "detail": f"{len(phases)} required phase result(s) recorded for the exact subject.",
-            "coverage": {"phases": len(phases), "request_sha256": runtime.get("request_sha256")},
+            "detail": (
+                "All six required exact-subject runtime phases passed."
+                if runtime_status == "PASS"
+                else "Runtime evidence is incomplete: "
+                + "; ".join(filter(None, (
+                    f"missing {', '.join(missing_runtime_phases)}" if missing_runtime_phases else "",
+                    f"non-pass {', '.join(failed_runtime_phases)}" if failed_runtime_phases else "",
+                )))
+                + "."
+            ),
+            "coverage": {
+                "phases": len(phases),
+                "required_phases": sorted(required_runtime_phases),
+                "missing_phases": missing_runtime_phases,
+                "failed_phases": failed_runtime_phases,
+                "request_sha256": runtime.get("request_sha256"),
+            },
             "evidence_refs": ref,
         }
         network = runtime.get("network") or {}
@@ -491,6 +521,19 @@ def _runner_controls(
         attempt_count = _integer(network_summary.get("outbound_attempt_count"))
         lost_events = _integer(network_summary.get("lost_events"))
         firewall_drops = _integer(network_summary.get("host_firewall_drop_count"))
+        interface_fields = (
+            "guest_interfaces", "host_interfaces", "no_network_device",
+            "network_interface_config_count", "tap_device_count",
+        )
+        expected_interfaces = None
+        if all(field in network_summary for field in interface_fields):
+            expected_interfaces = (
+                network_summary.get("guest_interfaces") == ["lo"]
+                and network_summary.get("host_interfaces") == ["lo"]
+                and network_summary.get("no_network_device") is True
+                and _integer(network_summary.get("network_interface_config_count")) == 0
+                and _integer(network_summary.get("tap_device_count")) == 0
+            )
         network_status = (
             "PASS"
             if network_summary.get("complete") is True
@@ -498,9 +541,11 @@ def _runner_controls(
             and network_summary.get("overflowed") is False
             and lost_events == 0
             and firewall_drops == 0
+            and expected_interfaces
             else "FAIL"
             if (attempt_count is not None and attempt_count > 0)
             or (firewall_drops is not None and firewall_drops > 0)
+            or expected_interfaces is False
             else "ERROR"
         )
         network_control = {
@@ -513,7 +558,7 @@ def _runner_controls(
                 f"{_integer(network_summary.get('ip_socket_event_count')) or 0} IP socket-setup event(s) "
                 "were classified with no telemetry loss."
                 if network_status == "PASS"
-                else "Outbound attempts or incomplete/lost telemetry require blocking review."
+                else "Outbound attempts, unexpected interfaces, network devices, or incomplete/lost telemetry require blocking review."
             ),
             "coverage": network_summary,
             "evidence_refs": ref,
@@ -580,6 +625,8 @@ def _scanner_result_detail(
         "required": bool(item.get("required")),
         "applicability": item.get("applicability"),
         "finding_count": _integer(item.get("finding_count")),
+        "findings_reported_count": _integer(item.get("findings_reported_count")),
+        "findings_truncated": item.get("findings_truncated") is True,
         "findings": [
             {
                 key: finding.get(key)
@@ -1009,7 +1056,15 @@ def build_model_intake_report(
     })
     timelines = _runner_timelines(runner_jobs)
     artifact_uri = str(artifact.get("immutable_uri") or "").lower() if artifact else ""
-    conversion_required = any(
+    unsafe_serialization_finding = any(
+        str(item.get("id") or "") == "model_intake:unsafe_serialization"
+        for item in static_payload.get("scan_findings") or []
+        if isinstance(item, dict)
+    )
+    artifact_extension = str(static_payload.get("artifact_extension") or "").lower()
+    conversion_required = unsafe_serialization_finding or artifact_extension in {
+        ".bin", ".pt", ".pth", ".ckpt", ".pkl", ".pickle", ".joblib",
+    } or any(
         artifact_uri.split("?", 1)[0].endswith(extension)
         for extension in (".bin", ".pt", ".pth", ".ckpt", ".pkl", ".pickle", ".joblib")
     )
@@ -1048,6 +1103,7 @@ def build_model_intake_report(
             receipt_overall_status == "INCOMPLETE"
             and receipt_signer_trust == "non_production_local_pem"
             and environment == "production"
+            and "expired" not in str(runtime_evidence_control.get("detail") or "").lower()
         ):
             runtime_status = "INCOMPLETE"
             runtime_detail = (
@@ -1059,7 +1115,7 @@ def build_model_intake_report(
                 "Runtime execution is complete. For production admission, configure an approved "
                 "KMS-backed runner signer and rerun; keep local PEM for technical, development, or test reviews."
             )
-        elif receipt_overall_status in {"INCOMPLETE", "ERROR", "REVIEW", "NOT_RUN"}:
+        elif receipt_overall_status in {"FAIL", "INCOMPLETE", "ERROR", "REVIEW", "NOT_RUN"}:
             runtime_status = receipt_overall_status
             runtime_detail = (
                 f"Exact-subject runtime phases passed, but the signed runtime evidence is "
@@ -1267,8 +1323,10 @@ def build_model_intake_report(
         if finding.get("id") != "license_file_missing"
     ]
     if static_control and static_security_findings:
-        labels: list[str] = []
-        remediation_steps: list[str] = []
+        blocking_labels: list[str] = []
+        review_labels: list[str] = []
+        blocking_remediation_steps: list[str] = []
+        review_remediation_steps: list[str] = []
         seen_locations: set[str] = set()
         for finding in sorted(
             static_security_findings,
@@ -1296,14 +1354,34 @@ def build_model_intake_report(
                     label += f" ({path}{f':{line}' if line else ''})"
                 location_label = f" at {path}{f':{line}' if line else ''}" if path else ""
                 action = f"Resolve {str(finding.get('message') or finding.get('call') or finding.get('id') or 'the scanner finding')}{location_label}, then rescan the new pinned revision."
-            labels.append(label)
-            remediation_steps.append(action)
-        result_label = "blocking or high-severity finding(s)" if static_control.get("status") == "FAIL" else "review item(s)"
-        static_control["detail"] = (
-            f"{len(labels)} {result_label}: " + "; ".join(labels[:5])
-            + (f"; and {len(labels) - 5} more" if len(labels) > 5 else "")
+            is_blocking = str(finding.get("severity") or "").lower() in {"critical", "high"}
+            if is_blocking:
+                blocking_labels.append(label)
+                blocking_remediation_steps.append(action)
+            else:
+                review_labels.append(label)
+                review_remediation_steps.append(
+                    f"Review {str(finding.get('message') or finding.get('call') or finding.get('id') or 'the scanner observation')}"
+                    + (f" at {path}{f':{line}' if line else ''}" if path else "")
+                    + " and document its disposition."
+                )
+        detail_parts: list[str] = []
+        if blocking_labels:
+            detail_parts.append(
+                f"{len(blocking_labels)} blocking high/critical finding(s): "
+                + "; ".join(blocking_labels[:5])
+                + (f"; and {len(blocking_labels) - 5} more" if len(blocking_labels) > 5 else "")
+            )
+        if review_labels:
+            detail_parts.append(
+                f"{len(review_labels)} review warning(s): "
+                + "; ".join(review_labels[:5])
+                + (f"; and {len(review_labels) - 5} more" if len(review_labels) > 5 else "")
+            )
+        static_control["detail"] = " ".join(detail_parts)
+        static_control["remediation"] = " ".join(
+            (blocking_remediation_steps + review_remediation_steps)[:5]
         )
-        static_control["remediation"] = " ".join(remediation_steps[:5])
         actions = _required_actions(controls)
         if outcome == "ALLOW":
             actions = [item for item in actions if item["status"] != "REVIEW"]
@@ -1525,13 +1603,29 @@ def apply_automatic_review_context(
     not_applicable = [item for item in technical_controls if item.get("status") == "NOT_APPLICABLE"]
     actions = _required_actions(technical_controls)
     automatic_outcome = str(automatic.get("technical_outcome") or "").upper()
-    normalized_outcome = {
+    controller_outcome = {
         "PASS": "ALLOW",
         "REVIEW_REQUIRED": "REVIEW",
         "REVIEW": "REVIEW",
         "BLOCK": "BLOCK",
         "INCOMPLETE": "INCOMPLETE",
     }.get(automatic_outcome, str(report.get("outcome") or "INCOMPLETE"))
+    # A controller stop must never hide a determinate blocking result already
+    # present in the signed evidence. BLOCK dominates incomplete execution,
+    # followed by missing evidence, review, and finally allow.
+    if any(item.get("status") == "FAIL" for item in technical_controls):
+        normalized_outcome = "BLOCK"
+    elif controller_outcome == "INCOMPLETE" or any(
+        item.get("status") in {"ERROR", "INCOMPLETE", "NOT_RUN"}
+        for item in technical_controls
+    ):
+        normalized_outcome = "INCOMPLETE"
+    elif controller_outcome == "REVIEW" or any(
+        item.get("status") == "REVIEW" for item in technical_controls
+    ):
+        normalized_outcome = "REVIEW"
+    else:
+        normalized_outcome = "ALLOW"
     attention_count = sum(
         item.get("status") in {"FAIL", "ERROR", "INCOMPLETE", "NOT_RUN", "REVIEW"}
         for item in technical_controls
@@ -1543,7 +1637,9 @@ def apply_automatic_review_context(
         "BLOCK": "One or more technical checks found a condition that blocks use of this revision.",
         "INCOMPLETE": "The technical review did not collect all required evidence.",
     }.get(automatic_outcome, str(report.get("plain_language") or "Technical review results are available."))
-    if automatic_outcome == "INCOMPLETE" and pending:
+    if normalized_outcome == "BLOCK":
+        technical_statement = "One or more technical checks found a condition that blocks use of this revision."
+    elif automatic_outcome == "INCOMPLETE" and pending:
         first_pending = next((item for item in pending if isinstance(item, dict)), {})
         pending_detail = str(first_pending.get("detail") or first_pending.get("status") or "required evidence is missing")
         technical_statement = (
@@ -1633,7 +1729,7 @@ def apply_automatic_review_context(
     report["detailed_review"] = detail
     report["presentation"] = _presentation_summary(
         controls,
-        outcome=automatic_outcome or normalized_outcome,
+        outcome=normalized_outcome,
         license_compliance=_json(detail.get("license_compliance"), {}),
         external_requirement_count=len(_json(detail.get("external_approval_requirements"), [])),
         license_source_missing=any(
@@ -1770,8 +1866,8 @@ def render_model_intake_html(report: dict[str, Any]) -> str:
         finding_id = str(finding.get("id") or finding.get("rule_id") or "")
         return str(
             finding.get("message") or finding.get("call") or finding.get("operator")
-            or finding.get("license") or finding.get("classification")
-            or known_descriptions.get(finding_id) or finding_id or "Finding reported"
+            or finding.get("license") or known_descriptions.get(finding_id)
+            or finding.get("classification") or finding_id or "Finding reported"
         )
 
     tool_sections: list[str] = []
@@ -2007,6 +2103,13 @@ def render_model_intake_html(report: dict[str, Any]) -> str:
         for item in static_detail.get("vulnerability_inventory") or []
         if isinstance(item, dict)
     ) or f"<tr><td colspan='6'>{esc(vulnerability_empty_message)}</td></tr>"
+    vulnerability_severity_cards = "".join(
+        f"<div class='severity-card severity-{esc(severity)}'>"
+        f"<span>{esc(severity.capitalize())}</span>"
+        f"<strong>{esc(_integer(vulnerability_summary.get(severity)) or 0)}</strong>"
+        "</div>"
+        for severity in ("critical", "high", "medium", "low")
+    )
     automatic = _json(report.get("automatic_review"), {})
     automatic_summary = _json(executive.get("automatic_technical_review"), {})
     subject_identity = _json(executive.get("subject_identity"), {})
@@ -2062,6 +2165,7 @@ html{{scroll-behavior:smooth}}body{{font:14px system-ui,sans-serif;margin:32px;c
 th,td{{border:1px solid #ccd2dc;padding:8px;vertical-align:top;text-align:left}}code{{white-space:pre-wrap;word-break:break-all;font-size:11px}}
 .status{{font-weight:700}}.pass{{color:#08783e}}.fail,.error,.crashed{{color:#b42318}}.review,.review_required,.warning,.incomplete,.not_run,.timeout,.unsupported{{color:#9a6700}}
 .status.critical{{color:#fff;background:#7a0019}}.status.high{{color:#b42318;background:#fee4e2}}.status.medium{{color:#b54708;background:#fffaeb}}.status.low{{color:#175cd3;background:#eff8ff}}.status.unknown,.status.info{{color:#475467;background:#f2f4f7}}
+.severity-grid{{display:grid;grid-template-columns:repeat(4,minmax(110px,1fr));gap:10px;max-width:720px;margin:14px 0}}.severity-card{{border-radius:8px;padding:10px 14px;display:flex;justify-content:space-between;align-items:center;border:1px solid transparent}}.severity-card strong{{font-size:22px}}.severity-critical{{color:#fff;background:#7a0019}}.severity-high{{color:#b42318;background:#fee4e2;border-color:#fecdca}}.severity-medium{{color:#b54708;background:#fffaeb;border-color:#fedf89}}.severity-low{{color:#175cd3;background:#eff8ff;border-color:#b2ddff}}
 .toc{{background:#f7f8fa;border:1px solid #d8dde6;border-radius:8px;padding:14px 18px;margin:20px 0}}.toc strong{{display:block;margin-bottom:6px}}.toc ul{{columns:2;margin:6px 0;padding-left:22px}}.toc li{{margin:5px 0}}a{{color:#175cd3;text-decoration:none}}a:hover{{text-decoration:underline}}.back{{display:inline-block;margin:8px 0 18px}}
 .no-print{{margin-right:8px}}.page-break{{break-before:page}}.tool-index{{line-height:2;margin:12px 0 20px}}.tool-index a{{display:inline-block;white-space:nowrap}}
 .tool-run{{border:1px solid #d8dde6;border-radius:8px;margin:14px 0;break-inside:avoid-page}}.tool-run summary{{cursor:pointer;display:flex;align-items:center;gap:14px;padding:12px 14px;background:#f7f8fa}}.tool-run summary h4{{font-size:17px;margin:0}}.run-stage{{color:#5b6475;font-size:14px;font-weight:500}}.finding-total{{color:#5b6475}}.tool-body{{padding:0 14px 14px}}.tool-run h5{{font-size:15px;margin-bottom:0}}.tool-overview th{{width:230px;background:#f7f8fa}}
@@ -2094,6 +2198,7 @@ th,td{{border:1px solid #ccd2dc;padding:8px;vertical-align:top;text-align:left}}
 <section id="reviewed-files"><h3>Reviewed repository files</h3><p>The immutable repository manifest contained {esc(manifest.get('total_files') or 0)} file(s); {esc(manifest.get('reported_files') or 0)} safe, content-free file record(s) are shown. A manifest entry proves acquisition and identity; each scanner's file coverage above proves whether that tool examined it.</p><table><thead><tr><th>Repository-relative file</th><th>Bytes</th><th>SHA-256</th></tr></thead><tbody>{manifest_rows}</tbody></table><a class="back no-print" href="#contents">Back to contents</a></section>
 <section id="dependencies"><h3>Dependencies and known vulnerabilities</h3>
 <p><strong>Runtime profile:</strong> {esc(runtime_profile.get('id') or 'not resolved')} · <strong>Dependency resolution:</strong> {esc(runtime_dependencies.get('status') or 'NOT_RUN')} · <strong>Known advisories:</strong> {esc(vulnerability_summary.get('total') or 0)} across {esc(vulnerability_summary.get('packages_affected') or 0)} package(s).</p>
+<div class="severity-grid" aria-label="Known vulnerability counts by severity">{vulnerability_severity_cards}</div>
 <p class="review-notes"><strong>Inventory scope:</strong> {esc(inventory_note)}</p>
 <table><thead><tr><th>Package</th><th>Installed version</th><th>Advisory</th><th>Severity</th><th>Reported by</th><th>Fix</th></tr></thead><tbody>{vulnerability_rows}</tbody></table>
 <details><summary>Derived inference imports</summary><table><thead><tr><th>Import</th><th>Resolved package</th><th>Version</th><th>Evidence</th><th>Status</th></tr></thead><tbody>{inferred_rows}</tbody></table></details>

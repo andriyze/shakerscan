@@ -153,6 +153,33 @@ def test_resolved_aibom_dependencies_keep_exact_package_identity_when_manifest_s
     assert completeness["dependency_component_count"] == 1
 
 
+def test_duplicate_manifest_and_runtime_dependency_merge_richer_evidence_without_inflating_ai_count():
+    result = _scan_result()
+    result["model_intake"]["aibom"]["components"].append({
+        "type": "runtime_dependency",
+        "name": "transformers",
+        "version": "4.44.0",
+        "purl": "pkg:pypi/transformers@4.44.0",
+        "hashes": [{"alg": "SHA-256", "content": "b" * 64}],
+        "profile_id": "shakerscan-firecracker-python312-cpu/v1",
+        "resolution": "hash_locked_runtime_profile",
+    })
+
+    document = build_model_intake_cyclonedx(result, scan_id="s-1")
+    dependencies = [item for item in document["components"] if item.get("purl") == "pkg:pypi/transformers@4.44.0"]
+    completeness = model_intake_bom_completeness(document)
+
+    assert len(dependencies) == 1
+    assert dependencies[0]["hashes"] == [{"alg": "SHA-256", "content": "b" * 64}]
+    assert {item["name"]: item["value"] for item in dependencies[0]["properties"]}.items() >= {
+        "shakerscan:aibom_type": "runtime_dependency",
+        "shakerscan:resolution": "hash_locked_runtime_profile",
+    }.items()
+    # The root model plus base model, tokenizer, and dataset are AI-system
+    # components; package dependencies remain dependency inventory only.
+    assert completeness["ai_component_count"] == 4
+
+
 def test_a_scan_without_model_intake_evidence_is_rejected():
     for payload in ({}, {"model_intake": {}}, {"discovery": {}}):
         try:

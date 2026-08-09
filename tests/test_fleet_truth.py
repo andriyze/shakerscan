@@ -272,11 +272,15 @@ def test_unexplained_image_drift_remote_node_is_not_schedulable():
 
 
 def test_worker_freshness_snapshot_marks_running_pending_as_unsafe(monkeypatch):
+    labels = {
+        "com.docker.compose.project": "shakerscan",
+        "com.docker.compose.service": "worker",
+    }
     containers = [
-        {"Id": "aaa111", "Names": ["/shakerscan-worker-1"], "State": "running"},
-        {"Id": "bbb222", "Names": ["/shakerscan-worker-2"], "State": "running"},
-        {"Id": "ccc333", "Names": ["/shakerscan-worker-3"], "State": "running"},
-        {"Id": "ddd444", "Names": ["/shakerscan-worker-old"], "State": "exited"},
+        {"Id": "aaa111", "Names": ["/shakerscan-worker-1"], "State": "running", "Labels": labels},
+        {"Id": "bbb222", "Names": ["/shakerscan-worker-2"], "State": "running", "Labels": labels},
+        {"Id": "ccc333", "Names": ["/shakerscan-worker-3"], "State": "running", "Labels": labels},
+        {"Id": "ddd444", "Names": ["/shakerscan-worker-old"], "State": "exited", "Labels": labels},
     ]
 
     class _Redis:
@@ -289,6 +293,7 @@ def test_worker_freshness_snapshot_marks_running_pending_as_unsafe(monkeypatch):
             }
 
     monkeypatch.setattr(api_module, "docker_socket_request", lambda *a, **k: (200, containers))
+    monkeypatch.setattr(api_module, "_local_compose_project_best_effort", lambda: "shakerscan")
     monkeypatch.setattr(api_module, "get_redis", lambda: _Redis())
     monkeypatch.setattr(api_module, "expected_build_fingerprint", lambda: "fp-current")
     monkeypatch.setattr(api_module, "current_scanner_version", lambda: "v1")

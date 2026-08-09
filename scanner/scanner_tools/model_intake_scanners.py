@@ -780,14 +780,29 @@ def _parse_external_scanner(
                 return "INCOMPLETE", [], {"error": "modelscan_output_shape_invalid"}
             if isinstance(parsed, dict) and not any(key in parsed for key in ("issues", "findings", "errors")):
                 return "INCOMPLETE", [], {"error": "modelscan_findings_key_missing"}
-            candidates = (
-                parsed if isinstance(parsed, list)
-                else parsed.get("issues") or parsed.get("findings") or parsed.get("errors") or []
-            )
+            candidates = parsed if isinstance(parsed, list) else parsed.get("issues") or parsed.get("findings") or []
             if not isinstance(candidates, list):
                 return "INCOMPLETE", [], {"error": "modelscan_findings_shape_invalid"}
             findings = [_modelscan_finding(item) for item in candidates[:1000]]
             summary["finding_count"] = len(candidates)
+            if isinstance(parsed, dict):
+                errors = parsed.get("errors") if isinstance(parsed.get("errors"), list) else []
+                skipped_raw = parsed.get("skipped")
+                skipped_count = (
+                    len(skipped_raw) if isinstance(skipped_raw, (list, dict))
+                    else int(skipped_raw) if isinstance(skipped_raw, int) and not isinstance(skipped_raw, bool)
+                    else 0
+                )
+                summary.update({
+                    "error_count": len(errors),
+                    "skipped_count": skipped_count,
+                })
+                if errors or skipped_count:
+                    return "INCOMPLETE", findings, {
+                        **summary,
+                        "error": "modelscan_incomplete_coverage",
+                        "errors_sha256": _sha256_json(errors) if errors else None,
+                    }
         elif scanner == "semgrep":
             if not isinstance(parsed, dict) or not isinstance(parsed.get("results"), list):
                 return "INCOMPLETE", [], {"error": "semgrep_results_missing"}

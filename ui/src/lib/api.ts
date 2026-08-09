@@ -4300,8 +4300,10 @@ export interface ModelIntakeRunnerStageState {
   }
 }
 
-export async function getModelIntakeRunnerStage(): Promise<ModelIntakeRunnerStageState> {
-  const res = await fetch(`${API_URL}/model-intake/runners/stage`)
+export async function getModelIntakeRunnerStage(operatorToken: string): Promise<ModelIntakeRunnerStageState> {
+  const res = await fetch(`${API_URL}/model-intake/runners/stage`, {
+    headers: modelIntakeWorkflowHeaders(operatorToken),
+  })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load staging state'))
   return res.json()
 }

@@ -147,6 +147,9 @@ def test_prebuilt_runtime_defaults_to_the_downloaded_release_version():
     assert 'release_version" != "dev"' in scanner
     assert ': "\\${SCANNER_IMAGE_TAG:=$release_image_tag}"' in installer
     assert '"$BIN_DIR/shakerscan" start -y' in installer
+    assert (ROOT / "install" / "STABLE_VERSION").read_text().strip() == "0.8.2"
+    assert 'CHANNEL_RAW_BASE="https://raw.githubusercontent.com/andriyze/shakerscan/main"' in installer
+    assert 'REPO_RAW_BASE="https://raw.githubusercontent.com/andriyze/shakerscan/v${stable_version}"' in installer
 
 
 def test_minimal_installed_research_adapter_has_all_imports(tmp_path):
@@ -513,6 +516,7 @@ def test_scanner_sh_restart_and_rebuild_recreate_api_scaled_workers():
     assert "refresh_workers_after_rebuild" in script
     assert 'existing_workers="$(running_scan_worker_count)"' in script
     assert 'refresh_workers_after_rebuild "$existing_workers"' in script
+    assert 'compose up --no-build -d --force-recreate model-intake-sandbox' in script
     assert 'compose up --no-build -d --force-recreate --scale worker="$desired_count" worker' in script
 
 

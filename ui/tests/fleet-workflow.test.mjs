@@ -9,4 +9,5 @@ test('fleet access failure does not render an empty fleet as authoritative state
   assert.match(page, /if \(!loading && error && nodes\.length === 0\)/)
   assert.match(page, /<OperatorAccessCard/)
   assert.match(page, /<ErrorState message=\{error\}/)
+  assert.match(page, /catch \(err\) \{[\s\S]*setNodes\(\[\]\)[\s\S]*setSummary\(EMPTY_SUMMARY\)/)
 })
