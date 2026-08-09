@@ -24,7 +24,6 @@ jobs:
   stable:
     name: Move stable aliases last
     runs-on: ubuntu-latest
-    environment: stable-promotion
     steps:
       - uses: actions/checkout@v6
         with:

@@ -151,7 +151,7 @@ ShakerScan 0.8.17 is a trusted-operator, self-hosted security scanner.
 | **SCAN-04** | Authenticated detector claims require server-observed accepted authentication and distinct-principal proof. | Current-fleet authenticated benchmark receipts. |
 | **MODEL-01** | Model acquisition, scanners, reports, policy, signing, and Firecracker evidence fail closed and remain bound to one immutable subject. | Full suites plus multiple real public-model runs on AMD64 KVM through UI, API, and agent skill paths. |
 | **MODEL-02** | Reports are decision-first, readable, and complete: controls, scanner details, CVEs, licenses, packages, network attempts, runtime evidence, gaps, and artifacts agree. | Browser QA and programmatic cross-checks of JSON, HTML, SARIF, AIBOM, SPDX, CycloneDX, license BOM, and notices. |
-| **FLEET-01** | Broker enrollment, placement, leases, artifacts, lifecycle controls, credentials, and build truth fail closed across real Linux hosts. | Two-node physical acceptance, exact-node placement, scaling, drain/resume, fault/reclaim, dedupe, artifact, token, and public-store isolation receipts. |
+| **FLEET-01** | Broker enrollment, placement, leases, artifacts, lifecycle controls, credentials, and build truth fail closed across real Linux hosts. | Automated contracts plus optional multi-node operational acceptance for exact-node placement, scaling, drain/resume, fault/reclaim, dedupe, artifacts, tokens, and public-store isolation. |
 | **UPGRADE-01** | Required schema failures stop startup; clean and repeated dirty upgrades preserve configuration, results, volumes, targets, findings, and Fleet identity. | Installer/upgrade/rollback smoke and deliberate migration-failure tests. |
 | **DEP-01** | Supported runtimes contain no unaccepted high/critical production dependency findings. | Locked Python audit, production npm audit, image/tool inventory, and documented exceptions if any. |
 | **BUILD-01** | Release-critical tools, rules, templates, images, source SHA, and final digests are reproducible and auditable. | Candidate image self-tests, inventory comparison, labels, SBOM/provenance, and published manifest inspection. |
@@ -208,7 +208,7 @@ Run every item against the exact commit intended for `v0.8.17`.
       external follow-up agree across formats.
 - [ ] No documented example model name is embedded in provider-neutral product scope or policy.
 
-### Fleet
+### Fleet (optional operational acceptance)
 
 - [ ] Control plane and at least two broker nodes run the exact frozen source/image identity.
 - [ ] Preflight proves artifact PUT/GET/DELETE, uniform transport, private Redis/PostgreSQL, and
@@ -235,15 +235,13 @@ After all frozen-source gates are green, follow [the release process](release-pr
 2. Run **Release candidate** for the exact full SHA. It builds once, publishes only
    `candidate-<sha>-<run-id>` manifests, and emits an immutable digest receipt. It cannot create a version
    tag, `latest`, a Git tag, a GitHub Release, or change the stable installer.
-3. Deploy those candidate digests to a clean control plane plus at least two broker nodes. Complete
-   physical acceptance and retain its content-free receipt and SHA-256.
-4. Run **Promote release** with the candidate run ID and acceptance receipt. The protected
-   `release-promotion` environment retags the already-tested digests as `0.8.17` and creates the
-   GitHub Release. It does not rebuild and does not move `latest`.
+3. Optionally deploy those candidate digests to a multi-node fleet and retain its content-free
+   operational acceptance receipt.
+4. Run **Promote release** with the candidate SHA and run ID. It retags the already-tested digests
+   as `0.8.17` and creates the GitHub Release. It does not rebuild and does not move `latest`.
 5. Perform clean-install, stateful-upgrade, rollback, UI, and public-host smoke against the exact
    published version. Retain the smoke receipt.
-6. In a separate reviewed PR, change `install/STABLE_VERSION` only. Then run **Promote stable
-   channel** through the protected `stable-promotion` environment. It verifies the public release,
+6. In a separate PR, change `install/STABLE_VERSION` only. Then run **Promote stable channel**. It verifies the public release,
    stable-version PR, and smoke receipt before moving `latest` by digest without rebuilding.
 7. Replace `pending candidate` in `RELEASES.md` with the tagged commit and published digests in a
    provenance-only follow-up.

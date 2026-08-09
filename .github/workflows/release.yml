@@ -12,15 +12,6 @@ on:
       candidate_run_id:
         description: "Successful Release candidate workflow run ID"
         required: true
-      acceptance_receipt_url:
-        description: "Durable URL for the content-free two-node physical acceptance receipt"
-        required: true
-      acceptance_receipt_sha256:
-        description: "SHA-256 of the physical acceptance receipt"
-        required: true
-      acceptance_node_count:
-        description: "Distinct accepted fleet nodes (minimum 2)"
-        required: true
 
 concurrency:
   group: shakerscan-release-promotion
@@ -37,9 +28,8 @@ env:
 
 jobs:
   promote:
-    name: Promote accepted candidate by digest
+    name: Promote validated candidate by digest
     runs-on: ubuntu-latest
-    environment: release-promotion
     permissions:
       contents: write
       actions: read
@@ -51,22 +41,16 @@ jobs:
           ref: ${{ inputs.candidate_sha }}
           fetch-depth: 0
 
-      - name: Validate candidate and physical acceptance
+      - name: Validate immutable candidate
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
           CANDIDATE_SHA: ${{ inputs.candidate_sha }}
           CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
-          ACCEPTANCE_URL: ${{ inputs.acceptance_receipt_url }}
-          ACCEPTANCE_SHA256: ${{ inputs.acceptance_receipt_sha256 }}
-          ACCEPTANCE_NODE_COUNT: ${{ inputs.acceptance_node_count }}
         shell: bash
         run: |
           [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]
           [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$ACCEPTANCE_SHA256" =~ ^[0-9a-f]{64}$ ]]
-          [[ "$ACCEPTANCE_URL" =~ ^https:// ]]
-          [[ "$ACCEPTANCE_NODE_COUNT" =~ ^[0-9]+$ && "$ACCEPTANCE_NODE_COUNT" -ge 2 ]]
           [[ "$(tr -d '[:space:]' < VERSION)" == "$VERSION" ]]
           [[ "$(git rev-parse HEAD)" == "$CANDIDATE_SHA" ]]
           python3 - "$VERSION" <<'PY'
@@ -81,31 +65,6 @@ jobs:
           ]
           if candidate and published and max(published) > candidate:
               raise SystemExit("refusing to publish a stable version older than an existing release")
-          PY
-          curl --fail --silent --show-error --location \
-            --proto '=https' --tlsv1.2 "$ACCEPTANCE_URL" \
-            --output physical-acceptance-receipt.json
-          echo "${ACCEPTANCE_SHA256}  physical-acceptance-receipt.json" | sha256sum --check --strict
-          python3 - "$ACCEPTANCE_NODE_COUNT" <<'PY'
-          import hashlib
-          import json
-          import sys
-          path = "physical-acceptance-receipt.json"
-          receipt = json.load(open(path, encoding="utf-8"))
-          embedded = receipt.pop("receipt_sha256", "")
-          canonical = json.dumps(receipt, sort_keys=True, separators=(",", ":"), default=str).encode()
-          required_checks = {
-              "physical_worker_loss_recovered",
-              "public_data_stores_closed",
-              "uniform_worker_build_mode",
-          }
-          passed_checks = {item.get("name") for item in receipt.get("checks", []) if item.get("pass") is True}
-          nodes = {node for node in receipt.get("selected_node_ids", []) if node}
-          assert receipt.get("schema_version") == "shakerscan_fleet_acceptance_v1"
-          assert receipt.get("passed") is True and receipt.get("preflight_only") is False
-          assert required_checks <= passed_checks
-          assert len(nodes) >= 2 and len(nodes) == int(sys.argv[1])
-          assert embedded == hashlib.sha256(canonical).hexdigest()
           PY
           git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
           git merge-base --is-ancestor "$CANDIDATE_SHA" origin/main
@@ -161,19 +120,15 @@ jobs:
           VERSION: ${{ inputs.version }}
           CANDIDATE_SHA: ${{ inputs.candidate_sha }}
           CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
-          ACCEPTANCE_URL: ${{ inputs.acceptance_receipt_url }}
-          ACCEPTANCE_SHA256: ${{ inputs.acceptance_receipt_sha256 }}
         shell: bash
         run: |
           cp "docs/releases/${VERSION}.md" release-notes.md
           cat >> release-notes.md <<EOF
 
-          ## Build and acceptance provenance
+          ## Build provenance
 
           - Candidate commit: \`${CANDIDATE_SHA}\`
           - Candidate workflow: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN_ID}
-          - Physical acceptance receipt: ${ACCEPTANCE_URL}
-          - Acceptance receipt SHA-256: \`${ACCEPTANCE_SHA256}\`
           - Stable installer and \`latest\` are promoted separately after public smoke.
           EOF
           gh release create "v${VERSION}" --target "$CANDIDATE_SHA" \

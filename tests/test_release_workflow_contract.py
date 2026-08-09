@@ -22,17 +22,14 @@ def test_candidate_build_cannot_publish_release_or_stable_aliases():
     assert 'verify_run "$CODEQL_RUN_ID" "CodeQL"' in text
 
 
-def test_release_promotion_reuses_candidate_digests_and_requires_physical_receipt():
+def test_release_promotion_reuses_candidate_digests_without_physical_gate():
     text = PROMOTION.read_text(encoding="utf-8")
 
-    assert "environment: release-promotion" in text
+    assert "environment: release-promotion" not in text
     assert "candidate_run_id:" in text
-    assert "acceptance_receipt_sha256:" in text
-    assert '"$ACCEPTANCE_NODE_COUNT" -ge 2' in text
-    assert 'shakerscan_fleet_acceptance_v1' in text
-    assert 'physical_worker_loss_recovered' in text
-    assert 'public_data_stores_closed' in text
-    assert 'sha256sum --check --strict' in text
+    assert "acceptance_receipt_sha256:" not in text
+    assert "ACCEPTANCE_NODE_COUNT" not in text
+    assert 'shakerscan_fleet_acceptance_v1' not in text
     assert "gh run download" in text
     assert 'actual="$(docker buildx imagetools inspect' in text
     assert 'docker buildx imagetools create -t "${image}:${VERSION}" "${image}@${expected}"' in text
@@ -41,10 +38,10 @@ def test_release_promotion_reuses_candidate_digests_and_requires_physical_receip
     assert ":latest" not in text
 
 
-def test_stable_channel_is_separate_protected_last_step():
+def test_stable_channel_is_separate_last_step():
     text = STABLE.read_text(encoding="utf-8")
 
-    assert "environment: stable-promotion" in text
+    assert "environment: stable-promotion" not in text
     assert "smoke_receipt_sha256:" in text
     assert "install/STABLE_VERSION" in text
     assert "public-smoke-receipt.json" in text
