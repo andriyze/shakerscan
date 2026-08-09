@@ -763,7 +763,7 @@ def test_signer_image_and_database_role_are_narrow_and_releasable():
     dockerfile = (ROOT / "api" / "model_intake_signer.Dockerfile").read_text()
     role_script = (ROOT / "db" / "configure-model-intake-signer-role.sh").read_text()
     publisher = (ROOT / "scripts" / "publish-images.sh").read_text()
-    release_workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text()
+    release_workflow = (ROOT / ".github" / "workflows" / "release-candidate.yml").read_text()
 
     assert "scanner/Dockerfile" not in dockerfile
     assert "worker.py" not in dockerfile

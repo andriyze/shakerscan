@@ -74,6 +74,14 @@ jobs:
               model-intake-tests/test_model_intake_attestation.py \
               model-intake-tests/test_model_intake_signature_crypto.py'
 
+      - name: Run complete Python unit and contract suite
+        if: steps.changes.outputs.backend == 'true'
+        run: |
+          docker compose exec -T api sh -lc '
+            cd /workspace &&
+            PYTHONPATH=/app/_src/api:/app/_src/scanner:/app/_src \
+              python -m pytest -q -p no:cacheprovider tests'
+
       - name: Dump stack logs on failure
         if: failure() && steps.changes.outputs.backend == 'true'
         run: docker compose logs --tail=300 api worker || true

@@ -62,9 +62,9 @@ scanner and API images and reads it back from every native release artifact befo
 - The clean scanner build downloaded only 5 MiB of Playwright's 821 MiB checksum-pinned base layer
   over 23 minutes before the registry connection reset. The build exited nonzero; API/UI/signer
   builds, audits, publication, GitHub Release, and stable promotion did not run.
-- The 0.8.9 workflow retries only whole deterministic build commands, retaining successful BuildKit
-  layers between attempts. Four exhausted attempts still stop publication, and image contents,
-  source revision, and base-image digest remain unchanged.
+- The candidate workflow retries only narrowly classified transient base-image pulls. Dockerfile,
+  self-test, unit-test, and image-build failures stop on their first deterministic failure; they are
+  not repeated in a way that duplicates or obscures the root cause.
 
 ### 0.8.7 post-publish evidence motivating this patch
 
@@ -229,16 +229,23 @@ Run every item against the exact commit intended for `v0.8.17`.
 
 ## Publication
 
-After all frozen-candidate gates are green:
+After all frozen-source gates are green, follow [the release process](release-process.md). In short:
 
-1. Confirm `VERSION`, `docs/releases/0.8.17.md`, and the pending `RELEASES.md` row agree.
-2. Merge the exact candidate to `main` without adding an untested merge-only change.
-3. Wait for required `main` checks, then create annotated tag `v0.8.17` on that exact commit.
-4. Push the tag and require the Release workflow to build/publish scanner, API, UI, and signer for
-   `linux/amd64` and `linux/arm64`.
-5. Verify manifest architectures, OCI labels, source revision, image digests, API Docker CLI,
-   scanner Docker absence, and GitHub release notes.
-6. Replace `pending candidate` in `RELEASES.md` with the tagged commit and published digests in a
+1. Merge through protected `main`; do not put functional changes in a `release:` commit.
+2. Run **Release candidate** for the exact full SHA. It builds once, publishes only
+   `candidate-<sha>-<run-id>` manifests, and emits an immutable digest receipt. It cannot create a version
+   tag, `latest`, a Git tag, a GitHub Release, or change the stable installer.
+3. Deploy those candidate digests to a clean control plane plus at least two broker nodes. Complete
+   physical acceptance and retain its content-free receipt and SHA-256.
+4. Run **Promote release** with the candidate run ID and acceptance receipt. The protected
+   `release-promotion` environment retags the already-tested digests as `0.8.17` and creates the
+   GitHub Release. It does not rebuild and does not move `latest`.
+5. Perform clean-install, stateful-upgrade, rollback, UI, and public-host smoke against the exact
+   published version. Retain the smoke receipt.
+6. In a separate reviewed PR, change `install/STABLE_VERSION` only. Then run **Promote stable
+   channel** through the protected `stable-promotion` environment. It verifies the public release,
+   stable-version PR, and smoke receipt before moving `latest` by digest without rebuilding.
+7. Replace `pending candidate` in `RELEASES.md` with the tagged commit and published digests in a
    provenance-only follow-up.
 
 ## Post-publish installation and cleanup

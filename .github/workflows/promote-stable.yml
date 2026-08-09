@@ -1,0 +1,72 @@
+name: Promote stable channel
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Already-published version that passed public smoke"
+        required: true
+      smoke_receipt_url:
+        description: "Durable public-smoke receipt URL"
+        required: true
+      smoke_receipt_sha256:
+        description: "SHA-256 of the public-smoke receipt"
+        required: true
+
+concurrency:
+  group: shakerscan-stable-promotion
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  stable:
+    name: Move stable aliases last
+    runs-on: ubuntu-latest
+    environment: stable-promotion
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+
+      - name: Verify release, installer PR, and public smoke
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          SMOKE_URL: ${{ inputs.smoke_receipt_url }}
+          SMOKE_SHA256: ${{ inputs.smoke_receipt_sha256 }}
+        shell: bash
+        run: |
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$SMOKE_URL" =~ ^https:// ]]
+          [[ "$SMOKE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$(tr -d '[:space:]' < install/STABLE_VERSION)" == "$VERSION" ]]
+          gh release view "v${VERSION}" --json isPrerelease,isDraft --jq '(.isPrerelease == false) and (.isDraft == false)' | grep -qx true
+          curl --fail --silent --show-error --location \
+            --proto '=https' --tlsv1.2 "$SMOKE_URL" --output public-smoke-receipt.json
+          echo "${SMOKE_SHA256}  public-smoke-receipt.json" | sha256sum --check --strict
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Move latest aliases without rebuilding
+        env:
+          VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          for image in \
+            shakerscan/shakerscan-scanner \
+            shakerscan/shakerscan-api \
+            shakerscan/shakerscan-ui \
+            shakerscan/shakerscan-model-intake-signer; do
+            digest="$(docker buildx imagetools inspect "${image}:${VERSION}" | awk '$1 == "Digest:" && !found {print $2; found=1}')"
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            docker buildx imagetools create -t "${image}:latest" "${image}@${digest}"
+            latest="$(docker buildx imagetools inspect "${image}:latest" | awk '$1 == "Digest:" && !found {print $2; found=1}')"
+            [[ "$latest" == "$digest" ]]
+          done

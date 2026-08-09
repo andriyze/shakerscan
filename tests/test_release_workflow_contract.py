@@ -2,40 +2,59 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
+CANDIDATE = ROOT / ".github" / "workflows" / "release-candidate.yml"
+PROMOTION = ROOT / ".github" / "workflows" / "release.yml"
+STABLE = ROOT / ".github" / "workflows" / "promote-stable.yml"
 
 
-def test_stable_release_latest_promotion_is_derived_and_serialized():
-    text = WORKFLOW.read_text(encoding="utf-8")
+def test_candidate_build_cannot_publish_release_or_stable_aliases():
+    text = CANDIDATE.read_text(encoding="utf-8")
 
-    assert "group: shakerscan-release-publication" in text
-    assert "push_latest:" not in text.split("jobs:", 1)[0]
-    assert 'if [[ "$version" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$ ]]' in text
-    assert 'push_latest="true"' in text
-    assert "Refusing to move latest backward" in text
-
-
-def test_every_release_image_verifies_latest_matches_version_digest():
-    text = WORKFLOW.read_text(encoding="utf-8")
-
-    assert text.count('latest_digest="$(docker buildx imagetools inspect') == 4
-    assert text.count("&& !found {print $2; found=1}") == 8
-    assert "{print $2; exit}" not in text
-    assert text.count('[[ -n "$version_digest" && "$version_digest" == "$latest_digest" ]]') == 4
+    assert "push:\n    tags:" not in text
+    assert "candidate-${{ needs.meta.outputs.candidate_sha }}-${{ github.run_id }}" in text
+    assert "gh release create" not in text
+    assert 'imagetools create -t "${SCANNER_IMAGE}:${VERSION}"' not in text
+    assert 'imagetools create -t "${SCANNER_IMAGE}:latest"' not in text
+    assert "shakerscan-release-candidate/v1" in text
+    assert "e2e_run_id:" in text
+    assert "codeql_run_id:" in text
+    assert 'verify_run "$E2E_RUN_ID" "E2E (full release gate)"' in text
+    assert 'verify_run "$CODEQL_RUN_ID" "CodeQL"' in text
 
 
-def test_manual_release_records_candidate_and_workflow_provenance():
-    text = WORKFLOW.read_text(encoding="utf-8")
+def test_release_promotion_reuses_candidate_digests_and_requires_physical_receipt():
+    text = PROMOTION.read_text(encoding="utf-8")
 
-    assert 'workflow_sha: ${{ steps.meta.outputs.workflow_sha }}' in text
-    assert 'echo "workflow_sha=${{ github.workflow_sha }}"' in text
-    assert text.count("com.shakerscan.release.workflow-revision=${{ needs.meta.outputs.workflow_sha }}") == 4
-    assert "Candidate source commit" in text
-    assert "Release workflow commit" in text
+    assert "environment: release-promotion" in text
+    assert "candidate_run_id:" in text
+    assert "acceptance_receipt_sha256:" in text
+    assert '"$ACCEPTANCE_NODE_COUNT" -ge 2' in text
+    assert 'shakerscan_fleet_acceptance_v1' in text
+    assert 'physical_worker_loss_recovered' in text
+    assert 'public_data_stores_closed' in text
+    assert 'sha256sum --check --strict' in text
+    assert "gh run download" in text
+    assert 'actual="$(docker buildx imagetools inspect' in text
+    assert 'docker buildx imagetools create -t "${image}:${VERSION}" "${image}@${expected}"' in text
+    assert 'existing="$(docker buildx imagetools inspect' in text
+    assert "docker build " not in text
+    assert ":latest" not in text
 
 
-def test_clean_release_build_retries_pinned_base_downloads_without_weakening_digests():
-    workflow = WORKFLOW.read_text(encoding="utf-8")
+def test_stable_channel_is_separate_protected_last_step():
+    text = STABLE.read_text(encoding="utf-8")
+
+    assert "environment: stable-promotion" in text
+    assert "smoke_receipt_sha256:" in text
+    assert "install/STABLE_VERSION" in text
+    assert "public-smoke-receipt.json" in text
+    assert "sha256sum --check --strict" in text
+    assert 'imagetools create -t "${image}:latest"' in text
+    assert "docker build " not in text
+
+
+def test_clean_candidate_build_retries_only_pinned_base_downloads():
+    workflow = CANDIDATE.read_text(encoding="utf-8")
     dockerfile = (ROOT / "scanner" / "Dockerfile").read_text(encoding="utf-8")
     pinned_bases = [
         line.removeprefix("FROM ").split(" AS ", 1)[0]
@@ -46,5 +65,6 @@ def test_clean_release_build_retries_pinned_base_downloads_without_weakening_dig
     assert len(pinned_bases) == 2
     assert all("@sha256:" in image for image in pinned_bases)
     assert all(image in workflow for image in pinned_bases)
-    assert workflow.count("scripts/retry-command.sh docker build") == 3
-    assert "scripts/retry-command.sh scripts/selftest-model-intake-guest.sh" in workflow
+    assert "scripts/retry-command.sh docker build" not in workflow
+    assert "scripts/retry-command.sh scripts/selftest-model-intake-guest.sh" not in workflow
+    assert workflow.count("scripts/retry-command.sh timeout 300 docker pull") == 2
