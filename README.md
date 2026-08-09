@@ -390,7 +390,7 @@ shakerscan fleet revoke-join-token <token-id>
 ```
 
 Every enrolled worker still receives its own node identity and durable credential. See the
-[multi-node guide](docs/multi-node-guide.md#enroll-several-workers-with-one-bounded-token) for the
+[multi-node guide](https://github.com/andriyze/shakerscan/blob/main/docs/multi-node-guide.md#enroll-several-workers-with-one-bounded-token) for the
 security and concurrency model.
 
 Host-side `shakerscan fleet` commands automatically use the API bind and port persisted by

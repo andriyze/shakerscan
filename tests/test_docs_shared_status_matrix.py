@@ -107,3 +107,14 @@ def test_functionality_reference_does_not_overclaim_keyless_token_bounding():
     assert "request unit is one tool invocation, not one wire request" in text
     assert "cannot meter an external coding agent's tokens" in text
     assert "turns, and tokens are bounded" not in text
+
+
+def test_functionality_reference_describes_current_stream_runtime():
+    text = _flat(FUNCTIONALITY_DOC)
+    assert "six background asyncio loops" in text
+    assert "leasing Redis Stream messages" in text
+    assert "running a `BLPOP` loop" not in text
+
+    fleet_text = _flat(FLEET_DOC)
+    assert "shared `scan_jobs` Redis Stream" in fleet_text
+    assert "shared `scan_jobs` Redis list" not in fleet_text

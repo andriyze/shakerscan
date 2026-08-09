@@ -49165,8 +49165,8 @@ def _research_fresh_processing_lease(
     """Accept only a worker-authored, recent pop/heartbeat marker.
 
     The API's ordinary ``status=queued`` cache hash is not queue durability: it
-    survives BLPOP, worker crashes, and queue clearing. Workers stamp
-    ``processing_lease_at`` immediately after BLPOP; running jobs also maintain
+    survives a Stream lease, worker crashes, and queue clearing. Workers stamp
+    ``processing_lease_at`` immediately after leasing; running jobs also maintain
     ``heartbeat``. Either timestamp is useful only while fresh.
     """
     values = _redis_hash_text(metadata)

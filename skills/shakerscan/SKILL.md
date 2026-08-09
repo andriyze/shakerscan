@@ -150,8 +150,10 @@ curl -s "$API_BASE/workers" | jq '.fleet, .execution_capacity'
   are available. Keep local `POST /workers` scaling distinct from remote `POST /fleet/scale` or
   per-node desired-state changes.
 
-For setup, read `docs/multi-node-guide.md` before mutating the host. Run the aggregated read-only
-preflight first. Treat the fleet operator token, join tokens, node credentials, connection bundles,
+For setup, read the public
+[Multi-Node Fleet Guide](https://github.com/andriyze/shakerscan/blob/main/docs/multi-node-guide.md)
+before mutating the host (a source checkout also has it at `docs/multi-node-guide.md`). Run the
+aggregated read-only preflight first. Treat the fleet operator token, join tokens, node credentials, connection bundles,
 and private CA material as secrets. Join tokens are single-use by default; when the operator needs
 one command for several machines, mint a short-lived bounded `--max-uses N` token for the exact host
 count, distribute it through an approved secret channel, and revoke unused capacity immediately.

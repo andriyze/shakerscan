@@ -2668,6 +2668,12 @@ start_agent() {
                     cd "$SCRIPT_DIR"
                     export SHAKERSCAN_AGENT_NAME="$agent"
                     export SHAKERSCAN_RESEARCH_PLANNER_MODE="agent"
+                    # Remote mode intentionally may not publish loopback. Give
+                    # project hooks and commands the host-reachable API plus the
+                    # browser-facing UI URL derived from the persisted access
+                    # configuration used by `scanner.sh status`.
+                    export SHAKERSCAN_API_BASE="${SHAKERSCAN_API_BASE:-$(api_probe_url)}"
+                    export SHAKERSCAN_UI_BASE="${SHAKERSCAN_UI_BASE:-$(ui_base_url)}"
                     exec "$agent"
                 fi
                 ;;
@@ -2908,6 +2914,15 @@ case $COMMAND in
             echo "Re-run the ShakerScan installer to refresh runtime files."
             exit 1
         fi
+        # Direct adapter invocation defaults to loopback. This wrapper has
+        # already validated and loaded the install's access configuration, so
+        # use the actual host-reachable bind and explicitly authorize that
+        # configured non-loopback origin when remote mode is active.
+        export SHAKERSCAN_API_URL="${SHAKERSCAN_API_URL:-$(api_probe_url)}"
+        case "$(probe_access_host)" in
+            localhost|127.0.0.1|::1) ;;
+            *) export SHAKERSCAN_MCP_ALLOW_REMOTE_API="${SHAKERSCAN_MCP_ALLOW_REMOTE_API:-true}" ;;
+        esac
         exec python3 "$SCRIPT_DIR/scripts/shakerscan_mcp.py"
         ;;
     model-intake-runner)

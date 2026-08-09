@@ -79,3 +79,20 @@ def test_every_active_document_is_indexed_and_local_links_resolve():
             if path_part and not (document.parent / path_part).resolve().exists():
                 missing.append((str(document.relative_to(ROOT)), destination))
     assert missing == []
+
+
+def test_minimal_installed_runtime_does_not_link_to_omitted_docs_tree():
+    installed_documents = [
+        ROOT / "README.md",
+        ROOT / "AGENTS.md",
+        ROOT / "CLAUDE.md",
+        *(ROOT / "skills").rglob("*.md"),
+        *(ROOT / ".claude").rglob("*.md"),
+    ]
+    broken = []
+    for document in installed_documents:
+        text = document.read_text(encoding="utf-8")
+        for destination in re.findall(r"\[[^]]+\]\(([^)]+)\)", text):
+            if destination.startswith("docs/"):
+                broken.append((str(document.relative_to(ROOT)), destination))
+    assert broken == []

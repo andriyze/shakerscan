@@ -7,7 +7,8 @@ from pathlib import Path
 import pytest
 
 
-MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "shakerscan_mcp.py"
+ROOT = Path(__file__).resolve().parents[1]
+MODULE_PATH = ROOT / "scripts" / "shakerscan_mcp.py"
 SPEC = importlib.util.spec_from_file_location("shakerscan_mcp", MODULE_PATH)
 assert SPEC and SPEC.loader
 mcp = importlib.util.module_from_spec(SPEC)
@@ -172,3 +173,9 @@ def test_mcp_api_origin_is_loopback_by_default_and_has_no_userinfo_or_path():
         mcp.normalize_api_url("http://user:pass@localhost:8080")
     with pytest.raises(ValueError):
         mcp.normalize_api_url("http://localhost:8080/api")
+
+
+def test_scanner_wrapper_routes_mcp_to_the_configured_runtime_bind():
+    scanner = (ROOT / "scanner.sh").read_text(encoding="utf-8")
+    assert 'export SHAKERSCAN_API_URL="${SHAKERSCAN_API_URL:-$(api_probe_url)}"' in scanner
+    assert 'export SHAKERSCAN_MCP_ALLOW_REMOTE_API="${SHAKERSCAN_MCP_ALLOW_REMOTE_API:-true}"' in scanner

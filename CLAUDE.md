@@ -26,8 +26,8 @@ Reusable task instructions live under `skills/`. Use `skills/shakerscan/SKILL.md
 workflow and the specialized skill directory for Interactive Testing, JS analysis, content
 discovery, Deep Hunt, or skill-system review.
 
-Do not duplicate API contracts in this file. Use `AGENTS.md`, the live
-`http://localhost:8080/openapi.json`, and the public
+Do not duplicate API contracts in this file. Use `AGENTS.md`, the live OpenAPI document at the API
+URL printed by `./scanner.sh status` (loopback installs use `http://localhost:8080/openapi.json`), and the public
 [functionality reference](https://github.com/andriyze/shakerscan/blob/main/docs/functionality-reference.md)
 so Claude Code follows the same current behavior as other agents. A source checkout also has that
 reference at `docs/functionality-reference.md`; the minimal installed runtime intentionally does not

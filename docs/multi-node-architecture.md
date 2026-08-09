@@ -102,7 +102,7 @@ worker instances joined to the same fleet.
 6. **Multi-node composes with the parallel-scan work, which has shipped.** Intra-target
    fan-out (`scan_plan -> scan_shard -> scan_merge`, plus the `scope`/`family`/`coverage`
    strategies) is implemented today — see `docs/dast-asm-architecture.md`. Shard jobs are
-   plain entries on the shared `scan_jobs` Redis list, so any fleet worker that consumes that
+   leased messages on the shared `scan_jobs` Redis Stream, so any qualified fleet worker that consumes that
 queue already runs shards of one logical scan; the merge reconciles regardless of which node
    ran each shard. Multi-node therefore adds *capacity* (more workers draining the same shard
    queue → more concurrent shards, so `coverage` fan-outs finish faster); it does not change the

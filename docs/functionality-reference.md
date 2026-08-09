@@ -6,7 +6,7 @@ governance, automation, UI, CLI, API, and agent-facing surfaces. The human-reada
 the behavior; the generated inventory in §17 enumerates every current public route, registry command,
 CLI flag, wrapper command, Make target, release gate, runtime configuration key, UI page, skill,
 agent, adapter, scanner module, and durable table.
-**Reconciled:** 2026-07-28
+**Reconciled:** 2026-08-09
 **Audience:** users, operators, AI coding agents, and engineers who need one place that explains the
 product's functionality end to end.
 
@@ -94,13 +94,16 @@ triaged, filtered, and reported through the same workflow.
 
 - **API server** (`api/api.py`): FastAPI app over an asyncpg PostgreSQL pool and Redis. Serves the
   full REST surface (scans, findings, targets, AI Gate, model intake, sessions, ASM, schedules,
-  workers, exposure graph). It runs three background asyncio loops in its lifespan:
+  workers, exposure graph). Its lifespan starts six background asyncio loops:
   - `stale_scan_checker` — fails scans stuck beyond `MAX_SCAN_DURATION`.
   - `schedule_runner` — fires due recurring schedules and recomputes their next run.
   - `asm_dispatcher` — for each ASM-enabled target, picks **one** safe next action (recon vs. test
     batch vs. wait) within freshness/rate/window budgets.
-- **Workers** (`api/worker.py`): each worker is a stateless process running a `BLPOP` loop over the
-  Redis queues (`scan_jobs`, optionally `retest_jobs`), processing one job to completion and spawning
+  - `research_autopilot_runner` — advances bounded compatibility research episodes.
+  - `scan_artifact_retention_runner` — enforces configured scan-artifact retention.
+  - `model_intake_automatic_review_runner` — advances durable automatic Model Intake reviews.
+- **Workers** (`api/worker.py`): each worker is a stateless process leasing Redis Stream messages
+  from the scan, retest, broker-ingest, and qualified placement queues, processing one job to completion and spawning
   the scanner as a subprocess. Job types: `scan` (standard), `scan_plan`/`scan_shard`/`scan_merge`
   (parallel), `discovery` (subdomains), `finding_retest` (verification), and `exploit_batch` (ASM).
 - **Scanner engine** (`scanner/scanner.py` → `build_report()`): the DAST orchestrator. Runs the scan

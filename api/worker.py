@@ -7038,7 +7038,7 @@ async def _confirmed_scan_handoff_status(scan_id: str) -> str:
     """Wait briefly for a two-phase queue handoff, then fail it closed.
 
     Legacy scans have no marker and remain claimable. New ASM enqueue paths persist
-    ``false`` before RPUSH and flip it to ``true`` only after Redis acknowledges.
+    ``false`` before enqueue and flip it to ``true`` only after Redis acknowledges.
     """
     scan_uuid = uuid.UUID(str(scan_id))
     row = None
@@ -9855,7 +9855,7 @@ async def process_exploit_batch_job(job_data: dict):
         return
 
     # Claim the durable scan row before leasing endpoints. This makes a failed or
-    # cancelled row authoritative even when Redis accepted RPUSH but the API lost
+    # cancelled row authoritative even when Redis accepted the enqueue but the API lost
     # the response and marked its pending handoff failed.
     async with db_pool.acquire() as conn:
         scan_claim = await conn.execute(
@@ -10881,9 +10881,8 @@ async def process_job(job_data: dict):
         if not job_data.get("_broker_result_id"):
             await _attribute_job_execution(job_data)
     except RuntimeError as exc:
-        # A node can be revoked between BLPOP and dispatch. Preserve the user's
-        # work while the control-plane WireGuard reconciler removes that peer;
-        # Redis Streams fencing will supersede this compatibility requeue.
+        # A node can be revoked between lease and dispatch. Preserve the user's
+        # work while the control-plane reconciler removes that peer.
         source_queue = str(
             job_data.get("_base_queue_name")
             or (RETEST_QUEUE_NAME if job_data.get('type') == 'finding_retest' else QUEUE_NAME)
@@ -10917,10 +10916,10 @@ def _mark_worker_processing_lease(
     source_queue: str,
     lease: QueueLease | None = None,
 ) -> None:
-    """Stamp a short-lived proof that this worker removed the job from Redis.
+    """Stamp a short-lived proof that this worker leased the job from Redis.
 
-    Queue membership disappears at BLPOP, before the durable DB row is claimed.
-    The API orphan reconciler accepts this timestamp only for a brief grace
+    The Stream message remains pending before the durable DB row is claimed.
+    The API orphan reconciler accepts this lease timestamp only for a brief grace
     window, so a worker crash cannot leave a stale ``status=queued`` hash looking
     like durable work for the hash's full one-day TTL.
     """

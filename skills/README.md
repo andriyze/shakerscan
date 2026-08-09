@@ -22,9 +22,10 @@ From a source checkout:
 codex   # or claude, or opencode
 ```
 
-For a VPS accessed over Tailscale, start with `./scanner.sh start --remote`. API calls executed on
-the VPS still use `http://localhost:8080`; user-facing links should use the URL printed by
-`./scanner.sh status`.
+For a VPS accessed over Tailscale, start with `./scanner.sh start --remote`. Remote mode may bind the
+API only to the Tailscale address, so use both URLs printed by `./scanner.sh status`, even for API
+calls executed on the VPS. `shakerscan agent ...` exports those URLs to its project commands and
+session hook automatically.
 
 ## Skill catalog
 

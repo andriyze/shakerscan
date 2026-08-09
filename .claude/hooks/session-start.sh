@@ -2,7 +2,26 @@
 # SessionStart hook for DAST Scanner
 # Checks if scanner is running and reports status
 
-API_BASE="${SHAKERSCAN_API_BASE:-http://localhost:8080}"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+
+read_runtime_value() {
+    key="$1"
+    [ -f "$SCRIPT_DIR/.env" ] || return 0
+    awk -F= -v key="$key" '$1 == key { value = substr($0, index($0, "=") + 1) } END { print value }' "$SCRIPT_DIR/.env" |
+        sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//"
+}
+
+if [ -n "${SHAKERSCAN_API_BASE:-}" ]; then
+    API_BASE="$SHAKERSCAN_API_BASE"
+else
+    bind_host="$(read_runtime_value SHAKERSCAN_BIND_HOST)"
+    api_port="$(read_runtime_value SHAKERSCAN_API_PORT)"
+    case "$bind_host" in
+        ""|0.0.0.0) bind_host=localhost ;;
+        *:*) bind_host="[$bind_host]" ;;
+    esac
+    API_BASE="http://${bind_host}:${api_port:-8080}"
+fi
 
 # Check if Docker is available
 if ! command -v docker &> /dev/null; then
