@@ -250,6 +250,25 @@ def test_model_intake_stage_manifest_is_bound_to_guest_build_inputs(tmp_path, mo
     )
 
     assert api_module._model_intake_stage_manifest(stage) is None
+
+
+def test_stage_manifest_records_the_prebuild_guest_input_snapshot(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        api_module,
+        "_model_intake_guest_rootfs_inputs_sha256",
+        lambda: "b" * 64,
+    )
+    api_module._write_model_intake_stage_manifest(
+        tmp_path,
+        {
+            "kernel": {"sha256": "a" * 64, "bytes": 1},
+            "rootfs": {"sha256": "b" * 64, "bytes": 2},
+        },
+        rootfs_inputs_sha256="a" * 64,
+    )
+
+    manifest = json.loads((tmp_path / "stage-manifest.json").read_text())
+    assert manifest["rootfs_inputs_sha256"] == "a" * 64
 from evidence_storage import store_evidence_content  # noqa: E402
 from scan_verification_state import scan_time_verification_fields  # noqa: E402
 

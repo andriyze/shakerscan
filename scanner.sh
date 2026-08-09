@@ -1328,6 +1328,10 @@ configure_runtime_mode() {
     export API_IMAGE_REPO="${API_IMAGE_REPO:-shakerscan/shakerscan-api}"
     export UI_IMAGE_REPO="${UI_IMAGE_REPO:-shakerscan/shakerscan-ui}"
     export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-shakerscan}"
+    # The source Compose file consumes this exact image identity. Keeping the
+    # build and sandbox retag on one explicit contract avoids guessing a tag
+    # synthesized independently from the build configuration.
+    export SCANNER_LOCAL_WORKER_IMAGE="${SCANNER_LOCAL_WORKER_IMAGE:-${COMPOSE_PROJECT_NAME}-worker:latest}"
     export SCANNER_RELEASE_VERSION="$release_version"
     if [ -z "${SCANNER_IMAGE_TAG:-}" ]; then
         if [ -n "$release_version" ] && [ "$release_version" != "dev" ]; then
@@ -2331,7 +2335,7 @@ submit_scan() {
 build_local_scanner_family() {
     local no_cache="${1:-}"
     local worker_image_id
-    local worker_image="${COMPOSE_PROJECT_NAME:-shakerscan}-worker:latest"
+    local worker_image="${SCANNER_LOCAL_WORKER_IMAGE:-shakerscan-worker:latest}"
     local sandbox_image="${MODEL_INTAKE_SANDBOX_IMAGE:-shakerscan-model-intake-sandbox:local}"
 
     # worker and model-intake-sandbox intentionally use the exact same image.
@@ -2340,10 +2344,8 @@ build_local_scanner_family() {
     # scanner runtime once, bind the sandbox tag to that exact image, then
     # build the API variant (the only variant that adds the Docker CLI).
     compose build $no_cache worker
-    # `compose images -q worker` reports the image used by an already-running
-    # worker container. Immediately after a rebuild that can be the retired
-    # image ID, not the newly tagged build, and Docker may already have removed
-    # it. Resolve the deterministic Compose build tag instead.
+    # The source Compose service builds and tags this exact explicit image.
+    # Querying a running worker here can return the retired pre-build ID.
     worker_image_id="$(docker image inspect --format '{{.Id}}' "$worker_image" 2>/dev/null || true)"
     if ! [[ "$worker_image_id" =~ ^(sha256:)?[0-9a-f]{64}$ ]]; then
         echo -e "${RED}Error: could not resolve the newly built worker image.${NC}"

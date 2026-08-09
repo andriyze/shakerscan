@@ -1118,6 +1118,14 @@ def test_conversion_rescan_uses_same_actionable_scanner_summary_shape():
     }]
 
 
+def test_repeated_conversion_rescans_keep_the_original_source_static_evidence():
+    source = inspect.getsource(api._register_and_rescan_converted_snapshot)
+
+    assert "payload_json #>> '{subject_identity,converted}'" in source
+    assert '"source_static_evidence_id": str(source_static["id"])' in source
+    assert "previous_static" not in source
+
+
 def test_automatic_review_system_principal_is_server_scoped_and_not_a_bearer_shortcut():
     request = api._model_intake_automatic_system_request()
 

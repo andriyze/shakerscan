@@ -244,7 +244,7 @@ def test_runner_subject_root_is_traversable_despite_service_umask(tmp_path):
     assert (destination / "1_Pooling" / "config.json").stat().st_mode & 0o777 == 0o644
 
 
-def test_guest_installs_only_identity_preserving_transformers_compatibility(monkeypatch):
+def test_guest_installs_bounded_transformers_compatibility_defaults(monkeypatch):
     guest_root = Path(__file__).resolve().parents[1] / "runner" / "guest"
     monkeypatch.syspath_prepend(str(guest_root))
     import guest_worker

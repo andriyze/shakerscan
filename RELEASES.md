@@ -7,6 +7,8 @@ with a guessed tag commit.
 
 The hosted installer resolves `install/STABLE_VERSION`, then downloads runtime files from the
 matching immutable `v<version>` tag. Advance that channel only after all release manifests exist.
+Release notes and image labels record both the candidate source commit and the workflow-definition
+commit; these can differ for an explicitly dispatched candidate build.
 Installed runtimes default to the immutable image tag recorded in their downloaded `VERSION` file.
 Use `./scanner.sh start --image-tag latest` only when you intentionally want the moving tag. The
 hosted installer still downloads runtime docs/scripts from its configured raw source, so the

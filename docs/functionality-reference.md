@@ -1241,7 +1241,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Scanner wrapper commands | 27 | `scanner.sh` |
 | Make targets | 12 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
-| Runtime environment keys | 316 | Python sources + Compose manifests |
+| Runtime environment keys | 317 | Python sources + Compose manifests |
 | Scanner modules | 99 | `scanner/scanner_tools/` |
 | UI pages | 31 | `ui/src/app/` |
 | Skills | 6 | `skills/` |
@@ -2094,6 +2094,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SCANNER_DNS_RESOLVERS` | `scanner/scanner.py` |
 | `SCANNER_IMAGE_REPO` | `docker-compose.release.yml` |
 | `SCANNER_IMAGE_TAG` | `docker-compose.release.yml` |
+| `SCANNER_LOCAL_WORKER_IMAGE` | `docker-compose.yml` |
 | `SCANNER_MAX_CONCURRENT` | `scanner/scanner_tools/common.py` |
 | `SCANNER_SUBPROCESS_ARTIFACT_MAX_BYTES` | `scanner/scanner_tools/common.py` |
 | `SCANNER_SUBPROCESS_RECEIPT_LIMIT` | `scanner/scanner_tools/common.py` |

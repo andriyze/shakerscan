@@ -76,9 +76,11 @@ def _install_transformers_compatibility() -> None:
 
     Transformers 5 computes tied-weight metadata in ``post_init``. Legacy
     remote classes that predate that contract may omit the call, so initialize
-    the same empty per-instance mapping used before expansion. Models that call
-    ``post_init`` replace it with the authoritative mapping; models that do not
-    must still pass source/converted embedding equivalence below.
+    the same empty per-instance compatibility default used before expansion.
+    Models that call ``post_init`` replace it with the authoritative mapping.
+    For legacy models that do not, this is a bounded compatibility choice;
+    source/converted embedding equivalence checks output consistency but does
+    not prove tied-weight metadata identity.
 
     Transformers 5 also removed the legacy ``get_head_mask`` helper. Reviewed
     remote models may still call it with the default ``head_mask=None``. Restore

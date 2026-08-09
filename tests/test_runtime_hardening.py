@@ -358,9 +358,9 @@ def test_scanner_sh_builds_shared_worker_and_intake_sandbox_image_once():
     # build arguments. Exporting each Compose target separately duplicates a
     # multi-gigabyte image and can exhaust supported source-build hosts.
     assert "compose build $no_cache worker" in helper
-    assert 'worker_image="${COMPOSE_PROJECT_NAME:-shakerscan}-worker:latest"' in helper
+    assert 'worker_image="${SCANNER_LOCAL_WORKER_IMAGE:-shakerscan-worker:latest}"' in helper
     assert "docker image inspect --format '{{.Id}}' \"$worker_image\"" in helper
-    assert helper.count("compose images -q worker") == 1  # explanatory comment only
+    assert "compose images -q worker" not in helper
     assert 'docker image tag "$worker_image_id" "$sandbox_image"' in helper
     assert "compose build $no_cache api" in helper
     assert "compose build $no_cache model-intake-sandbox" not in helper
@@ -396,6 +396,7 @@ build_local_scanner_family() {{
 {helper}
 }}
 COMPOSE_PROJECT_NAME=release-candidate
+SCANNER_LOCAL_WORKER_IMAGE=release-candidate-worker:latest
 MODEL_INTAKE_SANDBOX_IMAGE=release-sandbox:test
 build_local_scanner_family
 """

@@ -12901,16 +12901,17 @@ async def _register_and_rescan_converted_snapshot(
         )
         if not verified_conversion:
             raise HTTPException(status_code=409, detail="Verified conversion evidence is unavailable")
-        previous_static = await conn.fetchrow(
+        source_static = await conn.fetchrow(
             """
             SELECT id,payload_json FROM model_intake_evidence_records
             WHERE submission_id=$1 AND evidence_type='static_analysis'
+              AND COALESCE(payload_json #>> '{subject_identity,converted}','false') <> 'true'
             ORDER BY created_at DESC LIMIT 1
             """,
             submission_uuid,
         )
-        previous_payload = _model_intake_json_object(
-            previous_static["payload_json"] if previous_static else {}
+        source_payload = _model_intake_json_object(
+            source_static["payload_json"] if source_static else {}
         )
         report = {
             **report_base,
@@ -12965,9 +12966,9 @@ async def _register_and_rescan_converted_snapshot(
             # terms. Preserve the source policy result while the converted
             # snapshot's native license scanner still contributes findings.
             "license_compliance": _model_intake_json_object(
-                previous_payload.get("license_compliance")
+                source_payload.get("license_compliance")
             ),
-            "source_static_evidence_id": str(previous_static["id"]) if previous_static else None,
+            "source_static_evidence_id": str(source_static["id"]) if source_static else None,
         }
         report_sha = hashlib.sha256(
             json.dumps(report, sort_keys=True, separators=(",", ":")).encode()
@@ -14968,7 +14969,14 @@ def _model_intake_stage_manifest(stage_dir: Path) -> dict[str, Any] | None:
         return None
 
 
-def _write_model_intake_stage_manifest(stage_dir: Path, artifacts: dict[str, Any]) -> None:
+def _write_model_intake_stage_manifest(
+    stage_dir: Path,
+    artifacts: dict[str, Any],
+    *,
+    rootfs_inputs_sha256: str,
+) -> None:
+    if not re.fullmatch(r"[0-9a-f]{64}", rootfs_inputs_sha256):
+        raise ValueError("rootfs input snapshot digest is invalid")
     manifest = {
         "schema_version": "model-intake-runner-stage/v1",
         "artifacts": artifacts,
@@ -14977,7 +14985,7 @@ def _write_model_intake_stage_manifest(stage_dir: Path, artifacts: dict[str, Any
             "sha256": MODEL_INTAKE_GUEST_KERNEL_SHA256,
         },
         "rootfs_builder": "scripts/build-model-intake-guest-rootfs.sh",
-        "rootfs_inputs_sha256": _model_intake_guest_rootfs_inputs_sha256(),
+        "rootfs_inputs_sha256": rootfs_inputs_sha256,
     }
     temporary = stage_dir / "stage-manifest.json.partial"
     temporary.write_text(
@@ -15024,6 +15032,7 @@ def _model_intake_stage_run() -> None:
         script = Path("/workspace/scripts/build-model-intake-guest-rootfs.sh")
         if not script.is_file():
             raise RuntimeError("guest rootfs builder is unavailable in this runtime")
+        rootfs_inputs_sha256 = _model_intake_guest_rootfs_inputs_sha256()
         _model_intake_stage_log("building the guest image (this pulls CPU PyTorch; expect minutes)")
         process = subprocess.Popen(
             ["bash", str(script), str(rootfs_path)],
@@ -15037,6 +15046,11 @@ def _model_intake_stage_run() -> None:
             _model_intake_stage_log(line.rstrip())
         if process.wait() != 0:
             raise RuntimeError("guest rootfs build failed; see the staging log")
+        if _model_intake_guest_rootfs_inputs_sha256() != rootfs_inputs_sha256:
+            rootfs_path.unlink(missing_ok=True)
+            raise RuntimeError(
+                "guest rootfs source changed during the build; staged output was discarded, retry staging"
+            )
 
         artifacts = {
             "kernel": {
@@ -15050,7 +15064,11 @@ def _model_intake_stage_run() -> None:
                 "bytes": rootfs_path.stat().st_size,
             },
         }
-        _write_model_intake_stage_manifest(stage_dir, artifacts)
+        _write_model_intake_stage_manifest(
+            stage_dir,
+            artifacts,
+            rootfs_inputs_sha256=rootfs_inputs_sha256,
+        )
         _model_intake_stage_set(
             status="ready",
             phase="complete",

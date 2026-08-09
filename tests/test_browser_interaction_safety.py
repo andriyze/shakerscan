@@ -2,6 +2,8 @@ import asyncio
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import pytest
+
 from scanner.scanner_tools.http_scanner import (
     _BROWSER_SAFE_INTERACTION_SELECTORS,
     _browser_interaction_element_is_safe,
@@ -98,6 +100,7 @@ def test_passive_browser_route_allows_navigation_get():
 
 
 def test_browser_fetch_blocks_state_change_from_semantic_tab(tmp_path):
+    pytest.importorskip("playwright.async_api")
     class Handler(BaseHTTPRequestHandler):
         post_count = 0
 

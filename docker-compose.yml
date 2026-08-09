@@ -361,6 +361,7 @@ services:
   # ============================================================
   worker:
     init: true  # Use tini as PID 1 to reap zombie processes
+    image: ${SCANNER_LOCAL_WORKER_IMAGE:-shakerscan-worker:latest}
     # Resolve host-published services (e2e fixtures / honey targets) from inside the
     # container on Linux CI too. No-op on Docker Desktop, where it already resolves.
     extra_hosts:

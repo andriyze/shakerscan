@@ -41,6 +41,7 @@ jobs:
       push_latest: ${{ steps.meta.outputs.push_latest }}
       created: ${{ steps.meta.outputs.created }}
       candidate_sha: ${{ steps.meta.outputs.candidate_sha }}
+      workflow_sha: ${{ steps.meta.outputs.workflow_sha }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -131,6 +132,7 @@ jobs:
           echo "push_latest=$push_latest" >> "$GITHUB_OUTPUT"
           echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
           echo "candidate_sha=$candidate_sha" >> "$GITHUB_OUTPUT"
+          echo "workflow_sha=${{ github.workflow_sha }}" >> "$GITHUB_OUTPUT"
 
       - name: Verify candidate is on main
         shell: bash
@@ -277,6 +279,7 @@ jobs:
             org.opencontainers.image.created=${{ needs.meta.outputs.created }}
             org.opencontainers.image.version=${{ needs.meta.outputs.version }}
             org.opencontainers.image.revision=${{ needs.meta.outputs.candidate_sha }}
+            com.shakerscan.release.workflow-revision=${{ needs.meta.outputs.workflow_sha }}
             org.opencontainers.image.source=${{ env.SOURCE_URL }}
             org.opencontainers.image.url=https://hub.docker.com/r/shakerscan/shakerscan-scanner
             org.opencontainers.image.documentation=${{ env.SOURCE_URL }}#readme
@@ -299,6 +302,7 @@ jobs:
             org.opencontainers.image.created=${{ needs.meta.outputs.created }}
             org.opencontainers.image.version=${{ needs.meta.outputs.version }}
             org.opencontainers.image.revision=${{ needs.meta.outputs.candidate_sha }}
+            com.shakerscan.release.workflow-revision=${{ needs.meta.outputs.workflow_sha }}
             org.opencontainers.image.source=${{ env.SOURCE_URL }}
             org.opencontainers.image.url=https://hub.docker.com/r/shakerscan/shakerscan-api
             org.opencontainers.image.documentation=${{ env.SOURCE_URL }}#readme
@@ -321,6 +325,7 @@ jobs:
             org.opencontainers.image.created=${{ needs.meta.outputs.created }}
             org.opencontainers.image.version=${{ needs.meta.outputs.version }}
             org.opencontainers.image.revision=${{ needs.meta.outputs.candidate_sha }}
+            com.shakerscan.release.workflow-revision=${{ needs.meta.outputs.workflow_sha }}
             org.opencontainers.image.source=${{ env.SOURCE_URL }}
             org.opencontainers.image.url=https://hub.docker.com/r/shakerscan/shakerscan-ui
             org.opencontainers.image.documentation=${{ env.SOURCE_URL }}#readme
@@ -341,6 +346,7 @@ jobs:
             org.opencontainers.image.created=${{ needs.meta.outputs.created }}
             org.opencontainers.image.version=${{ needs.meta.outputs.version }}
             org.opencontainers.image.revision=${{ needs.meta.outputs.candidate_sha }}
+            com.shakerscan.release.workflow-revision=${{ needs.meta.outputs.workflow_sha }}
             org.opencontainers.image.source=${{ env.SOURCE_URL }}
             org.opencontainers.image.url=https://hub.docker.com/r/shakerscan/shakerscan-model-intake-signer
             org.opencontainers.image.documentation=${{ env.SOURCE_URL }}#readme
@@ -505,6 +511,13 @@ jobs:
             exit 1
           fi
           cp "$notes" release-notes.md
+          cat >> release-notes.md <<'EOF'
+
+          ## Build provenance
+
+          - Candidate source commit: `${{ needs.meta.outputs.candidate_sha }}`
+          - Release workflow commit: `${{ needs.meta.outputs.workflow_sha }}`
+          EOF
 
       - name: Create or update GitHub release
         env:

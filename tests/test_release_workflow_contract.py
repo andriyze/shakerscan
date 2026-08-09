@@ -22,3 +22,13 @@ def test_every_release_image_verifies_latest_matches_version_digest():
     assert text.count("&& !found {print $2; found=1}") == 8
     assert "{print $2; exit}" not in text
     assert text.count('[[ -n "$version_digest" && "$version_digest" == "$latest_digest" ]]') == 4
+
+
+def test_manual_release_records_candidate_and_workflow_provenance():
+    text = WORKFLOW.read_text(encoding="utf-8")
+
+    assert 'workflow_sha: ${{ steps.meta.outputs.workflow_sha }}' in text
+    assert 'echo "workflow_sha=${{ github.workflow_sha }}"' in text
+    assert text.count("com.shakerscan.release.workflow-revision=${{ needs.meta.outputs.workflow_sha }}") == 4
+    assert "Candidate source commit" in text
+    assert "Release workflow commit" in text
