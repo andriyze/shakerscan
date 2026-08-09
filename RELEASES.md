@@ -16,7 +16,8 @@ generated launcher also pins `SCANNER_IMAGE_TAG` to the downloaded version by de
 
 | Version | Git Commit | Scanner/Worker Image | API Image | UI Image | Model Intake Signer Image |
 | --- | --- | --- | --- | --- | --- |
-| 0.8.14 | pending candidate | pending | pending | pending | pending |
+| 0.8.15 | pending candidate | pending | pending | pending | pending |
+| 0.8.14 | `82ecff779b1ad1942ee8603fd43237929f1fa464` (failed validation; not published) | not published | not published | not published | not published |
 | 0.8.13 | `171ffb76800dfe329cd7a51edb85e8065b31c702` | `shakerscan/shakerscan-scanner:0.8.13` (`sha256:76a16abf72bd3a082ab4df684f9fc700e773f02ba8d037f1defb33d0ff004d9a`) | `shakerscan/shakerscan-api:0.8.13` (`sha256:997c260427c568fe6d113ff00ce5d518dd658bec94609963d10843703d756663`) | `shakerscan/shakerscan-ui:0.8.13` (`sha256:746c77b98f06d9ee8f48e8eafa5543fb65eeb60ed08b3ab3e9bd25039e55ebda`) | `shakerscan/shakerscan-model-intake-signer:0.8.13` (`sha256:ec3ad09fd2826a2e87806e611abed874c602e9e6554864ba76f94711eab0b923`) |
 | 0.8.12 | `fc4f0b8162f0ef1179b7f43d93a5c6c8075d0d80` (failed validation; not published) | not published | not published | not published | not published |
 | 0.8.11 | `23faaa7eea2117f40a450bd82377b7725d4feeb7` (cancelled validation; not published) | not published | not published | not published | not published |
@@ -47,15 +48,18 @@ tag alone does not prove which commit produced an image.
 
 ## Release Workflow
 
-Version 0.8.13 is the current stable release; 0.8.14 is the pending patch candidate. Version 0.8.9 was published but deliberately not
+Version 0.8.13 is the current stable release; 0.8.15 is the pending patch candidate. Version 0.8.9 was published but deliberately not
 promoted after the installed-runtime audit found a remote-mode agent/MCP routing defect; 0.8.10 was
 cancelled before publication when the same audit found remaining hard-coded loopback guidance;
 0.8.11 was cancelled before publication when the final audit found a host-world-writable Model
 Intake sandbox evidence queue; 0.8.12 failed its clean Linux/root suite before publication because
 the new ownership path called a nonexistent `Path.chown` method. Version 0.8.13 corrected that path,
 passed the exact-candidate release gate, and published matching `linux/amd64` and `linux/arm64`
-manifests. Its clean fleet conversion then exposed a transient MinIO bucket-readiness race; 0.8.14
-adds a bounded retry around the real artifact write/read/delete probe. Complete
+manifests. Its clean fleet conversion then exposed a transient MinIO bucket-readiness race. Version
+0.8.14 added a bounded retry around the real artifact write/read/delete probe, but its validation
+stopped before publication because a runtime test hardcoded an obsolete stable-channel version.
+Version 0.8.15 carries the Fleet fix and makes that test validate the published release ledger
+contract instead of a historical number. Complete
 [`docs/release-readiness.md`](docs/release-readiness.md), freeze the exact commit, and record its
 validation evidence before publishing a later release.
 

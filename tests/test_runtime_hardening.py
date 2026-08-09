@@ -141,13 +141,26 @@ def test_hosted_installer_packages_advertised_host_side_adapters():
 def test_prebuilt_runtime_defaults_to_the_downloaded_release_version():
     scanner = (ROOT / "scanner.sh").read_text()
     installer = (ROOT / "install" / "index.sh").read_text()
+    stable_version = (ROOT / "install" / "STABLE_VERSION").read_text().strip()
+    release_rows = [
+        line
+        for line in (ROOT / "RELEASES.md").read_text().splitlines()
+        if line.startswith(f"| {stable_version} |")
+    ]
 
     assert 'release_version="$(get_release_version)"' in scanner
     assert 'export SCANNER_IMAGE_TAG="$release_version"' in scanner
     assert 'release_version" != "dev"' in scanner
     assert ': "\\${SCANNER_IMAGE_TAG:=$release_image_tag}"' in installer
     assert '"$BIN_DIR/shakerscan" start -y' in installer
-    assert (ROOT / "install" / "STABLE_VERSION").read_text().strip() == "0.8.7"
+    # The stable channel advances after publication. Pin the contract to a valid,
+    # published ledger row instead of freezing a historical release number in the
+    # runtime test (which previously made every later promotion fail validation).
+    assert re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", stable_version)
+    assert len(release_rows) == 1
+    assert "pending" not in release_rows[0]
+    assert "not published" not in release_rows[0]
+    assert f"shakerscan/shakerscan-scanner:{stable_version}" in release_rows[0]
     assert 'CHANNEL_RAW_BASE="https://raw.githubusercontent.com/andriyze/shakerscan/main"' in installer
     assert 'REPO_RAW_BASE="https://raw.githubusercontent.com/andriyze/shakerscan/v${stable_version}"' in installer
 
