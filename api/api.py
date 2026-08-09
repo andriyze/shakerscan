@@ -38,6 +38,12 @@ from zoneinfo import ZoneInfo
 
 import asyncpg
 import redis
+try:
+    from release_identity import build_fingerprint as release_build_fingerprint
+    from release_identity import published_scanner_version
+except ModuleNotFoundError:
+    from scanner.release_identity import build_fingerprint as release_build_fingerprint
+    from scanner.release_identity import published_scanner_version
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, JSONResponse
@@ -9087,25 +9093,23 @@ async def _broker_reserve_request_budget(
         if parent_scan_id:
             # A parallel parent owns one logical per-domain allowance. Without
             # fair sharing, the first broker child can reserve the entire cap
-            # and leave every sibling parked for the reservation TTL. Divide
-            # the still-unreserved headroom among children that have not yet
-            # leased; running siblings are already reflected in Redis.
+            # and leave every sibling parked for the reservation TTL. Include
+            # running siblings in the divisor: a child can transition to running
+            # between this query and the Redis reservation, and COUNT=0 must not
+            # silently become "give this child the full remaining cap".
             try:
-                pending_sibling_count = max(
-                    1,
-                    int(
-                        await conn.fetchval(
-                            """
-                            SELECT COUNT(*)
-                            FROM scans
-                            WHERE parent_scan_id=$1
-                              AND status IN ('pending','queued')
-                            """,
-                            parent_scan_id,
-                        )
-                        or 1
-                    ),
+                sibling_count_value = await conn.fetchval(
+                    """
+                    SELECT COUNT(*)
+                    FROM scans
+                    WHERE parent_scan_id=$1
+                      AND status IN ('pending','queued','running')
+                    """,
+                    parent_scan_id,
                 )
+                if sibling_count_value is None:
+                    return None
+                pending_sibling_count = max(1, int(sibling_count_value))
             except Exception:
                 return None
             reserved = asm_inventory.reserved_domain_rate_count(redis_client, root_domain)
@@ -10242,8 +10246,8 @@ def expected_build_fingerprint() -> Optional[str]:
     # running stale orchestration/output code is not reported as build_current.
     workspace_fingerprint = hash_source_files(source_file_map(), require_all=True)
     if workspace_fingerprint:
-        return workspace_fingerprint
-    return hash_source_files(runtime_file_map(), require_all=True)
+        return release_build_fingerprint(workspace_fingerprint)
+    return release_build_fingerprint(hash_source_files(runtime_file_map(), require_all=True))
 
 
 def _git_head_short(repo: str = "/workspace") -> Optional[str]:
@@ -10271,11 +10275,12 @@ def _git_head_short(repo: str = "/workspace") -> Optional[str]:
 
 
 def current_scanner_version() -> str:
-    """Human build label used by API/workers to detect mixed deployments. Prefer
-    the live checkout's real commit (the API bind-mounts the repo at /workspace) so
-    the label reflects code deployed via volume-mount restarts, not the commit baked
-    into SCANNER_VERSION/GIT_COMMIT env when the container image was built."""
-    return (
+    """Human build label used by API/workers to detect mixed deployments.
+
+    Official images use the immutable image-layer release manifest. Development
+    images retain the live-checkout commit fallback needed by bind-mounted source.
+    """
+    return published_scanner_version(
         _git_head_short()
         or os.environ.get("SCANNER_VERSION")
         or os.environ.get("GIT_COMMIT")
@@ -10284,8 +10289,7 @@ def current_scanner_version() -> str:
 
 
 def _publish_scanner_version() -> str:
-    """Publish the real current build label to Redis so workers stamp/report the
-    deployed commit (their baked SCANNER_VERSION env is frozen at image build)."""
+    """Publish the authoritative release or development build label to Redis."""
     v = current_scanner_version()
     try:
         get_redis().set("shakerscan:scanner_version", v, ex=120)

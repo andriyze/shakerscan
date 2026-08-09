@@ -109,6 +109,7 @@ services:
       dockerfile: scanner/Dockerfile
       args:
         SCANNER_VERSION: ${SCANNER_VERSION:-dev}
+        SCANNER_SOURCE_REVISION: ${GIT_COMMIT:-unknown}
         # Only the API stages the Model Intake guest image, and only the API
         # mounts the Docker socket. Scan workers and the no-egress sandbox
         # handle hostile artifacts and deliberately get no Docker client.
@@ -301,6 +302,7 @@ services:
       dockerfile: scanner/Dockerfile
       args:
         SCANNER_VERSION: ${SCANNER_VERSION:-dev}
+        SCANNER_SOURCE_REVISION: ${GIT_COMMIT:-unknown}
     environment:
       - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@${SHAKERSCAN_DATA_BIND_HOST:-127.0.0.1}:${REDIS_PORT:-6379}
       - DATABASE_URL=postgresql://scanner:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@${SHAKERSCAN_DATA_BIND_HOST:-127.0.0.1}:${POSTGRES_PORT:-5432}/scanner
@@ -374,6 +376,7 @@ services:
       dockerfile: scanner/Dockerfile
       args:
         SCANNER_VERSION: ${SCANNER_VERSION:-dev}
+        SCANNER_SOURCE_REVISION: ${GIT_COMMIT:-unknown}
     environment:
       - PYTHONUNBUFFERED=1
       - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379
@@ -463,6 +466,7 @@ services:
       dockerfile: scanner/Dockerfile
       args:
         SCANNER_VERSION: ${SCANNER_VERSION:-dev}
+        SCANNER_SOURCE_REVISION: ${GIT_COMMIT:-unknown}
     user: "${MODEL_INTAKE_SANDBOX_UID:-10001}:${MODEL_INTAKE_SANDBOX_GID:-10001}"
     network_mode: none
     read_only: true
@@ -502,6 +506,7 @@ services:
       dockerfile: scanner/Dockerfile
       args:
         SCANNER_VERSION: ${SCANNER_VERSION:-dev}
+        SCANNER_SOURCE_REVISION: ${GIT_COMMIT:-unknown}
     environment:
       - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379
       - DATABASE_URL=postgresql://scanner:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/scanner

@@ -18,6 +18,7 @@ import socket
 import ssl
 import sys
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -38,6 +39,26 @@ class BrokerWorkerError(RuntimeError):
     pass
 
 
+class BrokerHTTPError(BrokerWorkerError):
+    """An authenticated broker response whose status controls retry posture."""
+
+    def __init__(self, status_code: int, detail: str = "") -> None:
+        self.status_code = int(status_code)
+        super().__init__(f"broker returned HTTP {self.status_code}: {detail[:300]}")
+
+
+def _heartbeat_failure_is_terminal(exc: Exception) -> bool:
+    """Fail closed immediately only when the control plane rejected authority.
+
+    Rate limits, server failures, and transport errors are retried within the
+    lease grace window. Authentication/conflict/not-found responses mean this
+    worker no longer owns the lease and must stop immediately.
+    """
+    if not isinstance(exc, BrokerHTTPError):
+        return False
+    return exc.status_code not in {408, 425, 429, 500, 502, 503, 504}
+
+
 def _heartbeat_lease_until_done(
     state: dict[str, Any],
     *,
@@ -50,6 +71,8 @@ def _heartbeat_lease_until_done(
     live: dict[str, Any],
     live_lock: threading.Lock,
     lease_failed: list[str],
+    failure_grace_seconds: float | None = None,
+    request_timeout: int = 15,
 ) -> None:
     """Keep broker ownership alive independently of scanner event-loop health.
 
@@ -59,7 +82,10 @@ def _heartbeat_lease_until_done(
     worker already uses a dedicated heartbeat thread for this reason; broker workers
     need the same failure posture.
     """
-    while not done.wait(heartbeat_interval):
+    grace = max(heartbeat_interval * 2, float(failure_grace_seconds or 0))
+    last_success = time.monotonic()
+    wait_seconds = heartbeat_interval
+    while not done.wait(wait_seconds):
         with live_lock:
             log_lines = list(live.get("log_lines") or [])
             live["log_lines"] = []
@@ -76,13 +102,33 @@ def _heartbeat_lease_until_done(
                     "progress": progress,
                     "log_lines": log_lines,
                 },
+                timeout=max(1, int(request_timeout)),
             )
+            if done.is_set():
+                return
+            last_success = time.monotonic()
+            wait_seconds = heartbeat_interval
             if response and response.get("cancel_requested"):
                 _signal_scanner_cancel_file(str(RESULTS_DIR / f"{scan_id}_cancel"))
         except Exception as exc:
-            lease_failed.append(str(exc))
-            _signal_scanner_cancel_file(str(RESULTS_DIR / f"{scan_id}_cancel"))
-            return
+            if done.is_set():
+                return
+            # Do not discard buffered logs just because this delivery attempt
+            # failed; resend them on the next successful heartbeat.
+            if log_lines:
+                with live_lock:
+                    pending = list(live.get("log_lines") or [])
+                    live["log_lines"] = (log_lines + pending)[-20:]
+            terminal = _heartbeat_failure_is_terminal(exc)
+            grace_expired = (time.monotonic() - last_success) >= grace
+            if terminal or grace_expired:
+                posture = "terminal" if terminal else "retry grace exhausted"
+                lease_failed.append(f"{posture}: {exc}")
+                _signal_scanner_cancel_file(str(RESULTS_DIR / f"{scan_id}_cancel"))
+                return
+            # Retry transient failures well before the lease deadline instead
+            # of sleeping a complete heartbeat interval again.
+            wait_seconds = max(0.01, min(5.0, heartbeat_interval / 3))
 
 
 def load_state(path: Path) -> dict[str, Any]:
@@ -155,7 +201,7 @@ def api_request(
             detail = str(json.load(exc).get("detail") or "")
         except Exception:
             pass
-        raise BrokerWorkerError(f"broker returned HTTP {exc.code}: {detail[:300]}") from exc
+        raise BrokerHTTPError(exc.code, detail) from exc
     except (urllib.error.URLError, TimeoutError, ssl.SSLError, OSError) as exc:
         raise BrokerWorkerError(f"broker request failed: {exc}") from exc
 
@@ -262,6 +308,7 @@ async def execute_lease(state: dict[str, Any], lease: dict[str, Any]) -> None:
     lease_id = str(lease.get("lease_id") or "")
     lease_token = str(lease.get("lease_token") or "")
     heartbeat_interval = max(5, int(lease.get("heartbeat_interval_seconds") or 30))
+    heartbeat_request_timeout = max(5, min(15, heartbeat_interval))
     lease_failed: list[str] = []
     done = threading.Event()
     live: dict[str, Any] = {"phase": "broker_execution", "progress": 5, "log_lines": []}
@@ -292,6 +339,8 @@ async def execute_lease(state: dict[str, Any], lease: dict[str, Any]) -> None:
             "live": live,
             "live_lock": live_lock,
             "lease_failed": lease_failed,
+            "failure_grace_seconds": heartbeat_interval * 2,
+            "request_timeout": heartbeat_request_timeout,
         },
         name=f"broker-heartbeat-{scan_id[:8]}",
         daemon=True,
@@ -378,7 +427,7 @@ async def execute_lease(state: dict[str, Any], lease: dict[str, Any]) -> None:
         )
     finally:
         done.set()
-        heartbeat_thread.join(timeout=heartbeat_interval + 45)
+        heartbeat_thread.join(timeout=heartbeat_request_timeout + 2)
         _clear_fleet_busy_marker(busy_marker)
 
 

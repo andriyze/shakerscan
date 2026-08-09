@@ -189,7 +189,10 @@ if [[ -z "$PLATFORM" ]]; then
 fi
 
 BUILD_ARGS=(--platform "$PLATFORM")
-SCANNER_BUILD_ARGS=(--build-arg "SCANNER_VERSION=$VERSION_LABEL")
+SCANNER_BUILD_ARGS=(
+  --build-arg "SCANNER_VERSION=$VERSION_LABEL"
+  --build-arg "SCANNER_SOURCE_REVISION=$REVISION_LABEL"
+)
 OUTPUT_ARGS=()
 if [[ "$PUSH" -eq 1 ]]; then
     OUTPUT_ARGS+=(--push)

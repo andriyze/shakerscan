@@ -1762,7 +1762,9 @@ def _worker_compose_env(
 ) -> dict[str, str]:
     expected_image = str(response["worker_image_digest"])
     selected_image = str(runtime_image or expected_image)
-    sandbox_uid, sandbox_gid = _sandbox_runtime_identity()
+    sandbox_uid, sandbox_gid = _sandbox_runtime_identity(
+        paths.root / "results" / "model-intake-sandbox"
+    )
     return {
         "FLEET_COMPOSE_PROJECT_NAME": f"shakerscan-fleet-{str(response['node_id'])[:8]}",
         "FLEET_NODE_ID": str(response["node_id"]),
@@ -1776,8 +1778,18 @@ def _worker_compose_env(
     }
 
 
-def _sandbox_runtime_identity() -> tuple[int, int]:
-    """Return the host bind owner and matching non-root container identity."""
+def _sandbox_runtime_identity(queue_path: Path | None = None) -> tuple[int, int]:
+    """Return the durable bind owner and matching non-root container identity.
+
+    Preserve an existing non-root owner across launcher-user changes. Older
+    root-run installations commonly own this queue as UID 10001; changing the
+    desired identity to the next operator's UID makes otherwise safe upgrades
+    impossible without weakening the private 0700 boundary.
+    """
+    if queue_path is not None and queue_path.exists() and not queue_path.is_symlink():
+        current = queue_path.stat()
+        if current.st_uid != 0:
+            return current.st_uid, current.st_gid
     uid = os.geteuid()
     gid = os.getegid()
     return (10001, 10001) if uid == 0 else (uid, gid)
@@ -1803,8 +1815,8 @@ def _prepare_worker_result_directories(paths: RuntimePaths) -> None:
         (paths.root / "results" / "model-intake-quarantine", 0o755),
         (paths.root / "results" / "model-intake-sandbox", 0o700),
     )
-    sandbox_uid, sandbox_gid = _sandbox_runtime_identity()
     sandbox_path = paths.root / "results" / "model-intake-sandbox"
+    sandbox_uid, sandbox_gid = _sandbox_runtime_identity(sandbox_path)
     for path, mode in directories:
         if path.is_symlink():
             raise FleetCLIError(f"worker result directory must not be a symlink: {path}")
@@ -1825,8 +1837,29 @@ def _prepare_worker_result_directories(paths: RuntimePaths) -> None:
     if sandbox_stat.st_uid != sandbox_uid or sandbox_stat.st_gid != sandbox_gid:
         raise FleetCLIError(
             f"worker sandbox queue {sandbox_path} must be owned by "
-            f"{sandbox_uid}:{sandbox_gid}; found {sandbox_stat.st_uid}:{sandbox_stat.st_gid}"
+            f"{sandbox_uid}:{sandbox_gid}; found {sandbox_stat.st_uid}:{sandbox_stat.st_gid}. "
+            "For a legacy root-owned queue, run the explicit host migration: "
+            "sudo shakerscan fleet repair-permissions --confirm"
         )
+
+
+def command_repair_permissions(paths: RuntimePaths, args: argparse.Namespace) -> None:
+    """Migrate legacy root/world-writable fleet queues to the private runtime UID."""
+    _require_linux()
+    if os.geteuid() != 0:
+        raise FleetCLIError("repair-permissions requires host root; rerun with sudo")
+    if not args.confirm:
+        raise FleetCLIError("repair-permissions requires --confirm after reviewing the target path")
+    results = paths.root / "results"
+    sandbox = results / "model-intake-sandbox"
+    for path in (results, sandbox):
+        if path.is_symlink():
+            raise FleetCLIError(f"worker result directory must not be a symlink: {path}")
+    results.mkdir(parents=True, exist_ok=True, mode=0o755)
+    sandbox.mkdir(parents=True, exist_ok=True, mode=0o700)
+    sandbox.chmod(0o700)
+    os.chown(sandbox, 10001, 10001)
+    print(f"Repaired private sandbox queue {sandbox} (owner 10001:10001, mode 0700)")
 
 
 def _write_compose_env(path: Path, values: dict[str, str]) -> None:
@@ -2631,6 +2664,15 @@ def build_parser() -> argparse.ArgumentParser:
     reconcile = subparsers.add_parser("reconcile", help="apply registered WireGuard peers locally")
     reconcile.add_argument("--local-api", help="override the host-published control-plane API origin")
     reconcile.add_argument("--quiet", action="store_true")
+    repair = subparsers.add_parser(
+        "repair-permissions",
+        help="migrate a legacy root-owned Model Intake sandbox queue",
+    )
+    repair.add_argument(
+        "--confirm",
+        action="store_true",
+        help="confirm changing only the private sandbox queue owner/mode",
+    )
     return parser
 
 
@@ -2651,6 +2693,8 @@ def main(argv: list[str] | None = None) -> int:
             command_join(paths, args)
         elif args.command == "reconcile":
             command_reconcile(paths, args)
+        elif args.command == "repair-permissions":
+            command_repair_permissions(paths, args)
         else:
             parser.error("unknown command")
     except FleetCLIError as exc:

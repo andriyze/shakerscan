@@ -652,6 +652,37 @@ def test_sandbox_queue_owner_uses_os_chown_for_root(monkeypatch, tmp_path):
     assert calls == [(queue, 10001, 10001)]
 
 
+def test_sandbox_runtime_identity_preserves_existing_non_root_owner(monkeypatch, tmp_path):
+    queue = tmp_path / "queue"
+    queue.mkdir()
+    monkeypatch.setattr(fleet_cli.os, "geteuid", lambda: 2000)
+    monkeypatch.setattr(fleet_cli.os, "getegid", lambda: 2000)
+    stat_result = queue.stat()
+    monkeypatch.setattr(
+        fleet_cli.Path,
+        "stat",
+        lambda self: types.SimpleNamespace(
+            st_uid=10001 if self == queue else stat_result.st_uid,
+            st_gid=10001 if self == queue else stat_result.st_gid,
+            st_mode=stat_result.st_mode,
+        ),
+    )
+
+    assert fleet_cli._sandbox_runtime_identity(queue) == (10001, 10001)
+
+
+def test_repair_permissions_requires_root_and_confirmation(monkeypatch, tmp_path):
+    paths = fleet_cli.RuntimePaths(tmp_path)
+    monkeypatch.setattr(fleet_cli, "_require_linux", lambda: None)
+    monkeypatch.setattr(fleet_cli.os, "geteuid", lambda: 1000)
+    with pytest.raises(fleet_cli.FleetCLIError, match="requires host root"):
+        fleet_cli.command_repair_permissions(paths, types.SimpleNamespace(confirm=True))
+
+    monkeypatch.setattr(fleet_cli.os, "geteuid", lambda: 0)
+    with pytest.raises(fleet_cli.FleetCLIError, match="requires --confirm"):
+        fleet_cli.command_repair_permissions(paths, types.SimpleNamespace(confirm=False))
+
+
 def test_worker_result_directory_preparation_rejects_symlink(tmp_path):
     paths = fleet_cli.RuntimePaths(tmp_path)
     outside = tmp_path / "outside"
