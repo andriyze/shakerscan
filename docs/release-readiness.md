@@ -1,6 +1,7 @@
 # ShakerScan 0.8.13 Release Readiness
 
-**Status (2026-08-09):** patch candidate in preparation; 0.8.7 remains the immutable stable channel.
+**Status (2026-08-09):** 0.8.13 is published and selected by the immutable stable channel. Clean
+two-VPS post-promotion acceptance is in progress.
 Version 0.8.9 passed CodeQL, all frozen gates, dependency audits, clean/dirty upgrade smokes,
 multi-architecture publication, and independent manifest checks. Its bounded clean-build retry also
 recovered the registry boundary that stopped 0.8.8. The stable channel was deliberately not advanced:
