@@ -16,6 +16,7 @@ generated launcher also pins `SCANNER_IMAGE_TAG` to the downloaded version by de
 
 | Version | Git Commit | Scanner/Worker Image | API Image | UI Image | Model Intake Signer Image |
 | --- | --- | --- | --- | --- | --- |
+| 0.8.5 | pending candidate | `shakerscan/shakerscan-scanner:0.8.5` | `shakerscan/shakerscan-api:0.8.5` | `shakerscan/shakerscan-ui:0.8.5` | `shakerscan/shakerscan-model-intake-signer:0.8.5` |
 | 0.8.4 | `fe7966ca21038f02c820c0b72f267d4e6a1d459f` | `shakerscan/shakerscan-scanner:0.8.4` (`sha256:7774cfbfc7bf0b98643060a114057e292d5ae0c1e7b5e9a45487b98c06deea35`) | `shakerscan/shakerscan-api:0.8.4` (`sha256:1546a210cdb2b29f7e5851b8642d55fcda3fd7e1c33bb5966c08b081df2a5d66`) | `shakerscan/shakerscan-ui:0.8.4` (`sha256:ef329ecfb00803090a39b0bc5b18a44181fe3f85e0c61bf3375497bf5942633f`) | `shakerscan/shakerscan-model-intake-signer:0.8.4` (`sha256:630cd8a6d00e1fc25fbb614887b92965423e8fb8e1a27cbe1531e7d000b3ba15`) |
 | 0.8.3 | `22da7b9f8ff91f31f03fdf9087e977df05f27a1b` | `shakerscan/shakerscan-scanner:0.8.3` (`sha256:e85a57cc29af3390c73e71c800f81d5a9c0f53909c869b59e78b291d11884007`) | `shakerscan/shakerscan-api:0.8.3` (`sha256:c3c42d9a706de9e5888c674ccc1e4dc280b1a5b4ab5b350b1becdfac3524a6e0`) | `shakerscan/shakerscan-ui:0.8.3` (`sha256:74d3f4b011ef9c1148b62d4a268b93de3f72b77661d261e4bfc417208cd979fe`) | `shakerscan/shakerscan-model-intake-signer:0.8.3` (`sha256:14b8541b21e64abfb22d31b29c3cc395e8e27e2347d4bd6fee02a36bdeee8f41`) |
 | 0.8.2 | `e5e95a5a898bee8d91ded464bc36c0d32ff5e26c` | `shakerscan/shakerscan-scanner:0.8.2` (`sha256:4de99e5349d7f572d05145d5d02a6919cd637a2dd3f5c976d957097ab0e3a838`) | `shakerscan/shakerscan-api:0.8.2` (`sha256:54e50d7bd2b9223a0bccb3eceb96cbe71166589944935cec03c77542d8100475`) | `shakerscan/shakerscan-ui:0.8.2` (`sha256:4a24d4d9965659e2842d94d72606d51c3329195d401e3aa6acf724d3d5b7ff98`) | `shakerscan/shakerscan-model-intake-signer:0.8.2` (`sha256:98600e5337ce739e917b14d994c6ac63ee1399169e09c4c17509bf141887b780`) |
@@ -37,7 +38,7 @@ tag alone does not prove which commit produced an image.
 
 ## Release Workflow
 
-Version 0.8.4 is the current stable release. Complete
+Version 0.8.4 is the current stable release; 0.8.5 is the pending candidate. Complete
 [`docs/release-readiness.md`](docs/release-readiness.md), freeze the exact commit, and record its
 validation evidence before publishing a later release.
 
