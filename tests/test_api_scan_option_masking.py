@@ -1777,6 +1777,48 @@ def test_broker_request_budget_reservation_enforces_fleet_default(monkeypatch):
     assert payload["options"]["request_budget_domain"] == "example.test"
 
 
+def test_broker_request_budget_fairly_partitions_parallel_siblings(monkeypatch):
+    parent_id = "22222222-2222-4222-8222-222222222222"
+    reservation_calls = []
+
+    class Conn:
+        async def fetchrow(self, _query, *_args):
+            return {
+                "root_domain": "example.test",
+                "asm_config": {"max_requests_per_hour_per_domain": 100},
+                "parent_scan_id": parent_id,
+            }
+
+        async def fetchval(self, query, *args):
+            assert "status IN ('pending','queued')" in query
+            assert str(args[0]) == parent_id
+            return 4
+
+    async def tested(*_args, **_kwargs):
+        return 0
+
+    def reserve(_redis, root_domain, cap, amount, **kwargs):
+        reservation_calls.append((root_domain, cap, amount, kwargs))
+        return amount
+
+    monkeypatch.setattr(api_module.asm_inventory, "domain_tested_recently_count", tested)
+    monkeypatch.setattr(api_module.asm_inventory, "reserved_domain_rate_count", lambda *_args: 0)
+    monkeypatch.setattr(api_module.asm_inventory, "reserve_domain_rate", reserve)
+    payload = {
+        "scan_id": "11111111-1111-4111-8111-111111111111",
+        "options": {"scan_type": "standard", "custom_budget": {"request_max": 80}},
+    }
+
+    receipt = asyncio.run(api_module._broker_reserve_request_budget(Conn(), object(), payload))
+
+    assert receipt["requested"] == 80
+    assert receipt["reservation_request"] == 25
+    assert receipt["granted"] == 25
+    assert receipt["pending_sibling_count"] == 4
+    assert reservation_calls == [("example.test", 100, 25, {"all_or_nothing": False})]
+    assert payload["options"]["custom_budget"]["request_max"] == 25
+
+
 def test_broker_request_budget_explicit_off_preserves_operator_control():
     payload = {"options": {"request_budget_mode": "off"}}
     assert asyncio.run(api_module._broker_reserve_request_budget(None, None, payload)) == {}

@@ -9068,7 +9068,7 @@ async def _broker_reserve_request_budget(
         return None
     target = await conn.fetchrow(
         """
-        SELECT t.root_domain, t.asm_config
+        SELECT t.root_domain, t.asm_config, s.parent_scan_id
         FROM scans s JOIN targets t ON t.id=s.target_id
         WHERE s.id=$1
         """,
@@ -9078,15 +9078,48 @@ async def _broker_reserve_request_budget(
     config = asm_inventory.merge_asm_config(parse_json_field((target or {}).get("asm_config")) or {})
     cap = int(config.get("max_requests_per_hour_per_domain") or 0)
     granted = requested
+    reservation_request = requested
+    pending_sibling_count = 1
     if root_domain and cap > 0:
         used = await asm_inventory.domain_tested_recently_count(conn, root_domain, hours=1)
         remaining = max(0, cap - int(used or 0))
+        parent_scan_id = (target or {}).get("parent_scan_id")
+        if parent_scan_id:
+            # A parallel parent owns one logical per-domain allowance. Without
+            # fair sharing, the first broker child can reserve the entire cap
+            # and leave every sibling parked for the reservation TTL. Divide
+            # the still-unreserved headroom among children that have not yet
+            # leased; running siblings are already reflected in Redis.
+            try:
+                pending_sibling_count = max(
+                    1,
+                    int(
+                        await conn.fetchval(
+                            """
+                            SELECT COUNT(*)
+                            FROM scans
+                            WHERE parent_scan_id=$1
+                              AND status IN ('pending','queued')
+                            """,
+                            parent_scan_id,
+                        )
+                        or 1
+                    ),
+                )
+            except Exception:
+                return None
+            reserved = asm_inventory.reserved_domain_rate_count(redis_client, root_domain)
+            unreserved = max(0, remaining - reserved)
+            if unreserved <= 0:
+                return None
+            fair_share = max(1, unreserved // pending_sibling_count)
+            reservation_request = min(requested, fair_share)
         try:
             granted = asm_inventory.reserve_domain_rate(
                 redis_client,
                 root_domain,
                 remaining,
-                requested,
+                reservation_request,
                 all_or_nothing=False,
             )
         except Exception:
@@ -9102,8 +9135,10 @@ async def _broker_reserve_request_budget(
     payload["options"] = options
     return {
         "requested": requested,
+        "reservation_request": reservation_request,
         "granted": granted,
         "root_domain": root_domain,
+        "pending_sibling_count": pending_sibling_count,
         "custom_budget": adjusted_budget,
         "request_budget_mode": mode,
     }
