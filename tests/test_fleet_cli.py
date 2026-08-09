@@ -658,15 +658,18 @@ def test_sandbox_runtime_identity_preserves_existing_non_root_owner(monkeypatch,
     monkeypatch.setattr(fleet_cli.os, "geteuid", lambda: 2000)
     monkeypatch.setattr(fleet_cli.os, "getegid", lambda: 2000)
     stat_result = queue.stat()
-    monkeypatch.setattr(
-        fleet_cli.Path,
-        "stat",
-        lambda self: types.SimpleNamespace(
+    original_stat = fleet_cli.Path.stat
+
+    def fake_stat(self, *args, **kwargs):
+        if self != queue:
+            return original_stat(self, *args, **kwargs)
+        return types.SimpleNamespace(
             st_uid=10001 if self == queue else stat_result.st_uid,
             st_gid=10001 if self == queue else stat_result.st_gid,
             st_mode=stat_result.st_mode,
-        ),
-    )
+        )
+
+    monkeypatch.setattr(fleet_cli.Path, "stat", fake_stat)
 
     assert fleet_cli._sandbox_runtime_identity(queue) == (10001, 10001)
 
