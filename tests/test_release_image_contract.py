@@ -16,7 +16,7 @@ def _service_block(compose: str, service: str) -> str:
 
 def test_release_images_keep_docker_client_at_control_plane_boundary():
     compose = (ROOT / "docker-compose.release.yml").read_text()
-    workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text()
+    workflow = (ROOT / ".github" / "workflows" / "release-candidate.yml").read_text()
     dockerfile = (ROOT / "scanner" / "Dockerfile").read_text()
 
     assert "${API_IMAGE_REPO:-shakerscan/shakerscan-api}" in _service_block(compose, "api")
@@ -33,7 +33,7 @@ def test_release_images_keep_docker_client_at_control_plane_boundary():
 
 
 def test_official_and_manual_publishers_ship_native_multiarch_api_image():
-    workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text()
+    workflow = (ROOT / ".github" / "workflows" / "release-candidate.yml").read_text()
     publisher = (ROOT / "scripts" / "publish-images.sh").read_text()
 
     assert "API_IMAGE: shakerscan/shakerscan-api" in workflow
@@ -43,22 +43,29 @@ def test_official_and_manual_publishers_ship_native_multiarch_api_image():
     assert "INSTALL_DOCKER_CLI=1" in workflow
     assert "steps.api.outputs.digest" in workflow
     assert "Create API control-plane manifest list" in workflow
-    assert 'docker buildx imagetools inspect "${API_IMAGE}:${VERSION}"' in workflow
+    assert 'docker buildx imagetools inspect "${API_IMAGE}:${CANDIDATE_TAG}"' in workflow
 
     assert 'API_REPO="${API_IMAGE_REPO:-shakerscan/shakerscan-api}"' in publisher
     assert '--build-arg "INSTALL_DOCKER_CLI=1"' in publisher
-    assert 'SCANNER_BUILD_ARGS=(--build-arg "SCANNER_VERSION=$VERSION_LABEL")' in publisher
+    assert '--build-arg "SCANNER_VERSION=$VERSION_LABEL"' in publisher
+    assert '--build-arg "SCANNER_SOURCE_REVISION=$REVISION_LABEL"' in publisher
     assert 'API_TAGS=(-t "$API_REPO:$TAG")' in publisher
 
 
 def test_scanner_image_bakes_release_identity_for_broker_workers():
     dockerfile = (ROOT / "scanner" / "Dockerfile").read_text()
     compose = (ROOT / "docker-compose.yml").read_text()
-    workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text()
+    workflow = (ROOT / ".github" / "workflows" / "release-candidate.yml").read_text()
 
     assert "ARG SCANNER_VERSION=dev" in dockerfile
+    assert "ARG SCANNER_SOURCE_REVISION=unknown" in dockerfile
     assert "ENV SCANNER_VERSION=${SCANNER_VERSION}" in dockerfile
+    assert "release-manifest.json" in dockerfile
+    assert "release_identity.py --verify" in (ROOT / "scanner" / "entrypoint.sh").read_text()
     assert compose.count("SCANNER_VERSION: ${SCANNER_VERSION:-dev}") >= 5
     assert workflow.count("SCANNER_VERSION=${{ needs.meta.outputs.version }}") == 4
     assert "Verify baked scanner release identity" in workflow
+    assert "SCANNER_SOURCE_REVISION=${{ needs.meta.outputs.candidate_sha }}" in workflow
+    assert "0.0.0-intentional-mismatch" in workflow
+    assert "accepted an intentionally wrong deployment identity" in workflow
     assert 'baked SCANNER_VERSION=$baked_version; expected $VERSION' in workflow

@@ -1252,7 +1252,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Scanner wrapper commands | 27 | `scanner.sh` |
 | Make targets | 12 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
-| Runtime environment keys | 319 | Python sources + Compose manifests |
+| Runtime environment keys | 323 | Python sources + Compose manifests |
 | Scanner modules | 99 | `scanner/scanner_tools/` |
 | UI pages | 31 | `ui/src/app/` |
 | Skills | 6 | `skills/` |
@@ -2005,7 +2005,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `FLEET_WORKER_MEMORY_LIMIT` | `docker-compose.broker-worker.yml`, `docker-compose.worker.yml` |
 | `FULL_COVERAGE_ALLOCATION_DEFAULT` | `api/parallel_scan.py` |
 | `GITHUB_TOKEN` | `scanner/scanner.py` |
-| `GIT_COMMIT` | `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner.py` |
+| `GIT_COMMIT` | `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scanner/release_identity.py` |
 | `HEARTBEAT_INTERVAL_SECONDS` | `api/worker.py` |
 | `HF_TOKEN` | `scanner/scanner_tools/model_intake.py` |
 | `HIBP_API_KEY` | `scanner/scanner.py` |
@@ -2106,13 +2106,16 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SCANNER_DEBUG_NOSQL` | `scanner/scanner.py`, `scanner/scanner_tools/active_checks.py` |
 | `SCANNER_DEBUG_SQLMAP` | `scanner/scanner.py` |
 | `SCANNER_DNS_RESOLVERS` | `scanner/scanner.py` |
+| `SCANNER_EXPECTED_REVISION` | `scanner/release_identity.py` |
+| `SCANNER_EXPECTED_VERSION` | `scanner/release_identity.py` |
 | `SCANNER_IMAGE_REPO` | `docker-compose.release.yml` |
 | `SCANNER_IMAGE_TAG` | `docker-compose.release.yml` |
 | `SCANNER_LOCAL_WORKER_IMAGE` | `docker-compose.yml` |
 | `SCANNER_MAX_CONCURRENT` | `scanner/scanner_tools/common.py` |
+| `SCANNER_RELEASE_VERSION` | `docker-compose.release.yml` |
 | `SCANNER_SUBPROCESS_ARTIFACT_MAX_BYTES` | `scanner/scanner_tools/common.py` |
 | `SCANNER_SUBPROCESS_RECEIPT_LIMIT` | `scanner/scanner_tools/common.py` |
-| `SCANNER_VERSION` | `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner.py` |
+| `SCANNER_VERSION` | `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scanner/release_identity.py` |
 | `SCAN_CANCEL_POLL_SECONDS` | `api/worker.py` |
 | `SCAN_CHECKPOINT_FILE` | `scanner/scanner.py` |
 | `SCAN_COOPERATIVE_CANCEL_GRACE_SECONDS` | `api/worker.py` |
@@ -2170,6 +2173,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_QUEUE_MAX_DELIVERY_ATTEMPTS` | `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_QUEUE_ROUTE_MAX` | `api/job_queue.py` |
 | `SHAKERSCAN_QUEUE_VISIBILITY_TIMEOUT_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_RELEASE_MANIFEST` | `scanner/release_identity.py` |
 | `SHAKERSCAN_REQUEST_BUDGET_DOMAIN` | `scanner/scanner.py` |
 | `SHAKERSCAN_REQUEST_BUDGET_LIMIT` | `scanner/scanner.py` |
 | `SHAKERSCAN_REQUEST_BUDGET_MODE` | `api/worker.py`, `scanner/scanner.py` |

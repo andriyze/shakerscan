@@ -1,0 +1,12 @@
+# Release and supply-chain controls require explicit maintainer review.
+/.github/workflows/ @andriyze
+/.github/rulesets/ @andriyze
+/.github/dependabot.yml @andriyze
+/scanner/Dockerfile @andriyze
+/scanner/entrypoint.sh @andriyze
+/scanner/release_identity.py @andriyze
+/scripts/publish-images.sh @andriyze
+/scripts/retry-command.sh @andriyze
+/install/STABLE_VERSION @andriyze
+/VERSION @andriyze
+/docs/releases/ @andriyze
