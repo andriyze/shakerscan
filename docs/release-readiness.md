@@ -1,15 +1,16 @@
 # ShakerScan 0.8.5 Release Readiness
 
-**Status (2026-08-09):** candidate locally validated, not published. Clean 0.8.4 post-publication acceptance
+**Status (2026-08-09):** 0.8.5 published and stable-channel promotion in progress. Clean 0.8.4 post-publication acceptance
 found two fail-closed scanner-image defects: ModelScan lacked its HDF5 dependency, and enforced Fleet
 request budgets mislabeled Nuclei as unavailable. The 0.8.5 candidate packages ModelScan's `h5py`
 extra, functionally self-tests a representative Keras HDF5 model during image construction, and
 separates Nuclei's local availability probe from its still-fail-closed unmetered target execution.
 The patch has passed 3,108 backend tests, 89 UI tests, the production UI build, all 14 named release
 gates, generated-inventory validation, locked Python and production npm audits, installer and schema
-upgrade smokes, scanner/API/signer builds, and the fixed guest conversion self-test. The stable
-installer remains on immutable 0.8.4 until exact-candidate multi-architecture publication and clean
-post-publish acceptance are complete.
+upgrade smokes, scanner/API/signer builds, and the fixed guest conversion self-test. Release workflow
+`31299029125` published the exact tagged commit for native `linux/amd64` and `linux/arm64`; independent
+inspection verified the four versioned manifests and exact `latest` digest equality. Clean hosted-
+installer acceptance remains pending and is not implied by registry publication.
 
 ### 0.8.4 post-publish evidence motivating this patch
 

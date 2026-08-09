@@ -147,7 +147,7 @@ def test_prebuilt_runtime_defaults_to_the_downloaded_release_version():
     assert 'release_version" != "dev"' in scanner
     assert ': "\\${SCANNER_IMAGE_TAG:=$release_image_tag}"' in installer
     assert '"$BIN_DIR/shakerscan" start -y' in installer
-    assert (ROOT / "install" / "STABLE_VERSION").read_text().strip() == "0.8.4"
+    assert (ROOT / "install" / "STABLE_VERSION").read_text().strip() == "0.8.5"
     assert 'CHANNEL_RAW_BASE="https://raw.githubusercontent.com/andriyze/shakerscan/main"' in installer
     assert 'REPO_RAW_BASE="https://raw.githubusercontent.com/andriyze/shakerscan/v${stable_version}"' in installer
 
