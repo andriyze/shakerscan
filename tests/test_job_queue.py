@@ -188,6 +188,57 @@ class LongPollTimeoutStreams(FakeStreams):
         raise TimeoutError("blocking read reached its socket timeout")
 
 
+class NoGroupDuringReclaimStreams(FakeStreams):
+    def __init__(self, route):
+        super().__init__()
+        self.route = route
+        self.failed = False
+
+    def xautoclaim(self, name, group, consumer, min_idle_time, start_id, count):
+        if name == stream_key(self.route) and not self.failed:
+            self.failed = True
+            self.eval(
+                "-- shakerscan:prune-empty-route",
+                4,
+                stream_key(self.route),
+                "shakerscan:queue-routes:scan_jobs",
+                f"shakerscan:queue-route-requirements:{self.route}",
+                self.route,
+                self.route,
+            )
+            raise RuntimeError(f"NOGROUP No such key '{name}' or consumer group '{group}'")
+        return super().xautoclaim(name, group, consumer, min_idle_time, start_id, count)
+
+
+class NoGroupDuringReadStreams(FakeStreams):
+    def __init__(self, route):
+        super().__init__()
+        self.route = route
+        self.failed = False
+
+    def xreadgroup(self, group, consumer, streams, count, block):
+        if stream_key(self.route) in streams and not self.failed:
+            self.failed = True
+            self.eval(
+                "-- shakerscan:prune-empty-route",
+                4,
+                stream_key(self.route),
+                "shakerscan:queue-routes:scan_jobs",
+                f"shakerscan:queue-route-requirements:{self.route}",
+                self.route,
+                self.route,
+            )
+            raise RuntimeError(
+                f"NOGROUP No such key '{stream_key(self.route)}' or consumer group '{group}'"
+            )
+        return super().xreadgroup(group, consumer, streams, count, block)
+
+
+class OtherReadFailureStreams(FakeStreams):
+    def xreadgroup(self, group, consumer, streams, count, block):
+        raise RuntimeError("READONLY replica cannot accept this operation")
+
+
 def test_stream_job_is_leased_heartbeated_and_acknowledged():
     redis = FakeStreams()
     payload = {"job_id": "job-1", "scan_id": "scan-1"}
@@ -221,6 +272,57 @@ def test_stream_long_poll_socket_timeout_is_an_empty_lease():
     )
 
     assert lease is None
+
+
+def test_route_pruned_during_reclaim_is_an_empty_lease_not_an_error():
+    placement = {"region": "eu-west"}
+    route = routed_queue_name("scan_jobs", placement)
+    redis = NoGroupDuringReclaimStreams(route)
+    enqueue_job(redis, "scan_jobs", {"job_id": "placed", "placement": placement})
+    redis.streams[stream_key(route)] = []
+
+    lease = lease_job(
+        redis,
+        [route],
+        consumer_name="broker-node:worker-1",
+        block_ms=20_000,
+        visibility_timeout_ms=60_000,
+    )
+
+    assert lease is None
+    assert route not in redis.smembers("shakerscan:queue-routes:scan_jobs")
+    assert stream_key(route) not in redis.streams
+
+
+def test_route_pruned_during_group_read_is_an_empty_lease_not_an_error():
+    placement = {"region": "eu-west"}
+    route = routed_queue_name("scan_jobs", placement)
+    redis = NoGroupDuringReadStreams(route)
+    enqueue_job(redis, "scan_jobs", {"job_id": "placed", "placement": placement})
+    redis.streams[stream_key(route)] = []
+
+    lease = lease_job(
+        redis,
+        ["scan_jobs", route],
+        consumer_name="broker-node:worker-1",
+        block_ms=20_000,
+        visibility_timeout_ms=60_000,
+    )
+
+    assert lease is None
+    assert route not in redis.smembers("shakerscan:queue-routes:scan_jobs")
+    assert stream_key(route) not in redis.streams
+
+
+def test_non_nogroup_stream_failure_remains_visible():
+    with pytest.raises(RuntimeError, match="READONLY"):
+        lease_job(
+            OtherReadFailureStreams(),
+            ["scan_jobs"],
+            consumer_name="broker-node:worker-1",
+            block_ms=20_000,
+            visibility_timeout_ms=60_000,
+        )
 
 
 def test_stale_delivery_is_reclaimed_and_attempt_is_visible():

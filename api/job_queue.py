@@ -311,6 +311,27 @@ def ensure_consumer_group(redis_client: Any, queue_name: str) -> bool:
         return False
 
 
+def _is_nogroup_error(exc: Exception) -> bool:
+    """Return whether Redis reports that a Stream consumer group disappeared.
+
+    Dynamic route cleanup intentionally deletes the empty Stream and its group.
+    A worker can already be polling a route snapshot when that happens, so
+    NOGROUP is an expected lifecycle race rather than a control-plane failure.
+    Keep this match narrow so connectivity, protocol, and other Redis failures
+    remain visible to callers.
+    """
+    return "NOGROUP" in str(exc).upper()
+
+
+def _refresh_groups_after_nogroup(redis_client: Any, queue_names: Iterable[str]) -> list[str]:
+    """Recreate durable groups and discard dynamic routes already pruned."""
+    return [
+        queue_name
+        for queue_name in queue_names
+        if ensure_consumer_group(redis_client, queue_name)
+    ]
+
+
 def enqueue_job(redis_client: Any, queue_name: str, payload: str | dict[str, Any]) -> str:
     routed_queue = queue_name
     normalized_payload: str | dict[str, Any] = payload
@@ -416,14 +437,24 @@ def lease_job(
     # atomic and increments Redis' delivery counter for bounded retry policy.
     for queue_name in queues:
         key = stream_key(queue_name)
-        claimed = redis_client.xautoclaim(
-            key,
-            CONSUMER_GROUP,
-            consumer_name,
-            min_idle_time=visibility_timeout_ms,
-            start_id="0-0",
-            count=1,
-        )
+        try:
+            claimed = redis_client.xautoclaim(
+                key,
+                CONSUMER_GROUP,
+                consumer_name,
+                min_idle_time=visibility_timeout_ms,
+                start_id="0-0",
+                count=1,
+            )
+        except Exception as exc:
+            if not _is_nogroup_error(exc):
+                raise
+            # The final acknowledgement of another worker can prune an empty
+            # dynamic route after this poll captured its name. Refreshing the
+            # group removes that stale route (or restores a concurrently
+            # re-enqueued one); the next poll can safely pick up new work.
+            _refresh_groups_after_nogroup(redis_client, [queue_name])
+            return None
         raw_messages = claimed[1] if claimed and len(claimed) > 1 else []
         messages = _decode_messages([(key, raw_messages)])
         if messages:
@@ -446,6 +477,13 @@ def lease_job(
             block=max(1, block_ms),
         )
     except Exception as exc:
+        if _is_nogroup_error(exc):
+            # XREADGROUP covers every qualified route in one blocking call.
+            # If any one is pruned while blocked, Redis aborts the whole read.
+            # Refresh all groups, but do not start a second long poll inside
+            # this request; returning no work keeps the broker timeout bounded.
+            _refresh_groups_after_nogroup(redis_client, queues)
+            return None
         is_timeout = (
             exc.__class__.__name__ == "TimeoutError"
             and (
