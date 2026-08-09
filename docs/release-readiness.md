@@ -1,11 +1,13 @@
 # ShakerScan 0.8.4 Release Readiness
 
-**Status (2026-08-08):** candidate prepared, not published. Parallel DAST acceptance passed on
+**Status (2026-08-09):** published from frozen commit
+`fe7966ca21038f02c820c0b72f267d4e6a1d459f`; post-publish clean-install acceptance is in progress.
+Parallel DAST acceptance passed on
 implementation commit `b86177f0`; the candidate source tree passed an exact-source rebuild/restart,
 3,106 backend tests, 89 UI tests, the production UI build, all 14 named safety gates, locked
-production dependency audits, generated-inventory validation, installer smoke, and browser QA. A
-final tag still requires the remaining physical Fleet/upgrade and frozen-SHA publication gates below.
-The stable installer remains on 0.8.3 until published multi-architecture manifests are verified.
+production dependency audits, generated-inventory validation, installer smoke, and browser QA.
+The frozen release workflow passed, and the four published multi-architecture manifests were
+independently verified before the stable installer channel advanced to 0.8.4.
 
 This is the single live release checklist. Code, migrations, generated inventories, runtime
 receipts, and fresh test output are authoritative. Earlier branch results are useful for finding
