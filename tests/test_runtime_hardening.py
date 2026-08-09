@@ -152,6 +152,13 @@ def test_prebuilt_runtime_defaults_to_the_downloaded_release_version():
     assert 'REPO_RAW_BASE="https://raw.githubusercontent.com/andriyze/shakerscan/v${stable_version}"' in installer
 
 
+def test_upgrade_smoke_waits_for_final_postgres_process():
+    script = (ROOT / "scripts" / "upgrade_smoke.sh").read_text()
+    assert "cat /proc/1/comm" in script
+    assert '[ "$pid1_comm" = "postgres" ]' in script
+    assert "pg_isready -U scanner -d scanner" in script
+
+
 def test_minimal_installed_research_adapter_has_all_imports(tmp_path):
     runtime = tmp_path / "runtime"
     for relative_path in (

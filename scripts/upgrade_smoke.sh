@@ -25,7 +25,14 @@ docker run --detach --name "$SMOKE_CONTAINER" \
 
 ready=0
 for _attempt in $(seq 1 60); do
-    if docker exec "$SMOKE_CONTAINER" pg_isready -U scanner -d scanner >/dev/null 2>&1; then
+    # The official image starts a temporary PostgreSQL server while it creates
+    # the configured database, then stops it and execs the final server as PID
+    # 1. pg_isready alone can catch that temporary window and the next command
+    # is then terminated by the intentional handoff. Require the final PID 1 as
+    # well as a live database probe before beginning either migration scenario.
+    pid1_comm="$(docker exec "$SMOKE_CONTAINER" cat /proc/1/comm 2>/dev/null || true)"
+    if [ "$pid1_comm" = "postgres" ] && \
+       docker exec "$SMOKE_CONTAINER" pg_isready -U scanner -d scanner >/dev/null 2>&1; then
         ready=1
         break
     fi
