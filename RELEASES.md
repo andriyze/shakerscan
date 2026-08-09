@@ -16,7 +16,7 @@ generated launcher also pins `SCANNER_IMAGE_TAG` to the downloaded version by de
 
 | Version | Git Commit | Scanner/Worker Image | API Image | UI Image | Model Intake Signer Image |
 | --- | --- | --- | --- | --- | --- |
-| 0.8.7 | pending candidate | `shakerscan/shakerscan-scanner:0.8.7` | `shakerscan/shakerscan-api:0.8.7` | `shakerscan/shakerscan-ui:0.8.7` | `shakerscan/shakerscan-model-intake-signer:0.8.7` |
+| 0.8.7 | `e21c3ec53041eaa4f2a6b32698a3bc828cc6a0d8` | `shakerscan/shakerscan-scanner:0.8.7` (`sha256:3d321e96a210034f641d1121b36b9da4750db5573f8309c4c1e0df42d207bcd7`) | `shakerscan/shakerscan-api:0.8.7` (`sha256:42e5c431e74d1d68e906f62ba63aec7bb8f763718e218c72115d091fdd9bea69`) | `shakerscan/shakerscan-ui:0.8.7` (`sha256:7df8d44a50092967e958f677d32ddbda50171de84dca2c556dab1bb97c8a995e`) | `shakerscan/shakerscan-model-intake-signer:0.8.7` (`sha256:f791700aaa4984478186d8254618e99a9c71cc2e6464d3f7fec0177d89146cb8`) |
 | 0.8.6 | `86ab5ae2c06c47ac92c6fb6c6b4ce4e708f9e382` (failed validation; not published) | not published | not published | not published | not published |
 | 0.8.5 | `9c34f18aa35b976f12fa7960563af3bc3b1c69a6` | `shakerscan/shakerscan-scanner:0.8.5` (`sha256:d60310929cf822c41edd2658634b0f142fc05f4d702c700bc72e96cc715cb36f`) | `shakerscan/shakerscan-api:0.8.5` (`sha256:11ebbd820f1a5fae085526331b4014666f756ffa2574005188356052ba4ee9e4`) | `shakerscan/shakerscan-ui:0.8.5` (`sha256:8600ac1dd844661b6a92b1c55649f4dddd90cdf6b735af3ff2efe0c554064719`) | `shakerscan/shakerscan-model-intake-signer:0.8.5` (`sha256:0aa2e1b12787a56d3ba7991d3484ae7d65ab636eefa801807af5008cfc4b8d60`) |
 | 0.8.4 | `fe7966ca21038f02c820c0b72f267d4e6a1d459f` | `shakerscan/shakerscan-scanner:0.8.4` (`sha256:7774cfbfc7bf0b98643060a114057e292d5ae0c1e7b5e9a45487b98c06deea35`) | `shakerscan/shakerscan-api:0.8.4` (`sha256:1546a210cdb2b29f7e5851b8642d55fcda3fd7e1c33bb5966c08b081df2a5d66`) | `shakerscan/shakerscan-ui:0.8.4` (`sha256:ef329ecfb00803090a39b0bc5b18a44181fe3f85e0c61bf3375497bf5942633f`) | `shakerscan/shakerscan-model-intake-signer:0.8.4` (`sha256:630cd8a6d00e1fc25fbb614887b92965423e8fb8e1a27cbe1531e7d000b3ba15`) |
@@ -40,7 +40,7 @@ tag alone does not prove which commit produced an image.
 
 ## Release Workflow
 
-Version 0.8.5 is the current stable release; 0.8.7 is the pending candidate. Complete
+Version 0.8.7 is the current stable release. Complete
 [`docs/release-readiness.md`](docs/release-readiness.md), freeze the exact commit, and record its
 validation evidence before publishing a later release.
 

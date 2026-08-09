@@ -1,6 +1,6 @@
 # ShakerScan 0.8.7 Release Readiness
 
-**Status (2026-08-09):** candidate fix implemented, not published. Literal clean 0.8.5 installs on
+**Status (2026-08-09):** 0.8.7 published; repeated clean acceptance in progress. Literal clean 0.8.5 installs on
 the control and worker VPSs selected only the published images and reached healthy standalone and
 broker-Fleet state. Exact-node Smart coverage acceptance then exposed a broker allocator defect: the
 first child reserved the entire default per-domain request allowance and left its siblings at
@@ -10,9 +10,11 @@ fail-closed behavior. Tagged candidate `v0.8.6` correctly stopped before publica
 smoke caught a PostgreSQL startup race: `pg_isready` observed the image's temporary initialization
 server immediately before its intentional shutdown. The 0.8.7 candidate additionally waits for the
 final `postgres` PID 1 before migration work. The complete backend suite passes 3,110 tests, and the
-clean/dirty upgrade smoke passes from the historical 0.5.7 schema. The stable installer remains
-pinned to immutable 0.8.5 until the exact 0.8.7 candidate passes frozen gates, native multi-
-architecture publication, and repeated clean acceptance.
+clean/dirty upgrade smoke passes from the historical 0.5.7 schema. Exact candidate
+`e21c3ec53041eaa4f2a6b32698a3bc828cc6a0d8` passed frozen gates and CodeQL, and all four images were
+published for native amd64/arm64 with independently verified version/`latest` digest equality. The
+stable installer now selects immutable 0.8.7; the clean published-image acceptance below remains the
+final operational confirmation.
 
 ### 0.8.5 post-publish evidence motivating this patch
 
