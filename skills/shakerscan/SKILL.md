@@ -161,9 +161,9 @@ Host-side `shakerscan fleet` commands resolve the API bind persisted by `scanner
 loopback after a Tailscale-only `--remote` start unless the operator explicitly overrides
 `--local-api`.
 
-For the 0.8.10 release boundary, initialize and join production fleets with `--network broker` and
+For the 0.8.11 release boundary, initialize and join production fleets with `--network broker` and
 `--transport broker`. The outbound-only HTTPS broker transport has passed physical multi-host
-acceptance. WireGuard fleet transport is implemented preview code but is not a supported 0.8.10
+acceptance. WireGuard fleet transport is implemented preview code but is not a supported 0.8.11
 production topology; do not present it as release-accepted until its separate physical matrix passes.
 
 Use node-level placement, not a worker-container identity. `node_id=local` selects control-plane
@@ -218,7 +218,7 @@ remains authoritative for scope, credentials, active-tool access, evidence, and 
 - Read `skills/ai-security-session/references/api.md` for interactive session schemas.
 - Read `skills/shakerscan/references/model-intake.md` before corporate Model Intake admission, Firecracker,
   conversion, or Codex-guided Model Intake operations.
-- Use `http://localhost:8080/openapi.json` when an API contract may have changed.
+- Use `$API_BASE/openapi.json` when an API contract may have changed.
 - Use the public
   `https://github.com/andriyze/shakerscan/blob/main/docs/functionality-reference.md` for the
   exhaustive product map. A source checkout also has it at `docs/functionality-reference.md`.

@@ -1,4 +1,4 @@
-# ShakerScan 0.8.10 Release Readiness
+# ShakerScan 0.8.11 Release Readiness
 
 **Status (2026-08-09):** patch candidate in preparation; 0.8.7 remains the immutable stable channel.
 Version 0.8.9 passed CodeQL, all frozen gates, dependency audits, clean/dirty upgrade smokes,
@@ -8,10 +8,12 @@ the subsequent whole-product audit found that `shakerscan agent`, the installed 
 and `shakerscan mcp` still defaulted to loopback even when `--remote` intentionally bound the API only
 to Tailscale. That made a healthy remote install appear unavailable to those agent-facing paths.
 
-The 0.8.10 candidate carries forward 0.8.9's narrow Redis `NOGROUP` route-lifecycle handling and
+The 0.8.11 candidate carries forward 0.8.9's narrow Redis `NOGROUP` route-lifecycle handling and
 routes installed agent/MCP entry points through the persisted host bind. It also corrects installed
-documentation links to engineering files omitted from the minimal curl runtime and reconciles the
-human architecture prose with the current Redis Streams and API-controller implementation. Full
+documentation links and remaining detailed-skill loopback examples for engineering files omitted
+from the minimal curl runtime, and reconciles the human architecture prose with the current Redis
+Streams and API-controller implementation. The 0.8.10 workflow was cancelled before publication
+when those final detailed-skill examples were found. Full
 frozen-candidate gates and clean published-image acceptance remain required before advancing
 `install/STABLE_VERSION`.
 
@@ -81,7 +83,7 @@ regressions but do not satisfy a frozen-candidate gate.
 
 ## Supported product boundary
 
-ShakerScan 0.8.10 is a trusted-operator, self-hosted security scanner.
+ShakerScan 0.8.11 is a trusted-operator, self-hosted security scanner.
 
 - Localhost is the default. Remote UI/API access must remain behind Tailscale, a VPN, a firewall, or
   an operator-managed authenticated reverse proxy. Direct public exposure is unsupported.
@@ -97,7 +99,7 @@ ShakerScan 0.8.10 is a trusted-operator, self-hosted security scanner.
   required tools, or missing runtime qualification fail closed. Technical review does not replace
   publisher trust, privacy, legal, business, or deployed-data-plane approval.
 - Fleet production support is the outbound-only HTTPS `broker` transport. Built-in WireGuard remains
-  preview code outside the 0.8.10 support boundary until it passes a separate physical acceptance
+  preview code outside the 0.8.11 support boundary until it passes a separate physical acceptance
   matrix.
 - AI Gate remains preview in this release.
 
@@ -125,7 +127,7 @@ production dependency findings.
 
 ## Frozen-candidate validation
 
-Run every item against the exact commit intended for `v0.8.10`.
+Run every item against the exact commit intended for `v0.8.11`.
 
 ### Code, dependencies, and builds
 
@@ -191,9 +193,9 @@ Run every item against the exact commit intended for `v0.8.10`.
 
 After all frozen-candidate gates are green:
 
-1. Confirm `VERSION`, `docs/releases/0.8.10.md`, and the pending `RELEASES.md` row agree.
+1. Confirm `VERSION`, `docs/releases/0.8.11.md`, and the pending `RELEASES.md` row agree.
 2. Merge the exact candidate to `main` without adding an untested merge-only change.
-3. Wait for required `main` checks, then create annotated tag `v0.8.10` on that exact commit.
+3. Wait for required `main` checks, then create annotated tag `v0.8.11` on that exact commit.
 4. Push the tag and require the Release workflow to build/publish scanner, API, UI, and signer for
    `linux/amd64` and `linux/arm64`.
 5. Verify manifest architectures, OCI labels, source revision, image digests, API Docker CLI,
@@ -205,7 +207,7 @@ After all frozen-candidate gates are green:
 
 - [ ] Deploy and verify the hosted installer separately; repository/image publication does not
       update `install.shakerscan.com`.
-- [ ] Clean-install `0.8.10` into an empty home and verify doctor, status, UI/API, MCP, agent launch,
+- [ ] Clean-install `0.8.11` into an empty home and verify doctor, status, UI/API, MCP, agent launch,
       skills, one Quick scan, and Model Intake readiness.
 - [ ] Upgrade a stateful installation and verify preserved targets, scans, findings, settings,
       evidence, and Fleet credentials.

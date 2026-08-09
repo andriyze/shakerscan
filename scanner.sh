@@ -2645,6 +2645,8 @@ show_env_help() {
     echo ""
     echo "Manual equivalent:"
     echo "  cd \"$SCRIPT_DIR\""
+    echo "  export SHAKERSCAN_API_BASE=\"$(api_probe_url)\""
+    echo "  export SHAKERSCAN_UI_BASE=\"$(ui_base_url)\""
     echo "  codex   # or claude, or opencode"
 }
 

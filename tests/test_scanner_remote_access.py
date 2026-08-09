@@ -77,6 +77,24 @@ start_agent codex
     ]
 
 
+def test_manual_agent_guidance_exports_remote_urls():
+    functions = SCANNER_SH.read_text(encoding="utf-8").rsplit("# Parse arguments", 1)[0]
+    command = functions + """
+SHAKERSCAN_BIND_HOST=100.100.100.100
+SHAKERSCAN_PUBLIC_HOST=scanner.example.test
+show_env_help
+"""
+    result = subprocess.run(
+        ["bash", "-c", command],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=True,
+    )
+    assert 'export SHAKERSCAN_API_BASE="http://100.100.100.100:8080"' in result.stdout
+    assert 'export SHAKERSCAN_UI_BASE="http://scanner.example.test:3000"' in result.stdout
+
+
 def test_session_hook_derives_remote_api_from_runtime_env(tmp_path):
     runtime = tmp_path / "runtime"
     hook_dir = runtime / ".claude" / "hooks"

@@ -154,8 +154,9 @@ shakerscan scan https://app.example.test \
   --confirm-active
 ```
 
-After a scan is queued, ShakerScan returns a scan ID. Follow it in the UI at
-`http://localhost:3000/scans/{scan_id}`. Long-running scans are asynchronous.
+After a scan is queued, ShakerScan returns a scan ID. On a default install, follow it at
+`http://localhost:3000/scans/{scan_id}`; remote installs use the UI URL printed by
+`./scanner.sh status`. Long-running scans are asynchronous.
 
 ### Scan with authentication
 
@@ -347,7 +348,7 @@ continues to support standalone ShakerScan, but does not expose Fleet navigation
 capacity; a direct Fleet-page visit explains the Linux requirement. Standalone Linux installs also
 hide Fleet and remote placement until `fleet init` succeeds.
 
-ShakerScan can add digest-pinned worker VPSs to one control plane. The supported 0.8.10 production
+ShakerScan can add digest-pinned worker VPSs to one control plane. The supported 0.8.11 production
 transport is the outbound-only HTTPS broker. Broker workers receive no Redis, PostgreSQL, or
 object-store credentials:
 
@@ -366,7 +367,7 @@ only that standalone project and preserves its data volumes before starting the 
 runtime. Unrelated Docker projects are not changed.
 
 The built-in WireGuard workflow remains available as an operator preview for machines you own and
-trust, but it is excluded from the 0.8.10 production support boundary until its own physical
+trust, but it is excluded from the 0.8.11 production support boundary until its own physical
 two-host acceptance matrix passes in a future release cycle:
 
 ```bash
@@ -496,7 +497,9 @@ destructive. Run `shakerscan scan --help` for scan flags, including `--type`, `-
 
 ## REST API
 
-The API base URL is `http://localhost:8080` when commands run on the ShakerScan host.
+The examples below assume the default loopback install. If `./scanner.sh status` prints a
+non-loopback API URL (including Tailscale-only remote mode), use that URL even for commands run on
+the ShakerScan host.
 
 ```bash
 # Health and queue
@@ -512,8 +515,9 @@ curl -X POST http://localhost:8080/scans \
 curl http://localhost:8080/scans/{scan_id}
 ```
 
-The live OpenAPI document is available at
-[http://localhost:8080/openapi.json](http://localhost:8080/openapi.json). Exact request examples and
+For a loopback install, the live OpenAPI document is available at
+[http://localhost:8080/openapi.json](http://localhost:8080/openapi.json); remote installs use the API
+URL printed by `./scanner.sh status`. Exact request examples and
 agent safety rules are in [`AGENTS.md`](AGENTS.md); the generated inventory in the
 [Functionality Reference](https://github.com/andriyze/shakerscan/blob/main/docs/functionality-reference.md)
 lists every public route.
@@ -594,6 +598,7 @@ Common fixes:
 - [Documentation index](https://github.com/andriyze/shakerscan/blob/main/docs/README.md)
 - [Full functionality reference](https://github.com/andriyze/shakerscan/blob/main/docs/functionality-reference.md)
 - [Release readiness checklist](https://github.com/andriyze/shakerscan/blob/main/docs/release-readiness.md)
+- [ShakerScan 0.8.11 release notes](https://github.com/andriyze/shakerscan/blob/main/docs/releases/0.8.11.md)
 - [ShakerScan 0.8.10 release notes](https://github.com/andriyze/shakerscan/blob/main/docs/releases/0.8.10.md)
 - [ShakerScan 0.8.9 release notes](https://github.com/andriyze/shakerscan/blob/main/docs/releases/0.8.9.md)
 - [ShakerScan 0.8.4 release notes](https://github.com/andriyze/shakerscan/blob/main/docs/releases/0.8.4.md)

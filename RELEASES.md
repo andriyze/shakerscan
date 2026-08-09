@@ -16,7 +16,8 @@ generated launcher also pins `SCANNER_IMAGE_TAG` to the downloaded version by de
 
 | Version | Git Commit | Scanner/Worker Image | API Image | UI Image | Model Intake Signer Image |
 | --- | --- | --- | --- | --- | --- |
-| 0.8.10 | pending candidate | pending | pending | pending | pending |
+| 0.8.11 | pending candidate | pending | pending | pending | pending |
+| 0.8.10 | `5a240166783ad673d6f375726d505a09ddc210a0` (cancelled validation; not published) | not published | not published | not published | not published |
 | 0.8.9 | `edbf513bd5c18e5905704f33e7e14ab3d9094ec9` (published; not promoted after remote-mode audit) | `shakerscan/shakerscan-scanner:0.8.9` (`sha256:98426ae86a576ed25e80c90beea6c90a1a06b1bc401cdc7fe992aa2fbacfcf2b`) | `shakerscan/shakerscan-api:0.8.9` (`sha256:8aff8313f7ad436aaaec923345f630bad3296a9fe5ac934682a0b96f1122e28c`) | `shakerscan/shakerscan-ui:0.8.9` (`sha256:6f1383e2d7bfdc1db618a8aba3b3230778cd1ef4f1fdd0901e90741720d723be`) | `shakerscan/shakerscan-model-intake-signer:0.8.9` (`sha256:ac6c3f9ef1109a10a05ccab66157ebdadd6519f0636ecad1ae5287850abd818e`) |
 | 0.8.8 | `0edc1b720dc98a49c90ff12b4fded0e347f7bb66` (failed validation; not published) | not published | not published | not published | not published |
 | 0.8.7 | `e21c3ec53041eaa4f2a6b32698a3bc828cc6a0d8` | `shakerscan/shakerscan-scanner:0.8.7` (`sha256:3d321e96a210034f641d1121b36b9da4750db5573f8309c4c1e0df42d207bcd7`) | `shakerscan/shakerscan-api:0.8.7` (`sha256:42e5c431e74d1d68e906f62ba63aec7bb8f763718e218c72115d091fdd9bea69`) | `shakerscan/shakerscan-ui:0.8.7` (`sha256:7df8d44a50092967e958f677d32ddbda50171de84dca2c556dab1bb97c8a995e`) | `shakerscan/shakerscan-model-intake-signer:0.8.7` (`sha256:f791700aaa4984478186d8254618e99a9c71cc2e6464d3f7fec0177d89146cb8`) |
@@ -43,9 +44,10 @@ tag alone does not prove which commit produced an image.
 
 ## Release Workflow
 
-Version 0.8.7 is the current stable release; 0.8.10 is the pending patch candidate. Version 0.8.9
+Version 0.8.7 is the current stable release; 0.8.11 is the pending patch candidate. Version 0.8.9
 was published but deliberately not promoted after the installed-runtime audit found a remote-mode
-agent/MCP routing defect. Complete
+agent/MCP routing defect; 0.8.10 was cancelled before publication when the same audit found remaining
+hard-coded loopback guidance. Complete
 [`docs/release-readiness.md`](docs/release-readiness.md), freeze the exact commit, and record its
 validation evidence before publishing a later release.
 

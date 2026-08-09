@@ -5,7 +5,8 @@ Save an evidence-backed finding from authorized manual or interactive testing.
 **Usage**: `/save-finding [session_id]`
 
 Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls and
-`UI_BASE=${SHAKERSCAN_UI_BASE:-http://localhost:3000}` for UI links.
+`UI_BASE=${SHAKERSCAN_UI_BASE:-http://localhost:3000}` for UI links. On a remote VPS, use the URLs
+printed by `./scanner.sh status`; the supported agent launcher exports them automatically.
 
 ## Evidence gate
 

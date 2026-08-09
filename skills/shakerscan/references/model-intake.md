@@ -20,7 +20,7 @@ supported model source; named public models are conformance fixtures, not a hard
 Set these shell variables without echoing their contents:
 
 ```bash
-API_BASE=http://localhost:8080
+API_BASE=http://localhost:8080  # replace with ./scanner.sh status output on a remote host
 UI_BASE=http://localhost:3000   # replace with ./scanner.sh status output on a remote host
 OPERATOR_TOKEN=...              # obtain through the approved secret channel
 ```

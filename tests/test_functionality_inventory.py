@@ -96,3 +96,13 @@ def test_minimal_installed_runtime_does_not_link_to_omitted_docs_tree():
             if destination.startswith("docs/"):
                 broken.append((str(document.relative_to(ROOT)), destination))
     assert broken == []
+
+
+def test_installed_skills_do_not_override_the_runtime_api_base():
+    skill = (ROOT / "skills/shakerscan/SKILL.md").read_text(encoding="utf-8")
+    model_reference = (
+        ROOT / "skills/shakerscan/references/model-intake.md"
+    ).read_text(encoding="utf-8")
+    assert "$API_BASE/openapi.json" in skill
+    assert "Use `http://localhost:8080/openapi.json`" not in skill
+    assert "API_BASE=http://localhost:8080  # replace with ./scanner.sh status output on a remote host" in model_reference

@@ -4,9 +4,9 @@ This guide explains how to operate one ShakerScan control plane with worker node
 hosts. For the trust model and implementation details, see
 [Multi-Node Architecture](multi-node-architecture.md).
 
-> **0.8.10 support boundary:** production Fleet support is the outbound-only HTTPS `broker`
+> **0.8.11 support boundary:** production Fleet support is the outbound-only HTTPS `broker`
 > transport. The `wireguard` workflow is an operator preview and has not yet passed its required
-> physical two-host acceptance. Do not use WireGuard mode for a 0.8.10
+> physical two-host acceptance. Do not use WireGuard mode for a 0.8.11
 > production deployment.
 
 ## What You Are Building
@@ -67,10 +67,10 @@ capacity. `GET /health` and `GET /workers` expose the same non-secret `fleet` ca
 
 | Transport | Use it when | Worker receives | Network requirement |
 |---|---|---|---|
-| `broker` | Supported in 0.8.10; use for owned or customer-hosted workers | A node credential and one job-scoped lease at a time; no database, Redis, or object-store credentials | Worker needs outbound HTTPS only |
+| `broker` | Supported in 0.8.11; use for owned or customer-hosted workers | A node credential and one job-scoped lease at a time; no database, Redis, or object-store credentials | Worker needs outbound HTTPS only |
 | `wireguard` | Preview only; owned/trusted worker hosts | Scoped private Redis/PostgreSQL and artifact credentials | Worker must reach the control plane's WireGuard UDP port |
 
-Broker mode is the supported 0.8.10 path and has the smaller worker trust boundary. WireGuard is the
+Broker mode is the supported 0.8.11 path and has the smaller worker trust boundary. WireGuard is the
 planned high-throughput owned-fleet path after its physical acceptance is complete. Both modes use
 digest-pinned worker images, authenticated node identities, leased jobs, centralized artifacts,
 and control-plane admission limits, but implementation presence does not make the preview transport
