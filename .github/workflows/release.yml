@@ -36,7 +36,7 @@ jobs:
       packages: write
     steps:
       - name: Checkout exact candidate
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.candidate_sha }}
           fetch-depth: 0

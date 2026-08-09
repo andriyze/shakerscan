@@ -11,7 +11,7 @@ jobs:
   commit-policy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Prevent release commits from hiding product changes

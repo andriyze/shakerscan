@@ -47,7 +47,7 @@ jobs:
       workflow_sha: ${{ steps.meta.outputs.workflow_sha }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           # Manual publication validates and builds the explicitly approved
           # candidate, even when main has moved on with workflow-only fixes.
@@ -116,7 +116,7 @@ jobs:
       actions: read
     steps:
       - name: Checkout approved candidate
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.meta.outputs.candidate_sha }}
           # The upgrade smoke loads the 0.5.7 schema from its historical
@@ -239,7 +239,7 @@ jobs:
             runner: ubuntu-24.04-arm
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.meta.outputs.candidate_sha }}
 
