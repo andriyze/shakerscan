@@ -10,6 +10,7 @@ import copy
 import contextvars
 import fnmatch
 import hashlib
+import hmac
 import io
 import importlib
 import ipaddress
@@ -20,6 +21,7 @@ import os
 import random
 import re
 import secrets
+import shlex
 import shutil
 import subprocess
 import threading
@@ -5552,6 +5554,55 @@ def _require_fleet_operator(request: Request) -> None:
         raise HTTPException(status_code=403, detail="fleet operator authentication failed")
 
 
+_MODEL_INTAKE_LOCAL_SESSION_VERSION = "mi-local-v1"
+_MODEL_INTAKE_LOCAL_SESSION_MAX_SECONDS = 8 * 60 * 60
+
+
+def _model_intake_local_session_valid(request: Request, credential: str) -> bool:
+    """Validate a short-lived browser session without exposing the operator token.
+
+    The UI can mint this only when both the configured deployment and the actual
+    browser hostname are loopback. Remote and managed deployments stay on named
+    reviewer credentials.
+    """
+    secret = os.environ.get("MODEL_INTAKE_LOCAL_SESSION_SECRET", "").strip()
+    configured_bind = os.environ.get("SHAKERSCAN_BIND_HOST", "127.0.0.1").strip()
+    try:
+        if len(secret) < 32 or not ipaddress.ip_address(configured_bind).is_loopback:
+            return False
+    except ValueError:
+        return False
+    # Browser calls from the UI to the API cross ports and therefore carry an
+    # Origin. Requiring it prevents a session minted by a mistakenly exposed
+    # loopback UI proxy from becoming a general-purpose remote bearer token.
+    origin = request.headers.get("origin", "").strip()
+    if not origin:
+        return False
+    try:
+        parsed = urllib.parse.urlsplit(origin)
+        if parsed.scheme not in {"http", "https"} or not ipaddress.ip_address(
+            "127.0.0.1" if parsed.hostname == "localhost" else str(parsed.hostname or "")
+        ).is_loopback:
+            return False
+    except ValueError:
+        return False
+    parts = credential.split(".")
+    if len(parts) != 4 or parts[0] != _MODEL_INTAKE_LOCAL_SESSION_VERSION:
+        return False
+    _, expires_raw, nonce, signature = parts
+    if not re.fullmatch(r"[0-9]{10}", expires_raw) or not re.fullmatch(r"[0-9a-f]{32}", nonce):
+        return False
+    if not re.fullmatch(r"[0-9a-f]{64}", signature):
+        return False
+    now = int(time.time())
+    expires_at = int(expires_raw)
+    if expires_at <= now or expires_at > now + _MODEL_INTAKE_LOCAL_SESSION_MAX_SECONDS + 60:
+        return False
+    unsigned = f"{parts[0]}.{expires_raw}.{nonce}"
+    expected = hmac.new(secret.encode(), unsigned.encode(), hashlib.sha256).hexdigest()
+    return secrets.compare_digest(signature, expected)
+
+
 def _require_model_intake_operator(request: Request) -> None:
     """Authorize deployment verification and Model Intake trust mutations."""
     # Requests created by the durable automatic-review controller carry a
@@ -5589,6 +5640,9 @@ def _require_model_intake_operator(request: Request) -> None:
             status_code=403,
             detail="Model Intake operator access requires loopback, verified Tailscale, or authenticated HTTPS",
         )
+    presented = _fleet_bearer_credential(request, principal="Model Intake operator")
+    if _model_intake_local_session_valid(request, presented):
+        return
     configured = _model_intake_configured_operator_credentials()
     legacy = (
         os.environ.get("MODEL_INTAKE_OPERATOR_TOKEN", "").strip()
@@ -5596,7 +5650,6 @@ def _require_model_intake_operator(request: Request) -> None:
     )
     if not configured and len(legacy) < 32:
         raise HTTPException(status_code=403, detail="Model Intake operator credential is not configured")
-    presented = _fleet_bearer_credential(request)
     presented_sha256 = hashlib.sha256(presented.encode()).hexdigest()
     configured_match = any(
         secrets.compare_digest(presented_sha256, item["token_sha256"])
@@ -5664,10 +5717,12 @@ def _model_intake_authenticated_subject(request: Request) -> str:
     if system_actor == "system:model-intake-auto":
         return system_actor
     _require_model_intake_operator(request)
+    credential = _fleet_bearer_credential(request, principal="Model Intake operator")
+    if _model_intake_local_session_valid(request, credential):
+        return "operator:standalone-local-ui"
     configured = _model_intake_operator_credential(request)
     if configured:
         return f"operator:{configured['subject']}"
-    credential = _fleet_bearer_credential(request)
     if not credential:
         raise HTTPException(status_code=403, detail="Model Intake authenticated identity is unavailable")
     return f"operator-token:{hashlib.sha256(credential.encode()).hexdigest()[:24]}"
@@ -5675,6 +5730,9 @@ def _model_intake_authenticated_subject(request: Request) -> str:
 
 def _model_intake_operator_roles(request: Request) -> set[str]:
     _model_intake_authenticated_subject(request)
+    credential = _fleet_bearer_credential(request, principal="Model Intake operator")
+    if _model_intake_local_session_valid(request, credential):
+        return set()
     configured = _model_intake_operator_credential(request)
     if configured:
         return set(configured["roles"])
@@ -15660,6 +15718,16 @@ async def model_intake_runner_install_plan():
             )
         else:
             supported, reason = True, "This host can run the Model Intake microVM tier."
+        runtime_dir = os.getenv("SHAKERSCAN_RUNTIME_DIR", "").strip()
+        if runtime_dir and Path(runtime_dir).is_absolute():
+            enter_runtime = f"cd {shlex.quote(runtime_dir)}"
+            runtime_label = runtime_dir
+            install_kind = os.getenv("SHAKERSCAN_INSTALL_KIND", "curl_install").strip() or "curl_install"
+        else:
+            enter_runtime = 'cd "$HOME/.shakerscan"'
+            runtime_label = "~/.shakerscan"
+            install_kind = "curl_install"
+        command_prefix = f"{enter_runtime} && sudo ./scanner.sh model-intake-runner install"
         return {
             "schema_version": "model-intake-runner-install-plan/v1",
             "supported": supported,
@@ -15670,10 +15738,12 @@ async def model_intake_runner_install_plan():
             # Installing mutates the host as root, which the API container
             # cannot and should not do on the operator's behalf.
             "executed_by": "operator_on_host",
-            "command": "sudo ./scanner.sh model-intake-runner install --signer <choice> --confirm",
-            "default_command": "sudo ./scanner.sh model-intake-runner install --confirm",
-            "production_command": "sudo ./scanner.sh model-intake-runner install --signer kms:<key-id> --confirm",
-            "status_command": "./scanner.sh model-intake-runner status",
+            "command": f"{command_prefix} --signer <choice> --confirm",
+            "default_command": f"{command_prefix} --confirm",
+            "production_command": f"{command_prefix} --signer kms:<key-id> --confirm",
+            "status_command": f"{enter_runtime} && ./scanner.sh model-intake-runner status",
+            "runtime_dir": runtime_label,
+            "install_kind": install_kind,
             # local-pem is the default because it is the only option that works
             # without external setup. It is listed first for that reason, and
             # labelled non-production so the default never implies more trust

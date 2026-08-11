@@ -243,6 +243,26 @@ ensure_model_intake_operator_credential() {
     chmod 600 "$SCRIPT_DIR/.env"
 }
 
+ensure_model_intake_local_session_secret() {
+    local current_secret next_secret
+
+    touch "$SCRIPT_DIR/.env"
+    chmod 600 "$SCRIPT_DIR/.env"
+    current_secret="${MODEL_INTAKE_LOCAL_SESSION_SECRET:-$(read_dotenv_value MODEL_INTAKE_LOCAL_SESSION_SECRET)}"
+    next_secret="$current_secret"
+    if [ "${#next_secret}" -lt 32 ]; then
+        next_secret="$(generate_datastore_secret)"
+    fi
+    if [ "${#next_secret}" -lt 32 ]; then
+        echo -e "${RED}Error: could not generate a strong local Model Intake session secret.${NC}" >&2
+        return 1
+    fi
+
+    export MODEL_INTAKE_LOCAL_SESSION_SECRET="$next_secret"
+    write_dotenv_value MODEL_INTAKE_LOCAL_SESSION_SECRET "$next_secret"
+    chmod 600 "$SCRIPT_DIR/.env"
+}
+
 ensure_model_intake_signer_credentials() {
     local current_token current_database_password next_token next_database_password
 
@@ -439,8 +459,11 @@ pull_prebuilt_images() {
     fi
 
     echo -e "${BLUE}Pulling prebuilt Docker images...${NC}"
-    if ! compose pull api worker ui; then
-        echo -e "${YELLOW}Warning: could not pull prebuilt images; continuing with local cache if available.${NC}"
+    if ! compose pull api worker ui model-intake-signer; then
+        echo -e "${RED}Error: could not pull the complete ShakerScan image set.${NC}" >&2
+        echo "Startup stopped to prevent a mixed-version deployment from cached images." >&2
+        echo "Check Docker Hub/network access and run './scanner.sh start' again." >&2
+        return 1
     fi
 }
 
@@ -1288,6 +1311,12 @@ set_build_env() {
 
     export SCANNER_RELEASE_VERSION="$release_version"
     export BUILD_GIT_COMMIT="$local_commit"
+    export SHAKERSCAN_RUNTIME_DIR="$SCRIPT_DIR"
+    if [ -d "$SCRIPT_DIR/.git" ]; then
+        export SHAKERSCAN_INSTALL_KIND="source_checkout"
+    else
+        export SHAKERSCAN_INSTALL_KIND="curl_install"
+    fi
 
     if [ "$USE_PREBUILT" -eq 1 ]; then
         export SCANNER_VERSION="$image_tag"
@@ -1553,6 +1582,7 @@ prepare_runtime_files() {
     ensure_directory_mode .shakerscan-fleet 700
     ensure_runtime_datastore_credentials
     ensure_model_intake_operator_credential
+    ensure_model_intake_local_session_secret
     ensure_model_intake_signer_credentials
 
     if [ "$USE_PREBUILT" -eq 1 ]; then
@@ -1610,6 +1640,54 @@ wait_for_url() {
     done
 
     echo -e "${YELLOW}$label did not become ready within ${timeout}s.${NC}"
+    return 1
+}
+
+build_versions_match() {
+    local left="${1%-dirty}"
+    local right="${2%-dirty}"
+    local shared
+    [ -n "$left" ] && [ -n "$right" ] || return 1
+    [ "$left" = "$right" ] && return 0
+    [[ "$left" =~ ^[0-9a-fA-F]+$ ]] && [[ "$right" =~ ^[0-9a-fA-F]+$ ]] || return 1
+    if [ "${#left}" -lt "${#right}" ]; then
+        shared="${right:0:${#left}}"
+        [ "${#left}" -ge 7 ] && [ "$left" = "$shared" ]
+    else
+        shared="${left:0:${#right}}"
+        [ "${#right}" -ge 7 ] && [ "$right" = "$shared" ]
+    fi
+}
+
+verify_running_build_identity() {
+    local expected="${SCANNER_VERSION:-}"
+    local api_json ui_json api_version ui_version worker_version
+    local elapsed=0 timeout="${SHAKERSCAN_BUILD_IDENTITY_TIMEOUT:-90}"
+
+    while [ "$elapsed" -lt "$timeout" ]; do
+        api_json="$(curl -fsS "$(api_probe_url)/health" 2>/dev/null || true)"
+        ui_json="$(curl -fsS "$(ui_probe_url)/api/build-identity" 2>/dev/null || true)"
+        api_version="$(printf '%s' "$api_json" | jq -r '.scanner_version // empty' 2>/dev/null || true)"
+        ui_version="$(printf '%s' "$ui_json" | jq -r '.ui_version // empty' 2>/dev/null || true)"
+        worker_version="$(printf '%s' "$api_json" | jq -r '.worker_build.scanner_version // empty' 2>/dev/null || true)"
+
+        if build_versions_match "$expected" "$api_version" \
+            && build_versions_match "$expected" "$ui_version" \
+            && [ "$(printf '%s' "$api_json" | jq -r '.worker_build.available == true and .worker_build.fleet_uniform == true and (.worker_build.stale_count // 0) == 0 and (.worker_build.pending_count // 0) == 0' 2>/dev/null || true)" = "true" ] \
+            && build_versions_match "$expected" "$worker_version"; then
+            echo -e "${GREEN}Build identity verified: UI, API, and workers are $expected${NC}"
+            return 0
+        fi
+        sleep 2
+        elapsed=$((elapsed + 2))
+    done
+
+    echo -e "${RED}Error: the running ShakerScan components do not share one build identity.${NC}" >&2
+    echo "  expected: ${expected:-unknown}" >&2
+    echo "  UI:      ${ui_version:-unavailable}" >&2
+    echo "  API:     ${api_version:-unavailable}" >&2
+    echo "  workers: ${worker_version:-unavailable}" >&2
+    echo "Startup failed closed. Re-run './scanner.sh start' after correcting image or worker pull failures." >&2
     return 1
 }
 
@@ -1751,8 +1829,9 @@ start_services() {
     fi
     compose_up -d --scale worker=$start_workers
     echo ""
-    wait_for_url "API" "$(api_probe_url)/health" 120 || true
-    wait_for_url "UI" "$(ui_probe_url)" 120 || true
+    wait_for_url "API" "$(api_probe_url)/health" 120
+    wait_for_url "UI" "$(ui_probe_url)" 120
+    verify_running_build_identity
     echo -e "${GREEN}Services started.${NC}"
     echo "  UI:  $(ui_base_url)"
     echo "  API: $(api_base_url)"

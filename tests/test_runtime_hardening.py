@@ -87,7 +87,10 @@ def test_fleet_ui_is_capability_driven_and_keeps_remote_capacity_last():
     assert "fleetOnly: true" in sidebar
     assert "!item.fleetOnly || fleetEnabled" in sidebar
     assert "workers?.fleet?.enabled === true" in dashboard
-    assert dashboard.index('aria-label="Increase local worker count"') < dashboard.rindex("{remoteAvailable} remote")
+    assert "`${localAvailable} workers available`" in dashboard
+    assert "`${localAvailable} local workers available`" not in dashboard
+    assert "fleetEnabled ? 'Increase local worker count' : 'Increase worker count'" in dashboard
+    assert dashboard.index("{fleetEnabled && (") < dashboard.rindex("{remoteAvailable} remote")
     assert "fleetState.status === 'unsupported'" in fleet_page
     assert "Multi-node Fleet is not supported on macOS" in fleet_page
     assert "Fleet is not enabled" in fleet_page
@@ -589,8 +592,10 @@ def test_standalone_datastore_credentials_are_generated_and_compose_has_no_known
     assert "ensure_runtime_datastore_credentials" in script
     assert "generate_datastore_secret" in script
     assert "ensure_model_intake_operator_credential" in script
+    assert "ensure_model_intake_local_session_secret" in script
     assert "ensure_model_intake_signer_credentials" in script
     assert "write_dotenv_value MODEL_INTAKE_OPERATOR_TOKEN" in script
+    assert "write_dotenv_value MODEL_INTAKE_LOCAL_SESSION_SECRET" in script
     assert "write_dotenv_value MODEL_INTAKE_SIGNER_INTERNAL_TOKEN" in script
     assert "write_dotenv_value MODEL_INTAKE_SIGNER_DATABASE_PASSWORD" in script
     for compose_name in ("docker-compose.yml", "docker-compose.release.yml"):
@@ -741,17 +746,39 @@ def test_existing_datastore_passwords_are_preserved(tmp_path):
     assert values["REDIS_PASSWORD"] == "r" * 40
 
 
-def test_ui_never_receives_the_model_intake_operator_secret():
-    # Host and forwarding headers are caller-controlled across reverse proxies,
-    # so the UI service is never a bearer-secret distribution endpoint.
+def test_ui_uses_a_separate_loopback_session_secret_not_the_operator_secret():
+    # The durable operator bearer never enters the UI. A separate secret signs
+    # short-lived sessions only for loopback-published browser installs.
     for compose_name in ("docker-compose.yml", "docker-compose.release.yml"):
         compose = (ROOT / compose_name).read_text()
         ui_block = re.split(r"\n  [a-z]", compose.split("\n  ui:\n", 1)[1], maxsplit=1)[0]
         assert "MODEL_INTAKE_OPERATOR_TOKEN=" not in ui_block
-        assert "SHAKERSCAN_UI_OPERATOR_AUTOFILL=" not in ui_block
+        assert "MODEL_INTAKE_LOCAL_SESSION_SECRET=${MODEL_INTAKE_LOCAL_SESSION_SECRET:-}" in ui_block
+        assert "SHAKERSCAN_BIND_HOST=${SHAKERSCAN_BIND_HOST:-127.0.0.1}" in ui_block
 
     route = (ROOT / "ui" / "src" / "app" / "api" / "model-intake" / "operator-credential" / "route.ts").read_text()
     assert "process.env.MODEL_INTAKE_OPERATOR_TOKEN" not in route
     assert "headers.get('x-forwarded-for')" not in route
     assert "headers.get('host')" not in route
+    assert "MODEL_INTAKE_LOCAL_SESSION_SECRET" in route
+    assert "SHAKERSCAN_BIND_HOST" in route
+    assert "SHAKERSCAN_PUBLIC_HOST" in route
+    assert "NextRequest" not in route
+    assert "local_session" in route
     assert "manual_required" in route
+
+
+def test_startup_fails_closed_on_mixed_release_images_and_ui_reports_baked_identity():
+    script = (ROOT / "scanner.sh").read_text()
+    dockerfile = (ROOT / "ui" / "Dockerfile").read_text()
+    route = (ROOT / "ui" / "src" / "app" / "api" / "build-identity" / "route.ts").read_text()
+
+    assert "verify_running_build_identity" in script
+    assert "/api/build-identity" in script
+    assert "Startup stopped to prevent a mixed-version deployment" in script
+    assert "continuing with local cache" not in script
+    assert "UI_BUILD_VERSION" in dockerfile
+    assert "COPY --from=builder /app/UI_BUILD_VERSION ./UI_BUILD_VERSION" in dockerfile
+    assert "readFileSync" in route
+    assert "UI_BUILD_VERSION" in route
+    assert "ui_version" in route

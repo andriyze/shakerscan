@@ -214,6 +214,19 @@ jobs:
           npm --prefix ui audit --omit=dev --audit-level=high
           npm --prefix ui run build
 
+      - name: Exercise the complete curl-installed stack
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          docker build \
+            --build-arg NEXT_PUBLIC_APP_VERSION="$VERSION" \
+            -f ui/Dockerfile -t shakerscan-ui:release-candidate ui
+          docker tag shakerscan-scanner:release-candidate "shakerscan-scanner:$VERSION"
+          docker tag shakerscan-api:release-candidate "shakerscan-api:$VERSION"
+          docker tag shakerscan-ui:release-candidate "shakerscan-ui:$VERSION"
+          docker tag shakerscan-model-intake-signer:release-candidate "shakerscan-model-intake-signer:$VERSION"
+          make installed-stack-smoke
+
       - name: Audit locked Python dependencies
         run: |
           python3 -m pip install --disable-pip-version-check pip-audit==2.10.1

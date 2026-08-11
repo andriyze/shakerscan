@@ -46,6 +46,15 @@ def test_stable_channel_is_separate_last_step():
     assert "install/STABLE_VERSION" in text
     assert "public-smoke-receipt.json" in text
     assert "sha256sum --check --strict" in text
+    assert "shakerscan-public-smoke/v1" in text
+    for check in (
+        "clean_install",
+        "ui_api_identity",
+        "worker_identity",
+        "model_intake_local_session",
+        "firecracker_command",
+    ):
+        assert f".checks.{check}" in text
     assert 'imagetools create -t "${image}:latest"' in text
     assert "docker build " not in text
 
