@@ -1250,9 +1250,9 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Local-agent adapters | 4 | `api/command_arsenal.py` |
 | Scanner CLI flags | 159 | `scanner/scanner.py` |
 | Scanner wrapper commands | 27 | `scanner.sh` |
-| Make targets | 12 | `Makefile` |
+| Make targets | 13 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
-| Runtime environment keys | 323 | Python sources + Compose manifests |
+| Runtime environment keys | 326 | Python sources + Compose manifests |
 | Scanner modules | 99 | `scanner/scanner_tools/` |
 | UI pages | 31 | `ui/src/app/` |
 | Skills | 6 | `skills/` |
@@ -1868,7 +1868,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Surface | Names |
 |---|---|
 | `scanner.sh` commands | `agent`, `ai`, `backup`, `build`, `doctor`, `env`, `fleet`, `gungnir`, `help`, `install-deps`, `join`, `logs`, `mcp`, `model-intake-runner`, `rebuild`, `reload`, `research`, `reset`, `restart`, `scale`, `scan`, `scan-full`, `scan-smart`, `shell`, `start`, `status`, `stop` |
-| Make targets | `dependency-audit`, `dependency-lock`, `e2e`, `e2e-ai-gate`, `e2e-dast`, `e2e-model-intake`, `e2e-model-intake-fixture`, `fleet-acceptance`, `installer-smoke`, `release-gates`, `test`, `upgrade-smoke` |
+| Make targets | `dependency-audit`, `dependency-lock`, `e2e`, `e2e-ai-gate`, `e2e-dast`, `e2e-model-intake`, `e2e-model-intake-fixture`, `fleet-acceptance`, `installed-stack-smoke`, `installer-smoke`, `release-gates`, `test`, `upgrade-smoke` |
 | Release gates | `test:evidence-provenance`, `test:fleet-current`, `test:hypothesis-proof-promotion`, `test:mcp-read-only`, `test:no-ai-verified`, `test:no-benchmark-fitting`, `test:no-phantom-tools`, `test:planner-no-shell`, `test:planner-risk`, `test:planner-scope`, `test:scanner-auth-quality`, `test:scanner-bounds`, `test:scanner-proof-truth`, `test:scanner-registry-coverage` |
 
 ### Runtime Environment-Key Inventory
@@ -2031,6 +2031,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `MODEL_INTAKE_AUTO_MAX_MEMORY_MIB` | `api/api.py` |
 | `MODEL_INTAKE_CONTROL_PLANE_SIGNING_KEY_PEM` | `api/model_intake_signer_service.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_DEPLOYMENT_VERIFIER_TOKEN` | `api/model_intake_admission_webhook.py` |
+| `MODEL_INTAKE_LOCAL_SESSION_SECRET` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_OCI_REGISTRY_REPOSITORY` | `scripts/model_intake_push_oci.py` |
 | `MODEL_INTAKE_OPERATOR_CREDENTIALS_JSON` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_OPERATOR_ROLES` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
@@ -2154,6 +2155,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_ENFORCE_FLEET_LIMITS` | `api/worker.py` |
 | `SHAKERSCAN_FLEET_OPERATOR_TOKEN` | `scripts/fleet_acceptance.py` |
 | `SHAKERSCAN_HOST_PLATFORM` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_INSTALL_KIND` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_MAX_ACTIVE_SCANS` | `api/api.py`, `api/worker.py` |
 | `SHAKERSCAN_MAX_WORKERS` | `api/api.py`, `docker-compose.yml` |
 | `SHAKERSCAN_MCP_ALLOW_REMOTE_API` | `scripts/shakerscan_mcp.py` |
@@ -2178,6 +2180,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_REQUEST_BUDGET_LIMIT` | `scanner/scanner.py` |
 | `SHAKERSCAN_REQUEST_BUDGET_MODE` | `api/worker.py`, `scanner/scanner.py` |
 | `SHAKERSCAN_REQUEST_BUDGET_RESERVED` | `scanner/scanner.py` |
+| `SHAKERSCAN_RUNTIME_DIR` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_SCAN_SLOT_MAX_WAIT_SECONDS` | `api/worker.py` |
 | `SHAKERSCAN_SCAN_SLOT_TTL_SECONDS` | `api/worker.py` |
 | `SHAKERSCAN_STALE_DURATION_GRACE_MIN` | `api/api.py` |

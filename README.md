@@ -599,6 +599,7 @@ Common fixes:
 - [Full functionality reference](https://github.com/andriyze/shakerscan/blob/main/docs/functionality-reference.md)
 - [Release readiness checklist](https://github.com/andriyze/shakerscan/blob/main/docs/release-readiness.md)
 - [Build-once release process](https://github.com/andriyze/shakerscan/blob/main/docs/release-process.md)
+- [ShakerScan 0.8.18 release notes](https://github.com/andriyze/shakerscan/blob/main/docs/releases/0.8.18.md)
 - [ShakerScan 0.8.17 release notes](https://github.com/andriyze/shakerscan/blob/main/docs/releases/0.8.17.md)
 - [ShakerScan 0.8.15 release notes](https://github.com/andriyze/shakerscan/blob/main/docs/releases/0.8.15.md)
 - [ShakerScan 0.8.10 release notes](https://github.com/andriyze/shakerscan/blob/main/docs/releases/0.8.10.md)
