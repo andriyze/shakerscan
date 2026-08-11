@@ -785,6 +785,12 @@ def cmd_install(args, runtime: Path) -> int:
         "MODEL_INTAKE_RUNNER_URL": f"http://{bind_host}:{args.bind_port}",
         "MODEL_INTAKE_RUNNER_INTERNAL_TOKEN": token,
         "MODEL_INTAKE_RUNNER_HOST_RESULTS_ROOT": str(shared_results_root),
+        "MODEL_INTAKE_RUNNER_MAX_INPUT_BYTES": (
+            _read_runner_env("MODEL_INTAKE_RUNNER_MAX_INPUT_BYTES") or str(128 * 1024**3)
+        ),
+        "MODEL_INTAKE_RUNNER_MAX_OUTPUT_BYTES": (
+            _read_runner_env("MODEL_INTAKE_RUNNER_MAX_OUTPUT_BYTES") or str(256 * 1024**3)
+        ),
     })
     # `docker compose restart` reuses the existing container and never re-reads
     # .env, so the API would keep an empty MODEL_INTAKE_RUNNER_URL and go on

@@ -394,7 +394,7 @@ class FirecrackerRunner:
             except OSError:
                 continue
         return storage_plan(
-            subject_bytes=path_size(subject),
+            subject_bytes=path_size(subject, physical=False),
             mode=str(request.get("mode", "runtime")),
             requested_output_bytes=request.get("output_bytes"),
             work_root=self.work_root,

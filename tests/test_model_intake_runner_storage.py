@@ -67,7 +67,7 @@ def test_cleanup_never_follows_symlinks_or_removes_active_scratch(tmp_path: Path
     jobs.mkdir()
     outside.mkdir()
     (outside / "keep.bin").write_bytes(b"keep")
-    scratch = work / "mi-old"
+    scratch = work / ("mi-" + "a" * 24)
     scratch.mkdir()
     (scratch / "large.bin").write_bytes(b"x" * 1024)
     (work / "mi-link").symlink_to(outside, target_is_directory=True)
@@ -122,3 +122,11 @@ def test_output_quota_is_large_but_bounded():
         storage.runner_drive_sizes(129 * storage.GIB, "conversion", None, {})
     with pytest.raises(ValueError, match="output quota"):
         storage.runner_drive_sizes(1 * storage.GIB, "runtime", 300 * storage.GIB, {})
+
+
+def test_sparse_subject_admission_uses_logical_not_allocated_bytes(tmp_path: Path):
+    subject = tmp_path / "sparse.bin"
+    with subject.open("wb") as handle:
+        handle.truncate(5 * storage.GIB)
+    assert storage.path_size(subject, physical=False) == 5 * storage.GIB
+    assert storage.path_size(subject) < storage.path_size(subject, physical=False)

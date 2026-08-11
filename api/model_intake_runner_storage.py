@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import os
 from pathlib import Path
+import re
 import shutil
 from typing import Any
 
@@ -51,14 +52,19 @@ def runner_drive_sizes(
     }
 
 
-def path_size(path: Path) -> int:
-    """Count regular files without following symlinks or crossing hidden roots."""
+def path_size(path: Path, *, physical: bool = True) -> int:
+    """Count regular files without following symlinks or crossing hidden roots.
+
+    UI usage and cleanup receipts use allocated blocks. Admission uses logical
+    bytes because copying a sparse untrusted file can materialize every zero.
+    """
     try:
         if path.is_symlink():
             return 0
         if path.is_file():
             stat = path.stat()
-            return stat.st_blocks * 512 if getattr(stat, "st_blocks", 0) else stat.st_size
+            blocks = getattr(stat, "st_blocks", None)
+            return blocks * 512 if physical and blocks is not None else stat.st_size
         if not path.is_dir():
             return 0
     except OSError:
@@ -72,7 +78,8 @@ def path_size(path: Path) -> int:
             try:
                 if not candidate.is_symlink() and candidate.is_file():
                     stat = candidate.stat()
-                    total += stat.st_blocks * 512 if getattr(stat, "st_blocks", 0) else stat.st_size
+                    blocks = getattr(stat, "st_blocks", None)
+                    total += blocks * 512 if physical and blocks is not None else stat.st_size
             except OSError:
                 continue
     return total
@@ -180,7 +187,7 @@ def cleanup_candidates(
             if (
                 path.is_dir()
                 and not path.is_symlink()
-                and path.name.startswith("mi-")
+                and re.fullmatch(r"mi-[0-9a-f]{24}", path.name)
                 and (force_inactive_work or _old_enough(path, work_age, now))
             ):
                 candidates.append({"category": "scratch", "path": path, "bytes": path_size(path)})
