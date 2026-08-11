@@ -7,6 +7,7 @@ set -eu
 INSTALL_URL="https://install.shakerscan.com"
 CHANNEL_RAW_BASE="https://raw.githubusercontent.com/andriyze/shakerscan/main"
 REPO_RAW_BASE="${SHAKERSCAN_RAW_BASE:-}"
+INSTALL_VERSION="${SHAKERSCAN_INSTALL_VERSION:-}"
 INSTALL_DIR="${SHAKERSCAN_HOME:-$HOME/.shakerscan}"
 BIN_DIR="${SHAKERSCAN_BIN_DIR:-$HOME/.local/bin}"
 START_AFTER_INSTALL="${SHAKERSCAN_START:-1}"
@@ -251,13 +252,20 @@ install_bootstrap_deps
 # both unpublished-image windows and main-vs-image source skew. A custom raw
 # base remains an explicit development/testing escape hatch.
 if [ -z "$REPO_RAW_BASE" ]; then
-    stable_raw="$(curl -fsSL "$CHANNEL_RAW_BASE/install/STABLE_VERSION")" || \
-        fail "failed to resolve the stable ShakerScan release channel"
-    stable_version="$(printf '%s' "$stable_raw" | tr -d '[:space:]')"
-    case "$stable_version" in
-        ""|*[!0-9A-Za-z._-]*) fail "stable release channel returned an unsafe version" ;;
-    esac
-    REPO_RAW_BASE="https://raw.githubusercontent.com/andriyze/shakerscan/v${stable_version}"
+    if [ -n "$INSTALL_VERSION" ]; then
+        if ! printf '%s' "$INSTALL_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$'; then
+            fail "SHAKERSCAN_INSTALL_VERSION must be a release version such as 0.8.18"
+        fi
+        REPO_RAW_BASE="https://raw.githubusercontent.com/andriyze/shakerscan/v${INSTALL_VERSION}"
+    else
+        stable_raw="$(curl -fsSL "$CHANNEL_RAW_BASE/install/STABLE_VERSION")" || \
+            fail "failed to resolve the stable ShakerScan release channel"
+        stable_version="$(printf '%s' "$stable_raw" | tr -d '[:space:]')"
+        case "$stable_version" in
+            ""|*[!0-9A-Za-z._-]*) fail "stable release channel returned an unsafe version" ;;
+        esac
+        REPO_RAW_BASE="https://raw.githubusercontent.com/andriyze/shakerscan/v${stable_version}"
+    fi
 fi
 
 say "ShakerScan installer"

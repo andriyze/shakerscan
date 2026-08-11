@@ -52,6 +52,7 @@ jobs:
             and .checks.ui_api_identity == "pass"
             and .checks.worker_identity == "pass"
             and .checks.model_intake_local_session == "pass"
+            and .checks.model_intake_browser_session == "pass"
             and .checks.firecracker_command == "pass"
           ' public-smoke-receipt.json >/dev/null
 

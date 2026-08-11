@@ -166,6 +166,8 @@ def test_prebuilt_runtime_defaults_to_the_downloaded_release_version():
     assert f"shakerscan/shakerscan-scanner:{stable_version}" in release_rows[0]
     assert 'CHANNEL_RAW_BASE="https://raw.githubusercontent.com/andriyze/shakerscan/main"' in installer
     assert 'REPO_RAW_BASE="https://raw.githubusercontent.com/andriyze/shakerscan/v${stable_version}"' in installer
+    assert 'INSTALL_VERSION="${SHAKERSCAN_INSTALL_VERSION:-}"' in installer
+    assert 'REPO_RAW_BASE="https://raw.githubusercontent.com/andriyze/shakerscan/v${INSTALL_VERSION}"' in installer
 
 
 def test_upgrade_smoke_waits_for_final_postgres_process():
@@ -746,26 +748,23 @@ def test_existing_datastore_passwords_are_preserved(tmp_path):
     assert values["REDIS_PASSWORD"] == "r" * 40
 
 
-def test_ui_uses_a_separate_loopback_session_secret_not_the_operator_secret():
-    # The durable operator bearer never enters the UI. A separate secret signs
-    # short-lived sessions only for loopback-published browser installs.
+def test_api_owns_loopback_session_signing_and_ui_never_receives_the_operator_secret():
+    # The durable operator bearer never enters the UI. The UI server presents a
+    # separate bootstrap secret to the API, which alone owns session signing.
     for compose_name in ("docker-compose.yml", "docker-compose.release.yml"):
         compose = (ROOT / compose_name).read_text()
         ui_block = re.split(r"\n  [a-z]", compose.split("\n  ui:\n", 1)[1], maxsplit=1)[0]
         assert "MODEL_INTAKE_OPERATOR_TOKEN=" not in ui_block
         assert "MODEL_INTAKE_LOCAL_SESSION_SECRET=${MODEL_INTAKE_LOCAL_SESSION_SECRET:-}" in ui_block
-        assert "SHAKERSCAN_BIND_HOST=${SHAKERSCAN_BIND_HOST:-127.0.0.1}" in ui_block
 
     route = (ROOT / "ui" / "src" / "app" / "api" / "model-intake" / "operator-credential" / "route.ts").read_text()
     assert "process.env.MODEL_INTAKE_OPERATOR_TOKEN" not in route
-    assert "headers.get('x-forwarded-for')" not in route
-    assert "headers.get('host')" not in route
     assert "MODEL_INTAKE_LOCAL_SESSION_SECRET" in route
-    assert "SHAKERSCAN_BIND_HOST" in route
-    assert "SHAKERSCAN_PUBLIC_HOST" in route
-    assert "NextRequest" not in route
-    assert "local_session" in route
-    assert "manual_required" in route
+    assert "createHmac" not in route
+    assert "http://api:8080/model-intake/operator-session" in route
+    api = (ROOT / "api" / "api.py").read_text()
+    assert "def _mint_model_intake_local_session" in api
+    assert '@app.get("/model-intake/operator-session")' in api
 
 
 def test_startup_fails_closed_on_mixed_release_images_and_ui_reports_baked_identity():
@@ -775,8 +774,8 @@ def test_startup_fails_closed_on_mixed_release_images_and_ui_reports_baked_ident
 
     assert "verify_running_build_identity" in script
     assert "/api/build-identity" in script
-    assert "Startup stopped to prevent a mixed-version deployment" in script
-    assert "continuing with local cache" not in script
+    assert "using the complete cached" in script
+    assert 'docker image inspect "$image"' in script
     assert "UI_BUILD_VERSION" in dockerfile
     assert "COPY --from=builder /app/UI_BUILD_VERSION ./UI_BUILD_VERSION" in dockerfile
     assert "readFileSync" in route

@@ -243,6 +243,19 @@ def _operator_request(token: str, *, origin: str | None = "http://127.0.0.1:3000
     })
 
 
+def _local_session_bootstrap_request(secret: str):
+    return api.Request({
+        "type": "http",
+        "method": "GET",
+        "path": "/model-intake/operator-session",
+        "headers": [(b"x-shakerscan-local-session-secret", secret.encode())],
+        "client": ("172.18.0.5", 40123),
+        "server": ("172.18.0.4", 8080),
+        "scheme": "http",
+        "query_string": b"",
+    })
+
+
 def _local_session(secret: str, *, expires_in: int = 300) -> str:
     expires_at = int(time.time()) + expires_in
     unsigned = f"mi-local-v1.{expires_at}.{'a' * 32}"
@@ -254,6 +267,7 @@ def test_loopback_model_intake_session_is_scoped_and_never_uses_operator_token(m
     secret = "local-session-secret-that-is-long-enough-for-hmac"
     monkeypatch.setenv("MODEL_INTAKE_LOCAL_SESSION_SECRET", secret)
     monkeypatch.setenv("SHAKERSCAN_BIND_HOST", "127.0.0.1")
+    monkeypatch.delenv("SHAKERSCAN_PUBLIC_HOST", raising=False)
     monkeypatch.delenv("MODEL_INTAKE_OPERATOR_TOKEN", raising=False)
     request = _operator_request(_local_session(secret))
 
@@ -267,6 +281,7 @@ def test_local_model_intake_session_fails_closed_on_remote_bind_or_expiry(monkey
     secret = "local-session-secret-that-is-long-enough-for-hmac"
     monkeypatch.setenv("MODEL_INTAKE_LOCAL_SESSION_SECRET", secret)
     monkeypatch.delenv("MODEL_INTAKE_OPERATOR_TOKEN", raising=False)
+    monkeypatch.delenv("SHAKERSCAN_PUBLIC_HOST", raising=False)
 
     monkeypatch.setenv("SHAKERSCAN_BIND_HOST", "0.0.0.0")
     with pytest.raises(api.HTTPException):
@@ -277,6 +292,21 @@ def test_local_model_intake_session_fails_closed_on_remote_bind_or_expiry(monkey
         api._require_model_intake_operator(_operator_request(_local_session(secret, expires_in=-1)))
     with pytest.raises(api.HTTPException):
         api._require_model_intake_operator(_operator_request(_local_session(secret), origin=None))
+
+
+def test_api_mints_the_loopback_session_and_rejects_the_bootstrap_secret(monkeypatch):
+    secret = "local-session-secret-that-is-long-enough-for-hmac"
+    monkeypatch.setenv("MODEL_INTAKE_LOCAL_SESSION_SECRET", secret)
+    monkeypatch.setenv("SHAKERSCAN_BIND_HOST", "127.0.0.1")
+    monkeypatch.delenv("SHAKERSCAN_PUBLIC_HOST", raising=False)
+
+    payload = asyncio.run(api.model_intake_operator_session(_local_session_bootstrap_request(secret)))
+    assert payload["available"] is True
+    assert payload["reason"] == "local_session"
+    api._require_model_intake_operator(_operator_request(payload["token"]))
+
+    with pytest.raises(api.HTTPException, match="bootstrap failed"):
+        asyncio.run(api.model_intake_operator_session(_local_session_bootstrap_request("wrong-secret")))
 
 
 def test_firecracker_install_plan_enters_curl_or_source_runtime(monkeypatch):
