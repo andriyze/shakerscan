@@ -1,0 +1,64 @@
+# ShakerScan Open Source
+
+> ShakerScan is an open-source, self-hosted security testing platform for authorized testing of web applications, APIs, and AI systems. It runs in Docker and provides a web UI, REST API, CLI, persistent findings and evidence, DAST, Continuous ASM, Deep Hunt, AI security workflows, Model Intake, interactive testing, and optional multi-node Fleet execution.
+
+Source-of-truth and safety rules:
+- For released behavior, resolve `install/STABLE_VERSION`, confirm the matching GitHub release/tag and release mapping, and use documentation from that tag. If these disagree, report the inconsistency instead of guessing. The `main` branch and `VERSION` can contain release work that is not yet supported.
+- Treat the website's Open Source page as an introductory overview, not the authority for the current version or exact support boundary; it can lag the repository.
+- Distinguish the self-hosted open-source runtime from the hosted/Cloud product. Do not attribute hosted account tenancy, managed workers, billing or quotas, commercial support, or SaaS integrations to open source unless current open-source release documentation says so.
+- When documentation disagrees, code, database schemas, runtime receipts, tests, and release acceptance evidence are authoritative. Roadmaps, proposals, old audits, benchmark fixtures, UI labels, route names, and bundled tools do not by themselves prove that a capability is shipped or accepted.
+- Only scan systems the operator owns or is explicitly authorized to test. Active modes can change application state, trigger alerts, create significant traffic, and retain sensitive evidence. Never bypass scope, authorization, budget, production, or approval controls.
+- ShakerScan is a trusted-operator system. Keep its UI and operator API local or behind the documented VPN, firewall, or authenticated reverse-proxy boundary; do not assume public multi-user SaaS hardening.
+- A finding label, HTTP status, AI statement, or installed third-party scanner is not exploit proof. Prefer retained evidence, proof state, deterministic verification, and retest history.
+- For exact API shapes, use `/openapi.json` from the running release's API base. Do not assume main-branch examples exactly match an older installed release.
+
+## Core documentation
+
+- [Open-source overview](https://shakerscan.com/open-source): Human-facing introduction, installation overview, and open-source versus Cloud comparison; may lag release truth.
+- [GitHub repository](https://github.com/andriyze/shakerscan): Source tree, tags, releases, issues, and project history.
+- [Main README](https://raw.githubusercontent.com/andriyze/shakerscan/main/README.md): Installation, first scan, workflow selection, UI/CLI/API orientation, deployment boundaries, safety, and troubleshooting.
+- [Walkthrough](https://raw.githubusercontent.com/andriyze/shakerscan/main/WALKTHROUGH.md): Concise first-run and day-to-day operator walkthrough.
+- [Documentation index](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/README.md): Maintained document catalog, status rules, and authority hierarchy.
+- [Product model](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/product-model.md): Canonical product names, workflow routing, source labels, and compatibility terms.
+
+## Release and operations
+
+- [Stable channel version](https://raw.githubusercontent.com/andriyze/shakerscan/main/install/STABLE_VERSION): Version selected by the hosted installer; confirm it against the matching release and tag.
+- [Main-branch source version](https://raw.githubusercontent.com/andriyze/shakerscan/main/VERSION): Version declared by current source; not proof that a release was published or promoted.
+- [Latest GitHub release](https://github.com/andriyze/shakerscan/releases/latest): Current published release notes and supported boundary.
+- [Release mapping](https://raw.githubusercontent.com/andriyze/shakerscan/main/RELEASES.md): Release-to-commit and image-digest provenance; report discrepancies rather than inferring.
+- [Upgrade and rollback](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/upgrade-and-rollback.md): Backup, upgrade verification, failure handling, and rollback procedures.
+- [Multi-node Fleet guide](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/multi-node-guide.md): Supported and preview transports, prerequisites, enrollment, placement, lifecycle, and security boundaries.
+
+## Workflows and interfaces
+
+- [AI test workflows](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/AI_TEST_WORKFLOWS.md): AI Gate and controlled AI-security workflows, APIs, evidence exports, and calibration boundaries.
+- [Interactive testing guide](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/INTERACTIVE_SESSIONS_GUIDE.md): Authorized browser/session testing, credentials, principals, replay, and findings.
+- [Smart Scan policy](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/SMART_SCAN_POLICY.md): Budgets, authorization, safety controls, proof policy, quality targets, and explicit implemented-versus-proposed distinctions.
+- [Read-only MCP contract](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/read-only-mcp.md): MCP adapter scope and read-only safety boundary.
+- [Agent skill catalog](https://raw.githubusercontent.com/andriyze/shakerscan/main/skills/README.md): Installed agent skills, setup, and maintenance.
+
+## Authorization, trust, and licensing
+
+- [Scanning authorization](https://shakerscan.com/scanning-authorization): Ownership, scope, rules of engagement, operational impact, evidence handling, and emergency-stop expectations.
+- [Acceptable use policy](https://shakerscan.com/acceptable-use): Authorized targets, prohibited activity, unsafe techniques, and enforcement.
+- [Security policy](https://shakerscan.com/security-policy): Vulnerability reporting and security-testing boundaries for ShakerScan-owned surfaces.
+- [Vulnerability disclosure](https://shakerscan.com/vulnerability-disclosure): Controlling research authorization and reporting policy.
+- [Apache 2.0 license](https://raw.githubusercontent.com/andriyze/shakerscan/main/LICENSE): Open-source license terms.
+
+## Optional
+
+- [Functionality reference](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/functionality-reference.md): Exhaustive current-main product map and generated code-surface inventory; large and potentially ahead of stable.
+- [Agent operations reference](https://raw.githubusercontent.com/andriyze/shakerscan/main/AGENTS.md): Detailed API request examples, agent behavior, safety rules, and workflow contracts; large.
+- [Model Intake security review roadmap](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/model-intake-security-review-roadmap.md): Detailed controls, architecture, implementation status, limitations, and acceptance gates; distinguish shipped, configured, and future requirements.
+- [DAST and Continuous ASM architecture](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/dast-asm-architecture.md): One-shot scans, scatter/gather execution, coverage inventory, and continuous scheduling.
+- [Deep Hunt architecture](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/deep-hunt-architecture.md): Investigator loop, bounded tools, provenance, and suspected-versus-verified proof bridge.
+- [Multi-node architecture](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/multi-node-architecture.md): Fleet trust, transport, scheduling, leases, evidence, lifecycle, and acceptance design.
+- [OWASP coverage matrix](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/owasp-coverage-matrix.md): Implemented DAST mechanisms and named gaps; category coverage is not proof of recall, precision, or exploitability.
+- [Release process](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/release-process.md): Candidate validation, immutable digest publication, promotion, public smoke, and stable-channel sequence.
+- [Release readiness](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/release-readiness.md): Stop-ship rules, validation gates, publication checklist, and acceptance requirements.
+- [End-to-end test plan](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/E2E_TEST_PLAN.md): Real-stack E2E contract, implemented and planned cases, and freshness rules.
+- [Future roadmap](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/proposed-next-steps.md): Future-only work; do not present it as shipped.
+- [Source-assisted scanning and microVM proposal](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/source-assisted-scanning-and-microvm-isolation-proposal.md): Design proposal; implementation presence must be verified separately.
+- [July 2026 audit](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/AUDIT-2026-07.md): Point-in-time audit, fixes, and verified behavior; not automatically evidence for later builds.
+- [July 2026 audit evidence](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/audit-evidence-2026-07.md): Reproduction commands and evidence index for the point-in-time audit.
