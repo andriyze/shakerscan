@@ -460,10 +460,20 @@ pull_prebuilt_images() {
 
     echo -e "${BLUE}Pulling prebuilt Docker images...${NC}"
     if ! compose pull api worker ui model-intake-signer; then
-        echo -e "${RED}Error: could not pull the complete ShakerScan image set.${NC}" >&2
-        echo "Startup stopped to prevent a mixed-version deployment from cached images." >&2
-        echo "Check Docker Hub/network access and run './scanner.sh start' again." >&2
-        return 1
+        local image
+        for image in \
+            "${API_IMAGE_REPO}:${SCANNER_IMAGE_TAG}" \
+            "${SCANNER_IMAGE_REPO}:${SCANNER_IMAGE_TAG}" \
+            "${UI_IMAGE_REPO}:${SCANNER_IMAGE_TAG}" \
+            "${MODEL_INTAKE_SIGNER_IMAGE_REPO}:${SCANNER_IMAGE_TAG}"; do
+            if ! docker image inspect "$image" >/dev/null 2>&1; then
+                echo -e "${RED}Error: image pull failed and $image is not cached.${NC}" >&2
+                echo "Check Docker Hub/network access and run './scanner.sh start' again." >&2
+                return 1
+            fi
+        done
+        echo -e "${YELLOW}Image pull failed; using the complete cached ${SCANNER_IMAGE_TAG} image set.${NC}"
+        echo "Startup will still verify UI, API, and worker build identity before reporting ready."
     fi
 }
 
@@ -1356,6 +1366,7 @@ configure_runtime_mode() {
     export SCANNER_IMAGE_REPO="${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}"
     export API_IMAGE_REPO="${API_IMAGE_REPO:-shakerscan/shakerscan-api}"
     export UI_IMAGE_REPO="${UI_IMAGE_REPO:-shakerscan/shakerscan-ui}"
+    export MODEL_INTAKE_SIGNER_IMAGE_REPO="${MODEL_INTAKE_SIGNER_IMAGE_REPO:-shakerscan/shakerscan-model-intake-signer}"
     export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-shakerscan}"
     # The source Compose file consumes this exact image identity. Keeping the
     # build and sandbox retag on one explicit contract avoids guessing a tag

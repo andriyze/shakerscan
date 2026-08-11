@@ -1242,8 +1242,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 303 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 256 | `api/api.py` |
+| Public REST operations | 304 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 257 | `api/api.py` |
 | Check families | 14 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 13 | `api/command_arsenal.py` |
@@ -1427,6 +1427,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `GET` | `/model-intake/checks` | `model_intake_check_catalog` |
 | `POST` | `/model-intake/conversion-profiles/resolve` | `resolve_model_intake_conversion_profile` |
 | `POST` | `/model-intake/loader-profiles/resolve` | `resolve_model_intake_loader_profile` |
+| `GET` | `/model-intake/operator-session` | `model_intake_operator_session` |
 | `GET` | `/model-intake/providers/readiness` | `model_intake_provider_readiness` |
 | `POST` | `/model-intake/reassessment/events` | `create_model_intake_reassessment_event` |
 | `POST` | `/model-intake/resolve` | `resolve_model_intake` |

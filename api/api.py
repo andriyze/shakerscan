@@ -5558,6 +5558,29 @@ _MODEL_INTAKE_LOCAL_SESSION_VERSION = "mi-local-v1"
 _MODEL_INTAKE_LOCAL_SESSION_MAX_SECONDS = 8 * 60 * 60
 
 
+def _model_intake_local_session_allowed() -> bool:
+    configured_bind = os.environ.get("SHAKERSCAN_BIND_HOST", "127.0.0.1").strip()
+    configured_public = os.environ.get("SHAKERSCAN_PUBLIC_HOST", "").strip()
+    try:
+        if not ipaddress.ip_address(configured_bind).is_loopback:
+            return False
+        return not configured_public or ipaddress.ip_address(
+            "127.0.0.1" if configured_public == "localhost" else configured_public
+        ).is_loopback
+    except ValueError:
+        return False
+
+
+def _mint_model_intake_local_session() -> tuple[str, int]:
+    secret = os.environ.get("MODEL_INTAKE_LOCAL_SESSION_SECRET", "").strip()
+    if len(secret) < 32:
+        raise HTTPException(status_code=503, detail="local Model Intake session is not configured")
+    expires_at = int(time.time()) + _MODEL_INTAKE_LOCAL_SESSION_MAX_SECONDS
+    unsigned = f"{_MODEL_INTAKE_LOCAL_SESSION_VERSION}.{expires_at}.{secrets.token_hex(16)}"
+    signature = hmac.new(secret.encode(), unsigned.encode(), hashlib.sha256).hexdigest()
+    return f"{unsigned}.{signature}", expires_at
+
+
 def _model_intake_local_session_valid(request: Request, credential: str) -> bool:
     """Validate a short-lived browser session without exposing the operator token.
 
@@ -5566,11 +5589,7 @@ def _model_intake_local_session_valid(request: Request, credential: str) -> bool
     reviewer credentials.
     """
     secret = os.environ.get("MODEL_INTAKE_LOCAL_SESSION_SECRET", "").strip()
-    configured_bind = os.environ.get("SHAKERSCAN_BIND_HOST", "127.0.0.1").strip()
-    try:
-        if len(secret) < 32 or not ipaddress.ip_address(configured_bind).is_loopback:
-            return False
-    except ValueError:
+    if len(secret) < 32 or not _model_intake_local_session_allowed():
         return False
     # Browser calls from the UI to the API cross ports and therefore carry an
     # Origin. Requiring it prevents a session minted by a mistakenly exposed
@@ -15032,6 +15051,37 @@ async def model_intake_capabilities():
     return {
         "schema_version": "model-intake-source-adapters/v1",
         "adapters": _model_adapter_catalog(),
+    }
+
+
+@app.get("/model-intake/operator-session")
+async def model_intake_operator_session(http_request: Request):
+    """Mint an opaque browser session only for a loopback-published install."""
+    if not _model_intake_local_session_allowed():
+        return {
+            "available": False,
+            "reason": "manual_required",
+            "detail": "This remote or managed deployment requires a named Model Intake reviewer credential.",
+            "hint": "Obtain the credential through your organization's approved secret or identity channel.",
+        }
+    secret = os.environ.get("MODEL_INTAKE_LOCAL_SESSION_SECRET", "").strip()
+    if len(secret) < 32:
+        return {
+            "available": False,
+            "reason": "not_configured",
+            "detail": "The local Model Intake session is not configured. Restart ShakerScan to repair it.",
+        }
+    presented = http_request.headers.get("x-shakerscan-local-session-secret", "").strip()
+    if not presented or not secrets.compare_digest(
+        presented, secret
+    ):
+        raise HTTPException(status_code=403, detail="local Model Intake session bootstrap failed")
+    token, expires_at = _mint_model_intake_local_session()
+    return {
+        "available": True,
+        "reason": "local_session",
+        "token": token,
+        "expires_at": datetime.fromtimestamp(expires_at, tz=timezone.utc).isoformat(),
     }
 
 

@@ -3,16 +3,17 @@ set -euo pipefail
 
 VERSION="${1:?usage: scripts/public_install_smoke.sh VERSION [receipt.json]}"
 RECEIPT="${2:-public-smoke-receipt.json}"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SMOKE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/shakerscan-public-smoke.XXXXXX")"
 SMOKE_ROOT="$(cd "$SMOKE_ROOT" && pwd -P)"
 SMOKE_HOME="$SMOKE_ROOT/home"
 RUNTIME="$SMOKE_HOME/.shakerscan"
 BIN_DIR="$SMOKE_HOME/.local/bin"
 PROJECT="shakerscan-public-smoke-$$"
-API_PORT=$((40000 + ($$ % 500)))
-UI_PORT=$((41000 + ($$ % 500)))
-POSTGRES_PORT=$((44000 + ($$ % 500)))
-REDIS_PORT=$((45000 + ($$ % 500)))
+API_PORT=8080
+UI_PORT=3000
+POSTGRES_PORT=5432
+REDIS_PORT=6379
 
 check_equal() {
     local label="$1" actual="$2" expected="$3"
@@ -39,7 +40,7 @@ trap cleanup EXIT
 mkdir -p "$SMOKE_HOME"
 curl -fsSL https://install.shakerscan.com | \
     HOME="$SMOKE_HOME" SHAKERSCAN_HOME="$RUNTIME" SHAKERSCAN_BIN_DIR="$BIN_DIR" \
-    SHAKERSCAN_START=0 SHELL=/bin/bash sh
+    SHAKERSCAN_INSTALL_VERSION="$VERSION" SHAKERSCAN_START=0 SHELL=/bin/bash sh
 check_equal "installed version" "$(tr -d '[:space:]' < "$RUNTIME/VERSION")" "$VERSION"
 
 HOME="$SMOKE_HOME" COMPOSE_PROJECT_NAME="$PROJECT" WORKERS=1 \
@@ -59,6 +60,11 @@ token="$(jq -r '.token' <<<"$session")"
 curl -fsS -H "Authorization: Bearer $token" -H "Origin: http://127.0.0.1:$UI_PORT" \
     "http://127.0.0.1:$API_PORT/model-intake/submissions?limit=1" >/dev/null
 
+docker run --rm --network host --entrypoint python \
+    -v "$ROOT_DIR/scripts/model_intake_browser_smoke.py:/tmp/model_intake_browser_smoke.py:ro" \
+    "shakerscan/shakerscan-scanner:$VERSION" \
+    /tmp/model_intake_browser_smoke.py "http://127.0.0.1:$UI_PORT"
+
 plan="$(curl -fsS "http://127.0.0.1:$API_PORT/model-intake/runners/install-plan")"
 check_equal "install kind" "$(jq -r '.install_kind' <<<"$plan")" "curl_install"
 case "$(jq -r '.command' <<<"$plan")" in
@@ -75,6 +81,7 @@ jq -n --arg version "$VERSION" --arg tested_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" 
     ui_api_identity: "pass",
     worker_identity: "pass",
     model_intake_local_session: "pass",
+    model_intake_browser_session: "pass",
     firecracker_command: "pass"
   }
 }' > "$RECEIPT"

@@ -52,6 +52,7 @@ def test_stable_channel_is_separate_last_step():
         "ui_api_identity",
         "worker_identity",
         "model_intake_local_session",
+        "model_intake_browser_session",
         "firecracker_command",
     ):
         assert f".checks.{check}" in text

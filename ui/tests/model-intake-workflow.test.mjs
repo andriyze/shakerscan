@@ -6,6 +6,7 @@ import test from 'node:test'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const api = readFileSync(path.join(root, 'src/lib/api.ts'), 'utf8')
+const apiServer = readFileSync(path.join(root, '../api/api.py'), 'utf8')
 const workflow = readFileSync(path.join(root, 'src/app/model-intake/ControlledWorkflow.tsx'), 'utf8')
 const page = readFileSync(path.join(root, 'src/app/model-intake/page.tsx'), 'utf8')
 const scanDetail = readFileSync(path.join(root, 'src/app/scans/[id]/page.tsx'), 'utf8')
@@ -126,10 +127,9 @@ test('local installs receive a scoped browser session without the operator secre
   assert.match(workflow, /onOperatorTokenChange\(event\.target\.value\)/)
 
   const route = readFileSync(path.join(root, 'src/app/api/model-intake/operator-credential/route.ts'), 'utf8')
-  assert.match(route, /manual_required/)
-  assert.match(route, /local_session/)
-  assert.match(route, /createHmac/)
+  assert.match(route, /model-intake\/operator-session/)
   assert.match(route, /MODEL_INTAKE_LOCAL_SESSION_SECRET/)
+  assert.doesNotMatch(route, /createHmac/)
   assert.doesNotMatch(route, /process\.env\.MODEL_INTAKE_OPERATOR_TOKEN/)
   assert.doesNotMatch(route, /headers\.get\('host'\)/)
 })
@@ -217,9 +217,6 @@ test('operator credential delivery cannot be enabled by spoofed deployment heade
   const route = readFileSync(path.join(root, 'src/app/api/model-intake/operator-credential/route.ts'), 'utf8')
   assert.doesNotMatch(route, /headers\.get\('x-forwarded-for'\)/)
   assert.doesNotMatch(route, /headers\.get\('host'\)/)
-  assert.match(route, /SHAKERSCAN_BIND_HOST/)
-  assert.match(route, /SHAKERSCAN_PUBLIC_HOST/)
-  assert.doesNotMatch(route, /NextRequest/)
   assert.doesNotMatch(route, /MODEL_INTAKE_OPERATOR_TOKEN/)
 })
 
@@ -227,9 +224,9 @@ test('credential messaging leads with impact and keeps ops detail behind a discl
   const route = readFileSync(path.join(root, 'src/app/api/model-intake/operator-credential/route.ts'), 'utf8')
   // Someone pasting a Hugging Face URL to run a preflight scan should never be
   // told to go paste an environment variable: the scan needs no credential.
-  assert.match(route, /hint/)
-  assert.match(route, /remote or managed deployment requires a named Model Intake reviewer credential/)
-  assert.match(route, /approved secret or identity channel/)
+  assert.match(workflow, /Where do I get one\?/)
+  assert.match(apiServer, /remote or managed deployment requires a named Model Intake reviewer credential/)
+  assert.match(apiServer, /approved secret or identity channel/)
   assert.match(workflow, /Where do I get one\?/)
   assert.match(workflow, /Everything before it/)
   // The context chip is neutral, not a warning, because preflight is unaffected.

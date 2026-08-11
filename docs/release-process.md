@@ -49,7 +49,10 @@ Release records build provenance. `latest` and the installer remain unchanged.
 Test the published version as a new user would. At minimum run
 `scripts/public_install_smoke.sh <version>`, which uses the public curl installer in an empty
 temporary home and verifies one UI/API/worker identity, the no-paste local Model Intake session,
-and the exact one-command Firecracker guidance. Continue with the stateful upgrade, rollback,
+the same session through the production browser bundle, and the exact one-command Firecracker
+guidance. The smoke passes `SHAKERSCAN_INSTALL_VERSION` to the public installer so it tests the
+published immutable version before the stable channel moves; ordinary installs leave that variable
+unset and continue to resolve `install/STABLE_VERSION`. Continue with the stateful upgrade, rollback,
 doctor/status, agent/MCP launch, a bounded scan, Model Intake readiness, and remote Fleet status.
 Preserve the generated content-free receipt and hash.
 

@@ -4319,35 +4319,6 @@ export interface ModelIntakeRunnerInstallPlan {
   cost: string
 }
 
-export interface ModelIntakeRunnerStageState {
-  status: 'idle' | 'running' | 'ready' | 'failed' | string
-  phase?: string
-  error?: string | null
-  log?: string[]
-  integrity_verified?: boolean
-  artifacts?: {
-    kernel?: { path: string; sha256: string }
-    rootfs?: { path: string; sha256: string; bytes: number }
-  }
-}
-
-export async function getModelIntakeRunnerStage(operatorToken: string): Promise<ModelIntakeRunnerStageState> {
-  const res = await fetch(`${API_URL}/model-intake/runners/stage`, {
-    headers: modelIntakeWorkflowHeaders(operatorToken),
-  })
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load staging state'))
-  return res.json()
-}
-
-export async function startModelIntakeRunnerStage(operatorToken: string): Promise<ModelIntakeRunnerStageState> {
-  const res = await fetch(`${API_URL}/model-intake/runners/stage`, {
-    method: 'POST',
-    headers: modelIntakeWorkflowHeaders(operatorToken),
-  })
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to start staging'))
-  return res.json()
-}
-
 export async function getModelIntakeRunnerInstallPlan(): Promise<ModelIntakeRunnerInstallPlan> {
   const res = await fetch(`${API_URL}/model-intake/runners/install-plan`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load runner install plan'))
