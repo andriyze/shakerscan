@@ -28,11 +28,13 @@ try:
     from model_intake_firecracker_runner import FirecrackerRunner, firecracker_readiness
     from model_intake_runner_controller import runner_memory_admission
     from model_intake_runner_inputs import normalize_known_answer_inputs
+    from model_intake_runner_storage import cleanup_candidates, cleanup_storage, storage_report
 except ModuleNotFoundError:  # pragma: no cover
     from api.model_intake_control_plane import canonical_bytes
     from api.model_intake_firecracker_runner import FirecrackerRunner, firecracker_readiness
     from api.model_intake_runner_controller import runner_memory_admission
     from api.model_intake_runner_inputs import normalize_known_answer_inputs
+    from api.model_intake_runner_storage import cleanup_candidates, cleanup_storage, storage_report
 
 
 class RunnerJobRequest(BaseModel):
@@ -56,7 +58,13 @@ class RunnerJobRequest(BaseModel):
     vcpu_count: int = Field(default=2, ge=1, le=32)
     memory_mib: int = Field(default=4096, ge=256, le=262144)
     timeout_seconds: int = Field(default=600, ge=30, le=3600)
-    output_bytes: int | None = Field(default=None, ge=64 * 1024**2, le=20 * 1024**3)
+    output_bytes: int | None = Field(default=None, ge=64 * 1024**2, le=500 * 1024**3)
+
+
+class RunnerStorageCleanupRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    dry_run: bool = True
+    force_inactive_scratch: bool = False
 
 
 def _now() -> str:
@@ -70,6 +78,8 @@ class DurableRunnerQueue:
         self.pending: queue.Queue[str] = queue.Queue(maxsize=int(os.getenv("MODEL_INTAKE_RUNNER_QUEUE_LIMIT", "32")))
         self.runner = FirecrackerRunner()
         self._recover()
+        if os.getenv("MODEL_INTAKE_RUNNER_AUTO_CLEANUP", "true").lower() == "true":
+            self.cleanup(dry_run=False, force_inactive_scratch=False)
         self.thread = threading.Thread(target=self._loop, name="model-intake-firecracker", daemon=True)
         self.thread.start()
 
@@ -106,13 +116,26 @@ class DurableRunnerQueue:
             normalized_inputs = normalize_known_answer_inputs(request.known_answer_inputs)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        resource_plan = runner_memory_admission(firecracker_readiness(), request.memory_mib)
-        if resource_plan.get("sufficient") is not True:
+        memory_plan = runner_memory_admission(firecracker_readiness(), request.memory_mib)
+        if memory_plan.get("sufficient") is not True:
             raise HTTPException(status_code=422, detail={
                 "code": "insufficient_runner_memory",
-                "message": resource_plan.get("reason"),
-                "resource_plan": resource_plan,
+                "message": memory_plan.get("reason"),
+                "resource_plan": {"memory": memory_plan},
             })
+        try:
+            disk_plan = self.runner.plan_storage(request.model_dump(mode="json"))
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail={
+                "code": "runner_storage_plan_failed", "message": str(exc)[:1000],
+            }) from exc
+        if disk_plan.get("sufficient") is not True:
+            raise HTTPException(status_code=422, detail={
+                "code": "insufficient_runner_storage",
+                "message": disk_plan.get("reason"),
+                "resource_plan": {"memory": memory_plan, "storage": disk_plan},
+            })
+        resource_plan = {"memory": memory_plan, "storage": disk_plan}
         job = {
             "schema_version": "model-intake-runner-job/v1",
             "id": str(uuid.uuid4()),
@@ -149,6 +172,13 @@ class DurableRunnerQueue:
                 job["started_at"] = _now()
                 self._write(job)
                 try:
+                    current_storage = self.runner.plan_storage(job["request"])
+                    job.setdefault("resource_plan", {})["storage"] = current_storage
+                    if current_storage.get("sufficient") is not True:
+                        raise RuntimeError(
+                            "insufficient_runner_storage: "
+                            + str(current_storage.get("reason") or "capacity changed before execution")
+                        )
                     job["result"] = self.runner.execute_and_sign(job["request"])
                     job["state"] = "completed"
                 except Exception as exc:
@@ -156,8 +186,40 @@ class DurableRunnerQueue:
                     job["error"] = {"code": type(exc).__name__, "message": str(exc)[:4000]}
                 job["finished_at"] = _now()
                 self._write(job)
+                if os.getenv("MODEL_INTAKE_RUNNER_AUTO_CLEANUP", "true").lower() == "true":
+                    self.cleanup(dry_run=False, force_inactive_scratch=False)
             finally:
                 self.pending.task_done()
+
+    def _has_active_job(self) -> bool:
+        for path in self.root.glob("*.json"):
+            try:
+                if json.loads(path.read_text()).get("state") in {"pending", "running"}:
+                    return True
+            except (OSError, json.JSONDecodeError):
+                continue
+        return False
+
+    def storage(self) -> dict[str, Any]:
+        return storage_report(
+            work_root=self.runner.work_root,
+            job_root=self.root,
+            conversion_root=self.runner.conversion_root,
+            active=self._has_active_job(),
+            environment=self.runner.env,
+        )
+
+    def cleanup(self, *, dry_run: bool, force_inactive_scratch: bool) -> dict[str, Any]:
+        active = self._has_active_job()
+        candidates = cleanup_candidates(
+            work_root=self.runner.work_root,
+            job_root=self.root,
+            active=active,
+            force_inactive_work=force_inactive_scratch,
+            environment=self.runner.env,
+        )
+        result = cleanup_storage(candidates, dry_run=dry_run)
+        return {**result, "active_job": active, "converted_models_deleted": False}
 
 
 def _authorize(token: str | None) -> None:
@@ -206,3 +268,26 @@ async def get_job(job_id: str, x_shakerscan_runner_token: str | None = Header(de
     if jobs is None:
         raise HTTPException(status_code=503, detail="runner queue is unavailable")
     return jobs.get(job_id)
+
+
+@app.get("/internal/model-intake/runner/storage")
+async def get_storage(x_shakerscan_runner_token: str | None = Header(default=None)):
+    _authorize(x_shakerscan_runner_token)
+    if jobs is None:
+        raise HTTPException(status_code=503, detail="runner queue is unavailable")
+    return await asyncio.to_thread(jobs.storage)
+
+
+@app.post("/internal/model-intake/runner/storage/cleanup")
+async def cleanup_runner_storage(
+    request: RunnerStorageCleanupRequest,
+    x_shakerscan_runner_token: str | None = Header(default=None),
+):
+    _authorize(x_shakerscan_runner_token)
+    if jobs is None:
+        raise HTTPException(status_code=503, detail="runner queue is unavailable")
+    return await asyncio.to_thread(
+        jobs.cleanup,
+        dry_run=request.dry_run,
+        force_inactive_scratch=request.force_inactive_scratch,
+    )

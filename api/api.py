@@ -4282,6 +4282,14 @@ class ModelRunnerJobCreateRequest(BaseModel):
     vcpu_count: int = Field(default=2, ge=1, le=32)
     memory_mib: int = Field(default=4096, ge=256, le=262144)
     timeout_seconds: int = Field(default=600, ge=30, le=3600)
+    output_bytes: Optional[int] = Field(default=None, ge=64 * 1024**2, le=500 * 1024**3)
+
+
+class ModelRunnerStorageCleanupRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    dry_run: bool = True
+    force_inactive_scratch: bool = False
 
 
 class ModelIntakeAgentSessionRequest(BaseModel):
@@ -13530,7 +13538,7 @@ def _model_intake_converted_snapshot_materialization(
             raise HTTPException(status_code=409, detail="Converted repository entry is unsafe")
         seen.add(relative_text)
         total_bytes += size
-        if total_bytes > int(os.getenv("MODEL_INTAKE_RUNNER_MAX_INPUT_BYTES", str(20 * 1024**3))):
+        if total_bytes > int(os.getenv("MODEL_INTAKE_RUNNER_MAX_INPUT_BYTES", str(128 * 1024**3))):
             raise HTTPException(status_code=409, detail="Converted repository exceeds the configured quota")
         path = (subject / relative).resolve(strict=True)
         if subject not in path.parents or not path.is_file() or path.is_symlink() or path.stat().st_size != size:
@@ -13709,6 +13717,7 @@ async def create_model_intake_runner_job(
         "vcpu_count": request.vcpu_count,
         "memory_mib": request.memory_mib,
         "timeout_seconds": request.timeout_seconds,
+        "output_bytes": request.output_bytes,
     }
     request_bytes = json.dumps(runner_request, sort_keys=True, separators=(",", ":")).encode()
     stored_request = {
@@ -13731,6 +13740,7 @@ async def create_model_intake_runner_job(
         "vcpu_count": request.vcpu_count,
         "memory_mib": request.memory_mib,
         "timeout_seconds": request.timeout_seconds,
+        "output_bytes": request.output_bytes,
     }
     remote = await asyncio.to_thread(
         _model_intake_runner_http,
@@ -15163,6 +15173,50 @@ async def model_intake_runner_readiness():
                 "fallback_execution": False,
             }
     return await asyncio.to_thread(_model_firecracker_readiness)
+
+
+@app.get("/model-intake/runners/storage")
+async def model_intake_runner_storage():
+    """Content-free disk capacity and retention status for the external runner."""
+    if not os.getenv("MODEL_INTAKE_RUNNER_URL", "").strip():
+        return {
+            "schema_version": "model-intake-runner-storage/v1",
+            "available": False,
+            "reason": "runner_service_not_configured",
+        }
+    try:
+        return await asyncio.to_thread(
+            _model_intake_runner_http,
+            "GET",
+            "/internal/model-intake/runner/storage",
+            None,
+        )
+    except Exception as exc:
+        return {
+            "schema_version": "model-intake-runner-storage/v1",
+            "available": False,
+            "reason": f"runner_service_unavailable:{type(exc).__name__}",
+        }
+
+
+@app.post("/model-intake/runners/storage/cleanup")
+async def model_intake_runner_storage_cleanup(
+    request: ModelRunnerStorageCleanupRequest,
+    http_request: Request,
+):
+    """Preview or remove only inactive scratch and expired terminal metadata."""
+    _model_intake_authenticated_subject(http_request)
+    if not os.getenv("MODEL_INTAKE_RUNNER_URL", "").strip():
+        raise HTTPException(status_code=503, detail="Model Intake runner service is not configured")
+    try:
+        return await asyncio.to_thread(
+            _model_intake_runner_http,
+            "POST",
+            "/internal/model-intake/runner/storage/cleanup",
+            request.model_dump(mode="json"),
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 _MODEL_INTAKE_STAGE_LOCK = threading.Lock()

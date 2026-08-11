@@ -1426,6 +1426,31 @@ export interface ModelIntakeRunnerReadiness {
   fallback_execution?: boolean
 }
 
+export interface ModelIntakeRunnerStorage {
+  schema_version: string
+  available: boolean
+  reason?: string
+  filesystem?: { total_bytes: number; used_bytes: number; free_bytes: number; reserve_bytes: number }
+  conversion_filesystem?: { total_bytes: number; used_bytes: number; free_bytes: number; reserve_bytes: number }
+  same_filesystem?: boolean
+  usage?: { scratch_bytes: number; job_metadata_bytes: number; converted_models_bytes: number }
+  reclaimable?: { dry_run: boolean; items: number; bytes: number; categories: Record<string, { items: number; bytes: number }> }
+  limits?: { max_input_bytes: number; max_output_bytes: number; reserve_percent: number; reserve_floor_bytes: number }
+  automatic_cleanup?: { enabled: boolean; scratch_retention_hours: number; job_retention_days: number; scope: string }
+  active_job?: boolean
+  converted_models_auto_deleted?: boolean
+}
+
+export interface ModelIntakeRunnerStorageCleanup {
+  dry_run: boolean
+  items: number
+  bytes: number
+  categories: Record<string, { items: number; bytes: number }>
+  active_job: boolean
+  converted_models_deleted: false
+  skipped_items?: number
+}
+
 export interface ModelIntakeAutomaticReview {
   id: string
   scan_id: string
@@ -4331,6 +4356,25 @@ export async function getModelIntakeRunnerReadiness(): Promise<ModelIntakeRunner
   return res.json()
 }
 
+export async function getModelIntakeRunnerStorage(): Promise<ModelIntakeRunnerStorage> {
+  const res = await fetch(`${API_URL}/model-intake/runners/storage`, { cache: 'no-store' })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load runner storage'))
+  return res.json()
+}
+
+export async function cleanupModelIntakeRunnerStorage(
+  data: { dry_run: boolean; force_inactive_scratch: boolean },
+  operatorToken: string,
+): Promise<ModelIntakeRunnerStorageCleanup> {
+  const res = await fetch(`${API_URL}/model-intake/runners/storage/cleanup`, {
+    method: 'POST',
+    headers: modelIntakeWorkflowHeaders(operatorToken, true),
+    body: JSON.stringify(data),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to clean runner storage'))
+  return res.json()
+}
+
 export async function createModelIntakeAutomaticReview(data: {
   source: string
   intended_environment: 'development' | 'test' | 'staging' | 'production'
@@ -4492,6 +4536,7 @@ export async function createModelIntakeRunnerJob(id: string, data: {
   vcpu_count?: number
   memory_mib?: number
   timeout_seconds?: number
+  output_bytes?: number
 }, operatorToken: string): Promise<{ job: ModelIntakeRunnerJob; loader_profile: Record<string, unknown>; deployable: false }> {
   const res = await fetch(`${API_URL}/model-intake/submissions/${id}/runner-jobs`, {
     method: 'POST',

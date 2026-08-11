@@ -47,6 +47,7 @@ def test_firecracker_provisioner_installs_every_first_party_runner_module():
         "model_intake_components.py",
         "model_intake_loader_profiles.py",
         "model_intake_runner_controller.py",
+        "model_intake_runner_storage.py",
         "model_intake_runner_inputs.py",
         "model_intake_runner_receipts.py",
         "model_intake_firecracker_runner.py",

@@ -528,6 +528,7 @@ def test_runner_job_dto_has_no_path_profile_or_command_authority():
     assert fields == {
         "operation", "deployment_bundle", "known_answer_inputs",
         "known_answer_embedding_sha256", "vcpu_count", "memory_mib", "timeout_seconds",
+        "output_bytes",
     }
     with pytest.raises(Exception):
         api.ModelRunnerJobCreateRequest(

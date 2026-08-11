@@ -41,9 +41,24 @@ except ModuleNotFoundError:  # pragma: no cover
     from api.model_intake_runner_inputs import suite_identity
     from api.model_intake_components import component_identities
 
+try:
+    from model_intake_runner_storage import path_size, runner_drive_sizes, storage_plan
+except ModuleNotFoundError:  # pragma: no cover
+    from api.model_intake_runner_storage import path_size, runner_drive_sizes, storage_plan
+
 
 class FirecrackerExecutionError(RuntimeError):
     pass
+
+
+def _destroy_transient_work(work: Path) -> None:
+    shutil.rmtree(work / "input-tree", ignore_errors=True)
+    shutil.rmtree(work / "output", ignore_errors=True)
+    for transient_name in ("input.ext4", "output.ext4"):
+        try:
+            (work / transient_name).unlink()
+        except OSError:
+            pass
 
 
 def _cgroup_counter(text: Any, name: str) -> int:
@@ -367,6 +382,27 @@ class FirecrackerRunner:
             raise FirecrackerExecutionError("subject path escapes the configured quarantine root")
         return path
 
+    def plan_storage(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Validate the write boundary and fail before allocating large images."""
+        subject = self._validated_subject(str(request.get("subject_path") or ""))
+        component_bytes = 0
+        for name in ("MODEL_INTAKE_KERNEL_IMAGE", "MODEL_INTAKE_ROOTFS_IMAGE"):
+            path = Path(self.env.get(name, ""))
+            try:
+                if path.is_file() and not path.is_symlink():
+                    component_bytes += path.stat().st_size
+            except OSError:
+                continue
+        return storage_plan(
+            subject_bytes=path_size(subject),
+            mode=str(request.get("mode", "runtime")),
+            requested_output_bytes=request.get("output_bytes"),
+            work_root=self.work_root,
+            conversion_root=self.conversion_root,
+            component_bytes=component_bytes,
+            environment=self.env,
+        )
+
     def _validate_subject_manifest(self, subject: Path, request: dict[str, Any]) -> dict[str, Any]:
         manifest_path = self._validated_subject(str(request.get("repository_manifest_path") or ""))
         if manifest_path.is_dir() or manifest_path.stat().st_size > 20_000_000:
@@ -536,18 +572,22 @@ class FirecrackerRunner:
         job_path = staging / "job.json"
         job_path.write_bytes(canonical_bytes(job))
         job_path.chmod(0o644)
-        size = _tree_size(staging)
-        max_input = int(self.env.get("MODEL_INTAKE_RUNNER_MAX_INPUT_BYTES", str(20 * 1024**3)))
-        if size > max_input:
-            raise FirecrackerExecutionError("runner subject exceeds the configured input quota")
-        image_size = max(256 * 1024**2, ((size * 13 // 10 + 128 * 1024**2 + 4095) // 4096) * 4096)
+        size = _tree_size(model)
+        try:
+            drive_sizes = runner_drive_sizes(
+                size,
+                str(request.get("mode", "runtime")),
+                request.get("output_bytes"),
+                self.env,
+            )
+        except ValueError as exc:
+            raise FirecrackerExecutionError(str(exc)) from exc
+        image_size = drive_sizes["input_image_bytes"]
         input_drive = work / "input.ext4"
         with input_drive.open("wb") as handle:
             handle.truncate(image_size)
         _require_ok(_run(["mkfs.ext4", "-q", "-F", "-d", str(staging), str(input_drive)], timeout=600), "input drive creation")
-        default_output = 512 * 1024**2 if request.get("mode", "runtime") == "runtime" else max(1024**3, size * 13 // 10)
-        output_limit = int(self.env.get("MODEL_INTAKE_RUNNER_MAX_OUTPUT_BYTES", str(5 * 1024**3)))
-        output_bytes = min(max(int(request.get("output_bytes") or default_output), 64 * 1024**2), output_limit)
+        output_bytes = drive_sizes["output_image_bytes"]
         output_drive = work / "output.ext4"
         with output_drive.open("wb") as handle:
             handle.truncate(output_bytes)
@@ -646,17 +686,21 @@ class FirecrackerRunner:
         namespace = vm_id
         work = self.work_root / vm_id
         work.mkdir(parents=True, mode=0o700)
-        input_drive, output_drive = self._prepare_drives(work, subject, request)
-        config = build_firecracker_config({
-            "vm_id": vm_id,
-            "kernel_image": self.env["MODEL_INTAKE_KERNEL_IMAGE"],
-            "rootfs_image": self.env["MODEL_INTAKE_ROOTFS_IMAGE"],
-            "input_drive": str(input_drive),
-            "output_drive": str(output_drive),
-            "vcpu_count": request.get("vcpu_count", 2),
-            "memory_mib": request.get("memory_mib", 4096),
-            "timeout_seconds": request.get("timeout_seconds", 600),
-        })
+        try:
+            input_drive, output_drive = self._prepare_drives(work, subject, request)
+            config = build_firecracker_config({
+                "vm_id": vm_id,
+                "kernel_image": self.env["MODEL_INTAKE_KERNEL_IMAGE"],
+                "rootfs_image": self.env["MODEL_INTAKE_ROOTFS_IMAGE"],
+                "input_drive": str(input_drive),
+                "output_drive": str(output_drive),
+                "vcpu_count": request.get("vcpu_count", 2),
+                "memory_mib": request.get("memory_mib", 4096),
+                "timeout_seconds": request.get("timeout_seconds", 600),
+            })
+        except Exception:
+            _destroy_transient_work(work)
+            raise
         firecracker = Path(self.env["MODEL_INTAKE_FIRECRACKER_BIN"])
         jailer = self.env["MODEL_INTAKE_JAILER_BIN"]
         jail_uid = int(self.env.get("MODEL_INTAKE_JAILER_UID", "65532"))
@@ -823,13 +867,7 @@ class FirecrackerRunner:
             # Raw traces can contain destination addresses and model paths. The
             # signed observation retains their digest plus a salted normalized
             # event stream, then destroys the transient drives and raw output.
-            shutil.rmtree(work / "input-tree", ignore_errors=True)
-            shutil.rmtree(extracted, ignore_errors=True)
-            for transient in (input_drive, output_drive):
-                try:
-                    transient.unlink()
-                except OSError:
-                    pass
+            _destroy_transient_work(work)
             return result
         finally:
             if firecracker_pid is not None and firecracker_start_time is not None:
@@ -855,6 +893,10 @@ class FirecrackerRunner:
                 pass
             if jail is not None and jail.parent.name == vm_id and jail.parent.parent.parent == self.jailer_root:
                 shutil.rmtree(jail.parent, ignore_errors=True)
+            # Large subjects can leave multiple full-size images when setup,
+            # execution, or evidence extraction fails. Always destroy those
+            # transient copies; the small log remains for bounded diagnostics.
+            _destroy_transient_work(work)
 
     def execute_and_sign(self, request: dict[str, Any]) -> dict[str, Any]:
         started_at = datetime.now(timezone.utc)

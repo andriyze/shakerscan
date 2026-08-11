@@ -371,6 +371,23 @@ test('the microVM tier is offered as an opt-in install, not executed by the API'
   assert.match(page, /onRecheck=\{loadRunnerReadiness\}/)
 })
 
+test('runner storage is visible, bounded before queueing, and safely cleanable', () => {
+  assert.match(api, /ModelIntakeRunnerStorage/)
+  assert.match(api, /getModelIntakeRunnerStorage/)
+  assert.match(api, /cleanupModelIntakeRunnerStorage/)
+  assert.match(shell, /Runner storage/)
+  assert.match(shell, /Free now/)
+  assert.match(shell, /Safety reserve/)
+  assert.match(shell, /Converted models retained/)
+  assert.match(shell, /Preview cleanup/)
+  assert.match(shell, /Clean inactive scratch/)
+  assert.match(shell, /never auto-deleted/)
+  assert.match(workflow, /Output disk GiB \(blank = automatic\)/)
+  assert.match(workflow, /output_bytes: outputBytes/)
+  assert.match(page, /storage=\{runnerStorage\}/)
+  assert.match(page, /onCleanup=\{cleanupRunnerStorage\}/)
+})
+
 test('local PEM is the default runner signer and KMS remains opt-in', () => {
   assert.match(shell, /useState\('local-pem'\)/)
   assert.doesNotMatch(shell, /useState\(environment === 'production' \? 'kms:<key-id>'/)

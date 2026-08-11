@@ -179,6 +179,7 @@ export function ControlledModelIntakeWorkflow({
   const [memoryMib, setMemoryMib] = useState(4096)
   const [vcpuCount, setVcpuCount] = useState(2)
   const [timeoutSeconds, setTimeoutSeconds] = useState(600)
+  const [outputGiB, setOutputGiB] = useState('')
 
   const [plannerObjective, setPlannerObjective] = useState('Inspect the current evidence, identify coverage gaps, and recommend the next bounded Model Intake action.')
   const [plannerSessionId, setPlannerSessionId] = useState('')
@@ -460,6 +461,10 @@ export function ControlledModelIntakeWorkflow({
       }
       const parsedInputs = JSON.parse(knownAnswerInputs)
       if (!Array.isArray(parsedInputs) || parsedInputs.some((item) => typeof item !== 'string')) throw new Error('Known-answer inputs must be a JSON string array')
+      const outputBytes = outputGiB.trim() ? Math.round(Number(outputGiB) * 1024 ** 3) : undefined
+      if (outputBytes !== undefined && (!Number.isFinite(outputBytes) || outputBytes < 64 * 1024 ** 2 || outputBytes > 500 * 1024 ** 3)) {
+        throw new Error('Output disk must be between 0.0625 and 500 GiB, or left blank for automatic sizing')
+      }
       await createModelIntakeRunnerJob(id, {
         operation: runnerOperation,
         deployment_bundle: bundle,
@@ -468,6 +473,7 @@ export function ControlledModelIntakeWorkflow({
         memory_mib: memoryMib,
         vcpu_count: vcpuCount,
         timeout_seconds: timeoutSeconds,
+        output_bytes: outputBytes,
       }, operatorToken)
       await loadSelected(id)
       toast.success('Firecracker job queued for the exact deployment subject')
@@ -1069,7 +1075,13 @@ export function ControlledModelIntakeWorkflow({
                 )
               )}
             </label>
-            <label className="grid gap-1 text-xs text-gray-300">Wall-clock timeout seconds<input className={inputClass} type="number" min={30} max={3600} value={timeoutSeconds} onChange={(event) => setTimeoutSeconds(Number(event.target.value))} /></label>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="grid gap-1 text-xs text-gray-300">Wall-clock timeout seconds<input className={inputClass} type="number" min={30} max={3600} value={timeoutSeconds} onChange={(event) => setTimeoutSeconds(Number(event.target.value))} /></label>
+              <label className="grid gap-1 text-xs text-gray-300">Output disk GiB (blank = automatic)
+                <input className={inputClass} type="number" min={0.0625} max={500} step={0.25} value={outputGiB} onChange={(event) => setOutputGiB(event.target.value)} placeholder={runnerOperation === 'conversion' ? 'Sized from the model' : '0.5'} />
+                <span className="text-[11px] text-gray-500">Conversion needs room for the converted weights. ShakerScan checks total peak disk use before queueing.</span>
+              </label>
+            </div>
             <button
               type="button"
               className={buttonClass}

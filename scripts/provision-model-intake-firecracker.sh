@@ -82,6 +82,7 @@ install -m 0644 \
     "$ROOT_DIR/api/model_intake_loader_profiles.py" \
     "$ROOT_DIR/api/model_intake_runner_inputs.py" \
     "$ROOT_DIR/api/model_intake_runner_controller.py" \
+    "$ROOT_DIR/api/model_intake_runner_storage.py" \
     "$ROOT_DIR/api/model_intake_runner_receipts.py" \
     "$ROOT_DIR/api/model_intake_firecracker_runner.py" \
     "$ROOT_DIR/api/model_intake_runner_service.py" \
@@ -116,6 +117,13 @@ allow_local_pem="$(read_runner_env MODEL_INTAKE_RUNNER_ALLOW_LOCAL_PEM)"
 signing_key_file="$(read_runner_env MODEL_INTAKE_RUNNER_SIGNING_KEY_PEM_FILE)"
 signer_key_id="$(read_runner_env MODEL_INTAKE_RUNNER_SIGNER_KEY_ID)"
 builder_id="$(read_runner_env MODEL_INTAKE_RUNNER_BUILDER_ID)"
+max_input_bytes="$(read_runner_env MODEL_INTAKE_RUNNER_MAX_INPUT_BYTES)"
+max_output_bytes="$(read_runner_env MODEL_INTAKE_RUNNER_MAX_OUTPUT_BYTES)"
+min_free_bytes="$(read_runner_env MODEL_INTAKE_RUNNER_MIN_FREE_BYTES)"
+disk_reserve_percent="$(read_runner_env MODEL_INTAKE_RUNNER_DISK_RESERVE_PERCENT)"
+auto_cleanup="$(read_runner_env MODEL_INTAKE_RUNNER_AUTO_CLEANUP)"
+work_retention_hours="$(read_runner_env MODEL_INTAKE_RUNNER_WORK_RETENTION_HOURS)"
+job_retention_days="$(read_runner_env MODEL_INTAKE_RUNNER_JOB_RETENTION_DAYS)"
 RUNNER_ENV_TEMP="${RUNNER_ENV}.partial"
 cat > "$RUNNER_ENV_TEMP" <<EOF
 MODEL_INTAKE_RUNNER_INTERNAL_TOKEN=$runner_token
@@ -134,6 +142,13 @@ MODEL_INTAKE_ROOTFS_IMAGE=$INSTALL_ROOT/rootfs/rootfs.ext4
 MODEL_INTAKE_ROOTFS_SHA256=$(sha256sum "$INSTALL_ROOT/rootfs/rootfs.ext4" | awk '{print $1}')
 MODEL_INTAKE_ROOTFS_INPUTS_SHA256=$ROOTFS_INPUTS_SHA256
 MODEL_INTAKE_RUNNER_EGRESS_POLICY=deny-all
+MODEL_INTAKE_RUNNER_MAX_INPUT_BYTES=${max_input_bytes:-137438953472}
+MODEL_INTAKE_RUNNER_MAX_OUTPUT_BYTES=${max_output_bytes:-274877906944}
+MODEL_INTAKE_RUNNER_MIN_FREE_BYTES=${min_free_bytes:-10737418240}
+MODEL_INTAKE_RUNNER_DISK_RESERVE_PERCENT=${disk_reserve_percent:-10}
+MODEL_INTAKE_RUNNER_AUTO_CLEANUP=${auto_cleanup:-true}
+MODEL_INTAKE_RUNNER_WORK_RETENTION_HOURS=${work_retention_hours:-24}
+MODEL_INTAKE_RUNNER_JOB_RETENTION_DAYS=${job_retention_days:-30}
 EOF
 for preserved in \
     "MODEL_INTAKE_RUNNER_SIGNER_BACKEND=$signer_backend" \

@@ -7,6 +7,7 @@ import {
   downloadModelIntakeSbom,
   type ModelIntakeRunnerInstallPlan,
   type ModelIntakeRunnerReadiness,
+  type ModelIntakeRunnerStorage,
   type ModelIntakeScanSummary,
 } from '@/lib/api'
 
@@ -184,10 +185,16 @@ export function RunnerInstallCard({
   readiness,
   plan,
   onRecheck,
+  storage,
+  cleanupBusy,
+  onCleanup,
 }: {
   readiness: ModelIntakeRunnerReadiness | null
   plan: ModelIntakeRunnerInstallPlan | null
   onRecheck: () => void
+  storage: ModelIntakeRunnerStorage | null
+  cleanupBusy: boolean
+  onCleanup: (dryRun: boolean) => void
 }) {
   const [open, setOpen] = useState(false)
   const [signer, setSigner] = useState('local-pem')
@@ -197,6 +204,14 @@ export function RunnerInstallCard({
   const signerArgument = signer.startsWith('kms:') ? `kms:${kmsKeyId.trim() || '<key-id>'}` : signer
   const command = (plan?.command || '').replace('<choice>', signerArgument)
   const commandReady = !signer.startsWith('kms:') || Boolean(kmsKeyId.trim())
+  const formatBytes = (value: number | undefined) => {
+    if (!Number.isFinite(value)) return '—'
+    const bytes = Number(value)
+    if (bytes >= 1024 ** 4) return `${(bytes / 1024 ** 4).toFixed(1)} TiB`
+    if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GiB`
+    if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MiB`
+    return `${bytes} B`
+  }
 
   async function copyCommand() {
     try {
@@ -250,6 +265,42 @@ export function RunnerInstallCard({
           verifies, installs, connects, and checks the runner.
         </p>
       </div>
+
+      {storage?.available && storage.filesystem && (
+        <div className="mt-3 rounded border border-gray-800 bg-gray-900/70 p-3">
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div>
+              <div className="text-xs font-medium text-gray-200">Runner storage</div>
+              <p className="mt-1 text-[11px] text-gray-500">
+                Every job is checked before large disk images are created. A conversion can need several
+                times the model size while it runs; jobs are rejected if that would cross the safety reserve.
+              </p>
+            </div>
+            <span className={`rounded px-2 py-1 text-xs font-semibold ${storage.active_job ? 'bg-cyan-950/50 text-cyan-200' : 'bg-gray-800 text-gray-300'}`}>
+              {storage.active_job ? 'job active' : 'idle'}
+            </span>
+          </div>
+          <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="rounded border border-gray-800 bg-gray-950 p-2"><div className="text-[10px] uppercase text-gray-600">Free now</div><div className="mt-1 text-sm font-semibold text-white">{formatBytes(storage.filesystem.free_bytes)}</div></div>
+            <div className="rounded border border-gray-800 bg-gray-950 p-2"><div className="text-[10px] uppercase text-gray-600">Safety reserve</div><div className="mt-1 text-sm font-semibold text-white">{formatBytes(storage.filesystem.reserve_bytes)}</div></div>
+            <div className="rounded border border-gray-800 bg-gray-950 p-2"><div className="text-[10px] uppercase text-gray-600">Runner scratch</div><div className="mt-1 text-sm font-semibold text-white">{formatBytes(storage.usage?.scratch_bytes)}</div></div>
+            <div className="rounded border border-gray-800 bg-gray-950 p-2"><div className="text-[10px] uppercase text-gray-600">Converted models retained</div><div className="mt-1 text-sm font-semibold text-white">{formatBytes(storage.usage?.converted_models_bytes)}</div></div>
+          </div>
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <button type="button" disabled={cleanupBusy} onClick={() => onCleanup(true)} className="rounded border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50">Preview cleanup</button>
+            <button type="button" disabled={cleanupBusy || storage.active_job} onClick={() => onCleanup(false)} className="rounded bg-cyan-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-cyan-700 disabled:opacity-50">Clean inactive scratch</button>
+            <span className="text-[11px] text-gray-500">
+              {formatBytes(storage.reclaimable?.bytes)} safely reclaimable now · automatic cleanup {storage.automatic_cleanup?.enabled ? 'on' : 'off'}
+            </span>
+          </div>
+          <p className="mt-2 text-[11px] text-gray-600">
+            Automatic cleanup removes inactive scratch after {storage.automatic_cleanup?.scratch_retention_hours ?? 24} hours and expired job metadata after {storage.automatic_cleanup?.job_retention_days ?? 30} days. Acquired and converted models are never auto-deleted because admissions may still reference them.
+          </p>
+          <p className="mt-1 text-[11px] text-gray-600">
+            Configured limits: {formatBytes(storage.limits?.max_input_bytes)} model input · {formatBytes(storage.limits?.max_output_bytes)} guest output. A 100 GiB conversion can require close to 900 GiB free with the current copy-isolated layout.
+          </p>
+        </div>
+      )}
 
       {plan && (
         plan.supported ? (

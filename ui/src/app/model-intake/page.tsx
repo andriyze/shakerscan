@@ -32,6 +32,8 @@ import {
   getModelIntakeScannerReadiness,
   getModelIntakeRunnerReadiness,
   getModelIntakeRunnerInstallPlan,
+  getModelIntakeRunnerStorage,
+  cleanupModelIntakeRunnerStorage,
   createModelIntakeAutomaticReview,
   listModelIntakeAutomaticReviews,
   downloadModelIntakeAutomaticReport,
@@ -53,6 +55,7 @@ import {
   type ModelIntakeScanRequest,
   type ModelIntakeRunnerReadiness,
   type ModelIntakeRunnerInstallPlan,
+  type ModelIntakeRunnerStorage,
   type ModelIntakeScanSummary,
   type ModelIntakeScannerReadiness,
   type ModelIntakeTrustAnchor,
@@ -500,6 +503,8 @@ function ModelIntakeSettingsContent() {
   const [scannerReadiness, setScannerReadiness] = useState<ModelIntakeScannerReadiness | null>(null)
   const [runnerReadiness, setRunnerReadiness] = useState<ModelIntakeRunnerReadiness | null>(null)
   const [runnerInstallPlan, setRunnerInstallPlan] = useState<ModelIntakeRunnerInstallPlan | null>(null)
+  const [runnerStorage, setRunnerStorage] = useState<ModelIntakeRunnerStorage | null>(null)
+  const [runnerCleanupBusy, setRunnerCleanupBusy] = useState(false)
   const [intakeScans, setIntakeScans] = useState<ModelIntakeScanSummary[]>([])
   const [queuedScanIds, setQueuedScanIds] = useState<string[]>([])
   const [staticScanId, setStaticScanId] = useState('')
@@ -590,13 +595,38 @@ function ModelIntakeSettingsContent() {
     // Readiness and the install plan answer different questions — "is it
     // running" and "can this host run it at all" — and the Status panel needs
     // both to decide between an install button and an unavailable notice.
-    const [readiness, plan] = await Promise.allSettled([
+    const [readiness, plan, storage] = await Promise.allSettled([
       getModelIntakeRunnerReadiness(),
       getModelIntakeRunnerInstallPlan(),
+      getModelIntakeRunnerStorage(),
     ])
     setRunnerReadiness(readiness.status === 'fulfilled' ? readiness.value : null)
     setRunnerInstallPlan(plan.status === 'fulfilled' ? plan.value : null)
+    setRunnerStorage(storage.status === 'fulfilled' ? storage.value : null)
   }, [])
+
+  const cleanupRunnerStorage = useCallback(async (dryRun: boolean) => {
+    if (!operatorToken) {
+      toast.error('An operator session is required to clean runner storage')
+      return
+    }
+    setRunnerCleanupBusy(true)
+    try {
+      const result = await cleanupModelIntakeRunnerStorage({
+        dry_run: dryRun,
+        force_inactive_scratch: !dryRun,
+      }, operatorToken)
+      const gib = (result.bytes / 1024 ** 3).toFixed(2)
+      toast.success(dryRun
+        ? `${result.items} safe item${result.items === 1 ? '' : 's'} can reclaim ${gib} GiB`
+        : `Removed ${result.items} safe item${result.items === 1 ? '' : 's'} and reclaimed ${gib} GiB`)
+      await loadRunnerReadiness()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Runner cleanup failed')
+    } finally {
+      setRunnerCleanupBusy(false)
+    }
+  }, [loadRunnerReadiness, operatorToken, toast])
 
   const loadIntakeScans = useCallback(async () => {
     try {
@@ -2796,6 +2826,9 @@ function ModelIntakeSettingsContent() {
             readiness={runnerReadiness}
             plan={runnerInstallPlan}
             onRecheck={loadRunnerReadiness}
+            storage={runnerStorage}
+            cleanupBusy={runnerCleanupBusy}
+            onCleanup={cleanupRunnerStorage}
           />
         </Card>
 
