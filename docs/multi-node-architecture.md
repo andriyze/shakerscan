@@ -1,6 +1,6 @@
 # Multi-Node Architecture
 
-**Status:** Design authority + implementation complete; optional 0.8.17 broker physical-acceptance renewal pending. The fan-out
+**Status:** Design authority + implementation complete; 0.8.18 broker physical-acceptance renewal pending. The fan-out
 substrate is shipped (see the code-grounded capability table below), and the durable node identity,
 bounded enrollment, authenticated heartbeat, and one-time connection-bundle API foundation is now
 implemented. The digest-pinned worker-only Compose runtime, pull-based node-agent, and versioned
@@ -13,10 +13,10 @@ separate local/remote capacity, current-work, per-node scaling, drain/resume, an
 Scan submission exposes automatic, control-plane-local, remote-fleet, and specific-remote-node execution location.
 A prior exact candidate passed a two-node HTTPS-broker deployment's non-destructive topology/storage/lease preflight,
 digest-pinned cross-node execution with centralized results and artifacts, and destructive physical
-worker-loss/reclaim acceptance. Because 0.8.17 corrects the published broker worker's stamped
-release identity, that receipt is historical and may be renewed on the frozen 0.8.17 SHA as
+worker-loss/reclaim acceptance. Because 0.8.18 changes Fleet-visible worker presentation,
+that receipt is historical and may be renewed on the frozen 0.8.18 SHA as
 operational evidence. WireGuard physical acceptance is deferred, so WireGuard remains preview code
-and is explicitly outside the 0.8.17 supported deployment boundary. Redis Stream
+and is explicitly outside the 0.8.18 supported deployment boundary. Redis Stream
 lease/heartbeat/ack/reclaim delivery is implemented. The
 general artifact manifest, deterministic result/checkpoint/diagnostic upload, referenced screenshot
 centralization, hash-verified proxy download, cross-node stale recovery, fleet-worker fail-closed
@@ -25,7 +25,7 @@ and enforceable fleet-wide admission/request limits are implemented. Graceful dr
 one-at-a-time worker image rollout are implemented. The outbound-only Phase-3 HTTPS broker, thin
 worker runtime, broker enrollment, lease/result/artifact protocol, and control-plane ingestion are
 implemented. Capacity-weighted fleet-wide scaling, immutable execution-context snapshots, and
-durable per-node lifecycle events are implemented. The broker path is the 0.8.17 production
+durable per-node lifecycle events are implemented. The broker path is the 0.8.18 production
 candidate; exact-SHA physical acceptance is optional operational evidence. WireGuard remains outside that supported boundary.
 **Scope:** run a coordinated ShakerScan fleet across multiple VMs/VPS hosts so one UI/API
 can scan more targets at once and run high-budget Full Coverage scans by using workers
