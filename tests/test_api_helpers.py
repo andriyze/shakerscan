@@ -304,11 +304,13 @@ def test_model_intake_operator_actions_require_explicit_token_even_on_loopback(m
     monkeypatch.delenv("FLEET_OPERATOR_TOKEN", raising=False)
     with pytest.raises(api_module.HTTPException) as exc:
         api_module._require_model_intake_operator(_fleet_request(host="127.0.0.1", scheme="http"))
-    assert exc.value.status_code == 403
+    assert exc.value.status_code == 401
+    assert "bearer credential is required" in str(exc.value.detail)
 
     with pytest.raises(api_module.HTTPException) as exc:
         api_module._require_model_intake_operator(_fleet_request(host="203.0.113.2", scheme="https"))
-    assert exc.value.status_code == 403
+    assert exc.value.status_code == 401
+    assert "bearer credential is required" in str(exc.value.detail)
 
     token = "m" * 32
     monkeypatch.setenv("MODEL_INTAKE_OPERATOR_TOKEN", token)
@@ -380,7 +382,7 @@ def test_model_intake_rescan_requires_operator_before_database_access(monkeypatc
             str(uuid.uuid4()),
             _fleet_request(host="127.0.0.1", scheme="http"),
         ))
-    assert caught.value.status_code == 403
+    assert caught.value.status_code == 401
     assert "credential" in str(caught.value.detail).lower()
 
     operator_token = "operator-" + "x" * 40
@@ -18551,7 +18553,8 @@ def test_model_intake_retention_execution_requires_operator_auth(monkeypatch):
             _fleet_request(host="203.0.113.2", scheme="https"),
         ))
 
-    assert exc_info.value.status_code == 403
+    assert exc_info.value.status_code == 401
+    assert "bearer credential is required" in str(exc_info.value.detail)
 
 
 def test_model_intake_queue_persists_content_free_evaluation_not_vectors(monkeypatch):
