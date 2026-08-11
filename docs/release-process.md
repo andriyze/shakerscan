@@ -46,13 +46,17 @@ Release records build provenance. `latest` and the installer remain unchanged.
 
 ## 4. Public smoke and stable promotion
 
-Test the published version as a new user would: clean hosted install, stateful upgrade, rollback,
-doctor/status, UI/API, agent/MCP launch, a bounded scan, Model Intake readiness, and remote Fleet
-status. Preserve a content-free smoke receipt and hash.
+Test the published version as a new user would. At minimum run
+`scripts/public_install_smoke.sh <version>`, which uses the public curl installer in an empty
+temporary home and verifies one UI/API/worker identity, the no-paste local Model Intake session,
+and the exact one-command Firecracker guidance. Continue with the stateful upgrade, rollback,
+doctor/status, agent/MCP launch, a bounded scan, Model Intake readiness, and remote Fleet status.
+Preserve the generated content-free receipt and hash.
 
 Only then merge a small PR changing `install/STABLE_VERSION`. Run **Promote stable channel** with the
-version and smoke receipt. The workflow confirms the public non-draft release and stable-version
-file, then moves each `latest` alias to the already-published version digest. It does not rebuild.
+version and smoke receipt. The workflow validates the receipt schema and every required clean-install
+check, confirms the public non-draft release and stable-version file, then moves each `latest` alias
+to the already-published version digest. It does not rebuild.
 
 ## Stop conditions
 

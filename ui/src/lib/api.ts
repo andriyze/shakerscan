@@ -3954,9 +3954,7 @@ export async function rescanModelIntakeTarget(targetId: string, operatorToken?: 
   status: string
   ui_url?: string
 }> {
-  const storedToken = typeof window !== 'undefined'
-    ? sessionStorage.getItem(MODEL_INTAKE_OPERATOR_TOKEN_KEY) || ''
-    : ''
+  const storedToken = getStoredModelIntakeOperatorToken()
   const token = operatorToken?.trim() || storedToken.trim()
   const res = await fetch(`${API_URL}/model-intake/targets/${targetId}/rescan`, {
     method: 'POST',
@@ -4093,6 +4091,22 @@ function modelIntakeWorkflowHeaders(operatorToken: string, json = false): Header
 }
 
 export const MODEL_INTAKE_OPERATOR_TOKEN_KEY = 'shakerscan:model-intake-operator-token'
+
+// Local UI sessions are deliberately short lived. Discard an expired one so
+// reopening Model Intake transparently asks the local UI server for a fresh
+// session instead of leaving the operator at an unexplained 403 response.
+export function getStoredModelIntakeOperatorToken(): string {
+  if (typeof window === 'undefined') return ''
+  const token = sessionStorage.getItem(MODEL_INTAKE_OPERATOR_TOKEN_KEY) || ''
+  if (!token.startsWith('mi-local-v1.')) return token
+  const parts = token.split('.')
+  const expiresAt = parts.length === 4 ? Number(parts[1]) : 0
+  if (!Number.isFinite(expiresAt) || expiresAt * 1000 <= Date.now() + 60_000) {
+    sessionStorage.removeItem(MODEL_INTAKE_OPERATOR_TOKEN_KEY)
+    return ''
+  }
+  return token
+}
 
 // The bundle this server will accept, derived through the same code path the
 // queue validates against. The UI must not recompute it: profile_sha256 hashes
@@ -4263,16 +4277,17 @@ export async function listRecentModelIntakeScans(limit = 25): Promise<ModelIntak
 
 export interface ModelIntakeOperatorCredential {
   available: boolean
-  reason: 'stored_session' | 'manual_required' | 'not_configured' | 'disabled' | 'unavailable'
+  reason: 'stored_session' | 'local_session' | 'manual_required' | 'not_configured' | 'disabled' | 'unavailable'
   token?: string
+  expires_at?: string
   // `detail` says what is affected in product terms; `hint` carries the
   // operations instruction and stays behind a disclosure in the UI.
   detail?: string
   hint?: string
 }
 
-// This route reports credential availability only. It never transports an
-// operator bearer secret from the UI server into browser JavaScript.
+// A loopback-only install returns a short-lived session signed with a separate
+// local secret. The durable operator credential never enters browser JavaScript.
 export async function getModelIntakeOperatorCredential(): Promise<ModelIntakeOperatorCredential> {
   try {
     const res = await fetch('/api/model-intake/operator-credential', { cache: 'no-store' })
@@ -4297,6 +4312,8 @@ export interface ModelIntakeRunnerInstallPlan {
   cpu_virtualization?: boolean | null
   command: string
   status_command: string
+  runtime_dir?: string
+  install_kind?: 'curl_install' | 'source_checkout' | string
   signer_choices: { value: string; label: string; production: boolean; detail: string }[]
   host_mutations: string[]
   cost: string

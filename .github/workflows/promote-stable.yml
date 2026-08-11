@@ -45,6 +45,15 @@ jobs:
           curl --fail --silent --show-error --location \
             --proto '=https' --tlsv1.2 "$SMOKE_URL" --output public-smoke-receipt.json
           echo "${SMOKE_SHA256}  public-smoke-receipt.json" | sha256sum --check --strict
+          jq -e --arg version "$VERSION" '
+            .schema_version == "shakerscan-public-smoke/v1"
+            and .version == $version
+            and .checks.clean_install == "pass"
+            and .checks.ui_api_identity == "pass"
+            and .checks.worker_identity == "pass"
+            and .checks.model_intake_local_session == "pass"
+            and .checks.firecracker_command == "pass"
+          ' public-smoke-receipt.json >/dev/null
 
       - uses: docker/setup-buildx-action@v4
 

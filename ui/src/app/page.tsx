@@ -299,16 +299,18 @@ export default function Dashboard() {
             className="flex h-10 items-center gap-2 rounded-lg border border-gray-800 bg-gray-900 px-2.5"
             title={workersError || (fleetEnabled
               ? `${totalAvailable} available: ${localAvailable} local, ${remoteAvailable} remote`
-              : `${localAvailable} local workers available`)}
+              : `${localAvailable} workers available`)}
           >
             <Server className="h-4 w-4 shrink-0 text-gray-500" aria-hidden="true" />
             <span className="min-w-6 text-center text-sm font-medium tabular-nums text-white">
               {workersKnown ? totalAvailable : '--'}
             </span>
             <span className="hidden text-xs text-gray-500 sm:inline">available</span>
-            <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] font-medium text-gray-300" title={`${workerCount ?? 0} local ${(workerCount ?? 0) === 1 ? 'worker' : 'workers'} running`}>
-              {localAvailable} local
-            </span>
+            {fleetEnabled && (
+              <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] font-medium text-gray-300" title={`${workerCount ?? 0} local ${(workerCount ?? 0) === 1 ? 'worker' : 'workers'} running`}>
+                {localAvailable} local
+              </span>
+            )}
             {staleCount > 0 && (
               <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-300" title="Workers running an outdated build">
                 {staleCount} stale
@@ -319,8 +321,8 @@ export default function Dashboard() {
               type="button"
               onClick={() => handleScale(Math.max(1, (workerCount || 1) - 1))}
               disabled={scaling || !workersKnown || (workerCount || 0) <= 1}
-              aria-label="Decrease local worker count"
-              title="Decrease local worker count"
+              aria-label={fleetEnabled ? 'Decrease local worker count' : 'Decrease worker count'}
+              title={fleetEnabled ? 'Decrease local worker count' : 'Decrease worker count'}
               className={`flex h-7 w-7 items-center justify-center rounded text-gray-400 transition-colors hover:bg-gray-800 hover:text-white disabled:cursor-not-allowed disabled:opacity-30 ${FOCUS_RING}`}
             >
               <Minus className="h-3.5 w-3.5" aria-hidden="true" />
@@ -329,8 +331,8 @@ export default function Dashboard() {
               type="button"
               onClick={() => handleScale(Math.min(maxWorkers, (workerCount || 1) + 1))}
               disabled={scaling || !workersKnown || (workerCount || 0) >= maxWorkers}
-              aria-label="Increase local worker count"
-              title="Increase local worker count"
+              aria-label={fleetEnabled ? 'Increase local worker count' : 'Increase worker count'}
+              title={fleetEnabled ? 'Increase local worker count' : 'Increase worker count'}
               className={`flex h-7 w-7 items-center justify-center rounded text-gray-400 transition-colors hover:bg-gray-800 hover:text-white disabled:cursor-not-allowed disabled:opacity-30 ${FOCUS_RING}`}
             >
               <Plus className="h-3.5 w-3.5" aria-hidden="true" />

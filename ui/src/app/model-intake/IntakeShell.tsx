@@ -1,15 +1,12 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useState } from 'react'
 import { CheckCircle2, Circle, Copy, LockKeyhole, PackageCheck, ShieldAlert, Server } from 'lucide-react'
 import {
   downloadModelIntakeLicenseArtifact,
   downloadModelIntakeSbom,
-  getModelIntakeRunnerStage,
-  startModelIntakeRunnerStage,
   type ModelIntakeRunnerInstallPlan,
   type ModelIntakeRunnerReadiness,
-  type ModelIntakeRunnerStageState,
   type ModelIntakeScanSummary,
 } from '@/lib/api'
 
@@ -186,56 +183,20 @@ export function IntakePhaseTabs({
 export function RunnerInstallCard({
   readiness,
   plan,
-  operatorToken,
-  environment,
   onRecheck,
 }: {
   readiness: ModelIntakeRunnerReadiness | null
   plan: ModelIntakeRunnerInstallPlan | null
-  operatorToken: string
-  environment: string
   onRecheck: () => void
 }) {
   const [open, setOpen] = useState(false)
   const [signer, setSigner] = useState('local-pem')
   const [kmsKeyId, setKmsKeyId] = useState('')
   const [copied, setCopied] = useState(false)
-  const [stage, setStage] = useState<ModelIntakeRunnerStageState | null>(null)
-  const [stageError, setStageError] = useState<string | null>(null)
   const installed = readiness?.ready === true
   const signerArgument = signer.startsWith('kms:') ? `kms:${kmsKeyId.trim() || '<key-id>'}` : signer
   const command = (plan?.command || '').replace('<choice>', signerArgument)
   const commandReady = !signer.startsWith('kms:') || Boolean(kmsKeyId.trim())
-  const staging = stage?.status === 'running'
-  const staged = stage?.status === 'ready'
-
-  const refreshStage = useCallback(async () => {
-    try {
-      setStage(await getModelIntakeRunnerStage(operatorToken))
-    } catch {
-      /* staging state is advisory; the install command works regardless */
-    }
-  }, [operatorToken])
-
-  useEffect(() => { void refreshStage() }, [refreshStage])
-  useEffect(() => {
-    // Keep the visible setup panel authoritative even if the initial POST
-    // response is lost to a component refresh or the API completes between
-    // polls. A closed panel still issues no background requests.
-    if (!open) return
-    void refreshStage()
-    const timer = setInterval(() => { void refreshStage() }, 3000)
-    return () => clearInterval(timer)
-  }, [open, refreshStage])
-
-  async function beginStaging() {
-    setStageError(null)
-    try {
-      setStage(await startModelIntakeRunnerStage(operatorToken))
-    } catch (err) {
-      setStageError(err instanceof Error ? err.message : 'Failed to start staging')
-    }
-  }
 
   async function copyCommand() {
     try {
@@ -257,7 +218,7 @@ export function RunnerInstallCard({
           </div>
           <p className="mt-1 max-w-3xl text-xs text-gray-500">
             Runs the exact model in a disposable no-egress microVM. Not installed by default: it
-            needs root, changes the host, and costs a multi-gigabyte guest image.
+            needs root, changes the host, and downloads a multi-gigabyte guest image.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -285,8 +246,8 @@ export function RunnerInstallCard({
           </li>
         </ul>
         <p className="mt-2 text-[11px] text-gray-500">
-          ShakerScan never installs this privileged tier silently. The UI can stage the pinned guest,
-          then gives the operator one reviewable host command.
+          ShakerScan never installs this privileged tier silently. One host command downloads,
+          verifies, installs, connects, and checks the runner.
         </p>
       </div>
 
@@ -310,13 +271,10 @@ export function RunnerInstallCard({
             </button>
             {open && (
               <div className="mt-3 grid gap-3 rounded border border-gray-800 bg-gray-900 p-3">
-                {/* Installing takes root on the host. The API runs in a
-                    container and must not do that on the operator's behalf, so
-                    this hands over an exact command instead of pretending. */}
                 <p className="text-xs text-gray-400">
                   {installed
                     ? 'This runner is installed. The same reviewed procedure installs it on another compatible host or refreshes its pinned components here.'
-                    : 'Run this on the ShakerScan host. It asks for confirmation and prints every change before touching anything.'}
+                    : 'Open a terminal on the computer running ShakerScan, copy the one command below, and run it. The command enters the correct ShakerScan folder for you.'}
                 </p>
                 <div>
                   <div className="text-xs font-medium text-gray-300">Receipt signer</div>
@@ -352,61 +310,24 @@ export function RunnerInstallCard({
                     </label>
                   )}
                 </div>
-                {/* The slow half of the install needs no privilege the API
-                    lacks, so the button does it and leaves only the fast root
-                    step to the operator. */}
-                <div className="rounded border border-gray-800 bg-gray-950 p-3">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="text-xs font-medium text-gray-300">
-                      Step 1 — stage the guest image and kernel
-                    </div>
-                    <span className={`rounded px-2 py-0.5 text-[10px] font-semibold ${
-                      staged ? 'bg-green-950/60 text-green-300'
-                        : staging ? 'bg-yellow-950/60 text-yellow-200'
-                          : stage?.status === 'failed' ? 'bg-red-950/60 text-red-300'
-                            : 'bg-gray-800 text-gray-400'
-                    }`}>
-                      {staged ? 'staged' : staging ? (stage?.phase || 'running') : stage?.status === 'failed' ? 'failed' : 'not staged'}
-                    </span>
-                  </div>
-                  <p className="mt-1 text-[11px] text-gray-500">
-                    Builds the multi-gigabyte guest and fetches the digest-pinned kernel. This is the
-                    slow part, and it needs no host privileges.
-                  </p>
-                  <button
-                    type="button"
-                    onClick={beginStaging}
-                    disabled={staging || !operatorToken.trim()}
-                    className="mt-2 inline-flex items-center gap-2 rounded border border-cyan-700 bg-cyan-950/40 px-3 py-1.5 text-xs text-cyan-100 hover:bg-cyan-900/40 disabled:cursor-not-allowed disabled:border-gray-700 disabled:bg-transparent disabled:text-gray-600"
-                  >
-                    {staging ? 'Staging…' : staged ? 'Re-stage' : 'Stage guest image'}
-                  </button>
-                  {!operatorToken.trim() && (
-                    <span className="ml-2 text-[11px] text-gray-500">Needs the operator credential.</span>
-                  )}
-                  {stageError && <div className="mt-2 text-[11px] text-red-300">{stageError}</div>}
-                  {stage?.error && <div className="mt-2 break-words text-[11px] text-red-300">{stage.error}</div>}
-                  {stage?.artifacts?.rootfs && (
-                    <div className="mt-2 break-all font-mono text-[10px] text-gray-500">
-                      rootfs sha256:{stage.artifacts.rootfs.sha256?.slice(0, 32)}… ({Math.round(stage.artifacts.rootfs.bytes / 1048576)} MB)
-                    </div>
-                  )}
-                  {stage?.log && stage.log.length > 0 && (staging || stage.status === 'failed') && (
-                    <pre className="mt-2 max-h-40 overflow-auto rounded bg-black/50 p-2 font-mono text-[10px] text-gray-400">
-                      {stage.log.slice(-12).join('\n')}
-                    </pre>
-                  )}
-                </div>
-
-                <div className="text-xs font-medium text-gray-300">
-                  Step 2 — install on the host (root, seconds){staged ? '' : ' — runs faster after staging'}
-                </div>
+                <div className="text-xs font-medium text-gray-300">Run this one command</div>
                 <div className="flex min-w-0 items-center gap-2 rounded border border-gray-800 bg-black/40 p-2">
                   <code className="min-w-0 flex-1 break-all font-mono text-[11px] text-cyan-200">{command}</code>
                   <button type="button" onClick={copyCommand} disabled={!commandReady} className="shrink-0 rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-40">
                     <Copy className="h-3 w-3" /> {copied ? 'Copied' : 'Copy'}
                   </button>
                 </div>
+                <p className="text-[11px] text-gray-500">
+                  Runtime: <code className="text-gray-300">{plan.runtime_dir || '~/.shakerscan'}</code>
+                  {plan.install_kind === 'source_checkout'
+                    ? ' (local source checkout)'
+                    : ' (curl installation)'}
+                </p>
+                <p className="text-[11px] text-gray-500">
+                  {plan.install_kind === 'source_checkout'
+                    ? 'The command enters this source checkout automatically.'
+                    : 'Curl installations live in ~/.shakerscan; the command enters that folder automatically.'}
+                </p>
                 <div className="text-xs text-gray-500">
                   <div className="font-medium text-gray-400">It will:</div>
                   <ul className="mt-1 list-disc pl-4">
@@ -416,7 +337,8 @@ export function RunnerInstallCard({
                 </div>
                 <p className="text-xs text-gray-500">
                   This one host command verifies the staged kernel and rootfs, installs or refreshes the
-                  service, restarts the API, and registers the purpose-scoped runner trust anchor. When it
+                  service, restarts the API, and registers the purpose-scoped runner trust anchor. It builds
+                  or downloads anything it still needs. When it
                   finishes, choose <span className="text-gray-300">Re-check</span> above.
                 </p>
               </div>

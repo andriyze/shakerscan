@@ -41,6 +41,7 @@ import {
   listRecentModelIntakeScans,
   resolveModelIntakeReference,
   submitModelIntakeScan,
+  getStoredModelIntakeOperatorToken,
   MODEL_INTAKE_OPERATOR_TOKEN_KEY,
   type ModelIntakeOperatorCredential,
   type ModelIntakeCheckCatalog,
@@ -619,7 +620,7 @@ function ModelIntakeSettingsContent() {
   // find it in .env was pure friction. Fall back to the manual field only when
   // the UI server declines (remote bind, autofill disabled, or unconfigured).
   const loadOperatorCredential = useCallback(async () => {
-    const stored = sessionStorage.getItem(MODEL_INTAKE_OPERATOR_TOKEN_KEY) || ''
+    const stored = getStoredModelIntakeOperatorToken()
     if (stored) {
       setOperatorToken(stored)
       setOperatorCredential({ available: true, reason: 'stored_session' })
@@ -2794,8 +2795,6 @@ function ModelIntakeSettingsContent() {
           <RunnerInstallCard
             readiness={runnerReadiness}
             plan={runnerInstallPlan}
-            operatorToken={operatorToken}
-            environment={environment}
             onRecheck={loadRunnerReadiness}
           />
         </Card>

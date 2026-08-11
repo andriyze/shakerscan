@@ -12,6 +12,7 @@ import {
   type PolicyProfile,
   type PolicyProfilePayload,
   getModelIntakeOperatorCredential,
+  getStoredModelIntakeOperatorToken,
   MODEL_INTAKE_OPERATOR_TOKEN_KEY,
   type ModelIntakeOperatorCredential,
 } from '@/lib/api'
@@ -113,7 +114,7 @@ export default function PolicyProfilesPage() {
   // Same contract as the Model Intake page: a loopback deployment supplies its
   // own credential, so the manual field is only for remote installs.
   useEffect(() => {
-    const stored = sessionStorage.getItem(MODEL_INTAKE_OPERATOR_TOKEN_KEY) || ''
+    const stored = getStoredModelIntakeOperatorToken()
     if (stored) {
       setOperatorToken(stored)
       setOperatorCredential({ available: true, reason: 'stored_session' })

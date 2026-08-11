@@ -114,18 +114,22 @@ test('page stages are numbered in the order they are rendered', () => {
   }
 })
 
-test('the browser credential status route never serializes an operator secret', () => {
+test('local installs receive a scoped browser session without the operator secret', () => {
   assert.match(api, /getModelIntakeOperatorCredential/)
   assert.match(api, /\/api\/model-intake\/operator-credential/)
   assert.match(page, /loadOperatorCredential/)
   assert.match(page, /getModelIntakeOperatorCredential\(\)/)
+  assert.match(api, /getStoredModelIntakeOperatorToken/)
+  assert.match(api, /expiresAt \* 1000 <= Date\.now\(\) \+ 60_000/)
   // The manual field remains for deployments the UI server will not autofill.
   assert.match(workflow, /operatorCredentialAutofilled/)
   assert.match(workflow, /onOperatorTokenChange\(event\.target\.value\)/)
 
   const route = readFileSync(path.join(root, 'src/app/api/model-intake/operator-credential/route.ts'), 'utf8')
   assert.match(route, /manual_required/)
-  assert.match(route, /Never serialize/)
+  assert.match(route, /local_session/)
+  assert.match(route, /createHmac/)
+  assert.match(route, /MODEL_INTAKE_LOCAL_SESSION_SECRET/)
   assert.doesNotMatch(route, /process\.env\.MODEL_INTAKE_OPERATOR_TOKEN/)
   assert.doesNotMatch(route, /headers\.get\('host'\)/)
 })
@@ -213,7 +217,9 @@ test('operator credential delivery cannot be enabled by spoofed deployment heade
   const route = readFileSync(path.join(root, 'src/app/api/model-intake/operator-credential/route.ts'), 'utf8')
   assert.doesNotMatch(route, /headers\.get\('x-forwarded-for'\)/)
   assert.doesNotMatch(route, /headers\.get\('host'\)/)
-  assert.doesNotMatch(route, /SHAKERSCAN_BIND_HOST/)
+  assert.match(route, /SHAKERSCAN_BIND_HOST/)
+  assert.match(route, /SHAKERSCAN_PUBLIC_HOST/)
+  assert.doesNotMatch(route, /NextRequest/)
   assert.doesNotMatch(route, /MODEL_INTAKE_OPERATOR_TOKEN/)
 })
 
@@ -222,8 +228,8 @@ test('credential messaging leads with impact and keeps ops detail behind a discl
   // Someone pasting a Hugging Face URL to run a preflight scan should never be
   // told to go paste an environment variable: the scan needs no credential.
   assert.match(route, /hint/)
-  assert.match(route, /Corporate admission actions require an operator credential/)
-  assert.match(route, /approved secret channel/)
+  assert.match(route, /remote or managed deployment requires a named Model Intake reviewer credential/)
+  assert.match(route, /approved secret or identity channel/)
   assert.match(workflow, /Where do I get one\?/)
   assert.match(workflow, /Everything before it/)
   // The context chip is neutral, not a warning, because preflight is unaffected.
@@ -352,10 +358,14 @@ test('the microVM tier is offered as an opt-in install, not executed by the API'
   assert.doesNotMatch(shell, /\{!installed && plan && \(/)
   assert.match(shell, /Receipt signer/)
   assert.match(shell, /navigator\.clipboard\.writeText\(command\)/)
-  // While the operator is watching setup, reconcile with the durable staging
-  // state even if the initial POST response or one timer tick was missed.
-  assert.match(shell, /if \(!open\) return/)
-  assert.match(shell, /setInterval\(\(\) => \{ void refreshStage\(\) \}, 3000\)/)
+  assert.match(shell, /Run this one command/)
+  assert.match(shell, /enters the correct ShakerScan folder for you/)
+  assert.match(shell, /plan\.runtime_dir/)
+  assert.match(shell, /curl installation/)
+  assert.match(shell, /Curl installations live in ~\/\.shakerscan/)
+  assert.match(shell, /local source checkout/)
+  assert.doesNotMatch(shell, /Stage guest image/)
+  assert.doesNotMatch(shell, /startModelIntakeRunnerStage/)
   // An unsupported host gets the reason, never an install button it cannot use.
   assert.match(shell, /plan\.supported/)
   assert.match(shell, /Every other Model Intake check is unaffected/)
