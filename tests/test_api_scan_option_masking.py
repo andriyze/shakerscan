@@ -765,6 +765,7 @@ def test_default_scan_list_hides_shards_and_asm_activity_rows():
         api_module.asm_inventory.ASM_BATCH_ROLE,
         api_module.asm_inventory.ASM_RECON_ROLE,
         api_module.parallel_scan.PARALLEL_DISCOVERY_ROLE,
+        api_module.DEVICE_WEB_ORIGIN_ROLE,
     ]
 
 
@@ -773,6 +774,7 @@ def test_scan_list_internal_flags_reveal_requested_implementation_rows():
         api_module.asm_inventory.ASM_BATCH_ROLE,
         api_module.asm_inventory.ASM_RECON_ROLE,
         api_module.parallel_scan.PARALLEL_DISCOVERY_ROLE,
+        api_module.DEVICE_WEB_ORIGIN_ROLE,
     ]
     assert api_module._hidden_scan_roles_for_list(include_internal=True) == ["shard"]
     assert api_module._hidden_scan_roles_for_list(include_shards=True, include_internal=True) == []
