@@ -895,6 +895,66 @@ def test_live_worker_build_reports_prune_old_local_hosts_but_keep_remote_nodes()
     assert set(filtered) == {b"live123", b"remote789"}
 
 
+def test_device_worker_readiness_uses_its_own_current_capable_registry(monkeypatch):
+    now = datetime.now(timezone.utc)
+
+    class RedisStub:
+        def hgetall(self, key):
+            assert key == "shakerscan:device_worker_build"
+            return {
+                b"device-1": json.dumps({
+                    "build_fingerprint": "expected",
+                    "scanner_version": "label",
+                    "worker_kind": "device",
+                    "tools": ["nmap", "ssh-keyscan"],
+                    "reported_at": now.isoformat(),
+                }).encode(),
+            }
+
+    monkeypatch.setenv("DEVICE_POSTURE_ENABLED", "true")
+    monkeypatch.setattr(api_module, "get_redis", lambda: RedisStub())
+    monkeypatch.setattr(api_module, "expected_build_fingerprint", lambda: "expected")
+    monkeypatch.setattr(api_module, "current_scanner_version", lambda: "label")
+
+    readiness = api_module._device_worker_readiness()
+
+    assert readiness["status"] == "ready"
+    assert readiness["capable_worker_count"] == 1
+    assert readiness["workers"][0]["capable"] is True
+
+
+def test_device_worker_readiness_fails_closed_for_stale_or_missing_nmap(monkeypatch):
+    now = datetime.now(timezone.utc)
+
+    class RedisStub:
+        def hgetall(self, key):
+            return {
+                "stale-device": json.dumps({
+                    "build_fingerprint": "old",
+                    "scanner_version": "label",
+                    "tools": ["nmap"],
+                    "reported_at": now.isoformat(),
+                }),
+                "no-nmap": json.dumps({
+                    "build_fingerprint": "expected",
+                    "scanner_version": "label",
+                    "tools": ["ssh-keyscan"],
+                    "reported_at": now.isoformat(),
+                }),
+            }
+
+    monkeypatch.setenv("DEVICE_POSTURE_ENABLED", "true")
+    monkeypatch.setattr(api_module, "get_redis", lambda: RedisStub())
+    monkeypatch.setattr(api_module, "expected_build_fingerprint", lambda: "expected")
+    monkeypatch.setattr(api_module, "current_scanner_version", lambda: "label")
+
+    readiness = api_module._device_worker_readiness()
+
+    assert readiness["status"] == "not_ready"
+    assert readiness["reason"] == "device_worker_build_stale"
+    assert readiness["capable_worker_count"] == 0
+
+
 def test_target_credential_profile_public_shape_never_returns_secret(monkeypatch):
     monkeypatch.setattr(api_module, "encryption_enabled", lambda: True)
     row = {

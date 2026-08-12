@@ -4945,6 +4945,9 @@ export async function routeAiOps(payload: {
 export async function getDeviceReadiness(): Promise<{
   enabled: boolean
   status: string
+  reason?: string | null
+  worker_count: number
+  capable_worker_count: number
   profiles: string[]
   required_worker_tools: string[]
   optional_sensor_capabilities: string[]

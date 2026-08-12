@@ -27,6 +27,8 @@ export default function DevicesPage() {
   const [loading, setLoading] = useState(true)
   const [failed, setFailed] = useState(false)
   const [enabled, setEnabled] = useState(true)
+  const [workerReady, setWorkerReady] = useState(false)
+  const [readinessReason, setReadinessReason] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [addOpen, setAddOpen] = useState(false)
   const [scanTarget, setScanTarget] = useState<DeviceTarget | null>(null)
@@ -44,6 +46,8 @@ export default function DevicesPage() {
       setDevices(deviceData.devices || [])
       setPolicies(policyData.policies || [])
       setEnabled(readiness.enabled)
+      setWorkerReady(readiness.status === 'ready')
+      setReadinessReason(readiness.reason || null)
       setFailed(false)
     } catch {
       setFailed(true)
@@ -111,6 +115,7 @@ export default function DevicesPage() {
       />
 
       {!enabled && <Card className="mb-4 border-amber-500/30 bg-amber-500/5 p-4 text-sm text-amber-200">Connected-device scanning is disabled by the operator.</Card>}
+      {enabled && !workerReady && <Card className="mb-4 border-amber-500/30 bg-amber-500/5 p-4 text-sm text-amber-200">Device inventory is available, but scans are paused until a current device worker with Nmap is ready{readinessReason ? ` (${readinessReason.replace(/_/g, ' ')})` : ''}.</Card>}
 
       <div className="mb-4 max-w-md"><Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search name, address, or manufacturer" aria-label="Search connected devices" /></div>
 
@@ -128,7 +133,7 @@ export default function DevicesPage() {
               <div className="rounded bg-gray-950 p-2"><div className="text-lg font-semibold text-white">{device.active_findings_count || 0}</div><div className="text-gray-500">findings</div></div>
               <div className="rounded bg-gray-950 p-2"><div className="truncate text-sm font-semibold text-white">{device.device_class}</div><div className="text-gray-500">class</div></div>
             </div>
-            <div className="mt-4 flex items-center justify-between text-xs text-gray-500"><span>{device.policy_name || 'Default policy'}</span><Button size="sm" onClick={() => { setScanTarget(device); setScanForm({ profile: 'posture', include_web_dast: true, web_scan_type: 'standard', confirm_authorized: false }) }}>Scan</Button></div>
+            <div className="mt-4 flex items-center justify-between text-xs text-gray-500"><span>{device.policy_name || 'Default policy'}</span><Button size="sm" disabled={!workerReady} onClick={() => { setScanTarget(device); setScanForm({ profile: 'posture', include_web_dast: true, web_scan_type: 'standard', confirm_authorized: false }) }}>Scan</Button></div>
           </Card>
         ))}</div>}
 

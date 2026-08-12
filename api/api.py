@@ -567,6 +567,7 @@ DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://scanner:scanner@loca
 RESULTS_DIR = Path(os.environ.get('RESULTS_DIR', '/results'))
 QUEUE_NAME = 'scan_jobs'
 DEVICE_QUEUE_NAME = os.environ.get("DEVICE_QUEUE_NAME", "device_scan_jobs")
+DEVICE_WORKER_BUILD_REGISTRY_KEY = "shakerscan:device_worker_build"
 RETEST_QUEUE_NAME = os.environ.get("RETEST_QUEUE_NAME", "retest_jobs")
 BROKER_INGEST_QUEUE_NAME = os.environ.get("BROKER_INGEST_QUEUE_NAME", "broker_ingest_jobs")
 BROKER_LEASE_SECONDS = max(60, int(os.environ.get("SHAKERSCAN_BROKER_LEASE_SECONDS", "300")))
@@ -18032,12 +18033,72 @@ def _device_locator_type(locator: str) -> str:
         return "hostname"
 
 
-@app.get("/devices/readiness")
-async def get_device_readiness():
+def _device_worker_readiness() -> dict[str, Any]:
+    """Return fresh, build-current device-worker capacity without touching Web DAST telemetry."""
     enabled = _device_posture_enabled()
+    expected_fingerprint = expected_build_fingerprint()
+    expected_version = current_scanner_version()
+    now = datetime.now(timezone.utc)
+    reports: list[dict[str, Any]] = []
+    try:
+        raw_reports = get_redis().hgetall(DEVICE_WORKER_BUILD_REGISTRY_KEY) or {}
+    except Exception:
+        raw_reports = {}
+    for raw_host, raw_payload in raw_reports.items():
+        host = raw_host.decode("utf-8", "replace") if isinstance(raw_host, bytes) else str(raw_host)
+        payload = raw_payload.decode("utf-8", "replace") if isinstance(raw_payload, bytes) else raw_payload
+        try:
+            report = json.loads(payload) if isinstance(payload, str) else dict(payload)
+            reported_at = datetime.fromisoformat(str(report.get("reported_at") or "").replace("Z", "+00:00"))
+            if reported_at.tzinfo is None:
+                reported_at = reported_at.replace(tzinfo=timezone.utc)
+            age_seconds = (now - reported_at.astimezone(timezone.utc)).total_seconds()
+            if not (-_WORKER_BUILD_REPORT_CLOCK_SKEW_SECONDS <= age_seconds <= _WORKER_BUILD_REPORT_MAX_AGE_SECONDS):
+                continue
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        tools = sorted({str(item).strip().lower() for item in report.get("tools", []) if str(item).strip()})
+        build_current = worker_build_current(
+            reported_fingerprint=report.get("build_fingerprint"),
+            reported_version=report.get("scanner_version"),
+            expected_fingerprint=expected_fingerprint,
+            expected_version=expected_version,
+        )
+        reports.append({
+            "worker_id": host,
+            "build_current": build_current,
+            "tools": tools,
+            "reported_at": report.get("reported_at"),
+            "capable": build_current is True and "nmap" in tools,
+        })
+    capable_count = sum(1 for report in reports if report["capable"])
+    if not enabled:
+        status, reason = "disabled", "feature_disabled"
+    elif capable_count:
+        status, reason = "ready", None
+    elif reports and any(report["build_current"] is False for report in reports):
+        status, reason = "not_ready", "device_worker_build_stale"
+    elif reports:
+        status, reason = "not_ready", "device_worker_missing_nmap_or_build_identity"
+    else:
+        status, reason = "not_ready", "no_fresh_device_worker"
     return {
         "enabled": enabled,
-        "status": "ready" if enabled else "disabled",
+        "status": status,
+        "reason": reason,
+        "queue_name": DEVICE_QUEUE_NAME,
+        "worker_count": len(reports),
+        "capable_worker_count": capable_count,
+        "workers": reports,
+        "expected_build_fingerprint": expected_fingerprint,
+    }
+
+
+@app.get("/devices/readiness")
+async def get_device_readiness():
+    readiness = _device_worker_readiness()
+    return {
+        **readiness,
         "profiles": sorted(DEVICE_PROFILES),
         "required_worker_tools": ["nmap"],
         "optional_sensor_capabilities": ["bluetooth", "ble", "passive_traffic"],
@@ -18246,6 +18307,16 @@ async def deactivate_device(device_id: str):
 async def scan_device(device_id: str, request: DeviceScanRequest):
     if not _device_posture_enabled():
         raise HTTPException(status_code=503, detail="Connected-device posture is disabled")
+    readiness = _device_worker_readiness()
+    if readiness["status"] != "ready":
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "message": "No build-current connected-device worker is ready",
+                "reason": readiness["reason"],
+                "worker_count": readiness["worker_count"],
+            },
+        )
     if not request.confirm_authorized:
         raise HTTPException(status_code=409, detail="Re-submit with confirm_authorized=true after confirming permission to scan this device")
     device_uuid = _device_uuid(device_id)

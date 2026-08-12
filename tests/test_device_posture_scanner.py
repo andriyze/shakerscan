@@ -1,6 +1,7 @@
 import asyncio
 import os
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -55,3 +56,23 @@ def test_web_detection_checks_nonstandard_ports(monkeypatch):
     ))
     assert origins[0]["origin"] == "https://10.0.0.8:49152"
     assert calls == [(49152, False), (49152, True)]
+
+
+def test_device_worker_identity_and_queue_are_isolated_from_web_dast():
+    root = Path(__file__).resolve().parents[1]
+    worker = (root / "api" / "worker.py").read_text(encoding="utf-8")
+    compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
+
+    assert '"shakerscan:device_worker_build" if DEVICE_ONLY_WORKER else "shakerscan:worker_build"' in worker
+    assert "base_queue_keys = [DEVICE_QUEUE_NAME]" in worker
+    assert "device-worker:" in compose
+    assert "DEVICE_ONLY_WORKER=true" in compose
+
+
+def test_upgrade_migration_adds_run_kind_before_device_filtered_views():
+    root = Path(__file__).resolve().parents[1]
+    migrations = (root / "api" / "retest_contract.py").read_text(encoding="utf-8")
+
+    run_kind_column = migrations.index("ADD COLUMN IF NOT EXISTS run_kind TEXT DEFAULT 'web_dast'")
+    latest_scans_view = migrations.index("CREATE OR REPLACE VIEW latest_scans AS")
+    assert run_kind_column < latest_scans_view

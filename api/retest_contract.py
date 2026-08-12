@@ -1025,6 +1025,7 @@ async def run_schema_migrations(pool) -> None:
                 ALTER TABLE scans
                 ADD COLUMN IF NOT EXISTS parent_scan_id UUID REFERENCES scans(id) ON DELETE SET NULL,
                 ADD COLUMN IF NOT EXISTS scan_role TEXT NOT NULL DEFAULT 'standalone',
+                ADD COLUMN IF NOT EXISTS run_kind TEXT DEFAULT 'web_dast',
                 ADD COLUMN IF NOT EXISTS shard_index INTEGER,
                 ADD COLUMN IF NOT EXISTS shard_count INTEGER
             """)

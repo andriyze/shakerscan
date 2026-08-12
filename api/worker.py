@@ -115,6 +115,8 @@ DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://scanner:scanner@loca
 RESULTS_DIR = Path(os.environ.get('RESULTS_DIR', '/results'))
 QUEUE_NAME = 'scan_jobs'
 DEVICE_QUEUE_NAME = os.environ.get("DEVICE_QUEUE_NAME", "device_scan_jobs")
+DEVICE_ONLY_WORKER = str(os.environ.get("DEVICE_ONLY_WORKER", "false")).strip().lower() in {"1", "true", "yes", "on"}
+WORKER_BUILD_REGISTRY_KEY = "shakerscan:device_worker_build" if DEVICE_ONLY_WORKER else "shakerscan:worker_build"
 RETEST_QUEUE_NAME = os.environ.get("RETEST_QUEUE_NAME", "retest_jobs")
 BROKER_INGEST_QUEUE_NAME = os.environ.get("BROKER_INGEST_QUEUE_NAME", "broker_ingest_jobs")
 AI_GATE_RUN_KINDS = {"ai_api", "ai_rag", "ai_trace", "ai_mcp", "ai_widget"}
@@ -11465,9 +11467,8 @@ async def async_main():
     await init_db()
 
     r = get_redis()
-    device_only_worker = str(os.environ.get("DEVICE_ONLY_WORKER", "false")).strip().lower() in {"1", "true", "yes", "on"}
     device_queue_enabled = str(os.environ.get("DEVICE_SCAN_WORKER_ENABLED", "false")).strip().lower() in {"1", "true", "yes", "on"}
-    if device_only_worker:
+    if DEVICE_ONLY_WORKER:
         base_queue_keys = [DEVICE_QUEUE_NAME]
     else:
         base_queue_keys = [QUEUE_NAME, RETEST_QUEUE_NAME, BROKER_INGEST_QUEUE_NAME]
@@ -11569,7 +11570,7 @@ async def async_main():
         # immediately. Crash/kill remnants still age out server-side, while graceful rebuilds do
         # not leave a transient false mismatch in the sidebar.
         try:
-            r.hdel("shakerscan:worker_build", _worker_build_hostname())
+            r.hdel(WORKER_BUILD_REGISTRY_KEY, _worker_build_hostname())
         except Exception:
             pass
         # Close database pool
@@ -11641,6 +11642,10 @@ def _worker_build_report_payload() -> tuple[str, str]:
         "build_fingerprint": _worker_build_fingerprint(),
         "scanner_version": published_scanner_version(_published_scanner_version()),
         "node_id": os.environ.get("SHAKERSCAN_NODE_ID") or os.environ.get("FLEET_NODE_ID") or None,
+        "worker_kind": "device" if DEVICE_ONLY_WORKER else "web_dast",
+        "tools": sorted(
+            tool for tool, command in DEFAULT_WORKER_TOOL_COMMANDS.items() if shutil.which(command)
+        ),
         "reported_at": utc_now_iso(),
     })
     return hostname, payload
@@ -11648,13 +11653,17 @@ def _worker_build_report_payload() -> tuple[str, str]:
 
 def _write_worker_build_report(redis_client) -> str:
     hostname, payload = _worker_build_report_payload()
-    redis_client.hset("shakerscan:worker_build", hostname, payload)
+    redis_client.hset(WORKER_BUILD_REGISTRY_KEY, hostname, payload)
     return hostname
 
 
 def report_worker_build_fingerprint() -> None:
-    """Register this worker's build fingerprint in Redis so GET /workers can show
-    per-worker current/stale status without shelling into containers."""
+    """Register build identity in the product-specific worker registry.
+
+    Device-only workers deliberately never enter the Web DAST registry, so adding
+    connected-device capacity cannot make the ordinary fleet look larger, stale,
+    or partially reported.
+    """
     try:
         hostname = _write_worker_build_report(get_redis())
         print(f"[worker] registered build fingerprint for {hostname}", flush=True)
