@@ -1212,6 +1212,7 @@ export interface Scan {
   scan_type: string
   run_kind?: string
   ai_target_id?: string | null
+  device_target_id?: string | null
   ai_target_type?: string | null
   progress?: number
   current_phase?: string
@@ -1287,6 +1288,91 @@ export interface Scan {
     executing_node_id?: string | null
     worker_id?: string | null
   }
+}
+
+export interface DevicePolicyRule {
+  action: 'allow' | 'deny' | 'review' | 'require'
+  transport?: 'any' | 'tcp' | 'udp'
+  ports?: number[]
+  service?: string
+  encrypted?: boolean
+  severity?: 'critical' | 'high' | 'medium' | 'low' | 'info'
+  reason?: string
+  requirements?: Record<string, unknown>
+}
+
+export interface DevicePolicy {
+  id: string
+  name: string
+  description?: string | null
+  device_class: string
+  environment: string
+  rules: DevicePolicyRule[]
+  is_builtin: boolean
+  is_active: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface DeviceTarget {
+  id: string
+  name: string
+  primary_locator: string
+  device_class: string
+  manufacturer?: string | null
+  model?: string | null
+  firmware_version?: string | null
+  stable_identity?: string | null
+  identity_confidence: 'low' | 'medium' | 'high' | 'verified'
+  environment: string
+  policy_id?: string | null
+  policy_name?: string | null
+  sensor_affinity?: string | null
+  metadata_json?: Record<string, unknown>
+  last_scanned_at?: string | null
+  last_scan_id?: string | null
+  last_score?: number | null
+  last_grade?: string | null
+  active_findings_count: number
+  services_count?: number
+  is_active: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface DeviceInterface {
+  id: string
+  interface_type: string
+  locator_type: string
+  locator: string
+  mac_address?: string | null
+  hostname?: string | null
+  network_zone?: string | null
+  first_seen_at: string
+  last_seen_at: string
+}
+
+export interface DeviceService {
+  id: string
+  transport: string
+  port: number
+  state: string
+  service_name: string
+  product?: string | null
+  version?: string | null
+  cpe?: string | null
+  encrypted?: boolean | null
+  web_origin?: string | null
+  policy_disposition?: string | null
+  policy_reason?: string | null
+  last_seen_at: string
+}
+
+export interface DeviceDetailResponse {
+  device: DeviceTarget
+  interfaces: DeviceInterface[]
+  services: DeviceService[]
+  scans: Scan[]
 }
 
 export interface ModelIntakeScanRequest {
@@ -2077,9 +2163,10 @@ export interface Finding {
   scan_id?: string
   target_id?: string
   ai_target_id?: string | null
+  device_target_id?: string | null
   ai_target_url?: string
   ai_target_name?: string
-  source?: 'scan' | 'manual' | 'ai_session' | 'ai_gate' | 'model_intake' | 'asm' | string
+  source?: 'scan' | 'manual' | 'ai_session' | 'ai_gate' | 'model_intake' | 'asm' | 'device' | string
   evidence?: string | Record<string, unknown>
   request?: string
   response?: string
@@ -4854,6 +4941,117 @@ export async function routeAiOps(payload: {
   return res.json()
 }
 
+// Connected devices — deliberately separate from Web DAST targets.
+export async function getDeviceReadiness(): Promise<{
+  enabled: boolean
+  status: string
+  profiles: string[]
+  required_worker_tools: string[]
+  optional_sensor_capabilities: string[]
+  wireless_status: string
+}> {
+  const res = await fetch(`${API_URL}/devices/readiness`, { cache: 'no-store' })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch device readiness'))
+  return res.json()
+}
+
+export async function getDevices(params?: {
+  include_inactive?: boolean
+  device_class?: string
+  search?: string
+  limit?: number
+  offset?: number
+}): Promise<{ devices: DeviceTarget[]; total: number; limit: number; offset: number }> {
+  const search = new URLSearchParams()
+  if (params?.include_inactive) search.set('include_inactive', 'true')
+  if (params?.device_class) search.set('device_class', params.device_class)
+  if (params?.search) search.set('search', params.search)
+  if (params?.limit) search.set('limit', String(params.limit))
+  if (params?.offset) search.set('offset', String(params.offset))
+  const res = await fetch(`${API_URL}/devices?${search}`, { cache: 'no-store' })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch connected devices'))
+  return res.json()
+}
+
+export async function getDevice(deviceId: string): Promise<DeviceDetailResponse> {
+  const res = await fetch(`${API_URL}/devices/${encodeURIComponent(deviceId)}`, { cache: 'no-store' })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch connected device'))
+  return res.json()
+}
+
+export async function createDevice(payload: {
+  name?: string
+  primary_locator: string
+  device_class?: string
+  manufacturer?: string
+  model?: string
+  environment?: string
+  policy_id?: string
+}): Promise<{ device: DeviceTarget }> {
+  const res = await fetch(`${API_URL}/devices`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to add connected device'))
+  return res.json()
+}
+
+export async function scanDevice(deviceId: string, payload: {
+  profile: 'inventory' | 'posture' | 'thorough'
+  confirm_authorized: boolean
+  include_web_dast: boolean
+  web_scan_type: 'quick' | 'standard' | 'deep'
+  max_web_origins?: number
+}): Promise<{ scan_id: string; job_id: string; status: string; ui_url: string }> {
+  const res = await fetch(`${API_URL}/devices/${encodeURIComponent(deviceId)}/scan`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to start connected-device scan'))
+  return res.json()
+}
+
+export async function getDevicePolicies(includeInactive = false): Promise<{ policies: DevicePolicy[] }> {
+  const res = await fetch(`${API_URL}/device-policies?include_inactive=${includeInactive ? 'true' : 'false'}`, { cache: 'no-store' })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch device policies'))
+  return res.json()
+}
+
+export async function createDevicePolicy(payload: {
+  name: string
+  description?: string
+  device_class: string
+  environment: string
+  rules: DevicePolicyRule[]
+}): Promise<{ policy: DevicePolicy }> {
+  const res = await fetch(`${API_URL}/device-policies`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to create device policy'))
+  return res.json()
+}
+
+export async function updateDevicePolicy(policyId: string, payload: Partial<{
+  name: string
+  description: string
+  device_class: string
+  environment: string
+  rules: DevicePolicyRule[]
+  is_active: boolean
+}>): Promise<{ policy: DevicePolicy }> {
+  const res = await fetch(`${API_URL}/device-policies/${encodeURIComponent(policyId)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to update device policy'))
+  return res.json()
+}
+
 // Targets
 export async function getTarget(targetId: string): Promise<Target> {
   const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}`)
@@ -5081,13 +5279,14 @@ export async function scanTarget(targetId: string, options: Record<string, unkno
 export async function getFindings(params?: {
   severity?: string
   status?: string
-  source_type?: 'dast' | 'ai' | 'ai_gate' | 'ai_session' | 'deep_hunt' | 'autonomous' | 'model_intake' | 'asm' | 'manual'
+  source_type?: 'dast' | 'device' | 'ai' | 'ai_gate' | 'ai_session' | 'deep_hunt' | 'autonomous' | 'model_intake' | 'asm' | 'manual'
   limit?: number
   offset?: number
   root_domain?: string
   scan_id?: string
   target_id?: string
   ai_target_id?: string
+  device_target_id?: string
   search?: string
   seen_within_days?: number
   first_seen_within_days?: number
@@ -5110,6 +5309,7 @@ export async function getFindings(params?: {
   if (params?.scan_id) searchParams.set('scan_id', params.scan_id)
   if (params?.target_id) searchParams.set('target_id', params.target_id)
   if (params?.ai_target_id) searchParams.set('ai_target_id', params.ai_target_id)
+  if (params?.device_target_id) searchParams.set('device_target_id', params.device_target_id)
   if (params?.search) searchParams.set('search', params.search)
   if (params?.seen_within_days) searchParams.set('seen_within_days', params.seen_within_days.toString())
   if (params?.first_seen_within_days) searchParams.set('first_seen_within_days', params.first_seen_within_days.toString())

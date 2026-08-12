@@ -34,6 +34,7 @@ interface FindingsFilters {
   scan_id?: string
   target_id?: string
   ai_target_id?: string
+  device_target_id?: string
   driven_by?: string
   research_campaign_id?: string
   search?: string
@@ -62,6 +63,7 @@ const VERIFICATION_VERDICTS = [
 const SOURCE_TYPE_OPTIONS = [
   { value: '', label: 'All' },
   { value: 'dast', label: 'DAST' },
+  { value: 'device', label: 'Device' },
   { value: 'deep_hunt', label: 'Deep Hunt' },
   { value: 'ai_gate', label: 'AI Gate' },
   { value: 'ai_session', label: 'Interactive' },
@@ -70,9 +72,12 @@ const SOURCE_TYPE_OPTIONS = [
   { value: 'manual', label: 'Manual' },
 ] as const
 
-type FindingSourceTypeFilter = 'dast' | 'ai' | 'ai_gate' | 'ai_session' | 'deep_hunt' | 'autonomous' | 'model_intake' | 'asm' | 'manual'
+type FindingSourceTypeFilter = 'dast' | 'device' | 'ai' | 'ai_gate' | 'ai_session' | 'deep_hunt' | 'autonomous' | 'model_intake' | 'asm' | 'manual'
 
 function getFindingSourceType(finding: Finding): FindingSourceType {
+  if (finding.source === 'device') {
+    return 'Device'
+  }
   if (finding.source === 'model_intake' || finding.tool === 'model_intake') {
     return 'Model Intake'
   }
@@ -147,6 +152,7 @@ function FindingsContent() {
   const scanIdFilter = filters.scan_id || ''
   const targetIdFilter = filters.target_id || ''
   const aiTargetIdFilter = filters.ai_target_id || ''
+  const deviceTargetIdFilter = filters.device_target_id || ''
   const drivenByFilter = filters.driven_by || ''
   const researchCampaignFilter = filters.research_campaign_id || ''
   const searchQuery = filters.search || ''
@@ -163,7 +169,7 @@ function FindingsContent() {
 
   const hasActiveFilters = Boolean(
     severityFilter || statusFilter || sourceTypeFilter || domainFilter ||
-    scanIdFilter || targetIdFilter || aiTargetIdFilter || drivenByFilter || researchCampaignFilter ||
+    scanIdFilter || targetIdFilter || aiTargetIdFilter || deviceTargetIdFilter || drivenByFilter || researchCampaignFilter ||
     searchQuery || lastSeenFilter ||
     firstSeenWithinFilter || resolvedWithinFilter ||
     verificationVerdictFilter || verificationModeFilter || verifiedOnlyFilter
@@ -197,7 +203,7 @@ function FindingsContent() {
 
   useEffect(() => {
     fetchFindings()
-  }, [severityFilter, statusFilter, sourceTypeFilter, domainFilter, scanIdFilter, targetIdFilter, aiTargetIdFilter, drivenByFilter, researchCampaignFilter, searchQuery, lastSeenFilter, firstSeenWithinFilter, resolvedWithinFilter, verificationVerdictFilter, verificationModeFilter, verifiedOnlyFilter, rawPage, sortBy, sortOrder])
+  }, [severityFilter, statusFilter, sourceTypeFilter, domainFilter, scanIdFilter, targetIdFilter, aiTargetIdFilter, deviceTargetIdFilter, drivenByFilter, researchCampaignFilter, searchQuery, lastSeenFilter, firstSeenWithinFilter, resolvedWithinFilter, verificationVerdictFilter, verificationModeFilter, verifiedOnlyFilter, rawPage, sortBy, sortOrder])
 
   async function fetchFindings() {
     try {
@@ -209,6 +215,7 @@ function FindingsContent() {
         scan_id: scanIdFilter || undefined,
         target_id: targetIdFilter || undefined,
         ai_target_id: aiTargetIdFilter || undefined,
+        device_target_id: deviceTargetIdFilter || undefined,
         search: searchQuery || undefined,
         seen_within_days: lastSeenFilter || undefined,
         first_seen_within_days: firstSeenWithinFilter || undefined,
@@ -621,7 +628,7 @@ function FindingsContent() {
       {/* Deep-link filters (arrive via links from scans/targets/exposure and
           have no visible control above) — surface each as a removable chip so
           the active scope is obvious and individually clearable. */}
-      {(scanIdFilter || targetIdFilter || aiTargetIdFilter || researchCampaignFilter || firstSeenWithinFilter > 0 || resolvedWithinFilter > 0) && (
+      {(scanIdFilter || targetIdFilter || aiTargetIdFilter || deviceTargetIdFilter || researchCampaignFilter || firstSeenWithinFilter > 0 || resolvedWithinFilter > 0) && (
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-xs text-gray-500">Filtered by:</span>
           {scanIdFilter && (
@@ -640,6 +647,12 @@ function FindingsContent() {
             <DeepLinkFilterChip
               label={`AI target: ${findings[0]?.ai_target_name || `${aiTargetIdFilter.slice(0, 8)}…`}`}
               onClear={() => setFilter('ai_target_id', undefined)}
+            />
+          )}
+          {deviceTargetIdFilter && (
+            <DeepLinkFilterChip
+              label={`Device: ${findings[0]?.target_name || findings[0]?.target_url || `${deviceTargetIdFilter.slice(0, 8)}…`}`}
+              onClear={() => setFilter('device_target_id', undefined)}
             />
           )}
           {firstSeenWithinFilter > 0 && (

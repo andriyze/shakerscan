@@ -44,6 +44,9 @@ import {
 } from '@/components/ui'
 
 function getFindingSourceType(finding: Finding): FindingSourceType {
+  if (finding.source === 'device') {
+    return 'Device'
+  }
   if (finding.source === 'model_intake' || finding.tool === 'model_intake') {
     return 'Model Intake'
   }

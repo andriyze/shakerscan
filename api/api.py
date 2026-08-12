@@ -2318,14 +2318,15 @@ async def get_finding_record(conn, finding_id: str):
         finding_uuid = uuid.UUID(finding_id)
         finding = await conn.fetchrow("""
             SELECT f.*,
-                   COALESCE(t.url, ait.endpoint_url) as target_url,
-                   COALESCE(t.name, ait.name) as target_name,
+                   COALESCE(t.url, ait.endpoint_url, dt.primary_locator) as target_url,
+                   COALESCE(t.name, ait.name, dt.name) as target_name,
                    t.root_domain,
                    ait.endpoint_url as ai_target_url,
                    ait.name as ai_target_name
             FROM findings f
             LEFT JOIN targets t ON f.target_id = t.id
             LEFT JOIN ai_targets ait ON f.ai_target_id = ait.id
+            LEFT JOIN device_targets dt ON f.device_target_id = dt.id
             WHERE f.id = $1
         """, finding_uuid)
     except ValueError:
@@ -2334,14 +2335,15 @@ async def get_finding_record(conn, finding_id: str):
     if not finding:
         finding = await conn.fetchrow("""
             SELECT f.*,
-                   COALESCE(t.url, ait.endpoint_url) as target_url,
-                   COALESCE(t.name, ait.name) as target_name,
+                   COALESCE(t.url, ait.endpoint_url, dt.primary_locator) as target_url,
+                   COALESCE(t.name, ait.name, dt.name) as target_name,
                    t.root_domain,
                    ait.endpoint_url as ai_target_url,
                    ait.name as ai_target_name
             FROM findings f
             LEFT JOIN targets t ON f.target_id = t.id
             LEFT JOIN ai_targets ait ON f.ai_target_id = ait.id
+            LEFT JOIN device_targets dt ON f.device_target_id = dt.id
             WHERE f.fingerprint = $1
             ORDER BY f.last_seen_at DESC
             LIMIT 1
@@ -2351,14 +2353,15 @@ async def get_finding_record(conn, finding_id: str):
         suffix = finding_id.split(':')[-1]
         finding = await conn.fetchrow("""
             SELECT f.*,
-                   COALESCE(t.url, ait.endpoint_url) as target_url,
-                   COALESCE(t.name, ait.name) as target_name,
+                   COALESCE(t.url, ait.endpoint_url, dt.primary_locator) as target_url,
+                   COALESCE(t.name, ait.name, dt.name) as target_name,
                    t.root_domain,
                    ait.endpoint_url as ai_target_url,
                    ait.name as ai_target_name
             FROM findings f
             LEFT JOIN targets t ON f.target_id = t.id
             LEFT JOIN ai_targets ait ON f.ai_target_id = ait.id
+            LEFT JOIN device_targets dt ON f.device_target_id = dt.id
             WHERE f.fingerprint = $1
             ORDER BY f.last_seen_at DESC
             LIMIT 1
@@ -53049,6 +53052,7 @@ async def list_findings(
     source_type: Optional[str] = Query(None, pattern="^(dast|device|ai|ai_gate|ai_session|deep_hunt|autonomous|model_intake|asm|manual)$"),
     target_id: Optional[str] = None,
     ai_target_id: Optional[str] = None,
+    device_target_id: Optional[str] = None,
     scan_id: Optional[str] = None,
     root_domain: Optional[str] = None,
     verification_verdict: Optional[str] = Query(None, pattern="^(exploited|likely_vulnerable|blocked_by_security|out_of_scope_internal|false_positive|likely_fixed|inconclusive|error)$"),
@@ -53075,7 +53079,7 @@ async def list_findings(
     # filter (e.g. ?domain= instead of ?root_domain=) would otherwise return the
     # full, unfiltered result set with no indication the filter did nothing.
     allowed_params = {
-        "severity", "status", "source_type", "target_id", "ai_target_id",
+        "severity", "status", "source_type", "target_id", "ai_target_id", "device_target_id",
         "scan_id", "root_domain", "verification_verdict", "verification_mode",
         "verified_only", "driven_by", "research_campaign_id", "search",
         "seen_within_days", "first_seen_within_days",
@@ -53098,8 +53102,8 @@ async def list_findings(
     async with db_pool.acquire() as conn:
         query = """
             SELECT f.*,
-                   COALESCE(t.url, ait.endpoint_url) as target_url,
-                   COALESCE(t.name, ait.name) as target_name,
+                   COALESCE(t.url, ait.endpoint_url, dt.primary_locator) as target_url,
+                   COALESCE(t.name, ait.name, dt.name) as target_name,
                    t.root_domain,
                    ait.endpoint_url as ai_target_url,
                    ait.name as ai_target_name,
@@ -53107,6 +53111,7 @@ async def list_findings(
             FROM findings f
             LEFT JOIN targets t ON f.target_id = t.id
             LEFT JOIN ai_targets ait ON f.ai_target_id = ait.id
+            LEFT JOIN device_targets dt ON f.device_target_id = dt.id
             WHERE 1=1
         """
         params: list = []
@@ -53134,6 +53139,11 @@ async def list_findings(
             params.append(uuid.UUID(ai_target_id))
             param_idx += 1
 
+        if device_target_id:
+            query += f" AND f.device_target_id = ${param_idx}"
+            params.append(uuid.UUID(device_target_id))
+            param_idx += 1
+
         if scan_id:
             query += f" AND f.scan_id = ${param_idx}"
             params.append(uuid.UUID(scan_id))
@@ -53143,6 +53153,7 @@ async def list_findings(
             query += f""" AND (
                 t.root_domain = ${param_idx}
                 OR LOWER(ait.endpoint_url) LIKE '%' || LOWER(${param_idx}) || '%'
+                OR LOWER(dt.primary_locator) LIKE '%' || LOWER(${param_idx}) || '%'
             )"""
             params.append(root_domain)
             param_idx += 1
@@ -54884,7 +54895,12 @@ async def get_finding(finding_id: str):
 
     # Retest capability hints so the UI can gate the retest button instead of
     # surfacing a 400 after the click.
-    if result.get("source") == "ai_gate" or result.get("ai_target_id"):
+    if result.get("source") == "device" or result.get("device_target_id"):
+        result["retest_supported"] = False
+        result["retest_type"] = None
+        result["retest_modes"] = []
+        result["retest_unsupported_reason"] = "device_findings_are_retested_by_a_bounded_device_scan"
+    elif result.get("source") == "ai_gate" or result.get("ai_target_id"):
         result["retest_supported"] = True
         result["retest_type"] = None
         result["retest_modes"] = ["same_probe", "same_family", "strict_replay"]
