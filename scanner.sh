@@ -2908,11 +2908,12 @@ devices_cmd() {
     case "$subcmd" in
         start)
             echo -e "${GREEN}Starting isolated connected-device worker...${NC}"
-            if [ "$USE_PREBUILT" -eq 1 ]; then
-                compose --profile devices up --no-build -d device-worker
-            else
-                compose --profile devices up -d --build device-worker
-            fi
+            # Starting optional capacity must never trigger an implicit source
+            # build. Source operators build once with `scanner.sh rebuild`;
+            # release operators already have the selected prebuilt image.
+            # `--no-build` also keeps enabling device capacity fast and avoids
+            # consuming resources used by ordinary Web DAST workers.
+            compose --profile devices up --no-build -d device-worker
             echo -e "${GREEN}Connected-device worker started${NC}"
             echo "Readiness: $(api_base_url)/devices/readiness"
             ;;

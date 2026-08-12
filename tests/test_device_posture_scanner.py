@@ -111,12 +111,15 @@ def test_device_worker_identity_and_queue_are_isolated_from_web_dast():
     root = Path(__file__).resolve().parents[1]
     worker = (root / "api" / "worker.py").read_text(encoding="utf-8")
     compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
+    launcher = (root / "scanner.sh").read_text(encoding="utf-8")
 
     assert '"shakerscan:device_worker_build" if DEVICE_ONLY_WORKER else "shakerscan:worker_build"' in worker
     assert "base_queue_keys = [DEVICE_QUEUE_NAME]" in worker
     assert "device-worker:" in compose
     assert 'profiles: ["devices"]' in compose
     assert "DEVICE_ONLY_WORKER=true" in compose
+    assert "compose --profile devices up --no-build -d device-worker" in launcher
+    assert "compose --profile devices up -d --build device-worker" not in launcher
 
 
 def test_upgrade_migration_adds_run_kind_before_device_filtered_views():
