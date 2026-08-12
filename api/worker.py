@@ -7349,6 +7349,175 @@ async def _finish_broker_result_ingest(job_data: dict[str, Any]) -> None:
         )
 
 
+def _device_score_with_web_findings(result: dict[str, Any]) -> None:
+    findings = result.get("findings") if isinstance(result.get("findings"), list) else []
+    weights = {"critical": 30, "high": 18, "medium": 8, "low": 3, "info": 0}
+    score = max(0, 100 - sum(weights.get(str(item.get("severity") or "info").lower(), 0) for item in findings if isinstance(item, dict)))
+    posture = result.get("device_posture") if isinstance(result.get("device_posture"), dict) else {}
+    completeness = posture.get("completeness") if isinstance(posture.get("completeness"), dict) else {}
+    children = posture.get("web_dast_children") if isinstance(posture.get("web_dast_children"), dict) else {}
+    incomplete = not bool(completeness.get("complete", False)) or int(children.get("failed") or 0) > 0
+    if incomplete:
+        score = min(score, 69)
+    grade = "A" if score >= 90 else "B" if score >= 80 else "C" if score >= 70 else "D" if score >= 60 else "F"
+    result.setdefault("result", {})["score"] = score
+    result["result"]["grade"] = grade
+    blocking = [item for item in findings if str(item.get("severity") or "").lower() in {"critical", "high"}]
+    decision = posture.get("decision") if isinstance(posture.get("decision"), dict) else {}
+    if blocking:
+        decision["decision"] = "block"
+        decision["rationale"] = f"{len(blocking)} high/critical connected-device finding(s) require remediation."
+    elif incomplete:
+        decision["decision"] = "needs_review"
+        decision["rationale"] = "One or more required device or web-origin checks were incomplete."
+    else:
+        decision["decision"] = "allow"
+        decision["rationale"] = "Device services and discovered web origins conform to policy."
+    posture["decision"] = decision
+    result["device_posture"] = posture
+
+
+async def run_device_web_children(
+    *,
+    parent_scan_id: str,
+    device_target_id: str,
+    parent_job_id: str,
+    parent_options: dict[str, Any],
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    """Run bounded passive Web DAST children without creating Web targets."""
+    posture = result.get("device_posture") if isinstance(result.get("device_posture"), dict) else {}
+    origins = posture.get("web_origins") if isinstance(posture.get("web_origins"), list) else []
+    limit = max(0, min(int(parent_options.get("max_web_origins") or 0), 32))
+    enabled = bool(parent_options.get("include_web_dast")) and limit > 0
+    selected = [origin for origin in origins if isinstance(origin, dict) and origin.get("origin")][:limit] if enabled else []
+    child_summary = {
+        "enabled": enabled,
+        "requested": len(selected),
+        "completed": 0,
+        "failed": 0,
+        "truncated": max(0, len(origins) - len(selected)) if enabled else 0,
+        "scan_type": str(parent_options.get("web_scan_type") or "standard"),
+        "children": [],
+    }
+    if not selected:
+        posture["web_dast_children"] = child_summary
+        result["device_posture"] = posture
+        _device_score_with_web_findings(result)
+        return result
+
+    web_scan_type = str(parent_options.get("web_scan_type") or "standard").lower()
+    if web_scan_type not in {"quick", "standard", "deep"}:
+        web_scan_type = "standard"
+    await update_scan_progress(parent_scan_id, "device_web_dast", 92, job_id=parent_job_id)
+    merged_findings = result.get("findings") if isinstance(result.get("findings"), list) else []
+
+    for index, origin_info in enumerate(selected, start=1):
+        origin = str(origin_info["origin"])
+        child_scan_id, child_job_id = str(uuid.uuid4()), str(uuid.uuid4())
+        child_options = {
+            "scan_type": web_scan_type,
+            "run_kind": "device_web_dast",
+            "active": False,
+            "xss": False,
+            "sqli": False,
+            "subfinder": False,
+            "enhanced_dns": False,
+            "device_parent_scan_id": parent_scan_id,
+            "device_target_id": device_target_id,
+            "device_origin": origin_info,
+            "request_budget_mode": "enforce",
+            "custom_budget": {
+                "max_duration_minutes": 20 if web_scan_type == "deep" else 10,
+                "max_urls": 250,
+                "request_max": 1500 if web_scan_type == "deep" else 750,
+                "active_max_endpoints": 0,
+            },
+        }
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO scans (
+                    id, target_id, ai_target_id, device_target_id, target_url, job_id,
+                    status, started_at, options, scan_type, run_kind, subject_ref,
+                    parent_scan_id, scan_role, progress, current_phase
+                ) VALUES ($1,NULL,NULL,$2,$3,$4,'running',NOW(),$5,$6,'device_web_dast',$7,$8,'device_web_origin',5,'starting')
+                """,
+                uuid.UUID(child_scan_id), uuid.UUID(device_target_id), origin, child_job_id,
+                json.dumps(child_options), web_scan_type,
+                f"device_target:{device_target_id}:web_origin:{hashlib.sha256(origin.encode()).hexdigest()[:20]}",
+                uuid.UUID(parent_scan_id),
+            )
+        started = utc_now()
+        try:
+            child_result = await run_scan(origin, child_options, scan_id=child_scan_id, job_id=child_job_id)
+            child_error = child_result.get("error") if isinstance(child_result, dict) else "invalid child result"
+        except Exception as exc:
+            child_result = _unexpected_scan_exception_result(origin, exc)
+            child_error = str(child_result.get("error") or exc)
+        completed = utc_now()
+        duration = int((completed - started).total_seconds())
+        child_findings = child_result.get("findings") if isinstance(child_result.get("findings"), list) else []
+        child_score = (child_result.get("result") or {}).get("score") if isinstance(child_result.get("result"), dict) else None
+        child_grade = (child_result.get("result") or {}).get("grade") if isinstance(child_result.get("result"), dict) else None
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """UPDATE scans SET status=$1, result=$2, score=$3, grade=$4,
+                       findings_count=$5, error_message=$6, completed_at=$7,
+                       duration_seconds=$8, progress=100, current_phase=$1
+                   WHERE id=$9""",
+                "failed" if child_error else "completed", json.dumps(child_result), child_score,
+                child_grade, len(child_findings), str(child_error)[:2000] if child_error else None,
+                completed, duration, uuid.UUID(child_scan_id),
+            )
+        await persist_result_artifact(child_result, child_job_id, child_scan_id)
+        child_entry = {
+            "scan_id": child_scan_id,
+            "origin": origin,
+            "status": "failed" if child_error else "completed",
+            "score": child_score,
+            "grade": child_grade,
+            "findings_count": len(child_findings),
+            "error": str(child_error)[:500] if child_error else None,
+        }
+        child_summary["children"].append(child_entry)
+        if child_error:
+            child_summary["failed"] += 1
+        else:
+            child_summary["completed"] += 1
+            for finding in child_findings:
+                if not isinstance(finding, dict):
+                    continue
+                merged = dict(finding)
+                original_fingerprint = str(merged.get("fingerprint") or generate_finding_fingerprint(merged))
+                merged["fingerprint"] = hashlib.sha256(f"device-web|{origin}|{original_fingerprint}".encode()).hexdigest()
+                merged["source"] = "device"
+                merged["tool"] = str(merged.get("tool") or "web_dast")
+                evidence = merged.get("evidence") if isinstance(merged.get("evidence"), dict) else {"original": merged.get("evidence")}
+                evidence["device_web_dast"] = {
+                    "parent_scan_id": parent_scan_id,
+                    "child_scan_id": child_scan_id,
+                    "origin": origin,
+                    "connect_address": origin_info.get("connect_address"),
+                    "host_header": origin_info.get("host_header"),
+                    "sni": origin_info.get("sni"),
+                }
+                merged["evidence"] = evidence
+                merged_findings.append(merged)
+        await update_scan_progress(
+            parent_scan_id,
+            "device_web_dast",
+            min(98, 92 + int(index / max(1, len(selected)) * 6)),
+            job_id=parent_job_id,
+        )
+
+    result["findings"] = merged_findings
+    posture["web_dast_children"] = child_summary
+    result["device_posture"] = posture
+    _device_score_with_web_findings(result)
+    return result
+
+
 async def process_scan_job(job_data: dict):
     """Process a scan job."""
     job_id = job_data.get('job_id', 'unknown')
@@ -7522,6 +7691,14 @@ async def process_scan_job(job_data: dict):
             else:
                 options = await _hydrate_managed_scan_credentials(options, scan_id)
                 result = await run_scan(target, options, scan_id=scan_id, job_id=job_id)
+                if device_target_id and (options or {}).get("run_kind") == "device_posture":
+                    result = await run_device_web_children(
+                        parent_scan_id=scan_id,
+                        device_target_id=device_target_id,
+                        parent_job_id=job_id,
+                        parent_options=options,
+                        result=result,
+                    )
         except ValueError as e:
             # Validation errors (e.g., incompatible options like public+smart)
             result = {
@@ -11288,7 +11465,15 @@ async def async_main():
     await init_db()
 
     r = get_redis()
-    base_queue_keys = list(dict.fromkeys([QUEUE_NAME, DEVICE_QUEUE_NAME, RETEST_QUEUE_NAME, BROKER_INGEST_QUEUE_NAME]))
+    device_only_worker = str(os.environ.get("DEVICE_ONLY_WORKER", "false")).strip().lower() in {"1", "true", "yes", "on"}
+    device_queue_enabled = str(os.environ.get("DEVICE_SCAN_WORKER_ENABLED", "false")).strip().lower() in {"1", "true", "yes", "on"}
+    if device_only_worker:
+        base_queue_keys = [DEVICE_QUEUE_NAME]
+    else:
+        base_queue_keys = [QUEUE_NAME, RETEST_QUEUE_NAME, BROKER_INGEST_QUEUE_NAME]
+        if device_queue_enabled:
+            base_queue_keys.append(DEVICE_QUEUE_NAME)
+    base_queue_keys = list(dict.fromkeys(base_queue_keys))
     queue_keys = list(base_queue_keys)
     print(
         f"Worker started, listening on queues: {', '.join(queue_keys)} "

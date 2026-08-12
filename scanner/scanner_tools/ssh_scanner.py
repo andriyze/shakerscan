@@ -38,6 +38,9 @@ async def ssh_auth_methods(host: str, port: int = 22, timeout: int = 10) -> dict
         "password_auth_enabled": False,
         "keyboard_interactive_enabled": False,
         "publickey_enabled": False,
+        "host_key": None,
+        "negotiated_algorithms": {},
+        "weak_algorithms": [],
         "port": port,
         "scan_completed": False,
         "error": None,
@@ -53,15 +56,18 @@ async def ssh_auth_methods(host: str, port: int = 22, timeout: int = 10) -> dict
         check_result = {
             "banner": None,
             "auth_methods": [],
+            "host_key": None,
+            "negotiated_algorithms": {},
+            "weak_algorithms": [],
             "error": None
         }
 
         transport = None
         try:
             # Create transport with timeout
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(timeout)
-            sock.connect((host, port))
+            # create_connection supports IPv4, IPv6, and hostnames without
+            # forcing the caller to guess an address family.
+            sock = socket.create_connection((host, port), timeout=timeout)
 
             transport = paramiko.Transport(sock)
             transport.banner_timeout = timeout
@@ -72,6 +78,26 @@ async def ssh_auth_methods(host: str, port: int = 22, timeout: int = 10) -> dict
 
             # Get the banner
             check_result["banner"] = transport.remote_version
+            server_key = transport.get_remote_server_key()
+            key_type = str(server_key.get_name() or "unknown")
+            key_bits = int(server_key.get_bits() or 0)
+            check_result["host_key"] = {"type": key_type, "bits": key_bits}
+            negotiated = {
+                "cipher_in": transport.remote_cipher,
+                "cipher_out": transport.local_cipher,
+                "mac_in": transport.remote_mac,
+                "mac_out": transport.local_mac,
+                "host_key": key_type,
+            }
+            check_result["negotiated_algorithms"] = negotiated
+            weak: list[str] = []
+            for kind, algorithm in negotiated.items():
+                lowered = str(algorithm or "").lower()
+                if any(marker in lowered for marker in ("3des", "blowfish", "arcfour", "des-cbc", "hmac-sha1", "hmac-md5", "ssh-dss")):
+                    weak.append(f"{kind}:{algorithm}")
+            if key_type == "ssh-rsa" and key_bits and key_bits < 2048:
+                weak.append(f"host_key:{key_type}-{key_bits}")
+            check_result["weak_algorithms"] = sorted(set(weak))
 
             # auth_none returns allowed types when auth fails
             # We use a probe username - doesn't need to be valid
@@ -114,6 +140,9 @@ async def ssh_auth_methods(host: str, port: int = 22, timeout: int = 10) -> dict
     # Update result with check results
     result["banner"] = check_result.get("banner")
     result["auth_methods"] = check_result.get("auth_methods", [])
+    result["host_key"] = check_result.get("host_key")
+    result["negotiated_algorithms"] = check_result.get("negotiated_algorithms", {})
+    result["weak_algorithms"] = check_result.get("weak_algorithms", [])
     result["error"] = check_result.get("error")
 
     if result["error"]:
@@ -153,6 +182,22 @@ async def ssh_auth_methods(host: str, port: int = 22, timeout: int = 10) -> dict
                 "auth_methods": auth_methods,
                 "banner": result["banner"],
                 "recommendation": "Review keyboard-interactive auth configuration - may allow password-based access"
+            }
+        })
+
+    if result["weak_algorithms"]:
+        result["findings"].append({
+            "title": "SSH Negotiated Weak Cryptographic Algorithm",
+            "severity": "high",
+            "cwe": "CWE-327",
+            "evidence": {
+                "host": host,
+                "port": port,
+                "banner": result["banner"],
+                "host_key": result["host_key"],
+                "negotiated_algorithms": result["negotiated_algorithms"],
+                "weak_algorithms": result["weak_algorithms"],
+                "recommendation": "Disable legacy SSH ciphers, MACs, and undersized host keys"
             }
         })
 
