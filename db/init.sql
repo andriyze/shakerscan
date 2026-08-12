@@ -697,6 +697,7 @@ SELECT DISTINCT ON (target_url) *
 FROM scans
 WHERE status = 'completed'
   AND (scan_role IS NULL OR scan_role <> 'shard')
+  AND COALESCE(run_kind, 'web_dast') NOT IN ('device_posture', 'device_web_dast')
 ORDER BY target_url, completed_at DESC;
 
 -- Active findings summary
@@ -718,11 +719,11 @@ GROUP BY target_id;
 CREATE VIEW dashboard_metrics AS
 SELECT
     (SELECT COUNT(*) FROM targets WHERE is_active = true AND COALESCE(discovery_source, 'manual') <> 'model-intake') as total_targets,
-    (SELECT COUNT(*) FROM scans WHERE status = 'completed' AND (scan_role IS NULL OR scan_role <> 'shard')) as total_scans,
-    (SELECT COUNT(*) FROM scans WHERE status = 'running' AND (scan_role IS NULL OR scan_role <> 'shard')) as running_scans,
-    (SELECT COUNT(*) FROM findings WHERE status = 'active') as active_findings,
-    (SELECT COUNT(*) FROM findings WHERE status = 'active' AND severity = 'critical') as critical_findings,
-    (SELECT COUNT(*) FROM findings WHERE status = 'active' AND severity = 'high') as high_findings,
+    (SELECT COUNT(*) FROM scans WHERE status = 'completed' AND (scan_role IS NULL OR scan_role <> 'shard') AND COALESCE(run_kind, 'web_dast') NOT IN ('device_posture', 'device_web_dast')) as total_scans,
+    (SELECT COUNT(*) FROM scans WHERE status = 'running' AND (scan_role IS NULL OR scan_role <> 'shard') AND COALESCE(run_kind, 'web_dast') NOT IN ('device_posture', 'device_web_dast')) as running_scans,
+    (SELECT COUNT(*) FROM findings WHERE status = 'active' AND COALESCE(source, 'scan') <> 'device') as active_findings,
+    (SELECT COUNT(*) FROM findings WHERE status = 'active' AND severity = 'critical' AND COALESCE(source, 'scan') <> 'device') as critical_findings,
+    (SELECT COUNT(*) FROM findings WHERE status = 'active' AND severity = 'high' AND COALESCE(source, 'scan') <> 'device') as high_findings,
     (SELECT AVG(score) FROM latest_scans) as avg_score;
 
 -- ============================================================

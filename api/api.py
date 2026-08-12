@@ -267,6 +267,9 @@ except ModuleNotFoundError:
     from api.ai_control_requirements import AI_CONTROL_REQUIREMENTS
 
 VALID_DAST_SCAN_TYPES = {"quick", "standard", "deep", "full", "aggressive", "smart"}
+DEVICE_RUN_KINDS = {"device_posture", "device_web_dast"}
+DEVICE_FINDING_SOURCE = "device"
+DEVICE_WEB_ORIGIN_ROLE = "device_web_origin"
 ACTIVE_ENFORCED_SCAN_TYPES = {"smart", "full", "aggressive"}
 VALID_SCHEDULE_KINDS = {"normal_scan", "asm_improve", "evidence_retention_sweep"}
 
@@ -1092,7 +1095,7 @@ def _resolve_hunt_tool_url(target_url: str, requested_target: Any) -> str:
 def _source_type_filter_sql(source_type: Optional[str]) -> str:
     """SQL fragment for the findings `source_type` filter (first-class taxonomy).
 
-    Values: dast / ai / ai_gate / ai_session / deep_hunt / autonomous /
+    Values: dast / device / ai / ai_gate / ai_session / deep_hunt / autonomous /
     model_intake / asm / manual.
     model_intake, ASM, manual, and the AI sources filter separately from DAST;
     the UI exposes this same product taxonomy.
@@ -1119,10 +1122,12 @@ def _source_type_filter_sql(source_type: Optional[str]) -> str:
         return " AND f.source = 'asm'"
     if source_type == "manual":
         return " AND f.source = 'manual'"
+    if source_type == "device":
+        return " AND f.source = 'device'"
     if source_type == "dast":
         return (
             " AND COALESCE(f.source, 'scan') NOT IN "
-            "('ai_gate', 'ai_session', 'autonomous', 'model_intake', 'asm', 'manual')"
+            "('ai_gate', 'ai_session', 'autonomous', 'model_intake', 'asm', 'manual', 'device')"
             " AND f.ai_target_id IS NULL"
             " AND COALESCE(f.tool, '') NOT IN ('model_intake', 'autonomous_workflow')"
             " AND COALESCE(f.evidence->'research'->>'driven_by', '') <> 'autonomous_research'"
@@ -1881,6 +1886,7 @@ def _hidden_scan_roles_for_list(*, include_shards: bool = False, include_interna
             asm_inventory.ASM_BATCH_ROLE,
             asm_inventory.ASM_RECON_ROLE,
             parallel_scan.PARALLEL_DISCOVERY_ROLE,
+            DEVICE_WEB_ORIGIN_ROLE,
         ])
     return hidden
 
@@ -6684,13 +6690,22 @@ def build_deployment_decision(
     findings = result.get("findings") if isinstance(result, dict) else []
 
     product_for_policy = "dast"
-    if isinstance(result, dict) and (result.get("ai_gate") or run_kind.startswith("ai_")):
+    if run_kind in DEVICE_RUN_KINDS or (isinstance(result, dict) and result.get("device_posture")):
+        product_for_policy = "device_posture"
+    elif isinstance(result, dict) and (result.get("ai_gate") or run_kind.startswith("ai_")):
         product_for_policy = "ai_gate"
     elif isinstance(result, dict) and (result.get("model_intake") or run_kind == "model_intake"):
         product_for_policy = "model_intake"
     policy_profile = _policy_profile_for_scan(scan, result if isinstance(result, dict) else {}, product_for_policy, db_profiles=db_policy_profiles)
 
-    if isinstance(result, dict) and (result.get("ai_gate") or run_kind.startswith("ai_")):
+    if run_kind in DEVICE_RUN_KINDS or (isinstance(result, dict) and result.get("device_posture")):
+        product = "device_posture"
+        posture = result.get("device_posture") if isinstance(result.get("device_posture"), dict) else {}
+        decision_obj = posture.get("decision") if isinstance(posture.get("decision"), dict) else {}
+        raw_decision = str((decision_obj or {}).get("decision") or "needs_review")
+        rationale = str((decision_obj or {}).get("rationale") or "Connected-device posture requires review.")
+        policy_name = str((decision_obj or {}).get("policy_name") or policy_profile["name"])
+    elif isinstance(result, dict) and (result.get("ai_gate") or run_kind.startswith("ai_")):
         product = "ai_gate"
         decision_obj = (result.get("ai_gate") or {}).get("decision") if isinstance(result.get("ai_gate"), dict) else {}
         raw_decision = str((decision_obj or {}).get("decision") or "needs_review")
@@ -21640,6 +21655,7 @@ async def list_scans(
     include_shards: bool = False,
     include_internal: bool = False,
     include_model_intake: bool = False,
+    include_devices: bool = False,
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0)
 ):
@@ -21685,6 +21701,14 @@ async def list_scans(
             """
             query += product_filter
             count_query += product_filter
+
+        if not include_devices:
+            device_filter = """
+                AND COALESCE(s.run_kind, '') NOT IN ('device_posture', 'device_web_dast')
+                AND COALESCE(s.scan_type, '') <> 'device_posture'
+            """
+            query += device_filter
+            count_query += device_filter
 
         params = []
         count_params = []

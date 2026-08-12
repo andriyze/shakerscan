@@ -28,6 +28,7 @@ def test_granular_values_are_distinct():
     assert f("ai_session") == " AND f.source = 'ai_session'"
     assert f("asm") == " AND f.source = 'asm'"
     assert f("manual") == " AND f.source = 'manual'"
+    assert f("device") == " AND f.source = 'device'"
     assert f("ai_gate") != f("ai_session")
 
 
@@ -40,7 +41,7 @@ def test_deep_hunt_is_the_user_facing_hunt_source():
 
 def test_dast_excludes_other_product_sources_and_hunt_driven_scans():
     dast = f("dast")
-    for source in ("asm", "manual", "ai_gate", "ai_session", "autonomous", "model_intake"):
+    for source in ("asm", "manual", "ai_gate", "ai_session", "autonomous", "model_intake", "device"):
         assert source in dast
     assert "autonomous_research" in dast
     assert "<>" in dast
