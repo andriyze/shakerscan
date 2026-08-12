@@ -4,6 +4,10 @@ ShakerScan treats TVs, cameras, printers, routers, NAS systems, conference equip
 network-connected devices as a separate security product surface. A device is not a Web DAST target,
 even when it exposes one or more web interfaces.
 
+Device capacity is opt-in so an existing DAST installation does not lose worker slots or memory.
+Start it with `./scanner.sh devices start`; inspect it with `./scanner.sh devices status`, and stop it
+with `./scanner.sh devices stop`.
+
 ## Product boundary
 
 - Devices live in `device_targets`; their interfaces and observed services live in

@@ -466,6 +466,7 @@ services:
   # Connected-device scans have dedicated capacity so full-port inventories and
   # bounded web-origin children cannot consume ordinary Web DAST worker slots.
   device-worker:
+    profiles: ["devices"]
     init: true
     image: ${SCANNER_LOCAL_WORKER_IMAGE:-shakerscan-worker:latest}
     extra_hosts:

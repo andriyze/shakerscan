@@ -115,6 +115,7 @@ def test_device_worker_identity_and_queue_are_isolated_from_web_dast():
     assert '"shakerscan:device_worker_build" if DEVICE_ONLY_WORKER else "shakerscan:worker_build"' in worker
     assert "base_queue_keys = [DEVICE_QUEUE_NAME]" in worker
     assert "device-worker:" in compose
+    assert 'profiles: ["devices"]' in compose
     assert "DEVICE_ONLY_WORKER=true" in compose
 
 

@@ -107,6 +107,10 @@ findings, proof state, coverage, and the final report.
 | Let the current AI agent explore and exploit autonomously | **Deep Hunt** |
 | Preview a natural-language operation safely | **AI Operations Router** |
 
+Connected-device scan capacity is opt-in to preserve existing DAST resources. Run
+`./scanner.sh devices start` before the first device scan and `./scanner.sh devices status` to check
+its dedicated worker/tool readiness.
+
 ### Scan types and coverage budgets
 
 Scan type controls what is tested. The coverage budget controls how much time and depth it receives.

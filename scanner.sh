@@ -1141,7 +1141,7 @@ install_dependencies() {
 
 command_needs_docker_runtime() {
     case "$1" in
-        start|stop|restart|status|scale|logs|scan|scan-full|scan-smart|gungnir|build|rebuild|reset|shell)
+        start|stop|restart|status|scale|logs|scan|scan-full|scan-smart|gungnir|devices|build|rebuild|reset|shell)
             return 0
             ;;
         *)
@@ -1159,6 +1159,10 @@ command_needs_curl() {
             return 0
             ;;
         gungnir)
+            [ "${subcmd:-status}" = "status" ]
+            return $?
+            ;;
+        devices)
             [ "${subcmd:-status}" = "status" ]
             return $?
             ;;
@@ -1751,6 +1755,7 @@ print_help() {
     echo "  mcp                Start the read-only Command Arsenal MCP stdio adapter"
     echo "  research <id> [N]  Run up to N bounded Codex decisions for a research episode"
     echo "  gungnir <cmd>      CT monitor: start, stop, status, logs"
+    echo "  devices <cmd>      Opt-in device worker: start, stop, status, logs"
     echo "  fleet init [...]   Initialize a WireGuard or outbound-HTTPS broker fleet"
     echo "  fleet preflight    Validate fleet prerequisites without changing state"
     echo "  fleet join-token   Mint a bounded ready-to-paste worker join command"
@@ -2897,6 +2902,41 @@ gungnir_cmd() {
     esac
 }
 
+devices_cmd() {
+    local subcmd=${1:-"status"}
+
+    case "$subcmd" in
+        start)
+            echo -e "${GREEN}Starting isolated connected-device worker...${NC}"
+            if [ "$USE_PREBUILT" -eq 1 ]; then
+                compose --profile devices up --no-build -d device-worker
+            else
+                compose --profile devices up -d --build device-worker
+            fi
+            echo -e "${GREEN}Connected-device worker started${NC}"
+            echo "Readiness: $(api_base_url)/devices/readiness"
+            ;;
+        stop)
+            echo -e "${YELLOW}Stopping connected-device worker...${NC}"
+            compose --profile devices stop device-worker
+            echo -e "${GREEN}Connected-device worker stopped${NC}"
+            ;;
+        status)
+            compose --profile devices ps device-worker
+            if curl -fsS "$(api_base_url)/devices/readiness" >/dev/null 2>&1; then
+                curl -fsS "$(api_base_url)/devices/readiness" | jq '{enabled,status,reason,worker_count,capable_worker_count,required_worker_tools}'
+            fi
+            ;;
+        logs)
+            compose --profile devices logs --tail=100 device-worker ${FOLLOW:-}
+            ;;
+        *)
+            echo "Usage: ./scanner.sh devices {start|stop|status|logs}"
+            return 1
+            ;;
+    esac
+}
+
 # Parse arguments
 COMMAND=${1:-"help"}
 shift || true
@@ -3016,6 +3056,10 @@ if [ "$COMMAND_HELP_ONLY" -eq 1 ]; then
             ;;
         gungnir)
             gungnir_cmd --help
+            exit 0
+            ;;
+        devices)
+            echo "Usage: ./scanner.sh devices {start|stop|status|logs}"
             exit 0
             ;;
         *)
@@ -3152,6 +3196,9 @@ case $COMMAND in
         ;;
     gungnir)
         gungnir_cmd "${ARGS[0]}"
+        ;;
+    devices)
+        devices_cmd "${ARGS[0]}"
         ;;
     build)
         build_images

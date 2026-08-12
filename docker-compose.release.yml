@@ -399,6 +399,58 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # Opt-in connected-device capacity. It uses a separate queue and health
+  # registry so enabling it cannot change Web DAST fleet freshness or slots.
+  device-worker:
+    profiles: ["devices"]
+    init: true
+    image: ${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}:${SCANNER_IMAGE_TAG:-latest}
+    environment:
+      - PYTHONUNBUFFERED=1
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379
+      - DATABASE_URL=postgresql://scanner:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/scanner
+      - RESULTS_DIR=/results
+      - SCANNER_VERSION=${SCANNER_VERSION:-latest}
+      - SCANNER_EXPECTED_VERSION=${SCANNER_RELEASE_VERSION:-}
+      - GIT_COMMIT=${GIT_COMMIT:-image:latest}
+      - DEVICE_ONLY_WORKER=true
+      - DEVICE_POSTURE_ENABLED=${DEVICE_POSTURE_ENABLED:-true}
+      - DEVICE_QUEUE_NAME=${DEVICE_QUEUE_NAME:-device_scan_jobs}
+      - SHAKERSCAN_QUEUE_CONSUMER_GROUP=${SHAKERSCAN_QUEUE_CONSUMER_GROUP:-shakerscan-workers}
+      - SHAKERSCAN_QUEUE_VISIBILITY_TIMEOUT_SECONDS=${SHAKERSCAN_DEVICE_QUEUE_VISIBILITY_TIMEOUT_SECONDS:-1800}
+      - SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_SECONDS=${SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_SECONDS:-30}
+      - SHAKERSCAN_QUEUE_MAX_DELIVERY_ATTEMPTS=${SHAKERSCAN_QUEUE_MAX_DELIVERY_ATTEMPTS:-5}
+      - SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_FAILURE_LIMIT=${SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_FAILURE_LIMIT:-3}
+      - AUTO_RETEST_ON_SCAN_COMPLETE=false
+      - EVIDENCE_STORAGE_BACKEND=${EVIDENCE_STORAGE_BACKEND:-local}
+      - EVIDENCE_S3_ENDPOINT_URL=${EVIDENCE_S3_ENDPOINT_URL:-}
+      - EVIDENCE_S3_BUCKET=${EVIDENCE_S3_BUCKET:-}
+      - EVIDENCE_S3_REGION=${EVIDENCE_S3_REGION:-us-east-1}
+      - EVIDENCE_S3_ACCESS_KEY_ID=${EVIDENCE_S3_ACCESS_KEY_ID:-}
+      - EVIDENCE_S3_SECRET_ACCESS_KEY=${EVIDENCE_S3_SECRET_ACCESS_KEY:-}
+      - EVIDENCE_S3_SESSION_TOKEN=${EVIDENCE_S3_SESSION_TOKEN:-}
+      - EVIDENCE_S3_FORCE_PATH_STYLE=${EVIDENCE_S3_FORCE_PATH_STYLE:-}
+      - ARTIFACT_STORAGE_BACKEND=${ARTIFACT_STORAGE_BACKEND:-}
+      - ARTIFACT_STORAGE_REQUIRED=${ARTIFACT_STORAGE_REQUIRED:-false}
+      - ARTIFACT_S3_PREFIX=${ARTIFACT_S3_PREFIX:-scan-artifacts}
+    volumes:
+      - ./results:/results
+    command: ["python3", "/app/worker.py"]
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 2G
+        reservations:
+          cpus: '0.25'
+          memory: 512M
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
   model-intake-sandbox:
     init: true
     image: ${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}:${SCANNER_IMAGE_TAG:-latest}
