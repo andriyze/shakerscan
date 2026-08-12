@@ -1,6 +1,7 @@
 # ShakerScan
 
-ShakerScan is an open-source security testing platform for web applications, APIs, and AI systems.
+ShakerScan is an open-source security testing platform for web applications, APIs, AI systems, and
+network-connected devices.
 It runs locally in Docker and gives you a web UI, REST API, CLI, persistent findings, and agent-ready
 workflows.
 
@@ -19,6 +20,8 @@ Check this model artifact before deployment.
 ShakerScan covers:
 
 - DAST for websites and APIs, from fast posture checks to authorized active XSS/SQLi testing
+- Connected-device posture for TVs, cameras, printers, routers, and appliances, including all-TCP
+  inventory, service allowlists, SSH checks, and passive web-interface testing on any port
 - Continuous attack-surface management (ASM), subdomain discovery, and certificate-transparency monitoring
 - AI Gate tests for chat, RAG, agent, and MCP endpoints *(preview)*
 - Model Intake reviews for provenance, dependencies, licenses, unsafe serialization, isolated runtime behavior, and deployment readiness
@@ -95,6 +98,7 @@ findings, proof state, coverage, and the final report.
 | Test an authenticated application or API | New Scan → Authentication, or `POST /scans` |
 | Keep an endpoint inventory fresh and close coverage gaps | **Continuous ASM** |
 | Discover subdomains continuously | **Targets** or Gungnir CT monitoring |
+| Inventory and assess a TV, camera, printer, or appliance | **Connected Devices** |
 | Test a chatbot, RAG pipeline, agent, or MCP server | **AI Gate** |
 | Vet a model artifact before deployment | **Model Intake** |
 | Reproduce a workflow or test two user roles manually | **Interactive Testing** |
@@ -290,6 +294,7 @@ and compatibility. It is not the Deep Hunt launcher.
 | Dashboard | Security posture, prioritized actions, recent activity, queue operations, worker freshness/scaling, and Gungnir |
 | Docs | In-app rendering of the installed README for setup, workflows, safety, and troubleshooting |
 | DAST Scans / New Scan | Submission, filters, cancellation, live logs, reports, proof, coverage, and PDF export |
+| Connected Devices | Separate device inventory, all-port posture, service policies, SSH checks, and discovered web interfaces |
 | Targets / Exposure | Asset inventory, subdomains, exposure graph, and application graph |
 | Coverage (Continuous ASM) | Endpoint inventory, proof-family coverage, gaps, recommendations, and activity |
 | Findings / Exceptions Queue | Triage, notes, retests, replay, cleanup, accepted risk, and exception lifecycle |
@@ -611,6 +616,7 @@ Common fixes:
 - [Skill and agent guide](skills/README.md)
 - [Smart Scan Policy](https://github.com/andriyze/shakerscan/blob/main/docs/SMART_SCAN_POLICY.md)
 - [DAST and Continuous ASM architecture](https://github.com/andriyze/shakerscan/blob/main/docs/dast-asm-architecture.md)
+- [Connected-device security](https://github.com/andriyze/shakerscan/blob/main/docs/connected-device-security.md)
 - [OWASP coverage matrix](https://github.com/andriyze/shakerscan/blob/main/docs/owasp-coverage-matrix.md)
 - [AI security workflows](https://github.com/andriyze/shakerscan/blob/main/docs/AI_TEST_WORKFLOWS.md)
 - [Interactive session guide](https://github.com/andriyze/shakerscan/blob/main/docs/INTERACTIVE_SESSIONS_GUIDE.md)

@@ -66,6 +66,7 @@ flags, skills, agents, adapters, modules, and durable tables) plus architecture/
 - **Evidence (`/evidence`)**: browse evidence instances, inspect objects, export content-free manifests/bundles, and run immutable-preview, approval-gated retention cleanup.
 - **New Scan (`/scan/new`)**: scan type grid (6 types with duration/description), coverage budget selector (`fast`, `balanced`, `thorough`, `exhaustive`), advanced option toggles (Active Testing, Nuclei Templates, Subdomain Discovery, Enhanced DNS, JS Dependency Scanning, JS Secret Scanning), and optional custom budget overrides. Warning for active testing types.
 - **Targets (`/targets`)**: hierarchical tree (root domains with collapsible subdomains), filter by discovery source/grade/has-findings, sort by domain/last-scanned/findings/score/date, search. Actions: add target, scan individual (dropdown), scan all in domain set, discover subdomains, create schedule (icon link). Shows subdomain count, scan count, findings count, grade per target.
+- **Connected Devices (`/devices`, `/devices/{id}`, `/devices/policies`)**: separate TV/camera/printer/router/appliance inventory, dedicated worker readiness, top-100 or all-TCP posture scans, curated UDP discovery, service/version/CPE evidence, SSH posture on discovered ports, ordered allow/deny/review/required-control policies, and passive Web DAST handoff for HTTP(S) found on any port. Device scans and hidden web children never create Web targets or alter ordinary DAST/ASM metrics.
 - **Schedules (`/schedules`)**: create/toggle/delete recurring daily/weekly normal scans and typed ASM coverage waves (`asm_improve`). Evidence cleanup is intentionally interactive-only; legacy `evidence_retention_sweep` schedules are disabled and cannot be created or resumed.
 - **Findings (`/findings`)**: filter by DAST, Deep Hunt, Interactive, AI Gate, Model Intake, ASM, or Manual source plus severity/status/last-seen/domain/search; sort by severity/first-seen/last-seen/CVSS; bulk cleanup with dry-run preview.
 - **Finding Detail (`/findings/{id}`)**: status triage buttons (active/resolved/false_positive/accepted_risk), **delete finding** with confirmation, source badge, analyst notes, CVSS, CWE link, evidence summary (URLs, payloads, parameters, status codes, response anomalies), remediation steps, AI analysis (verdict/confidence/rationale/recommendations), raw HTTP request/response, copy buttons for URLs/payloads/IDs, external links to vulnerable URLs, one-shot proof replay, and a bounded **Verify finding** action for target-linked DAST/Deep Hunt/ASM/manual web findings.
@@ -286,7 +287,7 @@ curl -X POST "http://localhost:8080/session/{session_id}/findings" \
 Status options: `active`, `resolved`, `false_positive`, `accepted_risk`
 
 Finding source filters are first-class: `dast`, `deep_hunt`, `ai`, `ai_gate`, `ai_session`,
-`autonomous`, `model_intake`, `asm`, and `manual`. The UI exposes DAST, Deep Hunt, Interactive,
+`autonomous`, `model_intake`, `device`, `asm`, and `manual`. The UI exposes DAST, Device, Deep Hunt, Interactive,
 AI Gate, Model Intake, ASM, and Manual controls. `deep_hunt` combines agent-native claims with
 scanner findings driven by a hunt. Use the broader `ai` compatibility filter when AI Gate and
 Interactive findings should be combined.
@@ -297,10 +298,11 @@ Interactive findings should be combined.
 |-----------|-------------|
 | `status` | Filter by status (active, resolved, false_positive, accepted_risk) |
 | `severity` | Filter by severity (critical, high, medium, low, info) |
-| `source_type` | `dast`, `deep_hunt`, `ai`, `ai_gate`, `ai_session`, `autonomous`, `model_intake`, `asm`, or `manual` |
+| `source_type` | `dast`, `device`, `deep_hunt`, `ai`, `ai_gate`, `ai_session`, `autonomous`, `model_intake`, `asm`, or `manual` |
 | `seen_within_days` | Only findings seen within N days (e.g., 7, 30, 60, 90) |
 | `root_domain` | Filter by root domain |
 | `target_id` | Filter by target ID |
+| `device_target_id` | Filter by connected-device ID |
 | `scan_id` | Filter by scan ID |
 | `verification_verdict` | Filter by latest verification verdict (`exploited`, `likely_fixed`, etc.) |
 | `verification_mode` | Filter findings with verification runs in mode `deterministic` or `ai_driven` |
@@ -368,6 +370,37 @@ curl -X POST http://localhost:8080/targets/{target_id}/scan \
 | `has_findings` | Filter: true (with findings) or false (no findings) |
 | `sort_by` | root_domain, last_scanned_at, active_findings_count, last_score, created_at |
 | `sort_order` | asc or desc |
+
+### Connected Devices
+
+Connected devices are a separate product namespace, not Web DAST targets. Before queueing a scan,
+confirm the operator owns the exact device or is explicitly authorized to test it. Device scans may
+inventory all 65,535 TCP ports; they never guess credentials, and their optional web children are
+bounded to passive `quick`, `standard`, or `deep` checks.
+
+```bash
+# Check dedicated worker/tool readiness
+curl http://localhost:8080/devices/readiness
+
+# Register one hostname or IP (URLs and network ranges are rejected)
+curl -X POST http://localhost:8080/devices \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Lobby TV","primary_locator":"tv.example.lan","device_class":"media"}'
+
+# Queue an authorized all-TCP posture scan and passive checks of web ports
+curl -X POST http://localhost:8080/devices/{device_id}/scan \
+  -H "Content-Type: application/json" \
+  -d '{"profile":"posture","confirm_authorized":true,"include_web_dast":true,"web_scan_type":"standard"}'
+
+# Inspect separate device inventory and policies
+curl http://localhost:8080/devices/{device_id}
+curl http://localhost:8080/device-policies
+curl "http://localhost:8080/findings?source_type=device&device_target_id={device_id}"
+```
+
+Profiles are `inventory` (top 100 TCP plus a small UDP set), `posture` (all TCP plus curated UDP),
+and `thorough` (all TCP with deeper fingerprinting plus curated UDP). After queueing, report the scan
+ID and `/devices/{device_id}?scan={scan_id}` UI link, then stop; do not poll.
 
 ### Continuous ASM
 

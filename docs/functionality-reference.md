@@ -1,4 +1,4 @@
-# ShakerScan Functionality Reference — DAST + AI Red Teaming
+# ShakerScan Functionality Reference — DAST + AI + Connected Devices
 
 **Status:** Canonical exhaustive functional reference for the whole product. This is the "what can
 ShakerScan actually do" map across DAST, attack-surface management, AI security, evidence,
@@ -30,6 +30,7 @@ product's functionality end to end.
 8. [DAST — scoring, attack chains, coverage, and reports](#8-dast--scoring-attack-chains-coverage-and-reports)
 9. [Scaling DAST: parallel scanning and Continuous ASM](#9-scaling-dast-parallel-scanning-and-continuous-asm)
 10. [Attack-surface management: discovery, CT monitoring, schedules](#10-attack-surface-management-discovery-ct-monitoring-schedules)
+   - [Connected-device posture](#connected-device-posture)
 11. [AI red teaming](#11-ai-red-teaming)
 12. [Cross-cutting: findings, exposure graph, workers, queue](#12-cross-cutting-findings-exposure-graph-workers-queue)
 13. [REST API reference (by area)](#13-rest-api-reference-by-area)
@@ -43,7 +44,8 @@ product's functionality end to end.
 
 ## 1. What ShakerScan is
 
-ShakerScan is an open-source security scanner for **web applications, APIs, and AI systems**. It runs
+ShakerScan is an open-source security scanner for **web applications, APIs, AI systems, and
+network-connected devices**. It runs
 locally as a Docker stack with a web UI, a REST API, a PostgreSQL database, a Redis job queue, and a
 scalable pool of scan workers. It is designed to be driven either directly (CLI / UI / REST) or
 through an AI coding agent (Claude Code, Codex, OpenCode) using plain-English requests.
@@ -61,6 +63,10 @@ It covers two complementary pillars:
 
 Both pillars write into one shared findings store and one exposure graph, so DAST and AI results are
 triaged, filtered, and reported through the same workflow.
+
+Connected-device posture is a deliberately separate plane: it inventories network services, applies
+device service policies, checks discovered SSH, and hands HTTP(S) interfaces on any port to bounded
+passive Web DAST children without creating Web targets or changing ordinary DAST metrics.
 
 ---
 
@@ -498,6 +504,30 @@ Schedule listings include derived `schedule_health` when recent scan results
 show repeated failures or timeout/heartbeat failures for the same active target/type pair, and the
 Dashboard Action Center links operators to the affected schedule plus the latest failed scan.
 
+### Connected-device posture
+
+Connected-device security is isolated from Web DAST targets. The `/devices` product surface stores
+TVs, cameras, printers, routers, NAS systems, conference equipment, and other network-connected
+assets in dedicated device, interface, and service tables. `device_posture` work uses its own queue,
+worker capacity, and build-health registry, so it cannot change ordinary Web DAST worker freshness,
+target counts, scan lists, ASM state, or dashboard posture.
+
+The `inventory` profile scans the top 100 TCP ports and a small UDP set; `posture` and `thorough`
+inventory all 65,535 TCP ports plus a declared curated UDP set. Nmap service/version/CPE output,
+addresses, hostnames, MAC/vendor evidence, and bounded OS hints are retained. The scanner recognizes
+HTTP and TLS on discovered TCP ports rather than assuming 80/443, then optionally runs hidden,
+passive-only `quick`, `standard`, or `deep` Web DAST children with capped origins, time, URLs, and
+requests. Child findings retain device/origin provenance and never create Web targets.
+
+SSH checks run on the discovered port and collect auth methods, host-key evidence, negotiated
+algorithms, and weak-crypto signals without credential guessing. Ordered service policies support
+allow, deny, review, and fail-closed required-control rules. Built-in generic, media, camera, printer,
+and network-appliance baselines can be copied or replaced with custom allowlists. A complete report
+states TCP/UDP scope and truncation; older device findings are cleared only after complete all-TCP
+and complete web-origin coverage. Bluetooth/BLE and other radio protocols remain a future
+capability-labeled sensor extension rather than an implied Docker-worker capability. See
+[`connected-device-security.md`](connected-device-security.md).
+
 ---
 
 ## 11. AI red teaming
@@ -780,7 +810,7 @@ audited sensitive access only when the server policy allows it.
 
 ## 12. Cross-cutting: findings, exposure graph, workers, queue
 
-**Findings lifecycle**: every DAST, Deep Hunt, Interactive, AI Gate, ASM, manual, and model-intake
+**Findings lifecycle**: every DAST, connected-device, Deep Hunt, Interactive, AI Gate, ASM, manual, and model-intake
 result lands in one
 `findings` table, de-duplicated by `(target_id, fingerprint)`. Findings have a status
 (`active` / `resolved` / `false_positive` / `accepted_risk`), CVSS, CWE/OWASP tags, evidence,
@@ -1013,6 +1043,10 @@ State-changing commands are not exposed. See [`docs/read-only-mcp.md`](read-only
 **Targets & domains**: `GET /targets` · `GET /targets/grouped` · `GET /domains` · `POST /targets` ·
 `GET /targets/{id}` · `PATCH /targets/{id}` · `DELETE /targets/{id}` · `POST /targets/{id}/scan`
 
+**Connected devices**: `GET /devices/readiness` · `GET|POST /devices` ·
+`GET|PATCH|DELETE /devices/{id}` · `POST /devices/{id}/scan` · `GET /device-scans` ·
+`GET|POST /device-policies` · `PATCH /device-policies/{id}`
+
 **Continuous ASM**: `GET /asm/check-families` · `GET /targets/{id}/asm/endpoints` ·
 `GET /targets/{id}/asm/coverage` · `POST /targets/{id}/asm/test` · `POST /targets/{id}/asm/recon` ·
 `POST /targets/{id}/asm/prune` · `POST /targets/{id}/asm/improve` · `GET|PUT /targets/{id}/asm/policy`
@@ -1147,6 +1181,9 @@ concurrency-limited with per-tool timeouts and a global deadline.
 | `/scans` | Filter, inspect, cancel, and rescan logical scans without exposing internal rows by default |
 | `/scans/{id}` | Live progress/logs, durable Model Intake activity, report, proof/coverage, deployment decision, AI/Model Intake panels, replay, history, and PDF |
 | `/targets` | Hierarchical target inventory, search/filter/sort, scanning, discovery, duplicate merge, and schedule entry points |
+| `/devices` | Separate connected-device inventory, readiness, all-port posture submission, policy assignment, and service/finding summaries |
+| `/devices/{id}` | Device identity, interfaces, listening services, policy decisions, discovered web origins, and scan history |
+| `/devices/policies` | Built-in and custom service allowlists with allow/deny/review/required-control rules and activation lifecycle |
 | `/targets/{id}/graph` | Route/object/principal graph, producer/consumer/auth edges, and graph-derived hypotheses |
 | `/asm` | Coverage, scheduler state, proof-family gaps, recommendations, endpoint inventory, inventory prune, and campaign timeline |
 | `/timeline` | Cross-product mission feed of command results, scans, schedules, evidence bindings, refuters, and exports |
@@ -2369,6 +2406,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | AI test workflows + Honey contract | [`AI_TEST_WORKFLOWS.md`](AI_TEST_WORKFLOWS.md) |
 | Interactive AI security sessions | [`INTERACTIVE_SESSIONS_GUIDE.md`](INTERACTIVE_SESSIONS_GUIDE.md) |
 | DAST execution and Continuous ASM architecture | [`dast-asm-architecture.md`](dast-asm-architecture.md) |
+| Connected-device architecture, policies, and safety boundary | [`connected-device-security.md`](connected-device-security.md) |
 | Multi-node fleet architecture (RFC) | [`multi-node-architecture.md`](multi-node-architecture.md) |
 | Multi-node setup and operations | [`multi-node-guide.md`](multi-node-guide.md) |
 
