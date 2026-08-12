@@ -57,6 +57,11 @@ except ModuleNotFoundError:
     from scanner.scanner_tools.build_fingerprint import hash_source_files, runtime_file_map, source_file_map
 
 try:
+    from scanner_tools.device_posture import DEVICE_PROFILES, normalize_device_locator
+except ModuleNotFoundError:
+    from scanner.scanner_tools.device_posture import DEVICE_PROFILES, normalize_device_locator
+
+try:
     from scanner_tools.model_intake_acquisition import acquisition_policy as _model_acquisition_policy
     from scanner_tools.model_intake_acquisition import download_http as _model_download_http
 except ModuleNotFoundError:
@@ -561,6 +566,7 @@ REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379')
 DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://scanner:scanner@localhost:5432/scanner')
 RESULTS_DIR = Path(os.environ.get('RESULTS_DIR', '/results'))
 QUEUE_NAME = 'scan_jobs'
+DEVICE_QUEUE_NAME = os.environ.get("DEVICE_QUEUE_NAME", "device_scan_jobs")
 RETEST_QUEUE_NAME = os.environ.get("RETEST_QUEUE_NAME", "retest_jobs")
 BROKER_INGEST_QUEUE_NAME = os.environ.get("BROKER_INGEST_QUEUE_NAME", "broker_ingest_jobs")
 BROKER_LEASE_SECONDS = max(60, int(os.environ.get("SHAKERSCAN_BROKER_LEASE_SECONDS", "300")))
@@ -4010,6 +4016,65 @@ class ScanRequest(BaseModel):
     target: str
     name: Optional[str] = None
     options: ScanOptions = Field(default_factory=ScanOptions)
+
+
+class DeviceTargetCreate(BaseModel):
+    name: Optional[str] = None
+    primary_locator: str
+    device_class: str = Field(default="generic", min_length=1, max_length=80)
+    manufacturer: Optional[str] = Field(default=None, max_length=160)
+    model: Optional[str] = Field(default=None, max_length=160)
+    firmware_version: Optional[str] = Field(default=None, max_length=160)
+    stable_identity: Optional[str] = Field(default=None, max_length=500)
+    identity_confidence: Literal["low", "medium", "high", "verified"] = "low"
+    environment: str = Field(default="production", min_length=1, max_length=80)
+    policy_id: Optional[str] = None
+    sensor_affinity: Optional[str] = Field(default=None, max_length=160)
+    metadata_json: dict[str, Any] = Field(default_factory=dict)
+    is_active: bool = True
+
+
+class DeviceTargetUpdate(BaseModel):
+    name: Optional[str] = None
+    primary_locator: Optional[str] = None
+    device_class: Optional[str] = Field(default=None, min_length=1, max_length=80)
+    manufacturer: Optional[str] = Field(default=None, max_length=160)
+    model: Optional[str] = Field(default=None, max_length=160)
+    firmware_version: Optional[str] = Field(default=None, max_length=160)
+    stable_identity: Optional[str] = Field(default=None, max_length=500)
+    identity_confidence: Optional[Literal["low", "medium", "high", "verified"]] = None
+    environment: Optional[str] = Field(default=None, min_length=1, max_length=80)
+    policy_id: Optional[str] = None
+    sensor_affinity: Optional[str] = Field(default=None, max_length=160)
+    metadata_json: Optional[dict[str, Any]] = None
+    is_active: Optional[bool] = None
+
+
+class DevicePolicyCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    description: Optional[str] = Field(default=None, max_length=1000)
+    device_class: str = Field(default="generic", min_length=1, max_length=80)
+    environment: str = Field(default="production", min_length=1, max_length=80)
+    rules: list[dict[str, Any]] = Field(default_factory=list, max_length=500)
+    is_active: bool = True
+
+
+class DevicePolicyUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=160)
+    description: Optional[str] = Field(default=None, max_length=1000)
+    device_class: Optional[str] = Field(default=None, min_length=1, max_length=80)
+    environment: Optional[str] = Field(default=None, min_length=1, max_length=80)
+    rules: Optional[list[dict[str, Any]]] = Field(default=None, max_length=500)
+    is_active: Optional[bool] = None
+
+
+class DeviceScanRequest(BaseModel):
+    profile: Literal["inventory", "posture", "thorough"] = "posture"
+    confirm_authorized: bool = False
+    include_web_dast: bool = True
+    web_scan_type: Literal["quick", "standard", "deep"] = "standard"
+    max_web_origins: int = Field(default=8, ge=0, le=32)
+    approval_receipt_id: Optional[str] = None
 
 
 class BatchRequest(BaseModel):
@@ -17901,6 +17966,382 @@ async def rescan_model_intake_target(target_id: str, http_request: Request):
         "ui_url": f"/scans/{scan_id}",
         "operation_id": str(command_result["id"]) if command_result else None,
     }
+
+
+# ============================================================
+# CONNECTED DEVICES
+# ============================================================
+
+def _device_posture_enabled() -> bool:
+    return str(os.environ.get("DEVICE_POSTURE_ENABLED", "true")).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _device_uuid(value: str, label: str = "device") -> uuid.UUID:
+    try:
+        return uuid.UUID(str(value))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid {label} id") from exc
+
+
+def _validate_device_policy_rules(rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for index, raw in enumerate(rules):
+        if not isinstance(raw, dict):
+            raise HTTPException(status_code=422, detail=f"policy rule {index + 1} must be an object")
+        rule = dict(raw)
+        action = str(rule.get("action") or "").strip().lower()
+        if action not in {"allow", "deny", "review", "require"}:
+            raise HTTPException(status_code=422, detail=f"policy rule {index + 1} action must be allow, deny, review, or require")
+        transport = str(rule.get("transport") or "any").strip().lower()
+        if transport not in {"any", "tcp", "udp"}:
+            raise HTTPException(status_code=422, detail=f"policy rule {index + 1} transport must be any, tcp, or udp")
+        ports = rule.get("ports")
+        if ports is not None:
+            if not isinstance(ports, list):
+                raise HTTPException(status_code=422, detail=f"policy rule {index + 1} ports must be a list")
+            try:
+                clean_ports = sorted({int(port) for port in ports})
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=422, detail=f"policy rule {index + 1} contains an invalid port") from exc
+            if any(port < 1 or port > 65535 for port in clean_ports):
+                raise HTTPException(status_code=422, detail=f"policy rule {index + 1} ports must be between 1 and 65535")
+            rule["ports"] = clean_ports
+        rule["action"] = action
+        rule["transport"] = transport
+        rule["service"] = str(rule.get("service") or "any").strip().lower()
+        normalized.append(rule)
+    return normalized
+
+
+def _decode_device_row(row: Any) -> dict[str, Any]:
+    payload = row_to_dict(row)
+    payload["metadata_json"] = _decode_json_value(payload.get("metadata_json")) or {}
+    if "rules" in payload:
+        payload["rules"] = _decode_json_value(payload.get("rules")) or []
+    return payload
+
+
+def _device_locator_type(locator: str) -> str:
+    try:
+        ipaddress.ip_address(locator)
+        return "ip"
+    except ValueError:
+        return "hostname"
+
+
+@app.get("/devices/readiness")
+async def get_device_readiness():
+    enabled = _device_posture_enabled()
+    return {
+        "enabled": enabled,
+        "status": "ready" if enabled else "disabled",
+        "profiles": sorted(DEVICE_PROFILES),
+        "required_worker_tools": ["nmap"],
+        "optional_sensor_capabilities": ["bluetooth", "ble", "passive_traffic"],
+        "wireless_status": "planned_sensor_extension",
+    }
+
+
+@app.get("/device-policies")
+async def list_device_policies(include_inactive: bool = False):
+    async with db_pool.acquire() as conn:
+        query = "SELECT * FROM device_policies"
+        if not include_inactive:
+            query += " WHERE is_active = true"
+        query += " ORDER BY is_builtin DESC, name"
+        rows = await conn.fetch(query)
+    return {"policies": [_decode_device_row(row) for row in rows]}
+
+
+@app.post("/device-policies")
+async def create_device_policy(request: DevicePolicyCreate):
+    rules = _validate_device_policy_rules(request.rules)
+    async with db_pool.acquire() as conn:
+        try:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO device_policies (name, description, device_class, environment, rules, is_builtin, is_active)
+                VALUES ($1,$2,$3,$4,$5,false,$6) RETURNING *
+                """,
+                request.name.strip(), request.description, request.device_class.strip().lower(),
+                request.environment.strip().lower(), json.dumps(rules), request.is_active,
+            )
+        except asyncpg.UniqueViolationError as exc:
+            raise HTTPException(status_code=409, detail="Device policy name already exists") from exc
+    return {"policy": _decode_device_row(row)}
+
+
+@app.patch("/device-policies/{policy_id}")
+async def update_device_policy(policy_id: str, request: DevicePolicyUpdate):
+    policy_uuid = _device_uuid(policy_id, "policy")
+    payload = request.model_dump(exclude_unset=True)
+    if "rules" in payload:
+        payload["rules"] = json.dumps(_validate_device_policy_rules(payload["rules"] or []))
+    for key in ("device_class", "environment"):
+        if key in payload and payload[key] is not None:
+            payload[key] = str(payload[key]).strip().lower()
+    if "name" in payload and payload["name"] is not None:
+        payload["name"] = str(payload["name"]).strip()
+    allowed = {"name", "description", "device_class", "environment", "rules", "is_active"}
+    payload = {key: value for key, value in payload.items() if key in allowed}
+    async with db_pool.acquire() as conn:
+        existing = await conn.fetchrow("SELECT * FROM device_policies WHERE id=$1", policy_uuid)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Device policy not found")
+        if existing["is_builtin"] and any(key in payload for key in {"name", "rules", "device_class"}):
+            raise HTTPException(status_code=409, detail="Built-in device policies cannot be modified; copy the policy instead")
+        if payload:
+            values = list(payload.values()) + [policy_uuid]
+            assignments = [f"{key}=${idx}" for idx, key in enumerate(payload, 1)]
+            await conn.execute(f"UPDATE device_policies SET {', '.join(assignments)}, updated_at=NOW() WHERE id=${len(values)}", *values)
+        row = await conn.fetchrow("SELECT * FROM device_policies WHERE id=$1", policy_uuid)
+    return {"policy": _decode_device_row(row)}
+
+
+@app.get("/devices")
+async def list_devices(
+    include_inactive: bool = False,
+    device_class: Optional[str] = None,
+    search: Optional[str] = None,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    conditions = ["($1::boolean = true OR d.is_active = true)"]
+    params: list[Any] = [include_inactive]
+    if device_class:
+        params.append(device_class.strip().lower())
+        conditions.append(f"d.device_class=${len(params)}")
+    if search:
+        params.append(f"%{search.strip()}%")
+        conditions.append(f"(d.name ILIKE ${len(params)} OR d.primary_locator ILIKE ${len(params)} OR COALESCE(d.manufacturer,'') ILIKE ${len(params)})")
+    where = " AND ".join(conditions)
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"""SELECT d.*, p.name AS policy_name,
+                       (SELECT COUNT(*) FROM device_services ds WHERE ds.device_target_id=d.id) AS services_count
+                FROM device_targets d LEFT JOIN device_policies p ON p.id=d.policy_id
+                WHERE {where} ORDER BY d.updated_at DESC LIMIT ${len(params)+1} OFFSET ${len(params)+2}""",
+            *params, limit, offset,
+        )
+        total = await conn.fetchval(f"SELECT COUNT(*) FROM device_targets d WHERE {where}", *params)
+    return {"devices": [_decode_device_row(row) for row in rows], "total": total, "limit": limit, "offset": offset}
+
+
+@app.post("/devices")
+async def create_device(request: DeviceTargetCreate):
+    if not _device_posture_enabled():
+        raise HTTPException(status_code=503, detail="Connected-device posture is disabled")
+    try:
+        locator = normalize_device_locator(request.primary_locator)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    policy_uuid = _device_uuid(request.policy_id, "policy") if request.policy_id else None
+    name = (request.name or locator).strip()
+    async with db_pool.acquire() as conn:
+        if policy_uuid and not await conn.fetchval("SELECT 1 FROM device_policies WHERE id=$1 AND is_active=true", policy_uuid):
+            raise HTTPException(status_code=422, detail="policy_id must reference an active device policy")
+        try:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO device_targets (
+                    name, primary_locator, device_class, manufacturer, model, firmware_version,
+                    stable_identity, identity_confidence, environment, policy_id, sensor_affinity,
+                    metadata_json, is_active
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *
+                """,
+                name, locator, request.device_class.strip().lower(), request.manufacturer, request.model,
+                request.firmware_version, request.stable_identity, request.identity_confidence,
+                request.environment.strip().lower(), policy_uuid, request.sensor_affinity,
+                json.dumps(request.metadata_json), request.is_active,
+            )
+        except asyncpg.UniqueViolationError as exc:
+            raise HTTPException(status_code=409, detail="A connected device already uses this locator") from exc
+        await conn.execute(
+            """INSERT INTO device_interfaces (device_target_id, interface_type, locator_type, locator)
+               VALUES ($1,'network',$2,$3) ON CONFLICT DO NOTHING""",
+            row["id"], _device_locator_type(locator), locator,
+        )
+    return {"device": _decode_device_row(row)}
+
+
+@app.get("/devices/{device_id}")
+async def get_device(device_id: str):
+    device_uuid = _device_uuid(device_id)
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT d.*, p.name AS policy_name FROM device_targets d LEFT JOIN device_policies p ON p.id=d.policy_id WHERE d.id=$1",
+            device_uuid,
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="Connected device not found")
+        interfaces = await conn.fetch("SELECT * FROM device_interfaces WHERE device_target_id=$1 ORDER BY last_seen_at DESC", device_uuid)
+        services = await conn.fetch("SELECT * FROM device_services WHERE device_target_id=$1 ORDER BY transport, port", device_uuid)
+        scans = await conn.fetch(
+            """SELECT id, status, scan_type, run_kind, score, grade, findings_count, progress,
+                      current_phase, created_at, completed_at
+               FROM scans WHERE device_target_id=$1 AND run_kind='device_posture'
+               ORDER BY created_at DESC LIMIT 20""",
+            device_uuid,
+        )
+    return {
+        "device": _decode_device_row(row),
+        "interfaces": [_decode_device_row(item) for item in interfaces],
+        "services": [_decode_device_row(item) for item in services],
+        "scans": [row_to_dict(item) for item in scans],
+    }
+
+
+@app.patch("/devices/{device_id}")
+async def update_device(device_id: str, request: DeviceTargetUpdate):
+    device_uuid = _device_uuid(device_id)
+    payload = request.model_dump(exclude_unset=True)
+    if "primary_locator" in payload and payload["primary_locator"] is not None:
+        try:
+            payload["primary_locator"] = normalize_device_locator(payload["primary_locator"])
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if "policy_id" in payload:
+        payload["policy_id"] = _device_uuid(payload["policy_id"], "policy") if payload["policy_id"] else None
+    if "metadata_json" in payload:
+        payload["metadata_json"] = json.dumps(payload["metadata_json"] or {})
+    for key in ("device_class", "environment"):
+        if key in payload and payload[key] is not None:
+            payload[key] = str(payload[key]).strip().lower()
+    allowed = {
+        "name", "primary_locator", "device_class", "manufacturer", "model", "firmware_version",
+        "stable_identity", "identity_confidence", "environment", "policy_id", "sensor_affinity",
+        "metadata_json", "is_active",
+    }
+    payload = {key: value for key, value in payload.items() if key in allowed}
+    async with db_pool.acquire() as conn:
+        if not await conn.fetchval("SELECT 1 FROM device_targets WHERE id=$1", device_uuid):
+            raise HTTPException(status_code=404, detail="Connected device not found")
+        if payload.get("policy_id") and not await conn.fetchval("SELECT 1 FROM device_policies WHERE id=$1 AND is_active=true", payload["policy_id"]):
+            raise HTTPException(status_code=422, detail="policy_id must reference an active device policy")
+        if payload:
+            values = list(payload.values()) + [device_uuid]
+            assignments = [f"{key}=${idx}" for idx, key in enumerate(payload, 1)]
+            try:
+                await conn.execute(f"UPDATE device_targets SET {', '.join(assignments)}, updated_at=NOW() WHERE id=${len(values)}", *values)
+            except asyncpg.UniqueViolationError as exc:
+                raise HTTPException(status_code=409, detail="A connected device already uses this locator") from exc
+        row = await conn.fetchrow("SELECT * FROM device_targets WHERE id=$1", device_uuid)
+    return {"device": _decode_device_row(row)}
+
+
+@app.delete("/devices/{device_id}")
+async def deactivate_device(device_id: str):
+    device_uuid = _device_uuid(device_id)
+    async with db_pool.acquire() as conn:
+        changed = await conn.execute("UPDATE device_targets SET is_active=false, updated_at=NOW() WHERE id=$1", device_uuid)
+    if changed == "UPDATE 0":
+        raise HTTPException(status_code=404, detail="Connected device not found")
+    return {"status": "deactivated", "device_id": device_id}
+
+
+@app.post("/devices/{device_id}/scan")
+async def scan_device(device_id: str, request: DeviceScanRequest):
+    if not _device_posture_enabled():
+        raise HTTPException(status_code=503, detail="Connected-device posture is disabled")
+    if not request.confirm_authorized:
+        raise HTTPException(status_code=409, detail="Re-submit with confirm_authorized=true after confirming permission to scan this device")
+    device_uuid = _device_uuid(device_id)
+    scan_id, job_id = str(uuid.uuid4()), str(uuid.uuid4())
+    async with db_pool.acquire() as conn:
+        device = await conn.fetchrow("SELECT * FROM device_targets WHERE id=$1", device_uuid)
+        if not device:
+            raise HTTPException(status_code=404, detail="Connected device not found")
+        if not device["is_active"]:
+            raise HTTPException(status_code=409, detail="Connected device is inactive")
+        active = await conn.fetchval(
+            "SELECT 1 FROM scans WHERE device_target_id=$1 AND run_kind='device_posture' AND status IN ('pending','queued','running') LIMIT 1",
+            device_uuid,
+        )
+        if active:
+            raise HTTPException(status_code=409, detail="A connected-device scan is already active for this device")
+        policy = await conn.fetchrow(
+            """SELECT * FROM device_policies
+               WHERE id=COALESCE($1, (SELECT id FROM device_policies WHERE name='connected-device-default-v1'))
+                 AND is_active=true""",
+            device["policy_id"],
+        )
+        if not policy:
+            raise HTTPException(status_code=409, detail="No active connected-device policy is available")
+        policy_payload = _decode_device_row(policy)
+        options = {
+            "run_kind": "device_posture",
+            "device_profile": request.profile,
+            "confirm_authorized": True,
+            "include_web_dast": request.include_web_dast,
+            "web_scan_type": request.web_scan_type,
+            "max_web_origins": request.max_web_origins,
+            "device_policy": {"id": str(policy["id"]), "name": policy["name"], "rules": policy_payload["rules"]},
+            "approval_receipt_id": request.approval_receipt_id,
+        }
+        await conn.execute(
+            """INSERT INTO scans (
+                   id, target_id, ai_target_id, device_target_id, target_url, job_id, status,
+                   options, scan_type, run_kind, subject_ref, scan_role
+               ) VALUES ($1,NULL,NULL,$2,$3,$4,'pending',$5,'device_posture','device_posture',$6,'standalone')""",
+            uuid.UUID(scan_id), device_uuid, device["primary_locator"], job_id,
+            json.dumps(options), f"device_target:{device_id}",
+        )
+    job_data = {
+        "type": "device_scan",
+        "job_id": job_id,
+        "scan_id": scan_id,
+        "target": device["primary_locator"],
+        "device_target_id": device_id,
+        "options": options,
+        "submitted_at": utc_now_iso(),
+        "_base_queue_name": DEVICE_QUEUE_NAME,
+    }
+    try:
+        enqueue_job(get_redis(), DEVICE_QUEUE_NAME, job_data)
+    except Exception as exc:
+        await _mark_scan_enqueue_failed(scan_id, f"connected-device enqueue failed: {exc}")
+        raise HTTPException(status_code=503, detail="Failed to queue connected-device scan") from exc
+    r = get_redis()
+    r.hset(f"job:{job_id}", mapping={"status": "queued", "target": device["primary_locator"], "scan_id": scan_id})
+    return {
+        "scan_id": scan_id,
+        "job_id": job_id,
+        "status": "queued",
+        "run_kind": "device_posture",
+        "device_target_id": device_id,
+        "target": device["primary_locator"],
+        "profile": request.profile,
+        "ui_url": f"/devices/{device_id}?scan={scan_id}",
+    }
+
+
+@app.get("/device-scans")
+async def list_device_scans(
+    status: Optional[str] = None,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    async with db_pool.acquire() as conn:
+        params: list[Any] = []
+        status_clause = ""
+        if status:
+            params.append(status)
+            status_clause = " AND s.status=$1"
+        params.extend([limit, offset])
+        rows = await conn.fetch(
+            f"""SELECT s.id, s.device_target_id, s.target_url, s.status, s.progress, s.current_phase,
+                       s.scan_type, s.run_kind, s.score, s.grade, s.findings_count, s.error_message,
+                       s.created_at, s.started_at, s.completed_at, s.duration_seconds, d.name AS target_name
+                FROM scans s JOIN device_targets d ON d.id=s.device_target_id
+                WHERE s.run_kind='device_posture'{status_clause}
+                ORDER BY s.created_at DESC LIMIT ${len(params)-1} OFFSET ${len(params)}""",
+            *params,
+        )
+        count_params = params[:-2]
+        total = await conn.fetchval(
+            f"SELECT COUNT(*) FROM scans s WHERE s.run_kind='device_posture'{status_clause}", *count_params,
+        )
+    return {"scans": [row_to_dict(row) for row in rows], "total": total, "limit": limit, "offset": offset}
 
 
 # ============================================================
@@ -52605,7 +53046,7 @@ async def list_findings(
     request: Request,
     severity: Optional[str] = None,
     status: Optional[str] = None,
-    source_type: Optional[str] = Query(None, pattern="^(dast|ai|ai_gate|ai_session|deep_hunt|autonomous|model_intake|asm|manual)$"),
+    source_type: Optional[str] = Query(None, pattern="^(dast|device|ai|ai_gate|ai_session|deep_hunt|autonomous|model_intake|asm|manual)$"),
     target_id: Optional[str] = None,
     ai_target_id: Optional[str] = None,
     scan_id: Optional[str] = None,

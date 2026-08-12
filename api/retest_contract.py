@@ -2395,11 +2395,116 @@ async def run_schema_migrations(pool) -> None:
                 CREATE INDEX IF NOT EXISTS idx_ai_surface_attempts_surface
                 ON ai_surface_attempts(surface_id, completed_at DESC)
             """)
+            # Connected-device posture uses a separate asset and finding namespace.
+            # Device-owned web children deliberately keep target_id NULL so they
+            # cannot mutate the Web DAST target inventory or ASM statistics.
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS device_policies (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    name TEXT NOT NULL UNIQUE,
+                    description TEXT,
+                    device_class TEXT NOT NULL DEFAULT 'generic',
+                    environment TEXT NOT NULL DEFAULT 'production',
+                    rules JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    is_builtin BOOLEAN NOT NULL DEFAULT false,
+                    is_active BOOLEAN NOT NULL DEFAULT true,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            await conn.execute("""
+                INSERT INTO device_policies (name, description, device_class, rules, is_builtin)
+                VALUES (
+                    'connected-device-default-v1',
+                    'Safe baseline: forbid cleartext administration, flag unknown services, and require secure SSH.',
+                    'generic',
+                    '[
+                      {"action":"deny","transport":"tcp","ports":[23,2323],"service":"telnet","severity":"critical","reason":"Cleartext remote administration is forbidden."},
+                      {"action":"deny","transport":"tcp","ports":[21],"service":"ftp","severity":"high","reason":"Cleartext file transfer is forbidden."},
+                      {"action":"require","transport":"tcp","service":"ssh","requirements":{"password_auth":false,"weak_algorithms":false},"severity":"high"},
+                      {"action":"allow","transport":"tcp","service":"http","encrypted":false,"severity":"medium"},
+                      {"action":"allow","transport":"tcp","service":"https","encrypted":true},
+                      {"action":"review","transport":"any","service":"unknown","severity":"medium","reason":"An unclassified listening service requires review."}
+                    ]'::jsonb,
+                    true
+                )
+                ON CONFLICT (name) DO NOTHING
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS device_targets (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    name TEXT NOT NULL,
+                    primary_locator TEXT NOT NULL UNIQUE,
+                    device_class TEXT NOT NULL DEFAULT 'generic',
+                    manufacturer TEXT,
+                    model TEXT,
+                    firmware_version TEXT,
+                    stable_identity TEXT,
+                    identity_confidence TEXT NOT NULL DEFAULT 'low',
+                    environment TEXT NOT NULL DEFAULT 'production',
+                    policy_id UUID REFERENCES device_policies(id) ON DELETE SET NULL,
+                    sensor_affinity TEXT,
+                    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    last_scanned_at TIMESTAMPTZ,
+                    last_scan_id UUID REFERENCES scans(id) ON DELETE SET NULL,
+                    last_score INTEGER,
+                    last_grade TEXT,
+                    active_findings_count INTEGER NOT NULL DEFAULT 0,
+                    is_active BOOLEAN NOT NULL DEFAULT true,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT device_targets_identity_confidence_check CHECK (identity_confidence IN ('low','medium','high','verified'))
+                )
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS device_interfaces (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    device_target_id UUID NOT NULL REFERENCES device_targets(id) ON DELETE CASCADE,
+                    interface_type TEXT NOT NULL DEFAULT 'network',
+                    locator_type TEXT NOT NULL DEFAULT 'ip',
+                    locator TEXT NOT NULL,
+                    mac_address TEXT,
+                    hostname TEXT,
+                    network_zone TEXT,
+                    first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    CONSTRAINT device_interfaces_locator_unique UNIQUE (device_target_id, interface_type, locator_type, locator)
+                )
+            """)
             await conn.execute("""
                 ALTER TABLE scans
                 ADD COLUMN IF NOT EXISTS run_kind TEXT DEFAULT 'web_dast',
                 ADD COLUMN IF NOT EXISTS subject_ref TEXT,
-                ADD COLUMN IF NOT EXISTS ai_target_id UUID REFERENCES ai_targets(id) ON DELETE SET NULL
+                ADD COLUMN IF NOT EXISTS ai_target_id UUID REFERENCES ai_targets(id) ON DELETE SET NULL,
+                ADD COLUMN IF NOT EXISTS device_target_id UUID REFERENCES device_targets(id) ON DELETE SET NULL
+            """)
+            await conn.execute("""
+                ALTER TABLE findings
+                ADD COLUMN IF NOT EXISTS device_target_id UUID REFERENCES device_targets(id) ON DELETE CASCADE
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS device_services (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    device_target_id UUID NOT NULL REFERENCES device_targets(id) ON DELETE CASCADE,
+                    scan_id UUID REFERENCES scans(id) ON DELETE SET NULL,
+                    interface_id UUID REFERENCES device_interfaces(id) ON DELETE SET NULL,
+                    transport TEXT NOT NULL,
+                    port INTEGER NOT NULL CHECK (port BETWEEN 1 AND 65535),
+                    state TEXT NOT NULL DEFAULT 'open',
+                    service_name TEXT NOT NULL DEFAULT 'unknown',
+                    product TEXT,
+                    version TEXT,
+                    cpe TEXT,
+                    encrypted BOOLEAN,
+                    web_origin TEXT,
+                    policy_disposition TEXT,
+                    policy_reason TEXT,
+                    first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    CONSTRAINT device_services_identity_unique UNIQUE (device_target_id, transport, port)
+                )
             """)
             await conn.execute("""
                 UPDATE scans SET run_kind = 'web_dast'
@@ -2418,7 +2523,9 @@ async def run_schema_migrations(pool) -> None:
                     'ai_rag',
                     'ai_trace',
                     'ai_mcp',
-                    'model_intake'
+                    'model_intake',
+                    'device_posture',
+                    'device_web_dast'
                 ))
             """)
             await conn.execute("""
@@ -2450,6 +2557,29 @@ async def run_schema_migrations(pool) -> None:
                 CREATE INDEX IF NOT EXISTS idx_findings_ai_target
                 ON findings(ai_target_id)
                 WHERE ai_target_id IS NOT NULL
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_device_targets_active_updated
+                ON device_targets(is_active, updated_at DESC)
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_scans_device_target_created
+                ON scans(device_target_id, created_at DESC)
+                WHERE device_target_id IS NOT NULL
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_findings_device_target
+                ON findings(device_target_id)
+                WHERE device_target_id IS NOT NULL
+            """)
+            await conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_findings_device_fingerprint
+                ON findings(device_target_id, fingerprint)
+                WHERE device_target_id IS NOT NULL
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_device_services_target_seen
+                ON device_services(device_target_id, last_seen_at DESC)
             """)
 
             # finding_verifications table

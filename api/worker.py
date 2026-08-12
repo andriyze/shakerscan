@@ -114,6 +114,7 @@ REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379')
 DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://scanner:scanner@localhost:5432/scanner')
 RESULTS_DIR = Path(os.environ.get('RESULTS_DIR', '/results'))
 QUEUE_NAME = 'scan_jobs'
+DEVICE_QUEUE_NAME = os.environ.get("DEVICE_QUEUE_NAME", "device_scan_jobs")
 RETEST_QUEUE_NAME = os.environ.get("RETEST_QUEUE_NAME", "retest_jobs")
 BROKER_INGEST_QUEUE_NAME = os.environ.get("BROKER_INGEST_QUEUE_NAME", "broker_ingest_jobs")
 AI_GATE_RUN_KINDS = {"ai_api", "ai_rag", "ai_trace", "ai_mcp", "ai_widget"}
@@ -172,6 +173,7 @@ MAX_SCAN_DURATION = {
     'smart': 360,
 }
 VALID_DAST_SCAN_TYPES = {"quick", "standard", "deep", "full", "aggressive", "smart"}
+DEVICE_RUN_KINDS = {"device_posture", "device_web_dast"}
 ACTIVE_ENFORCED_SCAN_TYPES = {"smart", "full", "aggressive"}
 SCANNER_AUTH_CONFIG_KEYS = {
     "api_token",
@@ -2042,6 +2044,18 @@ async def run_scan(
     persist_checkpoint_artifacts: bool = True,
 ) -> dict:
     """Execute scanner and return results."""
+    if options.get("run_kind") == "device_posture":
+        if scan_id:
+            await update_scan_progress(scan_id, "device_inventory", 10, job_id=job_id)
+        try:
+            from scanner_tools.device_posture import run_device_posture_scan
+        except ImportError:
+            from scanner.scanner_tools.device_posture import run_device_posture_scan
+        result = await run_device_posture_scan(target, dict(options or {}))
+        if scan_id:
+            await update_scan_progress(scan_id, "device_policy", 90, job_id=job_id)
+        return result
+
     if options.get("run_kind") in MODEL_INTAKE_RUN_KINDS:
         if scan_id:
             await update_scan_progress(scan_id, "model_intake", 15, job_id=job_id)
@@ -3625,6 +3639,169 @@ async def save_ai_findings(scan_id: str, ai_target_id: str, findings: list) -> i
                                                evidence_with_triage, tool_override='ai_gate')
 
     return saved
+
+
+async def save_device_findings(scan_id: str, device_target_id: str, findings: list) -> int:
+    """Persist findings in the device namespace without touching Web DAST targets."""
+    if not findings:
+        return 0
+    scan_uuid = uuid.UUID(scan_id)
+    device_uuid = uuid.UUID(device_target_id)
+    saved = 0
+    async with db_pool.acquire() as conn:
+        for finding in findings:
+            fingerprint = str(finding.get("fingerprint") or generate_finding_fingerprint(finding))
+            evidence_with_triage = _redact_finding_evidence(_build_evidence_with_triage(finding))
+            evidence_json = json.dumps(evidence_with_triage) if evidence_with_triage else None
+            recommendations = finding.get("ai_recommendations") or finding.get("recommendations")
+            recommendation_json = json.dumps(recommendations) if recommendations else None
+            existing = await conn.fetchrow(
+                "SELECT id, status, resurfaced_count FROM findings WHERE device_target_id=$1 AND fingerprint=$2",
+                device_uuid, fingerprint,
+            )
+            values = (
+                scan_uuid,
+                finding.get("title"),
+                finding.get("description"),
+                finding.get("severity", "info"),
+                finding.get("cvss_score"),
+                finding.get("tool") or "device_posture",
+                finding.get("cwe"),
+                finding.get("cwe_name"),
+                finding.get("owasp"),
+                finding.get("url"),
+                evidence_json,
+                finding.get("ai_verdict"),
+                finding.get("ai_confidence"),
+                finding.get("ai_rationale"),
+                recommendation_json,
+                finding.get("ai_classification_source"),
+            )
+            if existing:
+                resurfaced = int(existing.get("resurfaced_count") or 0) + (1 if existing["status"] == "resolved" else 0)
+                await conn.execute(
+                    """
+                    UPDATE findings SET
+                        status=CASE WHEN status='resolved' THEN 'active' ELSE status END,
+                        resolved_at=CASE WHEN status='resolved' THEN NULL ELSE resolved_at END,
+                        resurfaced_count=$1, last_seen_at=NOW(), scan_id=$2, title=$3,
+                        description=$4, severity=$5, cvss_score=$6, tool=$7, cwe=$8,
+                        cwe_name=$9, owasp=$10, url=$11, evidence=$12, ai_verdict=$13,
+                        ai_confidence=$14, ai_rationale=$15, ai_recommendations=$16,
+                        ai_classification_source=$17, source='device', updated_at=NOW()
+                    WHERE id=$18
+                    """,
+                    resurfaced, *values, existing["id"],
+                )
+                finding_id = existing["id"]
+            else:
+                finding_id = await conn.fetchval(
+                    """
+                    INSERT INTO findings (
+                        scan_id, target_id, ai_target_id, device_target_id, fingerprint,
+                        title, description, severity, cvss_score, tool, cwe, cwe_name,
+                        owasp, url, evidence, ai_verdict, ai_confidence, ai_rationale,
+                        ai_recommendations, ai_classification_source, source
+                    ) VALUES ($1,NULL,NULL,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,'device')
+                    RETURNING id
+                    """,
+                    scan_uuid, device_uuid, fingerprint,
+                    finding.get("title"), finding.get("description"), finding.get("severity", "info"),
+                    finding.get("cvss_score"), finding.get("tool") or "device_posture", finding.get("cwe"),
+                    finding.get("cwe_name"), finding.get("owasp"), finding.get("url"), evidence_json,
+                    finding.get("ai_verdict"), finding.get("ai_confidence"), finding.get("ai_rationale"),
+                    recommendation_json, finding.get("ai_classification_source"),
+                )
+            if finding_id:
+                saved += 1
+                await _persist_evidence_object(
+                    conn, scan_uuid, finding_id, finding, evidence_with_triage,
+                    tool_override=finding.get("tool") or "device_posture",
+                )
+    return saved
+
+
+async def persist_device_inventory(scan_id: str, device_target_id: str, result: dict[str, Any]) -> None:
+    """Upsert device identity, interfaces, and current listening services."""
+    posture = result.get("device_posture") if isinstance(result.get("device_posture"), dict) else {}
+    identity = posture.get("identity") if isinstance(posture.get("identity"), dict) else {}
+    services = posture.get("services") if isinstance(posture.get("services"), list) else []
+    device_uuid = uuid.UUID(device_target_id)
+    scan_uuid = uuid.UUID(scan_id)
+    addresses = [item for item in identity.get("addresses") or [] if isinstance(item, dict)]
+    hostnames = [str(item) for item in identity.get("hostnames") or [] if str(item).strip()]
+    mac = next((str(item.get("address")) for item in addresses if item.get("type") == "mac" and item.get("address")), None)
+    vendor = next((str(item.get("vendor")) for item in addresses if item.get("vendor")), None)
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            current = await conn.fetchrow("SELECT primary_locator, stable_identity FROM device_targets WHERE id=$1 FOR UPDATE", device_uuid)
+            if not current:
+                return
+            locator = str(current["primary_locator"])
+            locator_type = "hostname"
+            try:
+                ipaddress.ip_address(locator)
+                locator_type = "ip"
+            except ValueError:
+                pass
+            interface_id = await conn.fetchval(
+                """
+                INSERT INTO device_interfaces (
+                    device_target_id, interface_type, locator_type, locator, mac_address, hostname, last_seen_at, metadata_json
+                ) VALUES ($1,'network',$2,$3,$4,$5,NOW(),$6)
+                ON CONFLICT (device_target_id, interface_type, locator_type, locator) DO UPDATE SET
+                    mac_address=COALESCE(EXCLUDED.mac_address, device_interfaces.mac_address),
+                    hostname=COALESCE(EXCLUDED.hostname, device_interfaces.hostname),
+                    last_seen_at=NOW(), metadata_json=EXCLUDED.metadata_json
+                RETURNING id
+                """,
+                device_uuid, locator_type, locator, mac, hostnames[0] if hostnames else None,
+                json.dumps({"addresses": addresses, "os_matches": identity.get("os_matches") or []}),
+            )
+            await conn.execute("UPDATE device_services SET state='not_observed' WHERE device_target_id=$1", device_uuid)
+            for service in services:
+                if not isinstance(service, dict):
+                    continue
+                await conn.execute(
+                    """
+                    INSERT INTO device_services (
+                        device_target_id, scan_id, interface_id, transport, port, state,
+                        service_name, product, version, cpe, encrypted, web_origin,
+                        policy_disposition, policy_reason, last_seen_at, metadata_json
+                    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW(),$15)
+                    ON CONFLICT (device_target_id, transport, port) DO UPDATE SET
+                        scan_id=EXCLUDED.scan_id, interface_id=EXCLUDED.interface_id,
+                        state=EXCLUDED.state, service_name=EXCLUDED.service_name,
+                        product=EXCLUDED.product, version=EXCLUDED.version, cpe=EXCLUDED.cpe,
+                        encrypted=EXCLUDED.encrypted, web_origin=EXCLUDED.web_origin,
+                        policy_disposition=EXCLUDED.policy_disposition,
+                        policy_reason=EXCLUDED.policy_reason, last_seen_at=NOW(),
+                        metadata_json=EXCLUDED.metadata_json
+                    """,
+                    device_uuid, scan_uuid, interface_id, str(service.get("transport") or "tcp"),
+                    int(service.get("port")), str(service.get("state") or "open"),
+                    str(service.get("service_name") or "unknown"), service.get("product"),
+                    service.get("version"), service.get("cpe"), service.get("encrypted"),
+                    service.get("web_origin"), service.get("policy_disposition"),
+                    service.get("policy_reason"), json.dumps({
+                        key: value for key, value in service.items()
+                        if key not in {"transport", "port", "state", "service_name", "product", "version", "cpe", "encrypted", "web_origin", "policy_disposition", "policy_reason"}
+                    }),
+                )
+            stable_identity = current["stable_identity"] or (f"mac:{mac.lower()}" if mac else None)
+            identity_confidence = "high" if mac else "medium" if addresses else "low"
+            await conn.execute(
+                """UPDATE device_targets SET
+                       stable_identity=COALESCE(stable_identity,$1),
+                       identity_confidence=CASE
+                           WHEN identity_confidence='verified' THEN identity_confidence
+                           WHEN $2='high' THEN 'high'
+                           WHEN identity_confidence='low' THEN $2
+                           ELSE identity_confidence END,
+                       manufacturer=COALESCE(manufacturer,$3), updated_at=NOW()
+                   WHERE id=$4""",
+                stable_identity, identity_confidence, vendor, device_uuid,
+            )
 
 
 def _hypothesis_dedupe_part(value: Any, *, lower: bool = False) -> str | None:
@@ -7230,6 +7407,7 @@ async def process_scan_job(job_data: dict):
     # Update database
     target_id = None
     ai_target_id = None
+    device_target_id = None
     async with db_pool.acquire() as conn:
         update_result = await conn.execute("""
             UPDATE scans SET status = 'running', started_at = $1
@@ -7255,10 +7433,11 @@ async def process_scan_job(job_data: dict):
             return
 
         # Get target references
-        row = await conn.fetchrow("SELECT target_id, ai_target_id FROM scans WHERE id = $1", uuid.UUID(scan_id))
+        row = await conn.fetchrow("SELECT target_id, ai_target_id, device_target_id FROM scans WHERE id = $1", uuid.UUID(scan_id))
         if row:
             target_id = str(row['target_id']) if row['target_id'] else None
             ai_target_id = str(row['ai_target_id']) if row['ai_target_id'] else None
+            device_target_id = str(row['device_target_id']) if row['device_target_id'] else None
 
     # A broker ingest job carries immutable output from execution that already
     # happened on the remote node. It must not reserve execution budget again:
@@ -7528,6 +7707,13 @@ async def process_scan_job(job_data: dict):
                             updated_at = NOW()
                         WHERE id = $3
                     """, uuid.UUID(scan_id), completed_at, uuid.UUID(ai_target_id))
+                if device_target_id:
+                    await conn.execute("""
+                        UPDATE device_targets SET
+                            last_scan_id=$1, last_scanned_at=$2, last_score=$3,
+                            last_grade=$4, updated_at=NOW()
+                        WHERE id=$5
+                    """, uuid.UUID(scan_id), completed_at, score, grade, uuid.UUID(device_target_id))
 
         # Save to file after best-effort receipt emission so the file mirrors
         # the persisted scan result's receipt ids.
@@ -7545,6 +7731,24 @@ async def process_scan_job(job_data: dict):
                 saved_count = await save_ai_findings(scan_id, ai_target_id, findings)
             except Exception as e:
                 print(f"[{job_id[:8]}] save_ai_findings error: {e}", flush=True)
+        elif device_target_id and findings:
+            try:
+                saved_count = await save_device_findings(scan_id, device_target_id, findings)
+            except Exception as e:
+                print(f"[{job_id[:8]}] save_device_findings error: {e}", flush=True)
+
+        if device_target_id and not error:
+            try:
+                await persist_device_inventory(scan_id, device_target_id, result)
+                async with db_pool.acquire() as conn:
+                    await conn.execute("""
+                        UPDATE device_targets SET active_findings_count=(
+                            SELECT COUNT(*) FROM findings
+                            WHERE device_target_id=$1 AND status='active'
+                        ), updated_at=NOW() WHERE id=$1
+                    """, uuid.UUID(device_target_id))
+            except Exception as e:
+                print(f"[{job_id[:8]}] persist_device_inventory error: {e}", flush=True)
 
         if not error and (ai_target_id or target_id or (options or {}).get("run_kind") in MODEL_INTAKE_RUN_KINDS):
             try:
@@ -11084,7 +11288,7 @@ async def async_main():
     await init_db()
 
     r = get_redis()
-    base_queue_keys = list(dict.fromkeys([QUEUE_NAME, RETEST_QUEUE_NAME, BROKER_INGEST_QUEUE_NAME]))
+    base_queue_keys = list(dict.fromkeys([QUEUE_NAME, DEVICE_QUEUE_NAME, RETEST_QUEUE_NAME, BROKER_INGEST_QUEUE_NAME]))
     queue_keys = list(base_queue_keys)
     print(
         f"Worker started, listening on queues: {', '.join(queue_keys)} "

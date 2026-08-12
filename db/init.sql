@@ -195,6 +195,105 @@ ALTER TABLE scans
 ADD COLUMN ai_target_id UUID REFERENCES ai_targets(id) ON DELETE SET NULL;
 
 -- ============================================================
+-- CONNECTED DEVICES - Network-connected device posture assets
+-- ============================================================
+CREATE TABLE device_policies (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL UNIQUE,
+    description TEXT,
+    device_class TEXT NOT NULL DEFAULT 'generic',
+    environment TEXT NOT NULL DEFAULT 'production',
+    rules JSONB NOT NULL DEFAULT '[]'::jsonb,
+    is_builtin BOOLEAN NOT NULL DEFAULT false,
+    is_active BOOLEAN NOT NULL DEFAULT true,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+INSERT INTO device_policies (name, description, device_class, rules, is_builtin)
+VALUES (
+    'connected-device-default-v1',
+    'Safe baseline: forbid cleartext administration, flag unknown services, and require secure SSH.',
+    'generic',
+    '[
+      {"action":"deny","transport":"tcp","ports":[23,2323],"service":"telnet","severity":"critical","reason":"Cleartext remote administration is forbidden."},
+      {"action":"deny","transport":"tcp","ports":[21],"service":"ftp","severity":"high","reason":"Cleartext file transfer is forbidden."},
+      {"action":"require","transport":"tcp","service":"ssh","requirements":{"password_auth":false,"weak_algorithms":false},"severity":"high"},
+      {"action":"allow","transport":"tcp","service":"http","encrypted":false,"severity":"medium"},
+      {"action":"allow","transport":"tcp","service":"https","encrypted":true},
+      {"action":"review","transport":"any","service":"unknown","severity":"medium","reason":"An unclassified listening service requires review."}
+    ]'::jsonb,
+    true
+)
+ON CONFLICT (name) DO NOTHING;
+
+CREATE TABLE device_targets (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL,
+    primary_locator TEXT NOT NULL,
+    device_class TEXT NOT NULL DEFAULT 'generic',
+    manufacturer TEXT,
+    model TEXT,
+    firmware_version TEXT,
+    stable_identity TEXT,
+    identity_confidence TEXT NOT NULL DEFAULT 'low',
+    environment TEXT NOT NULL DEFAULT 'production',
+    policy_id UUID REFERENCES device_policies(id) ON DELETE SET NULL,
+    sensor_affinity TEXT,
+    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    last_scanned_at TIMESTAMPTZ,
+    last_scan_id UUID REFERENCES scans(id) ON DELETE SET NULL,
+    last_score INTEGER,
+    last_grade TEXT,
+    active_findings_count INTEGER NOT NULL DEFAULT 0,
+    is_active BOOLEAN NOT NULL DEFAULT true,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT device_targets_locator_unique UNIQUE (primary_locator),
+    CONSTRAINT device_targets_identity_confidence_check CHECK (identity_confidence IN ('low','medium','high','verified'))
+);
+
+CREATE TABLE device_interfaces (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    device_target_id UUID NOT NULL REFERENCES device_targets(id) ON DELETE CASCADE,
+    interface_type TEXT NOT NULL DEFAULT 'network',
+    locator_type TEXT NOT NULL DEFAULT 'ip',
+    locator TEXT NOT NULL,
+    mac_address TEXT,
+    hostname TEXT,
+    network_zone TEXT,
+    first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    CONSTRAINT device_interfaces_locator_unique UNIQUE (device_target_id, interface_type, locator_type, locator)
+);
+
+ALTER TABLE scans
+ADD COLUMN device_target_id UUID REFERENCES device_targets(id) ON DELETE SET NULL;
+
+CREATE TABLE device_services (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    device_target_id UUID NOT NULL REFERENCES device_targets(id) ON DELETE CASCADE,
+    scan_id UUID REFERENCES scans(id) ON DELETE SET NULL,
+    interface_id UUID REFERENCES device_interfaces(id) ON DELETE SET NULL,
+    transport TEXT NOT NULL,
+    port INTEGER NOT NULL CHECK (port BETWEEN 1 AND 65535),
+    state TEXT NOT NULL DEFAULT 'open',
+    service_name TEXT NOT NULL DEFAULT 'unknown',
+    product TEXT,
+    version TEXT,
+    cpe TEXT,
+    encrypted BOOLEAN,
+    web_origin TEXT,
+    policy_disposition TEXT,
+    policy_reason TEXT,
+    first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    CONSTRAINT device_services_identity_unique UNIQUE (device_target_id, transport, port)
+);
+
+-- ============================================================
 -- FINDINGS - Vulnerabilities discovered
 -- ============================================================
 CREATE TABLE findings (
@@ -202,6 +301,7 @@ CREATE TABLE findings (
     scan_id UUID REFERENCES scans(id) ON DELETE CASCADE,
     target_id UUID REFERENCES targets(id) ON DELETE CASCADE,
     ai_target_id UUID REFERENCES ai_targets(id) ON DELETE CASCADE,
+    device_target_id UUID REFERENCES device_targets(id) ON DELETE CASCADE,
 
     -- Finding identification (for deduplication)
     fingerprint TEXT NOT NULL,
@@ -536,6 +636,7 @@ CREATE INDEX idx_targets_is_root ON targets(is_root) WHERE is_root = true;
 -- Scans
 CREATE INDEX idx_scans_target_id ON scans(target_id);
 CREATE INDEX idx_scans_ai_target_id ON scans(ai_target_id) WHERE ai_target_id IS NOT NULL;
+CREATE INDEX idx_scans_device_target_id ON scans(device_target_id) WHERE device_target_id IS NOT NULL;
 CREATE INDEX idx_scans_run_kind ON scans(run_kind);
 CREATE INDEX idx_scans_status ON scans(status);
 CREATE INDEX idx_scans_created ON scans(created_at DESC);
@@ -656,6 +757,10 @@ CREATE INDEX idx_ai_targets_created ON ai_targets(created_at DESC);
 CREATE INDEX idx_findings_scan_id ON findings(scan_id);
 CREATE INDEX idx_findings_target_id ON findings(target_id);
 CREATE INDEX idx_findings_ai_target_id ON findings(ai_target_id) WHERE ai_target_id IS NOT NULL;
+CREATE INDEX idx_findings_device_target_id ON findings(device_target_id) WHERE device_target_id IS NOT NULL;
+CREATE UNIQUE INDEX idx_findings_device_fingerprint ON findings(device_target_id, fingerprint) WHERE device_target_id IS NOT NULL;
+CREATE INDEX idx_device_targets_active_updated ON device_targets(is_active, updated_at DESC);
+CREATE INDEX idx_device_services_target_seen ON device_services(device_target_id, last_seen_at DESC);
 CREATE INDEX idx_findings_severity ON findings(severity);
 CREATE INDEX idx_findings_status ON findings(status);
 CREATE INDEX idx_findings_fingerprint ON findings(fingerprint);
