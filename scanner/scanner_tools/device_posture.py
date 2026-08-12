@@ -243,9 +243,32 @@ def _rule_matches(rule: dict[str, Any], service: dict[str, Any]) -> bool:
     if expected not in {"any", actual}:
         return False
     encrypted = rule.get("encrypted")
-    if encrypted is not None and bool(service.get("encrypted")) != bool(encrypted):
+    # ``require`` rules select the service first and evaluate controls below.
+    # For allow/deny/review, encryption remains part of the selector.
+    if str(rule.get("action") or "").lower() != "require" and encrypted is not None and bool(service.get("encrypted")) != bool(encrypted):
         return False
     return True
+
+
+def _requirement_failures(rule: dict[str, Any], service: dict[str, Any]) -> list[str]:
+    requirements = rule.get("requirements") if isinstance(rule.get("requirements"), dict) else {}
+    failures: list[str] = []
+    expected_encrypted = rule.get("encrypted", requirements.get("encrypted"))
+    if expected_encrypted is not None and bool(service.get("encrypted")) != bool(expected_encrypted):
+        failures.append("service encryption does not match policy")
+
+    ssh = service.get("ssh") if isinstance(service.get("ssh"), dict) else {}
+    ssh_requirements = {"password_auth", "weak_algorithms", "publickey_auth"} & set(requirements)
+    if ssh_requirements and not ssh.get("scan_completed"):
+        failures.append("SSH controls could not be verified")
+        return failures
+    if requirements.get("password_auth") is False and ssh.get("password_auth_enabled"):
+        failures.append("SSH password authentication is enabled")
+    if requirements.get("weak_algorithms") is False and ssh.get("weak_algorithms"):
+        failures.append("SSH negotiated a weak cryptographic algorithm")
+    if requirements.get("publickey_auth") is True and not ssh.get("publickey_enabled"):
+        failures.append("SSH public-key authentication was not offered")
+    return failures
 
 
 def evaluate_service_policy(services: list[dict[str, Any]], rules: list[dict[str, Any]], *, policy_name: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -256,25 +279,37 @@ def evaluate_service_policy(services: list[dict[str, Any]], rules: list[dict[str
         matching = next((rule for rule in rules if _rule_matches(rule, service)), None)
         action = str((matching or {}).get("action") or "review").lower()
         reason = str((matching or {}).get("reason") or "No allowlist rule matched this listening service.")
+        requirement_failures = _requirement_failures(matching, service) if matching and action == "require" else []
+        if requirement_failures:
+            reason = "; ".join(requirement_failures) + "."
         service["policy_disposition"] = action
         service["policy_reason"] = reason
         evaluated.append(service)
-        if action not in {"deny", "review"}:
+        if action not in {"deny", "review"} and not requirement_failures:
             continue
         severity = str((matching or {}).get("severity") or ("high" if action == "deny" else "medium"))
         transport = service.get("transport")
         port = service.get("port")
         name = service.get("service_name") or "unknown"
-        fingerprint = hashlib.sha256(f"device-policy|{transport}|{port}|{name}|{action}".encode()).hexdigest()
+        finding_action = "require" if requirement_failures else action
+        fingerprint = hashlib.sha256(f"device-policy|{transport}|{port}|{name}|{finding_action}".encode()).hexdigest()
         findings.append({
             "fingerprint": fingerprint,
-            "title": f"{action.title()} device service: {name} on {port}/{transport}",
+            "title": (
+                f"Device service requirement not met: {name} on {port}/{transport}"
+                if requirement_failures else f"{action.title()} device service: {name} on {port}/{transport}"
+            ),
             "description": reason,
             "severity": severity,
             "tool": "device_policy",
             "source": "device",
             "cwe": "CWE-284",
-            "evidence": {"service": service, "policy_name": policy_name, "disposition": action},
+            "evidence": {
+                "service": service,
+                "policy_name": policy_name,
+                "disposition": finding_action,
+                "requirement_failures": requirement_failures,
+            },
             "remediation": "Disable the service or update the approved device policy with a narrowly scoped exception.",
         })
     return evaluated, findings

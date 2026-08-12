@@ -41,6 +41,55 @@ def test_policy_defaults_to_review_and_honors_deny():
     assert [row["severity"] for row in findings] == ["critical", "medium"]
 
 
+def test_require_policy_fails_closed_when_ssh_controls_are_unverified_or_weak():
+    rule = {
+        "action": "require",
+        "transport": "tcp",
+        "service": "ssh",
+        "requirements": {"password_auth": False, "weak_algorithms": False},
+        "severity": "high",
+    }
+    services = [{"transport": "tcp", "port": 2222, "service_name": "ssh", "ssh": {"scan_completed": False}}]
+    evaluated, findings = device_posture.evaluate_service_policy(services, [rule], policy_name="ssh-baseline")
+    assert evaluated[0]["policy_disposition"] == "require"
+    assert findings[0]["severity"] == "high"
+    assert "could not be verified" in findings[0]["description"]
+
+    services[0]["ssh"] = {
+        "scan_completed": True,
+        "password_auth_enabled": True,
+        "weak_algorithms": ["mac_in:hmac-sha1"],
+    }
+    _, findings = device_posture.evaluate_service_policy(services, [rule], policy_name="ssh-baseline")
+    assert findings[0]["evidence"]["requirement_failures"] == [
+        "SSH password authentication is enabled",
+        "SSH negotiated a weak cryptographic algorithm",
+    ]
+
+
+def test_require_policy_passes_when_ssh_controls_are_proven():
+    service = {
+        "transport": "tcp",
+        "port": 22,
+        "service_name": "ssh",
+        "ssh": {
+            "scan_completed": True,
+            "password_auth_enabled": False,
+            "weak_algorithms": [],
+            "publickey_enabled": True,
+        },
+    }
+    rule = {
+        "action": "require",
+        "transport": "tcp",
+        "service": "ssh",
+        "requirements": {"password_auth": False, "weak_algorithms": False, "publickey_auth": True},
+    }
+    evaluated, findings = device_posture.evaluate_service_policy([service], [rule], policy_name="ssh-baseline")
+    assert evaluated[0]["policy_disposition"] == "require"
+    assert findings == []
+
+
 def test_web_detection_checks_nonstandard_ports(monkeypatch):
     calls = []
 

@@ -227,6 +227,83 @@ VALUES (
 )
 ON CONFLICT (name) DO NOTHING;
 
+INSERT INTO device_policies (name, description, device_class, rules, is_builtin)
+VALUES
+(
+    'connected-device-default-v2',
+    'Fail-closed generic baseline: block cleartext administration, require hardened SSH, review cleartext web and unknown services.',
+    'generic',
+    '[
+      {"action":"deny","transport":"tcp","ports":[23,2323],"service":"telnet","severity":"critical","reason":"Cleartext remote administration is forbidden."},
+      {"action":"deny","transport":"tcp","ports":[21],"service":"ftp","severity":"high","reason":"Cleartext file transfer is forbidden."},
+      {"action":"require","transport":"tcp","service":"ssh","requirements":{"password_auth":false,"weak_algorithms":false,"publickey_auth":true},"severity":"high"},
+      {"action":"allow","transport":"tcp","service":"https","encrypted":true},
+      {"action":"review","transport":"tcp","service":"http","encrypted":false,"severity":"medium","reason":"Cleartext device management should be isolated or upgraded to HTTPS."},
+      {"action":"review","transport":"any","service":"unknown","severity":"medium","reason":"An unclassified listening service requires review."}
+    ]'::jsonb,
+    true
+),
+(
+    'media-device-baseline-v1',
+    'Smart TV, streaming, and conference display service baseline.',
+    'media',
+    '[
+      {"action":"deny","transport":"tcp","ports":[21,23,2323],"service":"any","severity":"critical","reason":"Legacy cleartext administration is forbidden."},
+      {"action":"require","transport":"tcp","service":"ssh","requirements":{"password_auth":false,"weak_algorithms":false,"publickey_auth":true},"severity":"high"},
+      {"action":"allow","transport":"tcp","service":"https","encrypted":true},
+      {"action":"review","transport":"tcp","service":"http","encrypted":false,"severity":"medium","reason":"Cleartext media-device web management requires network isolation."},
+      {"action":"allow","transport":"udp","ports":[1900],"service":"upnp"},
+      {"action":"allow","transport":"udp","ports":[5353],"service":"mdns"},
+      {"action":"review","transport":"any","service":"unknown","severity":"medium","reason":"Unexpected media-device service."}
+    ]'::jsonb,
+    true
+),
+(
+    'camera-baseline-v1',
+    'IP camera and video endpoint baseline.',
+    'camera',
+    '[
+      {"action":"deny","transport":"tcp","ports":[21,23,2323],"service":"any","severity":"critical","reason":"Legacy cleartext administration is forbidden."},
+      {"action":"require","transport":"tcp","service":"ssh","requirements":{"password_auth":false,"weak_algorithms":false,"publickey_auth":true},"severity":"high"},
+      {"action":"allow","transport":"tcp","service":"https","encrypted":true},
+      {"action":"review","transport":"tcp","service":"http","encrypted":false,"severity":"high","reason":"Camera management traffic is unencrypted."},
+      {"action":"review","transport":"tcp","service":"rtsp","severity":"medium","reason":"Confirm RTSP authentication and network isolation."},
+      {"action":"review","transport":"any","service":"unknown","severity":"high","reason":"Unexpected camera service."}
+    ]'::jsonb,
+    true
+),
+(
+    'printer-baseline-v1',
+    'Printer and multifunction-device baseline.',
+    'printer',
+    '[
+      {"action":"deny","transport":"tcp","ports":[21,23,2323],"service":"any","severity":"high","reason":"Legacy cleartext administration is forbidden."},
+      {"action":"require","transport":"tcp","service":"ssh","requirements":{"password_auth":false,"weak_algorithms":false,"publickey_auth":true},"severity":"high"},
+      {"action":"allow","transport":"tcp","service":"https","encrypted":true},
+      {"action":"review","transport":"tcp","service":"http","encrypted":false,"severity":"medium","reason":"Printer management is unencrypted."},
+      {"action":"review","transport":"tcp","ports":[631,9100],"service":"any","severity":"low","reason":"Confirm print service access is limited to print networks."},
+      {"action":"review","transport":"udp","ports":[161],"service":"snmp","severity":"medium","reason":"Confirm SNMPv3 and restricted management access."},
+      {"action":"review","transport":"any","service":"unknown","severity":"medium","reason":"Unexpected printer service."}
+    ]'::jsonb,
+    true
+),
+(
+    'network-appliance-baseline-v1',
+    'Router, access point, NAS, and network appliance baseline.',
+    'router',
+    '[
+      {"action":"deny","transport":"tcp","ports":[21,23,2323],"service":"any","severity":"critical","reason":"Legacy cleartext administration is forbidden."},
+      {"action":"require","transport":"tcp","service":"ssh","requirements":{"password_auth":false,"weak_algorithms":false,"publickey_auth":true},"severity":"high"},
+      {"action":"allow","transport":"tcp","service":"https","encrypted":true},
+      {"action":"review","transport":"tcp","service":"http","encrypted":false,"severity":"high","reason":"Network appliance management is unencrypted."},
+      {"action":"allow","transport":"any","ports":[53],"service":"domain"},
+      {"action":"review","transport":"udp","ports":[161],"service":"snmp","severity":"medium","reason":"Confirm SNMPv3 and management-plane isolation."},
+      {"action":"review","transport":"any","service":"unknown","severity":"high","reason":"Unexpected network appliance service."}
+    ]'::jsonb,
+    true
+)
+ON CONFLICT (name) DO NOTHING;
+
 CREATE TABLE device_targets (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name TEXT NOT NULL,

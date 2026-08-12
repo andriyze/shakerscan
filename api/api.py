@@ -18012,7 +18012,29 @@ def _validate_device_policy_rules(rules: list[dict[str, Any]]) -> list[dict[str,
             rule["ports"] = clean_ports
         rule["action"] = action
         rule["transport"] = transport
-        rule["service"] = str(rule.get("service") or "any").strip().lower()
+        service = str(rule.get("service") or "any").strip().lower()
+        if not service or len(service) > 80 or not re.fullmatch(r"[a-z0-9][a-z0-9+._/-]*|any", service):
+            raise HTTPException(status_code=422, detail=f"policy rule {index + 1} service is invalid")
+        rule["service"] = service
+        severity = str(rule.get("severity") or ("high" if action in {"deny", "require"} else "medium")).strip().lower()
+        if severity not in {"critical", "high", "medium", "low", "info"}:
+            raise HTTPException(status_code=422, detail=f"policy rule {index + 1} severity is invalid")
+        rule["severity"] = severity
+        if "encrypted" in rule and not isinstance(rule["encrypted"], bool):
+            raise HTTPException(status_code=422, detail=f"policy rule {index + 1} encrypted must be true or false")
+        requirements = rule.get("requirements")
+        if requirements is not None:
+            if not isinstance(requirements, dict):
+                raise HTTPException(status_code=422, detail=f"policy rule {index + 1} requirements must be an object")
+            allowed_requirements = {"encrypted", "password_auth", "weak_algorithms", "publickey_auth"}
+            unknown_requirements = set(requirements) - allowed_requirements
+            if unknown_requirements:
+                raise HTTPException(status_code=422, detail=f"policy rule {index + 1} has unsupported requirements")
+            if any(not isinstance(value, bool) for value in requirements.values()):
+                raise HTTPException(status_code=422, detail=f"policy rule {index + 1} requirement values must be true or false")
+        reason = rule.get("reason")
+        if reason is not None:
+            rule["reason"] = str(reason).strip()[:1000]
         normalized.append(rule)
     return normalized
 
@@ -18333,12 +18355,23 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
         )
         if active:
             raise HTTPException(status_code=409, detail="A connected-device scan is already active for this device")
-        policy = await conn.fetchrow(
-            """SELECT * FROM device_policies
-               WHERE id=COALESCE($1, (SELECT id FROM device_policies WHERE name='connected-device-default-v1'))
-                 AND is_active=true""",
-            device["policy_id"],
-        )
+        if device["policy_id"]:
+            policy = await conn.fetchrow(
+                "SELECT * FROM device_policies WHERE id=$1 AND is_active=true",
+                device["policy_id"],
+            )
+        else:
+            policy_class = "router" if str(device["device_class"]) in {"router", "nas"} else str(device["device_class"])
+            policy = await conn.fetchrow(
+                """SELECT * FROM device_policies
+                   WHERE is_active=true AND is_builtin=true
+                     AND device_class IN ($1, 'generic')
+                   ORDER BY (device_class=$1) DESC,
+                            (name='connected-device-default-v2') DESC,
+                            updated_at DESC
+                   LIMIT 1""",
+                policy_class,
+            )
         if not policy:
             raise HTTPException(status_code=409, detail="No active connected-device policy is available")
         policy_payload = _decode_device_row(policy)

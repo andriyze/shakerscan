@@ -955,6 +955,31 @@ def test_device_worker_readiness_fails_closed_for_stale_or_missing_nmap(monkeypa
     assert readiness["capable_worker_count"] == 0
 
 
+def test_device_policy_validation_normalizes_bounded_requirements():
+    rules = api_module._validate_device_policy_rules([{
+        "action": "require",
+        "transport": "TCP",
+        "service": "SSH",
+        "ports": [2222, 22, 22],
+        "requirements": {"password_auth": False, "weak_algorithms": False},
+        "severity": "HIGH",
+    }])
+    assert rules == [{
+        "action": "require",
+        "transport": "tcp",
+        "service": "ssh",
+        "ports": [22, 2222],
+        "requirements": {"password_auth": False, "weak_algorithms": False},
+        "severity": "high",
+    }]
+
+    with pytest.raises(api_module.HTTPException, match="unsupported requirements"):
+        api_module._validate_device_policy_rules([{
+            "action": "require",
+            "requirements": {"run_command": True},
+        }])
+
+
 def test_target_credential_profile_public_shape_never_returns_secret(monkeypatch):
     monkeypatch.setattr(api_module, "encryption_enabled", lambda: True)
     row = {

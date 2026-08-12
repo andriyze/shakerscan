@@ -3643,16 +3643,22 @@ async def save_ai_findings(scan_id: str, ai_target_id: str, findings: list) -> i
     return saved
 
 
-async def save_device_findings(scan_id: str, device_target_id: str, findings: list) -> int:
+async def save_device_findings(
+    scan_id: str,
+    device_target_id: str,
+    findings: list,
+    *,
+    resolve_missing: bool = False,
+) -> int:
     """Persist findings in the device namespace without touching Web DAST targets."""
-    if not findings:
-        return 0
     scan_uuid = uuid.UUID(scan_id)
     device_uuid = uuid.UUID(device_target_id)
     saved = 0
+    seen_fingerprints: list[str] = []
     async with db_pool.acquire() as conn:
         for finding in findings:
             fingerprint = str(finding.get("fingerprint") or generate_finding_fingerprint(finding))
+            seen_fingerprints.append(fingerprint)
             evidence_with_triage = _redact_finding_evidence(_build_evidence_with_triage(finding))
             evidence_json = json.dumps(evidence_with_triage) if evidence_with_triage else None
             recommendations = finding.get("ai_recommendations") or finding.get("recommendations")
@@ -3720,6 +3726,17 @@ async def save_device_findings(scan_id: str, device_target_id: str, findings: li
                     conn, scan_uuid, finding_id, finding, evidence_with_triage,
                     tool_override=finding.get("tool") or "device_posture",
                 )
+        if resolve_missing:
+            await conn.execute(
+                """
+                UPDATE findings
+                SET status='resolved', resolved_at=NOW(), updated_at=NOW()
+                WHERE device_target_id=$1 AND source='device' AND status='active'
+                  AND NOT (fingerprint = ANY($2::text[]))
+                """,
+                device_uuid,
+                seen_fingerprints,
+            )
     return saved
 
 
@@ -7358,7 +7375,12 @@ def _device_score_with_web_findings(result: dict[str, Any]) -> None:
     posture = result.get("device_posture") if isinstance(result.get("device_posture"), dict) else {}
     completeness = posture.get("completeness") if isinstance(posture.get("completeness"), dict) else {}
     children = posture.get("web_dast_children") if isinstance(posture.get("web_dast_children"), dict) else {}
-    incomplete = not bool(completeness.get("complete", False)) or int(children.get("failed") or 0) > 0
+    incomplete = (
+        not bool(completeness.get("complete", False))
+        or bool(completeness.get("web_probe_truncated", False))
+        or int(children.get("failed") or 0) > 0
+        or int(children.get("truncated") or 0) > 0
+    )
     if incomplete:
         score = min(score, 69)
     grade = "A" if score >= 90 else "B" if score >= 80 else "C" if score >= 70 else "D" if score >= 60 else "F"
@@ -7910,9 +7932,27 @@ async def process_scan_job(job_data: dict):
                 saved_count = await save_ai_findings(scan_id, ai_target_id, findings)
             except Exception as e:
                 print(f"[{job_id[:8]}] save_ai_findings error: {e}", flush=True)
-        elif device_target_id and findings:
+        elif device_target_id:
             try:
-                saved_count = await save_device_findings(scan_id, device_target_id, findings)
+                posture = result.get("device_posture") if isinstance(result.get("device_posture"), dict) else {}
+                completeness = posture.get("completeness") if isinstance(posture.get("completeness"), dict) else {}
+                web_children = posture.get("web_dast_children") if isinstance(posture.get("web_dast_children"), dict) else {}
+                resolve_missing = bool(
+                    completeness.get("complete")
+                    and completeness.get("tcp_scope") == "all_65535"
+                    and not completeness.get("web_probe_truncated")
+                    and (options or {}).get("include_web_dast")
+                    and web_children.get("enabled")
+                    and int(web_children.get("failed") or 0) == 0
+                    and int(web_children.get("truncated") or 0) == 0
+                    and int(web_children.get("completed") or 0) == int(web_children.get("requested") or 0)
+                )
+                saved_count = await save_device_findings(
+                    scan_id,
+                    device_target_id,
+                    findings,
+                    resolve_missing=resolve_missing,
+                )
             except Exception as e:
                 print(f"[{job_id[:8]}] save_device_findings error: {e}", flush=True)
 
