@@ -513,8 +513,13 @@ worker capacity, and build-health registry, so it cannot change ordinary Web DAS
 target counts, scan lists, ASM state, or dashboard posture.
 
 The `inventory` profile scans the top 100 TCP ports and a small UDP set; `posture` and `thorough`
-inventory all 65,535 TCP ports plus a declared curated UDP set. Nmap service/version/CPE output,
-addresses, hostnames, MAC/vendor evidence, and bounded OS hints are retained. The scanner recognizes
+inventory all 65,535 TCP ports plus a declared curated UDP set. Each scan checks priority TCP ports
+first, performs the requested discovery without version detection, and fingerprints only confirmed
+open ports. Nmap timeout markers are parsed independently of its process exit code, so partial
+all-port discovery cannot be reported complete. UDP `open|filtered`/`no-response` results are kept as
+inconclusive observations and excluded from service policy and scoring until a protocol response
+confirms them open. Nmap service/version/CPE output, addresses, hostnames, MAC/vendor evidence, and
+bounded OS hints are retained. The scanner recognizes
 HTTP and TLS on discovered TCP ports rather than assuming 80/443, then optionally runs hidden,
 passive-only `quick`, `standard`, or `deep` Web DAST children with capped origins, time, URLs, and
 requests. Child findings retain device/origin provenance and never create Web targets.
@@ -522,7 +527,8 @@ requests. Child findings retain device/origin provenance and never create Web ta
 SSH checks run on the discovered port and collect auth methods, host-key evidence, negotiated
 algorithms, and weak-crypto signals without credential guessing. Ordered service policies support
 allow, deny, review, and fail-closed required-control rules. Built-in generic, media, camera, printer,
-and network-appliance baselines can be copied or replaced with custom allowlists. A complete report
+and network-appliance baselines can be copied or replaced with custom allowlists. `review` findings
+produce `needs_review`; deny/failed-require findings block. A complete report
 states TCP/UDP scope and truncation; older device findings are cleared only after complete all-TCP
 and complete web-origin coverage. Bluetooth/BLE and other radio protocols remain a future
 capability-labeled sensor extension rather than an implied Docker-worker capability. See

@@ -33,10 +33,18 @@ Every profile is scoped to exactly one hostname or IP. URLs, CIDR ranges, paths,
 shell-like locators are rejected. The operator must explicitly confirm authorization before a scan
 is queued.
 
+TCP assessment is staged. A bounded priority pass checks common administration, media, printing,
+messaging, and nonstandard web ports first. The requested top-100 or all-port discovery then runs
+without expensive version detection, and service/version fingerprinting runs only against ports
+confirmed open. A timed-out full-range pass remains explicitly incomplete while preserving ports
+already confirmed by the priority pass.
+
 The scanner records service name, product/version hints, CPE, transport, port, encryption state,
 hostnames, addresses, MAC/vendor evidence when visible, and bounded OS fingerprints. UDP coverage is
 deliberately curated because a complete UDP sweep is both slow and ambiguous; the report lists the
-exact requested UDP ports instead of claiming full UDP coverage.
+exact requested UDP ports instead of claiming full UDP coverage. An Nmap `open|filtered` UDP result
+with `no-response` is retained as an inconclusive observation, not a listening service. It is
+excluded from policy evaluation and scoring unless a protocol response confirms the port as open.
 
 ## Web interfaces on any port
 
@@ -67,10 +75,15 @@ Service policies are ordered rules with four outcomes:
 - `require`: the service is permitted only when controls such as encryption, disabled SSH password
   authentication, no weak SSH algorithms, or public-key authentication are proven.
 
-Unmatched services default to review. Required controls fail closed when they cannot be verified.
+Unmatched confirmed-open services default to review. Required controls fail closed when they cannot be verified.
 ShakerScan ships generic, media-device, camera, printer, and network-appliance baselines. A device can
 use a selected custom policy; otherwise the closest active built-in policy is chosen by device class,
 with the generic fail-closed baseline as fallback.
+
+Policy actions determine the final posture decision: `deny` and failed `require` controls block,
+`review` requires review, and `allow` is emitted only when all required inventory stages completed
+and no confirmed finding remains. The score and decision therefore cannot report an F-grade review
+set as policy-conformant.
 
 Findings are auto-resolved only after a successful all-TCP assessment with untruncated web detection
 and complete web-child coverage. A fast or partial inventory never clears older findings.
@@ -118,5 +131,7 @@ and policy boundary.
 - Service and OS fingerprints are evidence, not guaranteed product identity. Stable MAC identity is
   unavailable across routed networks and can be randomized.
 - UDP coverage is a declared curated set, not all 65,535 ports.
+- UDP silence is inconclusive. Firewalls can make closed and open UDP ports look identical from the
+  worker's network path, so only a protocol response is treated as confirmed open.
 - No credential guessing, firmware extraction, destructive protocol testing, radio probing, or active
   XSS/SQLi is performed by the device workflow.

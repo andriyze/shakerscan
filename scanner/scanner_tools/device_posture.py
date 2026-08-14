@@ -32,9 +32,16 @@ except ImportError:  # pragma: no cover - flat scanner runtime
 
 DEVICE_PROFILES = {"inventory", "posture", "thorough"}
 COMMON_UDP_PORTS = (53, 67, 68, 69, 123, 137, 138, 161, 162, 500, 1900, 4500, 5353, 5683, 47808)
+PRIORITY_TCP_PORTS = (
+    21, 22, 23, 25, 53, 80, 81, 110, 111, 135, 139, 143, 443, 445, 554,
+    631, 1883, 2323, 3000, 5000, 5357, 5683, 7000, 8000, 8008, 8009,
+    8060, 8080, 8081, 8088, 8443, 8883, 8888, 9000, 9080, 9100, 9197,
+    49152,
+)
 WEB_SERVICE_NAMES = {"http", "https", "http-proxy", "http-alt", "ssl/http", "https-alt"}
 SSH_SERVICE_NAMES = {"ssh", "ssh-alt"}
 _HTTP_STATUS = re.compile(rb"^HTTP/(?:1\.[01]|2(?:\.0)?)\s+\d{3}\b", re.I)
+_TIMEOUT_TEXT = re.compile(r"(?:host\s+)?timed?\s*out|host-timeout", re.I)
 _HOST_RE = re.compile(r"^(?=.{1,253}$)(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.?$")
 
 
@@ -46,12 +53,14 @@ class DeviceScanProfile:
     host_timeout: str
     process_timeout: int
     web_probe_cap: int
+    fingerprint_intensity: int
+    fingerprint_timeout: int
 
 
 PROFILES = {
-    "inventory": DeviceScanProfile("inventory", ("--top-ports", "100"), COMMON_UDP_PORTS[:8], "180s", 240, 20),
-    "posture": DeviceScanProfile("posture", ("-p-",), COMMON_UDP_PORTS, "900s", 960, 64),
-    "thorough": DeviceScanProfile("thorough", ("-p-",), COMMON_UDP_PORTS, "1200s", 1260, 128),
+    "inventory": DeviceScanProfile("inventory", ("--top-ports", "100"), COMMON_UDP_PORTS[:8], "180s", 240, 20, 3, 180),
+    "posture": DeviceScanProfile("posture", ("-p-",), COMMON_UDP_PORTS, "900s", 960, 64, 5, 300),
+    "thorough": DeviceScanProfile("thorough", ("-p-",), COMMON_UDP_PORTS, "1200s", 1260, 128, 7, 600),
 }
 
 
@@ -78,6 +87,7 @@ def _service_from_element(port_elem: Any) -> dict[str, Any]:
     transport = str(port_elem.get("protocol") or "tcp").lower()
     state_elem = port_elem.find("state")
     state = str(state_elem.get("state") if state_elem is not None else "unknown")
+    state_reason = str(state_elem.get("reason") if state_elem is not None else "")
     service_elem = port_elem.find("service")
     service_name = str(service_elem.get("name") if service_elem is not None else "unknown").lower()
     tunnel = str(service_elem.get("tunnel") if service_elem is not None else "").lower()
@@ -88,6 +98,7 @@ def _service_from_element(port_elem: Any) -> dict[str, Any]:
         "transport": transport,
         "port": port,
         "state": state,
+        "state_reason": state_reason or None,
         "service_name": service_name or "unknown",
         "product": str(service_elem.get("product") or "") if service_elem is not None else "",
         "version": str(service_elem.get("version") or "") if service_elem is not None else "",
@@ -97,13 +108,52 @@ def _service_from_element(port_elem: Any) -> dict[str, Any]:
     }
 
 
-def parse_nmap_services(xml_text: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def parse_nmap_evidence(
+    xml_text: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    """Parse confirmed services, inconclusive observations, identity, and run status.
+
+    Nmap's UDP ``open|filtered`` state means that no response was received.  It
+    is useful inventory evidence, but it is not proof of a listening service.
+    Only an explicit ``open`` state is eligible for service policy evaluation.
+    """
     services: list[dict[str, Any]] = []
+    inconclusive: list[dict[str, Any]] = []
     identity: dict[str, Any] = {"hostnames": [], "addresses": [], "os_matches": []}
+    scan_status: dict[str, Any] = {
+        "xml_parsed": False,
+        "complete": False,
+        "finished_exit": None,
+        "summary": None,
+        "elapsed_seconds": None,
+        "host_count": 0,
+        "host_timed_out": False,
+        "incomplete_reasons": [],
+    }
     if not xml_text.strip():
-        return services, identity
-    root = ET.fromstring(xml_text)
+        scan_status["incomplete_reasons"].append("empty_nmap_output")
+        return services, inconclusive, identity, scan_status
+    try:
+        root = ET.fromstring(xml_text)
+    except (ET.ParseError, ValueError) as exc:
+        scan_status["incomplete_reasons"].append(f"invalid_nmap_xml:{type(exc).__name__}")
+        return services, inconclusive, identity, scan_status
+    scan_status["xml_parsed"] = True
+    finished = root.find("./runstats/finished")
+    if finished is not None:
+        scan_status["finished_exit"] = finished.get("exit")
+        scan_status["summary"] = finished.get("summary")
+        try:
+            scan_status["elapsed_seconds"] = float(finished.get("elapsed")) if finished.get("elapsed") else None
+        except (TypeError, ValueError):
+            pass
+    else:
+        scan_status["incomplete_reasons"].append("missing_nmap_runstats")
     for host_elem in root.findall(".//host"):
+        scan_status["host_count"] += 1
+        timed_out = str(host_elem.get("timedout") or "").strip().lower()
+        if timed_out not in {"", "0", "false", "no"}:
+            scan_status["host_timed_out"] = True
         for address in host_elem.findall("address"):
             identity["addresses"].append({
                 "address": address.get("addr"),
@@ -117,23 +167,147 @@ def parse_nmap_services(xml_text: str) -> tuple[list[dict[str, Any]], dict[str, 
             identity["os_matches"].append({"name": osmatch.get("name"), "accuracy": osmatch.get("accuracy")})
         for port_elem in host_elem.findall("./ports/port"):
             service = _service_from_element(port_elem)
-            if service["state"] in {"open", "open|filtered"}:
+            if service["state"] == "open":
+                service["confidence"] = "confirmed"
+                service["policy_eligible"] = True
                 services.append(service)
+            elif service["state"] == "open|filtered":
+                service["confidence"] = "inconclusive"
+                service["policy_eligible"] = False
+                service["observation_reason"] = (
+                    "No protocol response or ICMP unreachable message was received; "
+                    "the port may be open or filtered."
+                )
+                inconclusive.append(service)
+    if scan_status["host_timed_out"]:
+        scan_status["incomplete_reasons"].append("nmap_host_timeout")
+    if scan_status["finished_exit"] not in {"success", None}:
+        scan_status["incomplete_reasons"].append(f"nmap_exit:{scan_status['finished_exit']}")
+    scan_status["complete"] = bool(
+        scan_status["xml_parsed"]
+        and finished is not None
+        and scan_status["finished_exit"] == "success"
+        and not scan_status["host_timed_out"]
+    )
     services.sort(key=lambda row: (row["transport"], row["port"]))
+    inconclusive.sort(key=lambda row: (row["transport"], row["port"]))
+    return services, inconclusive, identity, scan_status
+
+
+def parse_nmap_services(xml_text: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Compatibility parser returning confirmed-open services only."""
+    services, _inconclusive, identity, _scan_status = parse_nmap_evidence(xml_text)
     return services, identity
 
 
-async def _nmap_scan(locator: str, profile: DeviceScanProfile) -> tuple[list[dict[str, Any]], dict[str, Any], list[dict[str, Any]]]:
+def _merge_identity(current: dict[str, Any], incoming: dict[str, Any]) -> None:
+    for key in ("hostnames", "addresses", "os_matches"):
+        existing = current.setdefault(key, [])
+        for item in incoming.get(key) or []:
+            if item not in existing:
+                existing.append(item)
+
+
+def _merge_services(current: dict[tuple[str, int], dict[str, Any]], services: list[dict[str, Any]]) -> None:
+    for service in services:
+        key = (str(service.get("transport") or "tcp"), int(service["port"]))
+        previous = current.get(key, {})
+        merged = dict(previous)
+        for field, value in service.items():
+            if value not in {None, ""} or field not in merged:
+                merged[field] = value
+        merged["state"] = "open"
+        merged["confidence"] = "confirmed"
+        merged["policy_eligible"] = True
+        current[key] = merged
+
+
+async def _run_nmap_stage(
+    cmd: list[str],
+    *,
+    stage: str,
+    transport: str,
+    timeout: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    stdout, stderr, exit_code = await run(cmd, timeout=timeout)
+    services, inconclusive, identity, scan_status = parse_nmap_evidence(stdout)
+    incomplete_reasons = list(scan_status.get("incomplete_reasons") or [])
+    if exit_code != 0:
+        incomplete_reasons.append(f"process_exit:{exit_code}")
+    if _TIMEOUT_TEXT.search(stderr or "") and "nmap_host_timeout" not in incomplete_reasons:
+        incomplete_reasons.append("nmap_timeout_reported")
+    complete = bool(exit_code == 0 and scan_status.get("complete") and not incomplete_reasons)
+    receipt = {
+        "stage": stage,
+        "transport": transport,
+        "exit_code": exit_code,
+        "complete": complete,
+        "xml_parsed": bool(scan_status.get("xml_parsed")),
+        "finished_exit": scan_status.get("finished_exit"),
+        "host_timed_out": bool(scan_status.get("host_timed_out")),
+        "elapsed_seconds": scan_status.get("elapsed_seconds"),
+        "confirmed_open_count": len(services),
+        "inconclusive_count": len(inconclusive),
+        "incomplete_reasons": list(dict.fromkeys(incomplete_reasons)),
+        "stderr": (stderr or "")[:500],
+    }
+    return services, inconclusive, identity, receipt
+
+
+async def _nmap_scan(
+    locator: str,
+    profile: DeviceScanProfile,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
     receipts: list[dict[str, Any]] = []
+    services_by_key: dict[tuple[str, int], dict[str, Any]] = {}
+    observations_by_key: dict[tuple[str, int], dict[str, Any]] = {}
+    identity: dict[str, Any] = {"hostnames": [], "addresses": [], "os_matches": []}
+
+    priority_cmd = [
+        "nmap", "-Pn", "-n", "-sT", "-T4", "--max-retries", "1",
+        "--host-timeout", "180s", "-p", ",".join(str(port) for port in PRIORITY_TCP_PORTS),
+        "-oX", "-", locator,
+    ]
+    priority_services, _priority_uncertain, priority_identity, priority_receipt = await _run_nmap_stage(
+        priority_cmd, stage="tcp_priority_discovery", transport="tcp", timeout=210,
+    )
+    priority_receipt["required"] = False
+    receipts.append(priority_receipt)
+    _merge_services(services_by_key, priority_services)
+    _merge_identity(identity, priority_identity)
+
     tcp_cmd = [
-        "nmap", "-Pn", "-n", "-sT", "-sV", "--version-intensity", "5",
+        "nmap", "-Pn", "-n", "-sT", "-T4", "--max-retries", "1",
         "--host-timeout", profile.host_timeout, *profile.tcp_args, "-oX", "-", locator,
     ]
-    tcp_out, tcp_err, tcp_rc = await run(tcp_cmd, timeout=profile.process_timeout)
-    receipts.append({"transport": "tcp", "exit_code": tcp_rc, "stderr": tcp_err[:500]})
-    if tcp_rc != 0 and not tcp_out:
-        raise RuntimeError(f"TCP inventory failed: {tcp_err.strip() or f'nmap exited {tcp_rc}'}")
-    services, identity = parse_nmap_services(tcp_out)
+    tcp_services, _tcp_uncertain, tcp_identity, tcp_receipt = await _run_nmap_stage(
+        tcp_cmd, stage="tcp_scope_discovery", transport="tcp", timeout=profile.process_timeout,
+    )
+    receipts.append(tcp_receipt)
+    tcp_receipt["required"] = True
+    _merge_services(services_by_key, tcp_services)
+    _merge_identity(identity, tcp_identity)
+
+    tcp_ports = sorted(port for (transport, port) in services_by_key if transport == "tcp")
+    fingerprint_receipts: list[dict[str, Any]] = []
+    for batch_number, offset in enumerate(range(0, len(tcp_ports), 128), start=1):
+        batch = tcp_ports[offset:offset + 128]
+        fingerprint_cmd = [
+            "nmap", "-Pn", "-n", "-sT", "-sV", "--version-intensity", str(profile.fingerprint_intensity),
+            "--host-timeout", f"{profile.fingerprint_timeout}s", "-p", ",".join(str(port) for port in batch),
+            "-oX", "-", locator,
+        ]
+        fingerprinted, _uncertain, fingerprint_identity, receipt = await _run_nmap_stage(
+            fingerprint_cmd,
+            stage=f"tcp_service_fingerprint_{batch_number}",
+            transport="tcp",
+            timeout=profile.fingerprint_timeout + 30,
+        )
+        receipts.append(receipt)
+        receipt["required"] = True
+        fingerprint_receipts.append(receipt)
+        _merge_services(services_by_key, fingerprinted)
+        _merge_identity(identity, fingerprint_identity)
 
     if profile.udp_ports:
         udp_cmd = [
@@ -141,16 +315,45 @@ async def _nmap_scan(locator: str, profile: DeviceScanProfile) -> tuple[list[dic
             "--max-retries", "1", "--host-timeout", "240s",
             "-p", ",".join(str(port) for port in profile.udp_ports), "-oX", "-", locator,
         ]
-        udp_out, udp_err, udp_rc = await run(udp_cmd, timeout=300)
-        receipts.append({"transport": "udp", "exit_code": udp_rc, "stderr": udp_err[:500]})
-        if udp_out:
-            udp_services, udp_identity = parse_nmap_services(udp_out)
-            services.extend(udp_services)
-            for key in ("hostnames", "addresses", "os_matches"):
-                identity[key] = identity.get(key, []) or udp_identity.get(key, [])
+        udp_services, udp_observations, udp_identity, udp_receipt = await _run_nmap_stage(
+            udp_cmd, stage="udp_service_discovery", transport="udp", timeout=300,
+        )
+        receipts.append(udp_receipt)
+        udp_receipt["required"] = True
+        _merge_services(services_by_key, udp_services)
+        _merge_identity(identity, udp_identity)
+        for observation in udp_observations:
+            observations_by_key[("udp", int(observation["port"]))] = observation
 
-    deduped = {(row["transport"], row["port"]): row for row in services}
-    return sorted(deduped.values(), key=lambda row: (row["transport"], row["port"])), identity, receipts
+    if not any(receipt.get("xml_parsed") for receipt in receipts if receipt.get("transport") == "tcp"):
+        errors = "; ".join(
+            str(receipt.get("stderr") or ",".join(receipt.get("incomplete_reasons") or []))
+            for receipt in receipts if receipt.get("transport") == "tcp"
+        )
+        raise RuntimeError(f"TCP inventory failed: {errors or 'Nmap returned no parseable result'}")
+
+    udp_receipts = [receipt for receipt in receipts if receipt.get("transport") == "udp"]
+    completeness = {
+        "complete": bool(
+            tcp_receipt.get("complete")
+            and all(receipt.get("complete") for receipt in fingerprint_receipts)
+            and all(receipt.get("complete") for receipt in udp_receipts)
+        ),
+        "tcp_discovery_complete": bool(tcp_receipt.get("complete")),
+        "tcp_fingerprinting_complete": all(receipt.get("complete") for receipt in fingerprint_receipts),
+        "udp_discovery_complete": all(receipt.get("complete") for receipt in udp_receipts),
+        "incomplete_stages": [
+            receipt["stage"] for receipt in receipts
+            if receipt.get("required", True) and not receipt.get("complete")
+        ],
+    }
+    return (
+        sorted(services_by_key.values(), key=lambda row: (row["transport"], row["port"])),
+        sorted(observations_by_key.values(), key=lambda row: (row["transport"], row["port"])),
+        identity,
+        receipts,
+        completeness,
+    )
 
 
 def _format_origin_host(locator: str) -> str:
@@ -276,6 +479,11 @@ def evaluate_service_policy(services: list[dict[str, Any]], rules: list[dict[str
     findings: list[dict[str, Any]] = []
     for original in services:
         service = dict(original)
+        if service.get("state") not in {None, "open"} or service.get("policy_eligible") is False:
+            service["policy_disposition"] = "not_evaluated"
+            service["policy_reason"] = "The service was not confirmed open and was excluded from policy evaluation."
+            evaluated.append(service)
+            continue
         matching = next((rule for rule in rules if _rule_matches(rule, service)), None)
         action = str((matching or {}).get("action") or "review").lower()
         reason = str((matching or {}).get("reason") or "No allowlist rule matched this listening service.")
@@ -324,6 +532,27 @@ def _score(findings: list[dict[str, Any]], *, complete: bool) -> tuple[int, str]
     return score, grade
 
 
+def _device_decision(findings: list[dict[str, Any]], *, complete: bool) -> tuple[str, str]:
+    blocking: list[dict[str, Any]] = []
+    review: list[dict[str, Any]] = []
+    for finding in findings:
+        evidence = finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}
+        disposition = str(evidence.get("disposition") or "").lower()
+        severity = str(finding.get("severity") or "info").lower()
+        tool = str(finding.get("tool") or "")
+        if disposition in {"deny", "require"} or (tool != "device_policy" and severity in {"critical", "high"}):
+            blocking.append(finding)
+        elif severity != "info" or disposition == "review":
+            review.append(finding)
+    if blocking:
+        return "block", f"{len(blocking)} blocking device posture finding(s) require remediation."
+    if not complete:
+        return "needs_review", "One or more required device inventory stages were incomplete."
+    if review:
+        return "needs_review", f"{len(review)} confirmed device service finding(s) require review."
+    return "allow", "Confirmed listening services conform to policy."
+
+
 async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict[str, Any]:
     locator = normalize_device_locator(locator)
     profile_name = str(options.get("device_profile") or "posture").lower()
@@ -332,7 +561,7 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
     if not options.get("confirm_authorized"):
         raise ValueError("connected-device scans require confirm_authorized=true")
     profile = PROFILES[profile_name]
-    services, identity, tool_receipts = await _nmap_scan(locator, profile)
+    services, inconclusive_observations, identity, tool_receipts, scan_completeness = await _nmap_scan(locator, profile)
     advertised_name = next(iter(identity.get("hostnames") or []), None)
     web_origins = await detect_web_origins(locator, services, cap=profile.web_probe_cap, advertised_name=advertised_name)
     origin_by_port = {int(origin["port"]): origin for origin in web_origins}
@@ -362,16 +591,9 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
     rules = policy.get("rules") if isinstance(policy.get("rules"), list) else []
     services, policy_findings = evaluate_service_policy(services, rules, policy_name=policy_name)
     findings = policy_findings + ssh_findings
-    tcp_receipt = next((item for item in tool_receipts if item["transport"] == "tcp"), {})
-    udp_receipt = next((item for item in tool_receipts if item["transport"] == "udp"), {})
-    complete = tcp_receipt.get("exit_code") == 0 and (not profile.udp_ports or udp_receipt.get("exit_code") == 0)
+    complete = bool(scan_completeness.get("complete"))
     score, grade = _score(findings, complete=complete)
-    blocking = [item for item in findings if item.get("severity") in {"critical", "high"}]
-    decision = "block" if blocking else "allow" if complete else "needs_review"
-    rationale = (
-        f"{len(blocking)} high/critical device posture finding(s) require remediation."
-        if blocking else "Observed services conform to policy." if complete else "Inventory was incomplete and requires review."
-    )
+    decision, rationale = _device_decision(findings, complete=complete)
     return {
         "target": locator,
         "result": {"score": score, "grade": grade},
@@ -381,16 +603,21 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
             "profile": profile_name,
             "identity": identity,
             "services": services,
+            "inconclusive_observations": inconclusive_observations,
             "web_origins": web_origins,
             "policy": {"name": policy_name, "rules_count": len(rules)},
             "decision": {"decision": decision, "rationale": rationale, "policy_name": policy_name},
             "completeness": {
                 "complete": complete,
                 "tcp_scope": "all_65535" if "-p-" in profile.tcp_args else "top_100",
+                "tcp_priority_ports": list(PRIORITY_TCP_PORTS),
                 "udp_ports_requested": list(profile.udp_ports),
+                "confirmed_services_count": len(services),
+                "inconclusive_observations_count": len(inconclusive_observations),
                 "tool_receipts": tool_receipts,
                 "web_probe_cap": profile.web_probe_cap,
                 "web_probe_truncated": len([s for s in services if s.get("transport") == "tcp" and s.get("state") == "open"]) > profile.web_probe_cap,
+                **scan_completeness,
             },
         },
         "scan_metadata": {"run_kind": "device_posture", "active_testing": False, "credentials_attempted": False},

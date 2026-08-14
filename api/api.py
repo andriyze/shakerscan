@@ -18204,7 +18204,7 @@ async def list_devices(
     async with db_pool.acquire() as conn:
         rows = await conn.fetch(
             f"""SELECT d.*, p.name AS policy_name,
-                       (SELECT COUNT(*) FROM device_services ds WHERE ds.device_target_id=d.id) AS services_count
+                       (SELECT COUNT(*) FROM device_services ds WHERE ds.device_target_id=d.id AND ds.state='open') AS services_count
                 FROM device_targets d LEFT JOIN device_policies p ON p.id=d.policy_id
                 WHERE {where} ORDER BY d.updated_at DESC LIMIT ${len(params)+1} OFFSET ${len(params)+2}""",
             *params, limit, offset,
@@ -18261,7 +18261,10 @@ async def get_device(device_id: str):
         if not row:
             raise HTTPException(status_code=404, detail="Connected device not found")
         interfaces = await conn.fetch("SELECT * FROM device_interfaces WHERE device_target_id=$1 ORDER BY last_seen_at DESC", device_uuid)
-        services = await conn.fetch("SELECT * FROM device_services WHERE device_target_id=$1 ORDER BY transport, port", device_uuid)
+        services = await conn.fetch(
+            "SELECT * FROM device_services WHERE device_target_id=$1 AND state='open' ORDER BY transport, port",
+            device_uuid,
+        )
         scans = await conn.fetch(
             """SELECT id, status, scan_type, run_kind, score, grade, findings_count, progress,
                       current_phase, created_at, completed_at

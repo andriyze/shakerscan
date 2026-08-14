@@ -3741,10 +3741,16 @@ async def save_device_findings(
 
 
 async def persist_device_inventory(scan_id: str, device_target_id: str, result: dict[str, Any]) -> None:
-    """Upsert device identity, interfaces, and current listening services."""
+    """Upsert device identity, confirmed services, and inconclusive observations."""
     posture = result.get("device_posture") if isinstance(result.get("device_posture"), dict) else {}
     identity = posture.get("identity") if isinstance(posture.get("identity"), dict) else {}
     services = posture.get("services") if isinstance(posture.get("services"), list) else []
+    observations = (
+        posture.get("inconclusive_observations")
+        if isinstance(posture.get("inconclusive_observations"), list)
+        else []
+    )
+    completeness = posture.get("completeness") if isinstance(posture.get("completeness"), dict) else {}
     device_uuid = uuid.UUID(device_target_id)
     scan_uuid = uuid.UUID(scan_id)
     addresses = [item for item in identity.get("addresses") or [] if isinstance(item, dict)]
@@ -3777,8 +3783,20 @@ async def persist_device_inventory(scan_id: str, device_target_id: str, result: 
                 device_uuid, locator_type, locator, mac, hostnames[0] if hostnames else None,
                 json.dumps({"addresses": addresses, "os_matches": identity.get("os_matches") or []}),
             )
-            await conn.execute("UPDATE device_services SET state='not_observed' WHERE device_target_id=$1", device_uuid)
-            for service in services:
+            if completeness.get("complete") and completeness.get("tcp_scope") == "all_65535":
+                await conn.execute(
+                    "UPDATE device_services SET state='not_observed' WHERE device_target_id=$1 AND transport='tcp'",
+                    device_uuid,
+                )
+            udp_ports_requested = [int(port) for port in completeness.get("udp_ports_requested") or []]
+            if completeness.get("udp_discovery_complete") and udp_ports_requested:
+                await conn.execute(
+                    """UPDATE device_services SET state='not_observed'
+                       WHERE device_target_id=$1 AND transport='udp' AND port=ANY($2::integer[])""",
+                    device_uuid,
+                    udp_ports_requested,
+                )
+            for service in [*services, *observations]:
                 if not isinstance(service, dict):
                     continue
                 await conn.execute(
@@ -7386,14 +7404,31 @@ def _device_score_with_web_findings(result: dict[str, Any]) -> None:
     grade = "A" if score >= 90 else "B" if score >= 80 else "C" if score >= 70 else "D" if score >= 60 else "F"
     result.setdefault("result", {})["score"] = score
     result["result"]["grade"] = grade
-    blocking = [item for item in findings if str(item.get("severity") or "").lower() in {"critical", "high"}]
+    blocking = []
+    review = []
+    for item in findings:
+        if not isinstance(item, dict):
+            continue
+        evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
+        disposition = str(evidence.get("disposition") or "").lower()
+        severity = str(item.get("severity") or "info").lower()
+        tool = str(item.get("tool") or "")
+        if disposition in {"deny", "require"} or (
+            tool != "device_policy" and severity in {"critical", "high"}
+        ):
+            blocking.append(item)
+        elif severity != "info" or disposition == "review":
+            review.append(item)
     decision = posture.get("decision") if isinstance(posture.get("decision"), dict) else {}
     if blocking:
         decision["decision"] = "block"
-        decision["rationale"] = f"{len(blocking)} high/critical connected-device finding(s) require remediation."
+        decision["rationale"] = f"{len(blocking)} blocking connected-device finding(s) require remediation."
     elif incomplete:
         decision["decision"] = "needs_review"
         decision["rationale"] = "One or more required device or web-origin checks were incomplete."
+    elif review:
+        decision["decision"] = "needs_review"
+        decision["rationale"] = f"{len(review)} confirmed connected-device finding(s) require review."
     else:
         decision["decision"] = "allow"
         decision["rationale"] = "Device services and discovered web origins conform to policy."

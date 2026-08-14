@@ -6,6 +6,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 
 import api as api_module  # noqa: E402
+import worker  # noqa: E402
 
 
 def test_device_children_are_hidden_from_the_default_scan_list():
@@ -49,3 +50,26 @@ def test_device_taxonomy_is_excluded_without_reclassifying_existing_products():
     dast = api_module._source_type_filter_sql("dast")
     assert "device" in dast
     assert api_module._source_type_filter_sql("device") == " AND f.source = 'device'"
+
+
+def test_device_postprocessing_keeps_review_findings_out_of_allow_and_block():
+    result = {
+        "result": {},
+        "findings": [{
+            "tool": "device_policy",
+            "severity": "high",
+            "evidence": {"disposition": "review"},
+        }],
+        "device_posture": {
+            "completeness": {"complete": True, "web_probe_truncated": False},
+            "web_dast_children": {"failed": 0, "truncated": 0},
+            "decision": {},
+        },
+    }
+    worker._device_score_with_web_findings(result)
+    assert result["device_posture"]["decision"]["decision"] == "needs_review"
+
+    result["findings"][0]["evidence"]["disposition"] = "deny"
+    result["findings"][0]["severity"] = "low"
+    worker._device_score_with_web_findings(result)
+    assert result["device_posture"]["decision"]["decision"] == "block"
