@@ -18265,6 +18265,12 @@ async def get_device(device_id: str):
             "SELECT * FROM device_services WHERE device_target_id=$1 AND state='open' ORDER BY transport, port",
             device_uuid,
         )
+        observations = await conn.fetch(
+            """SELECT * FROM device_services
+               WHERE device_target_id=$1 AND state='open|filtered'
+               ORDER BY transport, port""",
+            device_uuid,
+        )
         scans = await conn.fetch(
             """SELECT id, status, scan_type, run_kind, score, grade, findings_count, progress,
                       current_phase, created_at, completed_at
@@ -18276,6 +18282,7 @@ async def get_device(device_id: str):
         "device": _decode_device_row(row),
         "interfaces": [_decode_device_row(item) for item in interfaces],
         "services": [_decode_device_row(item) for item in services],
+        "inconclusive_observations": [_decode_device_row(item) for item in observations],
         "scans": [row_to_dict(item) for item in scans],
     }
 

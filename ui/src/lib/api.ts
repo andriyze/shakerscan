@@ -1372,6 +1372,7 @@ export interface DeviceDetailResponse {
   device: DeviceTarget
   interfaces: DeviceInterface[]
   services: DeviceService[]
+  inconclusive_observations?: DeviceService[]
   scans: Scan[]
 }
 

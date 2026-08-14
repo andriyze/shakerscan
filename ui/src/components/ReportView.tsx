@@ -732,6 +732,17 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
     { passed: [], failed: [], review: [], notTested: [], notApplicable: [] },
   )
   const ai_gate = scanData.ai_gate || null
+  const devicePosture = scanData.device_posture || null
+  const deviceServices = Array.isArray(devicePosture?.services) ? devicePosture.services : []
+  const deviceObservations = Array.isArray(devicePosture?.inconclusive_observations)
+    ? devicePosture.inconclusive_observations
+    : []
+  const deviceWebOrigins = Array.isArray(devicePosture?.web_origins) ? devicePosture.web_origins : []
+  const deviceCompleteness = asRecord(devicePosture?.completeness)
+  const deviceDecision = asRecord(devicePosture?.decision)
+  const deviceToolReceipts = Array.isArray(deviceCompleteness.tool_receipts)
+    ? deviceCompleteness.tool_receipts
+    : []
   const aiGateControlEvidence = ai_gate?.control_evidence || null
   const aiGateDecision = ai_gate?.decision || {}
   const aiGateStats = ai_gate?.statistics || {}
@@ -764,13 +775,14 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       : 'bg-slate-700 text-slate-300'
   const isAIScan = scan.scan_type === 'ai_gate' || String(scan.run_kind || '').startsWith('ai_') || Boolean(ai_gate)
   const isModelIntakeScan = scan.scan_type === 'model_intake' || scan.run_kind === 'model_intake' || Boolean(model_intake)
+  const isDeviceScan = scan.scan_type === 'device_posture' || scan.run_kind === 'device_posture' || Boolean(devicePosture)
   // Continuous ASM recon is a DISCOVERY pass (active testing off by design) that
   // refreshes the endpoint inventory; active vuln testing runs as separate ASM
   // test batches. Don't frame its intentionally-off active modules as a
   // "budget exhausted / coverage incomplete" failure.
   const isAsmRecon = scan.scan_role === 'asm_recon'
   const isAsmBatch = scan.scan_role === 'asm_batch'
-  const showCompletionBanner = !isAIScan && !isModelIntakeScan && !isAsmRecon && (
+  const showCompletionBanner = !isAIScan && !isModelIntakeScan && !isDeviceScan && !isAsmRecon && (
     scanCompletionStatus.complete === false ||
     scanCompletionStatus.limited === true ||
     completionSkippedModules.length > 0 ||
@@ -780,6 +792,8 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
     ? 'AI Gate'
     : isModelIntakeScan
       ? 'Model Intake'
+      : isDeviceScan
+        ? 'Connected device posture'
       : isAsmRecon
         ? 'ASM recon (discovery)'
         : isAsmBatch
@@ -1015,8 +1029,8 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                 {scan.grade || result.grade}
               </div>
             )}
-            {(scan.score !== null || result.score !== null) && (
-              <div className="text-xl text-gray-400">Score: {scan.score || result.score}/100</div>
+            {(scan.score != null || result.score != null) && (
+              <div className="text-xl text-gray-400">Score: {scan.score ?? result.score}/100</div>
             )}
           </div>
         </div>
@@ -1031,13 +1045,13 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
             <p className="text-lg font-semibold capitalize">{scanTypeLabel}</p>
           </div>
           <div className="bg-gray-700/50 rounded-lg p-4">
-            <h3 className="text-sm text-gray-400 mb-1">{isAIScan ? 'AI Depth' : isModelIntakeScan ? 'Intake Mode' : 'Scan Mode'}</h3>
+            <h3 className="text-sm text-gray-400 mb-1">{isAIScan ? 'AI Depth' : isModelIntakeScan ? 'Intake Mode' : isDeviceScan ? 'Device Profile' : 'Scan Mode'}</h3>
             <p className="text-lg font-semibold capitalize">
-              {isAIScan ? aiScanProfileLabel : isModelIntakeScan ? 'Artifact checks' : scan.options?.quick ? 'Quick' : 'Thorough'}
-              {!isAIScan && !isModelIntakeScan && scan.options?.active && ' + Active'}
+              {isAIScan ? aiScanProfileLabel : isModelIntakeScan ? 'Artifact checks' : isDeviceScan ? devicePosture?.profile || 'Posture' : scan.options?.quick ? 'Quick' : 'Thorough'}
+              {!isAIScan && !isModelIntakeScan && !isDeviceScan && scan.options?.active && ' + Active'}
             </p>
           </div>
-          {!isAIScan && !isModelIntakeScan && (
+          {!isAIScan && !isModelIntakeScan && !isDeviceScan && (
             <div className="bg-gray-700/50 rounded-lg p-4">
               <h3 className="text-sm text-gray-400 mb-1">Coverage Budget</h3>
               <p className="text-lg font-semibold capitalize">{budgetProfile || 'Balanced'}</p>
@@ -1062,6 +1076,126 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
           </div>
         </div>
       </div>}
+
+      {isDeviceScan && devicePosture && (
+        <section className="mb-8 rounded-lg border border-gray-700 bg-gray-800/50 p-5">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-semibold text-white">Connected-device network posture</h2>
+              <p className="mt-1 text-sm text-gray-400">
+                Policy is evaluated only against services that responded as confirmed open. Silent UDP probes remain unconfirmed and do not affect the score.
+              </p>
+            </div>
+            <span className={`rounded px-2.5 py-1 text-xs font-semibold uppercase ${
+              String(deviceDecision.decision || '').toLowerCase() === 'block'
+                ? 'bg-red-900/60 text-red-200'
+                : String(deviceDecision.decision || '').toLowerCase() === 'allow'
+                  ? 'bg-green-900/60 text-green-200'
+                  : 'bg-yellow-900/60 text-yellow-200'
+            }`}>
+              {String(deviceDecision.decision || 'needs review').replace(/_/g, ' ')}
+            </span>
+          </div>
+          {deviceDecision.rationale && <p className="mt-3 text-sm text-gray-300">{String(deviceDecision.rationale)}</p>}
+
+          <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="rounded border border-gray-700 bg-gray-950/40 p-3">
+              <div className="text-xl font-semibold text-white">{deviceServices.length}</div>
+              <div className="text-xs text-gray-500">Confirmed services</div>
+            </div>
+            <div className="rounded border border-gray-700 bg-gray-950/40 p-3">
+              <div className="text-xl font-semibold text-white">{deviceWebOrigins.length}</div>
+              <div className="text-xs text-gray-500">Web interfaces</div>
+            </div>
+            <div className="rounded border border-gray-700 bg-gray-950/40 p-3">
+              <div className="text-xl font-semibold text-amber-200">{deviceObservations.length}</div>
+              <div className="text-xs text-gray-500">Inconclusive observations</div>
+            </div>
+            <div className="rounded border border-gray-700 bg-gray-950/40 p-3">
+              <div className={`text-xl font-semibold ${deviceCompleteness.complete ? 'text-green-300' : 'text-amber-300'}`}>
+                {deviceCompleteness.complete ? 'Complete' : 'Partial'}
+              </div>
+              <div className="text-xs text-gray-500">Required inventory stages</div>
+            </div>
+          </div>
+
+          <div className="mt-4 grid gap-4 xl:grid-cols-2">
+            <div className="rounded border border-gray-700 bg-gray-950/30 p-4">
+              <h3 className="text-sm font-semibold text-gray-200">Confirmed listening services</h3>
+              {deviceServices.length === 0 ? (
+                <p className="mt-3 text-sm text-gray-500">No service was confirmed open.</p>
+              ) : (
+                <div className="mt-3 overflow-x-auto">
+                  <table className="w-full text-left text-sm">
+                    <thead className="text-xs uppercase text-gray-500"><tr><th className="pb-2 pr-3">Port</th><th className="pb-2 pr-3">Service</th><th className="pb-2 pr-3">Product</th><th className="pb-2">Policy</th></tr></thead>
+                    <tbody className="divide-y divide-gray-800">
+                      {deviceServices.map((service: any) => (
+                        <tr key={`${service.transport}-${service.port}`}>
+                          <td className="py-2 pr-3 font-mono text-gray-200">{service.port}/{service.transport}</td>
+                          <td className="py-2 pr-3 text-white">
+                            {service.web_origin ? <a href={service.web_origin} target="_blank" rel="noreferrer" className="text-blue-300 hover:text-blue-200">{service.service_name || 'unknown'}</a> : service.service_name || 'unknown'}
+                          </td>
+                          <td className="py-2 pr-3 text-gray-400">{[service.product, service.version].filter(Boolean).join(' ') || '—'}</td>
+                          <td className="py-2 text-gray-300">{String(service.policy_disposition || 'unreviewed').replace(/_/g, ' ')}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+
+            <div className="rounded border border-gray-700 bg-gray-950/30 p-4">
+              <h3 className="text-sm font-semibold text-gray-200">Inconclusive network observations</h3>
+              {deviceObservations.length === 0 ? (
+                <p className="mt-3 text-sm text-gray-500">No ambiguous port states were returned.</p>
+              ) : (
+                <div className="mt-3 space-y-2">
+                  {deviceObservations.map((observation: any) => (
+                    <div key={`${observation.transport}-${observation.port}`} className="rounded border border-amber-500/20 bg-amber-950/10 p-3">
+                      <div className="flex flex-wrap items-center gap-2 text-sm">
+                        <span className="font-mono text-amber-100">{observation.port}/{observation.transport}</span>
+                        <span className="text-gray-300">{observation.service_name || 'unknown'}</span>
+                        <span className="rounded bg-amber-900/40 px-1.5 py-0.5 text-xs text-amber-200">{observation.state || 'inconclusive'}</span>
+                        {observation.state_reason && <span className="text-xs text-gray-500">{observation.state_reason}</span>}
+                      </div>
+                      <p className="mt-1 text-xs text-gray-500">{observation.observation_reason || 'No response confirmed whether a service is listening.'}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <details className="mt-4 rounded border border-gray-700 bg-gray-950/30">
+            <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-gray-200">Inventory stage evidence</summary>
+            <div className="border-t border-gray-800 p-4">
+              <div className="mb-3 flex flex-wrap gap-2 text-xs text-gray-400">
+                <span>TCP scope: {String(deviceCompleteness.tcp_scope || 'unknown').replace(/_/g, ' ')}</span>
+                <span>TCP discovery: {deviceCompleteness.tcp_discovery_complete ? 'complete' : 'partial'}</span>
+                <span>Fingerprinting: {deviceCompleteness.tcp_fingerprinting_complete ? 'complete' : 'partial'}</span>
+                <span>UDP probes: {deviceCompleteness.udp_discovery_complete ? 'complete' : 'partial'}</span>
+              </div>
+              <div className="grid gap-2 md:grid-cols-2">
+                {deviceToolReceipts.map((receipt: any, index: number) => (
+                  <div key={`${receipt.stage || receipt.transport}-${index}`} className="rounded border border-gray-800 bg-black/20 p-3 text-xs">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-medium text-gray-200">{String(receipt.stage || receipt.transport || 'stage').replace(/_/g, ' ')}</span>
+                      <span className={receipt.complete ? 'text-green-300' : receipt.required === false ? 'text-gray-400' : 'text-amber-300'}>
+                        {receipt.complete ? 'complete' : receipt.required === false ? 'supplemental partial' : 'partial'}
+                      </span>
+                    </div>
+                    <div className="mt-1 text-gray-500">{Number(receipt.confirmed_open_count || 0)} confirmed · {Number(receipt.inconclusive_count || 0)} inconclusive</div>
+                    {Array.isArray(receipt.incomplete_reasons) && receipt.incomplete_reasons.length > 0 && (
+                      <div className="mt-1 text-amber-300">{receipt.incomplete_reasons.join(', ').replace(/_/g, ' ')}</div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </details>
+        </section>
+      )}
 
       {isAsmRecon && (
         <div className="mb-8 rounded-lg border border-blue-500/40 bg-blue-950/20 p-4">

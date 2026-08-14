@@ -45,6 +45,8 @@ deliberately curated because a complete UDP sweep is both slow and ambiguous; th
 exact requested UDP ports instead of claiming full UDP coverage. An Nmap `open|filtered` UDP result
 with `no-response` is retained as an inconclusive observation, not a listening service. It is
 excluded from policy evaluation and scoring unless a protocol response confirms the port as open.
+Scan reports and device details present these observations in a separate uncertainty section, so an
+operator can inspect the raw evidence without mistaking UDP silence for an exposed service.
 
 ## Web interfaces on any port
 

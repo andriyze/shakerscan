@@ -45,6 +45,7 @@ export default function DeviceDetailPage() {
   if (loading) return <div className="mx-auto max-w-7xl"><TableSkeleton rows={6} /></div>
   if (failed || !data) return <div className="mx-auto max-w-7xl"><ErrorState message="Could not load connected device" onRetry={load} /></div>
   const { device, interfaces, services, scans } = data
+  const observations = data.inconclusive_observations || []
 
   return (
     <div className="mx-auto max-w-7xl">
@@ -65,6 +66,25 @@ export default function DeviceDetailPage() {
           ))}</tbody></table></div></div>
         )}
       </section>
+
+      {observations.length > 0 && (
+        <section className="mb-6">
+          <h2 className="mb-1 text-lg font-semibold text-white">Inconclusive observations</h2>
+          <p className="mb-3 text-sm text-gray-500">These ports returned no conclusive protocol response. They are not counted as listening services and do not affect policy or score.</p>
+          <div className="overflow-hidden rounded-lg border border-amber-500/20">
+            <div className="divide-y divide-amber-500/10 bg-amber-950/10">
+              {observations.map((observation) => (
+                <div key={observation.id} className="flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-3 text-sm">
+                  <span className="font-mono text-amber-100">{observation.port}/{observation.transport}</span>
+                  <span className="text-gray-300">{observation.service_name || 'unknown'}</span>
+                  <span className="rounded bg-amber-900/40 px-2 py-0.5 text-xs text-amber-200">{observation.state}</span>
+                  <span className="text-xs text-gray-500">Not evaluated by service policy</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+      )}
 
       <div className="grid gap-6 lg:grid-cols-2">
         <section><h2 className="mb-3 text-lg font-semibold text-white">Interfaces and identity</h2><Card className="p-4">{interfaces.length ? <div className="space-y-3">{interfaces.map((item) => <div key={item.id} className="flex items-start justify-between gap-3 border-b border-gray-800 pb-3 last:border-0 last:pb-0"><div><p className="font-mono text-sm text-white">{item.locator}</p><p className="text-xs text-gray-500">{item.hostname || item.locator_type}</p></div><div className="text-right text-xs text-gray-400"><p>{item.mac_address || 'No MAC observed'}</p><p>{item.network_zone || 'Zone not assigned'}</p></div></div>)}</div> : <p className="text-sm text-gray-500">No interfaces observed.</p>}</Card></section>
