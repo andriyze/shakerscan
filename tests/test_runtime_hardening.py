@@ -781,3 +781,13 @@ def test_startup_fails_closed_on_mixed_release_images_and_ui_reports_baked_ident
     assert "readFileSync" in route
     assert "UI_BUILD_VERSION" in route
     assert "ui_version" in route
+
+
+def test_macos_build_network_can_follow_host_vpn_without_changing_runtime_networks():
+    script = (ROOT / "scanner.sh").read_text()
+    compose = (ROOT / "docker-compose.yml").read_text()
+
+    assert 'export SHAKERSCAN_BUILD_NETWORK="host"' in script
+    assert 'export SHAKERSCAN_BUILD_NETWORK="default"' in script
+    assert compose.count("network: ${SHAKERSCAN_BUILD_NETWORK:-default}") >= 8
+    assert "network_mode: ${SHAKERSCAN_BUILD_NETWORK" not in compose

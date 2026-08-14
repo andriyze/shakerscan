@@ -1326,6 +1326,18 @@ set_build_env() {
     export SCANNER_RELEASE_VERSION="$release_version"
     export BUILD_GIT_COMMIT="$local_commit"
     export SHAKERSCAN_RUNTIME_DIR="$SCRIPT_DIR"
+    # Docker Desktop bridge traffic can be excluded by a host VPN even while
+    # the host itself has working egress. BuildKit host networking follows the
+    # host route on macOS; this affects dependency-fetching build steps only,
+    # never the network namespace of a running ShakerScan service. Operators
+    # can override the choice explicitly when their Docker setup differs.
+    if [ -z "${SHAKERSCAN_BUILD_NETWORK:-}" ]; then
+        if [ "${PLATFORM:-}" = "macos" ]; then
+            export SHAKERSCAN_BUILD_NETWORK="host"
+        else
+            export SHAKERSCAN_BUILD_NETWORK="default"
+        fi
+    fi
     if [ -d "$SCRIPT_DIR/.git" ]; then
         export SHAKERSCAN_INSTALL_KIND="source_checkout"
     else

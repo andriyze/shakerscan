@@ -107,6 +107,7 @@ services:
     build:
       context: .
       dockerfile: scanner/Dockerfile
+      network: ${SHAKERSCAN_BUILD_NETWORK:-default}
       args:
         SCANNER_VERSION: ${SCANNER_VERSION:-dev}
         SCANNER_SOURCE_REVISION: ${GIT_COMMIT:-unknown}
@@ -274,6 +275,7 @@ services:
     build:
       context: .
       dockerfile: api/model_intake_signer.Dockerfile
+      network: ${SHAKERSCAN_BUILD_NETWORK:-default}
     environment:
       - DATABASE_URL=postgresql://model_intake_signer:${MODEL_INTAKE_SIGNER_DATABASE_PASSWORD:?MODEL_INTAKE_SIGNER_DATABASE_PASSWORD is required}@postgres:5432/scanner
       - MODEL_INTAKE_SIGNER_INTERNAL_TOKEN=${MODEL_INTAKE_SIGNER_INTERNAL_TOKEN:-}
@@ -305,6 +307,7 @@ services:
     build:
       context: .
       dockerfile: scanner/Dockerfile
+      network: ${SHAKERSCAN_BUILD_NETWORK:-default}
       args:
         SCANNER_VERSION: ${SCANNER_VERSION:-dev}
         SCANNER_SOURCE_REVISION: ${GIT_COMMIT:-unknown}
@@ -379,6 +382,7 @@ services:
     build:
       context: .
       dockerfile: scanner/Dockerfile
+      network: ${SHAKERSCAN_BUILD_NETWORK:-default}
       args:
         SCANNER_VERSION: ${SCANNER_VERSION:-dev}
         SCANNER_SOURCE_REVISION: ${GIT_COMMIT:-unknown}
@@ -474,6 +478,7 @@ services:
     build:
       context: .
       dockerfile: scanner/Dockerfile
+      network: ${SHAKERSCAN_BUILD_NETWORK:-default}
       args:
         SCANNER_VERSION: ${SCANNER_VERSION:-dev}
         SCANNER_SOURCE_REVISION: ${GIT_COMMIT:-unknown}
@@ -530,6 +535,7 @@ services:
     build:
       context: .
       dockerfile: scanner/Dockerfile
+      network: ${SHAKERSCAN_BUILD_NETWORK:-default}
       args:
         SCANNER_VERSION: ${SCANNER_VERSION:-dev}
         SCANNER_SOURCE_REVISION: ${GIT_COMMIT:-unknown}
@@ -570,6 +576,7 @@ services:
     build:
       context: .
       dockerfile: scanner/Dockerfile
+      network: ${SHAKERSCAN_BUILD_NETWORK:-default}
       args:
         SCANNER_VERSION: ${SCANNER_VERSION:-dev}
         SCANNER_SOURCE_REVISION: ${GIT_COMMIT:-unknown}
@@ -604,6 +611,7 @@ services:
     build:
       context: ./ui
       dockerfile: Dockerfile
+      network: ${SHAKERSCAN_BUILD_NETWORK:-default}
       args:
         - NEXT_PUBLIC_APP_VERSION=${SCANNER_VERSION:-dev}
     ports:
