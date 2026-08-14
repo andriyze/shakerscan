@@ -7393,13 +7393,14 @@ def _device_score_with_web_findings(result: dict[str, Any]) -> None:
     posture = result.get("device_posture") if isinstance(result.get("device_posture"), dict) else {}
     completeness = posture.get("completeness") if isinstance(posture.get("completeness"), dict) else {}
     children = posture.get("web_dast_children") if isinstance(posture.get("web_dast_children"), dict) else {}
+    execution_incomplete = not bool(completeness.get("execution_complete", completeness.get("complete", False)))
     incomplete = (
         not bool(completeness.get("complete", False))
         or bool(completeness.get("web_probe_truncated", False))
         or int(children.get("failed") or 0) > 0
         or int(children.get("truncated") or 0) > 0
     )
-    if incomplete:
+    if execution_incomplete:
         score = min(score, 69)
     grade = "A" if score >= 90 else "B" if score >= 80 else "C" if score >= 70 else "D" if score >= 60 else "F"
     result.setdefault("result", {})["score"] = score

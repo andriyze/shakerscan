@@ -128,6 +128,8 @@ def parse_nmap_evidence(
         "elapsed_seconds": None,
         "host_count": 0,
         "host_timed_out": False,
+        "port_state_counts": {},
+        "tcp_filtered_count": 0,
         "incomplete_reasons": [],
     }
     if not xml_text.strip():
@@ -167,6 +169,10 @@ def parse_nmap_evidence(
             identity["os_matches"].append({"name": osmatch.get("name"), "accuracy": osmatch.get("accuracy")})
         for port_elem in host_elem.findall("./ports/port"):
             service = _service_from_element(port_elem)
+            state = str(service["state"])
+            scan_status["port_state_counts"][state] = int(scan_status["port_state_counts"].get(state, 0)) + 1
+            if service["transport"] == "tcp" and state in {"filtered", "open|filtered"}:
+                scan_status["tcp_filtered_count"] += 1
             if service["state"] == "open":
                 service["confidence"] = "confirmed"
                 service["policy_eligible"] = True
@@ -179,6 +185,21 @@ def parse_nmap_evidence(
                     "the port may be open or filtered."
                 )
                 inconclusive.append(service)
+        scan_protocols = {
+            str(item.get("protocol") or "").lower()
+            for item in root.findall("./scaninfo")
+            if item.get("protocol")
+        }
+        scan_protocol = next(iter(scan_protocols)) if len(scan_protocols) == 1 else ""
+        for extra in host_elem.findall("./ports/extraports"):
+            state = str(extra.get("state") or "unknown")
+            try:
+                count = max(0, int(extra.get("count") or 0))
+            except (TypeError, ValueError):
+                count = 0
+            scan_status["port_state_counts"][state] = int(scan_status["port_state_counts"].get(state, 0)) + count
+            if scan_protocol == "tcp" and state in {"filtered", "open|filtered"}:
+                scan_status["tcp_filtered_count"] += count
     if scan_status["host_timed_out"]:
         scan_status["incomplete_reasons"].append("nmap_host_timeout")
     if scan_status["finished_exit"] not in {"success", None}:
@@ -248,6 +269,8 @@ async def _run_nmap_stage(
         "elapsed_seconds": scan_status.get("elapsed_seconds"),
         "confirmed_open_count": len(services),
         "inconclusive_count": len(inconclusive),
+        "port_state_counts": dict(scan_status.get("port_state_counts") or {}),
+        "tcp_filtered_count": int(scan_status.get("tcp_filtered_count") or 0),
         "incomplete_reasons": list(dict.fromkeys(incomplete_reasons)),
         "stderr": (stderr or "")[:500],
     }
@@ -333,19 +356,32 @@ async def _nmap_scan(
         raise RuntimeError(f"TCP inventory failed: {errors or 'Nmap returned no parseable result'}")
 
     udp_receipts = [receipt for receipt in receipts if receipt.get("transport") == "udp"]
-    completeness = {
-        "complete": bool(
+    execution_complete = bool(
             tcp_receipt.get("complete")
             and all(receipt.get("complete") for receipt in fingerprint_receipts)
             and all(receipt.get("complete") for receipt in udp_receipts)
-        ),
+    )
+    tcp_filtered_count = int(tcp_receipt.get("tcp_filtered_count") or 0)
+    tcp_visibility_complete = bool(tcp_receipt.get("complete") and tcp_filtered_count == 0)
+    uncertainty_present = bool(observations_by_key or tcp_filtered_count)
+    incomplete_stages = [
+        receipt["stage"] for receipt in receipts
+        if receipt.get("required", True) and not receipt.get("complete")
+    ]
+    if tcp_filtered_count:
+        incomplete_stages.append("tcp_scope_visibility")
+    if observations_by_key:
+        incomplete_stages.append("udp_service_uncertainty")
+    completeness = {
+        "complete": bool(execution_complete and not uncertainty_present),
+        "execution_complete": execution_complete,
         "tcp_discovery_complete": bool(tcp_receipt.get("complete")),
+        "tcp_visibility_complete": tcp_visibility_complete,
+        "tcp_filtered_ports_count": tcp_filtered_count,
         "tcp_fingerprinting_complete": all(receipt.get("complete") for receipt in fingerprint_receipts),
         "udp_discovery_complete": all(receipt.get("complete") for receipt in udp_receipts),
-        "incomplete_stages": [
-            receipt["stage"] for receipt in receipts
-            if receipt.get("required", True) and not receipt.get("complete")
-        ],
+        "uncertainty_present": uncertainty_present,
+        "incomplete_stages": incomplete_stages,
     }
     return (
         sorted(services_by_key.values(), key=lambda row: (row["transport"], row["port"])),
@@ -592,7 +628,8 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
     services, policy_findings = evaluate_service_policy(services, rules, policy_name=policy_name)
     findings = policy_findings + ssh_findings
     complete = bool(scan_completeness.get("complete"))
-    score, grade = _score(findings, complete=complete)
+    execution_complete = bool(scan_completeness.get("execution_complete", complete))
+    score, grade = _score(findings, complete=execution_complete)
     decision, rationale = _device_decision(findings, complete=complete)
     return {
         "target": locator,

@@ -47,6 +47,9 @@ with `no-response` is retained as an inconclusive observation, not a listening s
 excluded from policy evaluation and scoring unless a protocol response confirms the port as open.
 Scan reports and device details present these observations in a separate uncertainty section, so an
 operator can inspect the raw evidence without mistaking UDP silence for an exposed service.
+Successful tool execution is reported separately from coverage confidence. Filtered TCP ports or
+unresolved UDP observations prevent an `allow` decision and preserve prior service history, but they
+do not become findings or reduce the vulnerability score merely because the network path was silent.
 
 ## Web interfaces on any port
 

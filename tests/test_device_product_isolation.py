@@ -73,3 +73,23 @@ def test_device_postprocessing_keeps_review_findings_out_of_allow_and_block():
     result["findings"][0]["severity"] = "low"
     worker._device_score_with_web_findings(result)
     assert result["device_posture"]["decision"]["decision"] == "block"
+
+
+def test_device_uncertainty_requires_review_without_score_penalty():
+    result = {
+        "result": {},
+        "findings": [],
+        "device_posture": {
+            "completeness": {
+                "complete": False,
+                "execution_complete": True,
+                "uncertainty_present": True,
+                "web_probe_truncated": False,
+            },
+            "web_dast_children": {"failed": 0, "truncated": 0},
+            "decision": {},
+        },
+    }
+    worker._device_score_with_web_findings(result)
+    assert result["result"] == {"score": 100, "grade": "A"}
+    assert result["device_posture"]["decision"]["decision"] == "needs_review"

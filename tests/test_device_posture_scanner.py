@@ -58,6 +58,15 @@ def test_nmap_host_timeout_is_partial_even_when_nmap_exits_successfully():
     assert scan_status["incomplete_reasons"] == ["nmap_host_timeout"]
 
 
+def test_filtered_tcp_ports_are_counted_as_visibility_uncertainty():
+    ports = "<port protocol='tcp' portid='443'><state state='filtered' reason='no-response'/><service name='https'/></port>"
+    services, observations, _, scan_status = device_posture.parse_nmap_evidence(_nmap_xml(ports))
+    assert services == []
+    assert observations == []
+    assert scan_status["port_state_counts"] == {"filtered": 1}
+    assert scan_status["tcp_filtered_count"] == 1
+
+
 def test_policy_defaults_to_review_and_honors_deny():
     services = [
         {"transport": "tcp", "port": 23, "service_name": "telnet"},
@@ -133,14 +142,56 @@ def test_staged_scan_preserves_priority_ports_and_separates_udp_uncertainty(monk
     ]
     assert [(item["transport"], item["port"]) for item in observations] == [("udp", 53)]
     assert completeness["complete"] is False
+    assert completeness["execution_complete"] is False
+    assert completeness["uncertainty_present"] is True
     assert completeness["tcp_discovery_complete"] is False
-    assert completeness["incomplete_stages"] == ["tcp_scope_discovery"]
+    assert completeness["incomplete_stages"] == ["tcp_scope_discovery", "udp_service_uncertainty"]
     assert receipts[0]["stage"] == "tcp_priority_discovery"
     assert receipts[0]["required"] is False
     broad_command = next(cmd for cmd in commands if "-p-" in cmd)
     fingerprint_command = next(cmd for cmd in commands if "-sV" in cmd and "-sT" in cmd)
     assert "-sV" not in broad_command
     assert fingerprint_command[fingerprint_command.index("-p") + 1] == "80,443"
+
+
+def test_successful_filtered_tcp_scope_cannot_produce_complete_coverage(monkeypatch):
+    async def fake_run(cmd, timeout=60, input_text=None, retry=0):
+        if "-sU" in cmd:
+            closed = "<port protocol='udp' portid='53'><state state='closed' reason='port-unreach'/><service name='domain'/></port>"
+            return _nmap_xml(closed), "", 0
+        filtered = "<port protocol='tcp' portid='443'><state state='filtered' reason='no-response'/><service name='https'/></port>"
+        return _nmap_xml(filtered), "", 0
+
+    monkeypatch.setattr(device_posture, "run", fake_run)
+    services, observations, _, _, completeness = asyncio.run(
+        device_posture._nmap_scan("device.test", device_posture.PROFILES["posture"]),
+    )
+    assert services == []
+    assert observations == []
+    assert completeness["execution_complete"] is True
+    assert completeness["tcp_visibility_complete"] is False
+    assert completeness["tcp_filtered_ports_count"] == 1
+    assert completeness["complete"] is False
+    assert "tcp_scope_visibility" in completeness["incomplete_stages"]
+
+
+def test_udp_silence_prevents_allow_without_becoming_a_service(monkeypatch):
+    async def fake_run(cmd, timeout=60, input_text=None, retry=0):
+        if "-sU" in cmd:
+            uncertain = "<port protocol='udp' portid='1900'><state state='open|filtered' reason='no-response'/><service name='upnp'/></port>"
+            return _nmap_xml(uncertain), "", 0
+        return _nmap_xml(""), "", 0
+
+    monkeypatch.setattr(device_posture, "run", fake_run)
+    services, observations, _, _, completeness = asyncio.run(
+        device_posture._nmap_scan("device.test", device_posture.PROFILES["posture"]),
+    )
+    assert services == []
+    assert [(item["transport"], item["port"]) for item in observations] == [("udp", 1900)]
+    assert completeness["execution_complete"] is True
+    assert completeness["uncertainty_present"] is True
+    assert completeness["complete"] is False
+    assert "udp_service_uncertainty" in completeness["incomplete_stages"]
 
 
 def test_require_policy_fails_closed_when_ssh_controls_are_unverified_or_weak():
