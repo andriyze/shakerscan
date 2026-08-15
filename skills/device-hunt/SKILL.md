@@ -1,11 +1,13 @@
 ---
 name: device-hunt
-description: Direct a bounded AI investigation of one registered connected device through the device-agent API. Use for requests such as investigate, hunt, or autonomously assess a TV, camera, printer, router, NAS, appliance, or other connected device. Do not use for ordinary Web DAST, read-only explanation without new traffic, or fleet-wide campaigns.
+description: Run ShakerScan Device Hunt, a bounded AI investigation of one registered connected device through the device-agent API. Use for “Device Hunt” or requests to investigate, hunt, or autonomously assess a TV, camera, printer, router, NAS, appliance, or other connected device. Do not use for ordinary Web DAST, read-only explanation without new traffic, or fleet-wide campaigns.
 ---
 
 # Device Hunt
 
-Use the current coding-agent session as planner and ShakerScan as the only executor. Deterministic device scans remain authoritative; agent leads remain evidence-cited hypotheses.
+Device Hunt is ShakerScan's agentic connected-device workflow. Use the current coding-agent session
+as planner and ShakerScan as the only executor. Deterministic device scans remain authoritative;
+Device Hunt leads remain evidence-cited hypotheses.
 
 ## Authorize and launch
 

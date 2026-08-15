@@ -18,6 +18,8 @@ Specialized scanners remain first-class:
 - **Continuous ASM** keeps a target’s endpoint inventory and coverage current.
 - **AI Gate** tests chat, RAG, agent, and MCP systems.
 - **Model Intake** checks model artifacts, provenance, signatures, and policy.
+- **Device Hunt** is the agentic investigation workflow for one registered connected device. It is
+  separate from web-focused Deep Hunt and runs through the connected-device safety boundary.
 
 The web **Targets** inventory contains HTTP(S) applications only. Model repositories and artifacts stay in
 Model Intake, where their exact revision and content digests are the identity. They may still appear in
@@ -32,10 +34,24 @@ Agents must preserve these distinctions:
 | “scan example.com” | Quick DAST, the documented default |
 | “quick/standard/deep/full/aggressive/smart scan” | Exact DAST scan type |
 | “deep hunt”, “autonomous hunt”, “investigate autonomously” | Deep Hunt |
+| “device hunt”, “investigate/hunt this TV, camera, printer, router, or device” | Device Hunt |
 | “verify this finding” | Deterministic finding verifier/retest |
 | “interactive testing”, “test manually”, “browser session” | Interactive Testing |
 
 `deep scan` is DAST. `Deep Hunt` is AI-driven exploration and bounded exploitation.
+
+## Device Hunt
+
+Device Hunt is the connected-device counterpart to Deep Hunt. The current coding-agent session
+plans a bounded investigation of one registered device through `/devices/{device_id}/agent/session`
+and `/device-agent/session/*`. ShakerScan fixes the durable device identity, current locator, safety
+profile, credentials, traffic budgets, and health circuit breaker. Deterministic device scans remain
+authoritative; AI leads are evidence-cited hypotheses.
+
+Device Hunt may propose exact remote-device SSH commands only when an authenticated profile and
+pinned host key are available. A proposal is inert until the user separately confirms the immutable
+command plan in the UI. The internal `device-agent` API name remains for compatibility; UI and
+documentation use **Device Hunt**.
 
 ## Deep Hunt
 
@@ -112,6 +128,7 @@ technical metadata.
 | Explorer | Deep Hunt implementation |
 | Operator | Guided verifier implementation |
 | Research Agent | Deep Hunt or guided verifier, depending on route |
+| AI Device Investigation / device agent | Device Hunt |
 | AI Session / `ai_session` | Interactive |
 | Autonomous / `autonomous` finding source | Deep Hunt |
 | Plan a test | Test Builder |

@@ -99,6 +99,7 @@ findings, proof state, coverage, and the final report.
 | Keep an endpoint inventory fresh and close coverage gaps | **Continuous ASM** |
 | Discover subdomains continuously | **Targets** or Gungnir CT monitoring |
 | Inventory and assess a TV, camera, printer, or appliance | **Connected Devices** |
+| Let the current AI agent investigate one connected device | **Connected Devices → Device Hunt** |
 | Test a chatbot, RAG pipeline, agent, or MCP server | **AI Gate** |
 | Vet a model artifact before deployment | **Model Intake** |
 | Reproduce a workflow or test two user roles manually | **Interactive Testing** |
@@ -298,7 +299,7 @@ and compatibility. It is not the Deep Hunt launcher.
 | Dashboard | Security posture, prioritized actions, recent activity, queue operations, worker freshness/scaling, and Gungnir |
 | Docs | In-app rendering of the installed README for setup, workflows, safety, and troubleshooting |
 | DAST Scans / New Scan | Submission, filters, cancellation, live logs, reports, proof, coverage, and PDF export |
-| Connected Devices | Stable device identities with changeable IP/hostname history, separate TCP/UDP posture, service policies, credentialed SSH/web checks, typed one-port verification, and AI-directed Device Hunt |
+| Connected Devices / Device Hunt | Stable device identities with changeable IP/hostname history, separate TCP/UDP posture, service policies, credentialed SSH/web checks, typed one-port verification, and **Device Hunt** for bounded AI-directed investigation of one device |
 | Targets / Exposure | Asset inventory, subdomains, exposure graph, and application graph |
 | Coverage (Continuous ASM) | Endpoint inventory, proof-family coverage, gaps, recommendations, and activity |
 | Findings / Exceptions Queue | Triage, notes, retests, replay, cleanup, accepted risk, and exception lifecycle |

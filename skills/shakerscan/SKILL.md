@@ -1,6 +1,6 @@
 ---
 name: shakerscan
-description: Operate ShakerScan. Route scan requests to Web DAST, Deep Hunt requests to the keyless AI investigator, and manual browser work to Interactive Testing; also manage targets, Continuous ASM, findings, AI Gate, Model Intake, evidence, schedules, local workers, and opt-in Linux fleets.
+description: Operate ShakerScan. Route scan requests to Web DAST, web-agent investigations to Deep Hunt, connected-device agent investigations to Device Hunt, and manual browser work to Interactive Testing; also manage targets, Continuous ASM, findings, AI Gate, Model Intake, evidence, schedules, local workers, and opt-in Linux fleets.
 ---
 
 # ShakerScan
@@ -33,7 +33,7 @@ target binding, approvals, budgets, evidence, and finding proof.
 | “Scan this target” with no type | Quick Web DAST (`POST /scans`, `scan_type=quick`) |
 | Quick, standard, deep, full, aggressive, or smart DAST | `POST /scans` |
 | Deep Hunt, autonomous hunt, or investigate autonomously | Use the `research-agent` skill and `/agent/hunt/*` |
-| Investigate or hunt one connected device | Use the `device-hunt` skill; start at `/devices/{id}/agent/session`, then use `/device-agent/session/{run_id}/*` |
+| Device Hunt, or investigate/hunt one connected device | Use the `device-hunt` skill; start at `/devices/{id}/agent/session`, then use `/device-agent/session/{run_id}/*` |
 | Explain, compare, or triage a connected device without traffic | Use the `device-triage` skill |
 | Multiple targets | `POST /scans/batch` |
 | Authenticated or two-user testing | `POST /scans` with auth options |
@@ -69,6 +69,9 @@ origin. Model Intake artifacts remain exact-subject targets.
   authorization, create a target-bound credential-tier approval, and let ShakerScan enforce the
   request/action ceilings. The phrase “Deep Hunt” requests the workflow but is not itself a claim
   that the user owns the target.
+- Device Hunt is the separate agentic connected-device workflow. Confirm authorization for the
+  exact registered device; keep its immutable scope, safety profile, worker-only credentials,
+  health circuit breaker, and user-confirmed SSH shell boundary intact.
 - Treat credentials, auth headers, cookies, API keys, and approval receipts as secrets. Do not echo
   them in reports.
 - Production AI Gate scans require their production confirmation.
@@ -212,7 +215,8 @@ Keep these intents distinct:
   legacy `/research/campaigns/launch` path.
 - `verify this finding` → the bounded deterministic finding verification/retest path.
 - `test manually`, `interactive testing`, `browser session` → Interactive Testing.
-- `investigate/hunt this TV, camera, printer, router, or device` → `device-hunt`.
+- `device hunt`, `investigate/hunt this TV, camera, printer, router, or device` → Device Hunt through
+  the `device-hunt` skill, never Deep Hunt or ordinary Web DAST.
 - `explain/triage/compare this device` → `device-triage` unless the user explicitly authorizes new traffic.
 
 For Deep Hunt, use the current coding-agent session as the planner. Start

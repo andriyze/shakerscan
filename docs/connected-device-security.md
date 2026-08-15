@@ -207,21 +207,22 @@ device UUID. Completed and queued scan records retain the exact locator they use
 
 The operator must confirm that the replacement locator belongs to the same physical device. This is
 deliberately not inferred from IP reuse: DHCP can give an old address to a different host. Address
-changes are blocked while a posture scan, service probe, or AI investigation is active, preventing
+changes are blocked while a posture scan, service probe, or Device Hunt is active, preventing
 an in-flight operation from switching hosts. Prefer a stable local DNS/mDNS name where it is
 reliable; automatic MAC- or sensor-assisted relocation can be added later only with verified
 identity evidence.
 
-## AI-directed device investigation
+## Device Hunt
 
-Connected devices also have a keyless, turn-based investigator modeled on Deep Hunt. The current
-Codex, Claude, or OpenCode session is the planner, while ShakerScan executes a closed device-tool
-contract. Start it through `POST /devices/{device_id}/agent/session`; drive turns through
+**Device Hunt** is ShakerScan's keyless, turn-based agentic workflow for one connected device—the
+connected-device counterpart to web-focused Deep Hunt. The current Codex, Claude, or OpenCode
+session is the planner, while ShakerScan executes a closed device-tool contract. Start it through
+`POST /devices/{device_id}/agent/session`; drive turns through
 `POST /device-agent/session/{run_id}/reply`; inspect or cancel through the matching GET and cancel
 routes. The `/devices/{device_id}/agent` UI shows live state, budgets, evidence-backed leads, and the
 exact fixed safety profile.
 
-The device agent receives a server-owned 24-capability pack derived from the Smart TV assessment
+Device Hunt receives a server-owned 24-capability pack derived from the Smart TV assessment
 playbooks. `GET /devices/{device_id}/capabilities` resolves each capability as ready, completed,
 blocked, planned, sensor-required, lab-only, or not applicable using current device evidence,
 credentials, platform hints, and sensor readiness. `inspect_capabilities` refreshes this view during
@@ -229,7 +230,7 @@ an investigation. The catalog guides planning. Registered deterministic capabili
 their contracts; the SSH shell capability additionally requires a separately user-confirmed immutable
 plan.
 
-The device-agent tools can inspect the registered device and capability pack, queue a deterministic device scan,
+The Device Hunt tools can inspect the registered device and capability pack, queue a deterministic device scan,
 inspect a device-owned scan, query normalized graph evidence, and retain bounded notes. A run is fixed
 to one `device_target_id` and one safety profile at creation. Tool arguments contain no locator,
 credential, arbitrary URL, local-host shell, plugin, or safety-escalation field. The planner can only
@@ -237,7 +238,7 @@ propose remote-device SSH commands; confirmation is not a planner tool. Sessions
 36 tool actions, six calls per turn, and three queued scans. Concurrent agent sessions and concurrent
 device scans for the same device fail closed.
 
-The AI investigator cannot create authoritative findings. Scanner findings continue to come from
+Device Hunt cannot create authoritative findings. Scanner findings continue to come from
 deterministic device scans. A final AI debrief may retain evidence-backed hypotheses only when they
 cite real `devref_N` references created by device context, scan-result, or evidence-graph reads. Notes,
 queue acknowledgements, and model prose are not proof.

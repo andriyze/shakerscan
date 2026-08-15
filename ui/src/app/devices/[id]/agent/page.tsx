@@ -75,7 +75,7 @@ export default function DeviceAgentPage() {
       setError(null)
       setSession(value)
     }).catch((err) => {
-      if (!stopped) setError(err instanceof Error ? err.message : 'Could not load AI device investigation')
+      if (!stopped) setError(err instanceof Error ? err.message : 'Could not load Device Hunt')
       })
     }
     tick()
@@ -85,7 +85,7 @@ export default function DeviceAgentPage() {
     return () => { stopped = true; window.clearInterval(timer) }
   }, [runId, deviceId])
 
-  const example = useMemo(() => `investigate connected device ${data?.device.primary_locator || 'tv.lan'} with the AI device agent`, [data])
+  const example = useMemo(() => `Run Device Hunt on connected device ${data?.device.primary_locator || 'tv.lan'}`, [data])
 
   const start = async () => {
     if (!confirmed || starting) return
@@ -101,9 +101,9 @@ export default function DeviceAgentPage() {
       })
       setSession(value)
       setRunId(value.id)
-      toast.success('AI device investigation started — continue it from your coding agent')
+      toast.success('Device Hunt started — continue it from your coding agent')
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Could not start AI device investigation'
+      const message = err instanceof Error ? err.message : 'Could not start Device Hunt'
       setError(message); toast.error(message)
     } finally { setStarting(false) }
   }
@@ -111,8 +111,8 @@ export default function DeviceAgentPage() {
   const cancel = async () => {
     if (!runId || cancelling) return
     setCancelling(true)
-    try { setSession(await cancelDeviceAgentSession(runId)); toast.success('AI device investigation cancelled') }
-    catch (err) { toast.error(err instanceof Error ? err.message : 'Could not cancel investigation') }
+    try { setSession(await cancelDeviceAgentSession(runId)); toast.success('Device Hunt cancelled') }
+    catch (err) { toast.error(err instanceof Error ? err.message : 'Could not cancel Device Hunt') }
     finally { setCancelling(false) }
   }
 
@@ -135,7 +135,7 @@ export default function DeviceAgentPage() {
 
   return (
     <div className="mx-auto max-w-6xl">
-      <PageHeader backHref={`/devices/${deviceId}`} backLabel={data.device.name} title="AI Device Investigation" description="Your coding agent chooses device scans, reasons over normalized evidence, and may propose remote SSH commands. ShakerScan fixes scope and requires your exact confirmation before any proposed shell plan runs." icon={<Bot className="h-6 w-6" />} />
+      <PageHeader backHref={`/devices/${deviceId}`} backLabel={data.device.name} title="Device Hunt" description="The agentic connected-device workflow: your coding agent chooses bounded device scans, reasons over normalized evidence, and may propose remote SSH commands. ShakerScan fixes scope and requires your exact confirmation before any proposed shell plan runs." icon={<Bot className="h-6 w-6" />} />
 
       <Card className="mb-6 border-violet-500/25 bg-violet-500/[0.05] p-4">
         <div className="flex items-start gap-3"><Terminal className="mt-0.5 h-5 w-5 text-violet-300" /><div><p className="text-sm font-medium text-violet-100">Run it from your coding agent</p><p className="mt-1 text-xs leading-5 text-gray-400">Ask in plain language from the ShakerScan runtime. The agent starts this session, submits each tool-planning turn, and the activity appears here.</p><code className="mt-2 inline-block rounded border border-gray-700 bg-gray-950 px-3 py-1.5 text-xs text-gray-200">{example}</code></div></div>
@@ -154,7 +154,7 @@ export default function DeviceAgentPage() {
             {safetyProfile === 'authenticated_active' && <div className="grid gap-3 sm:grid-cols-2"><Field label="SSH credential"><Select value={sshCredentialId} onChange={(event) => setSshCredentialId(event.target.value)}><option value="">None</option>{credentials.filter((profile) => profile.auth_kind.startsWith('ssh_') && profile.execution_compatible).map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</Select></Field><Field label="Web credential"><Select value={webCredentialId} onChange={(event) => setWebCredentialId(event.target.value)}><option value="">None</option>{credentials.filter((profile) => profile.auth_kind.startsWith('web_') && profile.execution_compatible).map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</Select></Field><p className="sm:col-span-2 text-xs text-gray-500">The agent can select scans using these profiles and propose commands for a confirmed SSH service. Secret values never enter its transcript. Every shell proposal requires a separate exact-command confirmation below.</p></div>}
             <Field label="Maximum planner turns"><Input type="number" min="1" max="30" value={maxTurns} onChange={(event) => setMaxTurns(event.target.value)} /></Field>
             <label className="flex items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-sm text-amber-100"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} className="mt-1" /><span>I confirm I am authorized to let the AI direct bounded scans of this exact device.</span></label>
-            <Button disabled={!confirmed} loading={starting} onClick={start}><Bot className="h-4 w-4" /> Start investigation</Button>
+            <Button disabled={!confirmed} loading={starting} onClick={start}><Bot className="h-4 w-4" /> Start Device Hunt</Button>
           </div>
         </div>
       </Card>}
@@ -180,7 +180,7 @@ export default function DeviceAgentPage() {
           </div>)}</div>
         </Card>}
 
-        {session.result && <Card className="p-5"><h2 className="font-semibold text-white">Investigation result</h2><p className="mt-2 text-sm leading-6 text-gray-300">{session.result.summary || 'No summary supplied.'}</p>{(session.result.leads || []).length > 0 && <div className="mt-4 space-y-3">{session.result.leads?.map((lead) => <div key={`${lead.title}-${lead.evidence_refs.join('-')}`} className="rounded border border-amber-500/20 bg-amber-500/5 p-3"><p className="font-medium text-amber-100">{lead.title}</p><p className="mt-1 text-sm text-gray-400">{lead.rationale}</p><p className="mt-2 font-mono text-xs text-gray-500">{lead.evidence_refs.join(', ')}</p></div>)}</div>}</Card>}
+        {session.result && <Card className="p-5"><h2 className="font-semibold text-white">Device Hunt result</h2><p className="mt-2 text-sm leading-6 text-gray-300">{session.result.summary || 'No summary supplied.'}</p>{(session.result.leads || []).length > 0 && <div className="mt-4 space-y-3">{session.result.leads?.map((lead) => <div key={`${lead.title}-${lead.evidence_refs.join('-')}`} className="rounded border border-amber-500/20 bg-amber-500/5 p-3"><p className="font-medium text-amber-100">{lead.title}</p><p className="mt-1 text-sm text-gray-400">{lead.rationale}</p><p className="mt-2 font-mono text-xs text-gray-500">{lead.evidence_refs.join(', ')}</p></div>)}</div>}</Card>}
 
         <Card className="p-5"><h2 className="font-semibold text-white">Recent activity</h2><div className="mt-3 space-y-3">{session.events.length ? session.events.slice(-8).reverse().map((event, index) => <pre key={index} className="overflow-x-auto whitespace-pre-wrap rounded bg-gray-950 p-3 text-xs text-gray-400">{JSON.stringify(event, null, 2)}</pre>) : <p className="text-sm text-gray-500">Waiting for the coding agent’s first planner turn.</p>}</div></Card>
       </div>}

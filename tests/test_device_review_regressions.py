@@ -152,6 +152,21 @@ def test_device_views_expose_last_scan_reachability_without_assuming_online():
     assert "Reachability: not checked" in list_ui
 
 
+def test_device_hunt_is_the_consistent_user_facing_agent_name():
+    detail_ui = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "page.tsx").read_text()
+    hunt_ui = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "agent" / "page.tsx").read_text()
+    skill = (ROOT / "skills" / "device-hunt" / "SKILL.md").read_text()
+    skill_index = (ROOT / "skills" / "README.md").read_text()
+    product_model = (ROOT / "docs" / "product-model.md").read_text()
+
+    assert "> Device Hunt</Link>" in detail_ui
+    assert 'title="Device Hunt"' in hunt_ui
+    assert "Start Device Hunt" in hunt_ui
+    assert "name: device-hunt" in skill and "ShakerScan Device Hunt" in skill
+    assert "[`device-hunt`](device-hunt/SKILL.md)" in skill_index
+    assert "## Device Hunt" in product_model
+
+
 def test_device_findings_use_atomic_conflict_upsert():
     source = (ROOT / "api" / "worker.py").read_text()
     function = source[source.index("async def save_device_findings"):]

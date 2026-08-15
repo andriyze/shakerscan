@@ -5233,13 +5233,13 @@ export async function startDeviceAgentSession(deviceId: string, payload: {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   })
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to start AI device investigation'))
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to start Device Hunt'))
   return res.json()
 }
 
 export async function getDeviceAgentSession(runId: string): Promise<DeviceAgentSession> {
   const res = await fetch(`${API_URL}/device-agent/session/${encodeURIComponent(runId)}`, { cache: 'no-store' })
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load AI device investigation'))
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load Device Hunt'))
   return res.json()
 }
 
@@ -5249,13 +5249,13 @@ export async function replyDeviceAgentSession(runId: string, reply: string): Pro
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ reply }),
   })
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to submit AI device planner turn'))
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to submit Device Hunt planner turn'))
   return res.json()
 }
 
 export async function cancelDeviceAgentSession(runId: string): Promise<DeviceAgentSession> {
   const res = await fetch(`${API_URL}/device-agent/session/${encodeURIComponent(runId)}/cancel`, { method: 'POST' })
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to cancel AI device investigation'))
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to cancel Device Hunt'))
   return res.json()
 }
 
