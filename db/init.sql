@@ -438,6 +438,24 @@ CREATE UNIQUE INDEX idx_device_agent_runs_one_active_per_device
 ON device_agent_runs(device_target_id)
 WHERE status IN ('awaiting_planner','planning');
 
+CREATE TABLE device_agent_actions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    run_id UUID NOT NULL REFERENCES device_agent_runs(id) ON DELETE CASCADE,
+    device_target_id UUID NOT NULL REFERENCES device_targets(id) ON DELETE CASCADE,
+    tool_name TEXT NOT NULL,
+    tool_tier INTEGER NOT NULL CHECK (tool_tier BETWEEN 0 AND 3),
+    fragility_cost INTEGER NOT NULL DEFAULT 0 CHECK (fragility_cost BETWEEN 0 AND 100),
+    rationale TEXT,
+    evidence_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+    outcome TEXT NOT NULL CHECK (outcome IN ('completed','blocked','failed')),
+    result_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_device_agent_actions_run
+ON device_agent_actions(run_id, created_at);
+CREATE INDEX idx_device_agent_actions_device_day
+ON device_agent_actions(device_target_id, created_at DESC);
+
 -- ============================================================
 -- FINDINGS - Vulnerabilities discovered
 -- ============================================================

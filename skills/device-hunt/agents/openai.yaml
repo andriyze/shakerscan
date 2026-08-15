@@ -1,0 +1,4 @@
+interface:
+  display_name: "Device Hunt"
+  short_description: "AI-directed connected-device investigation"
+  default_prompt: "Use $device-hunt to investigate one authorized connected device with bounded, evidence-cited actions."

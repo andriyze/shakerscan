@@ -33,10 +33,13 @@ target binding, approvals, budgets, evidence, and finding proof.
 | “Scan this target” with no type | Quick Web DAST (`POST /scans`, `scan_type=quick`) |
 | Quick, standard, deep, full, aggressive, or smart DAST | `POST /scans` |
 | Deep Hunt, autonomous hunt, or investigate autonomously | Use the `research-agent` skill and `/agent/hunt/*` |
+| Investigate or hunt one connected device | Use the `device-hunt` skill and `/devices/{id}/agent/*` |
+| Explain, compare, or triage a connected device without traffic | Use the `device-triage` skill |
 | Multiple targets | `POST /scans/batch` |
 | Authenticated or two-user testing | `POST /scans` with auth options |
 | Targets and subdomains | `/targets`, `/domains`, `/discovery` |
 | Continuous endpoint coverage | `/targets/{id}/asm/*` |
+| Connected-device inventory, policy, credentials, and posture | `/devices*`, `/device-policies*` |
 | Findings, cleanup, triage, or retest | `/findings*`, `/retests*` |
 | Finding exceptions and deployment policies | `/finding-exceptions*`, `/policy-profiles*` |
 | AI chat, RAG, agent, MCP, or widget testing | `/ai/targets*` |
@@ -81,6 +84,9 @@ origin. Model Intake artifacts remain exact-subject targets.
 - Never replace unavailable Firecracker/KVM execution with the semantic container sandbox, QEMU, Docker,
   or an agent claim. Report `NOT_READY`/`INCOMPLETE`. The optional Model Intake coding-agent loop is
   advisory only and cannot approve, freeze evidence, change policy, sign, promote, or suppress a non-pass.
+- Connected-device scans are a separate namespace. Require exact-device authorization; never guess
+  credentials, discover a whole LAN, or route Device findings through Web DAST replay. Use encrypted
+  device credential profiles only with `authenticated_active`; the planner never receives secrets.
 
 ## Execute
 
@@ -206,6 +212,8 @@ Keep these intents distinct:
   legacy `/research/campaigns/launch` path.
 - `verify this finding` → the bounded deterministic finding verification/retest path.
 - `test manually`, `interactive testing`, `browser session` → Interactive Testing.
+- `investigate/hunt this TV, camera, printer, router, or device` → `device-hunt`.
+- `explain/triage/compare this device` → `device-triage` unless the user explicitly authorizes new traffic.
 
 For Deep Hunt, use the current coding-agent session as the planner. Start
 `POST /agent/hunt/{target_id}/session` with `mode:"deep_hunt"` and the approved receipt, then drive

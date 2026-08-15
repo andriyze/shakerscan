@@ -4970,13 +4970,14 @@ export interface DeviceAgentSession {
   turns: number
   actions_used: number
   scans_queued: number
-  budgets: { actions_remaining: number; scans_remaining: number; turns_remaining: number }
+  budgets: { actions_remaining: number; scans_remaining: number; turns_remaining: number; fragility_remaining: number }
   capabilities: {
     tools: string[]
     target_fixed: boolean
     safety_profile_fixed: boolean
     credentials_visible_to_planner: boolean
     agent_findings_authoritative: boolean
+    traffic_frozen: boolean
   }
   transcript: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>
   events: Array<Record<string, unknown>>

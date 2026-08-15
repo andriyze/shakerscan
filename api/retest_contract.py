@@ -2601,6 +2601,29 @@ async def run_schema_migrations(pool) -> None:
                 WHERE status IN ('awaiting_planner','planning')
             """)
             await conn.execute("""
+                CREATE TABLE IF NOT EXISTS device_agent_actions (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    run_id UUID NOT NULL REFERENCES device_agent_runs(id) ON DELETE CASCADE,
+                    device_target_id UUID NOT NULL REFERENCES device_targets(id) ON DELETE CASCADE,
+                    tool_name TEXT NOT NULL,
+                    tool_tier INTEGER NOT NULL CHECK (tool_tier BETWEEN 0 AND 3),
+                    fragility_cost INTEGER NOT NULL DEFAULT 0 CHECK (fragility_cost BETWEEN 0 AND 100),
+                    rationale TEXT,
+                    evidence_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    outcome TEXT NOT NULL CHECK (outcome IN ('completed','blocked','failed')),
+                    result_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_device_agent_actions_run
+                ON device_agent_actions(run_id, created_at)
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_device_agent_actions_device_day
+                ON device_agent_actions(device_target_id, created_at DESC)
+            """)
+            await conn.execute("""
                 UPDATE scans SET run_kind = 'web_dast'
                 WHERE run_kind IS NULL
             """)
