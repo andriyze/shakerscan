@@ -14,6 +14,8 @@ def test_safety_profiles_keep_coverage_independent_and_fail_closed():
     assert catalog["safe_remote"]["available"] is True
     assert catalog["authenticated_active"]["available"] is True
     assert catalog["authenticated_active"]["credentials_allowed"] is True
+    assert "explicit_user_confirmed_shell" in catalog["authenticated_active"]["allowed_action_classes"]
+    assert "explicit_user_confirmed_shell" not in catalog["safe_remote"]["allowed_action_classes"]
     assert catalog["lab_invasive"]["available"] is False
     assert catalog["observe_only"]["allowed_action_classes"] == ("readonly",)
 

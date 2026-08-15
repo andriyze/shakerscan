@@ -8,7 +8,7 @@ Use this reference for a deep assessment of a smart TV, connected display, set-t
 2. Prefer completed evidence and ready deterministic capabilities.
 3. Explain blocked, planned, sensor-required, lab-only, and not-applicable coverage explicitly.
 4. Select the smallest executable capability that can answer the objective.
-5. Never translate a playbook into arbitrary shell, raw socket, browser, firmware, radio, or third-party traffic.
+5. Prefer registered typed capabilities. If deeper host evidence genuinely requires shell, propose the smallest exact remote-device SSH command plan and wait for separate user confirmation. Never obtain local-host shell or translate a playbook into unconfirmed traffic.
 
 ## Core capability order
 
@@ -39,7 +39,11 @@ Load detailed guidance only for the selected surface:
 - Package inventory.
 - Update metadata.
 
-The model never supplies a command. Outputs are bounded, redacted, hashed, and stored in normalized evidence. Authentication failure or unavailable commands produce explicit incomplete coverage, not a secure conclusion.
+The fixed host-review capability never accepts model commands. Outputs are bounded, redacted, hashed, and stored in normalized evidence. Authentication failure or unavailable commands produce explicit incomplete coverage, not a secure conclusion.
+
+## User-confirmed SSH shell
+
+`agent-confirmed-ssh-shell` permits model-authored remote-device commands only through `propose_ssh_shell`. ShakerScan binds the immutable plan to the registered device, address generation, SSH port, credential profile, pinned host key, commands, timeout, and expiry. The user must review the exact commands and separately confirm the digest in the UI. Confirmation is single-use; output is bounded, redacted, hashed, and returned without a PTY or forwarded stdin. This authority never applies to the ShakerScan host.
 
 ## Safety interpretation
 

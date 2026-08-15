@@ -14,7 +14,9 @@ import device_agent  # noqa: E402
 def test_device_agent_contract_has_only_bounded_device_tools():
     names = {tool["name"] for tool in device_agent.tool_schemas()}
     assert names == device_agent.CALLABLE_TOOL_NAMES
-    assert "shell(" not in device_agent.render_contract().lower()
+    assert "propose_ssh_shell" in device_agent.render_contract()
+    assert "local-host shell" in device_agent.render_contract().lower()
+    assert "separate user confirmation" in device_agent.render_contract().lower()
     assert "queue_device_scan" in device_agent.render_contract()
     assert "devref_1" in device_agent.render_contract()
 
@@ -85,6 +87,19 @@ def test_device_agent_depth_tools_are_read_only_and_scan_costs_are_profiled():
         device_agent.validate_tool_call({"name": "queue_device_scan", "arguments": {
             "coverage_profile": "inventory", "reason": "unsafe", "capability_ids": ["arbitrary-shell"],
         }})
+    name, args = device_agent.validate_tool_call({"name": "propose_ssh_shell", "arguments": {
+        "port": 2222,
+        "commands": ["id", "uname -a"],
+        "purpose": "Inspect runtime identity",
+        "risk_summary": "Read-only identity commands",
+    }})
+    assert name == "propose_ssh_shell"
+    assert args["commands"] == ["id", "uname -a"]
+    assert args["timeout_seconds"] == 20
+    with pytest.raises(ValueError, match="unsupported arguments"):
+        device_agent.validate_tool_call({"name": "propose_ssh_shell", "arguments": {
+            "port": 22, "commands": ["id"], "purpose": "x", "risk_summary": "x", "target": "other-host",
+        }})
 
 
 def test_device_agent_local_intel_has_no_runtime_egress(tmp_path, monkeypatch):
@@ -119,6 +134,10 @@ def test_device_agent_api_and_schema_preserve_the_device_boundary():
     migration_source = open(os.path.join(ROOT, "api", "retest_contract.py"), encoding="utf-8").read()
     assert '@app.post("/devices/{device_id}/agent/session")' in api_source
     assert '@app.post("/device-agent/session/{run_id}/reply")' in api_source
+    assert '@app.post("/device-agent/session/{run_id}/shell-plans/{plan_id}/confirm")' in api_source
+    assert "confirm_exact_commands" in api_source
+    assert "confirm_remote_device_effects" in api_source
+    assert "_DEVICE_AGENT_APPROVED_SHELL_PLAN" in api_source
     assert "DeviceAgentSessionStartRequest" in api_source
     assert '"target_fixed": True' in api_source
     assert '"safety_profile_fixed": True' in api_source

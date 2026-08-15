@@ -28,6 +28,7 @@ ACTION_SAFETY_CLASSES = {
     "persistent_state",
     "resource_intensive",
     "destructive",
+    "explicit_user_confirmed_shell",
 }
 
 
@@ -71,7 +72,7 @@ SAFETY_PROFILES: dict[str, DeviceSafetyProfile] = {
     "authenticated_active": DeviceSafetyProfile(
         name="authenticated_active",
         label="Authenticated active",
-        allowed_action_classes=("readonly", "ephemeral_state"),
+        allowed_action_classes=("readonly", "ephemeral_state", "explicit_user_confirmed_shell"),
         max_concurrency=6,
         max_requests_per_second=8.0,
         health_monitor_required=True,

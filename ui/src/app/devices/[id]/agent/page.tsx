@@ -2,10 +2,11 @@
 
 import Link from 'next/link'
 import { useParams } from 'next/navigation'
-import { Bot, CircleStop, Terminal } from 'lucide-react'
+import { Bot, CircleStop, ShieldAlert, Terminal } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   cancelDeviceAgentSession,
+  confirmDeviceAgentShellPlan,
   getDevice,
   getDeviceCapabilities,
   getDeviceAgentSession,
@@ -39,6 +40,8 @@ export default function DeviceAgentPage() {
   const [loading, setLoading] = useState(true)
   const [starting, setStarting] = useState(false)
   const [cancelling, setCancelling] = useState(false)
+  const [confirmingPlan, setConfirmingPlan] = useState<string | null>(null)
+  const [confirmedPlans, setConfirmedPlans] = useState<Record<string, boolean>>({})
   const [error, setError] = useState<string | null>(null)
   const sessionRef = useRef<DeviceAgentSession | null>(null)
   sessionRef.current = session
@@ -113,19 +116,33 @@ export default function DeviceAgentPage() {
     finally { setCancelling(false) }
   }
 
+  const confirmShellPlan = async (planId: string) => {
+    if (!runId || confirmingPlan || !confirmedPlans[planId]) return
+    const plan = session?.shell_plans?.find((item) => item.plan_id === planId)
+    if (!plan) return
+    setConfirmingPlan(planId)
+    try {
+      setSession(await confirmDeviceAgentShellPlan(runId, plan))
+      setConfirmedPlans((current) => ({ ...current, [planId]: false }))
+      toast.success('Exact remote-device SSH commands confirmed and queued')
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not confirm SSH shell plan')
+    } finally { setConfirmingPlan(null) }
+  }
+
   if (loading) return <Skeleton className="h-96" />
   if (!data) return <ErrorState message={error || 'Could not load connected device'} onRetry={loadDevice} />
 
   return (
     <div className="mx-auto max-w-6xl">
-      <PageHeader backHref={`/devices/${deviceId}`} backLabel={data.device.name} title="AI Device Investigation" description="Your coding agent chooses bounded device scans and reasons over normalized evidence while ShakerScan fixes scope, safety, budgets, and findings authority." icon={<Bot className="h-6 w-6" />} />
+      <PageHeader backHref={`/devices/${deviceId}`} backLabel={data.device.name} title="AI Device Investigation" description="Your coding agent chooses device scans, reasons over normalized evidence, and may propose remote SSH commands. ShakerScan fixes scope and requires your exact confirmation before any proposed shell plan runs." icon={<Bot className="h-6 w-6" />} />
 
       <Card className="mb-6 border-violet-500/25 bg-violet-500/[0.05] p-4">
         <div className="flex items-start gap-3"><Terminal className="mt-0.5 h-5 w-5 text-violet-300" /><div><p className="text-sm font-medium text-violet-100">Run it from your coding agent</p><p className="mt-1 text-xs leading-5 text-gray-400">Ask in plain language from the ShakerScan runtime. The agent starts this session, submits each tool-planning turn, and the activity appears here.</p><code className="mt-2 inline-block rounded border border-gray-700 bg-gray-950 px-3 py-1.5 text-xs text-gray-200">{example}</code></div></div>
       </Card>
 
       {capabilityPack && <Card className="mb-6 p-5">
-        <div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="font-semibold text-white">Connected-device capability pack</h2><p className="mt-1 text-sm text-gray-500">The planner sees these playbooks, but ShakerScan executes only registered deterministic tools.</p></div><div className="flex gap-2 text-xs"><span className="rounded bg-emerald-500/10 px-2 py-1 text-emerald-300">{capabilityPack.summary.ready || 0} ready</span><span className="rounded bg-blue-500/10 px-2 py-1 text-blue-300">{capabilityPack.summary.completed || 0} covered</span><span className="rounded bg-amber-500/10 px-2 py-1 text-amber-300">{capabilityPack.summary.blocked || 0} blocked</span></div></div>
+        <div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="font-semibold text-white">Connected-device capability pack</h2><p className="mt-1 text-sm text-gray-500">The planner sees these playbooks. Registered tools run within their contracts; proposed SSH shell commands remain inert until you confirm the exact immutable plan.</p></div><div className="flex gap-2 text-xs"><span className="rounded bg-emerald-500/10 px-2 py-1 text-emerald-300">{capabilityPack.summary.ready || 0} ready</span><span className="rounded bg-blue-500/10 px-2 py-1 text-blue-300">{capabilityPack.summary.completed || 0} covered</span><span className="rounded bg-violet-500/10 px-2 py-1 text-violet-300">{capabilityPack.summary.approval_required || 0} approval</span><span className="rounded bg-amber-500/10 px-2 py-1 text-amber-300">{capabilityPack.summary.blocked || 0} blocked</span></div></div>
         <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">{capabilityPack.items.filter((item) => item.state !== 'not_applicable').map((item) => <div key={item.id} className="rounded border border-gray-800 bg-gray-950/60 p-3"><div className="flex items-start justify-between gap-2"><p className="text-sm font-medium text-gray-200">{item.title}</p><span className={`rounded px-1.5 py-0.5 text-[10px] ${item.state === 'completed' ? 'bg-blue-500/15 text-blue-300' : item.state === 'ready' ? 'bg-emerald-500/15 text-emerald-300' : item.state === 'blocked' ? 'bg-amber-500/15 text-amber-300' : 'bg-gray-800 text-gray-400'}`}>{item.state.replace(/_/g, ' ')}</span></div><p className="mt-1 text-xs text-gray-600">{item.implementation.replace(/_/g, ' ')} · {item.minimum_profile.replace(/_/g, ' ')}</p>{item.blockers.length > 0 && <p className="mt-1 text-xs text-amber-400/70">{item.blockers.join(', ').replace(/_/g, ' ')}</p>}</div>)}</div>
       </Card>}
 
@@ -134,7 +151,7 @@ export default function DeviceAgentPage() {
           <Field label="Objective"><Textarea rows={5} value={objective} onChange={(event) => setObjective(event.target.value)} /></Field>
           <div className="space-y-4">
             <Field label="Safety profile" hint="The agent cannot change this after launch."><Select value={safetyProfile} onChange={(event) => { const value = event.target.value as typeof safetyProfile; setSafetyProfile(value); if (value !== 'authenticated_active') { setSshCredentialId(''); setWebCredentialId('') } }}><option value="observe_only">Observe only</option><option value="safe_remote">Safe remote</option><option value="authenticated_active">Authenticated active</option></Select></Field>
-            {safetyProfile === 'authenticated_active' && <div className="grid gap-3 sm:grid-cols-2"><Field label="SSH credential"><Select value={sshCredentialId} onChange={(event) => setSshCredentialId(event.target.value)}><option value="">None</option>{credentials.filter((profile) => profile.auth_kind.startsWith('ssh_') && profile.execution_compatible).map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</Select></Field><Field label="Web credential"><Select value={webCredentialId} onChange={(event) => setWebCredentialId(event.target.value)}><option value="">None</option>{credentials.filter((profile) => profile.auth_kind.startsWith('web_') && profile.execution_compatible).map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</Select></Field><p className="sm:col-span-2 text-xs text-gray-500">The agent can select scans that use these profiles, but secret values never enter its transcript or evidence.</p></div>}
+            {safetyProfile === 'authenticated_active' && <div className="grid gap-3 sm:grid-cols-2"><Field label="SSH credential"><Select value={sshCredentialId} onChange={(event) => setSshCredentialId(event.target.value)}><option value="">None</option>{credentials.filter((profile) => profile.auth_kind.startsWith('ssh_') && profile.execution_compatible).map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</Select></Field><Field label="Web credential"><Select value={webCredentialId} onChange={(event) => setWebCredentialId(event.target.value)}><option value="">None</option>{credentials.filter((profile) => profile.auth_kind.startsWith('web_') && profile.execution_compatible).map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</Select></Field><p className="sm:col-span-2 text-xs text-gray-500">The agent can select scans using these profiles and propose commands for a confirmed SSH service. Secret values never enter its transcript. Every shell proposal requires a separate exact-command confirmation below.</p></div>}
             <Field label="Maximum planner turns"><Input type="number" min="1" max="30" value={maxTurns} onChange={(event) => setMaxTurns(event.target.value)} /></Field>
             <label className="flex items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-sm text-amber-100"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} className="mt-1" /><span>I confirm I am authorized to let the AI direct bounded scans of this exact device.</span></label>
             <Button disabled={!confirmed} loading={starting} onClick={start}><Bot className="h-4 w-4" /> Start investigation</Button>
@@ -149,6 +166,19 @@ export default function DeviceAgentPage() {
           {session.capabilities.traffic_frozen && <p className="mt-4 rounded border border-red-500/30 bg-red-500/5 p-3 text-sm text-red-200">Device traffic is frozen because a health circuit breaker fired. Read-only evidence tools remain available.</p>}
           <p className="mt-4 text-xs text-gray-500">Target fixed · safety profile <span className="text-gray-300">{session.safety_profile.replace(/_/g, ' ')}</span> · AI leads are hypotheses; deterministic device scans remain authoritative.</p>
         </Card>
+
+        {(session.shell_plans || []).length > 0 && <Card className="border-amber-500/25 p-5">
+          <div className="flex items-start gap-3"><ShieldAlert className="mt-0.5 h-5 w-5 text-amber-300" /><div><h2 className="font-semibold text-white">Remote-device SSH shell plans</h2><p className="mt-1 text-sm text-gray-500">These commands target the registered device only. A proposal does nothing until you review and confirm that exact digest.</p></div></div>
+          <div className="mt-4 space-y-4">{session.shell_plans.slice().reverse().map((plan) => <div key={plan.plan_id} className="rounded-lg border border-gray-800 bg-gray-950/60 p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="font-medium text-gray-100">{plan.purpose}</p><p className="mt-1 text-xs text-gray-500">{plan.target_locator}:{plan.ssh_port} · timeout {plan.timeout_seconds}s per command</p></div><span className={`rounded px-2 py-1 text-xs ${plan.status === 'proposed' ? 'bg-amber-500/15 text-amber-300' : plan.status === 'queued' ? 'bg-blue-500/15 text-blue-300' : 'bg-gray-800 text-gray-400'}`}>{plan.status}</span></div>
+            <p className="mt-3 text-sm text-amber-100/80">{plan.risk_summary}</p>
+            {plan.detected_risks.length > 0 && <p className="mt-2 text-xs text-red-300">Detected risk markers: {plan.detected_risks.join(', ').replace(/-/g, ' ')}</p>}
+            <div className="mt-3 space-y-2">{plan.commands.map((command, index) => <pre key={index} className="overflow-x-auto whitespace-pre-wrap rounded border border-gray-800 bg-black p-3 text-xs text-gray-200"><span className="select-none text-gray-600">{index + 1}. </span>{command}</pre>)}</div>
+            <p className="mt-3 break-all font-mono text-[10px] text-gray-600">SHA-256 {plan.plan_digest} · host key {plan.expected_host_key_fingerprint}</p>
+            {plan.scan_id && <Link href={`/devices/${deviceId}?scan=${plan.scan_id}`} className="mt-3 inline-block text-xs text-blue-400 hover:text-blue-300">Open queued device scan</Link>}
+            {plan.status === 'proposed' && <div className="mt-4 rounded border border-red-500/25 bg-red-500/5 p-3"><label className="flex items-start gap-3 text-sm text-red-100"><input type="checkbox" checked={Boolean(confirmedPlans[plan.plan_id])} onChange={(event) => setConfirmedPlans((current) => ({ ...current, [plan.plan_id]: event.target.checked }))} className="mt-1" /><span>I reviewed every command above and explicitly authorize this immutable plan to run on <strong>{plan.target_locator}:{plan.ssh_port}</strong>. I understand it may modify, disrupt, or expose data from the remote device.</span></label><Button variant="danger" className="mt-3" disabled={!confirmedPlans[plan.plan_id]} loading={confirmingPlan === plan.plan_id} onClick={() => confirmShellPlan(plan.plan_id)}><Terminal className="h-4 w-4" /> Confirm and run {plan.confirmation_phrase}</Button></div>}
+          </div>)}</div>
+        </Card>}
 
         {session.result && <Card className="p-5"><h2 className="font-semibold text-white">Investigation result</h2><p className="mt-2 text-sm leading-6 text-gray-300">{session.result.summary || 'No summary supplied.'}</p>{(session.result.leads || []).length > 0 && <div className="mt-4 space-y-3">{session.result.leads?.map((lead) => <div key={`${lead.title}-${lead.evidence_refs.join('-')}`} className="rounded border border-amber-500/20 bg-amber-500/5 p-3"><p className="font-medium text-amber-100">{lead.title}</p><p className="mt-1 text-sm text-gray-400">{lead.rationale}</p><p className="mt-2 font-mono text-xs text-gray-500">{lead.evidence_refs.join(', ')}</p></div>)}</div>}</Card>}
 

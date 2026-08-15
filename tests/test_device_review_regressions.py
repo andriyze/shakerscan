@@ -41,6 +41,20 @@ def test_device_agent_revalidates_the_session_receipt_on_every_turn():
     assert 'action_name="device.agent.session"' in reply
 
 
+def test_device_agent_shell_is_immutable_user_confirmed_and_remote_only():
+    source = (ROOT / "api" / "api.py").read_text()
+    endpoint = source[source.index('@app.post("/device-agent/session/{run_id}/shell-plans/{plan_id}/confirm")'):]
+    endpoint = endpoint[:endpoint.index('@app.post("/device-agent/session/{run_id}/reply")')]
+    scanner = (ROOT / "scanner" / "scanner_tools" / "ssh_scanner.py").read_text()
+    assert "confirm_exact_commands" in endpoint
+    assert "confirm_remote_device_effects" in endpoint
+    assert "device_shell.validate_shell_plan" in endpoint
+    assert "confirmed_plan_digest" in endpoint
+    assert "expected_host_key_fingerprint" in source
+    assert "pty_allocated" in scanner and "stdin_forwarded" in scanner
+    assert "subprocess" not in endpoint
+
+
 def test_dashboard_queries_explicitly_exclude_the_device_product_plane():
     source = (ROOT / "api" / "api.py").read_text()
     action_center = source[source.index("async def _build_dashboard_action_center"):]

@@ -134,6 +134,15 @@ def build_device_evidence_graph(
                 source="device_ssh_host_review",
                 confidence="correlated" if host_review.get("status") == "completed" else "observed",
             )
+        shell_execution = ssh.get("shell_execution") if isinstance(ssh.get("shell_execution"), dict) else None
+        if shell_execution:
+            add_observation(
+                "ssh_shell_execution",
+                service_id,
+                shell_execution,
+                source="device_agent_confirmed_ssh_shell",
+                confidence="correlated" if shell_execution.get("status") == "completed" else "observed",
+            )
 
     for origin in web_origins:
         if not isinstance(origin, dict) or not origin.get("origin"):

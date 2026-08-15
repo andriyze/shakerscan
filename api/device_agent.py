@@ -1,8 +1,10 @@
 """Keyless AI-directed connected-device investigation contracts.
 
 The coding-agent session is the planner; ShakerScan executes a small bounded
-tool set.  The planner never receives arbitrary shell, network destinations,
-credentials, or a way to raise the session safety profile.  Deterministic
+tool set. The planner never receives local-host shell, arbitrary network destinations,
+credentials, or a way to raise the session safety profile. Remote-device shell is
+available only as an immutable proposal that a user separately confirms.
+Deterministic
 device scans remain the source of findings and evidence.
 """
 
@@ -25,6 +27,7 @@ except ModuleNotFoundError:  # pragma: no cover - package import in host tests
 CALLABLE_TOOL_NAMES = {
     "inspect_device",
     "inspect_capabilities",
+    "propose_ssh_shell",
     "queue_device_scan",
     "inspect_device_scan",
     "query_device_evidence",
@@ -41,6 +44,7 @@ MAX_ACTIONS_PER_SESSION = 36
 MAX_SCANS_PER_SESSION = 3
 MAX_FRAGILITY_PER_SESSION = 40
 MAX_FRAGILITY_PER_DEVICE_DAY = 80
+CONFIRMED_SHELL_FRAGILITY_COST = 12
 MAX_LOCAL_INTEL_BYTES = 32 * 1024 * 1024
 _LOCAL_INTEL_CACHE: dict[tuple[Any, ...], Any] = {}
 _LOCAL_INTEL_CACHE_LOCK = threading.Lock()
@@ -109,6 +113,8 @@ TOOL_TIERS = {
     "note": 0,
     "queue_device_scan": 2,
     "verify_service_state": 2,
+    "propose_ssh_shell": 3,
+    "execute_confirmed_ssh_shell": 3,
 }
 
 PROTOCOL_PLAYBOOKS = {
@@ -279,6 +285,30 @@ def tool_schemas() -> list[dict[str, Any]]:
             },
         },
         {
+            "name": "propose_ssh_shell",
+            "description": (
+                "Propose exact commands for the already-selected device's pinned SSH service. "
+                "This never executes commands; a user must separately confirm the immutable plan in ShakerScan."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+                    "commands": {
+                        "type": "array",
+                        "items": {"type": "string", "minLength": 1, "maxLength": 4096},
+                        "minItems": 1,
+                        "maxItems": 8,
+                    },
+                    "timeout_seconds": {"type": "integer", "minimum": 5, "maximum": 60},
+                    "purpose": {"type": "string", "minLength": 1, "maxLength": 1000},
+                    "risk_summary": {"type": "string", "minLength": 1, "maxLength": 1000},
+                },
+                "required": ["port", "commands", "purpose", "risk_summary"],
+                "additionalProperties": False,
+            },
+        },
+        {
             "name": "inspect_device_scan",
             "description": "Read status and bounded result/evidence summaries for a scan that belongs to this device.",
             "parameters": {
@@ -356,7 +386,8 @@ def render_contract() -> str:
     lines = [
         "## CONNECTED-DEVICE AGENT TOOL CONTRACT",
         "You are directing an authorized investigation of exactly one registered connected device.",
-        "ShakerScan fixes the device locator and safety profile. Never invent another target or request arbitrary shell/network access.",
+        "ShakerScan fixes the device locator and safety profile. Never invent another target or local-host shell/network access.",
+        "Remote-device SSH commands may be proposed only with propose_ssh_shell. Proposal is not execution: show exact commands and wait for separate user confirmation in ShakerScan.",
         "Start from existing evidence, choose the smallest useful scan, inspect its result, and stop when the objective is answered.",
         "A queued scan is asynchronous: use inspect_device_scan on a later turn; do not repeatedly queue equivalent scans.",
         "Only deterministic scanner findings are findings. Your final leads are hypotheses and must cite real devref_N evidence references.",
@@ -392,6 +423,7 @@ def validate_tool_call(call: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     allowed_fields = {
         "inspect_device": set(),
         "inspect_capabilities": set(),
+        "propose_ssh_shell": {"port", "commands", "timeout_seconds", "purpose", "risk_summary"},
         "queue_device_scan": {"coverage_profile", "include_web_dast", "web_scan_type", "reason", "capability_ids"},
         "inspect_device_scan": {"scan_id"},
         "query_device_evidence": {"scan_id", "collection", "kind", "limit"},
@@ -428,6 +460,39 @@ def validate_tool_call(call: dict[str, Any]) -> tuple[str, dict[str, Any]]:
             "web_scan_type": web_type,
             "reason": reason[:500],
             "capability_ids": capability_ids,
+        }
+    elif name == "propose_ssh_shell":
+        port = int(args.get("port") or 0)
+        commands = args.get("commands")
+        purpose = str(args.get("purpose") or "").strip()
+        risk_summary = str(args.get("risk_summary") or "").strip()
+        timeout_seconds = int(args.get("timeout_seconds") or 20)
+        if not 1 <= port <= 65535:
+            raise ValueError("propose_ssh_shell port is invalid")
+        if not isinstance(commands, list) or not 1 <= len(commands) <= 8:
+            raise ValueError("propose_ssh_shell requires 1-8 commands")
+        normalized_commands = []
+        total = 0
+        for raw in commands:
+            command = str(raw or "")
+            if not command.strip() or len(command) > 4096:
+                raise ValueError("propose_ssh_shell command is empty or too long")
+            if "\x00" in command or "\r" in command:
+                raise ValueError("propose_ssh_shell command contains unsupported control characters")
+            total += len(command)
+            normalized_commands.append(command)
+        if total > 16_384:
+            raise ValueError("propose_ssh_shell command plan is too large")
+        if not purpose or not risk_summary:
+            raise ValueError("propose_ssh_shell requires purpose and risk_summary")
+        if not 5 <= timeout_seconds <= 60:
+            raise ValueError("propose_ssh_shell timeout_seconds is invalid")
+        args = {
+            "port": port,
+            "commands": normalized_commands,
+            "timeout_seconds": timeout_seconds,
+            "purpose": purpose[:1000],
+            "risk_summary": risk_summary[:1000],
         }
     elif name in {"inspect_device_scan", "query_device_evidence"}:
         scan_id = str(args.get("scan_id") or "").strip()

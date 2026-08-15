@@ -43,8 +43,9 @@ recorded safety profiles are:
   inventoried but no Web DAST children are launched.
 - `safe_remote`: bounded non-destructive network checks and passive device-owned Web DAST. This is
   the default and preserves the original connected-device behavior.
-- `authenticated_active`: supplied-credential, read-only SSH and web checks with device-bound,
-  encrypted credential profiles. It never guesses credentials.
+- `authenticated_active`: supplied-credential SSH and web checks with device-bound, encrypted
+  credential profiles. It never guesses credentials. Fixed host review is read-only; model-authored
+  remote SSH commands require a separate exact-plan user confirmation.
 - `lab_invasive`: reserved for a dedicated recovery-capable lab runner. It currently fails closed as
   unavailable and cannot be enabled by choosing a deeper coverage profile.
 
@@ -112,8 +113,17 @@ the credential is submitted, ShakerScan requires a SHA-256 SSH host-key fingerpr
 device observation and fails closed if the key changes. After authentication, the worker runs only
 server-owned read-only bundles for identity/runtime, interfaces/listeners, process and service names,
 accounts and bounded privilege metadata, mounts/hardening, packages, and update metadata. The model
-cannot supply shell text. Each bundle has a timeout and byte cap; outputs are secret-scrubbed, hashed,
+cannot supply shell text to this fixed capability. Each bundle has a timeout and byte cap; outputs are secret-scrubbed, hashed,
 and stored as device evidence. Collection failure is incomplete coverage, never a secure conclusion.
+
+Agentic mode also supports `agent-confirmed-ssh-shell` when fixed collectors cannot answer the
+objective. The model may propose up to eight exact remote-device commands, but it cannot execute or
+approve them. ShakerScan shows the immutable command list, risk markers, device and port, pinned host
+key, timeout, expiry, and SHA-256 plan digest. A user must separately confirm both the exact commands
+and their possible effects. The single-use plan then runs on the isolated device worker without a PTY
+or forwarded stdin, with bounded, redacted, hashed output. This authority never grants local
+ShakerScan-host shell access and cannot transfer to another device, address generation, port,
+credential profile, or SSH host key.
 
 Service policies are ordered rules with four outcomes:
 
@@ -196,17 +206,19 @@ contract. Start it through `POST /devices/{device_id}/agent/session`; drive turn
 routes. The `/devices/{device_id}/agent` UI shows live state, budgets, evidence-backed leads, and the
 exact fixed safety profile.
 
-The device agent receives a server-owned 23-capability pack derived from the Smart TV assessment
+The device agent receives a server-owned 24-capability pack derived from the Smart TV assessment
 playbooks. `GET /devices/{device_id}/capabilities` resolves each capability as ready, completed,
 blocked, planned, sensor-required, lab-only, or not applicable using current device evidence,
 credentials, platform hints, and sensor readiness. `inspect_capabilities` refreshes this view during
-an investigation. The catalog guides planning but grants no execution authority: only capability IDs
-registered in the API can be attached to a deterministic scan.
+an investigation. The catalog guides planning. Registered deterministic capabilities execute within
+their contracts; the SSH shell capability additionally requires a separately user-confirmed immutable
+plan.
 
 The device-agent tools can inspect the registered device and capability pack, queue a deterministic device scan,
 inspect a device-owned scan, query normalized graph evidence, and retain bounded notes. A run is fixed
 to one `device_target_id` and one safety profile at creation. Tool arguments contain no locator,
-credential, arbitrary URL, shell, plugin, or safety-escalation field. Sessions are capped at 30 turns,
+credential, arbitrary URL, local-host shell, plugin, or safety-escalation field. The planner can only
+propose remote-device SSH commands; confirmation is not a planner tool. Sessions are capped at 30 turns,
 36 tool actions, six calls per turn, and three queued scans. Concurrent agent sessions and concurrent
 device scans for the same device fail closed.
 
@@ -235,5 +247,6 @@ and policy boundary.
   worker's network path, so only a protocol response is treated as confirmed open.
 - No credential guessing, firmware extraction, destructive protocol testing, radio probing, or active
   XSS/SQLi is performed by the device workflow.
-- Authenticated host collection does not provide an arbitrary shell. Only fixed server-owned read-only
-  bundles can execute, and only after an earlier SSH host key has been pinned.
+- Fixed authenticated host collection accepts only server-owned read-only bundles. Agent-authored
+  remote SSH commands execute only after an earlier host key is pinned and a user separately confirms
+  the exact digest-bound plan; local-host shell is never exposed.

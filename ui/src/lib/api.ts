@@ -4991,6 +4991,25 @@ export interface AIOpsRouteResponse {
 
 export type DeviceAgentStatus = 'awaiting_planner' | 'planning' | 'completed' | 'cancelled' | 'failed'
 
+export interface DeviceAgentShellPlan {
+  schema_version: 'device-agent-ssh-shell-plan/v1'
+  plan_id: string
+  plan_digest: string
+  confirmation_phrase: string
+  status: 'proposed' | 'queueing' | 'queued' | 'expired' | 'failed'
+  target_locator: string
+  ssh_port: number
+  commands: string[]
+  timeout_seconds: number
+  purpose: string
+  risk_summary: string
+  detected_risks: string[]
+  expected_host_key_fingerprint: string
+  expires_at: string
+  scan_id?: string
+  last_queue_error?: string
+}
+
 export interface DeviceAgentSession {
   id: string
   device_target_id: string
@@ -5010,11 +5029,15 @@ export interface DeviceAgentSession {
     safety_profile_fixed: boolean
     credentials_visible_to_planner: boolean
     agent_findings_authoritative: boolean
+    remote_shell_scope?: 'registered_device_only'
+    remote_shell_requires_exact_user_confirmation?: boolean
+    local_host_shell_available?: boolean
     traffic_frozen: boolean
   }
   transcript: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>
   events: Array<Record<string, unknown>>
   notes: Array<{ kind: string; content: string; turn: number }>
+  shell_plans: DeviceAgentShellPlan[]
   next_action: string
   result?: {
     summary?: string
@@ -5196,6 +5219,21 @@ export async function replyDeviceAgentSession(runId: string, reply: string): Pro
 export async function cancelDeviceAgentSession(runId: string): Promise<DeviceAgentSession> {
   const res = await fetch(`${API_URL}/device-agent/session/${encodeURIComponent(runId)}/cancel`, { method: 'POST' })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to cancel AI device investigation'))
+  return res.json()
+}
+
+export async function confirmDeviceAgentShellPlan(runId: string, plan: DeviceAgentShellPlan): Promise<DeviceAgentSession> {
+  const res = await fetch(`${API_URL}/device-agent/session/${encodeURIComponent(runId)}/shell-plans/${encodeURIComponent(plan.plan_id)}/confirm`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      plan_digest: plan.plan_digest,
+      confirmation_phrase: plan.confirmation_phrase,
+      confirm_exact_commands: true,
+      confirm_remote_device_effects: true,
+    }),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to confirm remote-device SSH shell plan'))
   return res.json()
 }
 

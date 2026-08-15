@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scanner"))
 
-from scanner_tools import ssh_scanner  # noqa: E402
+from scanner_tools import device_shell, ssh_scanner  # noqa: E402
 
 
 def _fake_paramiko(*, offered, password_outcome="success"):
@@ -192,3 +192,56 @@ def test_authenticated_host_review_uses_fixed_bundles_and_redacts_output(monkeyp
     assert review["bundles"][0]["stdout"] == "uid=1000 password=***\n"
     assert "supersecret" not in str(review)
     assert opened[0].command == ssh_scanner.SSH_HOST_REVIEW_BUNDLES["identity_runtime"]
+
+
+def test_confirmed_shell_executes_only_the_digest_bound_commands_and_redacts_output():
+    plan = device_shell.build_shell_plan(
+        plan_id="11111111-1111-4111-8111-111111111111",
+        run_id="22222222-2222-4222-8222-222222222222",
+        device_target_id="33333333-3333-4333-8333-333333333333",
+        target_locator="tv.lan",
+        locator_generation=1,
+        credential_profile_id="44444444-4444-4444-8444-444444444444",
+        ssh_port=22,
+        expected_host_key_fingerprint="SHA256:fixture",
+        commands=["id", "uname -a"],
+        timeout_seconds=20,
+        purpose="Inspect runtime",
+        risk_summary="Read-only commands",
+        created_at="2026-08-15T20:00:00+00:00",
+        expires_at="2026-08-15T20:30:00+00:00",
+    )
+    plan.update({
+        "confirmed_at": "2026-08-15T20:01:00+00:00",
+        "confirmed_plan_digest": plan["plan_digest"],
+        "confirmation_basis": "explicit_user_exact_command_confirmation",
+    })
+
+    class Channel:
+        def __init__(self): self.output = bytearray(b"token=supersecret\n"); self.command = None
+        def settimeout(self, _timeout): return None
+        def exec_command(self, command): self.command = command
+        def recv_ready(self): return bool(self.output)
+        def recv(self, size): chunk = bytes(self.output[:size]); del self.output[:size]; return chunk
+        def recv_stderr_ready(self): return False
+        def recv_stderr(self, _size): return b""
+        def exit_status_ready(self): return not self.output
+        def recv_exit_status(self): return 0
+        def close(self): return None
+
+    class Transport:
+        def __init__(self): self.channels = []
+        def open_session(self, timeout=None): channel = Channel(); self.channels.append(channel); return channel
+
+    transport = Transport()
+    result = ssh_scanner._execute_ssh_shell_plan(transport, plan)
+    assert result["status"] == "completed"
+    assert [channel.command for channel in transport.channels] == ["id", "uname -a"]
+    assert result["commands"][0]["stdout"] == "token=***\n"
+    assert "supersecret" not in str(result)
+    assert result["pty_allocated"] is False
+    assert result["stdin_forwarded"] is False
+
+    unconfirmed = dict(plan)
+    unconfirmed.pop("confirmation_basis")
+    assert ssh_scanner._execute_ssh_shell_plan(Transport(), unconfirmed)["status"] == "rejected"

@@ -17,6 +17,7 @@ CAPABILITY_CATALOG: tuple[dict[str, Any], ...] = (
     {"id": "tcp-udp-network-discovery", "title": "TCP and UDP network discovery", "group": "core", "implementation": "available", "executor": "device_posture", "minimum_profile": "observe_only"},
     {"id": "service-fingerprinting-crypto", "title": "Service and cryptographic fingerprinting", "group": "core", "implementation": "available", "executor": "device_posture", "minimum_profile": "observe_only"},
     {"id": "ssh-authenticated-host-review", "title": "SSH-authenticated host review", "group": "host", "implementation": "available", "executor": "device_posture", "minimum_profile": "authenticated_active", "requires": ["confirmed_ssh", "ssh_credential"]},
+    {"id": "agent-confirmed-ssh-shell", "title": "User-confirmed AI SSH shell", "group": "host", "implementation": "available", "executor": "device_posture", "minimum_profile": "authenticated_active", "requires": ["confirmed_ssh", "ssh_credential", "user_confirmation"], "notes": "The agent may propose exact commands; every immutable plan requires separate user confirmation before execution."},
     {"id": "web-ui-dast", "title": "Web interface DAST", "group": "application", "implementation": "available", "executor": "device_web_dast", "minimum_profile": "safe_remote", "requires": ["web_origin"]},
     {"id": "api-graphql-websocket-testing", "title": "API, RPC, GraphQL, and WebSocket testing", "group": "application", "implementation": "partial", "executor": "device_web_dast", "minimum_profile": "safe_remote", "requires": ["web_origin"]},
     {"id": "auth-session-pairing-access-control", "title": "Authentication, session, and pairing review", "group": "application", "implementation": "planned", "executor": None, "minimum_profile": "safe_remote"},
@@ -37,7 +38,7 @@ CAPABILITY_CATALOG: tuple[dict[str, Any], ...] = (
 )
 
 CAPABILITIES_BY_ID = {item["id"]: item for item in CAPABILITY_CATALOG}
-EXECUTABLE_CAPABILITY_IDS = frozenset({"ssh-authenticated-host-review"})
+EXECUTABLE_CAPABILITY_IDS = frozenset({"ssh-authenticated-host-review", "agent-confirmed-ssh-shell"})
 
 
 def _normalized_platform(device: dict[str, Any]) -> str | None:
@@ -80,6 +81,7 @@ def capability_catalog_for_device(
         required_class = set(item.get("device_classes") or [])
         item_platform = item.get("platform")
         blockers: list[str] = []
+        confirmation_required = False
         applicable = not required_class or device_class in required_class
         if item_platform and platform and item_platform != platform:
             applicable = False
@@ -96,6 +98,8 @@ def capability_catalog_for_device(
                 blockers.append("radio_sensor_required")
             elif requirement in {"lab_runner", "recovery_proof"}:
                 blockers.append(requirement + "_required")
+            elif requirement == "user_confirmation":
+                confirmation_required = True
 
         if item["id"] in completed_capabilities:
             state = "completed"
@@ -105,6 +109,8 @@ def capability_catalog_for_device(
             state = item["implementation"]
         elif blockers:
             state = "blocked"
+        elif confirmation_required:
+            state = "approval_required"
         else:
             state = "ready"
         item.update({"state": state, "blockers": sorted(set(blockers)), "applicable": applicable})
@@ -118,7 +124,7 @@ def capability_catalog_for_device(
         "items": items,
         "summary": {
             state: sum(1 for item in items if item["state"] == state)
-            for state in ("ready", "completed", "blocked", "partial", "planned", "sensor_required", "lab_only", "not_applicable")
+            for state in ("ready", "completed", "approval_required", "blocked", "partial", "planned", "sensor_required", "lab_only", "not_applicable")
         },
     }
 

@@ -27,12 +27,14 @@ except ImportError:  # pragma: no cover - minimal host test environment
 try:
     from .common import run
     from .device_evidence import build_device_evidence_graph
+    from .device_shell import validate_shell_plan
     from .device_protocols import discover_core_device_protocols
     from .device_safety import DeviceSafetyGovernor, check_device_health, validate_safety_request
     from .ssh_scanner import DEFAULT_SSH_HOST_REVIEW_BUNDLES, full_ssh_scan
 except ImportError:  # pragma: no cover - flat scanner runtime
     from common import run
     from device_evidence import build_device_evidence_graph
+    from device_shell import validate_shell_plan
     from device_protocols import discover_core_device_protocols
     from device_safety import DeviceSafetyGovernor, check_device_health, validate_safety_request
     from ssh_scanner import DEFAULT_SSH_HOST_REVIEW_BUNDLES, full_ssh_scan
@@ -844,17 +846,26 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
     ))
     unsupported_capabilities = [
         item for item in requested_capabilities
-        if item not in {"ssh-authenticated-host-review"}
+        if item not in {"ssh-authenticated-host-review", "agent-confirmed-ssh-shell"}
     ]
     if unsupported_capabilities:
         raise ValueError("unsupported executable device capability: " + ", ".join(unsupported_capabilities))
-    if "ssh-authenticated-host-review" in requested_capabilities and not ssh_credentials:
-        raise ValueError("ssh-authenticated-host-review requires an SSH credential profile")
+    if {"ssh-authenticated-host-review", "agent-confirmed-ssh-shell"}.intersection(requested_capabilities) and not ssh_credentials:
+        raise ValueError("requested SSH capability requires an SSH credential profile")
+    shell_plan = None
+    if "agent-confirmed-ssh-shell" in requested_capabilities:
+        shell_plan = validate_shell_plan(options.get("device_shell_plan"))
+        if (
+            shell_plan.get("confirmation_basis") != "explicit_user_exact_command_confirmation"
+            or shell_plan.get("confirmed_plan_digest") != shell_plan.get("plan_digest")
+            or not shell_plan.get("confirmed_at")
+        ):
+            raise ValueError("agent-confirmed-ssh-shell requires exact user confirmation")
     extra_priority_ports = tuple(sorted({
         int(item.get("port"))
         for item in ssh_credentials
         if item.get("port") is not None and 1 <= int(item.get("port")) <= 65535
-    }))
+    } | ({int(shell_plan["ssh_port"])} if shell_plan else set())))
     expected_ssh_host_keys = {
         int(port): str(fingerprint)
         for port, fingerprint in (options.get("expected_ssh_host_keys") or {}).items()
@@ -983,6 +994,13 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
                 side_effects="server-owned read-only command bundles after supplied authentication",
             )
             safety.record_limit_enforcement("ssh_host_review", max_concurrency=1)
+        if "agent-confirmed-ssh-shell" in requested_capabilities:
+            safety.authorize(
+                "agent_confirmed_ssh_shell",
+                "explicit_user_confirmed_shell",
+                side_effects="arbitrary remote-device effects from the exact user-confirmed command plan",
+            )
+            safety.record_limit_enforcement("agent_confirmed_ssh_shell", max_concurrency=1)
         attempted_ssh_profiles: set[str] = set()
         for service in services:
             if service.get("transport") != "tcp" or str(service.get("service_name") or "").lower() not in SSH_SERVICE_NAMES:
@@ -998,11 +1016,22 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
                 item for item in ssh_credentials
                 if item.get("port") is None or int(item.get("port")) == service_port
             ), None)
+            shell_for_port = (
+                shell_plan
+                if shell_plan
+                and service_port == int(shell_plan["ssh_port"])
+                and ssh_credential
+                and str(ssh_credential.get("profile_id")) == str(shell_plan["credential_profile_id"])
+                else None
+            )
             if (
                 ssh_credential
-                and "ssh-authenticated-host-review" in requested_capabilities
+                and {"ssh-authenticated-host-review", "agent-confirmed-ssh-shell"}.intersection(requested_capabilities)
                 and service_port not in expected_ssh_host_keys
             ):
+                ssh_credential = None
+                shell_for_port = None
+            if "agent-confirmed-ssh-shell" in requested_capabilities and not shell_for_port and "ssh-authenticated-host-review" not in requested_capabilities:
                 ssh_credential = None
             credential_profile_id = str((ssh_credential or {}).get("profile_id") or "")
             if credential_profile_id in attempted_ssh_profiles:
@@ -1018,6 +1047,7 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
                     else None
                 ),
                 expected_host_key_fingerprint=expected_ssh_host_keys.get(service_port),
+                shell_plan=shell_for_port,
             )
             if ssh_credential:
                 attempted_ssh_profiles.add(credential_profile_id)
@@ -1080,6 +1110,25 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
             "capability_id": "ssh-authenticated-host-review",
             "status": review_status,
             "reason": None if reviews else "authenticated_ssh_collection_unavailable",
+        })
+    if "agent-confirmed-ssh-shell" in requested_capabilities:
+        shell_results = [
+            (service.get("ssh") or {}).get("shell_execution")
+            for service in services
+            if isinstance(service, dict) and isinstance(service.get("ssh"), dict)
+        ]
+        shell_results = [item for item in shell_results if isinstance(item, dict)]
+        shell_status = "blocked"
+        if any(item.get("status") == "completed" for item in shell_results):
+            shell_status = "completed"
+        elif shell_results:
+            shell_status = "partial"
+        capability_coverage.append({
+            "capability_id": "agent-confirmed-ssh-shell",
+            "status": shell_status,
+            "plan_id": shell_plan.get("plan_id") if shell_plan else None,
+            "plan_digest": shell_plan.get("plan_digest") if shell_plan else None,
+            "reason": None if shell_results else "confirmed_ssh_shell_execution_unavailable",
         })
 
     return {

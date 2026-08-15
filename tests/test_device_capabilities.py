@@ -24,6 +24,7 @@ def test_smart_tv_catalog_resolves_evidence_and_platform_without_making_planned_
     assert result["detected_platform"] == "android"
     assert by_id["tcp-udp-network-discovery"]["state"] == "completed"
     assert by_id["ssh-authenticated-host-review"]["state"] == "ready"
+    assert by_id["agent-confirmed-ssh-shell"]["state"] == "approval_required"
     assert by_id["android-tv-platform-review"]["state"] == "planned"
     assert by_id["tizen-tv-platform-review"]["state"] == "not_applicable"
     assert by_id["wireless-bluetooth-wifi-direct"]["state"] == "sensor_required"
@@ -40,6 +41,7 @@ def test_host_review_capability_fails_closed_without_service_or_credential():
 
 def test_only_server_implemented_capabilities_can_be_requested_for_execution():
     assert device_capabilities.validate_executable_capabilities(["ssh-authenticated-host-review", "ssh-authenticated-host-review"]) == ["ssh-authenticated-host-review"]
+    assert device_capabilities.validate_executable_capabilities(["agent-confirmed-ssh-shell"]) == ["agent-confirmed-ssh-shell"]
     with pytest.raises(ValueError, match="unsupported executable"):
         device_capabilities.validate_executable_capabilities(["hardware-debug-lab-review"])
 

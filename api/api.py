@@ -67,6 +67,11 @@ except ModuleNotFoundError:
     from scanner.scanner_tools.device_safety import safety_profile_catalog, validate_safety_request
 
 try:
+    from scanner_tools import device_shell
+except ModuleNotFoundError:
+    from scanner.scanner_tools import device_shell
+
+try:
     from scanner_tools.model_intake_acquisition import acquisition_policy as _model_acquisition_policy
     from scanner_tools.model_intake_acquisition import download_http as _model_download_http
 except ModuleNotFoundError:
@@ -4224,6 +4229,14 @@ class DeviceAgentSessionStartRequest(BaseModel):
 class DeviceAgentReplyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     reply: str = Field(min_length=1, max_length=200_000)
+
+
+class DeviceAgentShellConfirmRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    plan_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    confirmation_phrase: str = Field(min_length=1, max_length=64)
+    confirm_exact_commands: bool = False
+    confirm_remote_device_effects: bool = False
 
 
 class BatchRequest(BaseModel):
@@ -18125,6 +18138,10 @@ _DEVICE_AGENT_PARENT_AUTHORITY: contextvars.ContextVar[bool] = contextvars.Conte
     "device_agent_parent_authority",
     default=False,
 )
+_DEVICE_AGENT_APPROVED_SHELL_PLAN: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
+    "device_agent_approved_shell_plan",
+    default=None,
+)
 
 def _device_posture_enabled() -> bool:
     return str(os.environ.get("DEVICE_POSTURE_ENABLED", "true")).strip().lower() not in {"0", "false", "no", "off"}
@@ -18959,8 +18976,12 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if capability_ids and request.safety_profile != "authenticated_active":
         raise HTTPException(status_code=422, detail="Requested device capabilities require safety_profile=authenticated_active")
-    if "ssh-authenticated-host-review" in capability_ids and not request.ssh_credential_profile_id:
-        raise HTTPException(status_code=422, detail="SSH host review requires an SSH credential profile")
+    ssh_capabilities = {"ssh-authenticated-host-review", "agent-confirmed-ssh-shell"}
+    if ssh_capabilities.intersection(capability_ids) and not request.ssh_credential_profile_id:
+        raise HTTPException(status_code=422, detail="Requested SSH capability requires an SSH credential profile")
+    approved_shell_plan = _DEVICE_AGENT_APPROVED_SHELL_PLAN.get()
+    if "agent-confirmed-ssh-shell" in capability_ids and not approved_shell_plan:
+        raise HTTPException(status_code=422, detail="AI SSH shell execution requires a separately user-confirmed shell plan")
     device_uuid = _device_uuid(device_id)
     scan_id, job_id = str(uuid.uuid4()), str(uuid.uuid4())
     async with db_pool.acquire() as conn:
@@ -18999,14 +19020,14 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
                 )
                 if fingerprint.startswith("SHA256:"):
                     expected_ssh_host_keys[str(int(ssh_row["port"]))] = fingerprint
-        if "ssh-authenticated-host-review" in capability_ids and not expected_ssh_host_keys:
+        if ssh_capabilities.intersection(capability_ids) and not expected_ssh_host_keys:
             raise HTTPException(
                 status_code=409,
                 detail="Run an unauthenticated device inventory first so ShakerScan can pin the SSH host key before host review",
             )
         ssh_ref = next((ref for ref in credential_refs if ref.get("role") == "ssh"), None)
         if (
-            "ssh-authenticated-host-review" in capability_ids
+            bool(ssh_capabilities.intersection(capability_ids))
             and ssh_ref
             and ssh_ref.get("port") is None
             and len(expected_ssh_host_keys) > 1
@@ -19016,7 +19037,7 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
                 detail="Bind the SSH credential profile to one port before host review because this device exposes multiple SSH services",
             )
         if (
-            "ssh-authenticated-host-review" in capability_ids
+            bool(ssh_capabilities.intersection(capability_ids))
             and ssh_ref
             and ssh_ref.get("port") is not None
             and str(int(ssh_ref["port"])) not in expected_ssh_host_keys
@@ -19025,6 +19046,23 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
                 status_code=409,
                 detail="Run an unauthenticated inventory of the selected SSH port before host review so its host key can be pinned",
             )
+        if "agent-confirmed-ssh-shell" in capability_ids:
+            try:
+                approved_shell_plan = device_shell.validate_shell_plan(approved_shell_plan)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            shell_port = int(approved_shell_plan["ssh_port"])
+            shell_profile_id = str(approved_shell_plan["credential_profile_id"])
+            if (
+                str(approved_shell_plan.get("device_target_id")) != str(device_uuid)
+                or str(approved_shell_plan.get("target_locator")) != str(device["primary_locator"])
+                or int(approved_shell_plan.get("locator_generation") or -1) != int(device["locator_generation"])
+                or not ssh_ref
+                or str(ssh_ref.get("profile_id")) != shell_profile_id
+                or (ssh_ref.get("port") is not None and int(ssh_ref["port"]) != shell_port)
+                or expected_ssh_host_keys.get(str(shell_port)) != str(approved_shell_plan["expected_host_key_fingerprint"])
+            ):
+                raise HTTPException(status_code=409, detail="Confirmed SSH shell plan no longer matches the device, credential, port, or pinned host key")
         from_agent_session = _DEVICE_AGENT_PARENT_AUTHORITY.get()
         approval_context = await _validate_approval_receipt_for_action(
             conn,
@@ -19072,6 +19110,7 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
             "device_credential_profiles": credential_refs,
             "device_capability_ids": capability_ids,
             "expected_ssh_host_keys": expected_ssh_host_keys,
+            "device_shell_plan": approved_shell_plan if "agent-confirmed-ssh-shell" in capability_ids else None,
             "device_policy": {"id": str(policy["id"]), "name": policy["name"], "rules": policy_payload["rules"]},
             "approval_receipt_id": request.approval_receipt_id,
             "resolved_budget": {
@@ -19468,11 +19507,19 @@ def _device_agent_run_public(row: Any) -> dict[str, Any]:
             "safety_profile_fixed": True,
             "credentials_visible_to_planner": False,
             "agent_findings_authoritative": False,
+            "remote_shell_scope": "registered_device_only",
+            "remote_shell_requires_exact_user_confirmation": True,
+            "local_host_shell_available": False,
             "traffic_frozen": bool(state.get("traffic_frozen")),
         },
         "transcript": state.get("messages") or [],
         "events": state.get("events") or [],
         "notes": state.get("notes") or [],
+        "shell_plans": [
+            _sanitize_device_agent_value(plan)
+            for plan in list(state.get("shell_plans") or [])[-10:]
+            if isinstance(plan, dict)
+        ],
         "next_action": (
             f"POST /device-agent/session/{item.get('id')}/reply with tool_calls or a final debrief"
             if status == "awaiting_planner" else status
@@ -19550,6 +19597,20 @@ def _bounded_device_scan_result(row: Any) -> dict[str, Any]:
             ]
             bounded_ssh["host_review"] = review
             service["ssh"] = bounded_ssh
+        if ssh and isinstance(ssh.get("shell_execution"), dict):
+            bounded_ssh = dict(service.get("ssh") or ssh)
+            execution = dict(ssh["shell_execution"])
+            execution["commands"] = [
+                {
+                    **dict(command),
+                    "stdout": str(command.get("stdout") or "")[:8000],
+                    "stderr": str(command.get("stderr") or "")[:2000],
+                }
+                for command in list(execution.get("commands") or [])[:8]
+                if isinstance(command, dict)
+            ]
+            bounded_ssh["shell_execution"] = execution
+            service["ssh"] = bounded_ssh
         bounded_services.append(service)
     return {
         "scan_id": str(item.get("id") or ""),
@@ -19586,6 +19647,7 @@ def _bounded_device_scan_result(row: Any) -> dict[str, Any]:
 
 async def _execute_device_agent_tool(
     *,
+    run_id: uuid.UUID,
     device_target_id: uuid.UUID,
     safety_profile: str,
     approval_receipt_id: str | None,
@@ -19593,6 +19655,75 @@ async def _execute_device_agent_tool(
     name: str,
     args: dict[str, Any],
 ) -> dict[str, Any]:
+    if name == "propose_ssh_shell":
+        if safety_profile != "authenticated_active":
+            raise HTTPException(status_code=409, detail="Remote SSH shell proposals require an authenticated_active session")
+        ssh_ref = next((
+            ref for ref in state.get("device_credential_profiles", [])
+            if isinstance(ref, dict) and ref.get("role") == "ssh"
+        ), None)
+        if not ssh_ref:
+            raise HTTPException(status_code=409, detail="Bind an SSH credential profile to this investigation before proposing shell commands")
+        port = int(args["port"])
+        if ssh_ref.get("port") is not None and int(ssh_ref["port"]) != port:
+            raise HTTPException(status_code=409, detail="The proposed SSH port does not match the bound credential profile")
+        async with db_pool.acquire() as conn:
+            device = await conn.fetchrow(
+                "SELECT id, primary_locator, locator_generation, is_active FROM device_targets WHERE id=$1",
+                device_target_id,
+            )
+            service = await conn.fetchrow(
+                """SELECT port, metadata_json FROM device_services
+                   WHERE device_target_id=$1 AND transport='tcp' AND port=$2
+                     AND state='open' AND service_name IN ('ssh','ssh-alt')""",
+                device_target_id,
+                port,
+            )
+        if not device or not device["is_active"]:
+            raise HTTPException(status_code=404, detail="Active connected device not found")
+        if not service:
+            raise HTTPException(status_code=409, detail="Run inventory first; the proposed port is not a confirmed SSH service")
+        metadata = _decode_json_value(service["metadata_json"]) or {}
+        ssh_metadata = metadata.get("ssh") if isinstance(metadata, dict) and isinstance(metadata.get("ssh"), dict) else {}
+        host_key = ssh_metadata.get("host_key") if isinstance(ssh_metadata.get("host_key"), dict) else {}
+        fingerprint = str(ssh_metadata.get("pinned_host_key_fingerprint") or host_key.get("fingerprint_sha256") or "")
+        if not fingerprint.startswith("SHA256:"):
+            raise HTTPException(status_code=409, detail="Run unauthenticated inventory first so ShakerScan can pin this SSH host key")
+        now = datetime.now(timezone.utc)
+        plan = device_shell.build_shell_plan(
+            plan_id=str(uuid.uuid4()),
+            run_id=str(run_id),
+            device_target_id=str(device_target_id),
+            target_locator=str(device["primary_locator"]),
+            locator_generation=int(device["locator_generation"]),
+            credential_profile_id=str(ssh_ref["profile_id"]),
+            ssh_port=port,
+            expected_host_key_fingerprint=fingerprint,
+            commands=list(args["commands"]),
+            timeout_seconds=int(args.get("timeout_seconds") or 20),
+            purpose=str(args["purpose"]),
+            risk_summary=str(args["risk_summary"]),
+            created_at=now.isoformat(),
+            expires_at=(now + timedelta(minutes=30)).isoformat(),
+        )
+        plans = [item for item in state.get("shell_plans", []) if isinstance(item, dict)]
+        proposal_signature = hashlib.sha256(json.dumps({
+            "port": port,
+            "commands": plan["commands"],
+            "credential_profile_id": plan["credential_profile_id"],
+        }, sort_keys=True).encode()).hexdigest()
+        if any(item.get("proposal_signature") == proposal_signature and item.get("status") in {"proposed", "queueing", "queued"} for item in plans):
+            raise HTTPException(status_code=409, detail="An equivalent SSH shell plan already exists in this investigation")
+        plan["proposal_signature"] = proposal_signature
+        plans.append(plan)
+        state["shell_plans"] = plans[-10:]
+        return {
+            "ok": True,
+            "requires_user_confirmation": True,
+            "plan": plan,
+            "message": "No command executed. The exact immutable plan is waiting for separate user confirmation in ShakerScan.",
+        }
+
     if name == "inspect_capabilities":
         payload = await get_device_capabilities(str(device_target_id))
         return {"ok": True, "evidence_ref": _device_agent_add_evidence(state, payload), "data": payload}
@@ -19942,6 +20073,225 @@ async def get_device_agent_session(run_id: str):
     return _device_agent_run_public(row)
 
 
+@app.post("/device-agent/session/{run_id}/shell-plans/{plan_id}/confirm")
+async def confirm_device_agent_shell_plan(
+    run_id: str,
+    plan_id: str,
+    request: DeviceAgentShellConfirmRequest,
+):
+    """Confirm one immutable remote-device SSH command plan and queue it once."""
+    if not request.confirm_exact_commands or not request.confirm_remote_device_effects:
+        raise HTTPException(
+            status_code=409,
+            detail="Confirm both the exact commands and their possible effects on the remote device",
+        )
+    run_uuid = _device_uuid(run_id, "device agent run")
+    plan_uuid = _device_uuid(plan_id, "SSH shell plan")
+    queue_token = uuid.uuid4()
+    plan: dict[str, Any]
+    approval_receipt_id: str | None
+    device_target_id: uuid.UUID
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            row = await _device_agent_run_or_404(conn, run_id, for_update=True)
+            if str(row["status"]) != "awaiting_planner":
+                raise HTTPException(status_code=409, detail=f"Device agent run is {row['status']}, not awaiting shell confirmation")
+            if str(row["safety_profile"]) != "authenticated_active":
+                raise HTTPException(status_code=409, detail="Remote SSH shell requires an authenticated_active investigation")
+            state = _decode_json_value(row["state"]) or {}
+            if state.get("traffic_frozen"):
+                raise HTTPException(status_code=409, detail="Device traffic is frozen after a health circuit breaker")
+            plans = [item for item in state.get("shell_plans", []) if isinstance(item, dict)]
+            index = next((position for position, item in enumerate(plans) if str(item.get("plan_id")) == str(plan_uuid)), None)
+            if index is None:
+                raise HTTPException(status_code=404, detail="SSH shell plan not found in this investigation")
+            try:
+                plan = device_shell.validate_shell_plan(plans[index])
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            if str(plan.get("run_id")) != str(run_uuid) or str(plan.get("device_target_id")) != str(row["device_target_id"]):
+                raise HTTPException(status_code=409, detail="SSH shell plan scope does not match this investigation")
+            if plan.get("status") != "proposed":
+                raise HTTPException(status_code=409, detail=f"SSH shell plan is already {plan.get('status') or 'unavailable'}")
+            if request.plan_digest != str(plan["plan_digest"]):
+                raise HTTPException(status_code=409, detail="SSH shell plan digest changed; review the exact commands again")
+            if request.confirmation_phrase != str(plan["confirmation_phrase"]):
+                raise HTTPException(status_code=409, detail="SSH shell confirmation phrase does not match the immutable plan")
+            try:
+                expires_at = datetime.fromisoformat(str(plan["expires_at"]).replace("Z", "+00:00"))
+                if expires_at.tzinfo is None:
+                    expires_at = expires_at.replace(tzinfo=timezone.utc)
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=409, detail="SSH shell plan has an invalid expiry") from exc
+            if expires_at <= datetime.now(timezone.utc):
+                plans[index] = {**plan, "status": "expired"}
+                state["shell_plans"] = plans
+                await conn.execute(
+                    "UPDATE device_agent_runs SET state=$2, updated_at=NOW() WHERE id=$1",
+                    run_uuid,
+                    json.dumps(state, default=str),
+                )
+                raise HTTPException(status_code=409, detail="SSH shell plan expired; ask the agent to propose it again")
+            if int(state.get("actions_used") or 0) + 1 > device_agent.MAX_ACTIONS_PER_SESSION:
+                raise HTTPException(status_code=409, detail="Connected-device agent action budget exhausted")
+            if int(state.get("scans_queued") or 0) + 1 > device_agent.MAX_SCANS_PER_SESSION:
+                raise HTTPException(status_code=409, detail="Connected-device agent scan budget exhausted")
+            shell_cost = device_agent.CONFIRMED_SHELL_FRAGILITY_COST
+            if int(state.get("fragility_used") or 0) + shell_cost > int(state.get("fragility_budget") or 0):
+                raise HTTPException(status_code=409, detail="Connected-device agent fragility budget exhausted")
+            daily_used = int(await conn.fetchval(
+                """SELECT COALESCE(SUM(fragility_cost), 0) FROM device_agent_actions
+                   WHERE device_target_id=$1 AND outcome <> 'blocked'
+                     AND created_at >= date_trunc('day', NOW())""",
+                row["device_target_id"],
+            ) or 0)
+            if daily_used + shell_cost > device_agent.MAX_FRAGILITY_PER_DEVICE_DAY:
+                raise HTTPException(status_code=409, detail="Daily fragility budget for this device is exhausted")
+            device = await conn.fetchrow(
+                "SELECT id, primary_locator, locator_generation, is_active FROM device_targets WHERE id=$1",
+                row["device_target_id"],
+            )
+            if (
+                not device
+                or not device["is_active"]
+                or str(device["primary_locator"]) != str(plan["target_locator"])
+                or int(device["locator_generation"]) != int(plan["locator_generation"])
+            ):
+                raise HTTPException(status_code=409, detail="Device address or identity changed; ask the agent to propose a new shell plan")
+            await _validate_approval_receipt_for_action(
+                conn,
+                str(row["approval_receipt_id"]) if row["approval_receipt_id"] else None,
+                target_url=str(device["primary_locator"]),
+                action_name="device.agent.session",
+                risk_tier="active",
+                created_by=f"device_agent_shell:{run_id}",
+            )
+            confirmed_at = datetime.now(timezone.utc).isoformat()
+            plan = {
+                **plan,
+                "status": "queueing",
+                "confirmed_at": confirmed_at,
+                "confirmed_plan_digest": request.plan_digest,
+                "confirmation_basis": "explicit_user_exact_command_confirmation",
+            }
+            plans[index] = plan
+            state["shell_plans"] = plans
+            await conn.execute(
+                """UPDATE device_agent_runs
+                   SET status='planning', planning_token=$2, state=$3, updated_at=NOW()
+                   WHERE id=$1""",
+                run_uuid,
+                queue_token,
+                json.dumps(state, default=str),
+            )
+            approval_receipt_id = str(row["approval_receipt_id"]) if row["approval_receipt_id"] else None
+            device_target_id = row["device_target_id"]
+
+    parent_token = _DEVICE_AGENT_PARENT_AUTHORITY.set(True)
+    shell_token = _DEVICE_AGENT_APPROVED_SHELL_PLAN.set(plan)
+    try:
+        queued = await scan_device(str(device_target_id), DeviceScanRequest(
+            profile="inventory",
+            safety_profile="authenticated_active",
+            confirm_authorized=True,
+            include_web_dast=False,
+            max_web_origins=0,
+            ssh_credential_profile_id=str(plan["credential_profile_id"]),
+            capability_ids=["agent-confirmed-ssh-shell"],
+            approval_receipt_id=approval_receipt_id,
+        ))
+    except Exception as exc:
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                failed_row = await _device_agent_run_or_404(conn, run_id, for_update=True)
+                failed_state = _decode_json_value(failed_row["state"]) or {}
+                failed_plans = [item for item in failed_state.get("shell_plans", []) if isinstance(item, dict)]
+                failed_state["shell_plans"] = [
+                    {**item, "status": "proposed", "last_queue_error": type(exc).__name__}
+                    if str(item.get("plan_id")) == str(plan_uuid) else item
+                    for item in failed_plans
+                ]
+                await conn.execute(
+                    """UPDATE device_agent_runs SET status='awaiting_planner', planning_token=NULL,
+                           state=$2, updated_at=NOW()
+                       WHERE id=$1 AND status='planning' AND planning_token=$3""",
+                    run_uuid,
+                    json.dumps(failed_state, default=str),
+                    queue_token,
+                )
+        raise
+    finally:
+        _DEVICE_AGENT_APPROVED_SHELL_PLAN.reset(shell_token)
+        _DEVICE_AGENT_PARENT_AUTHORITY.reset(parent_token)
+
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            queued_row = await _device_agent_run_or_404(conn, run_id, for_update=True)
+            queued_state = _decode_json_value(queued_row["state"]) or {}
+            queued_plans = [item for item in queued_state.get("shell_plans", []) if isinstance(item, dict)]
+            queued_state["shell_plans"] = [
+                {**item, "status": "queued", "scan_id": queued["scan_id"], "queued_at": datetime.now(timezone.utc).isoformat()}
+                if str(item.get("plan_id")) == str(plan_uuid) else item
+                for item in queued_plans
+            ]
+            queued_state["actions_used"] = int(queued_state.get("actions_used") or 0) + 1
+            queued_state["scans_queued"] = int(queued_state.get("scans_queued") or 0) + 1
+            queued_state["fragility_used"] = int(queued_state.get("fragility_used") or 0) + device_agent.CONFIRMED_SHELL_FRAGILITY_COST
+            queued_state.setdefault("events", []).append({
+                "kind": "ssh_shell_plan_confirmed",
+                "plan_id": str(plan_uuid),
+                "plan_digest": request.plan_digest,
+                "scan_id": queued["scan_id"],
+                "commands_count": len(plan["commands"]),
+            })
+            queued_state["events"] = queued_state["events"][-200:]
+            queued_state.setdefault("messages", []).append({
+                "role": "user",
+                "content": (
+                    f"USER CONFIRMED exact remote-device SSH shell plan {plan_uuid} "
+                    f"with digest {request.plan_digest}; queued scan {queued['scan_id']}. "
+                    "Inspect that scan on a later turn before drawing conclusions."
+                ),
+            })
+            updated = await conn.fetchrow(
+                """UPDATE device_agent_runs SET status='awaiting_planner', planning_token=NULL,
+                       state=$2, updated_at=NOW()
+                   WHERE id=$1 AND status='planning' AND planning_token=$3 RETURNING *""",
+                run_uuid,
+                json.dumps(queued_state, default=str),
+                queue_token,
+            )
+            if not updated:
+                raise HTTPException(status_code=409, detail="SSH shell plan queued but investigation state changed; inspect the queued scan")
+    audit_warning = None
+    try:
+        await _record_device_agent_action(
+            run_id=run_uuid,
+            device_target_id=device_target_id,
+            tool_name="execute_confirmed_ssh_shell",
+            fragility_cost=device_agent.CONFIRMED_SHELL_FRAGILITY_COST,
+            rationale=str(plan.get("purpose") or "")[:1000],
+            outcome="completed",
+            evidence_refs=[],
+            result_summary={
+                "ok": True,
+                "plan_id": str(plan_uuid),
+                "plan_digest": request.plan_digest,
+                "scan_id": queued["scan_id"],
+                "confirmation_basis": "explicit_user_exact_command_confirmation",
+            },
+        )
+    except Exception as exc:
+        # The remote-device job is already durably queued. Never report it as a
+        # queue failure (which could invite an unsafe duplicate confirmation)
+        # merely because the secondary action-ledger write failed.
+        audit_warning = f"shell action ledger write failed: {type(exc).__name__}"
+    response = _device_agent_run_public(updated)
+    if audit_warning:
+        response["audit_warning"] = audit_warning
+    return response
+
+
 @app.post("/device-agent/session/{run_id}/reply")
 async def submit_device_agent_reply(run_id: str, request: DeviceAgentReplyRequest):
     run_uuid = _device_uuid(run_id, "device agent run")
@@ -20046,6 +20396,7 @@ async def submit_device_agent_reply(run_id: str, request: DeviceAgentReplyReques
                     authority_token = _DEVICE_AGENT_PARENT_AUTHORITY.set(True)
                     try:
                         output = await _execute_device_agent_tool(
+                            run_id=run_uuid,
                             device_target_id=device_target_id,
                             safety_profile=safety_profile,
                             approval_receipt_id=approval_receipt_id,
@@ -20062,11 +20413,15 @@ async def submit_device_agent_reply(run_id: str, request: DeviceAgentReplyReques
                     if reference:
                         evidence_refs.append(str(reference))
                     queued_output = output.get("queued") if isinstance(output, dict) and isinstance(output.get("queued"), dict) else {}
+                    proposed_plan = output.get("plan") if isinstance(output, dict) and isinstance(output.get("plan"), dict) else {}
                     summary = {
                         "ok": True,
                         "evidence_ref": reference,
                         "queued_scan_id": queued_output.get("scan_id"),
                         "queued_status": queued_output.get("status"),
+                        "proposed_shell_plan_id": proposed_plan.get("plan_id"),
+                        "proposed_shell_plan_digest": proposed_plan.get("plan_digest"),
+                        "requires_user_confirmation": bool(output.get("requires_user_confirmation")) if isinstance(output, dict) else False,
                     }
                     outcome = "completed"
                     results.append({"name": name, "ok": True, "output": _sanitize_device_agent_value(output)})
