@@ -394,7 +394,7 @@ def test_inconclusive_reachability_stops_before_inventory_and_has_no_grade(monke
     monkeypatch.setattr(device_posture, "probe_device_reachability", fake_reachability)
     monkeypatch.setattr(device_posture, "_nmap_scan", forbidden_inventory)
     result = asyncio.run(device_posture.run_device_posture_scan("tv.test", {
-        "device_profile": "posture",
+        "device_profile": "inventory",
         "safety_profile": "safe_remote",
         "confirm_authorized": True,
         "include_web_dast": True,
@@ -404,6 +404,111 @@ def test_inconclusive_reachability_stops_before_inventory_and_has_no_grade(monke
     assert result["device_posture"]["reachability"]["status"] == "inconclusive"
     assert result["device_posture"]["completeness"]["reachability_confirmed"] is False
     assert result["device_posture"]["decision"]["decision"] == "needs_review"
+
+
+def test_posture_reuses_all_tcp_fallback_when_only_nonstandard_port_responds(monkeypatch):
+    services = [{
+        "transport": "tcp", "port": 7345, "state": "open", "service_name": "unknown",
+        "policy_eligible": True,
+    }]
+    fallback = (
+        services,
+        [],
+        {"addresses": [{"address": "192.0.2.55", "type": "ipv4"}], "hostnames": []},
+        {
+            "stage": "tcp_scope_discovery", "transport": "tcp", "complete": True,
+            "xml_parsed": True, "confirmed_open_count": 1, "tcp_filtered_count": 0,
+            "port_state_counts": {"open": 1, "closed": 65534}, "incomplete_reasons": [],
+        },
+    )
+    reused = False
+
+    async def fake_resolve(_locator, **_kwargs):
+        return "192.0.2.55"
+
+    async def fake_reachability(locator, resolved_address, **kwargs):
+        assert 7345 in kwargs["port_hints"]
+        assert 6466 in kwargs["port_hints"]
+        return {
+            "schema_version": "device-reachability/v1", "status": "inconclusive", "online": None,
+            "network_accessible": None, "service_accessible": None, "confidence": "none",
+            "reason": "No direct response proved that the device is online.",
+            "locator": locator, "resolved_address": resolved_address, "resolution_succeeded": True,
+            "positive_signals": {"tcp_open_ports": [], "tcp_refused_ports": []},
+            "attempts": [], "nmap_host_discovery": {},
+        }
+
+    async def fake_scope(*_args, **_kwargs):
+        return fallback
+
+    async def fake_nmap(_locator, _profile, **kwargs):
+        nonlocal reused
+        reused = kwargs["prefetched_tcp_scope"] is fallback
+        return services, [], fallback[2], [fallback[3]], {
+            "complete": True, "execution_complete": True, "tcp_discovery_complete": True,
+            "tcp_visibility_complete": True, "tcp_filtered_ports_count": 0,
+            "tcp_fingerprinting_complete": True, "udp_discovery_complete": True,
+            "uncertainty_present": False, "incomplete_stages": [],
+        }
+
+    async def fake_health(_locator, *, stage, tcp_ports=(), timeout=1.5):
+        return {"stage": stage, "status": "healthy", "attempted_tcp_ports": list(tcp_ports), "responsive_tcp_ports": list(tcp_ports)}
+
+    async def fake_protocols(_locator, *, udp_ports):
+        return []
+
+    async def fake_origins(*_args, **_kwargs):
+        return []
+
+    monkeypatch.setattr(device_posture, "resolve_device_address", fake_resolve)
+    monkeypatch.setattr(device_posture, "probe_device_reachability", fake_reachability)
+    monkeypatch.setattr(device_posture, "_run_tcp_scope_discovery", fake_scope)
+    monkeypatch.setattr(device_posture, "_nmap_scan", fake_nmap)
+    monkeypatch.setattr(device_posture, "check_device_health", fake_health)
+    monkeypatch.setattr(device_posture, "discover_core_device_protocols", fake_protocols)
+    monkeypatch.setattr(device_posture, "detect_web_origins", fake_origins)
+    result = asyncio.run(device_posture.run_device_posture_scan("tv.test", {
+        "device_profile": "posture",
+        "safety_profile": "safe_remote",
+        "confirm_authorized": True,
+        "include_web_dast": False,
+        "device_class": "media",
+        "device_policy": {"name": "test", "rules": []},
+    }))
+    assert reused is True
+    assert result["device_posture"]["reachability"]["status"] == "online"
+    assert result["device_posture"]["reachability"]["fallback"]["inventory_reused"] is True
+
+
+def test_posture_fallback_silence_stays_inconclusive(monkeypatch):
+    async def fake_resolve(_locator, **_kwargs):
+        return "192.0.2.55"
+
+    async def fake_reachability(locator, resolved_address, **_kwargs):
+        return {
+            "schema_version": "device-reachability/v1", "status": "inconclusive", "online": None,
+            "network_accessible": None, "service_accessible": None, "confidence": "none",
+            "reason": "silence", "locator": locator, "resolved_address": resolved_address,
+            "resolution_succeeded": True, "positive_signals": {}, "attempts": [], "nmap_host_discovery": {},
+        }
+
+    async def fake_scope(*_args, **_kwargs):
+        return [], [], {}, {
+            "stage": "tcp_scope_discovery", "transport": "tcp", "complete": True,
+            "xml_parsed": True, "confirmed_open_count": 0, "tcp_filtered_count": 65535,
+            "port_state_counts": {"filtered": 65535}, "incomplete_reasons": [],
+        }
+
+    monkeypatch.setattr(device_posture, "resolve_device_address", fake_resolve)
+    monkeypatch.setattr(device_posture, "probe_device_reachability", fake_reachability)
+    monkeypatch.setattr(device_posture, "_run_tcp_scope_discovery", fake_scope)
+    result = asyncio.run(device_posture.run_device_posture_scan("tv.test", {
+        "device_profile": "posture", "safety_profile": "safe_remote",
+        "confirm_authorized": True, "include_web_dast": False,
+        "device_policy": {"name": "test", "rules": []},
+    }))
+    assert result["result"] == {"score": None, "grade": None}
+    assert result["device_posture"]["reachability"]["status"] == "inconclusive"
 
 
 def test_fingerprinting_is_capped_and_forces_incomplete_coverage(monkeypatch):

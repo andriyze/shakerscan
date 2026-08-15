@@ -27,6 +27,12 @@ def test_host_discovery_requires_a_real_positive_reason():
     assert device_reachability.parse_host_discovery(_host_xml(state="down", reason="no-response"))["positive"] is False
 
 
+def test_common_reachability_tier_includes_connected_device_services():
+    ports = set(device_reachability.REACHABILITY_TCP_PORTS)
+    assert {22, 80, 443, 554, 631, 1883, 5555, 7345, 8001, 8002, 8008, 8009, 8060, 8554, 9100}.issubset(ports)
+    assert len(ports) <= device_reachability.MAX_REACHABILITY_TCP_PORTS
+
+
 def test_connection_refused_is_positive_online_evidence(monkeypatch):
     async def refused(_host, _port):
         raise OSError(errno.ECONNREFUSED, "refused")
@@ -60,6 +66,31 @@ def test_silence_is_inconclusive_not_offline_or_online(monkeypatch):
     assert verdict["status"] == "inconclusive"
     assert verdict["online"] is None
     assert verdict["network_accessible"] is None
+
+
+def test_nonstandard_port_hint_is_probed_by_tcp_and_host_discovery(monkeypatch):
+    observed: dict[str, tuple[int, ...]] = {}
+
+    async def probe_round(_locator, ports, **_kwargs):
+        observed["tcp"] = ports
+        return [
+            {"port": port, "outcome": "open" if port == 7345 else "no_response"}
+            for port in ports
+        ]
+
+    async def nmap(_locator, *, tcp_ports, **_kwargs):
+        observed["nmap"] = tcp_ports
+        return {"complete": True, "positive": False, "host_state": "down", "reason": "no-response"}
+
+    monkeypatch.setattr(device_reachability, "_tcp_probe_round", probe_round)
+    monkeypatch.setattr(device_reachability, "_nmap_host_discovery", nmap)
+    verdict = asyncio.run(device_reachability.probe_device_reachability(
+        "tv.lan", "192.0.2.10", attempts=1, timeout=0.2, port_hints=[7345],
+    ))
+    assert verdict["status"] == "online"
+    assert verdict["positive_signals"]["tcp_open_ports"] == [7345]
+    assert observed["tcp"][0] == 7345
+    assert observed["nmap"][0] == 7345
 
 
 def test_consistent_network_unreachable_is_distinct_from_silence(monkeypatch):

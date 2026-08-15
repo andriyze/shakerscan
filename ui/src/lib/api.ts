@@ -5206,6 +5206,7 @@ export async function scanDevice(deviceId: string, payload: {
   include_web_dast: boolean
   web_scan_type: 'quick' | 'standard' | 'deep'
   max_web_origins?: number
+  port_hints?: number[]
   ssh_credential_profile_id?: string
   web_credential_profile_id?: string
   capability_ids?: string[]

@@ -14,6 +14,15 @@ const policyBadgeClass: Record<string, string> = {
   require: 'bg-amber-500/15 text-amber-300',
 }
 
+function parsePortHints(value: string): number[] {
+  if (!value.trim()) return []
+  const segments = value.split(',').map((item) => item.trim())
+  if (segments.some((item) => !/^\d+$/.test(item))) throw new Error('Port hints must be comma-separated whole numbers')
+  const ports = Array.from(new Set(segments.map(Number)))
+  if (ports.some((port) => port < 1 || port > 65535)) throw new Error('Port hints must be between 1 and 65535')
+  return ports
+}
+
 export default function DeviceDetailPage() {
   const params = useParams()
   const deviceId = params.id as string
@@ -34,7 +43,7 @@ export default function DeviceDetailPage() {
   const [renameName, setRenameName] = useState('')
   const [credentialForm, setCredentialForm] = useState({ name: '', auth_kind: 'ssh_password', username: '', secret: '', secondary_secret: '', login_path: '/login', port: '' })
   const [scanning, setScanning] = useState(false)
-  const [scan, setScan] = useState({ profile: 'inventory', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', ssh_credential_profile_id: '', web_credential_profile_id: '', include_ssh_host_review: false, confirm_authorized: false })
+  const [scan, setScan] = useState({ profile: 'inventory', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', port_hints: '', ssh_credential_profile_id: '', web_credential_profile_id: '', include_ssh_host_review: false, confirm_authorized: false })
 
   const load = useCallback(async () => {
     try {
@@ -55,6 +64,7 @@ export default function DeviceDetailPage() {
         include_web_dast: scan.include_web_dast,
         web_scan_type: scan.web_scan_type as 'quick' | 'standard' | 'deep',
         max_web_origins: 8,
+        port_hints: parsePortHints(scan.port_hints),
         ssh_credential_profile_id: scan.ssh_credential_profile_id || undefined,
         web_credential_profile_id: scan.web_credential_profile_id || undefined,
         capability_ids: scan.include_ssh_host_review ? ['ssh-authenticated-host-review'] : undefined,
@@ -134,7 +144,7 @@ export default function DeviceDetailPage() {
 
   return (
     <div className="mx-auto max-w-7xl">
-      <PageHeader backHref="/devices" backLabel="Connected devices" title={device.name} description={device.primary_locator} icon={<Router className="h-6 w-6" />} actions={<><Button variant="secondary" onClick={() => { setRenameName(device.name); setRenameOpen(true) }}><Pencil className="h-4 w-4" /> Rename</Button><Button variant="secondary" onClick={() => { setLocatorForm({ locator: device.primary_locator, reason: '', confirm_same_device: false }); setLocatorOpen(true) }}><MapPin className="h-4 w-4" /> Change address</Button><Link href={`/devices/${device.id}/agent`} className="inline-flex items-center gap-2 rounded-lg border border-violet-500/30 bg-violet-500/10 px-3 py-2 text-sm text-violet-200 hover:bg-violet-500/20"><Bot className="h-4 w-4" /> Device Hunt</Link><Link href={`/findings?source_type=device&device_target_id=${device.id}`} className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-200 hover:bg-gray-700">View findings</Link><Button onClick={() => { setScan({ profile: 'inventory', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', ssh_credential_profile_id: '', web_credential_profile_id: '', include_ssh_host_review: false, confirm_authorized: false }); setScanOpen(true) }}>Scan device</Button></>} />
+      <PageHeader backHref="/devices" backLabel="Connected devices" title={device.name} description={device.primary_locator} icon={<Router className="h-6 w-6" />} actions={<><Button variant="secondary" onClick={() => { setRenameName(device.name); setRenameOpen(true) }}><Pencil className="h-4 w-4" /> Rename</Button><Button variant="secondary" onClick={() => { setLocatorForm({ locator: device.primary_locator, reason: '', confirm_same_device: false }); setLocatorOpen(true) }}><MapPin className="h-4 w-4" /> Change address</Button><Link href={`/devices/${device.id}/agent`} className="inline-flex items-center gap-2 rounded-lg border border-violet-500/30 bg-violet-500/10 px-3 py-2 text-sm text-violet-200 hover:bg-violet-500/20"><Bot className="h-4 w-4" /> Device Hunt</Link><Link href={`/findings?source_type=device&device_target_id=${device.id}`} className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-200 hover:bg-gray-700">View findings</Link><Button onClick={() => { setScan({ profile: 'inventory', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', port_hints: '', ssh_credential_profile_id: '', web_credential_profile_id: '', include_ssh_host_review: false, confirm_authorized: false }); setScanOpen(true) }}>Scan device</Button></>} />
 
       <Card className={`mb-6 border p-4 ${reachabilityTone}`}>
         <div className="flex items-start gap-3"><ReachabilityIcon className="mt-0.5 h-5 w-5 shrink-0" /><div><p className="font-medium">{reachability ? `Device ${reachability.status === 'online' ? 'online' : reachability.status}` : 'Device reachability not checked'}</p><p className="mt-1 text-sm opacity-75">{reachability?.reason || 'Run a device scan to require a positive network response before port and policy checks begin.'}</p>{reachability?.status === 'online' && <p className="mt-2 text-xs opacity-70">Network accessible · {reachability.service_accessible === true ? 'at least one service responded' : reachability.service_accessible === false ? 'no listening TCP service found with complete visibility' : 'service accessibility still being assessed'} · {reachability.confidence} confidence</p>}</div></div>
@@ -193,6 +203,7 @@ export default function DeviceDetailPage() {
         <div className="space-y-4">
           <Field label="Coverage"><Select value={scan.profile} onChange={(event) => setScan({ ...scan, profile: event.target.value })}><option value="inventory">Inventory — top 100 TCP ports + curated UDP, lightest</option><option value="posture">Posture — all 65,535 TCP ports + curated UDP, slower</option><option value="thorough">Thorough — all 65,535 TCP ports + deeper fingerprints, heaviest</option></Select></Field>
           {scan.profile !== 'inventory' && <p className="rounded border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-amber-200">This profile checks every TCP port and can take hours on slow or filtered devices. Start with Inventory unless complete port coverage is required.</p>}
+          <Field label="Known TCP ports (optional)" hint="Previously observed and policy-defined ports are included automatically."><Input value={scan.port_hints} onChange={(event) => setScan({ ...scan, port_hints: event.target.value })} placeholder="7345, 9443" /></Field>
           <Field label="Safety level" hint="Safety is independent from port coverage."><Select value={scan.safety_profile} onChange={(event) => { const safety_profile = event.target.value; setScan({ ...scan, safety_profile, include_web_dast: safety_profile === 'observe_only' ? false : scan.include_web_dast, ssh_credential_profile_id: safety_profile === 'authenticated_active' ? scan.ssh_credential_profile_id : '', web_credential_profile_id: safety_profile === 'authenticated_active' ? scan.web_credential_profile_id : '', include_ssh_host_review: safety_profile === 'authenticated_active' ? scan.include_ssh_host_review : false }) }}><option value="observe_only">Observe only — discovery and fingerprints</option><option value="safe_remote">Safe remote — bounded non-destructive checks</option><option value="authenticated_active">Authenticated active — supplied SSH/web credentials</option><option value="lab_invasive" disabled>Lab invasive — dedicated runner required</option></Select></Field>
           {scan.safety_profile === 'authenticated_active' && <div className="grid gap-4 sm:grid-cols-2"><Field label="SSH credential"><Select value={scan.ssh_credential_profile_id} onChange={(event) => setScan({ ...scan, ssh_credential_profile_id: event.target.value, include_ssh_host_review: event.target.value ? scan.include_ssh_host_review : false })}><option value="">No SSH authentication</option>{credentials.filter((profile) => profile.auth_kind.startsWith('ssh_') && profile.execution_compatible).map((profile) => <option key={profile.id} value={profile.id}>{profile.name}{profile.port ? ` · ${profile.port}` : ''}</option>)}</Select></Field><Field label="Web credential"><Select value={scan.web_credential_profile_id} onChange={(event) => setScan({ ...scan, web_credential_profile_id: event.target.value })}><option value="">No web authentication</option>{credentials.filter((profile) => profile.auth_kind.startsWith('web_') && profile.execution_compatible).map((profile) => <option key={profile.id} value={profile.id}>{profile.name}{profile.port ? ` · ${profile.port}` : ''}</option>)}</Select></Field></div>}
           {scan.safety_profile === 'authenticated_active' && <label className="flex items-start gap-3 rounded-lg border border-violet-500/20 bg-violet-500/5 p-3 text-sm text-gray-300"><input type="checkbox" checked={scan.include_ssh_host_review} disabled={!scan.ssh_credential_profile_id} onChange={(event) => setScan({ ...scan, include_ssh_host_review: event.target.checked })} className="mt-1" /><span><strong className="block text-white">Collect read-only SSH host evidence</strong>Runs only server-owned identity, listener, process, account, hardening, package, and update bundles. Commands and output are bounded and secrets are redacted.</span></label>}

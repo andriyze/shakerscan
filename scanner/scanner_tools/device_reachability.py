@@ -6,7 +6,7 @@ import asyncio
 import errno
 import time
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Iterable
 
 try:
     from defusedxml import ElementTree as ET
@@ -20,10 +20,14 @@ except ImportError:  # pragma: no cover - flat scanner runtime
 
 
 REACHABILITY_TCP_PORTS = (
-    22, 23, 53, 80, 443, 554, 1883, 3000, 5000, 7000, 8008, 8009,
-    8060, 8080, 8443, 9080, 9090, 9197, 49152, 55000,
+    21, 22, 23, 53, 80, 81, 111, 139, 443, 445, 502, 515, 548, 554,
+    631, 873, 1883, 2049, 2323, 3000, 5000, 5001, 5555, 5683, 7000,
+    7001, 7345, 8000, 8001, 8002, 8008, 8009, 8060, 8080, 8081,
+    8443, 8554, 8883, 9000, 9080, 9090, 9100, 9197, 9220, 49152,
+    55000,
 )
 REACHABILITY_UDP_PORTS = (53, 123, 1900, 5353)
+MAX_REACHABILITY_TCP_PORTS = 256
 _REFUSED_ERRNOS = {errno.ECONNREFUSED}
 _UNREACHABLE_ERRNOS = {errno.ENETUNREACH, errno.EHOSTUNREACH, errno.EADDRNOTAVAIL}
 _POSITIVE_NMAP_REASONS = {
@@ -122,8 +126,13 @@ async def _tcp_probe_round(
     return await asyncio.gather(*(bounded(port) for port in ports))
 
 
-async def _nmap_host_discovery(locator: str, *, cancel_check: Any = None) -> dict[str, Any]:
-    tcp = ",".join(str(port) for port in REACHABILITY_TCP_PORTS)
+async def _nmap_host_discovery(
+    locator: str,
+    *,
+    tcp_ports: tuple[int, ...] = REACHABILITY_TCP_PORTS,
+    cancel_check: Any = None,
+) -> dict[str, Any]:
+    tcp = ",".join(str(port) for port in tcp_ports)
     udp = ",".join(str(port) for port in REACHABILITY_UDP_PORTS)
     cmd = [
         "nmap", "-sn", "-n", "--reason", "--max-retries", "1", "--host-timeout", "20s",
@@ -140,6 +149,30 @@ async def _nmap_host_discovery(locator: str, *, cancel_check: Any = None) -> dic
         "stderr": str(stderr or "")[:500],
     })
     return result
+
+
+def normalize_reachability_tcp_ports(port_hints: Iterable[Any] = ()) -> tuple[int, ...]:
+    """Keep operator/device-specific ports first, then the bounded common set."""
+    hinted: list[int] = []
+    seen: set[int] = set()
+    for raw_port in port_hints:
+        try:
+            port = int(raw_port)
+        except (TypeError, ValueError):
+            continue
+        if not 1 <= port <= 65535 or port in seen:
+            continue
+        hinted.append(port)
+        seen.add(port)
+        if len(hinted) >= MAX_REACHABILITY_TCP_PORTS:
+            return tuple(hinted)
+    for port in REACHABILITY_TCP_PORTS:
+        if port not in seen:
+            hinted.append(port)
+            seen.add(port)
+        if len(hinted) >= MAX_REACHABILITY_TCP_PORTS:
+            break
+    return tuple(hinted)
 
 
 def _build_verdict(
@@ -212,19 +245,25 @@ async def probe_device_reachability(
     *,
     attempts: int = 2,
     timeout: float = 1.0,
+    port_hints: Iterable[Any] = (),
     cancel_check: Any = None,
 ) -> dict[str, Any]:
     """Require a positive device response; silence is never treated as online."""
     rounds: list[dict[str, Any]] = []
     attempt_limit = max(1, min(int(attempts), 3))
-    nmap_task = asyncio.create_task(_nmap_host_discovery(resolved_address, cancel_check=cancel_check))
+    tcp_ports = normalize_reachability_tcp_ports(port_hints)
+    nmap_task = asyncio.create_task(_nmap_host_discovery(
+        resolved_address,
+        tcp_ports=tcp_ports,
+        cancel_check=cancel_check,
+    ))
     try:
         for attempt in range(1, attempt_limit + 1):
             if callable(cancel_check) and bool(await cancel_check()):
                 raise ValueError("connected-device scan cancelled during reachability preflight")
             probes = await _tcp_probe_round(
                 resolved_address,
-                REACHABILITY_TCP_PORTS,
+                tcp_ports,
                 timeout=max(0.2, min(float(timeout), 3.0)),
                 max_concurrency=10,
             )

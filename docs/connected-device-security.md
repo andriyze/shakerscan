@@ -53,20 +53,21 @@ Every device action receives a declared safety class. The device safety governor
 permitted by the selected profile and records baseline, post-inventory, and final health checkpoints.
 If a previously healthy device degrades, the scan is halted and cannot produce an allow decision.
 
-Before any top-100 or all-port inventory begins, ShakerScan runs a bounded, multi-signal reachability
-preflight. It tries common device TCP ports twice and runs Nmap host discovery with ARP/ICMP plus
-TCP and curated UDP discovery probes. A successful TCP connection, an explicit refusal/reset, or a
-real Nmap response reason proves that a network stack answered. DNS resolution, Nmap's `user-set`
-assume-up reason, timeouts, and silence do not. The receipt distinguishes `online`, `unreachable`,
-and `inconclusive`, records the evidence and check time, and is shown on the device list and detail
-page. An inconclusive result may mean that the device is asleep, powered off, isolated, or filtering
-the scanner; it is never silently reclassified as offline or online.
+Before inventory begins, ShakerScan runs a bounded, multi-signal reachability preflight. It checks
+previously observed open TCP ports, operator-supplied hints, policy and credential-bound ports, a
+compact common-device set, and a class-specific set for media/TV, camera, printer, router/NAS,
+conference, building, or industrial equipment. Nmap host discovery tries ARP/ICMP plus the same TCP hints and curated
+UDP probes. One successful TCP connection, an explicit refusal/reset, or a real Nmap response reason
+is enough to prove that the network stack answered. DNS resolution, Nmap's `user-set` assume-up
+reason, timeouts, and silence do not. The receipt distinguishes `online`, `unreachable`, and
+`inconclusive`, records the evidence and check time, and is shown on the device list and detail page.
 
-If online status is not positively proven, the expensive inventory and authenticated actions do not
-run. The scan records incomplete reachability evidence and produces neither a numeric score nor a
-grade. Post-scan open services, protocol replies, responsive health ports, and explicit closed-port
-responses corroborate the preflight. A completed all-TCP inventory can therefore distinguish an
-online device with no listening TCP services from a target whose reachability was never established.
+An inconclusive `inventory` preflight stops without expanding to all TCP ports. For `posture` and
+`thorough`, which already require all-TCP coverage, the requested all-TCP discovery may begin as a
+fallback and its result is reused as the main inventory rather than scanning the range twice. An open
+port or explicit closed-port response can then prove the device online; an all-filtered/silent result
+remains inconclusive. Until online status is positively proven, authenticated and later protocol
+actions do not run, and the scan produces neither a numeric score nor a grade.
 
 TCP assessment is staged. A bounded priority pass checks common administration, media, printing,
 messaging, and nonstandard web ports first. The requested top-100 or all-port discovery then runs

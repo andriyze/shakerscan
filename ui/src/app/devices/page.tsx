@@ -21,6 +21,15 @@ const DEVICE_CLASSES = [
 ] as const
 const PAGE_SIZE = 50
 
+function parsePortHints(value: string): number[] {
+  if (!value.trim()) return []
+  const segments = value.split(',').map((item) => item.trim())
+  if (segments.some((item) => !/^\d+$/.test(item))) throw new Error('Port hints must be comma-separated whole numbers')
+  const ports = Array.from(new Set(segments.map(Number)))
+  if (ports.some((port) => port < 1 || port > 65535)) throw new Error('Port hints must be between 1 and 65535')
+  return ports
+}
+
 export default function DevicesPage() {
   const toast = useToast()
   const [devices, setDevices] = useState<DeviceTarget[]>([])
@@ -39,7 +48,7 @@ export default function DevicesPage() {
   const [scanning, setScanning] = useState(false)
   const loadSequence = useRef(0)
   const [form, setForm] = useState({ name: '', primary_locator: '', device_class: 'generic', manufacturer: '', model: '', policy_id: '' })
-  const [scanForm, setScanForm] = useState({ profile: 'inventory', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', confirm_authorized: false })
+  const [scanForm, setScanForm] = useState({ profile: 'inventory', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', port_hints: '', confirm_authorized: false })
 
   const load = useCallback(async () => {
     const sequence = ++loadSequence.current
@@ -100,6 +109,7 @@ export default function DevicesPage() {
         include_web_dast: scanForm.include_web_dast,
         web_scan_type: scanForm.web_scan_type as 'quick' | 'standard' | 'deep',
         max_web_origins: 8,
+        port_hints: parsePortHints(scanForm.port_hints),
       })
       setScanTarget(null)
       toast.success('Device scan queued', { link: { href: `/scans/${queued.scan_id}`, label: 'View report' } })
@@ -143,7 +153,7 @@ export default function DevicesPage() {
               <div className="rounded bg-gray-950 p-2"><div className="text-lg font-semibold text-white">{device.active_findings_count || 0}</div><div className="text-gray-500">findings</div></div>
               <div className="rounded bg-gray-950 p-2"><div className="truncate text-sm font-semibold text-white">{device.device_class}</div><div className="text-gray-500">class</div></div>
             </div>
-            <div className="mt-4 flex items-center justify-between text-xs text-gray-500"><span>{device.policy_name || 'Default policy'}</span><Button size="sm" disabled={!workerReady} onClick={() => { setScanTarget(device); setScanForm({ profile: 'inventory', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', confirm_authorized: false }) }}>Scan</Button></div>
+            <div className="mt-4 flex items-center justify-between text-xs text-gray-500"><span>{device.policy_name || 'Default policy'}</span><Button size="sm" disabled={!workerReady} onClick={() => { setScanTarget(device); setScanForm({ profile: 'inventory', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', port_hints: '', confirm_authorized: false }) }}>Scan</Button></div>
           </Card>
         ))}</div>}
       {!loading && !failed && total > PAGE_SIZE && <div className="mt-5 flex items-center justify-between text-sm text-gray-400"><span>Showing {page * PAGE_SIZE + 1}–{Math.min(total, (page + 1) * PAGE_SIZE)} of {total}</span><div className="flex gap-2"><Button size="sm" variant="secondary" disabled={page === 0} onClick={() => setPage((value) => Math.max(0, value - 1))}>Previous</Button><Button size="sm" variant="secondary" disabled={(page + 1) * PAGE_SIZE >= total} onClick={() => setPage((value) => value + 1)}>Next</Button></div></div>}
@@ -162,6 +172,7 @@ export default function DevicesPage() {
         <div className="space-y-4">
           <Field label="Coverage"><Select value={scanForm.profile} onChange={(event) => setScanForm({ ...scanForm, profile: event.target.value })}><option value="inventory">Inventory — top 100 TCP ports + curated UDP, lightest</option><option value="posture">Posture — all 65,535 TCP ports + curated UDP, slower</option><option value="thorough">Thorough — all 65,535 TCP ports + deeper fingerprints, heaviest</option></Select></Field>
           {scanForm.profile !== 'inventory' && <p className="rounded border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-amber-200">This profile checks every TCP port and can take hours on slow or filtered devices. Start with Inventory unless complete port coverage is required.</p>}
+          <Field label="Known TCP ports (optional)" hint="Previously observed and policy-defined ports are included automatically."><Input value={scanForm.port_hints} onChange={(event) => setScanForm({ ...scanForm, port_hints: event.target.value })} placeholder="7345, 9443" /></Field>
           <Field label="Safety level" hint="Safety is independent from port coverage."><Select value={scanForm.safety_profile} onChange={(event) => { const safety_profile = event.target.value; setScanForm({ ...scanForm, safety_profile, include_web_dast: safety_profile === 'observe_only' ? false : scanForm.include_web_dast }) }}><option value="observe_only">Observe only — discovery and fingerprints</option><option value="safe_remote">Safe remote — bounded non-destructive checks</option><option value="authenticated_active">Authenticated active — credentials can be selected on the device page</option><option value="lab_invasive" disabled>Lab invasive — dedicated runner required</option></Select></Field>
           <label className="flex items-start gap-3 rounded-lg border border-gray-800 bg-gray-950 p-3 text-sm text-gray-300"><input type="checkbox" checked={scanForm.include_web_dast} disabled={scanForm.safety_profile === 'observe_only'} onChange={(event) => setScanForm({ ...scanForm, include_web_dast: event.target.checked })} className="mt-1" /><span><strong className="block text-white">Check discovered web interfaces</strong>{scanForm.safety_profile === 'observe_only' ? 'Observe-only discovers origins without launching Web DAST children.' : 'Run bounded passive Web DAST on HTTP(S) found on any port. These internal checks do not create Web targets.'}</span></label>
           {scanForm.include_web_dast && <Field label="Web coverage"><Select value={scanForm.web_scan_type} onChange={(event) => setScanForm({ ...scanForm, web_scan_type: event.target.value })}><option value="quick">Quick</option><option value="standard">Standard</option><option value="deep">Deep passive</option></Select></Field>}

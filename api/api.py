@@ -4197,10 +4197,22 @@ class DeviceScanRequest(BaseModel):
     include_web_dast: bool = True
     web_scan_type: Literal["quick", "standard", "deep"] = "standard"
     max_web_origins: int = Field(default=8, ge=0, le=32)
+    port_hints: list[int] = Field(
+        default_factory=list,
+        max_length=128,
+        description="Known TCP service ports to prioritize during device reachability discovery.",
+    )
     ssh_credential_profile_id: Optional[str] = None
     web_credential_profile_id: Optional[str] = None
     capability_ids: list[str] = Field(default_factory=list, max_length=8)
     approval_receipt_id: Optional[str] = None
+
+    @field_validator("port_hints")
+    @classmethod
+    def validate_port_hints(cls, values: list[int]) -> list[int]:
+        if any(port < 1 or port > 65535 for port in values):
+            raise ValueError("port_hints must contain TCP ports between 1 and 65535")
+        return list(dict.fromkeys(values))
 
 
 class DeviceServiceVerifyRequest(BaseModel):
@@ -19110,8 +19122,29 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
         if not policy:
             raise HTTPException(status_code=409, detail="No active connected-device policy is available")
         policy_payload = _decode_device_row(policy)
+        observed_tcp_rows = await conn.fetch(
+            """SELECT port FROM device_services
+               WHERE device_target_id=$1 AND transport='tcp' AND state='open'
+               ORDER BY last_seen_at DESC
+               LIMIT 512""",
+            device_uuid,
+        )
+        observed_tcp_ports = list(dict.fromkeys(int(row["port"]) for row in observed_tcp_rows))
+        policy_tcp_ports = list(dict.fromkeys(
+            int(port)
+            for rule in policy_payload["rules"] if isinstance(rule, dict)
+            and str(rule.get("transport") or "any") in {"any", "tcp"}
+            for port in (rule.get("ports") or [])
+            if 1 <= int(port) <= 65535
+        ))
+        credential_tcp_ports = list(dict.fromkeys(
+            int(ref["port"])
+            for ref in credential_refs
+            if ref.get("port") is not None and 1 <= int(ref["port"]) <= 65535
+        ))
         options = {
             "run_kind": "device_posture",
+            "device_class": str(device["device_class"]),
             "device_profile": request.profile,
             "safety_profile": request.safety_profile,
             "confirm_authorized": True,
@@ -19121,6 +19154,12 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
             "max_web_origins": request.max_web_origins,
             "device_credential_profiles": credential_refs,
             "device_capability_ids": capability_ids,
+            "device_reachability_port_hints": {
+                "user": request.port_hints,
+                "observed": observed_tcp_ports,
+                "policy": policy_tcp_ports,
+                "credential": credential_tcp_ports,
+            },
             "expected_ssh_host_keys": expected_ssh_host_keys,
             "device_shell_plan": approved_shell_plan if "agent-confirmed-ssh-shell" in capability_ids else None,
             "device_policy": {"id": str(policy["id"]), "name": policy["name"], "rules": policy_payload["rules"]},

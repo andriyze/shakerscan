@@ -28,6 +28,7 @@ try:
     from .common import run
     from .device_evidence import build_device_evidence_graph
     from .device_reachability import (
+        REACHABILITY_TCP_PORTS,
         corroborate_device_reachability,
         probe_device_reachability,
         unresolved_reachability,
@@ -40,6 +41,7 @@ except ImportError:  # pragma: no cover - flat scanner runtime
     from common import run
     from device_evidence import build_device_evidence_graph
     from device_reachability import (
+        REACHABILITY_TCP_PORTS,
         corroborate_device_reachability,
         probe_device_reachability,
         unresolved_reachability,
@@ -61,6 +63,20 @@ PRIORITY_TCP_PORTS = (
     8060, 8080, 8081, 8088, 8443, 8883, 8888, 9000, 9080, 9100, 9197,
     49152,
 )
+DEVICE_CLASS_TCP_PORTS = {
+    "generic": (),
+    "media": (
+        3001, 5555, 6466, 6467, 7000, 7001, 7100, 7345, 8001, 8002,
+        8008, 8009, 8060, 8200, 9080, 9197, 32400, 55000, 56789,
+    ),
+    "camera": (554, 1935, 5000, 8000, 8554, 8899, 9000, 34567, 37777),
+    "printer": (80, 280, 443, 515, 631, 1230, 1782, 1783, 1784, 9100, 9101, 9102, 9220, 9221, 9222, 9280, 9290),
+    "router": (21, 22, 23, 53, 80, 443, 445, 548, 873, 2049, 5000, 5001, 6690, 8200),
+    "nas": (21, 22, 80, 111, 139, 443, 445, 548, 873, 2049, 3260, 5000, 5001, 6690, 8200, 32400),
+    "conference": (80, 443, 554, 1720, 1935, 5060, 5061, 8000, 8443, 8554),
+    "building": (80, 102, 443, 502, 1883, 4840, 5683, 8000, 20000, 44818, 47808),
+    "industrial": (80, 102, 443, 502, 1883, 4840, 5683, 20000, 44818, 47808),
+}
 SSH_SERVICE_NAMES = {"ssh", "ssh-alt"}
 _HTTP_STATUS = re.compile(rb"^HTTP/(?:1\.[01]|2(?:\.0)?)\s+\d{3}\b", re.I)
 _TIMEOUT_TEXT = re.compile(r"(?:host\s+)?timed?\s*out|host-timeout", re.I)
@@ -406,6 +422,36 @@ async def _run_nmap_stage(
     return services, inconclusive, identity, receipt
 
 
+async def _run_tcp_scope_discovery(
+    locator: str,
+    profile: DeviceScanProfile,
+    *,
+    deadline: float | None = None,
+    cancel_check: Any = None,
+    max_requests_per_second: float = 10.0,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    """Run the authoritative TCP scope once so a fallback can become inventory."""
+    request_rate = max(1.0, float(max_requests_per_second or 1.0))
+    scope_port_count = 65_535 if "-p-" in profile.tcp_args else 100
+    rate_bound_timeout = int(scope_port_count / request_rate * 1.5) + 60
+    tcp_stage_timeout = max(profile.process_timeout, rate_bound_timeout)
+    if deadline is not None:
+        tcp_stage_timeout = max(60, min(tcp_stage_timeout, int(max(60, deadline - time.monotonic()))))
+    tcp_cmd = [
+        "nmap", "-Pn", "-n", "-sT", "-T4", "--max-retries", "1",
+        "--max-rate", f"{request_rate:g}",
+        "--host-timeout", f"{max(30, tcp_stage_timeout - 15)}s", *profile.tcp_args,
+        "-oX", "-", locator,
+    ]
+    return await _run_nmap_stage(
+        tcp_cmd,
+        stage="tcp_scope_discovery",
+        transport="tcp",
+        timeout=tcp_stage_timeout,
+        cancel_check=cancel_check,
+    )
+
+
 async def _nmap_scan(
     locator: str,
     profile: DeviceScanProfile,
@@ -414,6 +460,9 @@ async def _nmap_scan(
     cancel_check: Any = None,
     max_requests_per_second: float = 10.0,
     extra_priority_ports: tuple[int, ...] = (),
+    prefetched_tcp_scope: tuple[
+        list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], dict[str, Any]
+    ] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
     receipts: list[dict[str, Any]] = []
     services_by_key: dict[tuple[str, int], dict[str, Any]] = {}
@@ -428,36 +477,38 @@ async def _nmap_scan(
     request_rate = max(1.0, float(max_requests_per_second or 1.0))
     rate_args = ["--max-rate", f"{request_rate:g}"]
 
-    await ensure_active("TCP priority discovery")
-    priority_ports = tuple(sorted(set(PRIORITY_TCP_PORTS) | {int(port) for port in extra_priority_ports if 1 <= int(port) <= 65535}))
-    priority_cmd = [
-        "nmap", "-Pn", "-n", "-sT", "-T4", "--max-retries", "1", *rate_args,
-        "--host-timeout", "180s", "-p", ",".join(str(port) for port in priority_ports),
-        "-oX", "-", locator,
-    ]
-    priority_services, _priority_uncertain, priority_identity, priority_receipt = await _run_nmap_stage(
-        priority_cmd, stage="tcp_priority_discovery", transport="tcp", timeout=210,
-        cancel_check=cancel_check,
-    )
-    priority_receipt["required"] = False
-    receipts.append(priority_receipt)
-    _merge_services(services_by_key, priority_services)
-    _merge_identity(identity, priority_identity)
-
-    await ensure_active("TCP scope discovery")
-    scope_port_count = 65_535 if "-p-" in profile.tcp_args else 100
-    rate_bound_timeout = int(scope_port_count / request_rate * 1.5) + 60
-    tcp_stage_timeout = max(profile.process_timeout, rate_bound_timeout)
-    if deadline is not None:
-        tcp_stage_timeout = max(60, min(tcp_stage_timeout, int(max(60, deadline - time.monotonic()))))
-    tcp_cmd = [
-        "nmap", "-Pn", "-n", "-sT", "-T4", "--max-retries", "1", *rate_args,
-        "--host-timeout", f"{max(30, tcp_stage_timeout - 15)}s", *profile.tcp_args, "-oX", "-", locator,
-    ]
-    tcp_services, _tcp_uncertain, tcp_identity, tcp_receipt = await _run_nmap_stage(
-        tcp_cmd, stage="tcp_scope_discovery", transport="tcp", timeout=tcp_stage_timeout,
-        cancel_check=cancel_check,
-    )
+    priority_ports = tuple(sorted(
+        set(PRIORITY_TCP_PORTS)
+        | set(REACHABILITY_TCP_PORTS)
+        | {int(port) for port in extra_priority_ports if 1 <= int(port) <= 65535}
+    ))
+    if prefetched_tcp_scope is None:
+        await ensure_active("TCP priority discovery")
+        priority_cmd = [
+            "nmap", "-Pn", "-n", "-sT", "-T4", "--max-retries", "1", *rate_args,
+            "--host-timeout", "180s", "-p", ",".join(str(port) for port in priority_ports),
+            "-oX", "-", locator,
+        ]
+        priority_services, _priority_uncertain, priority_identity, priority_receipt = await _run_nmap_stage(
+            priority_cmd, stage="tcp_priority_discovery", transport="tcp", timeout=210,
+            cancel_check=cancel_check,
+        )
+        priority_receipt["required"] = False
+        receipts.append(priority_receipt)
+        _merge_services(services_by_key, priority_services)
+        _merge_identity(identity, priority_identity)
+        await ensure_active("TCP scope discovery")
+        tcp_services, _tcp_uncertain, tcp_identity, tcp_receipt = await _run_tcp_scope_discovery(
+            locator,
+            profile,
+            deadline=deadline,
+            cancel_check=cancel_check,
+            max_requests_per_second=request_rate,
+        )
+    else:
+        tcp_services, _tcp_uncertain, tcp_identity, original_receipt = prefetched_tcp_scope
+        tcp_receipt = dict(original_receipt)
+        tcp_receipt["reused_from_reachability_fallback"] = True
     receipts.append(tcp_receipt)
     tcp_receipt["required"] = True
     _merge_services(services_by_key, tcp_services)
@@ -987,11 +1038,11 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
             or not shell_plan.get("confirmed_at")
         ):
             raise ValueError("agent-confirmed-ssh-shell requires exact user confirmation")
-    extra_priority_ports = tuple(sorted({
+    credential_priority_ports = {
         int(item.get("port"))
         for item in ssh_credentials
         if item.get("port") is not None and 1 <= int(item.get("port")) <= 65535
-    } | ({int(shell_plan["ssh_port"])} if shell_plan else set())))
+    } | ({int(shell_plan["ssh_port"])} if shell_plan else set())
     expected_ssh_host_keys = {
         int(port): str(fingerprint)
         for port, fingerprint in (options.get("expected_ssh_host_keys") or {}).items()
@@ -1001,6 +1052,40 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
     policy = options.get("device_policy") if isinstance(options.get("device_policy"), dict) else {}
     policy_name = str(policy.get("name") or "connected-device-default-v1")
     rules = policy.get("rules") if isinstance(policy.get("rules"), list) else []
+    hint_payload = (
+        options.get("device_reachability_port_hints")
+        if isinstance(options.get("device_reachability_port_hints"), dict)
+        else {}
+    )
+
+    def valid_ports(values: Any) -> list[int]:
+        result: list[int] = []
+        for raw_port in values if isinstance(values, (list, tuple, set)) else []:
+            try:
+                port = int(raw_port)
+            except (TypeError, ValueError):
+                continue
+            if 1 <= port <= 65535 and port not in result:
+                result.append(port)
+        return result
+
+    policy_ports = [
+        port
+        for rule in rules if isinstance(rule, dict) and str(rule.get("transport") or "any") in {"any", "tcp"}
+        for port in valid_ports(rule.get("ports"))
+    ]
+    device_class = str(options.get("device_class") or "generic").strip().lower()
+    class_ports = DEVICE_CLASS_TCP_PORTS.get(device_class, DEVICE_CLASS_TCP_PORTS["generic"])
+    reachability_port_hints = list(dict.fromkeys([
+        *valid_ports(hint_payload.get("user")),
+        *valid_ports(hint_payload.get("observed")),
+        *valid_ports(hint_payload.get("credential")),
+        *credential_priority_ports,
+        *valid_ports(hint_payload.get("policy")),
+        *policy_ports,
+        *class_ports,
+    ]))
+    extra_priority_ports = tuple(sorted(set(reachability_port_hints)))
 
     async def ensure_active(stage: str) -> bool:
         if callable(cancel_check) and bool(await cancel_check()):
@@ -1031,9 +1116,52 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
         resolved_address,
         attempts=2,
         timeout=1.0,
+        port_hints=reachability_port_hints,
         cancel_check=cancel_check,
     )
     safety.record_health(_reachability_checkpoint(reachability, stage="reachability_preflight"))
+    prefetched_tcp_scope = None
+    inventory_authorized = False
+    if reachability.get("status") == "inconclusive" and "-p-" in profile.tcp_args:
+        await ensure_active("inconclusive reachability fallback")
+        safety.authorize("network_inventory", "readonly")
+        inventory_authorized = True
+        safety.record_limit_enforcement(
+            "nmap",
+            max_concurrency=1,
+            max_requests_per_second=safety_profile.max_requests_per_second,
+        )
+        prefetched_tcp_scope = await _run_tcp_scope_discovery(
+            resolved_address,
+            profile,
+            deadline=deadline,
+            cancel_check=cancel_check,
+            max_requests_per_second=safety_profile.max_requests_per_second,
+        )
+        fallback_services, _fallback_uncertain, _fallback_identity, fallback_receipt = prefetched_tcp_scope
+        reachability = corroborate_device_reachability(
+            reachability,
+            services=fallback_services,
+            tool_receipts=[fallback_receipt],
+            protocol_results=[],
+            health_checkpoints=[],
+            full_tcp_visibility=bool(
+                fallback_receipt.get("complete")
+                and not int(fallback_receipt.get("tcp_filtered_count") or 0)
+            ),
+        )
+        reachability["fallback"] = {
+            "attempted": True,
+            "kind": "all_tcp_scope",
+            "inventory_reused": True,
+            "complete": bool(fallback_receipt.get("complete")),
+            "confirmed_open_count": int(fallback_receipt.get("confirmed_open_count") or 0),
+            "closed_response_count": int(
+                (fallback_receipt.get("port_state_counts") or {}).get("closed") or 0
+            ),
+            "filtered_count": int(fallback_receipt.get("tcp_filtered_count") or 0),
+        }
+        safety.record_health(_reachability_checkpoint(reachability, stage="reachability_all_tcp_fallback"))
     if reachability.get("status") != "online":
         return _reachability_only_result(
             locator=locator,
@@ -1047,12 +1175,13 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
             policy_name=policy_name,
             policy_rules_count=len(rules),
         )
-    safety.authorize("network_inventory", "readonly")
-    safety.record_limit_enforcement(
-        "nmap",
-        max_concurrency=1,
-        max_requests_per_second=safety_profile.max_requests_per_second,
-    )
+    if not inventory_authorized:
+        safety.authorize("network_inventory", "readonly")
+        safety.record_limit_enforcement(
+            "nmap",
+            max_concurrency=1,
+            max_requests_per_second=safety_profile.max_requests_per_second,
+        )
     services, inconclusive_observations, identity, tool_receipts, scan_completeness = await _nmap_scan(
         resolved_address,
         profile,
@@ -1060,6 +1189,7 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
         cancel_check=cancel_check,
         max_requests_per_second=safety_profile.max_requests_per_second,
         extra_priority_ports=extra_priority_ports,
+        prefetched_tcp_scope=prefetched_tcp_scope,
     )
     safety.authorize("core_protocol_discovery", "readonly")
     if await ensure_active("core protocol discovery"):
