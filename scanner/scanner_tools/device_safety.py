@@ -77,8 +77,7 @@ SAFETY_PROFILES: dict[str, DeviceSafetyProfile] = {
         health_monitor_required=True,
         credentials_allowed=True,
         explicit_lab_confirmation_required=False,
-        available=False,
-        unavailable_reason="authenticated_device_collector_not_ready",
+        available=True,
     ),
     "lab_invasive": DeviceSafetyProfile(
         name="lab_invasive",

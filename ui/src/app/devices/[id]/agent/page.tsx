@@ -8,7 +8,9 @@ import {
   cancelDeviceAgentSession,
   getDevice,
   getDeviceAgentSession,
+  getDeviceCredentials,
   startDeviceAgentSession,
+  type DeviceCredentialProfile,
   type DeviceAgentSession,
   type DeviceDetailResponse,
 } from '@/lib/api'
@@ -23,9 +25,12 @@ export default function DeviceAgentPage() {
   const toast = useToast()
   const [data, setData] = useState<DeviceDetailResponse | null>(null)
   const [session, setSession] = useState<DeviceAgentSession | null>(null)
+  const [credentials, setCredentials] = useState<DeviceCredentialProfile[]>([])
   const [runId, setRunId] = useState<string | null>(null)
   const [objective, setObjective] = useState(DEFAULT_OBJECTIVE)
-  const [safetyProfile, setSafetyProfile] = useState<'observe_only' | 'safe_remote'>('safe_remote')
+  const [safetyProfile, setSafetyProfile] = useState<'observe_only' | 'safe_remote' | 'authenticated_active'>('safe_remote')
+  const [sshCredentialId, setSshCredentialId] = useState('')
+  const [webCredentialId, setWebCredentialId] = useState('')
   const [maxTurns, setMaxTurns] = useState('12')
   const [confirmed, setConfirmed] = useState(false)
   const [loading, setLoading] = useState(true)
@@ -36,7 +41,10 @@ export default function DeviceAgentPage() {
   sessionRef.current = session
 
   const loadDevice = useCallback(async () => {
-    try { setData(await getDevice(deviceId)); setError(null) }
+    try {
+      const [device, credentialData] = await Promise.all([getDevice(deviceId), getDeviceCredentials(deviceId)])
+      setData(device); setCredentials(credentialData.profiles || []); setError(null)
+    }
     catch (err) { setError(err instanceof Error ? err.message : 'Could not load connected device') }
     finally { setLoading(false) }
   }, [deviceId])
@@ -76,6 +84,8 @@ export default function DeviceAgentPage() {
         safety_profile: safetyProfile,
         max_turns: Math.max(1, Math.min(30, Number.parseInt(maxTurns, 10) || 12)),
         confirm_authorized: true,
+        ssh_credential_profile_id: sshCredentialId || undefined,
+        web_credential_profile_id: webCredentialId || undefined,
       })
       setSession(value)
       setRunId(value.id)
@@ -109,7 +119,8 @@ export default function DeviceAgentPage() {
         <div className="grid gap-4 lg:grid-cols-2">
           <Field label="Objective"><Textarea rows={5} value={objective} onChange={(event) => setObjective(event.target.value)} /></Field>
           <div className="space-y-4">
-            <Field label="Safety profile" hint="The agent cannot change this after launch."><Select value={safetyProfile} onChange={(event) => setSafetyProfile(event.target.value as 'observe_only' | 'safe_remote')}><option value="observe_only">Observe only</option><option value="safe_remote">Safe remote</option></Select></Field>
+            <Field label="Safety profile" hint="The agent cannot change this after launch."><Select value={safetyProfile} onChange={(event) => { const value = event.target.value as typeof safetyProfile; setSafetyProfile(value); if (value !== 'authenticated_active') { setSshCredentialId(''); setWebCredentialId('') } }}><option value="observe_only">Observe only</option><option value="safe_remote">Safe remote</option><option value="authenticated_active">Authenticated active</option></Select></Field>
+            {safetyProfile === 'authenticated_active' && <div className="grid gap-3 sm:grid-cols-2"><Field label="SSH credential"><Select value={sshCredentialId} onChange={(event) => setSshCredentialId(event.target.value)}><option value="">None</option>{credentials.filter((profile) => profile.auth_kind.startsWith('ssh_') && profile.execution_compatible).map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</Select></Field><Field label="Web credential"><Select value={webCredentialId} onChange={(event) => setWebCredentialId(event.target.value)}><option value="">None</option>{credentials.filter((profile) => profile.auth_kind.startsWith('web_') && profile.execution_compatible).map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</Select></Field><p className="sm:col-span-2 text-xs text-gray-500">The agent can select scans that use these profiles, but secret values never enter its transcript or evidence.</p></div>}
             <Field label="Maximum planner turns"><Input type="number" min="1" max="30" value={maxTurns} onChange={(event) => setMaxTurns(event.target.value)} /></Field>
             <label className="flex items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-sm text-amber-100"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} className="mt-1" /><span>I confirm I am authorized to let the AI direct bounded scans of this exact device.</span></label>
             <Button disabled={!confirmed} loading={starting} onClick={start}><Bot className="h-4 w-4" /> Start investigation</Button>

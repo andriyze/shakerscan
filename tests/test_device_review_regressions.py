@@ -96,3 +96,24 @@ def test_web_retest_endpoints_reject_device_findings():
     assert 'finding_data.get("source") == "device"' in single
     assert 'finding_data.get("device_target_id")' in single
     assert "device_findings_require_device_rescan" in bulk
+
+
+def test_device_credentials_are_bound_encrypted_and_resolved_only_in_worker_memory():
+    api = (ROOT / "api" / "api.py").read_text()
+    worker = (ROOT / "api" / "worker.py").read_text()
+    schema = (ROOT / "db" / "init.sql").read_text()
+    assert "CREATE TABLE device_credential_profiles" in schema
+    assert "Credential encryption is not configured" in api
+    assert "device_credential_profiles" in api
+    assert "_hydrate_device_scan_credentials" in worker
+    assert 'hydrated["_resolved_device_credentials"]' in worker
+    assert 'runtime_child_options["auth_header"]' in worker
+    assert 'runtime_child_options["auth_cookies"]' in worker
+    assert '"login_password": str(web_credential.get("secret")' in worker
+
+
+def test_device_auth_requires_authenticated_safety_and_never_enters_agent_transcript():
+    api = (ROOT / "api" / "api.py").read_text()
+    assert "Credentialed device scans require safety_profile=authenticated_active" in api
+    assert "Credentialed device investigations require safety_profile=authenticated_active" in api
+    assert '"credentials_visible_to_planner": False' in api

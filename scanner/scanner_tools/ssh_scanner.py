@@ -6,6 +6,7 @@ Reports password authentication as a medium severity finding per CIS/NIST guidan
 """
 
 import asyncio
+import io
 import socket
 from typing import Any
 
@@ -42,7 +43,12 @@ def classify_negotiated_ssh_algorithms(
     return sorted(set(weak)), highest
 
 
-async def ssh_auth_methods(host: str, port: int = 22, timeout: int = 10) -> dict[str, Any]:
+async def ssh_auth_methods(
+    host: str,
+    port: int = 22,
+    timeout: int = 10,
+    credential: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """
     Check SSH authentication methods using Paramiko.
 
@@ -69,6 +75,10 @@ async def ssh_auth_methods(host: str, port: int = 22, timeout: int = 10) -> dict
         "weak_algorithm_severity": None,
         "port": port,
         "scan_completed": False,
+        "authentication_attempted": False,
+        "authentication_succeeded": False,
+        "authentication_method": None,
+        "authentication_error": None,
         "error": None,
         "findings": []
     }
@@ -86,6 +96,10 @@ async def ssh_auth_methods(host: str, port: int = 22, timeout: int = 10) -> dict
             "negotiated_algorithms": {},
             "weak_algorithms": [],
             "weak_algorithm_severity": None,
+            "authentication_attempted": False,
+            "authentication_succeeded": False,
+            "authentication_method": None,
+            "authentication_error": None,
             "error": None
         }
 
@@ -125,19 +139,57 @@ async def ssh_auth_methods(host: str, port: int = 22, timeout: int = 10) -> dict
             check_result["weak_algorithms"] = weak
             check_result["weak_algorithm_severity"] = weak_severity
 
-            # auth_none returns allowed types when auth fails
-            # We use a probe username - doesn't need to be valid
-            try:
-                transport.auth_none("scanner_probe")
-                # If auth_none succeeds, server allows anonymous access (very rare)
-                check_result["auth_methods"] = ["none"]
-            except paramiko.BadAuthenticationType as e:
-                # This is the expected path - server returns allowed methods
-                check_result["auth_methods"] = list(e.allowed_types)
-            except paramiko.AuthenticationException:
-                # Auth failed but no method list returned
-                # Try to infer from what we know
-                check_result["auth_methods"] = ["unknown"]
+            if credential:
+                auth_kind = str(credential.get("auth_kind") or "")
+                username = str(credential.get("username") or "")
+                secret = str(credential.get("secret") or "")
+                check_result["authentication_attempted"] = True
+                check_result["authentication_method"] = auth_kind
+                try:
+                    if auth_kind == "ssh_password":
+                        transport.auth_password(username, secret, fallback=False)
+                        check_result["auth_methods"] = ["password"]
+                    elif auth_kind == "ssh_private_key":
+                        passphrase = credential.get("secondary_secret") or None
+                        key = None
+                        loaders = [
+                            getattr(paramiko, name, None)
+                            for name in ("Ed25519Key", "ECDSAKey", "RSAKey", "DSSKey")
+                        ]
+                        for key_class in loaders:
+                            if key_class is None:
+                                continue
+                            try:
+                                key = key_class.from_private_key(io.StringIO(secret), password=passphrase)
+                                break
+                            except Exception:
+                                continue
+                        if key is None:
+                            raise ValueError("unsupported_private_key")
+                        transport.auth_publickey(username, key)
+                        check_result["auth_methods"] = ["publickey"]
+                    else:
+                        raise ValueError("unsupported_auth_kind")
+                    check_result["authentication_succeeded"] = bool(transport.is_authenticated())
+                except paramiko.BadAuthenticationType as e:
+                    check_result["auth_methods"] = list(e.allowed_types)
+                    check_result["authentication_error"] = "authentication_method_rejected"
+                except paramiko.AuthenticationException:
+                    check_result["authentication_error"] = "authentication_rejected"
+                except ValueError as e:
+                    check_result["authentication_error"] = str(e)
+                except Exception as e:
+                    check_result["authentication_error"] = f"authentication_error:{type(e).__name__}"
+            else:
+                # auth_none returns allowed types when auth fails. No password or
+                # key is guessed; this is the existing posture-only capability probe.
+                try:
+                    transport.auth_none("scanner_probe")
+                    check_result["auth_methods"] = ["none"]
+                except paramiko.BadAuthenticationType as e:
+                    check_result["auth_methods"] = list(e.allowed_types)
+                except paramiko.AuthenticationException:
+                    check_result["auth_methods"] = ["unknown"]
 
         except TimeoutError:
             check_result["error"] = f"Connection timeout after {timeout}s"
@@ -170,6 +222,10 @@ async def ssh_auth_methods(host: str, port: int = 22, timeout: int = 10) -> dict
     result["negotiated_algorithms"] = check_result.get("negotiated_algorithms", {})
     result["weak_algorithms"] = check_result.get("weak_algorithms", [])
     result["weak_algorithm_severity"] = check_result.get("weak_algorithm_severity")
+    result["authentication_attempted"] = bool(check_result.get("authentication_attempted"))
+    result["authentication_succeeded"] = bool(check_result.get("authentication_succeeded"))
+    result["authentication_method"] = check_result.get("authentication_method")
+    result["authentication_error"] = check_result.get("authentication_error")
     result["error"] = check_result.get("error")
 
     if result["error"]:
@@ -231,7 +287,12 @@ async def ssh_auth_methods(host: str, port: int = 22, timeout: int = 10) -> dict
     return result
 
 
-async def full_ssh_scan(host: str, port: int = 22, timeout: int = 10) -> dict[str, Any]:
+async def full_ssh_scan(
+    host: str,
+    port: int = 22,
+    timeout: int = 10,
+    credential: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """
     Perform a full SSH security scan.
 
@@ -246,4 +307,4 @@ async def full_ssh_scan(host: str, port: int = 22, timeout: int = 10) -> dict[st
     Returns:
         Complete SSH scan results
     """
-    return await ssh_auth_methods(host, port, timeout)
+    return await ssh_auth_methods(host, port, timeout, credential=credential)

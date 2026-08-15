@@ -3,9 +3,9 @@
 import Link from 'next/link'
 import { useCallback, useEffect, useState } from 'react'
 import { useParams } from 'next/navigation'
-import { Bot, Globe, Router } from 'lucide-react'
-import { formatDate, getDevice, scanDevice, type DeviceDetailResponse } from '@/lib/api'
-import { Button, Card, EmptyState, ErrorState, Field, Modal, PageHeader, ScanStatusBadge, Select, TableSkeleton, useToast } from '@/components/ui'
+import { Bot, Globe, KeyRound, Router } from 'lucide-react'
+import { createDeviceCredential, deactivateDeviceCredential, formatDate, getDevice, getDeviceCredentials, scanDevice, type DeviceCredentialProfile, type DeviceDetailResponse } from '@/lib/api'
+import { Button, Card, EmptyState, ErrorState, Field, Input, Modal, PageHeader, ScanStatusBadge, Select, TableSkeleton, Textarea, useToast } from '@/components/ui'
 
 const policyBadgeClass: Record<string, string> = {
   allow: 'bg-emerald-500/15 text-emerald-300',
@@ -22,11 +22,18 @@ export default function DeviceDetailPage() {
   const [loading, setLoading] = useState(true)
   const [failed, setFailed] = useState(false)
   const [scanOpen, setScanOpen] = useState(false)
+  const [credentialOpen, setCredentialOpen] = useState(false)
+  const [credentials, setCredentials] = useState<DeviceCredentialProfile[]>([])
+  const [credentialSaving, setCredentialSaving] = useState(false)
+  const [credentialForm, setCredentialForm] = useState({ name: '', auth_kind: 'ssh_password', username: '', secret: '', secondary_secret: '', login_path: '/login', port: '' })
   const [scanning, setScanning] = useState(false)
-  const [scan, setScan] = useState({ profile: 'inventory', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', confirm_authorized: false })
+  const [scan, setScan] = useState({ profile: 'inventory', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', ssh_credential_profile_id: '', web_credential_profile_id: '', confirm_authorized: false })
 
   const load = useCallback(async () => {
-    try { setData(await getDevice(deviceId)); setFailed(false) } catch { setFailed(true) } finally { setLoading(false) }
+    try {
+      const [device, credentialData] = await Promise.all([getDevice(deviceId), getDeviceCredentials(deviceId)])
+      setData(device); setCredentials(credentialData.profiles || []); setFailed(false)
+    } catch { setFailed(true) } finally { setLoading(false) }
   }, [deviceId])
 
   useEffect(() => { load(); const timer = setInterval(load, 10_000); return () => clearInterval(timer) }, [load])
@@ -41,6 +48,8 @@ export default function DeviceDetailPage() {
         include_web_dast: scan.include_web_dast,
         web_scan_type: scan.web_scan_type as 'quick' | 'standard' | 'deep',
         max_web_origins: 8,
+        ssh_credential_profile_id: scan.ssh_credential_profile_id || undefined,
+        web_credential_profile_id: scan.web_credential_profile_id || undefined,
       })
       setScanOpen(false)
       toast.success('Device scan queued', { link: { href: `/scans/${queued.scan_id}`, label: 'View report' } })
@@ -50,6 +59,27 @@ export default function DeviceDetailPage() {
     } finally { setScanning(false) }
   }
 
+  async function saveCredential() {
+    setCredentialSaving(true)
+    try {
+      await createDeviceCredential(deviceId, {
+        name: credentialForm.name.trim(),
+        auth_kind: credentialForm.auth_kind as DeviceCredentialProfile['auth_kind'],
+        username: credentialForm.username.trim() || undefined,
+        secret: credentialForm.secret,
+        secondary_secret: credentialForm.secondary_secret || undefined,
+        login_path: credentialForm.auth_kind === 'web_form' ? credentialForm.login_path : undefined,
+        port: credentialForm.port ? Number(credentialForm.port) : undefined,
+      })
+      setCredentialOpen(false)
+      setCredentialForm({ name: '', auth_kind: 'ssh_password', username: '', secret: '', secondary_secret: '', login_path: '/login', port: '' })
+      toast.success('Encrypted device credential saved')
+      await load()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to save credential')
+    } finally { setCredentialSaving(false) }
+  }
+
   if (loading) return <div className="mx-auto max-w-7xl"><TableSkeleton rows={6} /></div>
   if (failed || !data) return <div className="mx-auto max-w-7xl"><ErrorState message="Could not load connected device" onRetry={load} /></div>
   const { device, interfaces, services, scans } = data
@@ -57,7 +87,7 @@ export default function DeviceDetailPage() {
 
   return (
     <div className="mx-auto max-w-7xl">
-      <PageHeader backHref="/devices" backLabel="Connected devices" title={device.name} description={device.primary_locator} icon={<Router className="h-6 w-6" />} actions={<><Link href={`/devices/${device.id}/agent`} className="inline-flex items-center gap-2 rounded-lg border border-violet-500/30 bg-violet-500/10 px-3 py-2 text-sm text-violet-200 hover:bg-violet-500/20"><Bot className="h-4 w-4" /> AI investigation</Link><Link href={`/findings?source_type=device&device_target_id=${device.id}`} className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-200 hover:bg-gray-700">View findings</Link><Button onClick={() => { setScan({ profile: 'inventory', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', confirm_authorized: false }); setScanOpen(true) }}>Scan device</Button></>} />
+      <PageHeader backHref="/devices" backLabel="Connected devices" title={device.name} description={device.primary_locator} icon={<Router className="h-6 w-6" />} actions={<><Link href={`/devices/${device.id}/agent`} className="inline-flex items-center gap-2 rounded-lg border border-violet-500/30 bg-violet-500/10 px-3 py-2 text-sm text-violet-200 hover:bg-violet-500/20"><Bot className="h-4 w-4" /> AI investigation</Link><Link href={`/findings?source_type=device&device_target_id=${device.id}`} className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-200 hover:bg-gray-700">View findings</Link><Button onClick={() => { setScan({ profile: 'inventory', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', ssh_credential_profile_id: '', web_credential_profile_id: '', confirm_authorized: false }); setScanOpen(true) }}>Scan device</Button></>} />
 
       <div className="mb-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
         {[
@@ -94,6 +124,11 @@ export default function DeviceDetailPage() {
         </section>
       )}
 
+      <section className="mb-6">
+        <div className="mb-3 flex items-center justify-between"><div><h2 className="text-lg font-semibold text-white">Authentication profiles</h2><p className="text-sm text-gray-500">Encrypted, device-bound credentials are resolved only inside the device worker. The AI planner never sees secret values.</p></div><Button size="sm" variant="secondary" onClick={() => setCredentialOpen(true)}><KeyRound className="h-4 w-4" /> Add credential</Button></div>
+        <Card className="p-4">{credentials.length ? <div className="space-y-3">{credentials.map((profile) => <div key={profile.id} className="flex items-center justify-between gap-3 border-b border-gray-800 pb-3 last:border-0 last:pb-0"><div><p className="text-sm font-medium text-white">{profile.name}</p><p className="text-xs text-gray-500">{profile.auth_kind.replace(/_/g, ' ')}{profile.username ? ` · ${profile.username}` : ''}{profile.port ? ` · port ${profile.port}` : ''} · {profile.status}</p></div><Button size="sm" variant="ghost" onClick={async () => { try { await deactivateDeviceCredential(deviceId, profile.id); toast.success('Credential deactivated'); await load() } catch (error) { toast.error(error instanceof Error ? error.message : 'Failed to deactivate credential') } }}>Deactivate</Button></div>)}</div> : <p className="text-sm text-gray-500">No credentials configured. Unauthenticated scans remain available.</p>}</Card>
+      </section>
+
       <div className="grid gap-6 lg:grid-cols-2">
         <section><h2 className="mb-3 text-lg font-semibold text-white">Interfaces and identity</h2><Card className="p-4">{interfaces.length ? <div className="space-y-3">{interfaces.map((item) => <div key={item.id} className="flex items-start justify-between gap-3 border-b border-gray-800 pb-3 last:border-0 last:pb-0"><div><p className="font-mono text-sm text-white">{item.locator}</p><p className="text-xs text-gray-500">{item.hostname || item.locator_type}</p></div><div className="text-right text-xs text-gray-400"><p>{item.mac_address || 'No MAC observed'}</p><p>{item.network_zone || 'Zone not assigned'}</p></div></div>)}</div> : <p className="text-sm text-gray-500">No interfaces observed.</p>}</Card></section>
         <section><h2 className="mb-3 text-lg font-semibold text-white">Recent device scans</h2><Card className="p-4">{scans.length ? <div className="space-y-3">{scans.slice(0, 8).map((item) => <Link key={item.id} href={`/scans/${item.id}`} className="flex items-center justify-between gap-3 border-b border-gray-800 pb-3 last:border-0 last:pb-0 hover:text-blue-300"><div><p className="text-sm text-white">{item.current_phase?.replace(/_/g, ' ') || item.scan_type}</p><p className="text-xs text-gray-500">{formatDate(item.created_at)}</p></div><ScanStatusBadge status={item.status} /></Link>)}</div> : <p className="text-sm text-gray-500">No scans yet.</p>}</Card></section>
@@ -103,10 +138,24 @@ export default function DeviceDetailPage() {
         <div className="space-y-4">
           <Field label="Coverage"><Select value={scan.profile} onChange={(event) => setScan({ ...scan, profile: event.target.value })}><option value="inventory">Inventory — top 100 TCP ports + curated UDP, lightest</option><option value="posture">Posture — all 65,535 TCP ports + curated UDP, slower</option><option value="thorough">Thorough — all 65,535 TCP ports + deeper fingerprints, heaviest</option></Select></Field>
           {scan.profile !== 'inventory' && <p className="rounded border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-amber-200">This profile checks every TCP port and can take hours on slow or filtered devices. Start with Inventory unless complete port coverage is required.</p>}
-          <Field label="Safety level" hint="Safety is independent from port coverage."><Select value={scan.safety_profile} onChange={(event) => { const safety_profile = event.target.value; setScan({ ...scan, safety_profile, include_web_dast: safety_profile === 'observe_only' ? false : scan.include_web_dast }) }}><option value="observe_only">Observe only — discovery and fingerprints</option><option value="safe_remote">Safe remote — bounded non-destructive checks</option><option value="authenticated_active" disabled>Authenticated active — coming next</option><option value="lab_invasive" disabled>Lab invasive — dedicated runner required</option></Select></Field>
+          <Field label="Safety level" hint="Safety is independent from port coverage."><Select value={scan.safety_profile} onChange={(event) => { const safety_profile = event.target.value; setScan({ ...scan, safety_profile, include_web_dast: safety_profile === 'observe_only' ? false : scan.include_web_dast, ssh_credential_profile_id: safety_profile === 'authenticated_active' ? scan.ssh_credential_profile_id : '', web_credential_profile_id: safety_profile === 'authenticated_active' ? scan.web_credential_profile_id : '' }) }}><option value="observe_only">Observe only — discovery and fingerprints</option><option value="safe_remote">Safe remote — bounded non-destructive checks</option><option value="authenticated_active">Authenticated active — supplied SSH/web credentials</option><option value="lab_invasive" disabled>Lab invasive — dedicated runner required</option></Select></Field>
+          {scan.safety_profile === 'authenticated_active' && <div className="grid gap-4 sm:grid-cols-2"><Field label="SSH credential"><Select value={scan.ssh_credential_profile_id} onChange={(event) => setScan({ ...scan, ssh_credential_profile_id: event.target.value })}><option value="">No SSH authentication</option>{credentials.filter((profile) => profile.auth_kind.startsWith('ssh_') && profile.execution_compatible).map((profile) => <option key={profile.id} value={profile.id}>{profile.name}{profile.port ? ` · ${profile.port}` : ''}</option>)}</Select></Field><Field label="Web credential"><Select value={scan.web_credential_profile_id} onChange={(event) => setScan({ ...scan, web_credential_profile_id: event.target.value })}><option value="">No web authentication</option>{credentials.filter((profile) => profile.auth_kind.startsWith('web_') && profile.execution_compatible).map((profile) => <option key={profile.id} value={profile.id}>{profile.name}{profile.port ? ` · ${profile.port}` : ''}</option>)}</Select></Field></div>}
           <label className="flex items-start gap-3 rounded-lg border border-gray-800 bg-gray-950 p-3 text-sm text-gray-300"><input type="checkbox" checked={scan.include_web_dast} disabled={scan.safety_profile === 'observe_only'} onChange={(event) => setScan({ ...scan, include_web_dast: event.target.checked })} className="mt-1" /><span><strong className="block text-white">Check web interfaces on every discovered port</strong>{scan.safety_profile === 'observe_only' ? 'Observe-only discovers origins without launching Web DAST children.' : 'Runs bounded passive Web DAST as hidden device-owned checks.'}</span></label>
           {scan.include_web_dast && <Field label="Web coverage"><Select value={scan.web_scan_type} onChange={(event) => setScan({ ...scan, web_scan_type: event.target.value })}><option value="quick">Quick</option><option value="standard">Standard</option><option value="deep">Deep passive</option></Select></Field>}
           <label className="flex items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-sm text-amber-100"><input type="checkbox" checked={scan.confirm_authorized} onChange={(event) => setScan({ ...scan, confirm_authorized: event.target.checked })} className="mt-1" />I confirm I am authorized to scan this device and its listening services.</label>
+        </div>
+      </Modal>
+
+      <Modal open={credentialOpen} title="Add encrypted device credential" onClose={() => setCredentialOpen(false)} footer={<><Button variant="secondary" onClick={() => setCredentialOpen(false)}>Cancel</Button><Button loading={credentialSaving} disabled={!credentialForm.name.trim() || !credentialForm.secret || (['ssh_password', 'ssh_private_key', 'web_form'].includes(credentialForm.auth_kind) && !credentialForm.username.trim())} onClick={saveCredential}>Save credential</Button></>}>
+        <div className="space-y-4">
+          <Field label="Profile name" required><Input value={credentialForm.name} onChange={(event) => setCredentialForm({ ...credentialForm, name: event.target.value })} placeholder="Device administrator" /></Field>
+          <Field label="Authentication type"><Select value={credentialForm.auth_kind} onChange={(event) => setCredentialForm({ ...credentialForm, auth_kind: event.target.value })}><option value="ssh_password">SSH password</option><option value="ssh_private_key">SSH private key</option><option value="web_authorization_header">Web Authorization header</option><option value="web_cookie">Web session cookie</option><option value="web_form">Web login form</option></Select></Field>
+          {['ssh_password', 'ssh_private_key', 'web_form'].includes(credentialForm.auth_kind) && <Field label="Username" required><Input value={credentialForm.username} onChange={(event) => setCredentialForm({ ...credentialForm, username: event.target.value })} autoComplete="off" /></Field>}
+          <Field label={credentialForm.auth_kind === 'ssh_private_key' ? 'Private key' : credentialForm.auth_kind === 'web_authorization_header' ? 'Authorization value' : credentialForm.auth_kind === 'web_cookie' ? 'Cookie value' : 'Password'} required>{credentialForm.auth_kind === 'ssh_private_key' ? <Textarea rows={7} value={credentialForm.secret} onChange={(event) => setCredentialForm({ ...credentialForm, secret: event.target.value })} /> : <Input type="password" value={credentialForm.secret} onChange={(event) => setCredentialForm({ ...credentialForm, secret: event.target.value })} autoComplete="new-password" />}</Field>
+          {credentialForm.auth_kind === 'ssh_private_key' && <Field label="Key passphrase (optional)"><Input type="password" value={credentialForm.secondary_secret} onChange={(event) => setCredentialForm({ ...credentialForm, secondary_secret: event.target.value })} autoComplete="new-password" /></Field>}
+          {credentialForm.auth_kind === 'web_form' && <Field label="Login path" hint="Relative to each discovered web origin."><Input value={credentialForm.login_path} onChange={(event) => setCredentialForm({ ...credentialForm, login_path: event.target.value })} placeholder="/login" /></Field>}
+          <Field label="Limit to port (optional)"><Input type="number" min="1" max="65535" value={credentialForm.port} onChange={(event) => setCredentialForm({ ...credentialForm, port: event.target.value })} /></Field>
+          <p className="rounded border border-amber-500/20 bg-amber-500/5 p-3 text-xs text-amber-100">ShakerScan performs at most one supplied SSH authentication attempt per discovered SSH service. It never guesses passwords or keys. Web credentials apply only to bounded device-owned web children.</p>
         </div>
       </Modal>
     </div>

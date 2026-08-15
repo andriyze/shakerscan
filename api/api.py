@@ -4135,6 +4135,45 @@ class DevicePolicyUpdate(BaseModel):
     is_active: Optional[bool] = None
 
 
+class DeviceCredentialProfileCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=120)
+    auth_kind: Literal[
+        "ssh_password", "ssh_private_key", "web_authorization_header", "web_cookie", "web_form"
+    ]
+    username: Optional[str] = Field(default=None, max_length=320)
+    secret: str = Field(min_length=1, max_length=131_072)
+    secondary_secret: Optional[str] = Field(default=None, max_length=16_384)
+    login_path: Optional[str] = Field(default=None, max_length=1000)
+    port: Optional[int] = Field(default=None, ge=1, le=65535)
+    expires_at: Optional[datetime] = None
+    metadata_json: dict[str, Any] = Field(default_factory=dict, max_length=50)
+
+    @model_validator(mode="after")
+    def validate_device_credential(self):
+        if self.auth_kind in {"ssh_password", "ssh_private_key", "web_form"} and not str(self.username or "").strip():
+            raise ValueError(f"{self.auth_kind} requires username")
+        if self.auth_kind.startswith("web_") and ("\r" in self.secret or "\n" in self.secret):
+            raise ValueError("web credential values must not contain CR or LF")
+        if self.login_path:
+            parsed = urllib.parse.urlsplit(self.login_path)
+            if parsed.scheme or parsed.netloc or not self.login_path.startswith("/"):
+                raise ValueError("login_path must be a device-relative path beginning with /")
+        if self.auth_kind == "web_form" and not self.login_path:
+            raise ValueError("web_form requires login_path")
+        return self
+
+
+class DeviceCredentialProfileRotate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    secret: str = Field(min_length=1, max_length=131_072)
+    secondary_secret: Optional[str] = Field(default=None, max_length=16_384)
+    expires_at: Optional[datetime] = None
+    clear_expiry: bool = False
+
+
 class DeviceScanRequest(BaseModel):
     profile: Literal["inventory", "posture", "thorough"] = "inventory"
     safety_profile: Literal["observe_only", "safe_remote", "authenticated_active", "lab_invasive"] = "safe_remote"
@@ -4143,6 +4182,8 @@ class DeviceScanRequest(BaseModel):
     include_web_dast: bool = True
     web_scan_type: Literal["quick", "standard", "deep"] = "standard"
     max_web_origins: int = Field(default=8, ge=0, le=32)
+    ssh_credential_profile_id: Optional[str] = None
+    web_credential_profile_id: Optional[str] = None
     approval_receipt_id: Optional[str] = None
 
 
@@ -4152,6 +4193,8 @@ class DeviceAgentSessionStartRequest(BaseModel):
     safety_profile: Literal["observe_only", "safe_remote", "authenticated_active", "lab_invasive"] = "safe_remote"
     max_turns: int = Field(default=12, ge=1, le=30)
     confirm_authorized: bool = False
+    ssh_credential_profile_id: Optional[str] = None
+    web_credential_profile_id: Optional[str] = None
     approval_receipt_id: Optional[str] = None
 
 
@@ -18134,6 +18177,54 @@ def _device_locator_type(locator: str) -> str:
         return "hostname"
 
 
+def _public_device_credential_profile(row: Any) -> dict[str, Any]:
+    payload = _decode_device_row(row)
+    stored_secret = str(payload.pop("secret_value", "") or "")
+    status, refresh_required = _target_credential_profile_status(payload)
+    payload["secret_configured"] = bool(stored_secret)
+    payload["storage_encrypted"] = stored_secret.startswith("enc:fernet:")
+    payload["status"] = status
+    payload["refresh_required"] = refresh_required
+    payload["execution_compatible"] = status == "active" and bool(stored_secret)
+    return payload
+
+
+def _device_credential_secret_value(secret: str, secondary_secret: str | None) -> str:
+    return encrypt_secret(json.dumps({
+        "secret": secret,
+        "secondary_secret": secondary_secret or None,
+    }))
+
+
+async def _validate_device_credential_refs(
+    conn: Any,
+    device_target_id: uuid.UUID,
+    *,
+    ssh_profile_id: str | None,
+    web_profile_id: str | None,
+) -> list[dict[str, str]]:
+    requested = [
+        ("ssh", ssh_profile_id, {"ssh_password", "ssh_private_key"}),
+        ("web", web_profile_id, {"web_authorization_header", "web_cookie", "web_form"}),
+    ]
+    refs: list[dict[str, str]] = []
+    for role, raw_id, allowed_kinds in requested:
+        if not raw_id:
+            continue
+        profile_id = _device_uuid(raw_id, f"{role} credential profile")
+        row = await conn.fetchrow(
+            """SELECT id, auth_kind FROM device_credential_profiles
+               WHERE id=$1 AND device_target_id=$2 AND is_active=true
+                 AND (expires_at IS NULL OR expires_at > NOW())""",
+            profile_id,
+            device_target_id,
+        )
+        if not row or str(row["auth_kind"]) not in allowed_kinds:
+            raise HTTPException(status_code=422, detail=f"Active {role} credential profile is unavailable for this device")
+        refs.append({"role": role, "profile_id": str(profile_id), "auth_kind": str(row["auth_kind"])})
+    return refs
+
+
 def _device_worker_readiness() -> dict[str, Any]:
     """Return fresh, build-current device-worker capacity without touching Web DAST telemetry."""
     enabled = _device_posture_enabled()
@@ -18333,6 +18424,102 @@ async def create_device(request: DeviceTargetCreate):
     return {"device": _decode_device_row(row)}
 
 
+@app.get("/devices/{device_id}/credentials")
+async def list_device_credentials(device_id: str, include_inactive: bool = False):
+    device_uuid = _device_uuid(device_id)
+    async with db_pool.acquire() as conn:
+        if not await conn.fetchval("SELECT 1 FROM device_targets WHERE id=$1", device_uuid):
+            raise HTTPException(status_code=404, detail="Connected device not found")
+        rows = await conn.fetch(
+            """SELECT * FROM device_credential_profiles
+               WHERE device_target_id=$1 AND ($2::boolean OR is_active=true)
+               ORDER BY auth_kind, name""",
+            device_uuid,
+            include_inactive,
+        )
+    return {"profiles": [_public_device_credential_profile(row) for row in rows]}
+
+
+@app.post("/devices/{device_id}/credentials")
+async def create_device_credential(device_id: str, request: DeviceCredentialProfileCreate):
+    if not encryption_enabled():
+        raise HTTPException(status_code=503, detail="Credential encryption is not configured")
+    device_uuid = _device_uuid(device_id)
+    async with db_pool.acquire() as conn:
+        if not await conn.fetchval("SELECT 1 FROM device_targets WHERE id=$1 AND is_active=true", device_uuid):
+            raise HTTPException(status_code=404, detail="Active connected device not found")
+        try:
+            row = await conn.fetchrow(
+                """INSERT INTO device_credential_profiles (
+                       device_target_id, name, auth_kind, username, secret_value,
+                       secret_preview, login_path, port, expires_at, metadata_json
+                   ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *""",
+                device_uuid,
+                _normalize_target_credential_profile_name(request.name),
+                request.auth_kind,
+                str(request.username or "").strip() or None,
+                _device_credential_secret_value(request.secret, request.secondary_secret),
+                _mask_ai_target_secret(request.secret),
+                request.login_path,
+                request.port,
+                request.expires_at,
+                json.dumps(_redact_agent_payload(request.metadata_json)),
+            )
+        except asyncpg.UniqueViolationError as exc:
+            raise HTTPException(status_code=409, detail="Device credential profile name already exists") from exc
+    return {"profile": _public_device_credential_profile(row)}
+
+
+@app.post("/devices/{device_id}/credentials/{profile_id}/rotate")
+async def rotate_device_credential(
+    device_id: str,
+    profile_id: str,
+    request: DeviceCredentialProfileRotate,
+):
+    if not encryption_enabled():
+        raise HTTPException(status_code=503, detail="Credential encryption is not configured")
+    device_uuid = _device_uuid(device_id)
+    profile_uuid = _device_uuid(profile_id, "credential profile")
+    async with db_pool.acquire() as conn:
+        existing = await conn.fetchrow(
+            "SELECT auth_kind FROM device_credential_profiles WHERE id=$1 AND device_target_id=$2",
+            profile_uuid,
+            device_uuid,
+        )
+        if not existing:
+            raise HTTPException(status_code=404, detail="Device credential profile not found")
+        if str(existing["auth_kind"]).startswith("web_") and ("\r" in request.secret or "\n" in request.secret):
+            raise HTTPException(status_code=422, detail="Web credential values must not contain CR or LF")
+        row = await conn.fetchrow(
+            """UPDATE device_credential_profiles
+               SET secret_value=$3, secret_preview=$4,
+                   expires_at=CASE WHEN $5 THEN NULL ELSE COALESCE($6, expires_at) END,
+                   is_active=true, rotated_at=NOW(), updated_at=NOW()
+               WHERE id=$1 AND device_target_id=$2 RETURNING *""",
+            profile_uuid,
+            device_uuid,
+            _device_credential_secret_value(request.secret, request.secondary_secret),
+            _mask_ai_target_secret(request.secret),
+            request.clear_expiry,
+            request.expires_at,
+        )
+    return {"profile": _public_device_credential_profile(row)}
+
+
+@app.delete("/devices/{device_id}/credentials/{profile_id}")
+async def deactivate_device_credential(device_id: str, profile_id: str):
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """UPDATE device_credential_profiles SET is_active=false, updated_at=NOW()
+               WHERE id=$1 AND device_target_id=$2 RETURNING *""",
+            _device_uuid(profile_id, "credential profile"),
+            _device_uuid(device_id),
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="Device credential profile not found")
+    return {"status": "deactivated", "profile": _public_device_credential_profile(row)}
+
+
 @app.get("/devices/{device_id}")
 async def get_device(
     device_id: str,
@@ -18453,7 +18640,7 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
     if not request.confirm_authorized:
         raise HTTPException(status_code=409, detail="Re-submit with confirm_authorized=true after confirming permission to scan this device")
     try:
-        validate_safety_request({
+        safety_contract = validate_safety_request({
             "safety_profile": request.safety_profile,
             "confirm_lab_invasive": request.confirm_lab_invasive,
             "include_web_dast": request.include_web_dast,
@@ -18468,6 +18655,17 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
             raise HTTPException(status_code=404, detail="Connected device not found")
         if not device["is_active"]:
             raise HTTPException(status_code=409, detail="Connected device is inactive")
+        credential_refs = await _validate_device_credential_refs(
+            conn,
+            device_uuid,
+            ssh_profile_id=request.ssh_credential_profile_id,
+            web_profile_id=request.web_credential_profile_id,
+        )
+        if credential_refs and not safety_contract.credentials_allowed:
+            raise HTTPException(
+                status_code=422,
+                detail="Credentialed device scans require safety_profile=authenticated_active",
+            )
         approval_context = await _validate_approval_receipt_for_action(
             conn,
             request.approval_receipt_id,
@@ -18511,6 +18709,7 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
             "include_web_dast": request.include_web_dast,
             "web_scan_type": request.web_scan_type,
             "max_web_origins": request.max_web_origins,
+            "device_credential_profiles": credential_refs,
             "device_policy": {"id": str(policy["id"]), "name": policy["name"], "rules": policy_payload["rules"]},
             "approval_receipt_id": request.approval_receipt_id,
             "resolved_budget": {
@@ -18756,6 +18955,14 @@ async def _execute_device_agent_tool(
             include_web_dast=include_web_dast,
             web_scan_type=args.get("web_scan_type") or "standard",
             max_web_origins=8,
+            ssh_credential_profile_id=next((
+                str(ref.get("profile_id")) for ref in state.get("device_credential_profiles", [])
+                if isinstance(ref, dict) and ref.get("role") == "ssh"
+            ), None),
+            web_credential_profile_id=next((
+                str(ref.get("profile_id")) for ref in state.get("device_credential_profiles", [])
+                if isinstance(ref, dict) and ref.get("role") == "web"
+            ), None),
             approval_receipt_id=approval_receipt_id,
         ))
         state["scans_queued"] = int(state.get("scans_queued") or 0) + 1
@@ -18826,6 +19033,17 @@ async def start_device_agent_session(device_id: str, request: DeviceAgentSession
         )
         if not device or not device["is_active"]:
             raise HTTPException(status_code=404, detail="Active connected device not found")
+        credential_refs = await _validate_device_credential_refs(
+            conn,
+            device_uuid,
+            ssh_profile_id=request.ssh_credential_profile_id,
+            web_profile_id=request.web_credential_profile_id,
+        )
+        if credential_refs and not profile.credentials_allowed:
+            raise HTTPException(
+                status_code=422,
+                detail="Credentialed device investigations require safety_profile=authenticated_active",
+            )
         if await conn.fetchval(
             "SELECT 1 FROM device_agent_runs WHERE device_target_id=$1 AND status IN ('awaiting_planner','planning') LIMIT 1",
             device_uuid,
@@ -18844,6 +19062,7 @@ async def start_device_agent_session(device_id: str, request: DeviceAgentSession
             safety_profile=profile.name,
             max_turns=request.max_turns,
         )
+        state["device_credential_profiles"] = credential_refs
         state["messages"].insert(1, {
             "role": "system",
             "content": (

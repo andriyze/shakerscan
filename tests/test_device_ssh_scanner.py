@@ -33,4 +33,6 @@ def test_ssh_result_contract_has_algorithm_evidence_when_dependency_is_absent_or
     assert "host_key" in result
     assert "negotiated_algorithms" in result
     assert "weak_algorithms" in result
+    assert "authentication_attempted" in result
+    assert "authentication_succeeded" in result
     assert isinstance(result["findings"], list)

@@ -12,7 +12,8 @@ def test_safety_profiles_keep_coverage_independent_and_fail_closed():
     catalog = {item["name"]: item for item in device_safety.safety_profile_catalog()}
     assert catalog["observe_only"]["available"] is True
     assert catalog["safe_remote"]["available"] is True
-    assert catalog["authenticated_active"]["available"] is False
+    assert catalog["authenticated_active"]["available"] is True
+    assert catalog["authenticated_active"]["credentials_allowed"] is True
     assert catalog["lab_invasive"]["available"] is False
     assert catalog["observe_only"]["allowed_action_classes"] == ("readonly",)
 
@@ -31,8 +32,9 @@ def test_safety_request_rejects_misleading_or_unavailable_modes():
             "safety_profile": "observe_only",
             "include_web_dast": True,
         })
-    with pytest.raises(ValueError, match="authenticated_device_collector_not_ready"):
-        device_safety.validate_safety_request({"safety_profile": "authenticated_active"})
+    assert device_safety.validate_safety_request({
+        "safety_profile": "authenticated_active",
+    }).credentials_allowed is True
     assert device_safety.validate_safety_request({
         "safety_profile": "safe-remote",
         "include_web_dast": True,

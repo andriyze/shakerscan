@@ -1609,6 +1609,68 @@ async def _hydrate_managed_scan_credentials(options: dict[str, Any], scan_id: st
     return hydrated
 
 
+async def _hydrate_device_scan_credentials(options: dict[str, Any], scan_id: str) -> dict[str, Any]:
+    """Resolve device-bound credentials in worker memory without persisting secrets."""
+    hydrated = dict(options or {})
+    raw_refs = hydrated.get("device_credential_profiles")
+    if not isinstance(raw_refs, list) or not raw_refs:
+        return hydrated
+    refs = [dict(item) for item in raw_refs if isinstance(item, dict)][:2]
+    roles = [str(item.get("role") or "") for item in refs]
+    if len(roles) != len(set(roles)) or not all(role in {"ssh", "web"} for role in roles):
+        raise ValueError("invalid device credential profile references")
+    try:
+        profile_ids = [uuid.UUID(str(item.get("profile_id") or "")) for item in refs]
+        scan_uuid = uuid.UUID(str(scan_id))
+    except ValueError as exc:
+        raise ValueError("invalid device credential profile id") from exc
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT cp.id, cp.auth_kind, cp.username, cp.secret_value,
+                      cp.login_path, cp.port
+               FROM scans s
+               JOIN device_credential_profiles cp ON cp.device_target_id=s.device_target_id
+               WHERE s.id=$1 AND cp.id=ANY($2::uuid[]) AND cp.is_active=true
+                 AND (cp.expires_at IS NULL OR cp.expires_at > NOW())""",
+            scan_uuid,
+            profile_ids,
+        )
+    by_id = {str(row["id"]): dict(row) for row in rows}
+    resolved: list[dict[str, Any]] = []
+    for ref in refs:
+        role = str(ref["role"])
+        profile_id = str(ref["profile_id"])
+        row = by_id.get(profile_id)
+        if row is None:
+            raise ValueError(f"device {role} credential profile is unavailable")
+        auth_kind = str(row.get("auth_kind") or "")
+        if (role == "ssh") != auth_kind.startswith("ssh_"):
+            raise ValueError(f"device {role} credential profile kind mismatch")
+        raw_secret = str(decrypt_secret(row.get("secret_value")) or "")
+        if not raw_secret or raw_secret.startswith("enc:fernet:"):
+            raise ValueError(f"device {role} credential profile could not be decrypted")
+        try:
+            secret_payload = json.loads(raw_secret)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"device {role} credential profile has an invalid secret payload") from exc
+        secret = str(secret_payload.get("secret") or "")
+        secondary_secret = str(secret_payload.get("secondary_secret") or "") or None
+        if not secret or (role == "web" and ("\r" in secret or "\n" in secret)):
+            raise ValueError(f"device {role} credential profile is invalid")
+        resolved.append({
+            "role": role,
+            "profile_id": profile_id,
+            "auth_kind": auth_kind,
+            "username": str(row.get("username") or "") or None,
+            "secret": secret,
+            "secondary_secret": secondary_secret,
+            "login_path": str(row.get("login_path") or "") or None,
+            "port": int(row["port"]) if row.get("port") is not None else None,
+        })
+    hydrated["_resolved_device_credentials"] = resolved
+    return hydrated
+
+
 async def _hydrate_ai_gate_options(options: dict[str, Any]) -> dict[str, Any]:
     hydrated = dict(options)
     ai_target = dict(hydrated.get("ai_target") or {})
@@ -7471,6 +7533,10 @@ async def run_device_web_children(
         web_scan_type = "standard"
     await update_scan_progress(parent_scan_id, "device_web_dast", 92, job_id=parent_job_id)
     merged_findings = result.get("findings") if isinstance(result.get("findings"), list) else []
+    web_credentials = [
+        dict(item) for item in parent_options.get("_resolved_device_credentials", [])
+        if isinstance(item, dict) and item.get("role") == "web"
+    ]
 
     for index, origin_info in enumerate(selected, start=1):
         if _scan_cancel_requested(parent_scan_id):
@@ -7478,6 +7544,11 @@ async def run_device_web_children(
             child_summary["truncated"] += len(selected) - index + 1
             break
         origin = str(origin_info["origin"])
+        origin_port = int(origin_info.get("port") or urllib.parse.urlsplit(origin).port or 0)
+        web_credential = next((
+            item for item in web_credentials
+            if item.get("port") is None or int(item.get("port")) == origin_port
+        ), None)
         child_scan_id, child_job_id = str(uuid.uuid4()), str(uuid.uuid4())
         child_options = {
             "scan_type": web_scan_type,
@@ -7490,6 +7561,13 @@ async def run_device_web_children(
             "device_parent_scan_id": parent_scan_id,
             "device_target_id": device_target_id,
             "device_origin": origin_info,
+            "device_credential_profile_ref": (
+                {
+                    "profile_id": str(web_credential.get("profile_id") or ""),
+                    "auth_kind": str(web_credential.get("auth_kind") or ""),
+                }
+                if web_credential else None
+            ),
             "request_budget_mode": "enforce",
             "custom_budget": {
                 "max_duration_minutes": 20 if web_scan_type == "deep" else 10,
@@ -7529,7 +7607,26 @@ async def run_device_web_children(
         child_heartbeat_thread.start()
         started = utc_now()
         try:
-            child_result = await run_scan(origin, child_options, scan_id=child_scan_id, job_id=child_job_id)
+            runtime_child_options = dict(child_options)
+            if web_credential:
+                auth_kind = str(web_credential.get("auth_kind") or "")
+                if auth_kind == "web_authorization_header":
+                    runtime_child_options["auth_header"] = str(web_credential.get("secret") or "")
+                elif auth_kind == "web_cookie":
+                    runtime_child_options["auth_cookies"] = str(web_credential.get("secret") or "")
+                elif auth_kind == "web_form":
+                    runtime_child_options.update({
+                        "login_url": urllib.parse.urljoin(origin.rstrip("/") + "/", str(web_credential.get("login_path") or "/")),
+                        "login_username": str(web_credential.get("username") or ""),
+                        "login_password": str(web_credential.get("secret") or ""),
+                        "auto_auth": True,
+                    })
+            child_result = await run_scan(
+                origin,
+                runtime_child_options,
+                scan_id=child_scan_id,
+                job_id=child_job_id,
+            )
             child_error = child_result.get("error") if isinstance(child_result, dict) else "invalid child result"
         except Exception as exc:
             child_result = _unexpected_scan_exception_result(origin, exc)
@@ -7561,6 +7658,8 @@ async def run_device_web_children(
             "grade": child_grade,
             "findings_count": len(child_findings),
             "error": str(child_error)[:500] if child_error else None,
+            "credential_profile_id": str(web_credential.get("profile_id") or "") if web_credential else None,
+            "authenticated": bool(web_credential),
         }
         child_summary["children"].append(child_entry)
         get_redis().hset(child_job_key, mapping={
@@ -7779,6 +7878,8 @@ async def process_scan_job(job_data: dict):
                 result = await _load_broker_result(job_data, scan_id)
             else:
                 options = await _hydrate_managed_scan_credentials(options, scan_id)
+                if device_target_id and (options or {}).get("run_kind") == "device_posture":
+                    options = await _hydrate_device_scan_credentials(options, scan_id)
                 result = await run_scan(target, options, scan_id=scan_id, job_id=job_id)
                 if device_target_id and (options or {}).get("run_kind") == "device_posture":
                     result = await run_device_web_children(

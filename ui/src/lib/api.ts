@@ -1368,6 +1368,24 @@ export interface DeviceService {
   last_seen_at: string
 }
 
+export interface DeviceCredentialProfile {
+  id: string
+  device_target_id: string
+  name: string
+  auth_kind: 'ssh_password' | 'ssh_private_key' | 'web_authorization_header' | 'web_cookie' | 'web_form'
+  username?: string | null
+  secret_preview?: string | null
+  login_path?: string | null
+  port?: number | null
+  expires_at?: string | null
+  is_active: boolean
+  secret_configured: boolean
+  storage_encrypted: boolean
+  status: 'active' | 'expired' | 'inactive'
+  refresh_required: boolean
+  execution_compatible: boolean
+}
+
 export interface DeviceDetailResponse {
   device: DeviceTarget
   interfaces: DeviceInterface[]
@@ -5074,6 +5092,8 @@ export async function scanDevice(deviceId: string, payload: {
   include_web_dast: boolean
   web_scan_type: 'quick' | 'standard' | 'deep'
   max_web_origins?: number
+  ssh_credential_profile_id?: string
+  web_credential_profile_id?: string
 }): Promise<{ scan_id: string; job_id: string; status: string; ui_url: string }> {
   const res = await fetch(`${API_URL}/devices/${encodeURIComponent(deviceId)}/scan`, {
     method: 'POST',
@@ -5086,10 +5106,12 @@ export async function scanDevice(deviceId: string, payload: {
 
 export async function startDeviceAgentSession(deviceId: string, payload: {
   objective: string
-  safety_profile: 'observe_only' | 'safe_remote'
+  safety_profile: 'observe_only' | 'safe_remote' | 'authenticated_active'
   max_turns: number
   confirm_authorized: boolean
   approval_receipt_id?: string
+  ssh_credential_profile_id?: string
+  web_credential_profile_id?: string
 }): Promise<DeviceAgentSession> {
   const res = await fetch(`${API_URL}/devices/${encodeURIComponent(deviceId)}/agent/session`, {
     method: 'POST',
@@ -5120,6 +5142,36 @@ export async function cancelDeviceAgentSession(runId: string): Promise<DeviceAge
   const res = await fetch(`${API_URL}/device-agent/session/${encodeURIComponent(runId)}/cancel`, { method: 'POST' })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to cancel AI device investigation'))
   return res.json()
+}
+
+export async function getDeviceCredentials(deviceId: string, includeInactive = false): Promise<{ profiles: DeviceCredentialProfile[] }> {
+  const res = await fetch(`${API_URL}/devices/${encodeURIComponent(deviceId)}/credentials?include_inactive=${includeInactive ? 'true' : 'false'}`, { cache: 'no-store' })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load device credentials'))
+  return res.json()
+}
+
+export async function createDeviceCredential(deviceId: string, payload: {
+  name: string
+  auth_kind: DeviceCredentialProfile['auth_kind']
+  username?: string
+  secret: string
+  secondary_secret?: string
+  login_path?: string
+  port?: number
+  expires_at?: string
+}): Promise<{ profile: DeviceCredentialProfile }> {
+  const res = await fetch(`${API_URL}/devices/${encodeURIComponent(deviceId)}/credentials`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to save device credential'))
+  return res.json()
+}
+
+export async function deactivateDeviceCredential(deviceId: string, profileId: string): Promise<void> {
+  const res = await fetch(`${API_URL}/devices/${encodeURIComponent(deviceId)}/credentials/${encodeURIComponent(profileId)}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to deactivate device credential'))
 }
 
 export async function getDevicePolicies(includeInactive = false): Promise<{ policies: DevicePolicy[] }> {

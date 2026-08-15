@@ -2489,6 +2489,33 @@ async def run_schema_migrations(pool) -> None:
                 )
             """)
             await conn.execute("""
+                CREATE TABLE IF NOT EXISTS device_credential_profiles (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    device_target_id UUID NOT NULL REFERENCES device_targets(id) ON DELETE CASCADE,
+                    name TEXT NOT NULL,
+                    auth_kind TEXT NOT NULL,
+                    username TEXT,
+                    secret_value TEXT NOT NULL,
+                    secret_preview TEXT,
+                    login_path TEXT,
+                    port INTEGER CHECK (port IS NULL OR port BETWEEN 1 AND 65535),
+                    expires_at TIMESTAMPTZ,
+                    is_active BOOLEAN NOT NULL DEFAULT true,
+                    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    rotated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT device_credential_profiles_kind_check CHECK (auth_kind IN (
+                        'ssh_password','ssh_private_key','web_authorization_header','web_cookie','web_form'
+                    )),
+                    CONSTRAINT device_credential_profiles_name_unique UNIQUE (device_target_id, name)
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_device_credential_profiles_active
+                ON device_credential_profiles(device_target_id, is_active, expires_at)
+            """)
+            await conn.execute("""
                 ALTER TABLE scans
                 ADD COLUMN IF NOT EXISTS run_kind TEXT DEFAULT 'web_dast',
                 ADD COLUMN IF NOT EXISTS subject_ref TEXT,

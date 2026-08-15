@@ -819,6 +819,11 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
     budget_seconds = configured_minutes * 60 if configured_minutes > 0 else DEFAULT_PROFILE_BUDGET_SECONDS[profile_name]
     deadline = time.monotonic() + max(60, budget_seconds)
     cancel_check = options.get("_cancel_check")
+    resolved_credentials = [
+        dict(item) for item in options.get("_resolved_device_credentials", [])
+        if isinstance(item, dict)
+    ]
+    ssh_credentials = [item for item in resolved_credentials if item.get("role") == "ssh"]
 
     async def ensure_active(stage: str) -> bool:
         if callable(cancel_check) and bool(await cancel_check()):
@@ -928,7 +933,11 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
         scan_completeness["safety_halted"] = True
         scan_completeness.setdefault("incomplete_stages", []).append("device_health_degraded")
     else:
-        safety.authorize("ssh_posture_handshake", "readonly")
+        safety.authorize(
+            "ssh_posture_handshake",
+            "ephemeral_state" if ssh_credentials else "readonly",
+            side_effects="one operator-supplied authentication attempt" if ssh_credentials else "none",
+        )
         for service in services:
             if service.get("transport") != "tcp" or str(service.get("service_name") or "").lower() not in SSH_SERVICE_NAMES:
                 continue
@@ -938,7 +947,19 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
                 scan_completeness["overall_budget_exhausted"] = True
                 scan_completeness.setdefault("incomplete_stages", []).append("overall_device_budget_exhausted")
                 break
-            ssh_result = await full_ssh_scan(resolved_address, port=int(service["port"]), timeout=8)
+            service_port = int(service["port"])
+            ssh_credential = next((
+                item for item in ssh_credentials
+                if item.get("port") is None or int(item.get("port")) == service_port
+            ), None)
+            ssh_result = await full_ssh_scan(
+                resolved_address,
+                port=service_port,
+                timeout=8,
+                credential=ssh_credential,
+            )
+            if ssh_credential:
+                ssh_result["credential_profile_id"] = str(ssh_credential.get("profile_id") or "")
             service["ssh"] = {key: value for key, value in ssh_result.items() if key != "findings"}
             for finding in ssh_result.get("findings") or []:
                 finding = dict(finding)
@@ -1009,5 +1030,9 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
             "credentials_attempted": False,
             "device_coverage_profile": profile_name,
             "device_safety_profile": safety_profile.name,
+            "credential_profile_refs": [
+                {"role": item.get("role"), "profile_id": item.get("profile_id"), "auth_kind": item.get("auth_kind")}
+                for item in resolved_credentials
+            ],
         },
     }
