@@ -33,7 +33,7 @@ target binding, approvals, budgets, evidence, and finding proof.
 | “Scan this target” with no type | Quick Web DAST (`POST /scans`, `scan_type=quick`) |
 | Quick, standard, deep, full, aggressive, or smart DAST | `POST /scans` |
 | Deep Hunt, autonomous hunt, or investigate autonomously | Use the `research-agent` skill and `/agent/hunt/*` |
-| Investigate or hunt one connected device | Use the `device-hunt` skill and `/devices/{id}/agent/*` |
+| Investigate or hunt one connected device | Use the `device-hunt` skill; start at `/devices/{id}/agent/session`, then use `/device-agent/session/{run_id}/*` |
 | Explain, compare, or triage a connected device without traffic | Use the `device-triage` skill |
 | Multiple targets | `POST /scans/batch` |
 | Authenticated or two-user testing | `POST /scans` with auth options |

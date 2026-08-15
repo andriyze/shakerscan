@@ -1385,7 +1385,6 @@ export interface DeviceCredentialProfile {
   name: string
   auth_kind: 'ssh_password' | 'ssh_private_key' | 'web_authorization_header' | 'web_cookie' | 'web_form'
   username?: string | null
-  secret_preview?: string | null
   login_path?: string | null
   port?: number | null
   expires_at?: string | null

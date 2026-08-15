@@ -103,7 +103,9 @@ an allow decision.
 SSH is checked on the port where it was actually discovered, not only port 22. The scanner records
 the banner, server host-key type and size, authentication methods, negotiated cipher/MAC, password
 and keyboard-interactive availability, public-key availability, and weak negotiated algorithms. It
-does not guess usernames or passwords and never attempts credential authentication.
+never guesses usernames or passwords. Under `authenticated_active`, an operator may attach one
+encrypted, device-bound SSH profile; offered methods are enumerated independently and the supplied
+credential is attempted at most once per device scan, subject to persisted cooldown and daily caps.
 
 Service policies are ordered rules with four outcomes:
 

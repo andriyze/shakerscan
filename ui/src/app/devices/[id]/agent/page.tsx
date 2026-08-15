@@ -54,18 +54,24 @@ export default function DeviceAgentPage() {
   useEffect(() => {
     if (!runId) return
     let stopped = false
-    const tick = () => getDeviceAgentSession(runId).then((value) => {
+    const tick = () => {
+      if (stopped) return
+      getDeviceAgentSession(runId).then((value) => {
       if (stopped) return
       if (value.device_target_id !== deviceId) {
+        stopped = true
         setError('This investigation run belongs to a different connected device.')
         setSession(null)
+        setRunId(null)
+        window.history.replaceState(null, '', window.location.pathname)
         return
       }
       setError(null)
       setSession(value)
     }).catch((err) => {
       if (!stopped) setError(err instanceof Error ? err.message : 'Could not load AI device investigation')
-    })
+      })
+    }
     tick()
     const timer = window.setInterval(() => {
       if (!TERMINAL.has(sessionRef.current?.status || '')) tick()

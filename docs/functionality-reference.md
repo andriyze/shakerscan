@@ -1089,7 +1089,7 @@ State-changing commands are not exposed. See [`docs/read-only-mcp.md`](read-only
 `GET|PATCH|DELETE /devices/{id}` · `POST /devices/{id}/scan` ·
 `POST /devices/{id}/verify-service` · `GET /device-scans` ·
 `GET|POST /devices/{id}/credentials` · `POST /devices/{id}/credentials/{profile_id}/rotate` ·
-`DELETE /devices/{id}/credentials/{profile_id}` ·
+`DELETE /devices/{id}/credentials/{profile_id}` · `POST /devices/{id}/credentials/{profile_id}/acknowledge-lockout` ·
 `POST /devices/{id}/agent/session` · `GET /device-agent/session/{run_id}` ·
 `POST /device-agent/session/{run_id}/reply|cancel` ·
 `GET|POST /device-policies` · `PATCH /device-policies/{id}`
@@ -1340,12 +1340,12 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Make targets | 13 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
 | Runtime environment keys | 333 | Python sources + Compose manifests |
-| Scanner modules | 100 | `scanner/scanner_tools/` |
+| Scanner modules | 101 | `scanner/scanner_tools/` |
 | UI pages | 34 | `ui/src/app/` |
 | Skills | 8 | `skills/` |
 | Slash commands | 15 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
-| Durable tables | 71 | `db/init.sql` + migrations |
+| Durable tables | 72 | `db/init.sql` + migrations |
 
 ### Public REST Operations
 
@@ -1461,6 +1461,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `POST` | `/devices/{device_id}/credentials` | `create_device_credential` |
 | `DELETE` | `/devices/{device_id}/credentials/{profile_id}` | `deactivate_device_credential` |
 | `POST` | `/devices/{device_id}/credentials/{profile_id}/rotate` | `rotate_device_credential` |
+| `POST` | `/devices/{device_id}/credentials/{profile_id}/acknowledge-lockout` | `acknowledge_device_credential_lockout` |
 | `POST` | `/devices/{device_id}/scan` | `scan_device` |
 | `POST` | `/devices/{device_id}/verify-service` | `verify_device_service` |
 | `GET` | `/discovery` | `list_discovery_runs` |

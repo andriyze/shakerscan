@@ -46,7 +46,7 @@ export default function DeviceDetailPage() {
     try {
       const queued = await scanDevice(deviceId, {
         profile: scan.profile as 'inventory' | 'posture' | 'thorough',
-        safety_profile: scan.safety_profile as 'observe_only' | 'safe_remote',
+        safety_profile: scan.safety_profile as 'observe_only' | 'safe_remote' | 'authenticated_active',
         confirm_authorized: scan.confirm_authorized,
         include_web_dast: scan.include_web_dast,
         web_scan_type: scan.web_scan_type as 'quick' | 'standard' | 'deep',
@@ -162,7 +162,7 @@ export default function DeviceDetailPage() {
           {scan.safety_profile === 'authenticated_active' && <div className="grid gap-4 sm:grid-cols-2"><Field label="SSH credential"><Select value={scan.ssh_credential_profile_id} onChange={(event) => setScan({ ...scan, ssh_credential_profile_id: event.target.value })}><option value="">No SSH authentication</option>{credentials.filter((profile) => profile.auth_kind.startsWith('ssh_') && profile.execution_compatible).map((profile) => <option key={profile.id} value={profile.id}>{profile.name}{profile.port ? ` · ${profile.port}` : ''}</option>)}</Select></Field><Field label="Web credential"><Select value={scan.web_credential_profile_id} onChange={(event) => setScan({ ...scan, web_credential_profile_id: event.target.value })}><option value="">No web authentication</option>{credentials.filter((profile) => profile.auth_kind.startsWith('web_') && profile.execution_compatible).map((profile) => <option key={profile.id} value={profile.id}>{profile.name}{profile.port ? ` · ${profile.port}` : ''}</option>)}</Select></Field></div>}
           <label className="flex items-start gap-3 rounded-lg border border-gray-800 bg-gray-950 p-3 text-sm text-gray-300"><input type="checkbox" checked={scan.include_web_dast} disabled={scan.safety_profile === 'observe_only'} onChange={(event) => setScan({ ...scan, include_web_dast: event.target.checked })} className="mt-1" /><span><strong className="block text-white">Check web interfaces on every discovered port</strong>{scan.safety_profile === 'observe_only' ? 'Observe-only discovers origins without launching Web DAST children.' : 'Runs bounded passive Web DAST as hidden device-owned checks.'}</span></label>
           {scan.include_web_dast && <Field label="Web coverage"><Select value={scan.web_scan_type} onChange={(event) => setScan({ ...scan, web_scan_type: event.target.value })}><option value="quick">Quick</option><option value="standard">Standard</option><option value="deep">Deep passive</option></Select></Field>}
-          <label className="flex items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-sm text-amber-100"><input type="checkbox" checked={scan.confirm_authorized} onChange={(event) => setScan({ ...scan, confirm_authorized: event.target.checked })} className="mt-1" />I confirm I am authorized to scan this device and its listening services.</label>
+          <label className="flex items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-sm text-amber-100"><input type="checkbox" checked={scan.confirm_authorized} onChange={(event) => setScan({ ...scan, confirm_authorized: event.target.checked })} className="mt-1" />I confirm I am authorized to scan this device and its listening services{scan.ssh_credential_profile_id || scan.web_credential_profile_id ? ', and I authorize one bounded attempt with each selected credential' : ''}.</label>
         </div>
       </Modal>
 
@@ -175,7 +175,7 @@ export default function DeviceDetailPage() {
           {credentialForm.auth_kind === 'ssh_private_key' && <Field label="Key passphrase (optional)"><Input type="password" value={credentialForm.secondary_secret} onChange={(event) => setCredentialForm({ ...credentialForm, secondary_secret: event.target.value })} autoComplete="new-password" /></Field>}
           {credentialForm.auth_kind === 'web_form' && <Field label="Login path" hint="Relative to each discovered web origin."><Input value={credentialForm.login_path} onChange={(event) => setCredentialForm({ ...credentialForm, login_path: event.target.value })} placeholder="/login" /></Field>}
           <Field label="Limit to port (optional)"><Input type="number" min="1" max="65535" value={credentialForm.port} onChange={(event) => setCredentialForm({ ...credentialForm, port: event.target.value })} /></Field>
-          <p className="rounded border border-amber-500/20 bg-amber-500/5 p-3 text-xs text-amber-100">ShakerScan performs at most one supplied SSH authentication attempt per discovered SSH service. It never guesses passwords or keys. Web credentials apply only to bounded device-owned web children.</p>
+          <p className="rounded border border-amber-500/20 bg-amber-500/5 p-3 text-xs text-amber-100">ShakerScan performs at most one supplied SSH authentication attempt per credential profile and device scan, with cross-scan cooldown and daily limits. It never guesses passwords or keys. Web credentials apply only to bounded device-owned web children.</p>
         </div>
       </Modal>
 
