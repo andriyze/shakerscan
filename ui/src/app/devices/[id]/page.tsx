@@ -3,8 +3,8 @@
 import Link from 'next/link'
 import { useCallback, useEffect, useState } from 'react'
 import { useParams } from 'next/navigation'
-import { Bot, Globe, KeyRound, Router } from 'lucide-react'
-import { createDeviceCredential, deactivateDeviceCredential, formatDate, getDevice, getDeviceCredentials, scanDevice, type DeviceCredentialProfile, type DeviceDetailResponse } from '@/lib/api'
+import { Bot, Globe, KeyRound, MapPin, Router } from 'lucide-react'
+import { changeDeviceLocator, createDeviceCredential, deactivateDeviceCredential, formatDate, getDevice, getDeviceCredentials, scanDevice, type DeviceCredentialProfile, type DeviceDetailResponse } from '@/lib/api'
 import { Button, Card, EmptyState, ErrorState, Field, Input, Modal, PageHeader, ScanStatusBadge, Select, TableSkeleton, Textarea, useToast } from '@/components/ui'
 
 const policyBadgeClass: Record<string, string> = {
@@ -23,8 +23,11 @@ export default function DeviceDetailPage() {
   const [failed, setFailed] = useState(false)
   const [scanOpen, setScanOpen] = useState(false)
   const [credentialOpen, setCredentialOpen] = useState(false)
+  const [locatorOpen, setLocatorOpen] = useState(false)
   const [credentials, setCredentials] = useState<DeviceCredentialProfile[]>([])
   const [credentialSaving, setCredentialSaving] = useState(false)
+  const [locatorSaving, setLocatorSaving] = useState(false)
+  const [locatorForm, setLocatorForm] = useState({ locator: '', reason: '', confirm_same_device: false })
   const [credentialForm, setCredentialForm] = useState({ name: '', auth_kind: 'ssh_password', username: '', secret: '', secondary_secret: '', login_path: '/login', port: '' })
   const [scanning, setScanning] = useState(false)
   const [scan, setScan] = useState({ profile: 'inventory', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', ssh_credential_profile_id: '', web_credential_profile_id: '', confirm_authorized: false })
@@ -80,14 +83,31 @@ export default function DeviceDetailPage() {
     } finally { setCredentialSaving(false) }
   }
 
+  async function saveLocator() {
+    setLocatorSaving(true)
+    try {
+      const result = await changeDeviceLocator(deviceId, {
+        locator: locatorForm.locator.trim(),
+        reason: locatorForm.reason.trim() || undefined,
+        confirm_same_device: locatorForm.confirm_same_device,
+      })
+      setLocatorOpen(false)
+      setLocatorForm({ locator: '', reason: '', confirm_same_device: false })
+      toast.success(result.status === 'changed' ? 'Device address changed' : 'Device already uses this address')
+      await load()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to change device address')
+    } finally { setLocatorSaving(false) }
+  }
+
   if (loading) return <div className="mx-auto max-w-7xl"><TableSkeleton rows={6} /></div>
   if (failed || !data) return <div className="mx-auto max-w-7xl"><ErrorState message="Could not load connected device" onRetry={load} /></div>
-  const { device, interfaces, services, scans } = data
+  const { device, interfaces, services, scans, locator_history: locatorHistory } = data
   const observations = data.inconclusive_observations || []
 
   return (
     <div className="mx-auto max-w-7xl">
-      <PageHeader backHref="/devices" backLabel="Connected devices" title={device.name} description={device.primary_locator} icon={<Router className="h-6 w-6" />} actions={<><Link href={`/devices/${device.id}/agent`} className="inline-flex items-center gap-2 rounded-lg border border-violet-500/30 bg-violet-500/10 px-3 py-2 text-sm text-violet-200 hover:bg-violet-500/20"><Bot className="h-4 w-4" /> AI investigation</Link><Link href={`/findings?source_type=device&device_target_id=${device.id}`} className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-200 hover:bg-gray-700">View findings</Link><Button onClick={() => { setScan({ profile: 'inventory', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', ssh_credential_profile_id: '', web_credential_profile_id: '', confirm_authorized: false }); setScanOpen(true) }}>Scan device</Button></>} />
+      <PageHeader backHref="/devices" backLabel="Connected devices" title={device.name} description={device.primary_locator} icon={<Router className="h-6 w-6" />} actions={<><Button variant="secondary" onClick={() => { setLocatorForm({ locator: device.primary_locator, reason: '', confirm_same_device: false }); setLocatorOpen(true) }}><MapPin className="h-4 w-4" /> Change address</Button><Link href={`/devices/${device.id}/agent`} className="inline-flex items-center gap-2 rounded-lg border border-violet-500/30 bg-violet-500/10 px-3 py-2 text-sm text-violet-200 hover:bg-violet-500/20"><Bot className="h-4 w-4" /> AI investigation</Link><Link href={`/findings?source_type=device&device_target_id=${device.id}`} className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-200 hover:bg-gray-700">View findings</Link><Button onClick={() => { setScan({ profile: 'inventory', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', ssh_credential_profile_id: '', web_credential_profile_id: '', confirm_authorized: false }); setScanOpen(true) }}>Scan device</Button></>} />
 
       <div className="mb-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
         {[
@@ -130,7 +150,7 @@ export default function DeviceDetailPage() {
       </section>
 
       <div className="grid gap-6 lg:grid-cols-2">
-        <section><h2 className="mb-3 text-lg font-semibold text-white">Interfaces and identity</h2><Card className="p-4">{interfaces.length ? <div className="space-y-3">{interfaces.map((item) => <div key={item.id} className="flex items-start justify-between gap-3 border-b border-gray-800 pb-3 last:border-0 last:pb-0"><div><p className="font-mono text-sm text-white">{item.locator}</p><p className="text-xs text-gray-500">{item.hostname || item.locator_type}</p></div><div className="text-right text-xs text-gray-400"><p>{item.mac_address || 'No MAC observed'}</p><p>{item.network_zone || 'Zone not assigned'}</p></div></div>)}</div> : <p className="text-sm text-gray-500">No interfaces observed.</p>}</Card></section>
+        <section><h2 className="mb-3 text-lg font-semibold text-white">Interfaces and identity</h2><Card className="p-4"><div className="mb-4 border-b border-gray-800 pb-3"><p className="text-xs text-gray-500">Permanent device ID</p><p className="mt-1 break-all font-mono text-xs text-gray-300">{device.id}</p></div>{interfaces.length ? <div className="space-y-3">{interfaces.map((item) => <div key={item.id} className="flex items-start justify-between gap-3 border-b border-gray-800 pb-3 last:border-0 last:pb-0"><div><p className="font-mono text-sm text-white">{item.locator}{item.locator === device.primary_locator && <span className="ml-2 rounded bg-blue-500/15 px-1.5 py-0.5 text-[10px] text-blue-300">current</span>}</p><p className="text-xs text-gray-500">{item.hostname || item.locator_type}</p></div><div className="text-right text-xs text-gray-400"><p>{item.mac_address || 'No MAC observed'}</p><p>{item.network_zone || 'Zone not assigned'}</p></div></div>)}</div> : <p className="text-sm text-gray-500">No interfaces observed.</p>}</Card>{locatorHistory.length > 1 && <Card className="mt-3 p-4"><p className="mb-3 text-sm font-medium text-white">Address history</p><div className="space-y-2">{locatorHistory.slice(0, 8).map((entry) => <div key={entry.id} className="flex items-start justify-between gap-3 text-xs"><div><p className="font-mono text-gray-300">{entry.locator}</p><p className="text-gray-600">{entry.change_reason || entry.change_source}</p></div><p className="whitespace-nowrap text-gray-500">{formatDate(entry.changed_at)}</p></div>)}</div></Card>}</section>
         <section><h2 className="mb-3 text-lg font-semibold text-white">Recent device scans</h2><Card className="p-4">{scans.length ? <div className="space-y-3">{scans.slice(0, 8).map((item) => <Link key={item.id} href={`/scans/${item.id}`} className="flex items-center justify-between gap-3 border-b border-gray-800 pb-3 last:border-0 last:pb-0 hover:text-blue-300"><div><p className="text-sm text-white">{item.current_phase?.replace(/_/g, ' ') || item.scan_type}</p><p className="text-xs text-gray-500">{formatDate(item.created_at)}</p></div><ScanStatusBadge status={item.status} /></Link>)}</div> : <p className="text-sm text-gray-500">No scans yet.</p>}</Card></section>
       </div>
 
@@ -156,6 +176,15 @@ export default function DeviceDetailPage() {
           {credentialForm.auth_kind === 'web_form' && <Field label="Login path" hint="Relative to each discovered web origin."><Input value={credentialForm.login_path} onChange={(event) => setCredentialForm({ ...credentialForm, login_path: event.target.value })} placeholder="/login" /></Field>}
           <Field label="Limit to port (optional)"><Input type="number" min="1" max="65535" value={credentialForm.port} onChange={(event) => setCredentialForm({ ...credentialForm, port: event.target.value })} /></Field>
           <p className="rounded border border-amber-500/20 bg-amber-500/5 p-3 text-xs text-amber-100">ShakerScan performs at most one supplied SSH authentication attempt per discovered SSH service. It never guesses passwords or keys. Web credentials apply only to bounded device-owned web children.</p>
+        </div>
+      </Modal>
+
+      <Modal open={locatorOpen} title="Change device address" onClose={() => setLocatorOpen(false)} footer={<><Button variant="secondary" onClick={() => setLocatorOpen(false)}>Cancel</Button><Button loading={locatorSaving} disabled={!locatorForm.locator.trim() || !locatorForm.confirm_same_device} onClick={saveLocator}>Save address</Button></>}>
+        <div className="space-y-4">
+          <p className="text-sm text-gray-400">The permanent device ID, scan history, findings, policies, and credentials will stay unchanged. Future scans will use the new address.</p>
+          <Field label="Current IP address or hostname" required hint="Enter one address only; URLs and network ranges are not accepted."><Input value={locatorForm.locator} onChange={(event) => setLocatorForm({ ...locatorForm, locator: event.target.value })} placeholder="192.168.1.45 or tv.lan" /></Field>
+          <Field label="Reason (optional)"><Input value={locatorForm.reason} onChange={(event) => setLocatorForm({ ...locatorForm, reason: event.target.value })} placeholder="DHCP assigned a new address" /></Field>
+          <label className="flex items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-sm text-amber-100"><input type="checkbox" checked={locatorForm.confirm_same_device} onChange={(event) => setLocatorForm({ ...locatorForm, confirm_same_device: event.target.checked })} className="mt-1" /><span>I verified that this address belongs to the same physical device. ShakerScan will not automatically trust an IP that may have been reassigned to something else.</span></label>
         </div>
       </Modal>
     </div>

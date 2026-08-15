@@ -2489,6 +2489,39 @@ async def run_schema_migrations(pool) -> None:
                 )
             """)
             await conn.execute("""
+                CREATE TABLE IF NOT EXISTS device_locator_history (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    device_target_id UUID NOT NULL REFERENCES device_targets(id) ON DELETE CASCADE,
+                    previous_locator TEXT,
+                    locator TEXT NOT NULL,
+                    locator_type TEXT NOT NULL,
+                    change_reason TEXT,
+                    change_source TEXT NOT NULL DEFAULT 'operator',
+                    changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_device_locator_history_device
+                ON device_locator_history(device_target_id, changed_at DESC)
+            """)
+            await conn.execute("""
+                INSERT INTO device_locator_history (
+                    device_target_id, previous_locator, locator, locator_type,
+                    change_reason, change_source
+                )
+                SELECT d.id, NULL, d.primary_locator,
+                       CASE
+                           WHEN d.primary_locator ~ '^([0-9]{1,3}\\.){3}[0-9]{1,3}$'
+                                OR d.primary_locator LIKE '%:%' THEN 'ip'
+                           ELSE 'hostname'
+                       END,
+                       'Initial registered locator', 'migration'
+                FROM device_targets d
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM device_locator_history h WHERE h.device_target_id=d.id
+                )
+            """)
+            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS device_credential_profiles (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     device_target_id UUID NOT NULL REFERENCES device_targets(id) ON DELETE CASCADE,

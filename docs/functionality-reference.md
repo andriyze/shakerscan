@@ -558,6 +558,14 @@ UDP port, checks health before and after, and returns a typed `satisfied`, `refu
 `inconclusive` invariant. Filtered, silent, malformed, timed-out, or missing-port output is never
 accepted as proof that a service is absent. Probe rows remain separate from Web DAST targets,
 findings, scores, device inventory, and ordinary DAST metrics.
+
+Each connected device has an immutable UUID and a mutable current locator. Operators can use
+`POST /devices/{device_id}/locator` or the device detail page's **Change address** action after a
+DHCP change; the API requires same-device confirmation, rejects changes during active device
+traffic or an AI investigation, and appends the transition to `device_locator_history`. Existing
+policies, credentials, findings, scans, and agent memory remain bound to the device UUID, while each
+scan keeps the exact locator used at submission.
+
 Core protocol adapters send bounded exact-target unicast SSDP and mDNS discovery probes, normalize
 UPnP and DNS-SD metadata, refuse to follow cross-host descriptor locations, and promote UDP
 `open|filtered` state only after a valid application response.
@@ -1447,6 +1455,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `DELETE` | `/devices/{device_id}` | `deactivate_device` |
 | `GET` | `/devices/{device_id}` | `get_device` |
 | `PATCH` | `/devices/{device_id}` | `update_device` |
+| `POST` | `/devices/{device_id}/locator` | `change_device_locator` |
 | `POST` | `/devices/{device_id}/agent/session` | `start_device_agent_session` |
 | `GET` | `/devices/{device_id}/credentials` | `list_device_credentials` |
 | `POST` | `/devices/{device_id}/credentials` | `create_device_credential` |
@@ -2425,6 +2434,7 @@ orchestrator.
 | `device_agent_runs` | `db/init.sql` |
 | `device_credential_profiles` | `db/init.sql` |
 | `device_interfaces` | `db/init.sql` |
+| `device_locator_history` | `db/init.sql` |
 | `device_policies` | `db/init.sql` |
 | `device_services` | `db/init.sql` |
 | `device_targets` | `db/init.sql` |

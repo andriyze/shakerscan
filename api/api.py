@@ -4117,6 +4117,12 @@ class DeviceTargetUpdate(BaseModel):
     is_active: Optional[bool] = None
 
 
+class DeviceLocatorChangeRequest(BaseModel):
+    locator: str
+    reason: Optional[str] = Field(default=None, max_length=500)
+    confirm_same_device: bool = False
+
+
 class DevicePolicyCreate(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     description: Optional[str] = Field(default=None, max_length=1000)
@@ -18189,6 +18195,76 @@ def _device_locator_type(locator: str) -> str:
         return "hostname"
 
 
+async def _change_device_primary_locator(
+    conn: Any,
+    device_uuid: uuid.UUID,
+    locator: str,
+    *,
+    reason: str | None,
+    source: str,
+) -> tuple[Any, Any | None]:
+    """Change a device's current address without changing its durable identity."""
+    current = await conn.fetchrow(
+        "SELECT * FROM device_targets WHERE id=$1 FOR UPDATE",
+        device_uuid,
+    )
+    if not current:
+        raise HTTPException(status_code=404, detail="Connected device not found")
+    previous = str(current["primary_locator"])
+    if previous == locator:
+        return current, None
+    if await conn.fetchval(
+        """SELECT 1 FROM scans
+           WHERE device_target_id=$1
+             AND run_kind IN ('device_posture','device_probe')
+             AND status IN ('pending','queued','running') LIMIT 1""",
+        device_uuid,
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Wait for the active connected-device scan or probe to finish before changing its address",
+        )
+    if await conn.fetchval(
+        """SELECT 1 FROM device_agent_runs
+           WHERE device_target_id=$1 AND status IN ('awaiting_planner','planning') LIMIT 1""",
+        device_uuid,
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Finish or cancel the active AI device investigation before changing its address",
+        )
+    await conn.execute(
+        "UPDATE device_targets SET primary_locator=$1, updated_at=NOW() WHERE id=$2",
+        locator,
+        device_uuid,
+    )
+    await conn.execute(
+        """INSERT INTO device_interfaces (
+               device_target_id, interface_type, locator_type, locator, metadata_json
+           ) VALUES ($1,'network',$2,$3,$4)
+           ON CONFLICT (device_target_id, interface_type, locator_type, locator) DO UPDATE SET
+               metadata_json=device_interfaces.metadata_json || EXCLUDED.metadata_json""",
+        device_uuid,
+        _device_locator_type(locator),
+        locator,
+        json.dumps({"configured": True, "change_source": source}),
+    )
+    history = await conn.fetchrow(
+        """INSERT INTO device_locator_history (
+               device_target_id, previous_locator, locator, locator_type,
+               change_reason, change_source
+           ) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *""",
+        device_uuid,
+        previous,
+        locator,
+        _device_locator_type(locator),
+        (reason or "Address updated").strip()[:500],
+        source,
+    )
+    updated = await conn.fetchrow("SELECT * FROM device_targets WHERE id=$1", device_uuid)
+    return updated, history
+
+
 def _public_device_credential_profile(row: Any) -> dict[str, Any]:
     payload = _decode_device_row(row)
     stored_secret = str(payload.pop("secret_value", "") or "")
@@ -18433,6 +18509,13 @@ async def create_device(request: DeviceTargetCreate):
                VALUES ($1,'network',$2,$3) ON CONFLICT DO NOTHING""",
             row["id"], _device_locator_type(locator), locator,
         )
+        await conn.execute(
+            """INSERT INTO device_locator_history (
+                   device_target_id, previous_locator, locator, locator_type,
+                   change_reason, change_source
+               ) VALUES ($1,NULL,$2,$3,'Initial registered locator','registration')""",
+            row["id"], locator, _device_locator_type(locator),
+        )
     return {"device": _decode_device_row(row)}
 
 
@@ -18547,6 +18630,11 @@ async def get_device(
         if not row:
             raise HTTPException(status_code=404, detail="Connected device not found")
         interfaces = await conn.fetch("SELECT * FROM device_interfaces WHERE device_target_id=$1 ORDER BY last_seen_at DESC", device_uuid)
+        locator_history = await conn.fetch(
+            """SELECT * FROM device_locator_history
+               WHERE device_target_id=$1 ORDER BY changed_at DESC, id DESC LIMIT 50""",
+            device_uuid,
+        )
         services = await conn.fetch(
             """SELECT * FROM device_services
                WHERE device_target_id=$1 AND state='open'
@@ -18577,6 +18665,7 @@ async def get_device(
     return {
         "device": _decode_device_row(row),
         "interfaces": [_decode_device_row(item) for item in interfaces],
+        "locator_history": [_decode_device_row(item) for item in locator_history],
         "services": [_decode_device_row(item) for item in services],
         "services_total": int(services_total or 0),
         "inconclusive_observations": [_decode_device_row(item) for item in observations],
@@ -18591,9 +18680,10 @@ async def get_device(
 async def update_device(device_id: str, request: DeviceTargetUpdate):
     device_uuid = _device_uuid(device_id)
     payload = request.model_dump(exclude_unset=True)
-    if "primary_locator" in payload and payload["primary_locator"] is not None:
+    requested_locator = payload.pop("primary_locator", None) if "primary_locator" in payload else None
+    if requested_locator is not None:
         try:
-            payload["primary_locator"] = normalize_device_locator(payload["primary_locator"])
+            requested_locator = normalize_device_locator(requested_locator)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
     if "policy_id" in payload:
@@ -18610,19 +18700,60 @@ async def update_device(device_id: str, request: DeviceTargetUpdate):
     }
     payload = {key: value for key, value in payload.items() if key in allowed}
     async with db_pool.acquire() as conn:
-        if not await conn.fetchval("SELECT 1 FROM device_targets WHERE id=$1", device_uuid):
-            raise HTTPException(status_code=404, detail="Connected device not found")
-        if payload.get("policy_id") and not await conn.fetchval("SELECT 1 FROM device_policies WHERE id=$1 AND is_active=true", payload["policy_id"]):
-            raise HTTPException(status_code=422, detail="policy_id must reference an active device policy")
-        if payload:
-            values = list(payload.values()) + [device_uuid]
-            assignments = [f"{key}=${idx}" for idx, key in enumerate(payload, 1)]
+        async with conn.transaction():
+            if not await conn.fetchval("SELECT 1 FROM device_targets WHERE id=$1", device_uuid):
+                raise HTTPException(status_code=404, detail="Connected device not found")
+            if payload.get("policy_id") and not await conn.fetchval("SELECT 1 FROM device_policies WHERE id=$1 AND is_active=true", payload["policy_id"]):
+                raise HTTPException(status_code=422, detail="policy_id must reference an active device policy")
             try:
-                await conn.execute(f"UPDATE device_targets SET {', '.join(assignments)}, updated_at=NOW() WHERE id=${len(values)}", *values)
+                if requested_locator is not None:
+                    await _change_device_primary_locator(
+                        conn,
+                        device_uuid,
+                        requested_locator,
+                        reason="Address changed through device update",
+                        source="device_patch",
+                    )
+                if payload:
+                    values = list(payload.values()) + [device_uuid]
+                    assignments = [f"{key}=${idx}" for idx, key in enumerate(payload, 1)]
+                    await conn.execute(f"UPDATE device_targets SET {', '.join(assignments)}, updated_at=NOW() WHERE id=${len(values)}", *values)
             except asyncpg.UniqueViolationError as exc:
                 raise HTTPException(status_code=409, detail="A connected device already uses this locator") from exc
-        row = await conn.fetchrow("SELECT * FROM device_targets WHERE id=$1", device_uuid)
+            row = await conn.fetchrow("SELECT * FROM device_targets WHERE id=$1", device_uuid)
     return {"device": _decode_device_row(row)}
+
+
+@app.post("/devices/{device_id}/locator")
+async def change_device_locator(device_id: str, request: DeviceLocatorChangeRequest):
+    """Move one durable device identity to a new current IP address or hostname."""
+    if not request.confirm_same_device:
+        raise HTTPException(
+            status_code=409,
+            detail="Confirm that the new address belongs to this same physical device",
+        )
+    try:
+        locator = normalize_device_locator(request.locator)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    device_uuid = _device_uuid(device_id)
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            try:
+                row, history = await _change_device_primary_locator(
+                    conn,
+                    device_uuid,
+                    locator,
+                    reason=request.reason,
+                    source="operator",
+                )
+            except asyncpg.UniqueViolationError as exc:
+                raise HTTPException(status_code=409, detail="A connected device already uses this locator") from exc
+    return {
+        "status": "unchanged" if history is None else "changed",
+        "device": _decode_device_row(row),
+        "change": _decode_device_row(history) if history else None,
+    }
 
 
 @app.delete("/devices/{device_id}")

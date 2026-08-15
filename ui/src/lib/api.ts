@@ -1352,6 +1352,17 @@ export interface DeviceInterface {
   last_seen_at: string
 }
 
+export interface DeviceLocatorHistory {
+  id: string
+  device_target_id: string
+  previous_locator?: string | null
+  locator: string
+  locator_type: string
+  change_reason?: string | null
+  change_source: string
+  changed_at: string
+}
+
 export interface DeviceService {
   id: string
   transport: string
@@ -1389,6 +1400,7 @@ export interface DeviceCredentialProfile {
 export interface DeviceDetailResponse {
   device: DeviceTarget
   interfaces: DeviceInterface[]
+  locator_history: DeviceLocatorHistory[]
   services: DeviceService[]
   services_total?: number
   inconclusive_observations?: DeviceService[]
@@ -5064,6 +5076,20 @@ export async function getDevices(params?: {
 export async function getDevice(deviceId: string): Promise<DeviceDetailResponse> {
   const res = await fetch(`${API_URL}/devices/${encodeURIComponent(deviceId)}`, { cache: 'no-store' })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch connected device'))
+  return res.json()
+}
+
+export async function changeDeviceLocator(deviceId: string, payload: {
+  locator: string
+  reason?: string
+  confirm_same_device: boolean
+}): Promise<{ status: 'changed' | 'unchanged'; device: DeviceTarget; change?: DeviceLocatorHistory | null }> {
+  const res = await fetch(`${API_URL}/devices/${encodeURIComponent(deviceId)}/locator`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to change device address'))
   return res.json()
 }
 

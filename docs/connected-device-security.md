@@ -11,7 +11,9 @@ with `./scanner.sh devices stop`.
 ## Product boundary
 
 - Devices live in `device_targets`; their interfaces and observed services live in
-  `device_interfaces` and `device_services`.
+  `device_interfaces` and `device_services`. The `device_targets.id` UUID is the durable identity;
+  its current IP address or hostname is mutable and every change is retained in
+  `device_locator_history`.
 - Device scans use `run_kind=device_posture` and a dedicated Redis queue and worker.
 - Web interfaces discovered on any TCP port are checked by hidden `device_web_dast` children. Those
   children have no Web target, cannot alter Web target or ASM statistics, and do not appear in the
@@ -41,8 +43,8 @@ recorded safety profiles are:
   inventoried but no Web DAST children are launched.
 - `safe_remote`: bounded non-destructive network checks and passive device-owned Web DAST. This is
   the default and preserves the original connected-device behavior.
-- `authenticated_active`: reserved for the supplied-credential, read-only host collector and later
-  bounded active checks. It currently fails closed as unavailable.
+- `authenticated_active`: supplied-credential, read-only SSH and web checks with device-bound,
+  encrypted credential profiles. It never guesses credentials.
 - `lab_invasive`: reserved for a dedicated recovery-capable lab runner. It currently fails closed as
   unavailable and cannot be enabled by choosing a deeper coverage profile.
 
@@ -135,6 +137,15 @@ curl -X POST http://localhost:8080/devices \
   -H 'Content-Type: application/json' \
   -d '{"name":"Lobby display","primary_locator":"tv.example.lan","device_class":"media"}'
 
+# Keep the same permanent device after DHCP changes its address
+curl -X POST http://localhost:8080/devices/DEVICE_ID/locator \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "locator":"192.168.1.45",
+    "reason":"DHCP assigned a new address",
+    "confirm_same_device":true
+  }'
+
 # Queue an authorized full TCP posture scan with passive web handoff
 curl -X POST http://localhost:8080/devices/DEVICE_ID/scan \
   -H 'Content-Type: application/json' \
@@ -149,7 +160,22 @@ curl -X POST http://localhost:8080/devices/DEVICE_ID/scan \
 
 Policy management is available at `GET/POST /device-policies` and
 `PATCH /device-policies/{policy_id}`. Device inventory is available at `GET/POST /devices`,
-`GET/PATCH/DELETE /devices/{device_id}`, and `GET /device-scans`.
+`GET/PATCH/DELETE /devices/{device_id}`, `POST /devices/{device_id}/locator`, and
+`GET /device-scans`.
+
+## Stable identity and changing addresses
+
+A TV or other DHCP client can keep the same ShakerScan device ID while its IP address changes. The
+device detail page's **Change address** action updates only the current locator. Policies,
+credentials, findings, services, scans, agent memory, and history remain attached to the permanent
+device UUID. Completed and queued scan records retain the exact locator they used.
+
+The operator must confirm that the replacement locator belongs to the same physical device. This is
+deliberately not inferred from IP reuse: DHCP can give an old address to a different host. Address
+changes are blocked while a posture scan, service probe, or AI investigation is active, preventing
+an in-flight operation from switching hosts. Prefer a stable local DNS/mDNS name where it is
+reliable; automatic MAC- or sensor-assisted relocation can be added later only with verified
+identity evidence.
 
 ## AI-directed device investigation
 

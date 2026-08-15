@@ -61,6 +61,40 @@ def test_bootstrap_schema_contains_device_agent_runs():
     assert "idx_scans_one_active_device_traffic" in init_sql
 
 
+def test_device_locator_changes_preserve_identity_and_history():
+    api = (ROOT / "api" / "api.py").read_text()
+    schema = (ROOT / "db" / "init.sql").read_text()
+    migration = (ROOT / "api" / "retest_contract.py").read_text()
+    endpoint = api[api.index('@app.post("/devices/{device_id}/locator")'):]
+    endpoint = endpoint[:endpoint.index('@app.delete("/devices/{device_id}")')]
+    helper = api[api.index("async def _change_device_primary_locator"):]
+    helper = helper[:helper.index("def _public_device_credential_profile")]
+
+    assert "CREATE TABLE device_locator_history" in schema
+    assert "CREATE TABLE IF NOT EXISTS device_locator_history" in migration
+    assert "device_target_id UUID NOT NULL REFERENCES device_targets(id) ON DELETE CASCADE" in schema
+    assert "UPDATE device_targets SET primary_locator" in helper
+    assert "INSERT INTO device_locator_history" in helper
+    assert "confirm_same_device" in endpoint
+    assert "active connected-device scan or probe" in helper
+    assert "active AI device investigation" in helper
+    assert "INSERT INTO device_targets" not in endpoint
+
+
+def test_device_detail_exposes_current_locator_and_bounded_history():
+    api = (ROOT / "api" / "api.py").read_text()
+    detail = api[api.index('@app.get("/devices/{device_id}")'):]
+    detail = detail[:detail.index('@app.patch("/devices/{device_id}")')]
+    ui = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "page.tsx").read_text()
+
+    assert "device_locator_history" in detail
+    assert "LIMIT 50" in detail
+    assert '"locator_history"' in detail
+    assert "Permanent device ID" in ui
+    assert "Change address" in ui
+    assert "same physical device" in ui
+
+
 def test_device_findings_use_atomic_conflict_upsert():
     source = (ROOT / "api" / "worker.py").read_text()
     function = source[source.index("async def save_device_findings"):]

@@ -349,6 +349,27 @@ CREATE TABLE device_interfaces (
     CONSTRAINT device_interfaces_locator_unique UNIQUE (device_target_id, interface_type, locator_type, locator)
 );
 
+CREATE TABLE device_locator_history (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    device_target_id UUID NOT NULL REFERENCES device_targets(id) ON DELETE CASCADE,
+    previous_locator TEXT,
+    locator TEXT NOT NULL,
+    locator_type TEXT NOT NULL,
+    change_reason TEXT,
+    change_source TEXT NOT NULL DEFAULT 'operator',
+    changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_device_locator_history_device
+ON device_locator_history(device_target_id, changed_at DESC);
+
+INSERT INTO device_locator_history (
+    device_target_id, previous_locator, locator, locator_type, change_reason, change_source
+)
+SELECT id, NULL, primary_locator,
+       CASE WHEN primary_locator ~ '^([0-9]{1,3}\.){3}[0-9]{1,3}$' OR primary_locator LIKE '%:%' THEN 'ip' ELSE 'hostname' END,
+       'Initial registered locator', 'registration'
+FROM device_targets;
+
 CREATE TABLE device_credential_profiles (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     device_target_id UUID NOT NULL REFERENCES device_targets(id) ON DELETE CASCADE,
