@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import hashlib
 
 import pytest
 
@@ -86,9 +87,14 @@ def test_device_agent_local_intel_has_no_runtime_egress(tmp_path, monkeypatch):
         "severity": "high",
     }]}))
     monkeypatch.setenv("DEVICE_INTEL_DB_PATH", str(store))
+    monkeypatch.setenv("DEVICE_INTEL_DB_SHA256", hashlib.sha256(store.read_bytes()).hexdigest())
     result = device_agent.resolve_local_intel(cpe="cpe:/o:vendor:device:1.0", product=None, version=None)
     assert result["runtime_egress"] is False
     assert result["candidates"][0]["advisory_id"] == "CVE-TEST-0001"
+    monkeypatch.setenv("DEVICE_INTEL_DB_SHA256", "0" * 64)
+    rejected = device_agent.resolve_local_intel(cpe="cpe:/o:vendor:device:1.0", product=None, version=None)
+    assert rejected["status"] == "integrity_mismatch"
+    assert rejected["candidates"] == []
 
 
 def test_protocol_playbook_never_infers_unknown_service_from_port_alone():

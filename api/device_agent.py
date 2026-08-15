@@ -9,7 +9,9 @@ device scans remain the source of findings and evidence.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +39,7 @@ MAX_ACTIONS_PER_SESSION = 36
 MAX_SCANS_PER_SESSION = 3
 MAX_FRAGILITY_PER_SESSION = 40
 MAX_FRAGILITY_PER_DEVICE_DAY = 80
+MAX_LOCAL_INTEL_BYTES = 32 * 1024 * 1024
 
 TOOL_TIERS = {
     "inspect_device": 0,
@@ -119,14 +122,45 @@ def lookup_protocol_playbook(service_name: str, port: int | None = None) -> dict
 
 
 def resolve_local_intel(*, cpe: str | None, product: str | None, version: str | None) -> dict[str, Any]:
-    """Search an optional operator-pinned local advisory JSON store; never uses runtime egress."""
+    """Search a hash-pinned local advisory JSON snapshot; never uses runtime egress."""
     path = str(os.environ.get("DEVICE_INTEL_DB_PATH") or "").strip()
+    expected_sha256 = str(os.environ.get("DEVICE_INTEL_DB_SHA256") or "").strip().lower()
     query = {"cpe": str(cpe or "")[:500], "product": str(product or "")[:300], "version": str(version or "")[:200]}
     if not path:
         return {"status": "not_configured", "query": query, "candidates": [], "runtime_egress": False}
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+        return {
+            "status": "untrusted_snapshot",
+            "query": query,
+            "candidates": [],
+            "error": "DEVICE_INTEL_DB_SHA256 is required",
+            "runtime_egress": False,
+        }
     try:
-        raw = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
+        snapshot_path = Path(path)
+        size_bytes = snapshot_path.stat().st_size
+        if size_bytes > MAX_LOCAL_INTEL_BYTES:
+            return {
+                "status": "snapshot_too_large",
+                "query": query,
+                "candidates": [],
+                "size_bytes": size_bytes,
+                "max_bytes": MAX_LOCAL_INTEL_BYTES,
+                "runtime_egress": False,
+            }
+        content = snapshot_path.read_bytes()
+        actual_sha256 = hashlib.sha256(content).hexdigest()
+        if actual_sha256 != expected_sha256:
+            return {
+                "status": "integrity_mismatch",
+                "query": query,
+                "candidates": [],
+                "expected_sha256": expected_sha256,
+                "actual_sha256": actual_sha256,
+                "runtime_egress": False,
+            }
+        raw = json.loads(content.decode("utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
         return {"status": "unavailable", "query": query, "candidates": [], "error": type(exc).__name__, "runtime_egress": False}
     records = raw if isinstance(raw, list) else raw.get("advisories", []) if isinstance(raw, dict) else []
     candidates = []
@@ -150,7 +184,13 @@ def resolve_local_intel(*, cpe: str | None, product: str | None, version: str | 
         })
         if len(candidates) >= 50:
             break
-    return {"status": "available", "query": query, "candidates": candidates, "runtime_egress": False}
+    return {
+        "status": "available",
+        "query": query,
+        "candidates": candidates,
+        "snapshot_sha256": expected_sha256,
+        "runtime_egress": False,
+    }
 
 
 def tool_schemas() -> list[dict[str, Any]]:

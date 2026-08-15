@@ -544,7 +544,7 @@ dedicated runner is ready. Device reports carry `device-safety/v1` receipts plus
 stable `device-evidence/v1` node/edge/observation graph. The keyless device investigator uses
 `POST /devices/{device_id}/agent/session` and `/device-agent/session/*` to let the current coding
 agent inspect device state, compare scans, recall prior hypotheses, query effective policy, use
-offline advisory candidates and protocol playbooks, queue bounded deterministic scans, and query
+size-capped SHA-256-pinned offline advisory candidates and protocol playbooks, queue bounded deterministic scans, and query
 normalized evidence. Its context pack treats network data as untrusted, its target and safety profile
 are immutable, and its tool/turn/scan/daily-device/fragility budgets are server-enforced and recorded
 in a durable action ledger. A health circuit breaker freezes new traffic while leaving read-only
