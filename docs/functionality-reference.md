@@ -1329,8 +1329,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 317 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 266 | `api/api.py` |
+| Public REST operations | 329 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 277 | `api/api.py` |
 | Check families | 14 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 13 | `api/command_arsenal.py` |
@@ -1339,13 +1339,13 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Scanner wrapper commands | 28 | `scanner.sh` |
 | Make targets | 13 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
-| Runtime environment keys | 333 | Python sources + Compose manifests |
-| Scanner modules | 101 | `scanner/scanner_tools/` |
-| UI pages | 34 | `ui/src/app/` |
+| Runtime environment keys | 339 | Python sources + Compose manifests |
+| Scanner modules | 105 | `scanner/scanner_tools/` |
+| UI pages | 35 | `ui/src/app/` |
 | Skills | 8 | `skills/` |
 | Slash commands | 15 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
-| Durable tables | 72 | `db/init.sql` + migrations |
+| Durable tables | 76 | `db/init.sql` + migrations |
 
 ### Public REST Operations
 
@@ -1442,26 +1442,27 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `GET` | `/artifacts/storage/health` | `get_artifact_storage_health` |
 | `GET` | `/asm/check-families` | `asm_check_families` |
 | `GET` | `/dashboard` | `dashboard` |
+| `GET` | `/device-agent/runs` | `list_device_agent_runs` |
+| `GET` | `/device-agent/session/{run_id}` | `get_device_agent_session` |
+| `POST` | `/device-agent/session/{run_id}/cancel` | `cancel_device_agent_session` |
+| `POST` | `/device-agent/session/{run_id}/reply` | `submit_device_agent_reply` |
 | `GET` | `/device-policies` | `list_device_policies` |
 | `POST` | `/device-policies` | `create_device_policy` |
 | `PATCH` | `/device-policies/{policy_id}` | `update_device_policy` |
 | `GET` | `/device-scans` | `list_device_scans` |
-| `GET` | `/device-agent/session/{run_id}` | `get_device_agent_session` |
-| `POST` | `/device-agent/session/{run_id}/cancel` | `cancel_device_agent_session` |
-| `POST` | `/device-agent/session/{run_id}/reply` | `submit_device_agent_reply` |
 | `GET` | `/devices` | `list_devices` |
 | `POST` | `/devices` | `create_device` |
 | `GET` | `/devices/readiness` | `get_device_readiness` |
 | `DELETE` | `/devices/{device_id}` | `deactivate_device` |
 | `GET` | `/devices/{device_id}` | `get_device` |
 | `PATCH` | `/devices/{device_id}` | `update_device` |
-| `POST` | `/devices/{device_id}/locator` | `change_device_locator` |
 | `POST` | `/devices/{device_id}/agent/session` | `start_device_agent_session` |
 | `GET` | `/devices/{device_id}/credentials` | `list_device_credentials` |
 | `POST` | `/devices/{device_id}/credentials` | `create_device_credential` |
 | `DELETE` | `/devices/{device_id}/credentials/{profile_id}` | `deactivate_device_credential` |
-| `POST` | `/devices/{device_id}/credentials/{profile_id}/rotate` | `rotate_device_credential` |
 | `POST` | `/devices/{device_id}/credentials/{profile_id}/acknowledge-lockout` | `acknowledge_device_credential_lockout` |
+| `POST` | `/devices/{device_id}/credentials/{profile_id}/rotate` | `rotate_device_credential` |
+| `POST` | `/devices/{device_id}/locator` | `change_device_locator` |
 | `POST` | `/devices/{device_id}/scan` | `scan_device` |
 | `POST` | `/devices/{device_id}/verify-service` | `verify_device_service` |
 | `GET` | `/discovery` | `list_discovery_runs` |
@@ -2069,10 +2070,14 @@ Only key names and declaring sources are documented; secret values are never rea
 | `DATABASE_URL` | `api/api.py`, `api/gungnir_worker.py`, `api/model_intake_signer_service.py`, `api/worker.py`, `scanner/gungnir_worker.py`, `scripts/model_intake_workflow_smoke.py`, `scripts/upgrade_schema_smoke.py` |
 | `DEFAULT_ASM_ENABLED` | `api/api.py` |
 | `DEFAULT_RESEARCH_PLANNER_MODE` | `api/api.py` |
+| `DEVICE_INTEL_DB_PATH` | `api/device_agent.py` |
+| `DEVICE_INTEL_DB_SHA256` | `api/device_agent.py` |
 | `DEVICE_ONLY_WORKER` | `api/worker.py` |
-| `DEVICE_POSTURE_ENABLED` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `DEVICE_POSTURE_ENABLED` | `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `DEVICE_QUEUE_NAME` | `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `DEVICE_SCAN_WORKER_ENABLED` | `api/worker.py` |
+| `DEVICE_SSH_AUTH_COOLDOWN_SECONDS` | `api/worker.py` |
+| `DEVICE_SSH_AUTH_DAILY_FAILURE_CAP` | `api/worker.py` |
 | `DOMAIN_RATE_REQUEUE_DELAY_SECONDS` | `api/worker.py` |
 | `ENV` | `scanner/scanner_tools/remediation_kb.py` |
 | `EVIDENCE_INLINE_MAX_BYTES` | `api/evidence_storage.py` |
@@ -2262,6 +2267,8 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_BROKER_MAX_ACTIVE_SCANS` | `api/api.py` |
 | `SHAKERSCAN_BROKER_MAX_ARTIFACT_BYTES` | `api/api.py` |
 | `SHAKERSCAN_BROKER_MAX_RESULT_BYTES` | `api/api.py` |
+| `SHAKERSCAN_BUILD_NETWORK` | `docker-compose.yml` |
+| `SHAKERSCAN_CALIBRATION_IMPORT_ROOT` | `scripts/device_posture_calibration.py` |
 | `SHAKERSCAN_CANCEL_FILE` | `scanner/scanner_tools/cancellation.py`, `scanner/scanner_tools/common.py` |
 | `SHAKERSCAN_COMPOSE_PROJECT` | `api/api.py` |
 | `SHAKERSCAN_CORS_ALLOW_ORIGINS` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
@@ -2337,8 +2344,8 @@ Only key names and declaring sources are documented; secret values are never rea
 | `/deep-hunt/operator` | `ui/src/app/deep-hunt/operator/page.tsx` |
 | `/deep-hunt` | `ui/src/app/deep-hunt/page.tsx` |
 | `/deep-hunt/runs/{id}` | `ui/src/app/deep-hunt/runs/[id]/page.tsx` |
-| `/devices/{id}` | `ui/src/app/devices/[id]/page.tsx` |
 | `/devices/{id}/agent` | `ui/src/app/devices/[id]/agent/page.tsx` |
+| `/devices/{id}` | `ui/src/app/devices/[id]/page.tsx` |
 | `/devices` | `ui/src/app/devices/page.tsx` |
 | `/devices/policies` | `ui/src/app/devices/policies/page.tsx` |
 | `/docs` | `ui/src/app/docs/page.tsx` |
@@ -2369,8 +2376,8 @@ Only key names and declaring sources are documented; secret values are never rea
 |---|---|---|
 | `ai-security-session` | Interactive Testing through ShakerScan's `/session` API. Use when asked to test manually, open an interactive browser session, exercise authentication workflows, or perform BOLA/IDOR endpoint replay. | `skills/ai-security-session/SKILL.md` |
 | `content-discovery` | Build target-specific content discovery seeds, path lists, and ShakerScan scan inputs from scan results, JS analysis, framework clues, and exposed docs. Use when asked for content discovery, wordlist generation, ffuf seeds, admin path discovery, hidden file discovery, route discovery, or custom endpoint seeding. | `skills/content-discovery/SKILL.md` |
-| `device-hunt` | Direct a bounded AI investigation of one registered and authorized connected device; deterministic scans and typed verifiers remain authoritative. | `skills/device-hunt/SKILL.md` |
-| `device-triage` | Explain, compare, and triage existing connected-device evidence without sending new traffic. | `skills/device-triage/SKILL.md` |
+| `device-hunt` | Direct a bounded AI investigation of one registered connected device through the device-agent API. Use for requests such as investigate, hunt, or autonomously assess a TV, camera, printer, router, NAS, appliance, or other connected device. Do not use for ordinary Web DAST, read-only explanation without new traffic, or fleet-wide campaigns. | `skills/device-hunt/SKILL.md` |
+| `device-triage` | Explain or triage one registered connected device using existing ShakerScan evidence only. Use for requests such as explain this device, compare its scans, assess whether a device finding is credible, review policy decisions, or summarize device drift when the user has not authorized new device traffic. Do not queue scans or probes. | `skills/device-triage/SKILL.md` |
 | `js-analyze` | Analyze JavaScript bundles, frontend routes, browser-captured APIs, libraries, and secrets for a ShakerScan target or completed scan. Use when asked for JS analysis, route analysis, frontend endpoint discovery, library review, source-map hints, or to build `custom_endpoints` for a ShakerScan scan. | `skills/js-analyze/SKILL.md` |
 | `research-agent` | Run ShakerScan Deep Hunt—the current coding agent performs free-form, AI-driven exploration and bounded active exploitation through /agent/hunt/* while ShakerScan enforces target scope, approvals, budgets, evidence provenance, and deterministic finding verification. Use for “deep hunt”, “autonomous hunt”, or “investigate autonomously”; do not use for ordinary DAST scans. | `skills/research-agent/SKILL.md` |
 | `review-skills` | Review ShakerScan skills, commands, and subagents for broken references, invalid Claude Code configuration, prompt anti-patterns, missing hard gates, missing outputs, and weak operational guidance. Use when asked to audit, review, or quality-check the skill system itself. | `skills/review-skills/SKILL.md` |
@@ -2402,11 +2409,7 @@ Only key names and declaring sources are documented; secret values are never rea
 
 ### Scanner Module Inventory
 
-Connected-device modules additionally include `device_evidence.py`, `device_probe.py`,
-`device_protocols.py`, and `device_safety.py`; `device_posture.py` remains the broad inventory
-orchestrator.
-
-`access_control_checks.py`, `active_checks.py`, `active_enrichment_policy.py`, `active_prioritization.py`, `adaptive_throttle.py`, `ai_classifier.py`, `api_auth.py`, `api_security.py`, `approval_checks.py`, `asn_discovery.py`, `attack_chains.py`, `attempt_telemetry.py`, `auth_session.py`, `benchmark_summary.py`, `bola_comparison.py`, `bounded_exec.py`, `brand_protection.py`, `breach_check.py`, `build_fingerprint.py`, `cancellation.py`, `client_side.py`, `common.py`, `completion_status.py`, `compliance_mapper.py`, `coverage_tracker.py`, `credential_check.py`, `critical_checks.py`, `ct_monitor.py`, `data_exposure.py`, `deduplication_engine.py`, `deserialization_tests.py`, `device_posture.py`, `discovery.py`, `dns_enhanced.py`, `dom_xss_analyzer.py`, `domain_intel.py`, `exposure_markers.py`, `file_upload_tests.py`, `finding_correlator.py`, `finding_validator.py`, `focused_scope.py`, `form_login.py`, `github_recon.py`, `google_dorking.py`, `gopher_payloads.py`, `graphql_schema_recovery.py`, `grpc_discovery.py`, `gungnir.py`, `har_discovery.py`, `hash_routes.py`, `health_check.py`, `http_scanner.py`, `hunter_summary.py`, `infrastructure_checks.py`, `injection_extra_checks.py`, `ip_reputation.py`, `logging_checks.py`, `model_intake.py`, `model_intake_acquisition.py`, `model_intake_adapter_self_test.py`, `model_intake_admission.py`, `model_intake_archives.py`, `model_intake_attestation.py`, `model_intake_evaluation.py`, `model_intake_licenses.py`, `model_intake_providers.py`, `model_intake_registry.py`, `model_intake_retention.py`, `model_intake_runtime.py`, `model_intake_safetensors_runtime.py`, `model_intake_safetensors_selftest.py`, `model_intake_sandbox.py`, `model_intake_scanners.py`, `network_services.py`, `nmap.py`, `nuclei.py`, `oauth_auth.py`, `oauth_tests.py`, `phase4_checks.py`, `proof_of_exploit.py`, `race_condition_tests.py`, `remediation_kb.py`, `report_gating.py`, `request_meter.py`, `resource_propagation.py`, `sarif_output.py`, `scan_delta.py`, `signal_types.py`, `smtp_scanner.py`, `ssh_scanner.py`, `subdomain_discovery.py`, `subfinder.py`, `tech_discovery.py`, `tls_scanner.py`, `vendor_risk.py`, `verification_engine.py`, `verification_phase.py`, `wayback_discovery.py`, `webhook_checks.py`, `websocket_security.py`
+`access_control_checks.py`, `active_checks.py`, `active_enrichment_policy.py`, `active_prioritization.py`, `adaptive_throttle.py`, `ai_classifier.py`, `api_auth.py`, `api_security.py`, `approval_checks.py`, `asn_discovery.py`, `attack_chains.py`, `attempt_telemetry.py`, `auth_session.py`, `benchmark_summary.py`, `bola_comparison.py`, `bounded_exec.py`, `brand_protection.py`, `breach_check.py`, `build_fingerprint.py`, `cancellation.py`, `client_side.py`, `common.py`, `completion_status.py`, `compliance_mapper.py`, `coverage_tracker.py`, `credential_check.py`, `critical_checks.py`, `ct_monitor.py`, `data_exposure.py`, `deduplication_engine.py`, `deserialization_tests.py`, `device_evidence.py`, `device_posture.py`, `device_probe.py`, `device_protocols.py`, `device_safety.py`, `device_web.py`, `discovery.py`, `dns_enhanced.py`, `dom_xss_analyzer.py`, `domain_intel.py`, `exposure_markers.py`, `file_upload_tests.py`, `finding_correlator.py`, `finding_validator.py`, `focused_scope.py`, `form_login.py`, `github_recon.py`, `google_dorking.py`, `gopher_payloads.py`, `graphql_schema_recovery.py`, `grpc_discovery.py`, `gungnir.py`, `har_discovery.py`, `hash_routes.py`, `health_check.py`, `http_scanner.py`, `hunter_summary.py`, `infrastructure_checks.py`, `injection_extra_checks.py`, `ip_reputation.py`, `logging_checks.py`, `model_intake.py`, `model_intake_acquisition.py`, `model_intake_adapter_self_test.py`, `model_intake_admission.py`, `model_intake_archives.py`, `model_intake_attestation.py`, `model_intake_evaluation.py`, `model_intake_licenses.py`, `model_intake_providers.py`, `model_intake_registry.py`, `model_intake_retention.py`, `model_intake_runtime.py`, `model_intake_safetensors_runtime.py`, `model_intake_safetensors_selftest.py`, `model_intake_sandbox.py`, `model_intake_scanners.py`, `network_services.py`, `nmap.py`, `nuclei.py`, `oauth_auth.py`, `oauth_tests.py`, `phase4_checks.py`, `proof_of_exploit.py`, `race_condition_tests.py`, `remediation_kb.py`, `report_gating.py`, `request_meter.py`, `resource_propagation.py`, `sarif_output.py`, `scan_delta.py`, `signal_types.py`, `smtp_scanner.py`, `ssh_scanner.py`, `subdomain_discovery.py`, `subfinder.py`, `tech_discovery.py`, `tls_scanner.py`, `vendor_risk.py`, `verification_engine.py`, `verification_phase.py`, `wayback_discovery.py`, `webhook_checks.py`, `websocket_security.py`
 
 ### Durable Storage Inventory
 
@@ -2433,6 +2436,7 @@ orchestrator.
 | `command_results` | `api/retest_contract.py` |
 | `device_agent_actions` | `db/init.sql` |
 | `device_agent_runs` | `db/init.sql` |
+| `device_credential_attempts` | `db/init.sql` |
 | `device_credential_profiles` | `db/init.sql` |
 | `device_interfaces` | `db/init.sql` |
 | `device_locator_history` | `db/init.sql` |

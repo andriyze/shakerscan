@@ -18398,7 +18398,7 @@ def test_bulk_finding_update_reports_rows_actually_changed(monkeypatch):
         async def fetch(self, _query, status, notes, ids):
             assert status == "resolved" and notes == "audit"
             assert len(ids) == 2  # duplicate request ID is de-duplicated
-            return [{"id": ids[0]}]  # second UUID does not exist
+            return [{"id": ids[0], "device_target_id": None}]  # second UUID does not exist
 
     class Acquire:
         async def __aenter__(self):
