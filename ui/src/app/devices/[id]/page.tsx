@@ -3,8 +3,8 @@
 import Link from 'next/link'
 import { useCallback, useEffect, useState } from 'react'
 import { useParams } from 'next/navigation'
-import { Bot, ChevronDown, ChevronUp, CircleHelp, Globe, KeyRound, MapPin, Router, Wifi, WifiOff } from 'lucide-react'
-import { changeDeviceLocator, createDeviceCredential, deactivateDeviceCredential, formatDate, getDevice, getDeviceCredentials, scanDevice, type DeviceCredentialProfile, type DeviceDetailResponse } from '@/lib/api'
+import { Bot, ChevronDown, ChevronUp, CircleHelp, Globe, KeyRound, MapPin, Pencil, Router, Wifi, WifiOff } from 'lucide-react'
+import { changeDeviceLocator, createDeviceCredential, deactivateDeviceCredential, formatDate, getDevice, getDeviceCredentials, renameDevice, scanDevice, type DeviceCredentialProfile, type DeviceDetailResponse } from '@/lib/api'
 import { Button, Card, EmptyState, ErrorState, Field, Input, Modal, PageHeader, ScanStatusBadge, Select, TableSkeleton, Textarea, useToast } from '@/components/ui'
 
 const policyBadgeClass: Record<string, string> = {
@@ -24,11 +24,14 @@ export default function DeviceDetailPage() {
   const [scanOpen, setScanOpen] = useState(false)
   const [credentialOpen, setCredentialOpen] = useState(false)
   const [locatorOpen, setLocatorOpen] = useState(false)
+  const [renameOpen, setRenameOpen] = useState(false)
   const [credentials, setCredentials] = useState<DeviceCredentialProfile[]>([])
   const [credentialSaving, setCredentialSaving] = useState(false)
   const [locatorSaving, setLocatorSaving] = useState(false)
+  const [renameSaving, setRenameSaving] = useState(false)
   const [showInconclusive, setShowInconclusive] = useState(false)
   const [locatorForm, setLocatorForm] = useState({ locator: '', reason: '', confirm_same_device: false })
+  const [renameName, setRenameName] = useState('')
   const [credentialForm, setCredentialForm] = useState({ name: '', auth_kind: 'ssh_password', username: '', secret: '', secondary_secret: '', login_path: '/login', port: '' })
   const [scanning, setScanning] = useState(false)
   const [scan, setScan] = useState({ profile: 'inventory', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', ssh_credential_profile_id: '', web_credential_profile_id: '', include_ssh_host_review: false, confirm_authorized: false })
@@ -102,6 +105,20 @@ export default function DeviceDetailPage() {
     } finally { setLocatorSaving(false) }
   }
 
+  async function saveName() {
+    const name = renameName.trim()
+    if (!name) return
+    setRenameSaving(true)
+    try {
+      await renameDevice(deviceId, name)
+      setRenameOpen(false)
+      toast.success('Device renamed')
+      await load()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to rename device')
+    } finally { setRenameSaving(false) }
+  }
+
   if (loading) return <div className="mx-auto max-w-7xl"><TableSkeleton rows={6} /></div>
   if (failed || !data) return <div className="mx-auto max-w-7xl"><ErrorState message="Could not load connected device" onRetry={load} /></div>
   const { device, interfaces, services, scans, locator_history: locatorHistory } = data
@@ -117,7 +134,7 @@ export default function DeviceDetailPage() {
 
   return (
     <div className="mx-auto max-w-7xl">
-      <PageHeader backHref="/devices" backLabel="Connected devices" title={device.name} description={device.primary_locator} icon={<Router className="h-6 w-6" />} actions={<><Button variant="secondary" onClick={() => { setLocatorForm({ locator: device.primary_locator, reason: '', confirm_same_device: false }); setLocatorOpen(true) }}><MapPin className="h-4 w-4" /> Change address</Button><Link href={`/devices/${device.id}/agent`} className="inline-flex items-center gap-2 rounded-lg border border-violet-500/30 bg-violet-500/10 px-3 py-2 text-sm text-violet-200 hover:bg-violet-500/20"><Bot className="h-4 w-4" /> AI investigation</Link><Link href={`/findings?source_type=device&device_target_id=${device.id}`} className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-200 hover:bg-gray-700">View findings</Link><Button onClick={() => { setScan({ profile: 'inventory', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', ssh_credential_profile_id: '', web_credential_profile_id: '', include_ssh_host_review: false, confirm_authorized: false }); setScanOpen(true) }}>Scan device</Button></>} />
+      <PageHeader backHref="/devices" backLabel="Connected devices" title={device.name} description={device.primary_locator} icon={<Router className="h-6 w-6" />} actions={<><Button variant="secondary" onClick={() => { setRenameName(device.name); setRenameOpen(true) }}><Pencil className="h-4 w-4" /> Rename</Button><Button variant="secondary" onClick={() => { setLocatorForm({ locator: device.primary_locator, reason: '', confirm_same_device: false }); setLocatorOpen(true) }}><MapPin className="h-4 w-4" /> Change address</Button><Link href={`/devices/${device.id}/agent`} className="inline-flex items-center gap-2 rounded-lg border border-violet-500/30 bg-violet-500/10 px-3 py-2 text-sm text-violet-200 hover:bg-violet-500/20"><Bot className="h-4 w-4" /> AI investigation</Link><Link href={`/findings?source_type=device&device_target_id=${device.id}`} className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-200 hover:bg-gray-700">View findings</Link><Button onClick={() => { setScan({ profile: 'inventory', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', ssh_credential_profile_id: '', web_credential_profile_id: '', include_ssh_host_review: false, confirm_authorized: false }); setScanOpen(true) }}>Scan device</Button></>} />
 
       <Card className={`mb-6 border p-4 ${reachabilityTone}`}>
         <div className="flex items-start gap-3"><ReachabilityIcon className="mt-0.5 h-5 w-5 shrink-0" /><div><p className="font-medium">{reachability ? `Device ${reachability.status === 'online' ? 'online' : reachability.status}` : 'Device reachability not checked'}</p><p className="mt-1 text-sm opacity-75">{reachability?.reason || 'Run a device scan to require a positive network response before port and policy checks begin.'}</p>{reachability?.status === 'online' && <p className="mt-2 text-xs opacity-70">Network accessible · {reachability.service_accessible === true ? 'at least one service responded' : reachability.service_accessible === false ? 'no listening TCP service found with complete visibility' : 'service accessibility still being assessed'} · {reachability.confidence} confidence</p>}</div></div>
@@ -205,6 +222,10 @@ export default function DeviceDetailPage() {
           <Field label="Reason (optional)"><Input value={locatorForm.reason} onChange={(event) => setLocatorForm({ ...locatorForm, reason: event.target.value })} placeholder="DHCP assigned a new address" /></Field>
           <label className="flex items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-sm text-amber-100"><input type="checkbox" checked={locatorForm.confirm_same_device} onChange={(event) => setLocatorForm({ ...locatorForm, confirm_same_device: event.target.checked })} className="mt-1" /><span>I verified that this address belongs to the same physical device. ShakerScan will not automatically trust an IP that may have been reassigned to something else.</span></label>
         </div>
+      </Modal>
+
+      <Modal open={renameOpen} title="Rename connected device" onClose={() => setRenameOpen(false)} footer={<><Button variant="secondary" onClick={() => setRenameOpen(false)}>Cancel</Button><Button loading={renameSaving} disabled={!renameName.trim() || renameName.trim() === device.name} onClick={saveName}>Save name</Button></>}>
+        <Field label="Device name" required hint="This changes the display name only. Device identity, address, scans, policies, and credentials stay unchanged."><Input value={renameName} maxLength={160} autoFocus onChange={(event) => setRenameName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && renameName.trim() && renameName.trim() !== device.name) saveName() }} /></Field>
       </Modal>
     </div>
   )

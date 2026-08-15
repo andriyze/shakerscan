@@ -5156,6 +5156,16 @@ export async function getDeviceCapabilities(deviceId: string): Promise<DeviceCap
   return res.json()
 }
 
+export async function renameDevice(deviceId: string, name: string): Promise<{ device: DeviceTarget }> {
+  const res = await fetch(`${API_URL}/devices/${encodeURIComponent(deviceId)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to rename connected device'))
+  return res.json()
+}
+
 export async function changeDeviceLocator(deviceId: string, payload: {
   locator: string
   reason?: string

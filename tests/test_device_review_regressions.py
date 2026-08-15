@@ -110,6 +110,20 @@ def test_device_detail_exposes_current_locator_and_bounded_history():
     assert "same physical device" in ui
 
 
+def test_device_detail_supports_display_name_changes_without_changing_identity():
+    api = (ROOT / "api" / "api.py").read_text()
+    api_client = (ROOT / "ui" / "src" / "lib" / "api.ts").read_text()
+    ui = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "page.tsx").read_text()
+    endpoint = api[api.index('@app.patch("/devices/{device_id}")'):]
+    endpoint = endpoint[:endpoint.index('@app.post("/devices/{device_id}/locator")')]
+
+    assert 'detail="Device name cannot be empty"' in endpoint
+    assert 'payload["name"] = normalized_name' in endpoint
+    assert "export async function renameDevice" in api_client
+    assert "Rename connected device" in ui
+    assert "This changes the display name only" in ui
+
+
 def test_device_detail_scopes_udp_uncertainty_to_the_latest_posture_scan():
     api = (ROOT / "api" / "api.py").read_text()
     detail = api[api.index('@app.get("/devices/{device_id}")'):]

@@ -4108,7 +4108,7 @@ class DeviceTargetCreate(BaseModel):
 
 
 class DeviceTargetUpdate(BaseModel):
-    name: Optional[str] = Field(default=None, max_length=160)
+    name: Optional[str] = Field(default=None, min_length=1, max_length=160)
     primary_locator: Optional[str] = None
     device_class: Optional[str] = Field(default=None, min_length=1, max_length=80)
     manufacturer: Optional[str] = Field(default=None, max_length=160)
@@ -18866,6 +18866,11 @@ async def update_device(device_id: str, request: DeviceTargetUpdate):
         payload["policy_id"] = _device_uuid(payload["policy_id"], "policy") if payload["policy_id"] else None
     if "metadata_json" in payload:
         payload["metadata_json"] = json.dumps(payload["metadata_json"] or {})
+    if "name" in payload:
+        normalized_name = str(payload.get("name") or "").strip()
+        if not normalized_name:
+            raise HTTPException(status_code=422, detail="Device name cannot be empty")
+        payload["name"] = normalized_name
     for key in ("device_class", "environment"):
         if key in payload and payload[key] is not None:
             payload[key] = str(payload[key]).strip().lower()
