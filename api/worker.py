@@ -805,7 +805,7 @@ def _external_dast_tool_specs(result: dict[str, Any], options: dict[str, Any]) -
     known_subprocess_tools = {
         "curl", "dig", "host", "nslookup", "delv",
         "httpx", "katana", "subfinder", "ffuf", "nuclei", "dalfox",
-        "sqlmap", "sqlmap.py", "nmap", "sslyze", "testssl", "testssl.sh",
+        "sqlmap", "sqlmap.py", "nmap", "naabu", "sslyze", "testssl", "testssl.sh",
         "playwright",
     }
     for item in subprocess_receipts[:200]:

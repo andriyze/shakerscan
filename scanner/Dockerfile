@@ -11,6 +11,12 @@
 # dependency (go-tree-sitter) compiles cleanly.
 FROM golang:1.26.5-bookworm@sha256:6c5605ab3a9a9fb3c4eafe5b3d63cdbf3881caf113262b67862547b54a9db599 AS go-builder
 
+# Naabu supports both SYN and CONNECT discovery, and its Go packet-capture
+# dependency is compiled even though ShakerScan deliberately invokes CONNECT
+# mode for unprivileged, portable connected-device scans.
+RUN apt-get update && apt-get install -y --no-install-recommends libpcap-dev && \
+    rm -rf /var/lib/apt/lists/*
+
 # Install ProjectDiscovery tools + Gungnir (CT log scanner). Versions remain
 # immutable, while bounded retries tolerate transient DNS/module-proxy outages.
 # Each command is built from a small wrapper module so minimum-version
@@ -53,6 +59,7 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
       build_tool httpx github.com/projectdiscovery/httpx/cmd/httpx v1.10.0 && \
       build_tool katana github.com/projectdiscovery/katana/cmd/katana v1.7.0 && \
       build_tool subfinder github.com/projectdiscovery/subfinder/v2/cmd/subfinder v2.15.0 && \
+      build_tool naabu github.com/projectdiscovery/naabu/v2/cmd/naabu v2.3.7 && \
       build_tool nuclei github.com/projectdiscovery/nuclei/v3/cmd/nuclei v3.11.0 && \
       build_tool dalfox github.com/hahwul/dalfox/v2 v2.13.0 && \
       build_tool ffuf github.com/ffuf/ffuf/v2 v2.2.1 && \
@@ -104,6 +111,7 @@ COPY --from=go-builder /go/bin/tlsx /opt/tools/tlsx
 COPY --from=go-builder /go/bin/httpx /opt/tools/httpx
 COPY --from=go-builder /go/bin/katana /opt/tools/katana
 COPY --from=go-builder /go/bin/subfinder /opt/tools/subfinder
+COPY --from=go-builder /go/bin/naabu /opt/tools/naabu
 COPY --from=go-builder /go/bin/nuclei /opt/tools/nuclei
 COPY --from=go-builder /go/bin/dalfox /opt/tools/dalfox
 COPY --from=go-builder /go/bin/ffuf /opt/tools/ffuf
@@ -344,6 +352,7 @@ RUN set -e && \
     /opt/tools/httpx -version && \
     /opt/tools/katana -version && \
     /opt/tools/subfinder -version && \
+    /opt/tools/naabu -version && \
     /opt/tools/nuclei -version && \
     /opt/tools/dalfox version && \
     /opt/tools/modelscan --version && \

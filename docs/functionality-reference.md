@@ -512,10 +512,11 @@ assets in dedicated device, interface, and service tables. `device_posture` work
 worker capacity, and build-health registry, so it cannot change ordinary Web DAST worker freshness,
 target counts, scan lists, ASM state, or dashboard posture.
 
-The `inventory` profile scans the top 100 TCP ports and a small UDP set; `posture` and `thorough`
-inventory all 65,535 TCP ports plus a declared curated UDP set. Each scan checks priority TCP ports
-first, performs the requested discovery without version detection, and fingerprints only confirmed
-open ports. Reachability prioritizes previously observed, operator-hinted, policy-defined, and
+The `inventory` profile scans the top 100 TCP ports with Nmap and a small UDP set; `posture` and
+`thorough` use bounded Naabu CONNECT discovery across all 65,535 TCP ports plus a declared curated
+UDP set, then use Nmap only to fingerprint confirmed-open ports. A Naabu failure is recorded and
+falls back to the slower Nmap full-range path. Each scan checks priority TCP ports first.
+Reachability prioritizes previously observed, operator-hinted, policy-defined, and
 credential-bound TCP ports, then applies compact common, device-class-specific, and major-TV-manufacturer
 port sets (Vizio, LG, Samsung, TCL, and Hisense). If that bounded check is silent, only an already
 all-TCP `posture` or `thorough` scan expands discovery; the same result becomes the main inventory,

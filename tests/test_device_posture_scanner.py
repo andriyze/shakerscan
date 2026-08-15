@@ -67,6 +67,70 @@ def test_filtered_tcp_ports_are_counted_as_visibility_uncertainty():
     assert scan_status["tcp_filtered_count"] == 1
 
 
+def test_parse_naabu_evidence_accepts_only_valid_confirmed_ports():
+    output = "\n".join([
+        '{"host":"10.0.0.4","ip":"10.0.0.4","port":7345,"protocol":"tcp"}',
+        '{"host":"10.0.0.4","ip":"10.0.0.4","port":443,"protocol":"tcp"}',
+        '{"port":0}',
+        'not-json',
+    ])
+    services, receipt = device_posture.parse_naabu_evidence(output, "10.0.0.4")
+    assert [service["port"] for service in services] == [443, 7345]
+    assert all(service["state"] == "open" for service in services)
+    assert all(service["discovery_tool"] == "naabu" for service in services)
+    assert receipt["parsed"] is False
+    assert receipt["malformed_line_count"] == 2
+
+
+def test_all_tcp_scope_uses_bounded_naabu_connect_discovery(monkeypatch):
+    commands = []
+
+    async def fake_run(cmd, timeout=60, input_text=None, retry=0):
+        commands.append(cmd)
+        return '{"host":"10.0.0.4","ip":"10.0.0.4","port":7345,"protocol":"tcp"}\n', "", 0
+
+    monkeypatch.setattr(device_posture, "run", fake_run)
+    monkeypatch.setattr(device_posture, "_naabu_available", lambda: True)
+    services, observations, identity, receipt = asyncio.run(
+        device_posture._run_tcp_scope_discovery(
+            "10.0.0.4",
+            device_posture.PROFILES["posture"],
+            max_port_probes_per_second=250,
+        ),
+    )
+    assert [service["port"] for service in services] == [7345]
+    assert observations == []
+    assert identity["addresses"][0]["address"] == "10.0.0.4"
+    assert receipt["tool"] == "naabu"
+    assert receipt["complete"] is True
+    command = commands[0]
+    assert command[command.index("-scan-type") + 1] == "c"
+    assert command[command.index("-top-ports") + 1] == "full"
+    assert command[command.index("-rate") + 1] == "250"
+    assert "-verify" in command
+
+
+def test_failed_naabu_scope_falls_back_to_nmap(monkeypatch):
+    commands = []
+
+    async def fake_run(cmd, timeout=60, input_text=None, retry=0):
+        commands.append(cmd)
+        if cmd[0] == "naabu":
+            return "", "naabu failed", 1
+        port = "<port protocol='tcp' portid='443'><state state='open' reason='syn-ack'/><service name='https'/></port>"
+        return _nmap_xml(port), "", 0
+
+    monkeypatch.setattr(device_posture, "run", fake_run)
+    monkeypatch.setattr(device_posture, "_naabu_available", lambda: True)
+    services, _, _, receipt = asyncio.run(
+        device_posture._run_tcp_scope_discovery("10.0.0.4", device_posture.PROFILES["posture"]),
+    )
+    assert [service["port"] for service in services] == [443]
+    assert [command[0] for command in commands] == ["naabu", "nmap"]
+    assert receipt["fallback_from"]["tool"] == "naabu"
+    assert receipt["fallback_from"]["complete"] is False
+
+
 def test_policy_defaults_to_review_and_honors_deny():
     services = [
         {"transport": "tcp", "port": 23, "service_name": "telnet"},

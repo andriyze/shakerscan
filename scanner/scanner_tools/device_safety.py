@@ -39,6 +39,7 @@ class DeviceSafetyProfile:
     allowed_action_classes: tuple[str, ...]
     max_concurrency: int
     max_requests_per_second: float
+    max_port_probes_per_second: float
     health_monitor_required: bool
     credentials_allowed: bool
     explicit_lab_confirmation_required: bool
@@ -53,6 +54,7 @@ SAFETY_PROFILES: dict[str, DeviceSafetyProfile] = {
         allowed_action_classes=("readonly",),
         max_concurrency=4,
         max_requests_per_second=5.0,
+        max_port_probes_per_second=50.0,
         health_monitor_required=False,
         credentials_allowed=False,
         explicit_lab_confirmation_required=False,
@@ -64,6 +66,7 @@ SAFETY_PROFILES: dict[str, DeviceSafetyProfile] = {
         allowed_action_classes=("readonly", "ephemeral_state"),
         max_concurrency=8,
         max_requests_per_second=10.0,
+        max_port_probes_per_second=250.0,
         health_monitor_required=True,
         credentials_allowed=False,
         explicit_lab_confirmation_required=False,
@@ -75,6 +78,7 @@ SAFETY_PROFILES: dict[str, DeviceSafetyProfile] = {
         allowed_action_classes=("readonly", "ephemeral_state", "explicit_user_confirmed_shell"),
         max_concurrency=6,
         max_requests_per_second=8.0,
+        max_port_probes_per_second=200.0,
         health_monitor_required=True,
         credentials_allowed=True,
         explicit_lab_confirmation_required=False,
@@ -92,6 +96,7 @@ SAFETY_PROFILES: dict[str, DeviceSafetyProfile] = {
         ),
         max_concurrency=2,
         max_requests_per_second=3.0,
+        max_port_probes_per_second=100.0,
         health_monitor_required=True,
         credentials_allowed=True,
         explicit_lab_confirmation_required=True,

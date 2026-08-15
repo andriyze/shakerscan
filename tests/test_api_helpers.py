@@ -906,7 +906,7 @@ def test_device_worker_readiness_uses_its_own_current_capable_registry(monkeypat
                     "build_fingerprint": "expected",
                     "scanner_version": "label",
                     "worker_kind": "device",
-                    "tools": ["nmap", "ssh-keyscan"],
+                    "tools": ["naabu", "nmap", "ssh-keyscan"],
                     "reported_at": now.isoformat(),
                 }).encode(),
             }
@@ -923,7 +923,7 @@ def test_device_worker_readiness_uses_its_own_current_capable_registry(monkeypat
     assert readiness["workers"][0]["capable"] is True
 
 
-def test_device_worker_readiness_fails_closed_for_stale_or_missing_nmap(monkeypatch):
+def test_device_worker_readiness_fails_closed_for_stale_or_missing_port_tools(monkeypatch):
     now = datetime.now(timezone.utc)
 
     class RedisStub:
@@ -938,7 +938,7 @@ def test_device_worker_readiness_fails_closed_for_stale_or_missing_nmap(monkeypa
                 "no-nmap": json.dumps({
                     "build_fingerprint": "expected",
                     "scanner_version": "label",
-                    "tools": ["ssh-keyscan"],
+                    "tools": ["naabu", "ssh-keyscan"],
                     "reported_at": now.isoformat(),
                 }),
             }

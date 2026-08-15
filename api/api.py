@@ -18396,7 +18396,7 @@ def _device_worker_readiness() -> dict[str, Any]:
             "build_current": build_current,
             "tools": tools,
             "reported_at": report.get("reported_at"),
-            "capable": build_current is True and "nmap" in tools,
+            "capable": build_current is True and {"nmap", "naabu"}.issubset(tools),
         })
     capable_count = sum(1 for report in reports if report["capable"])
     if not enabled:
@@ -18406,7 +18406,7 @@ def _device_worker_readiness() -> dict[str, Any]:
     elif reports and any(report["build_current"] is False for report in reports):
         status, reason = "not_ready", "device_worker_build_stale"
     elif reports:
-        status, reason = "not_ready", "device_worker_missing_nmap_or_build_identity"
+        status, reason = "not_ready", "device_worker_missing_nmap_naabu_or_build_identity"
     else:
         status, reason = "not_ready", "no_fresh_device_worker"
     return {
@@ -18429,7 +18429,7 @@ async def get_device_readiness():
         "profiles": sorted(DEVICE_PROFILES),
         "coverage_profiles": sorted(DEVICE_PROFILES),
         "safety_profiles": safety_profile_catalog(),
-        "required_worker_tools": ["nmap"],
+        "required_worker_tools": ["naabu", "nmap"],
         "optional_sensor_capabilities": ["bluetooth", "ble", "passive_traffic"],
         "wireless_status": "planned_sensor_extension",
     }

@@ -28,8 +28,8 @@ with `./scanner.sh devices stop`.
 | Profile | TCP inventory | UDP inventory | Typical use |
 |---|---|---|---|
 | `inventory` | Nmap top 100 TCP ports | Small common-device set | Fast reachability and first inventory |
-| `posture` | All 65,535 TCP ports | Curated discovery/management set | Normal device assessment |
-| `thorough` | All 65,535 TCP ports with deeper fingerprinting | Curated discovery/management set | Higher-confidence service posture |
+| `posture` | Naabu CONNECT discovery of all 65,535 TCP ports; Nmap fingerprints open ports | Curated discovery/management set | Normal device assessment |
+| `thorough` | Naabu CONNECT discovery of all 65,535 TCP ports; deeper Nmap fingerprinting | Curated discovery/management set | Higher-confidence service posture |
 
 Every profile is scoped to exactly one hostname or IP. URLs, CIDR ranges, paths, credentials, and
 shell-like locators are rejected. The operator must explicitly confirm authorization before a scan
@@ -76,10 +76,13 @@ remains inconclusive. Until online status is positively proven, authenticated an
 actions do not run, and the scan produces neither a numeric score nor a grade.
 
 TCP assessment is staged. A bounded priority pass checks common administration, media, printing,
-messaging, and nonstandard web ports first. The requested top-100 or all-port discovery then runs
-without expensive version detection, and service/version fingerprinting runs only against ports
-confirmed open. A timed-out full-range pass remains explicitly incomplete while preserving ports
-already confirmed by the priority pass.
+messaging, and nonstandard web ports first. Nmap handles the top-100 inventory profile. For all-port
+`posture` and `thorough` scans, Naabu performs a rate-limited CONNECT scan and Nmap runs expensive
+service/version fingerprinting only against confirmed-open ports. Naabu runs at a separate,
+device-safe port-probe ceiling from application-protocol request limits. If Naabu is unavailable or
+fails, the scanner records that receipt and falls back to the slower Nmap full-range path. A timed-out
+full-range pass remains explicitly incomplete while preserving ports already confirmed by the
+priority pass.
 
 The scanner records service name, product/version hints, CPE, transport, port, encryption state,
 hostnames, addresses, MAC/vendor evidence when visible, and bounded OS fingerprints. UDP coverage is

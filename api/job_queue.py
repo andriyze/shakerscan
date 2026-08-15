@@ -36,6 +36,7 @@ DEFAULT_WORKER_TOOL_COMMANDS = {
     "playwright": "node",
     "sqlmap": "sqlmap",
     "nmap": "nmap",
+    "naabu": "naabu",
     "subfinder": "subfinder",
 }
 

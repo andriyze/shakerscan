@@ -11,7 +11,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import ipaddress
+import json
 import re
+import shutil
 import socket
 import ssl
 import time
@@ -54,6 +56,7 @@ except ImportError:  # pragma: no cover - flat scanner runtime
 
 DEVICE_PROFILES = {"inventory", "posture", "thorough"}
 MAX_FINGERPRINT_PORTS = 512
+NAABU_CONNECT_WORKERS = 25
 DEFAULT_PROFILE_BUDGET_SECONDS = {"inventory": 120 * 60, "posture": 360 * 60, "thorough": 720 * 60}
 COMMON_UDP_PORTS = (53, 67, 68, 69, 123, 137, 138, 161, 162, 500, 1900, 4500, 5353, 5683, 47808)
 INVENTORY_UDP_PORTS = (53, 123, 161, 1900, 5353, 5683, 47808, 67)
@@ -327,6 +330,103 @@ def parse_nmap_services(xml_text: str) -> tuple[list[dict[str, Any]], dict[str, 
     return services, identity
 
 
+def parse_naabu_evidence(output: str, locator: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Parse Naabu JSONL without treating malformed or silent output as an open port."""
+    services: dict[int, dict[str, Any]] = {}
+    malformed_lines = 0
+    for raw_line in str(output or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+            port = int(row.get("port"))
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
+            malformed_lines += 1
+            continue
+        if not 1 <= port <= 65535:
+            malformed_lines += 1
+            continue
+        services[port] = {
+            "transport": "tcp",
+            "port": port,
+            "state": "open",
+            "state_reason": "tcp-connect",
+            "service_name": "unknown",
+            "product": "",
+            "version": "",
+            "extra_info": "",
+            "tunnel": None,
+            "cpe": None,
+            "confidence": "confirmed",
+            "policy_eligible": True,
+            "discovery_tool": "naabu",
+        }
+    return sorted(services.values(), key=lambda item: int(item["port"])), {
+        "parsed": malformed_lines == 0,
+        "malformed_line_count": malformed_lines,
+        "confirmed_open_count": len(services),
+        "identity": {
+            "hostnames": [],
+            "addresses": [{"address": locator, "type": "ipv6" if ":" in locator else "ipv4", "vendor": None}],
+            "os_matches": [],
+        },
+    }
+
+
+def _naabu_available() -> bool:
+    return bool(shutil.which("naabu") or shutil.which("/opt/tools/naabu"))
+
+
+async def _run_naabu_tcp_scope_discovery(
+    locator: str,
+    *,
+    timeout: int,
+    cancel_check: Any = None,
+    max_port_probes_per_second: float = 250.0,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    rate = max(1, int(max_port_probes_per_second or 1))
+    cmd = [
+        "naabu", "-host", locator, "-Pn", "-scan-type", "c", "-top-ports", "full",
+        "-rate", str(rate), "-c", str(NAABU_CONNECT_WORKERS), "-retries", "1",
+        "-timeout", "1000", "-verify", "-json", "-silent", "-no-color",
+        "-disable-update-check", "-no-stdin",
+    ]
+    run_options: dict[str, Any] = {"timeout": timeout}
+    if callable(cancel_check):
+        run_options["cancel_check"] = cancel_check
+    started = time.monotonic()
+    stdout, stderr, exit_code = await run(cmd, **run_options)
+    services, parsed = parse_naabu_evidence(stdout, locator)
+    incomplete_reasons: list[str] = []
+    if exit_code != 0:
+        incomplete_reasons.append(f"process_exit:{exit_code}")
+    if not parsed["parsed"]:
+        incomplete_reasons.append("malformed_naabu_jsonl")
+    complete = not incomplete_reasons
+    receipt = {
+        "stage": "tcp_scope_discovery",
+        "tool": "naabu",
+        "transport": "tcp",
+        "exit_code": exit_code,
+        "complete": complete,
+        "parsed": bool(parsed["parsed"]),
+        "xml_parsed": False,
+        "confirmed_open_count": len(services),
+        "inconclusive_count": 0,
+        "port_state_counts": {"open": len(services)},
+        "tcp_filtered_count": 0,
+        "silent_port_classification": "closed_or_filtered_not_distinguished",
+        "malformed_port_count": int(parsed["malformed_line_count"]),
+        "incomplete_reasons": incomplete_reasons,
+        "elapsed_seconds": round(time.monotonic() - started, 3),
+        "rate_limit_per_second": rate,
+        "scan_type": "connect",
+        "stderr": (stderr or "")[:500],
+    }
+    return services, [], parsed["identity"], receipt
+
+
 def _merge_identity(current: dict[str, Any], incoming: dict[str, Any]) -> None:
     for key in ("hostnames", "addresses", "os_matches"):
         existing = current.setdefault(key, [])
@@ -418,6 +518,7 @@ async def _run_nmap_stage(
         "exit_code": exit_code,
         "complete": complete,
         "xml_parsed": bool(scan_status.get("xml_parsed")),
+        "parsed": bool(scan_status.get("xml_parsed")),
         "finished_exit": scan_status.get("finished_exit"),
         "host_timed_out": bool(scan_status.get("host_timed_out")),
         "elapsed_seconds": scan_status.get("elapsed_seconds"),
@@ -442,9 +543,30 @@ async def _run_tcp_scope_discovery(
     deadline: float | None = None,
     cancel_check: Any = None,
     max_requests_per_second: float = 10.0,
+    max_port_probes_per_second: float = 250.0,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
     """Run the authoritative TCP scope once so a fallback can become inventory."""
     request_rate = max(1.0, float(max_requests_per_second or 1.0))
+    if "-p-" in profile.tcp_args and _naabu_available():
+        scope_port_count = 65_535
+        port_probe_rate = max(1.0, float(max_port_probes_per_second or 1.0))
+        rate_bound_timeout = int(scope_port_count / port_probe_rate * 2.0) + 90
+        tcp_stage_timeout = max(profile.process_timeout, rate_bound_timeout)
+        if deadline is not None:
+            tcp_stage_timeout = max(60, min(tcp_stage_timeout, int(max(60, deadline - time.monotonic()))))
+        naabu_result = await _run_naabu_tcp_scope_discovery(
+            locator,
+            timeout=tcp_stage_timeout,
+            cancel_check=cancel_check,
+            max_port_probes_per_second=port_probe_rate,
+        )
+        if naabu_result[3].get("complete"):
+            return naabu_result
+        # Preserve the failed fast-discovery receipt on the authoritative Nmap
+        # fallback so reports explain why the slower path was used.
+        naabu_failure = dict(naabu_result[3])
+    else:
+        naabu_failure = None
     scope_port_count = 65_535 if "-p-" in profile.tcp_args else 100
     rate_bound_timeout = int(scope_port_count / request_rate * 1.5) + 60
     tcp_stage_timeout = max(profile.process_timeout, rate_bound_timeout)
@@ -456,13 +578,16 @@ async def _run_tcp_scope_discovery(
         "--host-timeout", f"{max(30, tcp_stage_timeout - 15)}s", *profile.tcp_args,
         "-oX", "-", locator,
     ]
-    return await _run_nmap_stage(
+    result = await _run_nmap_stage(
         tcp_cmd,
         stage="tcp_scope_discovery",
         transport="tcp",
         timeout=tcp_stage_timeout,
         cancel_check=cancel_check,
     )
+    if naabu_failure:
+        result[3]["fallback_from"] = naabu_failure
+    return result
 
 
 async def _nmap_scan(
@@ -472,6 +597,7 @@ async def _nmap_scan(
     deadline: float | None = None,
     cancel_check: Any = None,
     max_requests_per_second: float = 10.0,
+    max_port_probes_per_second: float = 250.0,
     extra_priority_ports: tuple[int, ...] = (),
     prefetched_tcp_scope: tuple[
         list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], dict[str, Any]
@@ -517,6 +643,7 @@ async def _nmap_scan(
             deadline=deadline,
             cancel_check=cancel_check,
             max_requests_per_second=request_rate,
+            max_port_probes_per_second=max_port_probes_per_second,
         )
     else:
         tcp_services, _tcp_uncertain, tcp_identity, original_receipt = prefetched_tcp_scope
@@ -586,7 +713,7 @@ async def _nmap_scan(
             "inconclusive_count": 0,
         })
 
-    if not any(receipt.get("xml_parsed") for receipt in receipts if receipt.get("transport") == "tcp"):
+    if not any(receipt.get("parsed") or receipt.get("xml_parsed") for receipt in receipts if receipt.get("transport") == "tcp"):
         errors = "; ".join(
             str(receipt.get("stderr") or ",".join(receipt.get("incomplete_reasons") or []))
             for receipt in receipts if receipt.get("transport") == "tcp"
@@ -638,6 +765,7 @@ async def _nmap_scan(
         "tcp_fingerprint_truncated_count": fingerprint_truncated_count,
         "overall_budget_exhausted": bool(fingerprint_budget_exhausted or udp_budget_exhausted),
         "max_requests_per_second_enforced": request_rate,
+        "max_port_probes_per_second_enforced": max_port_probes_per_second,
         "udp_discovery_complete": all(receipt.get("complete") for receipt in udp_receipts),
         "udp_extraports_inconclusive_count": udp_extraports_inconclusive_count,
         "uncertainty_present": uncertainty_present,
@@ -1148,9 +1276,9 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
         safety.authorize("network_inventory", "readonly")
         inventory_authorized = True
         safety.record_limit_enforcement(
-            "nmap",
+            "naabu+nmap",
             max_concurrency=1,
-            max_requests_per_second=safety_profile.max_requests_per_second,
+            max_requests_per_second=safety_profile.max_port_probes_per_second,
         )
         prefetched_tcp_scope = await _run_tcp_scope_discovery(
             resolved_address,
@@ -1158,6 +1286,7 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
             deadline=deadline,
             cancel_check=cancel_check,
             max_requests_per_second=safety_profile.max_requests_per_second,
+            max_port_probes_per_second=safety_profile.max_port_probes_per_second,
         )
         fallback_services, _fallback_uncertain, _fallback_identity, fallback_receipt = prefetched_tcp_scope
         reachability = corroborate_device_reachability(
@@ -1199,9 +1328,9 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
     if not inventory_authorized:
         safety.authorize("network_inventory", "readonly")
         safety.record_limit_enforcement(
-            "nmap",
+            "naabu+nmap",
             max_concurrency=1,
-            max_requests_per_second=safety_profile.max_requests_per_second,
+            max_requests_per_second=safety_profile.max_port_probes_per_second,
         )
     services, inconclusive_observations, identity, tool_receipts, scan_completeness = await _nmap_scan(
         resolved_address,
@@ -1209,6 +1338,7 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
         deadline=deadline,
         cancel_check=cancel_check,
         max_requests_per_second=safety_profile.max_requests_per_second,
+        max_port_probes_per_second=safety_profile.max_port_probes_per_second,
         extra_priority_ports=extra_priority_ports,
         prefetched_tcp_scope=prefetched_tcp_scope,
     )

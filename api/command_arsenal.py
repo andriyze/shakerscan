@@ -2026,6 +2026,7 @@ TOOL_ADAPTERS: tuple[ToolAdapterSpec, ...] = (
     ToolAdapterSpec("dalfox", "xss", "Dalfox XSS scanner.", "active", "wired", ("dalfox",), ("version",), ("/opt/tools/dalfox",), "dalfox-json-v1", "xss-reflection-or-browser-proof"),
     ToolAdapterSpec("sqlmap", "sqli", "sqlmap SQL injection verifier.", "active", "gated", ("sqlmap", "sqlmap.py"), ("--version",), ("/opt/tools/sqlmap",), "sqlmap-output-v1", "sqli-dbms-or-error-proof", "rerun-request-with-sqli-proof", timeout_seconds=10),
     ToolAdapterSpec("nmap", "port_scan", "nmap network service discovery.", "active", "gated", ("nmap",), ("--version",), ("/opt/tools/nmap",), "nmap-xml-v1", "open-port-observation"),
+    ToolAdapterSpec("naabu", "port_discovery", "Naabu fast TCP port discovery.", "active", "gated", ("naabu",), ("-version",), ("/opt/tools/naabu",), "naabu-jsonl-v1", "open-port-observation"),
     ToolAdapterSpec("sslyze", "tls", "SSLyze TLS scanner (disabled until upstream supports the audited cryptography runtime).", "passive", "disabled", ("sslyze",), ("--version",), ("/opt/tools/sslyze",), "sslyze-json-v1", "tls-protocol-observation"),
     ToolAdapterSpec("testssl.sh", "tls", "testssl.sh TLS scanner.", "passive", "wired", ("testssl.sh",), ("--version",), ("/opt/testssl.sh/testssl.sh",), "testssl-json-v1", "tls-protocol-observation", None, timeout_seconds=10),
     ToolAdapterSpec("playwright", "browser_proof", "Playwright browser proof execution.", "active", "wired", ("playwright",), ("--version",), (), "playwright-proof-v1", "browser-observation"),
