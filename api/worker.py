@@ -173,9 +173,10 @@ MAX_SCAN_DURATION = {
     'full': 600,        # 10 hours
     'aggressive': 600,  # 10 hours
     'smart': 360,
+    'device_probe': 5,
 }
 VALID_DAST_SCAN_TYPES = {"quick", "standard", "deep", "full", "aggressive", "smart"}
-DEVICE_RUN_KINDS = {"device_posture", "device_web_dast"}
+DEVICE_RUN_KINDS = {"device_posture", "device_probe", "device_web_dast"}
 ACTIVE_ENFORCED_SCAN_TYPES = {"smart", "full", "aggressive"}
 SCANNER_AUTH_CONFIG_KEYS = {
     "api_token",
@@ -415,6 +416,13 @@ async def _persist_tool_output_artifact(
 
 def _internal_executor_receipt_spec(options: dict[str, Any]) -> dict[str, str] | None:
     run_kind = str((options or {}).get("run_kind") or "").strip()
+    if run_kind == "device_probe":
+        return {
+            "tool_name": "device_service_state_verifier",
+            "parser_status_key": "device_probe",
+            "parser": "device-probe-v1",
+            "proof_contract": "fixed-device-single-service-state",
+        }
     if run_kind in AI_GATE_RUN_KINDS:
         return {
             "tool_name": "ai_gate_probe_executor",
@@ -2108,6 +2116,22 @@ async def run_scan(
     persist_checkpoint_artifacts: bool = True,
 ) -> dict:
     """Execute scanner and return results."""
+    if options.get("run_kind") == "device_probe":
+        if scan_id:
+            await update_scan_progress(scan_id, "device_service_probe", 20, job_id=job_id)
+        try:
+            from scanner_tools.device_probe import run_device_service_probe
+        except ImportError:
+            from scanner.scanner_tools.device_probe import run_device_service_probe
+        if str(os.environ.get("DEVICE_POSTURE_ENABLED", "true")).strip().lower() in {"0", "false", "no", "off"}:
+            raise ValueError("connected-device posture is disabled on this worker")
+        probe_options = dict(options or {})
+        probe_options["_cancel_check"] = lambda: asyncio.to_thread(_scan_cancel_requested, scan_id)
+        result = await run_device_service_probe(target, probe_options)
+        if scan_id:
+            await update_scan_progress(scan_id, "device_service_verdict", 90, job_id=job_id)
+        return _strip_null_bytes(result) if isinstance(result, dict) else result
+
     if options.get("run_kind") == "device_posture":
         if scan_id:
             await update_scan_progress(scan_id, "device_inventory", 10, job_id=job_id)
@@ -8074,7 +8098,7 @@ async def process_scan_job(job_data: dict):
                             updated_at = NOW()
                         WHERE id = $3
                     """, uuid.UUID(scan_id), completed_at, uuid.UUID(ai_target_id))
-                if device_target_id:
+                if device_target_id and (options or {}).get("run_kind") == "device_posture":
                     await conn.execute("""
                         UPDATE device_targets SET
                             last_scan_id=$1, last_scanned_at=$2, last_score=$3,
@@ -8098,7 +8122,7 @@ async def process_scan_job(job_data: dict):
                 saved_count = await save_ai_findings(scan_id, ai_target_id, findings)
             except Exception as e:
                 print(f"[{job_id[:8]}] save_ai_findings error: {e}", flush=True)
-        elif device_target_id:
+        elif device_target_id and (options or {}).get("run_kind") == "device_posture":
             try:
                 posture = result.get("device_posture") if isinstance(result.get("device_posture"), dict) else {}
                 completeness = posture.get("completeness") if isinstance(posture.get("completeness"), dict) else {}
@@ -8126,7 +8150,7 @@ async def process_scan_job(job_data: dict):
             except Exception as e:
                 print(f"[{job_id[:8]}] save_device_findings error: {e}", flush=True)
 
-        if device_target_id and not error:
+        if device_target_id and not error and (options or {}).get("run_kind") == "device_posture":
             try:
                 await persist_device_inventory(scan_id, device_target_id, result)
                 async with db_pool.acquire() as conn:

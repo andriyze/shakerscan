@@ -41,6 +41,7 @@ __all__ = [
     "ct_monitor",
     "device_evidence",
     "device_posture",
+    "device_probe",
     "device_protocols",
     "device_safety",
     "discovery",

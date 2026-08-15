@@ -130,7 +130,7 @@ CREATE TABLE scans (
     error_message TEXT,
     CONSTRAINT scans_run_kind_check CHECK (run_kind IN (
         'web_dast','ai_api','ai_widget','ai_rag','ai_trace','ai_mcp',
-        'model_intake','device_posture','device_web_dast'
+        'model_intake','device_posture','device_probe','device_web_dast'
     )),
     retry_count INTEGER DEFAULT 0,
 
@@ -800,10 +800,10 @@ CREATE INDEX idx_targets_is_root ON targets(is_root) WHERE is_root = true;
 CREATE INDEX idx_scans_target_id ON scans(target_id);
 CREATE INDEX idx_scans_ai_target_id ON scans(ai_target_id) WHERE ai_target_id IS NOT NULL;
 CREATE INDEX idx_scans_device_target_id ON scans(device_target_id) WHERE device_target_id IS NOT NULL;
-CREATE UNIQUE INDEX idx_scans_one_active_device_posture
+CREATE UNIQUE INDEX idx_scans_one_active_device_traffic
 ON scans(device_target_id)
 WHERE device_target_id IS NOT NULL
-  AND run_kind='device_posture'
+  AND run_kind IN ('device_posture','device_probe')
   AND status IN ('pending','queued','running');
 CREATE INDEX idx_scans_run_kind ON scans(run_kind);
 CREATE INDEX idx_scans_status ON scans(status);
@@ -970,7 +970,7 @@ SELECT DISTINCT ON (target_url) *
 FROM scans
 WHERE status = 'completed'
   AND (scan_role IS NULL OR scan_role <> 'shard')
-  AND COALESCE(run_kind, 'web_dast') NOT IN ('device_posture', 'device_web_dast')
+  AND COALESCE(run_kind, 'web_dast') NOT IN ('device_posture', 'device_probe', 'device_web_dast')
 ORDER BY target_url, completed_at DESC;
 
 -- Active findings summary
@@ -992,8 +992,8 @@ GROUP BY target_id;
 CREATE VIEW dashboard_metrics AS
 SELECT
     (SELECT COUNT(*) FROM targets WHERE is_active = true AND COALESCE(discovery_source, 'manual') <> 'model-intake') as total_targets,
-    (SELECT COUNT(*) FROM scans WHERE status = 'completed' AND (scan_role IS NULL OR scan_role <> 'shard') AND COALESCE(run_kind, 'web_dast') NOT IN ('device_posture', 'device_web_dast')) as total_scans,
-    (SELECT COUNT(*) FROM scans WHERE status = 'running' AND (scan_role IS NULL OR scan_role <> 'shard') AND COALESCE(run_kind, 'web_dast') NOT IN ('device_posture', 'device_web_dast')) as running_scans,
+    (SELECT COUNT(*) FROM scans WHERE status = 'completed' AND (scan_role IS NULL OR scan_role <> 'shard') AND COALESCE(run_kind, 'web_dast') NOT IN ('device_posture', 'device_probe', 'device_web_dast')) as total_scans,
+    (SELECT COUNT(*) FROM scans WHERE status = 'running' AND (scan_role IS NULL OR scan_role <> 'shard') AND COALESCE(run_kind, 'web_dast') NOT IN ('device_posture', 'device_probe', 'device_web_dast')) as running_scans,
     (SELECT COUNT(*) FROM findings WHERE status = 'active' AND COALESCE(source, 'scan') <> 'device') as active_findings,
     (SELECT COUNT(*) FROM findings WHERE status = 'active' AND severity = 'critical' AND COALESCE(source, 'scan') <> 'device') as critical_findings,
     (SELECT COUNT(*) FROM findings WHERE status = 'active' AND severity = 'high' AND COALESCE(source, 'scan') <> 'device') as high_findings,

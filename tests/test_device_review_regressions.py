@@ -58,7 +58,7 @@ def test_bootstrap_schema_contains_device_agent_runs():
     assert "CREATE TABLE device_agent_runs" in init_sql
     assert "device_target_id UUID NOT NULL REFERENCES device_targets(id) ON DELETE CASCADE" in init_sql
     assert "idx_device_agent_runs_one_active_per_device" in init_sql
-    assert "idx_scans_one_active_device_posture" in init_sql
+    assert "idx_scans_one_active_device_traffic" in init_sql
 
 
 def test_device_findings_use_atomic_conflict_upsert():

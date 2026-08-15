@@ -277,7 +277,7 @@ except ModuleNotFoundError:
     from api.ai_control_requirements import AI_CONTROL_REQUIREMENTS
 
 VALID_DAST_SCAN_TYPES = {"quick", "standard", "deep", "full", "aggressive", "smart"}
-DEVICE_RUN_KINDS = {"device_posture", "device_web_dast"}
+DEVICE_RUN_KINDS = {"device_posture", "device_probe", "device_web_dast"}
 DEVICE_FINDING_SOURCE = "device"
 DEVICE_WEB_ORIGIN_ROLE = "device_web_origin"
 ACTIVE_ENFORCED_SCAN_TYPES = {"smart", "full", "aggressive"}
@@ -2867,7 +2867,7 @@ async def cleanup_stale_device_lifecycle(pool: asyncpg.Pool) -> None:
         if queued_job_ids is not None:
             pending = await conn.fetch(
                 """SELECT id, job_id FROM scans
-                   WHERE run_kind='device_posture' AND status IN ('pending','queued')
+                   WHERE run_kind IN ('device_posture','device_probe') AND status IN ('pending','queued')
                      AND created_at < $1""",
                 now - timedelta(minutes=10),
             )
@@ -4184,6 +4184,18 @@ class DeviceScanRequest(BaseModel):
     max_web_origins: int = Field(default=8, ge=0, le=32)
     ssh_credential_profile_id: Optional[str] = None
     web_credential_profile_id: Optional[str] = None
+    approval_receipt_id: Optional[str] = None
+
+
+class DeviceServiceVerifyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    transport: Literal["tcp", "udp"]
+    port: int = Field(ge=1, le=65535)
+    expected_state: Literal["open", "closed"]
+    safety_profile: Literal["safe_remote", "authenticated_active", "lab_invasive"] = "safe_remote"
+    confirm_authorized: bool = False
+    confirm_lab_invasive: bool = False
+    reason: str = Field(min_length=1, max_length=500)
     approval_receipt_id: Optional[str] = None
 
 
@@ -18558,7 +18570,7 @@ async def get_device(
         scans = await conn.fetch(
             """SELECT id, status, scan_type, run_kind, score, grade, findings_count, progress,
                       current_phase, created_at, completed_at
-               FROM scans WHERE device_target_id=$1 AND run_kind='device_posture'
+               FROM scans WHERE device_target_id=$1 AND run_kind IN ('device_posture','device_probe')
                ORDER BY created_at DESC LIMIT 20""",
             device_uuid,
         )
@@ -18675,7 +18687,7 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
             created_by="device_scan_endpoint",
         )
         active = await conn.fetchval(
-            "SELECT 1 FROM scans WHERE device_target_id=$1 AND run_kind='device_posture' AND status IN ('pending','queued','running') LIMIT 1",
+            "SELECT 1 FROM scans WHERE device_target_id=$1 AND run_kind IN ('device_posture','device_probe') AND status IN ('pending','queued','running') LIMIT 1",
             device_uuid,
         )
         if active:
@@ -18762,6 +18774,113 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
     }
 
 
+@app.post("/devices/{device_id}/verify-service")
+async def verify_device_service(device_id: str, request: DeviceServiceVerifyRequest):
+    """Queue one fixed-port state invariant on the dedicated device worker."""
+    if not _device_posture_enabled():
+        raise HTTPException(status_code=503, detail="Connected-device posture is disabled")
+    readiness = _device_worker_readiness()
+    if readiness["status"] != "ready":
+        raise HTTPException(status_code=503, detail={
+            "message": "No build-current connected-device worker is ready",
+            "reason": readiness["reason"],
+            "worker_count": readiness["worker_count"],
+        })
+    if not request.confirm_authorized:
+        raise HTTPException(status_code=409, detail="Confirm authorization before probing this device service")
+    try:
+        safety_contract = validate_safety_request({
+            "safety_profile": request.safety_profile,
+            "confirm_lab_invasive": request.confirm_lab_invasive,
+            "include_web_dast": False,
+        })
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if safety_contract.name == "observe_only":
+        raise HTTPException(status_code=422, detail="observe_only cannot send a service verification probe")
+
+    device_uuid = _device_uuid(device_id)
+    scan_id, job_id = str(uuid.uuid4()), str(uuid.uuid4())
+    async with db_pool.acquire() as conn:
+        device = await conn.fetchrow("SELECT * FROM device_targets WHERE id=$1", device_uuid)
+        if not device:
+            raise HTTPException(status_code=404, detail="Connected device not found")
+        if not device["is_active"]:
+            raise HTTPException(status_code=409, detail="Connected device is inactive")
+        approval_context = await _validate_approval_receipt_for_action(
+            conn,
+            request.approval_receipt_id,
+            target_url=str(device["primary_locator"]),
+            action_name="device.verify_service",
+            risk_tier="active",
+            created_by="device_service_verifier",
+        )
+        if await conn.fetchval(
+            "SELECT 1 FROM scans WHERE device_target_id=$1 AND run_kind IN ('device_posture','device_probe') AND status IN ('pending','queued','running') LIMIT 1",
+            device_uuid,
+        ):
+            raise HTTPException(status_code=409, detail="Connected-device traffic is already active for this device")
+        options = {
+            "run_kind": "device_probe",
+            "probe_kind": "service_state",
+            "probe_transport": request.transport,
+            "probe_port": request.port,
+            "expected_state": request.expected_state,
+            "reason": request.reason,
+            "safety_profile": request.safety_profile,
+            "confirm_authorized": True,
+            "confirm_lab_invasive": request.confirm_lab_invasive,
+            "approval_receipt_id": request.approval_receipt_id,
+            "resolved_budget": {
+                "scan_type": "device_probe",
+                "budget_profile": "single_service",
+                "budget_source": "device_verification_submission",
+                "max_duration_minutes": 5,
+            },
+        }
+        if approval_context:
+            options.update(approval_context)
+        try:
+            await conn.execute(
+                """INSERT INTO scans (
+                       id, target_id, ai_target_id, device_target_id, target_url, job_id, status,
+                       options, scan_type, run_kind, subject_ref, scan_role
+                   ) VALUES ($1,NULL,NULL,$2,$3,$4,'pending',$5,'device_probe','device_probe',$6,'standalone')""",
+                uuid.UUID(scan_id), device_uuid, device["primary_locator"], job_id,
+                json.dumps(options), f"device_target:{device_id}",
+            )
+        except asyncpg.UniqueViolationError as exc:
+            raise HTTPException(status_code=409, detail="Connected-device traffic is already active for this device") from exc
+    job_data = {
+        "type": "device_probe",
+        "job_id": job_id,
+        "scan_id": scan_id,
+        "target": device["primary_locator"],
+        "device_target_id": device_id,
+        "options": options,
+        "submitted_at": utc_now_iso(),
+        "_base_queue_name": DEVICE_QUEUE_NAME,
+    }
+    try:
+        enqueue_job(get_redis(), DEVICE_QUEUE_NAME, job_data)
+    except Exception as exc:
+        await _mark_scan_enqueue_failed(scan_id, f"connected-device probe enqueue failed: {exc}")
+        raise HTTPException(status_code=503, detail="Failed to queue connected-device service verification") from exc
+    get_redis().hset(f"job:{job_id}", mapping={"status": "queued", "target": device["primary_locator"], "scan_id": scan_id})
+    return {
+        "scan_id": scan_id,
+        "job_id": job_id,
+        "status": "queued",
+        "run_kind": "device_probe",
+        "device_target_id": device_id,
+        "target": device["primary_locator"],
+        "transport": request.transport,
+        "port": request.port,
+        "expected_state": request.expected_state,
+        "ui_url": f"/devices/{device_id}?scan={scan_id}",
+    }
+
+
 @app.get("/device-scans")
 async def list_device_scans(
     status: Optional[str] = None,
@@ -18780,13 +18899,13 @@ async def list_device_scans(
                        s.scan_type, s.run_kind, s.score, s.grade, s.findings_count, s.error_message,
                        s.created_at, s.started_at, s.completed_at, s.duration_seconds, d.name AS target_name
                 FROM scans s JOIN device_targets d ON d.id=s.device_target_id
-                WHERE s.run_kind='device_posture'{status_clause}
+                WHERE s.run_kind IN ('device_posture','device_probe'){status_clause}
                 ORDER BY s.created_at DESC LIMIT ${len(params)-1} OFFSET ${len(params)}""",
             *params,
         )
         count_params = params[:-2]
         total = await conn.fetchval(
-            f"SELECT COUNT(*) FROM scans s WHERE s.run_kind='device_posture'{status_clause}", *count_params,
+            f"SELECT COUNT(*) FROM scans s WHERE s.run_kind IN ('device_posture','device_probe'){status_clause}", *count_params,
         )
     return {"scans": [row_to_dict(row) for row in rows], "total": total, "limit": limit, "offset": offset}
 
@@ -19030,6 +19149,7 @@ def _bounded_device_scan_result(row: Any) -> dict[str, Any]:
     item = row_to_dict(row) if row is not None and not isinstance(row, dict) else dict(row or {})
     result = _decode_json_value(item.get("result")) or {}
     posture = result.get("device_posture") if isinstance(result.get("device_posture"), dict) else {}
+    probe = result.get("device_probe") if isinstance(result.get("device_probe"), dict) else {}
     graph = posture.get("evidence_graph") if isinstance(posture.get("evidence_graph"), dict) else {}
     findings = result.get("findings") if isinstance(result.get("findings"), list) else []
     return {
@@ -19040,10 +19160,12 @@ def _bounded_device_scan_result(row: Any) -> dict[str, Any]:
         "score": item.get("score"),
         "grade": item.get("grade"),
         "error_message": item.get("error_message"),
+        "run_kind": item.get("run_kind"),
         "device_profile": posture.get("profile"),
         "decision": posture.get("decision"),
         "completeness": posture.get("completeness"),
-        "safety": posture.get("safety"),
+        "safety": probe.get("safety") or posture.get("safety"),
+        "device_probe": probe or None,
         "services": list(posture.get("services") or [])[:100],
         "inconclusive_observations": list(posture.get("inconclusive_observations") or [])[:100],
         "web_origins": list(posture.get("web_origins") or [])[:32],
@@ -19170,7 +19292,7 @@ async def _execute_device_agent_tool(
                 device_target_id,
             )
             scans = await conn.fetch(
-                "SELECT id, status, progress, current_phase, score, grade, findings_count, created_at, completed_at FROM scans WHERE device_target_id=$1 AND run_kind='device_posture' ORDER BY created_at DESC LIMIT 20",
+                "SELECT id, run_kind, status, progress, current_phase, score, grade, findings_count, created_at, completed_at FROM scans WHERE device_target_id=$1 AND run_kind IN ('device_posture','device_probe') ORDER BY created_at DESC LIMIT 20",
                 device_target_id,
             )
             severity_rows = await conn.fetch(
@@ -19216,6 +19338,30 @@ async def _execute_device_agent_tool(
             "message": "Scan queued. Inspect it on a later turn; do not queue an equivalent scan while it is active.",
         }
 
+    if name == "verify_service_state":
+        if state.get("traffic_frozen"):
+            raise HTTPException(status_code=409, detail="Device traffic is frozen after a health circuit breaker")
+        if safety_profile == "observe_only":
+            raise HTTPException(status_code=409, detail="observe_only does not permit service verification traffic")
+        if int(state.get("scans_queued") or 0) >= device_agent.MAX_SCANS_PER_SESSION:
+            raise HTTPException(status_code=409, detail="Connected-device agent scan budget exhausted")
+        queued = await verify_device_service(str(device_target_id), DeviceServiceVerifyRequest(
+            transport=args["transport"],
+            port=args["port"],
+            expected_state=args["expected_state"],
+            safety_profile=safety_profile,
+            confirm_authorized=True,
+            reason=args["reason"],
+            approval_receipt_id=approval_receipt_id,
+        ))
+        state["scans_queued"] = int(state.get("scans_queued") or 0) + 1
+        return {
+            "ok": True,
+            "queued": queued,
+            "reason": args.get("reason"),
+            "message": "One typed service-state verification was queued. Inspect it on a later turn.",
+        }
+
     if name == "note":
         note = {"kind": args["kind"], "content": args["content"], "turn": int(state.get("turns") or 0)}
         state.setdefault("notes", []).append(note)
@@ -19225,7 +19371,7 @@ async def _execute_device_agent_tool(
     scan_uuid = _device_uuid(str(args.get("scan_id") or ""), "scan")
     async with db_pool.acquire() as conn:
         scan = await conn.fetchrow(
-            "SELECT id, device_target_id, status, progress, current_phase, score, grade, error_message, result FROM scans WHERE id=$1 AND device_target_id=$2 AND run_kind='device_posture'",
+            "SELECT id, device_target_id, run_kind, status, progress, current_phase, score, grade, error_message, result FROM scans WHERE id=$1 AND device_target_id=$2 AND run_kind IN ('device_posture','device_probe')",
             scan_uuid,
             device_target_id,
         )
@@ -19471,8 +19617,8 @@ async def submit_device_agent_reply(run_id: str, request: DeviceAgentReplyReques
                     cost = device_agent.tool_fragility_cost(name, args)
                     signature = json.dumps({"name": name, "arguments": args}, sort_keys=True, default=str)
                     queued_signatures = state.setdefault("queued_scan_signatures", [])
-                    if name == "queue_device_scan" and signature in queued_signatures:
-                        raise HTTPException(status_code=409, detail="Equivalent device scan was already queued in this session")
+                    if name in {"queue_device_scan", "verify_service_state"} and signature in queued_signatures:
+                        raise HTTPException(status_code=409, detail="Equivalent device traffic was already queued in this session")
                     session_used = int(state.get("fragility_used") or 0)
                     session_budget = int(state.get("fragility_budget") or device_agent.MAX_FRAGILITY_PER_SESSION)
                     if session_used + cost > session_budget:
@@ -19492,7 +19638,7 @@ async def submit_device_agent_reply(run_id: str, request: DeviceAgentReplyReques
                         name=name,
                         args=args,
                     )
-                    if name == "queue_device_scan":
+                    if name in {"queue_device_scan", "verify_service_state"}:
                         queued_signatures.append(signature)
                         state["queued_scan_signatures"] = queued_signatures[-20:]
                     reference = output.get("evidence_ref") if isinstance(output, dict) else None
@@ -21168,7 +21314,7 @@ async def _build_dashboard_action_center(conn, *, worker_snapshot: dict[str, Any
               AND (scan_role IS NULL OR scan_role <> 'shard')
               AND device_target_id IS NULL
               AND COALESCE(scan_role, '') <> 'device_web_origin'
-              AND COALESCE(run_kind, '') <> 'device_posture'
+              AND COALESCE(run_kind, '') NOT IN ('device_posture','device_probe','device_web_dast')
             ORDER BY created_at DESC
             LIMIT 5
         """)
@@ -21675,7 +21821,7 @@ async def dashboard():
                   AND COALESCE(scan_type, '') <> 'model_intake'
                   AND device_target_id IS NULL
                   AND COALESCE(scan_role, '') <> 'device_web_origin'
-                  AND COALESCE(run_kind, '') <> 'device_posture'
+                  AND COALESCE(run_kind, '') NOT IN ('device_posture','device_probe','device_web_dast')
                 ORDER BY
                     COALESCE(
                         'target:' || target_id::text,
@@ -23415,8 +23561,8 @@ async def list_scans(
 
         if not include_devices:
             device_filter = """
-                AND COALESCE(s.run_kind, '') NOT IN ('device_posture', 'device_web_dast')
-                AND COALESCE(s.scan_type, '') <> 'device_posture'
+                AND COALESCE(s.run_kind, '') NOT IN ('device_posture', 'device_probe', 'device_web_dast')
+                AND COALESCE(s.scan_type, '') NOT IN ('device_posture', 'device_probe')
             """
             query += device_filter
             count_query += device_filter

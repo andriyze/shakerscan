@@ -1365,15 +1365,15 @@ async def run_schema_migrations(pool) -> None:
                 FROM scans
                 WHERE status = 'completed'
                   AND (scan_role IS NULL OR scan_role <> 'shard')
-                  AND COALESCE(run_kind, 'web_dast') NOT IN ('device_posture', 'device_web_dast')
+                  AND COALESCE(run_kind, 'web_dast') NOT IN ('device_posture', 'device_probe', 'device_web_dast')
                 ORDER BY target_url, completed_at DESC
             """)
             await conn.execute("""
                 CREATE OR REPLACE VIEW dashboard_metrics AS
                 SELECT
                     (SELECT COUNT(*) FROM targets WHERE is_active = true AND COALESCE(discovery_source, 'manual') <> 'model-intake') as total_targets,
-                    (SELECT COUNT(*) FROM scans WHERE status = 'completed' AND (scan_role IS NULL OR scan_role <> 'shard') AND COALESCE(run_kind, 'web_dast') NOT IN ('device_posture', 'device_web_dast')) as total_scans,
-                    (SELECT COUNT(*) FROM scans WHERE status = 'running' AND (scan_role IS NULL OR scan_role <> 'shard') AND COALESCE(run_kind, 'web_dast') NOT IN ('device_posture', 'device_web_dast')) as running_scans,
+                    (SELECT COUNT(*) FROM scans WHERE status = 'completed' AND (scan_role IS NULL OR scan_role <> 'shard') AND COALESCE(run_kind, 'web_dast') NOT IN ('device_posture', 'device_probe', 'device_web_dast')) as total_scans,
+                    (SELECT COUNT(*) FROM scans WHERE status = 'running' AND (scan_role IS NULL OR scan_role <> 'shard') AND COALESCE(run_kind, 'web_dast') NOT IN ('device_posture', 'device_probe', 'device_web_dast')) as running_scans,
                     (SELECT COUNT(*) FROM findings WHERE status = 'active' AND COALESCE(source, 'scan') <> 'device') as active_findings,
                     (SELECT COUNT(*) FROM findings WHERE status = 'active' AND severity = 'critical' AND COALESCE(source, 'scan') <> 'device') as critical_findings,
                     (SELECT COUNT(*) FROM findings WHERE status = 'active' AND severity = 'high' AND COALESCE(source, 'scan') <> 'device') as high_findings,
@@ -2642,6 +2642,7 @@ async def run_schema_migrations(pool) -> None:
                     'ai_mcp',
                     'model_intake',
                     'device_posture',
+                    'device_probe',
                     'device_web_dast'
                 ))
             """)
@@ -2729,7 +2730,7 @@ async def run_schema_migrations(pool) -> None:
                     ) AS position
                     FROM scans
                     WHERE device_target_id IS NOT NULL
-                      AND run_kind='device_posture'
+                      AND run_kind IN ('device_posture','device_probe')
                       AND status IN ('pending','queued','running')
                 )
                 UPDATE scans
@@ -2738,10 +2739,13 @@ async def run_schema_migrations(pool) -> None:
                 WHERE id IN (SELECT id FROM ranked WHERE position > 1)
             """)
             await conn.execute("""
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_scans_one_active_device_posture
+                DROP INDEX IF EXISTS idx_scans_one_active_device_posture
+            """)
+            await conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_scans_one_active_device_traffic
                 ON scans(device_target_id)
                 WHERE device_target_id IS NOT NULL
-                  AND run_kind='device_posture'
+                  AND run_kind IN ('device_posture','device_probe')
                   AND status IN ('pending','queued','running')
             """)
             await conn.execute("""

@@ -67,8 +67,14 @@ def test_device_agent_depth_tools_are_read_only_and_scan_costs_are_profiled():
     assert device_agent.tool_fragility_cost("diff_scans", {}) == 0
     assert device_agent.tool_fragility_cost("queue_device_scan", {"coverage_profile": "inventory"}) == 5
     assert device_agent.tool_fragility_cost("queue_device_scan", {"coverage_profile": "thorough", "include_web_dast": True}) == 22
+    assert device_agent.tool_fragility_cost("verify_service_state", {"transport": "tcp"}) == 3
+    assert device_agent.tool_fragility_cost("verify_service_state", {"transport": "udp"}) == 6
     name, args = device_agent.validate_tool_call({"name": "diff_scans", "arguments": {}})
     assert name == "diff_scans" and args == {"scan_a": None, "scan_b": None}
+    name, args = device_agent.validate_tool_call({"name": "verify_service_state", "arguments": {
+        "transport": "tcp", "port": 8443, "expected_state": "closed", "reason": "admin listener should be absent",
+    }})
+    assert name == "verify_service_state" and args["port"] == 8443
 
 
 def test_device_agent_local_intel_has_no_runtime_egress(tmp_path, monkeypatch):

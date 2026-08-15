@@ -29,6 +29,7 @@ CALLABLE_TOOL_NAMES = {
     "query_policy",
     "resolve_intel",
     "lookup_protocol_playbook",
+    "verify_service_state",
     "note",
 }
 MAX_TOOL_CALLS_PER_TURN = 6
@@ -48,6 +49,7 @@ TOOL_TIERS = {
     "lookup_protocol_playbook": 1,
     "note": 0,
     "queue_device_scan": 2,
+    "verify_service_state": 2,
 }
 
 PROTOCOL_PLAYBOOKS = {
@@ -90,6 +92,8 @@ PROTOCOL_PLAYBOOKS = {
 
 
 def tool_fragility_cost(name: str, args: dict[str, Any]) -> int:
+    if name == "verify_service_state":
+        return 6 if str(args.get("transport") or "tcp") == "udp" else 3
     if name != "queue_device_scan":
         return 0
     coverage = str(args.get("coverage_profile") or "inventory")
@@ -217,6 +221,21 @@ def tool_schemas() -> list[dict[str, Any]]:
             "parameters": {"type": "object", "properties": {"service_name": {"type": "string"}, "port": {"type": "integer", "minimum": 1, "maximum": 65535}}, "required": ["service_name"], "additionalProperties": False},
         },
         {
+            "name": "verify_service_state",
+            "description": "Queue one typed, fixed-port TCP or UDP probe to verify an expected open or closed state.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "transport": {"type": "string", "enum": ["tcp", "udp"]},
+                    "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+                    "expected_state": {"type": "string", "enum": ["open", "closed"]},
+                    "reason": {"type": "string"},
+                },
+                "required": ["transport", "port", "expected_state", "reason"],
+                "additionalProperties": False,
+            },
+        },
+        {
             "name": "note",
             "description": "Record a bounded hypothesis, observation, or next step. Notes are not findings or proof.",
             "parameters": {
@@ -280,6 +299,7 @@ def validate_tool_call(call: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         "query_policy": set(),
         "resolve_intel": {"cpe", "product", "version"},
         "lookup_protocol_playbook": {"service_name", "port"},
+        "verify_service_state": {"transport", "port", "expected_state", "reason"},
         "note": {"kind", "content"},
     }[name]
     if set(args) - allowed_fields:
@@ -329,6 +349,20 @@ def validate_tool_call(call: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         if port is not None and not 1 <= port <= 65535:
             raise ValueError("lookup_protocol_playbook port is invalid")
         args = {"service_name": service_name, "port": port}
+    elif name == "verify_service_state":
+        transport = str(args.get("transport") or "").lower()
+        expected_state = str(args.get("expected_state") or "").lower()
+        port = int(args.get("port") or 0)
+        reason = str(args.get("reason") or "").strip()
+        if transport not in {"tcp", "udp"}:
+            raise ValueError("verify_service_state transport must be tcp or udp")
+        if expected_state not in {"open", "closed"}:
+            raise ValueError("verify_service_state expected_state must be open or closed")
+        if not 1 <= port <= 65535:
+            raise ValueError("verify_service_state port is invalid")
+        if not reason:
+            raise ValueError("verify_service_state requires a reason")
+        args = {"transport": transport, "port": port, "expected_state": expected_state, "reason": reason[:500]}
     elif name == "note":
         kind = str(args.get("kind") or "").lower()
         content = str(args.get("content") or "").strip()

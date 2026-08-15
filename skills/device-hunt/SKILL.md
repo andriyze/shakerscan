@@ -29,8 +29,9 @@ Follow the tool contract in the transcript. Prefer this cadence:
 2. Use `diff_scans`, `recall_hypotheses`, and `query_policy` before new traffic.
 3. Use `resolve_intel` only against the operator-pinned local store and `lookup_protocol_playbook` only as guidance.
 4. Queue the smallest useful deterministic scan: inventory before posture, posture before thorough.
-5. Inspect completed scan evidence on a later user turn. Do not repeatedly queue an equivalent scan.
-6. Finish with a debrief whose leads cite real `devref_N` references.
+5. When a hypothesis concerns exactly one TCP or UDP listener, prefer `verify_service_state` over a broad rescan. It queues a typed one-device, one-port invariant and treats filtered or silent results as inconclusive—not proof of absence.
+6. Inspect completed scan evidence on a later user turn. Do not repeatedly queue equivalent traffic.
+7. Finish with a debrief whose leads cite real `devref_N` references.
 
 When a tool queues a scan, report its ID and `/devices/{device_id}?scan={scan_id}`, then stop. Do not poll.
 
