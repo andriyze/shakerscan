@@ -373,6 +373,7 @@ import agent_loop
 import agent_provenance
 import agent_text_toolcalls
 import agent_tools
+import device_agent
 from job_queue import (
     DEFAULT_WORKER_TOOL_COMMANDS,
     QueueLease,
@@ -4086,6 +4087,20 @@ class DeviceScanRequest(BaseModel):
     web_scan_type: Literal["quick", "standard", "deep"] = "standard"
     max_web_origins: int = Field(default=8, ge=0, le=32)
     approval_receipt_id: Optional[str] = None
+
+
+class DeviceAgentSessionStartRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    objective: str = Field(default="Assess the connected device security posture.", max_length=2000)
+    safety_profile: Literal["observe_only", "safe_remote", "authenticated_active", "lab_invasive"] = "safe_remote"
+    max_turns: int = Field(default=12, ge=1, le=30)
+    confirm_authorized: bool = False
+    approval_receipt_id: Optional[str] = None
+
+
+class DeviceAgentReplyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    reply: str = Field(min_length=1, max_length=200_000)
 
 
 class BatchRequest(BaseModel):
@@ -18479,6 +18494,416 @@ async def list_device_scans(
             f"SELECT COUNT(*) FROM scans s WHERE s.run_kind='device_posture'{status_clause}", *count_params,
         )
     return {"scans": [row_to_dict(row) for row in rows], "total": total, "limit": limit, "offset": offset}
+
+
+def _device_agent_run_public(row: Any) -> dict[str, Any]:
+    item = row_to_dict(row) if row is not None and not isinstance(row, dict) else dict(row or {})
+    state = _decode_json_value(item.get("state")) or {}
+    result = _decode_json_value(item.get("result")) or {}
+    status = str(item.get("status") or "")
+    return {
+        "id": str(item.get("id") or ""),
+        "device_target_id": str(item.get("device_target_id") or ""),
+        "objective": item.get("objective") or "",
+        "status": status,
+        "stop_reason": item.get("stop_reason"),
+        "planner_mode": item.get("planner_mode") or "agent",
+        "safety_profile": item.get("safety_profile") or state.get("safety_profile"),
+        "max_turns": int(item.get("max_turns") or state.get("max_turns") or 0),
+        "turns": int(state.get("turns") or 0),
+        "actions_used": int(state.get("actions_used") or 0),
+        "scans_queued": int(state.get("scans_queued") or 0),
+        "budgets": {
+            "actions_remaining": max(0, device_agent.MAX_ACTIONS_PER_SESSION - int(state.get("actions_used") or 0)),
+            "scans_remaining": max(0, device_agent.MAX_SCANS_PER_SESSION - int(state.get("scans_queued") or 0)),
+            "turns_remaining": max(0, int(item.get("max_turns") or 0) - int(state.get("turns") or 0)),
+        },
+        "capabilities": {
+            "tools": sorted(device_agent.CALLABLE_TOOL_NAMES),
+            "target_fixed": True,
+            "safety_profile_fixed": True,
+            "credentials_visible_to_planner": False,
+            "agent_findings_authoritative": False,
+        },
+        "transcript": state.get("messages") or [],
+        "events": state.get("events") or [],
+        "notes": state.get("notes") or [],
+        "next_action": (
+            f"POST /device-agent/session/{item.get('id')}/reply with tool_calls or a final debrief"
+            if status == "awaiting_planner" else status
+        ),
+        "result": result or None,
+        "created_at": item.get("created_at"),
+        "updated_at": item.get("updated_at"),
+    }
+
+
+async def _device_agent_run_or_404(conn: Any, run_id: str, *, for_update: bool = False) -> Any:
+    query = "SELECT * FROM device_agent_runs WHERE id=$1"
+    if for_update:
+        query += " FOR UPDATE"
+    row = await conn.fetchrow(query, _device_uuid(run_id, "device agent run"))
+    if not row:
+        raise HTTPException(status_code=404, detail="Connected-device agent run not found")
+    return row
+
+
+def _device_agent_add_evidence(state: dict[str, Any], payload: dict[str, Any]) -> str:
+    sequence = max(1, int(state.get("next_evidence_ref") or 1))
+    ref = f"devref_{sequence}"
+    state["next_evidence_ref"] = sequence + 1
+    evidence = state.setdefault("evidence", {})
+    evidence[ref] = payload
+    return ref
+
+
+def _bounded_device_scan_result(row: Any) -> dict[str, Any]:
+    item = row_to_dict(row) if row is not None and not isinstance(row, dict) else dict(row or {})
+    result = _decode_json_value(item.get("result")) or {}
+    posture = result.get("device_posture") if isinstance(result.get("device_posture"), dict) else {}
+    graph = posture.get("evidence_graph") if isinstance(posture.get("evidence_graph"), dict) else {}
+    findings = result.get("findings") if isinstance(result.get("findings"), list) else []
+    return {
+        "scan_id": str(item.get("id") or ""),
+        "status": item.get("status"),
+        "progress": item.get("progress"),
+        "current_phase": item.get("current_phase"),
+        "score": item.get("score"),
+        "grade": item.get("grade"),
+        "error_message": item.get("error_message"),
+        "device_profile": posture.get("profile"),
+        "decision": posture.get("decision"),
+        "completeness": posture.get("completeness"),
+        "safety": posture.get("safety"),
+        "services": list(posture.get("services") or [])[:100],
+        "inconclusive_observations": list(posture.get("inconclusive_observations") or [])[:100],
+        "web_origins": list(posture.get("web_origins") or [])[:32],
+        "findings": [{
+            "title": finding.get("title"),
+            "severity": finding.get("severity"),
+            "tool": finding.get("tool"),
+            "cwe": finding.get("cwe"),
+        } for finding in findings[:100] if isinstance(finding, dict)],
+        "evidence_graph_counts": {
+            "nodes": len(graph.get("nodes") or []),
+            "edges": len(graph.get("edges") or []),
+            "observations": len(graph.get("observations") or []),
+        },
+    }
+
+
+async def _execute_device_agent_tool(
+    *,
+    device_target_id: uuid.UUID,
+    safety_profile: str,
+    approval_receipt_id: str | None,
+    state: dict[str, Any],
+    name: str,
+    args: dict[str, Any],
+) -> dict[str, Any]:
+    if name == "inspect_device":
+        async with db_pool.acquire() as conn:
+            device = await conn.fetchrow(
+                "SELECT d.*, p.name AS policy_name FROM device_targets d LEFT JOIN device_policies p ON p.id=d.policy_id WHERE d.id=$1",
+                device_target_id,
+            )
+            if not device or not device["is_active"]:
+                raise HTTPException(status_code=404, detail="Active connected device not found")
+            services = await conn.fetch(
+                "SELECT transport, port, state, service_name, product, version, cpe, encrypted, web_origin, policy_disposition, policy_reason, last_seen_at FROM device_services WHERE device_target_id=$1 ORDER BY state='open' DESC, transport, port LIMIT 200",
+                device_target_id,
+            )
+            scans = await conn.fetch(
+                "SELECT id, status, progress, current_phase, score, grade, findings_count, created_at, completed_at FROM scans WHERE device_target_id=$1 AND run_kind='device_posture' ORDER BY created_at DESC LIMIT 20",
+                device_target_id,
+            )
+            severity_rows = await conn.fetch(
+                "SELECT severity, COUNT(*) AS count FROM findings WHERE device_target_id=$1 AND status='active' GROUP BY severity",
+                device_target_id,
+            )
+        payload = {
+            "device": _decode_device_row(device),
+            "services": [row_to_dict(row) for row in services],
+            "recent_scans": [row_to_dict(row) for row in scans],
+            "active_findings_by_severity": {str(row["severity"]): int(row["count"]) for row in severity_rows},
+        }
+        return {"ok": True, "evidence_ref": _device_agent_add_evidence(state, payload), "data": payload}
+
+    if name == "queue_device_scan":
+        if int(state.get("scans_queued") or 0) >= device_agent.MAX_SCANS_PER_SESSION:
+            raise HTTPException(status_code=409, detail="Connected-device agent scan budget exhausted")
+        include_web_dast = bool(args.get("include_web_dast")) and safety_profile != "observe_only"
+        queued = await scan_device(str(device_target_id), DeviceScanRequest(
+            profile=args["coverage_profile"],
+            safety_profile=safety_profile,
+            confirm_authorized=True,
+            include_web_dast=include_web_dast,
+            web_scan_type=args.get("web_scan_type") or "standard",
+            max_web_origins=8,
+            approval_receipt_id=approval_receipt_id,
+        ))
+        state["scans_queued"] = int(state.get("scans_queued") or 0) + 1
+        return {
+            "ok": True,
+            "queued": queued,
+            "reason": args.get("reason"),
+            "message": "Scan queued. Inspect it on a later turn; do not queue an equivalent scan while it is active.",
+        }
+
+    if name == "note":
+        note = {"kind": args["kind"], "content": args["content"], "turn": int(state.get("turns") or 0)}
+        state.setdefault("notes", []).append(note)
+        state["notes"] = state["notes"][-100:]
+        return {"ok": True, "note": note, "evidence_ref": None}
+
+    scan_uuid = _device_uuid(str(args.get("scan_id") or ""), "scan")
+    async with db_pool.acquire() as conn:
+        scan = await conn.fetchrow(
+            "SELECT id, device_target_id, status, progress, current_phase, score, grade, error_message, result FROM scans WHERE id=$1 AND device_target_id=$2 AND run_kind='device_posture'",
+            scan_uuid,
+            device_target_id,
+        )
+    if not scan:
+        raise HTTPException(status_code=404, detail="Device scan not found for this agent target")
+    if name == "inspect_device_scan":
+        payload = _bounded_device_scan_result(scan)
+        ref = _device_agent_add_evidence(state, payload) if payload.get("status") in {"completed", "failed"} else None
+        return {"ok": True, "evidence_ref": ref, "data": payload}
+    if name == "query_device_evidence":
+        result = _decode_json_value(scan["result"]) or {}
+        posture = result.get("device_posture") if isinstance(result.get("device_posture"), dict) else {}
+        graph = posture.get("evidence_graph") if isinstance(posture.get("evidence_graph"), dict) else {}
+        collection = args["collection"]
+        rows = [row for row in list(graph.get(collection) or []) if isinstance(row, dict)]
+        kind = args.get("kind")
+        if kind:
+            rows = [row for row in rows if str(row.get("kind") or "") == kind]
+        payload = {
+            "scan_id": str(scan_uuid),
+            "collection": collection,
+            "kind": kind,
+            "items": rows[:int(args.get("limit") or 25)],
+            "matched_count": len(rows),
+        }
+        return {"ok": True, "evidence_ref": _device_agent_add_evidence(state, payload), "data": payload}
+    raise HTTPException(status_code=422, detail="Unsupported connected-device agent tool")
+
+
+@app.post("/devices/{device_id}/agent/session")
+async def start_device_agent_session(device_id: str, request: DeviceAgentSessionStartRequest):
+    if not request.confirm_authorized:
+        raise HTTPException(status_code=409, detail="Confirm authorization before starting an AI-directed device investigation")
+    try:
+        profile = validate_safety_request({
+            "safety_profile": request.safety_profile,
+            "include_web_dast": request.safety_profile != "observe_only",
+        })
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    device_uuid = _device_uuid(device_id)
+    async with db_pool.acquire() as conn:
+        device = await conn.fetchrow(
+            "SELECT id, name, primary_locator, device_class, is_active FROM device_targets WHERE id=$1",
+            device_uuid,
+        )
+        if not device or not device["is_active"]:
+            raise HTTPException(status_code=404, detail="Active connected device not found")
+        if await conn.fetchval(
+            "SELECT 1 FROM device_agent_runs WHERE device_target_id=$1 AND status IN ('awaiting_planner','planning') LIMIT 1",
+            device_uuid,
+        ):
+            raise HTTPException(status_code=409, detail="An AI-directed investigation is already active for this device")
+        await _require_approval_receipt_if_policy_enabled(
+            conn,
+            request.approval_receipt_id,
+            action_name="device.agent.session",
+            risk_tier="active",
+            created_by="device_agent_session",
+        )
+        state = device_agent.seed_state(
+            objective=request.objective,
+            safety_profile=profile.name,
+            max_turns=request.max_turns,
+        )
+        state["messages"].insert(1, {
+            "role": "system",
+            "content": (
+                f"Fixed target: {device['name']} ({device['primary_locator']}), class={device['device_class']}. "
+                f"Fixed safety profile: {profile.name}. The target and safety profile cannot be changed during this run."
+            ),
+        })
+        row = await conn.fetchrow(
+            """INSERT INTO device_agent_runs (
+                   device_target_id, objective, safety_profile, max_turns,
+                   approval_receipt_id, state, created_by
+               ) VALUES ($1,$2,$3,$4,$5,$6,'device_agent_session') RETURNING *""",
+            device_uuid,
+            request.objective,
+            profile.name,
+            request.max_turns,
+            _device_uuid(request.approval_receipt_id, "approval receipt") if request.approval_receipt_id else None,
+            json.dumps(state, default=str),
+        )
+    return _device_agent_run_public(row)
+
+
+@app.get("/device-agent/session/{run_id}")
+async def get_device_agent_session(run_id: str):
+    async with db_pool.acquire() as conn:
+        row = await _device_agent_run_or_404(conn, run_id)
+    return _device_agent_run_public(row)
+
+
+@app.post("/device-agent/session/{run_id}/reply")
+async def submit_device_agent_reply(run_id: str, request: DeviceAgentReplyRequest):
+    run_uuid = _device_uuid(run_id, "device agent run")
+    planning_token = uuid.uuid4()
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            row = await _device_agent_run_or_404(conn, run_id, for_update=True)
+            if str(row["status"]) != "awaiting_planner":
+                raise HTTPException(status_code=409, detail=f"Device agent run is {row['status']}, not awaiting a reply")
+            device = await conn.fetchrow("SELECT id, is_active FROM device_targets WHERE id=$1", row["device_target_id"])
+            if not device or not device["is_active"]:
+                cancelled = await conn.fetchrow(
+                    "UPDATE device_agent_runs SET status='cancelled', stop_reason='device_deactivated', updated_at=NOW() WHERE id=$1 RETURNING *",
+                    run_uuid,
+                )
+                return _device_agent_run_public(cancelled)
+            await _require_approval_receipt_if_policy_enabled(
+                conn,
+                str(row["approval_receipt_id"]) if row["approval_receipt_id"] else None,
+                action_name="device.agent.reply",
+                risk_tier="active",
+                created_by=f"device_agent_session:{run_id}",
+            )
+            state = _decode_json_value(row["state"]) or {}
+            await conn.execute(
+                "UPDATE device_agent_runs SET status='planning', planning_token=$2, updated_at=NOW() WHERE id=$1",
+                run_uuid,
+                planning_token,
+            )
+            device_target_id = row["device_target_id"]
+            safety_profile = str(row["safety_profile"])
+            approval_receipt_id = str(row["approval_receipt_id"]) if row["approval_receipt_id"] else None
+            max_turns = int(row["max_turns"] or 12)
+
+    try:
+        interpreted = device_agent.interpret_reply(request.reply)
+        state.setdefault("messages", []).append({"role": "assistant", "content": request.reply[:20_000]})
+        state["turns"] = int(state.get("turns") or 0) + 1
+        terminal_status = "awaiting_planner"
+        stop_reason = None
+        final_result: dict[str, Any] = {}
+        if interpreted["kind"] == "done":
+            final_result = dict(interpreted["result"])
+            evidence = state.get("evidence") if isinstance(state.get("evidence"), dict) else {}
+            valid_leads = []
+            for lead in final_result.get("leads") or []:
+                refs = [ref for ref in lead.get("evidence_refs") or [] if ref in evidence]
+                if refs:
+                    valid_leads.append({**lead, "evidence_refs": refs, "status": "hypothesis"})
+            final_result["leads"] = valid_leads
+            final_result["authoritative_findings"] = False
+            final_result["finding_source"] = "deterministic_device_scans_only"
+            terminal_status = "completed"
+            stop_reason = "planner_debrief"
+        else:
+            calls = interpreted.get("calls") or []
+            if int(state.get("actions_used") or 0) + len(calls) > device_agent.MAX_ACTIONS_PER_SESSION:
+                raise HTTPException(status_code=409, detail="Connected-device agent action budget exhausted")
+            results: list[dict[str, Any]] = []
+            for call in calls:
+                try:
+                    name, args = device_agent.validate_tool_call(call)
+                    output = await _execute_device_agent_tool(
+                        device_target_id=device_target_id,
+                        safety_profile=safety_profile,
+                        approval_receipt_id=approval_receipt_id,
+                        state=state,
+                        name=name,
+                        args=args,
+                    )
+                    results.append({"name": name, "ok": True, "output": output})
+                except Exception as exc:
+                    detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+                    results.append({"name": str(call.get("name") or "unknown"), "ok": False, "error": detail})
+                state["actions_used"] = int(state.get("actions_used") or 0) + 1
+            state.setdefault("events", []).append({"turn": state["turns"], "tool_results": results})
+            state["events"] = state["events"][-200:]
+            state["messages"].append({
+                "role": "user",
+                "content": "DEVICE TOOL RESULTS\n" + json.dumps(results, default=str)[:30_000],
+            })
+            if state["turns"] >= max_turns:
+                terminal_status = "failed"
+                stop_reason = "turn_limit_without_debrief"
+        async with db_pool.acquire() as conn:
+            updated = await conn.fetchrow(
+                """UPDATE device_agent_runs
+                   SET status=$2, stop_reason=$3, state=$4, result=$5,
+                       planning_token=NULL, updated_at=NOW()
+                   WHERE id=$1 AND status='planning' AND planning_token=$6
+                   RETURNING *""",
+                run_uuid,
+                terminal_status,
+                stop_reason,
+                json.dumps(state, default=str),
+                json.dumps(final_result, default=str),
+                planning_token,
+            )
+            if not updated:
+                updated = await _device_agent_run_or_404(conn, run_id)
+        return _device_agent_run_public(updated)
+    except Exception:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE device_agent_runs SET status='awaiting_planner', planning_token=NULL, updated_at=NOW() WHERE id=$1 AND status='planning' AND planning_token=$2",
+                run_uuid,
+                planning_token,
+            )
+        raise
+
+
+@app.post("/device-agent/session/{run_id}/cancel")
+async def cancel_device_agent_session(run_id: str):
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """UPDATE device_agent_runs
+               SET status='cancelled', stop_reason='cancelled', planning_token=NULL, updated_at=NOW()
+               WHERE id=$1 AND status IN ('awaiting_planner','planning') RETURNING *""",
+            _device_uuid(run_id, "device agent run"),
+        )
+        if not row:
+            row = await _device_agent_run_or_404(conn, run_id)
+    return _device_agent_run_public(row)
+
+
+@app.get("/device-agent/runs")
+async def list_device_agent_runs(
+    device_target_id: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = Query(50, ge=1, le=200),
+):
+    clauses: list[str] = []
+    params: list[Any] = []
+    if device_target_id:
+        params.append(_device_uuid(device_target_id))
+        clauses.append(f"device_target_id=${len(params)}")
+    if status:
+        normalized = status.strip().lower()
+        if normalized not in {"awaiting_planner", "planning", "completed", "cancelled", "failed"}:
+            raise HTTPException(status_code=400, detail="Invalid device agent status")
+        params.append(normalized)
+        clauses.append(f"status=${len(params)}")
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    params.append(limit)
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM device_agent_runs" + where + f" ORDER BY created_at DESC LIMIT ${len(params)}",
+            *params,
+        )
+    return {"runs": [_device_agent_run_public(row) for row in rows], "count": len(rows)}
 
 
 # ============================================================

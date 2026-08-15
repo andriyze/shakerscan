@@ -3,7 +3,7 @@
 import Link from 'next/link'
 import { useCallback, useEffect, useState } from 'react'
 import { useParams } from 'next/navigation'
-import { Globe, Router } from 'lucide-react'
+import { Bot, Globe, Router } from 'lucide-react'
 import { formatDate, getDevice, scanDevice, type DeviceDetailResponse } from '@/lib/api'
 import { Button, Card, EmptyState, ErrorState, Field, Modal, PageHeader, ScanStatusBadge, Select, TableSkeleton, useToast } from '@/components/ui'
 
@@ -50,7 +50,7 @@ export default function DeviceDetailPage() {
 
   return (
     <div className="mx-auto max-w-7xl">
-      <PageHeader backHref="/devices" backLabel="Connected devices" title={device.name} description={device.primary_locator} icon={<Router className="h-6 w-6" />} actions={<><Link href={`/findings?source_type=device&device_target_id=${device.id}`} className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-200 hover:bg-gray-700">View findings</Link><Button onClick={() => { setScan({ profile: 'posture', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', confirm_authorized: false }); setScanOpen(true) }}>Scan device</Button></>} />
+      <PageHeader backHref="/devices" backLabel="Connected devices" title={device.name} description={device.primary_locator} icon={<Router className="h-6 w-6" />} actions={<><Link href={`/devices/${device.id}/agent`} className="inline-flex items-center gap-2 rounded-lg border border-violet-500/30 bg-violet-500/10 px-3 py-2 text-sm text-violet-200 hover:bg-violet-500/20"><Bot className="h-4 w-4" /> AI investigation</Link><Link href={`/findings?source_type=device&device_target_id=${device.id}`} className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-200 hover:bg-gray-700">View findings</Link><Button onClick={() => { setScan({ profile: 'posture', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', confirm_authorized: false }); setScanOpen(true) }}>Scan device</Button></>} />
 
       <div className="mb-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
         {[

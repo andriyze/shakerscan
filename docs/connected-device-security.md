@@ -143,6 +143,27 @@ Policy management is available at `GET/POST /device-policies` and
 `PATCH /device-policies/{policy_id}`. Device inventory is available at `GET/POST /devices`,
 `GET/PATCH/DELETE /devices/{device_id}`, and `GET /device-scans`.
 
+## AI-directed device investigation
+
+Connected devices also have a keyless, turn-based investigator modeled on Deep Hunt. The current
+Codex, Claude, or OpenCode session is the planner, while ShakerScan executes a closed device-tool
+contract. Start it through `POST /devices/{device_id}/agent/session`; drive turns through
+`POST /device-agent/session/{run_id}/reply`; inspect or cancel through the matching GET and cancel
+routes. The `/devices/{device_id}/agent` UI shows live state, budgets, evidence-backed leads, and the
+exact fixed safety profile.
+
+The initial device-agent tools can inspect the registered device, queue a deterministic device scan,
+inspect a device-owned scan, query normalized graph evidence, and retain bounded notes. A run is fixed
+to one `device_target_id` and one safety profile at creation. Tool arguments contain no locator,
+credential, arbitrary URL, shell, plugin, or safety-escalation field. Sessions are capped at 30 turns,
+36 tool actions, six calls per turn, and three queued scans. Concurrent agent sessions and concurrent
+device scans for the same device fail closed.
+
+The AI investigator cannot create authoritative findings. Scanner findings continue to come from
+deterministic device scans. A final AI debrief may retain evidence-backed hypotheses only when they
+cite real `devref_N` references created by device context, scan-result, or evidence-graph reads. Notes,
+queue acknowledgements, and model prose are not proof.
+
 ## Wireless and non-IP extensions
 
 Bluetooth, BLE, Zigbee, Thread, and passive network telemetry require hardware or network placement

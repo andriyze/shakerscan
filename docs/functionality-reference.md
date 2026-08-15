@@ -534,6 +534,15 @@ and complete web-origin coverage. Bluetooth/BLE and other radio protocols remain
 capability-labeled sensor extension rather than an implied Docker-worker capability. See
 [`connected-device-security.md`](connected-device-security.md).
 
+Device coverage depth and action safety are independent. `observe_only` and `safe_remote` are
+available; authenticated and lab-invasive profiles are declared but fail closed until their
+dedicated collectors/runners are ready. Device reports carry `device-safety/v1` receipts plus a
+stable `device-evidence/v1` node/edge/observation graph. The keyless device investigator uses
+`POST /devices/{device_id}/agent/session` and `/device-agent/session/*` to let the current coding
+agent inspect device state, queue bounded deterministic scans, and query normalized evidence. Its
+target and safety profile are immutable, its tool/turn/scan budgets are server-enforced, and its
+debrief can create evidence-backed hypotheses but never authoritative findings.
+
 ---
 
 ## 11. AI red teaming

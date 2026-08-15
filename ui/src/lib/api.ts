@@ -4922,6 +4922,42 @@ export interface AIOpsRouteResponse {
   blast_radius?: Record<string, unknown>
 }
 
+export type DeviceAgentStatus = 'awaiting_planner' | 'planning' | 'completed' | 'cancelled' | 'failed'
+
+export interface DeviceAgentSession {
+  id: string
+  device_target_id: string
+  objective: string
+  status: DeviceAgentStatus
+  stop_reason?: string | null
+  planner_mode: 'agent'
+  safety_profile: 'observe_only' | 'safe_remote' | 'authenticated_active' | 'lab_invasive'
+  max_turns: number
+  turns: number
+  actions_used: number
+  scans_queued: number
+  budgets: { actions_remaining: number; scans_remaining: number; turns_remaining: number }
+  capabilities: {
+    tools: string[]
+    target_fixed: boolean
+    safety_profile_fixed: boolean
+    credentials_visible_to_planner: boolean
+    agent_findings_authoritative: boolean
+  }
+  transcript: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>
+  events: Array<Record<string, unknown>>
+  notes: Array<{ kind: string; content: string; turn: number }>
+  next_action: string
+  result?: {
+    summary?: string
+    leads?: Array<{ title: string; rationale: string; evidence_refs: string[]; status: 'hypothesis' }>
+    next_actions?: string[]
+    authoritative_findings?: boolean
+  } | null
+  created_at?: string
+  updated_at?: string
+}
+
 export async function routeAiOps(payload: {
   prompt?: string
   utterance?: string
@@ -5029,6 +5065,44 @@ export async function scanDevice(deviceId: string, payload: {
     body: JSON.stringify(payload),
   })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to start connected-device scan'))
+  return res.json()
+}
+
+export async function startDeviceAgentSession(deviceId: string, payload: {
+  objective: string
+  safety_profile: 'observe_only' | 'safe_remote'
+  max_turns: number
+  confirm_authorized: boolean
+  approval_receipt_id?: string
+}): Promise<DeviceAgentSession> {
+  const res = await fetch(`${API_URL}/devices/${encodeURIComponent(deviceId)}/agent/session`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to start AI device investigation'))
+  return res.json()
+}
+
+export async function getDeviceAgentSession(runId: string): Promise<DeviceAgentSession> {
+  const res = await fetch(`${API_URL}/device-agent/session/${encodeURIComponent(runId)}`, { cache: 'no-store' })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load AI device investigation'))
+  return res.json()
+}
+
+export async function replyDeviceAgentSession(runId: string, reply: string): Promise<DeviceAgentSession> {
+  const res = await fetch(`${API_URL}/device-agent/session/${encodeURIComponent(runId)}/reply`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reply }),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to submit AI device planner turn'))
+  return res.json()
+}
+
+export async function cancelDeviceAgentSession(runId: string): Promise<DeviceAgentSession> {
+  const res = await fetch(`${API_URL}/device-agent/session/${encodeURIComponent(runId)}/cancel`, { method: 'POST' })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to cancel AI device investigation'))
   return res.json()
 }
 
