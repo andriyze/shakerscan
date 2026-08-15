@@ -422,7 +422,7 @@ def test_device_inventory_only_retires_services_after_matching_complete_coverage
     assert 'for service in [*services, *observations]:' in worker
     assert "ds.device_target_id=d.id AND ds.state='open'" in api
     assert "device_target_id=$1 AND state='open'" in api
-    assert "device_target_id=$1 AND state='open|filtered'" in api
+    assert "device_target_id=$1 AND state='open|filtered' AND scan_id=$2" in api
     assert '"inconclusive_observations": [_decode_device_row(item) for item in observations]' in api
 
 

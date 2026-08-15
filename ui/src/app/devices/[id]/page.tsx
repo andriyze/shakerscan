@@ -3,7 +3,7 @@
 import Link from 'next/link'
 import { useCallback, useEffect, useState } from 'react'
 import { useParams } from 'next/navigation'
-import { Bot, Globe, KeyRound, MapPin, Router } from 'lucide-react'
+import { Bot, ChevronDown, ChevronUp, Globe, KeyRound, MapPin, Router } from 'lucide-react'
 import { changeDeviceLocator, createDeviceCredential, deactivateDeviceCredential, formatDate, getDevice, getDeviceCredentials, scanDevice, type DeviceCredentialProfile, type DeviceDetailResponse } from '@/lib/api'
 import { Button, Card, EmptyState, ErrorState, Field, Input, Modal, PageHeader, ScanStatusBadge, Select, TableSkeleton, Textarea, useToast } from '@/components/ui'
 
@@ -27,6 +27,7 @@ export default function DeviceDetailPage() {
   const [credentials, setCredentials] = useState<DeviceCredentialProfile[]>([])
   const [credentialSaving, setCredentialSaving] = useState(false)
   const [locatorSaving, setLocatorSaving] = useState(false)
+  const [showInconclusive, setShowInconclusive] = useState(false)
   const [locatorForm, setLocatorForm] = useState({ locator: '', reason: '', confirm_same_device: false })
   const [credentialForm, setCredentialForm] = useState({ name: '', auth_kind: 'ssh_password', username: '', secret: '', secondary_secret: '', login_path: '/login', port: '' })
   const [scanning, setScanning] = useState(false)
@@ -104,6 +105,7 @@ export default function DeviceDetailPage() {
   if (failed || !data) return <div className="mx-auto max-w-7xl"><ErrorState message="Could not load connected device" onRetry={load} /></div>
   const { device, interfaces, services, scans, locator_history: locatorHistory } = data
   const observations = data.inconclusive_observations || []
+  const observationTotal = data.inconclusive_observations_total ?? observations.length
 
   return (
     <div className="mx-auto max-w-7xl">
@@ -127,20 +129,24 @@ export default function DeviceDetailPage() {
 
       {observations.length > 0 && (
         <section className="mb-6">
-          <h2 className="mb-1 text-lg font-semibold text-white">Inconclusive observations</h2>
-          <p className="mb-3 text-sm text-gray-500">These ports returned no conclusive protocol response. They are not counted as listening services and do not affect policy or score.</p>
-          <div className="overflow-hidden rounded-lg border border-amber-500/20">
-            <div className="divide-y divide-amber-500/10 bg-amber-950/10">
+          <h2 className="mb-1 text-lg font-semibold text-white">Unconfirmed port probes</h2>
+          <p className="mb-3 text-sm text-gray-500">The latest scan received no response from these probes. They are not confirmed open, are not listening services, and do not affect policy or score.</p>
+          <Card className="overflow-hidden p-0">
+            <button type="button" onClick={() => setShowInconclusive(!showInconclusive)} className="flex w-full items-center justify-between gap-4 p-4 text-left hover:bg-gray-900/70" aria-expanded={showInconclusive}>
+              <span><strong className="block text-sm text-white">{observationTotal} no-response probe{observationTotal === 1 ? '' : 's'}</strong><span className="text-xs text-gray-500">Not confirmed open · details hidden by default</span></span>
+              {showInconclusive ? <ChevronUp className="h-4 w-4 text-gray-400" /> : <ChevronDown className="h-4 w-4 text-gray-400" />}
+            </button>
+            {showInconclusive && <div className="divide-y divide-amber-500/10 border-t border-gray-800 bg-amber-950/10">
               {observations.map((observation) => (
                 <div key={observation.id} className="flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-3 text-sm">
-                  <span className="font-mono text-amber-100">{observation.port}/{observation.transport}</span>
-                  <span className="text-gray-300">{observation.service_name || 'unknown'}</span>
-                  <span className="rounded bg-amber-900/40 px-2 py-0.5 text-xs text-amber-200">{observation.state}</span>
-                  <span className="text-xs text-gray-500">Not evaluated by service policy</span>
+                  <span className="font-mono text-gray-200">{observation.port}/{observation.transport}</span>
+                  <span className="text-gray-400">Expected protocol: {observation.service_name || 'unknown'}</span>
+                  <span className="rounded bg-gray-800 px-2 py-0.5 text-xs text-gray-300">No response</span>
+                  <span className="text-xs font-medium text-amber-200">Not confirmed open</span>
                 </div>
               ))}
-            </div>
-          </div>
+            </div>}
+          </Card>
         </section>
       )}
 

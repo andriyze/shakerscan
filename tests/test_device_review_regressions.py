@@ -96,6 +96,20 @@ def test_device_detail_exposes_current_locator_and_bounded_history():
     assert "same physical device" in ui
 
 
+def test_device_detail_scopes_udp_uncertainty_to_the_latest_posture_scan():
+    api = (ROOT / "api" / "api.py").read_text()
+    detail = api[api.index('@app.get("/devices/{device_id}")'):]
+    detail = detail[:detail.index('@app.patch("/devices/{device_id}")')]
+    ui = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "page.tsx").read_text()
+
+    assert "state='open|filtered' AND scan_id=$2" in detail
+    assert 'row["last_scan_id"]' in detail
+    assert "Unconfirmed port probes" in ui
+    assert "They are not confirmed open" in ui
+    assert "details hidden by default" in ui
+    assert "Not confirmed open" in ui
+
+
 def test_device_findings_use_atomic_conflict_upsert():
     source = (ROOT / "api" / "worker.py").read_text()
     function = source[source.index("async def save_device_findings"):]

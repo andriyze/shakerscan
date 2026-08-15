@@ -18749,13 +18749,14 @@ async def get_device(
         )
         observations = await conn.fetch(
             """SELECT * FROM device_services
-               WHERE device_target_id=$1 AND state='open|filtered'
-               ORDER BY transport, port LIMIT $2 OFFSET $3""",
-            device_uuid, service_limit, service_offset,
+               WHERE device_target_id=$1 AND state='open|filtered' AND scan_id=$2
+               ORDER BY transport, port LIMIT $3 OFFSET $4""",
+            device_uuid, row["last_scan_id"], service_limit, service_offset,
         )
         observations_total = await conn.fetchval(
-            "SELECT COUNT(*) FROM device_services WHERE device_target_id=$1 AND state='open|filtered'",
-            device_uuid,
+            """SELECT COUNT(*) FROM device_services
+               WHERE device_target_id=$1 AND state='open|filtered' AND scan_id=$2""",
+            device_uuid, row["last_scan_id"],
         )
         scans = await conn.fetch(
             """SELECT id, status, scan_type, run_kind, score, grade, findings_count, progress,
