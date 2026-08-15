@@ -124,6 +124,16 @@ def build_device_evidence_graph(
             confidence=confidence,
         )
         add_edge("exposes", device_id, service_id, evidence=evidence_id)
+        ssh = service.get("ssh") if isinstance(service.get("ssh"), dict) else {}
+        host_review = ssh.get("host_review") if isinstance(ssh.get("host_review"), dict) else None
+        if host_review:
+            add_observation(
+                "ssh_host_review",
+                service_id,
+                host_review,
+                source="device_ssh_host_review",
+                confidence="correlated" if host_review.get("status") == "completed" else "observed",
+            )
 
     for origin in web_origins:
         if not isinstance(origin, dict) or not origin.get("origin"):

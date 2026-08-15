@@ -29,13 +29,13 @@ try:
     from .device_evidence import build_device_evidence_graph
     from .device_protocols import discover_core_device_protocols
     from .device_safety import DeviceSafetyGovernor, check_device_health, validate_safety_request
-    from .ssh_scanner import full_ssh_scan
+    from .ssh_scanner import DEFAULT_SSH_HOST_REVIEW_BUNDLES, full_ssh_scan
 except ImportError:  # pragma: no cover - flat scanner runtime
     from common import run
     from device_evidence import build_device_evidence_graph
     from device_protocols import discover_core_device_protocols
     from device_safety import DeviceSafetyGovernor, check_device_health, validate_safety_request
-    from ssh_scanner import full_ssh_scan
+    from ssh_scanner import DEFAULT_SSH_HOST_REVIEW_BUNDLES, full_ssh_scan
 
 
 DEVICE_PROFILES = {"inventory", "posture", "thorough"}
@@ -401,6 +401,7 @@ async def _nmap_scan(
     deadline: float | None = None,
     cancel_check: Any = None,
     max_requests_per_second: float = 10.0,
+    extra_priority_ports: tuple[int, ...] = (),
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
     receipts: list[dict[str, Any]] = []
     services_by_key: dict[tuple[str, int], dict[str, Any]] = {}
@@ -416,9 +417,10 @@ async def _nmap_scan(
     rate_args = ["--max-rate", f"{request_rate:g}"]
 
     await ensure_active("TCP priority discovery")
+    priority_ports = tuple(sorted(set(PRIORITY_TCP_PORTS) | {int(port) for port in extra_priority_ports if 1 <= int(port) <= 65535}))
     priority_cmd = [
         "nmap", "-Pn", "-n", "-sT", "-T4", "--max-retries", "1", *rate_args,
-        "--host-timeout", "180s", "-p", ",".join(str(port) for port in PRIORITY_TCP_PORTS),
+        "--host-timeout", "180s", "-p", ",".join(str(port) for port in priority_ports),
         "-oX", "-", locator,
     ]
     priority_services, _priority_uncertain, priority_identity, priority_receipt = await _run_nmap_stage(
@@ -450,7 +452,7 @@ async def _nmap_scan(
     _merge_identity(identity, tcp_identity)
 
     discovered_tcp_ports = sorted(port for (transport, port) in services_by_key if transport == "tcp")
-    priority_set = set(PRIORITY_TCP_PORTS)
+    priority_set = set(priority_ports)
     tcp_ports = sorted(discovered_tcp_ports, key=lambda port: (port not in priority_set, port))[:MAX_FINGERPRINT_PORTS]
     fingerprint_truncated_count = max(0, len(discovered_tcp_ports) - len(tcp_ports))
     fingerprint_budget_exhausted = False
@@ -835,6 +837,29 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
     if resolved_credentials and not safety_profile.credentials_allowed:
         raise ValueError(f"device credentials are forbidden by safety profile {safety_profile.name}")
     ssh_credentials = [item for item in resolved_credentials if item.get("role") == "ssh"]
+    requested_capabilities = list(dict.fromkeys(
+        str(item or "").strip().lower()
+        for item in options.get("device_capability_ids", [])
+        if str(item or "").strip()
+    ))
+    unsupported_capabilities = [
+        item for item in requested_capabilities
+        if item not in {"ssh-authenticated-host-review"}
+    ]
+    if unsupported_capabilities:
+        raise ValueError("unsupported executable device capability: " + ", ".join(unsupported_capabilities))
+    if "ssh-authenticated-host-review" in requested_capabilities and not ssh_credentials:
+        raise ValueError("ssh-authenticated-host-review requires an SSH credential profile")
+    extra_priority_ports = tuple(sorted({
+        int(item.get("port"))
+        for item in ssh_credentials
+        if item.get("port") is not None and 1 <= int(item.get("port")) <= 65535
+    }))
+    expected_ssh_host_keys = {
+        int(port): str(fingerprint)
+        for port, fingerprint in (options.get("expected_ssh_host_keys") or {}).items()
+        if str(port).isdigit() and 1 <= int(port) <= 65535 and str(fingerprint).startswith("SHA256:")
+    }
     resolved_address = await resolve_device_address(locator)
 
     async def ensure_active(stage: str) -> bool:
@@ -858,6 +883,7 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
         deadline=deadline,
         cancel_check=cancel_check,
         max_requests_per_second=safety_profile.max_requests_per_second,
+        extra_priority_ports=extra_priority_ports,
     )
     safety.authorize("core_protocol_discovery", "readonly")
     if await ensure_active("core protocol discovery"):
@@ -950,6 +976,13 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
             "ephemeral_state" if ssh_credentials else "readonly",
             side_effects="one operator-supplied authentication attempt" if ssh_credentials else "none",
         )
+        if "ssh-authenticated-host-review" in requested_capabilities:
+            safety.authorize(
+                "ssh_authenticated_host_review",
+                "readonly",
+                side_effects="server-owned read-only command bundles after supplied authentication",
+            )
+            safety.record_limit_enforcement("ssh_host_review", max_concurrency=1)
         attempted_ssh_profiles: set[str] = set()
         for service in services:
             if service.get("transport") != "tcp" or str(service.get("service_name") or "").lower() not in SSH_SERVICE_NAMES:
@@ -965,6 +998,12 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
                 item for item in ssh_credentials
                 if item.get("port") is None or int(item.get("port")) == service_port
             ), None)
+            if (
+                ssh_credential
+                and "ssh-authenticated-host-review" in requested_capabilities
+                and service_port not in expected_ssh_host_keys
+            ):
+                ssh_credential = None
             credential_profile_id = str((ssh_credential or {}).get("profile_id") or "")
             if credential_profile_id in attempted_ssh_profiles:
                 ssh_credential = None
@@ -973,6 +1012,12 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
                 port=service_port,
                 timeout=8,
                 credential=ssh_credential,
+                host_review_bundles=(
+                    DEFAULT_SSH_HOST_REVIEW_BUNDLES
+                    if ssh_credential and "ssh-authenticated-host-review" in requested_capabilities
+                    else None
+                ),
+                expected_host_key_fingerprint=expected_ssh_host_keys.get(service_port),
             )
             if ssh_credential:
                 attempted_ssh_profiles.add(credential_profile_id)
@@ -1010,6 +1055,33 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
         tool_receipts=tool_receipts,
         safety_receipt=safety_receipt,
     )
+    capability_coverage = [
+        {"capability_id": "scope-safety-health", "status": "completed" if not safety.halted else "failed"},
+        {"capability_id": "device-identity-attack-surface", "status": "completed" if identity else "partial"},
+        {"capability_id": "tcp-udp-network-discovery", "status": "completed" if scan_completeness.get("execution_complete") else "partial"},
+        {"capability_id": "service-fingerprinting-crypto", "status": "completed" if services else "partial"},
+        {"capability_id": "smart-tv-lan-protocols", "status": "partial" if protocol_results else "not_observed"},
+        {"capability_id": "web-ui-dast", "status": "completed" if web_origins else "not_observed"},
+        {"capability_id": "evidence-correlation-reporting", "status": "completed"},
+    ]
+    if "ssh-authenticated-host-review" in requested_capabilities:
+        reviews = [
+            (service.get("ssh") or {}).get("host_review")
+            for service in services
+            if isinstance(service, dict) and isinstance(service.get("ssh"), dict)
+        ]
+        reviews = [item for item in reviews if isinstance(item, dict)]
+        review_status = "blocked"
+        if any(item.get("status") == "completed" for item in reviews):
+            review_status = "completed"
+        elif reviews:
+            review_status = "partial"
+        capability_coverage.append({
+            "capability_id": "ssh-authenticated-host-review",
+            "status": review_status,
+            "reason": None if reviews else "authenticated_ssh_collection_unavailable",
+        })
+
     return {
         "target": locator,
         "resolved_target": resolved_address,
@@ -1028,10 +1100,12 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
             "decision": {"decision": decision, "rationale": rationale, "policy_name": policy_name},
             "safety": safety_receipt,
             "evidence_graph": evidence_graph,
+            "capability_coverage": capability_coverage,
+            "requested_capabilities": requested_capabilities,
             "completeness": {
                 "complete": complete,
                 "tcp_scope": "all_65535" if "-p-" in profile.tcp_args else "top_100",
-                "tcp_priority_ports": list(PRIORITY_TCP_PORTS),
+                "tcp_priority_ports": sorted(set(PRIORITY_TCP_PORTS) | set(extra_priority_ports)),
                 "udp_ports_requested": list(profile.udp_ports),
                 "confirmed_services_count": len(services),
                 "inconclusive_observations_count": len(inconclusive_observations),

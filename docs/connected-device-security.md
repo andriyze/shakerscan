@@ -107,6 +107,14 @@ never guesses usernames or passwords. Under `authenticated_active`, an operator 
 encrypted, device-bound SSH profile; offered methods are enumerated independently and the supplied
 credential is attempted at most once per device scan, subject to persisted cooldown and daily caps.
 
+An authenticated scan may explicitly request the `ssh-authenticated-host-review` capability. Before
+the credential is submitted, ShakerScan requires a SHA-256 SSH host-key fingerprint from an earlier
+device observation and fails closed if the key changes. After authentication, the worker runs only
+server-owned read-only bundles for identity/runtime, interfaces/listeners, process and service names,
+accounts and bounded privilege metadata, mounts/hardening, packages, and update metadata. The model
+cannot supply shell text. Each bundle has a timeout and byte cap; outputs are secret-scrubbed, hashed,
+and stored as device evidence. Collection failure is incomplete coverage, never a secure conclusion.
+
 Service policies are ordered rules with four outcomes:
 
 - `allow`: the observed service is expected.
@@ -188,7 +196,14 @@ contract. Start it through `POST /devices/{device_id}/agent/session`; drive turn
 routes. The `/devices/{device_id}/agent` UI shows live state, budgets, evidence-backed leads, and the
 exact fixed safety profile.
 
-The initial device-agent tools can inspect the registered device, queue a deterministic device scan,
+The device agent receives a server-owned 23-capability pack derived from the Smart TV assessment
+playbooks. `GET /devices/{device_id}/capabilities` resolves each capability as ready, completed,
+blocked, planned, sensor-required, lab-only, or not applicable using current device evidence,
+credentials, platform hints, and sensor readiness. `inspect_capabilities` refreshes this view during
+an investigation. The catalog guides planning but grants no execution authority: only capability IDs
+registered in the API can be attached to a deterministic scan.
+
+The device-agent tools can inspect the registered device and capability pack, queue a deterministic device scan,
 inspect a device-owned scan, query normalized graph evidence, and retain bounded notes. A run is fixed
 to one `device_target_id` and one safety profile at creation. Tool arguments contain no locator,
 credential, arbitrary URL, shell, plugin, or safety-escalation field. Sessions are capped at 30 turns,
@@ -220,3 +235,5 @@ and policy boundary.
   worker's network path, so only a protocol response is treated as confirmed open.
 - No credential guessing, firmware extraction, destructive protocol testing, radio probing, or active
   XSS/SQLi is performed by the device workflow.
+- Authenticated host collection does not provide an arbitrary shell. Only fixed server-owned read-only
+  bundles can execute, and only after an earlier SSH host key has been pinned.

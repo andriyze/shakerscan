@@ -1421,6 +1421,28 @@ export interface DeviceDetailResponse {
   }>
 }
 
+export interface DeviceCapabilityItem {
+  id: string
+  title: string
+  group: string
+  implementation: 'available' | 'partial' | 'planned' | 'sensor_required' | 'lab_only'
+  executor?: string | null
+  minimum_profile: 'observe_only' | 'safe_remote' | 'authenticated_active' | 'lab_invasive'
+  state: 'ready' | 'completed' | 'blocked' | 'planned' | 'sensor_required' | 'lab_only' | 'not_applicable'
+  blockers: string[]
+  applicable: boolean
+  notes?: string
+}
+
+export interface DeviceCapabilitiesResponse {
+  schema_version: 'device-capabilities/v1'
+  device_id: string
+  device_class: string
+  detected_platform?: string | null
+  items: DeviceCapabilityItem[]
+  summary: Record<string, number>
+}
+
 export interface ModelIntakeScanRequest {
   artifact_url: string
   name?: string
@@ -5078,6 +5100,12 @@ export async function getDevice(deviceId: string): Promise<DeviceDetailResponse>
   return res.json()
 }
 
+export async function getDeviceCapabilities(deviceId: string): Promise<DeviceCapabilitiesResponse> {
+  const res = await fetch(`${API_URL}/devices/${encodeURIComponent(deviceId)}/capabilities`, { cache: 'no-store' })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load device capabilities'))
+  return res.json()
+}
+
 export async function changeDeviceLocator(deviceId: string, payload: {
   locator: string
   reason?: string
@@ -5120,6 +5148,7 @@ export async function scanDevice(deviceId: string, payload: {
   max_web_origins?: number
   ssh_credential_profile_id?: string
   web_credential_profile_id?: string
+  capability_ids?: string[]
 }): Promise<{ scan_id: string; job_id: string; status: string; ui_url: string }> {
   const res = await fetch(`${API_URL}/devices/${encodeURIComponent(deviceId)}/scan`, {
     method: 'POST',

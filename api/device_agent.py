@@ -24,6 +24,7 @@ except ModuleNotFoundError:  # pragma: no cover - package import in host tests
 
 CALLABLE_TOOL_NAMES = {
     "inspect_device",
+    "inspect_capabilities",
     "queue_device_scan",
     "inspect_device_scan",
     "query_device_evidence",
@@ -97,6 +98,7 @@ def _read_local_intel_snapshot(path: str, expected_sha256: str) -> Any:
 
 TOOL_TIERS = {
     "inspect_device": 0,
+    "inspect_capabilities": 0,
     "inspect_device_scan": 0,
     "query_device_evidence": 0,
     "diff_scans": 0,
@@ -157,6 +159,8 @@ def tool_fragility_cost(name: str, args: dict[str, Any]) -> int:
     cost = {"inventory": 5, "posture": 12, "thorough": 18}.get(coverage, 12)
     if args.get("include_web_dast"):
         cost += 4
+    if args.get("capability_ids"):
+        cost += 6
     return cost
 
 
@@ -247,6 +251,11 @@ def tool_schemas() -> list[dict[str, Any]]:
             "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
         },
         {
+            "name": "inspect_capabilities",
+            "description": "Read the server-owned connected-device capability pack, current applicability, blockers, and completed coverage.",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+        {
             "name": "queue_device_scan",
             "description": (
                 "Queue one deterministic device scan on the already-selected device. "
@@ -259,6 +268,11 @@ def tool_schemas() -> list[dict[str, Any]]:
                     "include_web_dast": {"type": "boolean"},
                     "web_scan_type": {"type": "string", "enum": ["quick", "standard", "deep"]},
                     "reason": {"type": "string", "maxLength": 500},
+                    "capability_ids": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["ssh-authenticated-host-review"]},
+                        "maxItems": 1,
+                    },
                 },
                 "required": ["coverage_profile", "reason"],
                 "additionalProperties": False,
@@ -377,7 +391,8 @@ def validate_tool_call(call: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     args = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
     allowed_fields = {
         "inspect_device": set(),
-        "queue_device_scan": {"coverage_profile", "include_web_dast", "web_scan_type", "reason"},
+        "inspect_capabilities": set(),
+        "queue_device_scan": {"coverage_profile", "include_web_dast", "web_scan_type", "reason", "capability_ids"},
         "inspect_device_scan": {"scan_id"},
         "query_device_evidence": {"scan_id", "collection", "kind", "limit"},
         "diff_scans": {"scan_a", "scan_b"},
@@ -400,11 +415,19 @@ def validate_tool_call(call: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         reason = str(args.get("reason") or "").strip()
         if not reason:
             raise ValueError("queue_device_scan reason is required")
+        capability_ids = list(dict.fromkeys(
+            str(item or "").strip().lower()
+            for item in (args.get("capability_ids") or [])
+            if str(item or "").strip()
+        ))
+        if any(item != "ssh-authenticated-host-review" for item in capability_ids) or len(capability_ids) > 1:
+            raise ValueError("queue_device_scan capability_ids are invalid")
         args = {
             "coverage_profile": coverage,
             "include_web_dast": bool(args.get("include_web_dast", True)),
             "web_scan_type": web_type,
             "reason": reason[:500],
+            "capability_ids": capability_ids,
         }
     elif name in {"inspect_device_scan", "query_device_evidence"}:
         scan_id = str(args.get("scan_id") or "").strip()

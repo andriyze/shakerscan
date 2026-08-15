@@ -1329,8 +1329,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 329 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 277 | `api/api.py` |
+| Public REST operations | 330 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 278 | `api/api.py` |
 | Check families | 14 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 13 | `api/command_arsenal.py` |
@@ -1457,6 +1457,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `GET` | `/devices/{device_id}` | `get_device` |
 | `PATCH` | `/devices/{device_id}` | `update_device` |
 | `POST` | `/devices/{device_id}/agent/session` | `start_device_agent_session` |
+| `GET` | `/devices/{device_id}/capabilities` | `get_device_capabilities` |
 | `GET` | `/devices/{device_id}/credentials` | `list_device_credentials` |
 | `POST` | `/devices/{device_id}/credentials` | `create_device_credential` |
 | `DELETE` | `/devices/{device_id}/credentials/{profile_id}` | `deactivate_device_credential` |

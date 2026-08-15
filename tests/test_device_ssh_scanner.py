@@ -1,6 +1,8 @@
 import os
 import sys
 import asyncio
+import hashlib
+import base64
 from types import SimpleNamespace
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scanner"))
@@ -23,6 +25,7 @@ def _fake_paramiko(*, offered, password_outcome="success"):
     class Key:
         def get_name(self): return "ssh-ed25519"
         def get_bits(self): return 256
+        def asbytes(self): return b"fixture-host-key"
 
     transports = []
 
@@ -128,3 +131,64 @@ def test_private_key_success_does_not_conceal_password_and_raw_value_errors_are_
     }))
     assert result["authentication_error"] == "authentication_error:ValueError"
     assert "backend secret text" not in str(result)
+
+
+def test_host_key_fingerprint_and_mismatch_block_credentials(monkeypatch):
+    class Key:
+        def asbytes(self): return b"known-host-key"
+
+    expected = "SHA256:" + base64.b64encode(hashlib.sha256(b"known-host-key").digest()).decode().rstrip("=")
+    assert ssh_scanner.ssh_host_key_fingerprint(Key()) == expected
+
+    fake = _fake_paramiko(offered=["publickey"])
+    monkeypatch.setattr(ssh_scanner, "paramiko", fake, raising=False)
+    monkeypatch.setattr(ssh_scanner, "HAS_PARAMIKO", True)
+    monkeypatch.setattr(ssh_scanner.socket, "create_connection", lambda *_args, **_kwargs: object())
+    result = asyncio.run(ssh_scanner.ssh_auth_methods(
+        "192.0.2.10",
+        credential={"auth_kind": "ssh_private_key", "username": "operator", "secret": "fixture-key"},
+        expected_host_key_fingerprint="SHA256:not-the-device-key",
+    ))
+    assert result["authentication_attempted"] is False
+    assert result["authentication_error"] == "host_key_mismatch"
+    assert result["pinned_host_key_fingerprint"] == "SHA256:not-the-device-key"
+    assert result["host_key"]["fingerprint_sha256"] != result["pinned_host_key_fingerprint"]
+
+
+def test_authenticated_host_review_uses_fixed_bundles_and_redacts_output(monkeypatch):
+    fake = _fake_paramiko(offered=["publickey"])
+
+    class Channel:
+        def __init__(self):
+            self.output = bytearray(b"uid=1000 password=supersecret\n")
+            self.command = None
+
+        def settimeout(self, _timeout): return None
+        def exec_command(self, command): self.command = command
+        def recv_ready(self): return bool(self.output)
+        def recv(self, size):
+            chunk = bytes(self.output[:size]); del self.output[:size]; return chunk
+        def recv_stderr_ready(self): return False
+        def recv_stderr(self, _size): return b""
+        def exit_status_ready(self): return not self.output
+        def recv_exit_status(self): return 0
+        def close(self): return None
+
+    opened = []
+    def open_session(self, timeout=None):
+        channel = Channel(); opened.append(channel); return channel
+    fake.Transport.open_session = open_session
+    monkeypatch.setattr(ssh_scanner, "paramiko", fake, raising=False)
+    monkeypatch.setattr(ssh_scanner, "HAS_PARAMIKO", True)
+    monkeypatch.setattr(ssh_scanner.socket, "create_connection", lambda *_args, **_kwargs: object())
+    result = asyncio.run(ssh_scanner.ssh_auth_methods(
+        "192.0.2.10",
+        credential={"auth_kind": "ssh_private_key", "username": "operator", "secret": "fixture-key"},
+        host_review_bundles=["identity_runtime"],
+    ))
+    review = result["host_review"]
+    assert review["status"] == "completed"
+    assert review["commands_server_owned"] is True
+    assert review["bundles"][0]["stdout"] == "uid=1000 password=***\n"
+    assert "supersecret" not in str(review)
+    assert opened[0].command == ssh_scanner.SSH_HOST_REVIEW_BUNDLES["identity_runtime"]

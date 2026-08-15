@@ -374,6 +374,7 @@ import agent_provenance
 import agent_text_toolcalls
 import agent_tools
 import device_agent
+import device_capabilities
 from job_queue import (
     DEFAULT_WORKER_TOOL_COMMANDS,
     QueueLease,
@@ -4193,6 +4194,7 @@ class DeviceScanRequest(BaseModel):
     max_web_origins: int = Field(default=8, ge=0, le=32)
     ssh_credential_profile_id: Optional[str] = None
     web_credential_profile_id: Optional[str] = None
+    capability_ids: list[str] = Field(default_factory=list, max_length=8)
     approval_receipt_id: Optional[str] = None
 
 
@@ -18299,18 +18301,18 @@ async def _validate_device_credential_refs(
     *,
     ssh_profile_id: str | None,
     web_profile_id: str | None,
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     requested = [
         ("ssh", ssh_profile_id, {"ssh_password", "ssh_private_key"}),
         ("web", web_profile_id, {"web_authorization_header", "web_cookie", "web_form"}),
     ]
-    refs: list[dict[str, str]] = []
+    refs: list[dict[str, Any]] = []
     for role, raw_id, allowed_kinds in requested:
         if not raw_id:
             continue
         profile_id = _device_uuid(raw_id, f"{role} credential profile")
         row = await conn.fetchrow(
-            """SELECT id, auth_kind FROM device_credential_profiles
+            """SELECT id, auth_kind, port FROM device_credential_profiles
                WHERE id=$1 AND device_target_id=$2 AND is_active=true
                  AND (expires_at IS NULL OR expires_at > NOW())""",
             profile_id,
@@ -18318,7 +18320,12 @@ async def _validate_device_credential_refs(
         )
         if not row or str(row["auth_kind"]) not in allowed_kinds:
             raise HTTPException(status_code=422, detail=f"Active {role} credential profile is unavailable for this device")
-        refs.append({"role": role, "profile_id": str(profile_id), "auth_kind": str(row["auth_kind"])})
+        refs.append({
+            "role": role,
+            "profile_id": str(profile_id),
+            "auth_kind": str(row["auth_kind"]),
+            "port": int(row["port"]) if row["port"] is not None else None,
+        })
     return refs
 
 
@@ -18395,6 +18402,49 @@ async def get_device_readiness():
         "optional_sensor_capabilities": ["bluetooth", "ble", "passive_traffic"],
         "wireless_status": "planned_sensor_extension",
     }
+
+
+@app.get("/devices/{device_id}/capabilities")
+async def get_device_capabilities(device_id: str):
+    """Return server-owned Smart TV/device playbooks resolved against current evidence."""
+    device_uuid = _device_uuid(device_id)
+    async with db_pool.acquire() as conn:
+        device = await conn.fetchrow("SELECT * FROM device_targets WHERE id=$1", device_uuid)
+        if not device:
+            raise HTTPException(status_code=404, detail="Connected device not found")
+        services = await conn.fetch(
+            """SELECT transport, port, state, service_name, web_origin
+               FROM device_services WHERE device_target_id=$1 AND state='open'""",
+            device_uuid,
+        )
+        credential_rows = await conn.fetch(
+            """SELECT auth_kind FROM device_credential_profiles
+               WHERE device_target_id=$1 AND is_active=true
+                 AND (expires_at IS NULL OR expires_at > NOW())""",
+            device_uuid,
+        )
+        latest = await conn.fetchrow(
+            """SELECT result FROM scans
+               WHERE device_target_id=$1 AND run_kind='device_posture' AND status='completed'
+               ORDER BY completed_at DESC NULLS LAST, created_at DESC LIMIT 1""",
+            device_uuid,
+        )
+    latest_result = _decode_json_value(latest["result"]) if latest else {}
+    posture = latest_result.get("device_posture") if isinstance(latest_result, dict) and isinstance(latest_result.get("device_posture"), dict) else {}
+    completed = {
+        str(item.get("capability_id"))
+        for item in posture.get("capability_coverage") or []
+        if isinstance(item, dict) and item.get("status") == "completed"
+    }
+    decoded_device = _decode_device_row(device)
+    metadata = decoded_device.get("metadata_json") if isinstance(decoded_device.get("metadata_json"), dict) else {}
+    return device_capabilities.capability_catalog_for_device(
+        decoded_device,
+        services=[row_to_dict(row) for row in services],
+        credential_kinds={str(row["auth_kind"]) for row in credential_rows},
+        completed_capabilities=completed,
+        sensor_capabilities={str(item) for item in metadata.get("sensor_capabilities", []) if str(item)},
+    )
 
 
 @app.get("/device-policies")
@@ -18903,6 +18953,14 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
         })
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
+        capability_ids = device_capabilities.validate_executable_capabilities(request.capability_ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if capability_ids and request.safety_profile != "authenticated_active":
+        raise HTTPException(status_code=422, detail="Requested device capabilities require safety_profile=authenticated_active")
+    if "ssh-authenticated-host-review" in capability_ids and not request.ssh_credential_profile_id:
+        raise HTTPException(status_code=422, detail="SSH host review requires an SSH credential profile")
     device_uuid = _device_uuid(device_id)
     scan_id, job_id = str(uuid.uuid4()), str(uuid.uuid4())
     async with db_pool.acquire() as conn:
@@ -18921,6 +18979,51 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
             raise HTTPException(
                 status_code=422,
                 detail="Credentialed device scans require safety_profile=authenticated_active",
+            )
+        expected_ssh_host_keys: dict[str, str] = {}
+        if any(ref.get("role") == "ssh" for ref in credential_refs):
+            ssh_rows = await conn.fetch(
+                """SELECT port, metadata_json FROM device_services
+                   WHERE device_target_id=$1 AND transport='tcp' AND state='open'
+                     AND service_name IN ('ssh','ssh-alt')""",
+                device_uuid,
+            )
+            for ssh_row in ssh_rows:
+                metadata = _decode_json_value(ssh_row["metadata_json"]) or {}
+                ssh_metadata = metadata.get("ssh") if isinstance(metadata, dict) and isinstance(metadata.get("ssh"), dict) else {}
+                host_key = ssh_metadata.get("host_key") if isinstance(ssh_metadata.get("host_key"), dict) else {}
+                fingerprint = str(
+                    ssh_metadata.get("pinned_host_key_fingerprint")
+                    or host_key.get("fingerprint_sha256")
+                    or ""
+                )
+                if fingerprint.startswith("SHA256:"):
+                    expected_ssh_host_keys[str(int(ssh_row["port"]))] = fingerprint
+        if "ssh-authenticated-host-review" in capability_ids and not expected_ssh_host_keys:
+            raise HTTPException(
+                status_code=409,
+                detail="Run an unauthenticated device inventory first so ShakerScan can pin the SSH host key before host review",
+            )
+        ssh_ref = next((ref for ref in credential_refs if ref.get("role") == "ssh"), None)
+        if (
+            "ssh-authenticated-host-review" in capability_ids
+            and ssh_ref
+            and ssh_ref.get("port") is None
+            and len(expected_ssh_host_keys) > 1
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="Bind the SSH credential profile to one port before host review because this device exposes multiple SSH services",
+            )
+        if (
+            "ssh-authenticated-host-review" in capability_ids
+            and ssh_ref
+            and ssh_ref.get("port") is not None
+            and str(int(ssh_ref["port"])) not in expected_ssh_host_keys
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Run an unauthenticated inventory of the selected SSH port before host review so its host key can be pinned",
             )
         from_agent_session = _DEVICE_AGENT_PARENT_AUTHORITY.get()
         approval_context = await _validate_approval_receipt_for_action(
@@ -18967,6 +19070,8 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
             "web_scan_type": request.web_scan_type,
             "max_web_origins": request.max_web_origins,
             "device_credential_profiles": credential_refs,
+            "device_capability_ids": capability_ids,
+            "expected_ssh_host_keys": expected_ssh_host_keys,
             "device_policy": {"id": str(policy["id"]), "name": policy["name"], "rules": policy_payload["rules"]},
             "approval_receipt_id": request.approval_receipt_id,
             "resolved_budget": {
@@ -19240,7 +19345,7 @@ def _diff_device_scan_snapshots(older: dict[str, Any], newer: dict[str, Any]) ->
 async def _build_device_agent_context_pack(
     conn: Any,
     device: Any,
-    credential_refs: list[dict[str, str]],
+    credential_refs: list[dict[str, Any]],
     max_turns: int,
 ) -> dict[str, Any]:
     device_id = device["id"]
@@ -19286,6 +19391,19 @@ async def _build_device_agent_context_pack(
         })
     snapshots = [_device_scan_snapshot(row) for row in scans]
     latest_diff = _diff_device_scan_snapshots(snapshots[1], snapshots[0]) if len(snapshots) == 2 else None
+    latest_result = _decode_json_value(scans[0]["result"]) if scans else {}
+    latest_posture = latest_result.get("device_posture") if isinstance(latest_result, dict) and isinstance(latest_result.get("device_posture"), dict) else {}
+    completed_capabilities = {
+        str(item.get("capability_id"))
+        for item in latest_posture.get("capability_coverage") or []
+        if isinstance(item, dict) and item.get("status") == "completed"
+    }
+    capability_pack = device_capabilities.capability_catalog_for_device(
+        _decode_device_row(device),
+        services=[row_to_dict(row) for row in services],
+        credential_kinds={str(ref.get("auth_kind") or "") for ref in credential_refs},
+        completed_capabilities=completed_capabilities,
+    )
     return {
         "schema_version": "device-agent-context/v1",
         "device": {
@@ -19306,6 +19424,7 @@ async def _build_device_agent_context_pack(
         "latest_completed_scan": snapshots[0] if snapshots else None,
         "diff_from_previous": latest_diff,
         "prior_investigation_memory": memory,
+        "capability_pack": capability_pack,
         "credential_capabilities": [
             {"role": ref.get("role"), "profile_id": ref.get("profile_id"), "auth_kind": ref.get("auth_kind")}
             for ref in credential_refs
@@ -19379,10 +19498,11 @@ def _sanitize_device_agent_value(value: Any, *, depth: int = 0) -> Any:
     if depth > 8:
         return "[truncated]"
     if isinstance(value, str):
-        return "".join(
+        cleaned = "".join(
             character for character in value
             if character in {"\n", "\t"} or 32 <= ord(character) != 127
         )
+        return cleaned[:50_000]
     if isinstance(value, dict):
         return {
             str(_sanitize_device_agent_value(key, depth=depth + 1))[:200]:
@@ -19410,6 +19530,27 @@ def _bounded_device_scan_result(row: Any) -> dict[str, Any]:
     probe = result.get("device_probe") if isinstance(result.get("device_probe"), dict) else {}
     graph = posture.get("evidence_graph") if isinstance(posture.get("evidence_graph"), dict) else {}
     findings = result.get("findings") if isinstance(result.get("findings"), list) else []
+    bounded_services = []
+    for raw_service in list(posture.get("services") or [])[:100]:
+        if not isinstance(raw_service, dict):
+            continue
+        service = dict(raw_service)
+        ssh = service.get("ssh") if isinstance(service.get("ssh"), dict) else None
+        if ssh and isinstance(ssh.get("host_review"), dict):
+            bounded_ssh = dict(ssh)
+            review = dict(ssh["host_review"])
+            review["bundles"] = [
+                {
+                    **dict(bundle),
+                    "stdout": str(bundle.get("stdout") or "")[:4000],
+                    "stderr": str(bundle.get("stderr") or "")[:1000],
+                }
+                for bundle in list(review.get("bundles") or [])[:10]
+                if isinstance(bundle, dict)
+            ]
+            bounded_ssh["host_review"] = review
+            service["ssh"] = bounded_ssh
+        bounded_services.append(service)
     return {
         "scan_id": str(item.get("id") or ""),
         "status": item.get("status"),
@@ -19424,9 +19565,11 @@ def _bounded_device_scan_result(row: Any) -> dict[str, Any]:
         "completeness": posture.get("completeness"),
         "safety": probe.get("safety") or posture.get("safety"),
         "device_probe": probe or None,
-        "services": list(posture.get("services") or [])[:100],
+        "services": bounded_services,
         "inconclusive_observations": list(posture.get("inconclusive_observations") or [])[:100],
         "web_origins": list(posture.get("web_origins") or [])[:32],
+        "capability_coverage": list(posture.get("capability_coverage") or [])[:50],
+        "requested_capabilities": list(posture.get("requested_capabilities") or [])[:20],
         "findings": [{
             "title": finding.get("title"),
             "severity": finding.get("severity"),
@@ -19450,6 +19593,10 @@ async def _execute_device_agent_tool(
     name: str,
     args: dict[str, Any],
 ) -> dict[str, Any]:
+    if name == "inspect_capabilities":
+        payload = await get_device_capabilities(str(device_target_id))
+        return {"ok": True, "evidence_ref": _device_agent_add_evidence(state, payload), "data": payload}
+
     if name == "lookup_protocol_playbook":
         payload = device_agent.lookup_protocol_playbook(args["service_name"], args.get("port"))
         return {"ok": True, "evidence_ref": _device_agent_add_evidence(state, payload), "data": payload}
@@ -19585,6 +19732,7 @@ async def _execute_device_agent_tool(
                 str(ref.get("profile_id")) for ref in state.get("device_credential_profiles", [])
                 if isinstance(ref, dict) and ref.get("role") == "web"
             ), None),
+            capability_ids=list(args.get("capability_ids") or []),
             approval_receipt_id=approval_receipt_id,
         ))
         state["scans_queued"] = int(state.get("scans_queued") or 0) + 1

@@ -26,12 +26,13 @@ POST /device-agent/session/{run_id}/reply
 Follow the tool contract in the transcript. Prefer this cadence:
 
 1. Read the context pack and `inspect_device`.
-2. Use `diff_scans`, `recall_hypotheses`, and `query_policy` before new traffic.
-3. Use `resolve_intel` only against the operator-pinned local store. It must have both `DEVICE_INTEL_DB_PATH` and a matching `DEVICE_INTEL_DB_SHA256`; treat matches as candidates, not vulnerability proof. Use `lookup_protocol_playbook` only as guidance.
-4. Queue the smallest useful deterministic scan: inventory before posture, posture before thorough.
-5. When a hypothesis concerns exactly one TCP or UDP listener, prefer `verify_service_state` over a broad rescan. It queues a typed one-device, one-port invariant and treats filtered or silent results as inconclusive—not proof of absence.
-6. Inspect completed scan evidence on a later user turn. Do not repeatedly queue equivalent traffic.
-7. Finish with a debrief whose leads cite real `devref_N` references.
+2. Read `capability_pack` or call `inspect_capabilities`. For smart TVs and connected displays, read [references/smart-tv-capabilities.md](references/smart-tv-capabilities.md) and use it as planning guidance.
+3. Use `diff_scans`, `recall_hypotheses`, and `query_policy` before new traffic.
+4. Use `resolve_intel` only against the operator-pinned local store. It must have both `DEVICE_INTEL_DB_PATH` and a matching `DEVICE_INTEL_DB_SHA256`; treat matches as candidates, not vulnerability proof. Use `lookup_protocol_playbook` only as guidance.
+5. Queue the smallest useful deterministic scan: inventory before posture, posture before thorough. Request `ssh-authenticated-host-review` only through the declared `capability_ids` field under an authenticated session with a bound SSH profile.
+6. When a hypothesis concerns exactly one TCP or UDP listener, prefer `verify_service_state` over a broad rescan. It queues a typed one-device, one-port invariant and treats filtered or silent results as inconclusive—not proof of absence.
+7. Inspect completed scan evidence on a later user turn. Do not repeatedly queue equivalent traffic.
+8. Finish with a debrief whose leads cite real `devref_N` references and list material capability gaps.
 
 When a tool queues a scan, report its ID and `/devices/{device_id}?scan={scan_id}`, then stop. Do not poll.
 
@@ -41,7 +42,7 @@ When a tool queues a scan, report its ID and `/devices/{device_id}?scan={scan_id
 - Printer: correlate IPP/IPPS, mDNS, firmware/CPE, and policy exposure. Never submit print jobs.
 - Camera/DVR: correlate RTSP, HTTP(S), ONVIF-like services, and isolation policy. Never guess stream paths or credentials.
 - Router/NAS: prioritize admin origins, SSH posture, cleartext management, and UPnP exposure.
-- SSH: use the deterministic handshake first. A configured credential permits one bounded authentication attempt and no command execution.
+- SSH: use the deterministic handshake first. A configured credential permits one bounded authentication attempt. Host commands run only when `ssh-authenticated-host-review` is requested; they come from fixed server-owned read-only bundles, never model text.
 
 ## Safety and evidence
 

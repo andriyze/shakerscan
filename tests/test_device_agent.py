@@ -63,11 +63,12 @@ def test_device_agent_state_fixes_safety_and_budgets():
 
 
 def test_device_agent_depth_tools_are_read_only_and_scan_costs_are_profiled():
-    for name in ("diff_scans", "recall_hypotheses", "query_policy", "resolve_intel", "lookup_protocol_playbook"):
+    for name in ("inspect_capabilities", "diff_scans", "recall_hypotheses", "query_policy", "resolve_intel", "lookup_protocol_playbook"):
         assert name in device_agent.CALLABLE_TOOL_NAMES
     assert device_agent.tool_fragility_cost("diff_scans", {}) == 0
     assert device_agent.tool_fragility_cost("queue_device_scan", {"coverage_profile": "inventory"}) == 5
     assert device_agent.tool_fragility_cost("queue_device_scan", {"coverage_profile": "thorough", "include_web_dast": True}) == 22
+    assert device_agent.tool_fragility_cost("queue_device_scan", {"coverage_profile": "inventory", "capability_ids": ["ssh-authenticated-host-review"]}) == 11
     assert device_agent.tool_fragility_cost("verify_service_state", {"transport": "tcp"}) == 3
     assert device_agent.tool_fragility_cost("verify_service_state", {"transport": "udp"}) == 6
     name, args = device_agent.validate_tool_call({"name": "diff_scans", "arguments": {}})
@@ -76,6 +77,14 @@ def test_device_agent_depth_tools_are_read_only_and_scan_costs_are_profiled():
         "transport": "tcp", "port": 8443, "expected_state": "closed", "reason": "admin listener should be absent",
     }})
     assert name == "verify_service_state" and args["port"] == 8443
+    name, args = device_agent.validate_tool_call({"name": "queue_device_scan", "arguments": {
+        "coverage_profile": "inventory", "reason": "correlate listeners", "capability_ids": ["ssh-authenticated-host-review"],
+    }})
+    assert name == "queue_device_scan" and args["capability_ids"] == ["ssh-authenticated-host-review"]
+    with pytest.raises(ValueError, match="capability_ids"):
+        device_agent.validate_tool_call({"name": "queue_device_scan", "arguments": {
+            "coverage_profile": "inventory", "reason": "unsafe", "capability_ids": ["arbitrary-shell"],
+        }})
 
 
 def test_device_agent_local_intel_has_no_runtime_egress(tmp_path, monkeypatch):

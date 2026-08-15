@@ -6,9 +6,17 @@ Reports password authentication as a medium severity finding per CIS/NIST guidan
 """
 
 import asyncio
+import base64
+import hashlib
 import io
 import socket
+import time
 from typing import Any
+
+try:
+    from ..redaction import redact_text
+except ImportError:  # pragma: no cover - flat scanner runtime
+    from redaction import redact_text
 
 # Paramiko - optional import for SSH scanning
 try:
@@ -16,6 +24,139 @@ try:
     HAS_PARAMIKO = True
 except ImportError:
     HAS_PARAMIKO = False
+
+
+SSH_HOST_REVIEW_BUNDLES: dict[str, str] = {
+    "identity_runtime": "id 2>/dev/null; uname -a 2>/dev/null; uptime 2>/dev/null; date 2>/dev/null; (cat /etc/os-release 2>/dev/null || true)",
+    "network_listeners": "(ip address 2>/dev/null || ifconfig -a 2>/dev/null || true); (ip route 2>/dev/null || route -n 2>/dev/null || true); (ss -lntup 2>/dev/null || netstat -lntup 2>/dev/null || true)",
+    "processes_services": "(ps -eo user,pid,ppid,comm 2>/dev/null || ps -o user,pid,ppid,comm 2>/dev/null || true); (systemctl list-units --type=service --all --no-pager 2>/dev/null || rc-status 2>/dev/null || true)",
+    "accounts_privilege": "awk -F: '{print $1 \":\" $3 \":\" $4 \":\" $7}' /etc/passwd 2>/dev/null; (getcap -r /bin /sbin /usr/bin /usr/sbin 2>/dev/null || true)",
+    "filesystem_hardening": "mount 2>/dev/null; df -P 2>/dev/null; (sysctl kernel.randomize_va_space fs.suid_dumpable 2>/dev/null || true); (getenforce 2>/dev/null || true)",
+    "software_packages": "(dpkg-query -W -f='${Package} ${Version}\\n' 2>/dev/null || rpm -qa 2>/dev/null || opkg list-installed 2>/dev/null || apk info -vv 2>/dev/null || true) | sed -n '1,400p'",
+    "update_metadata": "for p in /etc/update* /etc/*release /var/lib/update* /var/lib/rauc /var/lib/swupdate; do test -e \"$p\" && stat -c '%A %U %G %s %y %n' \"$p\" 2>/dev/null; done",
+}
+DEFAULT_SSH_HOST_REVIEW_BUNDLES = tuple(SSH_HOST_REVIEW_BUNDLES)
+MAX_SSH_BUNDLE_BYTES = 64 * 1024
+MAX_SSH_REVIEW_BYTES = 256 * 1024
+
+
+def ssh_host_key_fingerprint(key: Any) -> str:
+    """Return the OpenSSH-style SHA256 fingerprint without exposing key data."""
+    material = bytes(key.asbytes())
+    encoded = base64.b64encode(hashlib.sha256(material).digest()).decode().rstrip("=")
+    return f"SHA256:{encoded}"
+
+
+def _collect_ssh_host_review(
+    transport: Any,
+    bundles: list[str] | tuple[str, ...],
+    *,
+    timeout: float = 8.0,
+) -> dict[str, Any]:
+    """Execute only server-owned read-only command bundles on an authenticated transport."""
+    requested = list(dict.fromkeys(str(item) for item in bundles))
+    unknown = [item for item in requested if item not in SSH_HOST_REVIEW_BUNDLES]
+    if unknown:
+        return {"status": "rejected", "error": "unsupported_bundle", "bundles": [], "unknown": unknown}
+    results: list[dict[str, Any]] = []
+    total_bytes = 0
+    for bundle in requested:
+        command = SSH_HOST_REVIEW_BUNDLES[bundle]
+        stdout = bytearray()
+        stderr = bytearray()
+        timed_out = False
+        output_limit_hit = False
+        exit_status: int | None = None
+        started = time.monotonic()
+        channel = None
+        try:
+            channel = transport.open_session(timeout=timeout)
+            channel.settimeout(0.2)
+            channel.exec_command(command)
+            deadline = started + timeout
+            while time.monotonic() < deadline:
+                if total_bytes + len(stdout) + len(stderr) >= MAX_SSH_REVIEW_BYTES:
+                    output_limit_hit = True
+                    break
+                progressed = False
+                if channel.recv_ready() and total_bytes + len(stdout) + len(stderr) < MAX_SSH_REVIEW_BYTES:
+                    remaining = min(
+                        MAX_SSH_BUNDLE_BYTES - len(stdout) - len(stderr),
+                        MAX_SSH_REVIEW_BYTES - total_bytes - len(stdout) - len(stderr),
+                    )
+                    if remaining > 0:
+                        stdout.extend(channel.recv(min(8192, remaining)))
+                    else:
+                        output_limit_hit = True
+                        break
+                    progressed = True
+                if channel.recv_stderr_ready() and total_bytes + len(stdout) + len(stderr) < MAX_SSH_REVIEW_BYTES:
+                    remaining = min(
+                        MAX_SSH_BUNDLE_BYTES - len(stdout) - len(stderr),
+                        MAX_SSH_REVIEW_BYTES - total_bytes - len(stdout) - len(stderr),
+                    )
+                    if remaining > 0:
+                        stderr.extend(channel.recv_stderr(min(8192, remaining)))
+                    else:
+                        output_limit_hit = True
+                        break
+                    progressed = True
+                if channel.exit_status_ready() and not channel.recv_ready() and not channel.recv_stderr_ready():
+                    exit_status = int(channel.recv_exit_status())
+                    break
+                if not progressed:
+                    time.sleep(0.02)
+            else:
+                timed_out = True
+        except Exception as exc:
+            results.append({
+                "bundle": bundle,
+                "status": "error",
+                "error": type(exc).__name__,
+                "duration_ms": int((time.monotonic() - started) * 1000),
+            })
+            continue
+        finally:
+            if channel is not None:
+                try:
+                    channel.close()
+                except Exception:
+                    pass
+        raw_stdout = bytes(stdout)
+        raw_stderr = bytes(stderr)
+        total_bytes += len(raw_stdout) + len(raw_stderr)
+        decoded_stdout = raw_stdout.decode("utf-8", errors="replace").replace("\x00", "")
+        decoded_stderr = raw_stderr.decode("utf-8", errors="replace").replace("\x00", "")
+        bundle_truncated = (
+            output_limit_hit
+            or len(raw_stdout) + len(raw_stderr) >= MAX_SSH_BUNDLE_BYTES
+            or total_bytes >= MAX_SSH_REVIEW_BYTES
+        )
+        results.append({
+            "bundle": bundle,
+            "status": "timeout" if timed_out else "truncated" if bundle_truncated else "completed",
+            "exit_status": exit_status,
+            "stdout": redact_text(decoded_stdout),
+            "stderr": redact_text(decoded_stderr),
+            "stdout_sha256": hashlib.sha256(raw_stdout).hexdigest(),
+            "stderr_sha256": hashlib.sha256(raw_stderr).hexdigest(),
+            "truncated": bundle_truncated,
+            "duration_ms": int((time.monotonic() - started) * 1000),
+        })
+        if total_bytes >= MAX_SSH_REVIEW_BYTES:
+            break
+    completed = sum(1 for item in results if item.get("status") == "completed")
+    return {
+        "schema_version": "device-ssh-host-review/v1",
+        "capability_id": "ssh-authenticated-host-review",
+        "status": "completed" if completed == len(requested) else "partial" if completed else "failed",
+        "requested_bundles": requested,
+        "completed_bundles": completed,
+        "total_bytes": total_bytes,
+        "commands_server_owned": True,
+        "outputs_redacted": True,
+        "bundles": results,
+    }
 
 
 def classify_negotiated_ssh_algorithms(
@@ -48,6 +189,8 @@ async def ssh_auth_methods(
     port: int = 22,
     timeout: int = 10,
     credential: dict[str, Any] | None = None,
+    host_review_bundles: list[str] | tuple[str, ...] | None = None,
+    expected_host_key_fingerprint: str | None = None,
 ) -> dict[str, Any]:
     """
     Check SSH authentication methods using Paramiko.
@@ -71,6 +214,7 @@ async def ssh_auth_methods(
         "keyboard_interactive_enabled": False,
         "publickey_enabled": False,
         "host_key": None,
+        "pinned_host_key_fingerprint": expected_host_key_fingerprint,
         "negotiated_algorithms": {},
         "weak_algorithms": [],
         "weak_algorithm_severity": None,
@@ -80,6 +224,7 @@ async def ssh_auth_methods(
         "authentication_succeeded": False,
         "authentication_method": None,
         "authentication_error": None,
+        "host_review": None,
         "error": None,
         "findings": []
     }
@@ -95,6 +240,7 @@ async def ssh_auth_methods(
             "auth_methods": [],
             "auth_methods_complete": False,
             "host_key": None,
+            "pinned_host_key_fingerprint": expected_host_key_fingerprint,
             "negotiated_algorithms": {},
             "weak_algorithms": [],
             "weak_algorithm_severity": None,
@@ -102,6 +248,7 @@ async def ssh_auth_methods(
             "authentication_succeeded": False,
             "authentication_method": None,
             "authentication_error": None,
+            "host_review": None,
             "error": None
         }
 
@@ -124,7 +271,19 @@ async def ssh_auth_methods(
             server_key = transport.get_remote_server_key()
             key_type = str(server_key.get_name() or "unknown")
             key_bits = int(server_key.get_bits() or 0)
-            check_result["host_key"] = {"type": key_type, "bits": key_bits}
+            try:
+                fingerprint = ssh_host_key_fingerprint(server_key)
+            except (AttributeError, TypeError, ValueError):
+                fingerprint = None
+            check_result["host_key"] = {
+                "type": key_type,
+                "bits": key_bits,
+                "fingerprint_sha256": fingerprint,
+            }
+            if credential and expected_host_key_fingerprint and fingerprint != expected_host_key_fingerprint:
+                check_result["authentication_error"] = "host_key_mismatch"
+                check_result["error"] = "SSH host key did not match the previously observed device key"
+                return check_result
             negotiated = {
                 "cipher_in": transport.remote_cipher,
                 "cipher_out": transport.local_cipher,
@@ -205,6 +364,11 @@ async def ssh_auth_methods(
                     else:
                         raise ValueError("unsupported_auth_kind")
                     check_result["authentication_succeeded"] = bool(transport.is_authenticated())
+                    if check_result["authentication_succeeded"] and host_review_bundles:
+                        check_result["host_review"] = _collect_ssh_host_review(
+                            transport,
+                            host_review_bundles,
+                        )
                 except paramiko.BadAuthenticationType as e:
                     check_result["authentication_error"] = "authentication_method_rejected"
                 except paramiko.AuthenticationException:
@@ -254,6 +418,7 @@ async def ssh_auth_methods(
     result["auth_methods"] = check_result.get("auth_methods", [])
     result["auth_methods_complete"] = bool(check_result.get("auth_methods_complete"))
     result["host_key"] = check_result.get("host_key")
+    result["pinned_host_key_fingerprint"] = check_result.get("pinned_host_key_fingerprint")
     result["negotiated_algorithms"] = check_result.get("negotiated_algorithms", {})
     result["weak_algorithms"] = check_result.get("weak_algorithms", [])
     result["weak_algorithm_severity"] = check_result.get("weak_algorithm_severity")
@@ -261,6 +426,7 @@ async def ssh_auth_methods(
     result["authentication_succeeded"] = bool(check_result.get("authentication_succeeded"))
     result["authentication_method"] = check_result.get("authentication_method")
     result["authentication_error"] = check_result.get("authentication_error")
+    result["host_review"] = check_result.get("host_review")
     result["error"] = check_result.get("error")
 
     if result["error"]:
@@ -327,6 +493,8 @@ async def full_ssh_scan(
     port: int = 22,
     timeout: int = 10,
     credential: dict[str, Any] | None = None,
+    host_review_bundles: list[str] | tuple[str, ...] | None = None,
+    expected_host_key_fingerprint: str | None = None,
 ) -> dict[str, Any]:
     """
     Perform a full SSH security scan.
@@ -342,4 +510,11 @@ async def full_ssh_scan(
     Returns:
         Complete SSH scan results
     """
-    return await ssh_auth_methods(host, port, timeout, credential=credential)
+    return await ssh_auth_methods(
+        host,
+        port,
+        timeout,
+        credential=credential,
+        host_review_bundles=host_review_bundles,
+        expected_host_key_fingerprint=expected_host_key_fingerprint,
+    )

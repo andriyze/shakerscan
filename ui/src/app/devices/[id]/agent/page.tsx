@@ -7,12 +7,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   cancelDeviceAgentSession,
   getDevice,
+  getDeviceCapabilities,
   getDeviceAgentSession,
   getDeviceCredentials,
   startDeviceAgentSession,
   type DeviceCredentialProfile,
   type DeviceAgentSession,
   type DeviceDetailResponse,
+  type DeviceCapabilitiesResponse,
 } from '@/lib/api'
 import { Button, Card, ErrorState, Field, Input, PageHeader, Select, Skeleton, Textarea, useToast } from '@/components/ui'
 
@@ -26,6 +28,7 @@ export default function DeviceAgentPage() {
   const [data, setData] = useState<DeviceDetailResponse | null>(null)
   const [session, setSession] = useState<DeviceAgentSession | null>(null)
   const [credentials, setCredentials] = useState<DeviceCredentialProfile[]>([])
+  const [capabilityPack, setCapabilityPack] = useState<DeviceCapabilitiesResponse | null>(null)
   const [runId, setRunId] = useState<string | null>(null)
   const [objective, setObjective] = useState(DEFAULT_OBJECTIVE)
   const [safetyProfile, setSafetyProfile] = useState<'observe_only' | 'safe_remote' | 'authenticated_active'>('safe_remote')
@@ -42,8 +45,8 @@ export default function DeviceAgentPage() {
 
   const loadDevice = useCallback(async () => {
     try {
-      const [device, credentialData] = await Promise.all([getDevice(deviceId), getDeviceCredentials(deviceId)])
-      setData(device); setCredentials(credentialData.profiles || []); setError(null)
+      const [device, credentialData, capabilities] = await Promise.all([getDevice(deviceId), getDeviceCredentials(deviceId), getDeviceCapabilities(deviceId)])
+      setData(device); setCredentials(credentialData.profiles || []); setCapabilityPack(capabilities); setError(null)
     }
     catch (err) { setError(err instanceof Error ? err.message : 'Could not load connected device') }
     finally { setLoading(false) }
@@ -120,6 +123,11 @@ export default function DeviceAgentPage() {
       <Card className="mb-6 border-violet-500/25 bg-violet-500/[0.05] p-4">
         <div className="flex items-start gap-3"><Terminal className="mt-0.5 h-5 w-5 text-violet-300" /><div><p className="text-sm font-medium text-violet-100">Run it from your coding agent</p><p className="mt-1 text-xs leading-5 text-gray-400">Ask in plain language from the ShakerScan runtime. The agent starts this session, submits each tool-planning turn, and the activity appears here.</p><code className="mt-2 inline-block rounded border border-gray-700 bg-gray-950 px-3 py-1.5 text-xs text-gray-200">{example}</code></div></div>
       </Card>
+
+      {capabilityPack && <Card className="mb-6 p-5">
+        <div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="font-semibold text-white">Connected-device capability pack</h2><p className="mt-1 text-sm text-gray-500">The planner sees these playbooks, but ShakerScan executes only registered deterministic tools.</p></div><div className="flex gap-2 text-xs"><span className="rounded bg-emerald-500/10 px-2 py-1 text-emerald-300">{capabilityPack.summary.ready || 0} ready</span><span className="rounded bg-blue-500/10 px-2 py-1 text-blue-300">{capabilityPack.summary.completed || 0} covered</span><span className="rounded bg-amber-500/10 px-2 py-1 text-amber-300">{capabilityPack.summary.blocked || 0} blocked</span></div></div>
+        <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">{capabilityPack.items.filter((item) => item.state !== 'not_applicable').map((item) => <div key={item.id} className="rounded border border-gray-800 bg-gray-950/60 p-3"><div className="flex items-start justify-between gap-2"><p className="text-sm font-medium text-gray-200">{item.title}</p><span className={`rounded px-1.5 py-0.5 text-[10px] ${item.state === 'completed' ? 'bg-blue-500/15 text-blue-300' : item.state === 'ready' ? 'bg-emerald-500/15 text-emerald-300' : item.state === 'blocked' ? 'bg-amber-500/15 text-amber-300' : 'bg-gray-800 text-gray-400'}`}>{item.state.replace(/_/g, ' ')}</span></div><p className="mt-1 text-xs text-gray-600">{item.implementation.replace(/_/g, ' ')} · {item.minimum_profile.replace(/_/g, ' ')}</p>{item.blockers.length > 0 && <p className="mt-1 text-xs text-amber-400/70">{item.blockers.join(', ').replace(/_/g, ' ')}</p>}</div>)}</div>
+      </Card>}
 
       {!session && <Card className="p-5">
         <div className="grid gap-4 lg:grid-cols-2">
