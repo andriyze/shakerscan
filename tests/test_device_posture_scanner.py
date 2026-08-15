@@ -260,6 +260,52 @@ def test_web_detection_checks_nonstandard_ports(monkeypatch):
     assert calls == [(49152, False), (49152, True)]
 
 
+def test_device_scan_emits_independent_safety_and_normalized_evidence(monkeypatch):
+    services = [{
+        "transport": "tcp", "port": 8443, "state": "open", "service_name": "https",
+        "policy_eligible": True, "tunnel": "ssl",
+    }]
+
+    async def fake_nmap(locator, profile):
+        return services, [], {"addresses": [{"address": "192.0.2.40", "type": "ipv4"}], "hostnames": ["tv.test"]}, [], {
+            "complete": True,
+            "execution_complete": True,
+            "tcp_discovery_complete": True,
+            "tcp_visibility_complete": True,
+            "tcp_filtered_ports_count": 0,
+            "tcp_fingerprinting_complete": True,
+            "udp_discovery_complete": True,
+            "uncertainty_present": False,
+            "incomplete_stages": [],
+        }
+
+    async def fake_health(locator, *, stage, tcp_ports=(), timeout=1.5):
+        return {"stage": stage, "status": "healthy" if tcp_ports else "indeterminate"}
+
+    async def fake_origins(locator, rows, *, cap=64, advertised_name=None):
+        return [{
+            "origin": "https://tv.test:8443", "port": 8443, "scheme": "https",
+            "tls": True, "status_line": "HTTP/1.1 200 OK",
+        }]
+
+    monkeypatch.setattr(device_posture, "_nmap_scan", fake_nmap)
+    monkeypatch.setattr(device_posture, "check_device_health", fake_health)
+    monkeypatch.setattr(device_posture, "detect_web_origins", fake_origins)
+    result = asyncio.run(device_posture.run_device_posture_scan("tv.test", {
+        "device_profile": "inventory",
+        "safety_profile": "safe_remote",
+        "confirm_authorized": True,
+        "include_web_dast": True,
+        "device_policy": {"name": "test", "rules": [{"action": "allow", "transport": "tcp", "service": "https", "encrypted": True}]},
+    }))
+    posture = result["device_posture"]
+    assert posture["profile"] == "inventory"
+    assert posture["safety"]["profile"]["name"] == "safe_remote"
+    assert posture["evidence_graph"]["schema_version"] == "device-evidence/v1"
+    assert result["scan_metadata"]["device_coverage_profile"] == "inventory"
+    assert result["scan_metadata"]["device_safety_profile"] == "safe_remote"
+
+
 def test_device_worker_identity_and_queue_are_isolated_from_web_dast():
     root = Path(__file__).resolve().parents[1]
     worker = (root / "api" / "worker.py").read_text(encoding="utf-8")

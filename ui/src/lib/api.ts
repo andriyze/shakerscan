@@ -4950,6 +4950,19 @@ export async function getDeviceReadiness(): Promise<{
   worker_count: number
   capable_worker_count: number
   profiles: string[]
+  coverage_profiles: string[]
+  safety_profiles: Array<{
+    name: 'observe_only' | 'safe_remote' | 'authenticated_active' | 'lab_invasive'
+    label: string
+    allowed_action_classes: string[]
+    max_concurrency: number
+    max_requests_per_second: number
+    health_monitor_required: boolean
+    credentials_allowed: boolean
+    explicit_lab_confirmation_required: boolean
+    available: boolean
+    unavailable_reason?: string | null
+  }>
   required_worker_tools: string[]
   optional_sensor_capabilities: string[]
   wireless_status: string
@@ -5003,7 +5016,9 @@ export async function createDevice(payload: {
 
 export async function scanDevice(deviceId: string, payload: {
   profile: 'inventory' | 'posture' | 'thorough'
+  safety_profile: 'observe_only' | 'safe_remote' | 'authenticated_active' | 'lab_invasive'
   confirm_authorized: boolean
+  confirm_lab_invasive?: boolean
   include_web_dast: boolean
   web_scan_type: 'quick' | 'standard' | 'deep'
   max_web_origins?: number

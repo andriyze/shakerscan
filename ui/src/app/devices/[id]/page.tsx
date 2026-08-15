@@ -16,7 +16,7 @@ export default function DeviceDetailPage() {
   const [failed, setFailed] = useState(false)
   const [scanOpen, setScanOpen] = useState(false)
   const [scanning, setScanning] = useState(false)
-  const [scan, setScan] = useState({ profile: 'posture', include_web_dast: true, web_scan_type: 'standard', confirm_authorized: false })
+  const [scan, setScan] = useState({ profile: 'posture', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', confirm_authorized: false })
 
   const load = useCallback(async () => {
     try { setData(await getDevice(deviceId)); setFailed(false) } catch { setFailed(true) } finally { setLoading(false) }
@@ -29,6 +29,7 @@ export default function DeviceDetailPage() {
     try {
       const queued = await scanDevice(deviceId, {
         profile: scan.profile as 'inventory' | 'posture' | 'thorough',
+        safety_profile: scan.safety_profile as 'observe_only' | 'safe_remote',
         confirm_authorized: scan.confirm_authorized,
         include_web_dast: scan.include_web_dast,
         web_scan_type: scan.web_scan_type as 'quick' | 'standard' | 'deep',
@@ -49,7 +50,7 @@ export default function DeviceDetailPage() {
 
   return (
     <div className="mx-auto max-w-7xl">
-      <PageHeader backHref="/devices" backLabel="Connected devices" title={device.name} description={device.primary_locator} icon={<Router className="h-6 w-6" />} actions={<><Link href={`/findings?source_type=device&device_target_id=${device.id}`} className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-200 hover:bg-gray-700">View findings</Link><Button onClick={() => { setScan({ profile: 'posture', include_web_dast: true, web_scan_type: 'standard', confirm_authorized: false }); setScanOpen(true) }}>Scan device</Button></>} />
+      <PageHeader backHref="/devices" backLabel="Connected devices" title={device.name} description={device.primary_locator} icon={<Router className="h-6 w-6" />} actions={<><Link href={`/findings?source_type=device&device_target_id=${device.id}`} className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-200 hover:bg-gray-700">View findings</Link><Button onClick={() => { setScan({ profile: 'posture', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', confirm_authorized: false }); setScanOpen(true) }}>Scan device</Button></>} />
 
       <div className="mb-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
         {[
@@ -94,7 +95,8 @@ export default function DeviceDetailPage() {
       <Modal open={scanOpen} title={`Scan ${device.name}`} onClose={() => setScanOpen(false)} footer={<><Button variant="secondary" onClick={() => setScanOpen(false)}>Cancel</Button><Button loading={scanning} disabled={!scan.confirm_authorized} onClick={queueScan}>Queue scan</Button></>}>
         <div className="space-y-4">
           <Field label="Coverage"><Select value={scan.profile} onChange={(event) => setScan({ ...scan, profile: event.target.value })}><option value="inventory">Inventory — top TCP and common UDP probes</option><option value="posture">Posture — all TCP and common UDP probes</option><option value="thorough">Thorough — all TCP with deeper fingerprinting</option></Select></Field>
-          <label className="flex items-start gap-3 rounded-lg border border-gray-800 bg-gray-950 p-3 text-sm text-gray-300"><input type="checkbox" checked={scan.include_web_dast} onChange={(event) => setScan({ ...scan, include_web_dast: event.target.checked })} className="mt-1" /><span><strong className="block text-white">Check web interfaces on every discovered port</strong>Runs bounded passive Web DAST as hidden device-owned checks.</span></label>
+          <Field label="Safety level" hint="Safety is independent from port coverage."><Select value={scan.safety_profile} onChange={(event) => { const safety_profile = event.target.value; setScan({ ...scan, safety_profile, include_web_dast: safety_profile === 'observe_only' ? false : scan.include_web_dast }) }}><option value="observe_only">Observe only — discovery and fingerprints</option><option value="safe_remote">Safe remote — bounded non-destructive checks</option><option value="authenticated_active" disabled>Authenticated active — coming next</option><option value="lab_invasive" disabled>Lab invasive — dedicated runner required</option></Select></Field>
+          <label className="flex items-start gap-3 rounded-lg border border-gray-800 bg-gray-950 p-3 text-sm text-gray-300"><input type="checkbox" checked={scan.include_web_dast} disabled={scan.safety_profile === 'observe_only'} onChange={(event) => setScan({ ...scan, include_web_dast: event.target.checked })} className="mt-1" /><span><strong className="block text-white">Check web interfaces on every discovered port</strong>{scan.safety_profile === 'observe_only' ? 'Observe-only discovers origins without launching Web DAST children.' : 'Runs bounded passive Web DAST as hidden device-owned checks.'}</span></label>
           {scan.include_web_dast && <Field label="Web coverage"><Select value={scan.web_scan_type} onChange={(event) => setScan({ ...scan, web_scan_type: event.target.value })}><option value="quick">Quick</option><option value="standard">Standard</option><option value="deep">Deep passive</option></Select></Field>}
           <label className="flex items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-sm text-amber-100"><input type="checkbox" checked={scan.confirm_authorized} onChange={(event) => setScan({ ...scan, confirm_authorized: event.target.checked })} className="mt-1" />I confirm I am authorized to scan this device and its listening services.</label>
         </div>

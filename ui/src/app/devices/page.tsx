@@ -35,7 +35,7 @@ export default function DevicesPage() {
   const [saving, setSaving] = useState(false)
   const [scanning, setScanning] = useState(false)
   const [form, setForm] = useState({ name: '', primary_locator: '', device_class: 'generic', manufacturer: '', model: '', policy_id: '' })
-  const [scanForm, setScanForm] = useState({ profile: 'posture', include_web_dast: true, web_scan_type: 'standard', confirm_authorized: false })
+  const [scanForm, setScanForm] = useState({ profile: 'posture', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', confirm_authorized: false })
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -87,6 +87,7 @@ export default function DevicesPage() {
     try {
       const queued = await scanDevice(scanTarget.id, {
         profile: scanForm.profile as 'inventory' | 'posture' | 'thorough',
+        safety_profile: scanForm.safety_profile as 'observe_only' | 'safe_remote',
         confirm_authorized: scanForm.confirm_authorized,
         include_web_dast: scanForm.include_web_dast,
         web_scan_type: scanForm.web_scan_type as 'quick' | 'standard' | 'deep',
@@ -133,7 +134,7 @@ export default function DevicesPage() {
               <div className="rounded bg-gray-950 p-2"><div className="text-lg font-semibold text-white">{device.active_findings_count || 0}</div><div className="text-gray-500">findings</div></div>
               <div className="rounded bg-gray-950 p-2"><div className="truncate text-sm font-semibold text-white">{device.device_class}</div><div className="text-gray-500">class</div></div>
             </div>
-            <div className="mt-4 flex items-center justify-between text-xs text-gray-500"><span>{device.policy_name || 'Default policy'}</span><Button size="sm" disabled={!workerReady} onClick={() => { setScanTarget(device); setScanForm({ profile: 'posture', include_web_dast: true, web_scan_type: 'standard', confirm_authorized: false }) }}>Scan</Button></div>
+            <div className="mt-4 flex items-center justify-between text-xs text-gray-500"><span>{device.policy_name || 'Default policy'}</span><Button size="sm" disabled={!workerReady} onClick={() => { setScanTarget(device); setScanForm({ profile: 'posture', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', confirm_authorized: false }) }}>Scan</Button></div>
           </Card>
         ))}</div>}
 
@@ -150,7 +151,8 @@ export default function DevicesPage() {
       <Modal open={Boolean(scanTarget)} title={`Scan ${scanTarget?.name || 'device'}`} onClose={() => setScanTarget(null)} footer={<><Button variant="secondary" onClick={() => setScanTarget(null)}>Cancel</Button><Button loading={scanning} disabled={!scanForm.confirm_authorized} onClick={startScan}>Queue scan</Button></>}>
         <div className="space-y-4">
           <Field label="Coverage"><Select value={scanForm.profile} onChange={(event) => setScanForm({ ...scanForm, profile: event.target.value })}><option value="inventory">Inventory — top TCP and common UDP probes</option><option value="posture">Posture — all TCP and common UDP probes</option><option value="thorough">Thorough — all TCP with deeper fingerprinting</option></Select></Field>
-          <label className="flex items-start gap-3 rounded-lg border border-gray-800 bg-gray-950 p-3 text-sm text-gray-300"><input type="checkbox" checked={scanForm.include_web_dast} onChange={(event) => setScanForm({ ...scanForm, include_web_dast: event.target.checked })} className="mt-1" /><span><strong className="block text-white">Check discovered web interfaces</strong>Run bounded passive Web DAST on HTTP(S) found on any port. These internal checks do not create Web targets.</span></label>
+          <Field label="Safety level" hint="Safety is independent from port coverage."><Select value={scanForm.safety_profile} onChange={(event) => { const safety_profile = event.target.value; setScanForm({ ...scanForm, safety_profile, include_web_dast: safety_profile === 'observe_only' ? false : scanForm.include_web_dast }) }}><option value="observe_only">Observe only — discovery and fingerprints</option><option value="safe_remote">Safe remote — bounded non-destructive checks</option><option value="authenticated_active" disabled>Authenticated active — coming next</option><option value="lab_invasive" disabled>Lab invasive — dedicated runner required</option></Select></Field>
+          <label className="flex items-start gap-3 rounded-lg border border-gray-800 bg-gray-950 p-3 text-sm text-gray-300"><input type="checkbox" checked={scanForm.include_web_dast} disabled={scanForm.safety_profile === 'observe_only'} onChange={(event) => setScanForm({ ...scanForm, include_web_dast: event.target.checked })} className="mt-1" /><span><strong className="block text-white">Check discovered web interfaces</strong>{scanForm.safety_profile === 'observe_only' ? 'Observe-only discovers origins without launching Web DAST children.' : 'Run bounded passive Web DAST on HTTP(S) found on any port. These internal checks do not create Web targets.'}</span></label>
           {scanForm.include_web_dast && <Field label="Web coverage"><Select value={scanForm.web_scan_type} onChange={(event) => setScanForm({ ...scanForm, web_scan_type: event.target.value })}><option value="quick">Quick</option><option value="standard">Standard</option><option value="deep">Deep passive</option></Select></Field>}
           <label className="flex items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-sm text-amber-100"><input type="checkbox" checked={scanForm.confirm_authorized} onChange={(event) => setScanForm({ ...scanForm, confirm_authorized: event.target.checked })} className="mt-1" /><span>I confirm I am authorized to scan this device and its listening services.</span></label>
         </div>

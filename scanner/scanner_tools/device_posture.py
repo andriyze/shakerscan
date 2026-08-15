@@ -24,9 +24,13 @@ except ImportError:  # pragma: no cover - minimal host test environment
 
 try:
     from .common import run
+    from .device_evidence import build_device_evidence_graph
+    from .device_safety import DeviceSafetyGovernor, check_device_health, validate_safety_request
     from .ssh_scanner import full_ssh_scan
 except ImportError:  # pragma: no cover - flat scanner runtime
     from common import run
+    from device_evidence import build_device_evidence_graph
+    from device_safety import DeviceSafetyGovernor, check_device_health, validate_safety_request
     from ssh_scanner import full_ssh_scan
 
 
@@ -596,8 +600,20 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
         raise ValueError(f"device_profile must be one of: {', '.join(sorted(DEVICE_PROFILES))}")
     if not options.get("confirm_authorized"):
         raise ValueError("connected-device scans require confirm_authorized=true")
+    safety_profile = validate_safety_request(options)
+    safety = DeviceSafetyGovernor(safety_profile)
+    safety.authorize("target_health_baseline", "readonly")
+    safety.record_health(await check_device_health(locator, stage="baseline"))
+    safety.authorize("network_inventory", "readonly")
     profile = PROFILES[profile_name]
     services, inconclusive_observations, identity, tool_receipts, scan_completeness = await _nmap_scan(locator, profile)
+    known_tcp_ports = [
+        int(service["port"])
+        for service in services
+        if service.get("transport") == "tcp" and service.get("state") == "open"
+    ]
+    safety.record_health(await check_device_health(locator, stage="post_inventory", tcp_ports=known_tcp_ports))
+    safety.authorize("web_origin_discovery", "readonly")
     advertised_name = next(iter(identity.get("hostnames") or []), None)
     web_origins = await detect_web_origins(locator, services, cap=profile.web_probe_cap, advertised_name=advertised_name)
     origin_by_port = {int(origin["port"]): origin for origin in web_origins}
@@ -611,6 +627,7 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
             service["encrypted"] = True
 
     ssh_findings: list[dict[str, Any]] = []
+    safety.authorize("ssh_posture_handshake", "readonly")
     for service in services:
         if service.get("transport") != "tcp" or str(service.get("service_name") or "").lower() not in SSH_SERVICE_NAMES:
             continue
@@ -622,6 +639,13 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
             finding["source"] = "device"
             ssh_findings.append(finding)
 
+    safety.record_health(await check_device_health(locator, stage="final", tcp_ports=known_tcp_ports))
+    safety_receipt = safety.receipt()
+    if safety.halted:
+        scan_completeness["complete"] = False
+        scan_completeness["safety_halted"] = True
+        scan_completeness.setdefault("incomplete_stages", []).append("device_health_degraded")
+
     policy = options.get("device_policy") if isinstance(options.get("device_policy"), dict) else {}
     policy_name = str(policy.get("name") or "connected-device-default-v1")
     rules = policy.get("rules") if isinstance(policy.get("rules"), list) else []
@@ -631,6 +655,15 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
     execution_complete = bool(scan_completeness.get("execution_complete", complete))
     score, grade = _score(findings, complete=execution_complete)
     decision, rationale = _device_decision(findings, complete=complete)
+    evidence_graph = build_device_evidence_graph(
+        locator=locator,
+        identity=identity,
+        services=services,
+        inconclusive_observations=inconclusive_observations,
+        web_origins=web_origins,
+        tool_receipts=tool_receipts,
+        safety_receipt=safety_receipt,
+    )
     return {
         "target": locator,
         "result": {"score": score, "grade": grade},
@@ -644,6 +677,8 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
             "web_origins": web_origins,
             "policy": {"name": policy_name, "rules_count": len(rules)},
             "decision": {"decision": decision, "rationale": rationale, "policy_name": policy_name},
+            "safety": safety_receipt,
+            "evidence_graph": evidence_graph,
             "completeness": {
                 "complete": complete,
                 "tcp_scope": "all_65535" if "-p-" in profile.tcp_args else "top_100",
@@ -657,5 +692,11 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
                 **scan_completeness,
             },
         },
-        "scan_metadata": {"run_kind": "device_posture", "active_testing": False, "credentials_attempted": False},
+        "scan_metadata": {
+            "run_kind": "device_posture",
+            "active_testing": False,
+            "credentials_attempted": False,
+            "device_coverage_profile": profile_name,
+            "device_safety_profile": safety_profile.name,
+        },
     }

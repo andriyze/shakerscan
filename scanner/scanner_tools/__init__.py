@@ -39,6 +39,8 @@ __all__ = [
     "compliance_mapper",
     "credential_check",
     "ct_monitor",
+    "device_evidence",
+    "device_safety",
     "discovery",
     "domain_intel",
     "form_login",

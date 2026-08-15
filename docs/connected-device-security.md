@@ -33,6 +33,23 @@ Every profile is scoped to exactly one hostname or IP. URLs, CIDR ranges, paths,
 shell-like locators are rejected. The operator must explicitly confirm authorization before a scan
 is queued.
 
+Coverage and safety are independent controls. `inventory`, `posture`, and `thorough` select how much
+of the device is inventoried; they never grant permission for more invasive actions. The separately
+recorded safety profiles are:
+
+- `observe_only`: discovery, banners, TLS/HTTP detection, and SSH posture handshakes. Web origins are
+  inventoried but no Web DAST children are launched.
+- `safe_remote`: bounded non-destructive network checks and passive device-owned Web DAST. This is
+  the default and preserves the original connected-device behavior.
+- `authenticated_active`: reserved for the supplied-credential, read-only host collector and later
+  bounded active checks. It currently fails closed as unavailable.
+- `lab_invasive`: reserved for a dedicated recovery-capable lab runner. It currently fails closed as
+  unavailable and cannot be enabled by choosing a deeper coverage profile.
+
+Every device action receives a declared safety class. The device safety governor blocks actions not
+permitted by the selected profile and records baseline, post-inventory, and final health checkpoints.
+If a previously healthy device degrades, the scan is halted and cannot produce an allow decision.
+
 TCP assessment is staged. A bounded priority pass checks common administration, media, printing,
 messaging, and nonstandard web ports first. The requested top-100 or all-port discovery then runs
 without expensive version detection, and service/version fingerprinting runs only against ports
@@ -50,6 +67,12 @@ operator can inspect the raw evidence without mistaking UDP silence for an expos
 Successful tool execution is reported separately from coverage confidence. Filtered TCP ports or
 unresolved UDP observations prevent an `allow` decision and preserve prior service history, but they
 do not become findings or reduce the vulnerability score merely because the network path was silent.
+
+Each report also carries a deterministic `device-evidence/v1` graph. It normalizes the device,
+interfaces, services, inconclusive observations, web origins, tool executions, and health
+checkpoints into stable nodes, edges, and observations. This is the compatibility layer used by
+future protocol adapters and the AI-directed device investigator; adapters exchange normalized
+observations rather than requiring later stages to parse raw tool strings.
 
 ## Web interfaces on any port
 

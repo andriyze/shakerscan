@@ -62,6 +62,11 @@ except ModuleNotFoundError:
     from scanner.scanner_tools.device_posture import DEVICE_PROFILES, normalize_device_locator
 
 try:
+    from scanner_tools.device_safety import safety_profile_catalog, validate_safety_request
+except ModuleNotFoundError:
+    from scanner.scanner_tools.device_safety import safety_profile_catalog, validate_safety_request
+
+try:
     from scanner_tools.model_intake_acquisition import acquisition_policy as _model_acquisition_policy
     from scanner_tools.model_intake_acquisition import download_http as _model_download_http
 except ModuleNotFoundError:
@@ -4074,7 +4079,9 @@ class DevicePolicyUpdate(BaseModel):
 
 class DeviceScanRequest(BaseModel):
     profile: Literal["inventory", "posture", "thorough"] = "posture"
+    safety_profile: Literal["observe_only", "safe_remote", "authenticated_active", "lab_invasive"] = "safe_remote"
     confirm_authorized: bool = False
+    confirm_lab_invasive: bool = False
     include_web_dast: bool = True
     web_scan_type: Literal["quick", "standard", "deep"] = "standard"
     max_web_origins: int = Field(default=8, ge=0, le=32)
@@ -18122,6 +18129,8 @@ async def get_device_readiness():
     return {
         **readiness,
         "profiles": sorted(DEVICE_PROFILES),
+        "coverage_profiles": sorted(DEVICE_PROFILES),
+        "safety_profiles": safety_profile_catalog(),
         "required_worker_tools": ["nmap"],
         "optional_sensor_capabilities": ["bluetooth", "ble", "passive_traffic"],
         "wireless_status": "planned_sensor_extension",
@@ -18351,6 +18360,14 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
         )
     if not request.confirm_authorized:
         raise HTTPException(status_code=409, detail="Re-submit with confirm_authorized=true after confirming permission to scan this device")
+    try:
+        validate_safety_request({
+            "safety_profile": request.safety_profile,
+            "confirm_lab_invasive": request.confirm_lab_invasive,
+            "include_web_dast": request.include_web_dast,
+        })
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     device_uuid = _device_uuid(device_id)
     scan_id, job_id = str(uuid.uuid4()), str(uuid.uuid4())
     async with db_pool.acquire() as conn:
@@ -18388,7 +18405,9 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
         options = {
             "run_kind": "device_posture",
             "device_profile": request.profile,
+            "safety_profile": request.safety_profile,
             "confirm_authorized": True,
+            "confirm_lab_invasive": request.confirm_lab_invasive,
             "include_web_dast": request.include_web_dast,
             "web_scan_type": request.web_scan_type,
             "max_web_origins": request.max_web_origins,
@@ -18428,6 +18447,7 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
         "device_target_id": device_id,
         "target": device["primary_locator"],
         "profile": request.profile,
+        "safety_profile": request.safety_profile,
         "ui_url": f"/devices/{device_id}?scan={scan_id}",
     }
 
