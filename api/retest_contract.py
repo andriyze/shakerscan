@@ -2453,7 +2453,17 @@ async def run_schema_migrations(pool) -> None:
                         CASE
                             WHEN rule->>'action'='deny'
                              AND rule->>'transport'='tcp'
-                             AND (rule->'ports') ?| ARRAY['21','23','2323']
+                             AND EXISTS (
+                                 SELECT 1
+                                 FROM jsonb_array_elements_text(
+                                     CASE
+                                         WHEN jsonb_typeof(rule->'ports') = 'array'
+                                         THEN rule->'ports'
+                                         ELSE '[]'::jsonb
+                                     END
+                                 ) AS denied_port(value)
+                                 WHERE denied_port.value IN ('21','23','2323')
+                             )
                             THEN jsonb_set(rule, '{service}', '"any"'::jsonb, true)
                             ELSE rule
                         END

@@ -155,3 +155,15 @@ def test_device_auth_requires_authenticated_safety_and_never_enters_agent_transc
     assert "Credentialed device investigations require safety_profile=authenticated_active" in api
     assert '"credentials_visible_to_planner": False' in api
     assert 'device credentials require safety_profile=authenticated_active' in worker
+
+
+def test_legacy_policy_upgrade_matches_numeric_json_port_arrays():
+    migration = (ROOT / "api" / "retest_contract.py").read_text()
+    upgrade = migration[migration.index("UPDATE device_policies AS policy"):]
+    upgrade = upgrade[:upgrade.index("CREATE TABLE IF NOT EXISTS device_targets")]
+
+    # JSONB `?|` only matches string array members, while policy ports are JSON
+    # numbers. Expanding as text makes both fresh and legacy numeric arrays match.
+    assert "jsonb_array_elements_text" in upgrade
+    assert "denied_port.value IN ('21','23','2323')" in upgrade
+    assert "(rule->'ports') ?|" not in upgrade
