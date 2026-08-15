@@ -77,6 +77,19 @@ DEVICE_CLASS_TCP_PORTS = {
     "building": (80, 102, 443, 502, 1883, 4840, 5683, 8000, 20000, 44818, 47808),
     "industrial": (80, 102, 443, 502, 1883, 4840, 5683, 20000, 44818, 47808),
 }
+TV_MANUFACTURER_TCP_PORTS = {
+    # Vizio SmartCast uses HTTPS/7345 on current firmware and HTTPS/9000 on
+    # older firmware generations.
+    "vizio": (7345, 9000),
+    # LG webOS uses WS/3000 and WSS/3001; 8080 covers older REST generations.
+    "lg": (3000, 3001, 8080),
+    # Samsung Smart View/Tizen control and service endpoints.
+    "samsung": (8000, 8001, 8002, 9197),
+    # TCL ships multiple TV platforms, principally Roku and Google/Android TV.
+    "tcl": (5555, 6466, 6467, 8008, 8009, 8060),
+    # Hisense ships VIDAA plus Google/Android and Roku variants.
+    "hisense": (5555, 6466, 6467, 8008, 8009, 8060, 36669),
+}
 SSH_SERVICE_NAMES = {"ssh", "ssh-alt"}
 _HTTP_STATUS = re.compile(rb"^HTTP/(?:1\.[01]|2(?:\.0)?)\s+\d{3}\b", re.I)
 _TIMEOUT_TEXT = re.compile(r"(?:host\s+)?timed?\s*out|host-timeout", re.I)
@@ -1076,6 +1089,13 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
     ]
     device_class = str(options.get("device_class") or "generic").strip().lower()
     class_ports = DEVICE_CLASS_TCP_PORTS.get(device_class, DEVICE_CLASS_TCP_PORTS["generic"])
+    manufacturer = re.sub(r"[^a-z0-9]+", "", str(options.get("device_manufacturer") or "").lower())
+    manufacturer_ports = tuple(dict.fromkeys(
+        port
+        for vendor, ports in TV_MANUFACTURER_TCP_PORTS.items()
+        if vendor in manufacturer
+        for port in ports
+    ))
     reachability_port_hints = list(dict.fromkeys([
         *valid_ports(hint_payload.get("user")),
         *valid_ports(hint_payload.get("observed")),
@@ -1084,6 +1104,7 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
         *valid_ports(hint_payload.get("policy")),
         *policy_ports,
         *class_ports,
+        *manufacturer_ports,
     ]))
     extra_priority_ports = tuple(sorted(set(reachability_port_hints)))
 

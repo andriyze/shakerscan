@@ -480,6 +480,42 @@ def test_posture_reuses_all_tcp_fallback_when_only_nonstandard_port_responds(mon
     assert result["device_posture"]["reachability"]["fallback"]["inventory_reused"] is True
 
 
+def test_major_tv_manufacturer_port_sets_cover_native_and_multi_os_models():
+    ports = device_posture.TV_MANUFACTURER_TCP_PORTS
+    assert {7345, 9000}.issubset(ports["vizio"])
+    assert {3000, 3001}.issubset(ports["lg"])
+    assert {8001, 8002}.issubset(ports["samsung"])
+    assert {6466, 6467, 8008, 8009, 8060}.issubset(ports["tcl"])
+    assert {6466, 6467, 8008, 8009, 8060, 36669}.issubset(ports["hisense"])
+
+
+def test_hisense_manufacturer_adds_vidaa_mqtt_to_preflight(monkeypatch):
+    captured: list[int] = []
+
+    async def fake_resolve(_locator, **_kwargs):
+        return "192.0.2.56"
+
+    async def fake_reachability(locator, resolved_address, **kwargs):
+        captured.extend(kwargs["port_hints"])
+        return {
+            "schema_version": "device-reachability/v1", "status": "inconclusive", "online": None,
+            "network_accessible": None, "service_accessible": None, "confidence": "none",
+            "reason": "silence", "locator": locator, "resolved_address": resolved_address,
+            "resolution_succeeded": True, "positive_signals": {}, "attempts": [], "nmap_host_discovery": {},
+        }
+
+    monkeypatch.setattr(device_posture, "resolve_device_address", fake_resolve)
+    monkeypatch.setattr(device_posture, "probe_device_reachability", fake_reachability)
+    result = asyncio.run(device_posture.run_device_posture_scan("tv.test", {
+        "device_class": "media", "device_manufacturer": "Hisense USA",
+        "device_profile": "inventory", "safety_profile": "safe_remote",
+        "confirm_authorized": True, "include_web_dast": False,
+        "device_policy": {"name": "test", "rules": []},
+    }))
+    assert 36669 in captured
+    assert result["device_posture"]["reachability"]["status"] == "inconclusive"
+
+
 def test_posture_fallback_silence_stays_inconclusive(monkeypatch):
     async def fake_resolve(_locator, **_kwargs):
         return "192.0.2.55"

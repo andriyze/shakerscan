@@ -62,6 +62,12 @@ is enough to prove that the network stack answered. DNS resolution, Nmap's `user
 reason, timeouts, and silence do not. The receipt distinguishes `online`, `unreachable`, and
 `inconclusive`, records the evidence and check time, and is shown on the device list and detail page.
 
+Media devices also receive manufacturer-aware hints when the inventory identifies Vizio, LG,
+Samsung, TCL, or Hisense. These include Vizio SmartCast `7345`/legacy `9000`, LG webOS
+`3000`/`3001`, Samsung Smart View/Tizen `8001`/`8002`, Roku ECP `8060`, Android/Google TV remote and
+Cast ports used by multi-platform TCL/Hisense models, and Hisense VIDAA MQTT `36669`. A probe is only
+a discovery hint: it is never rendered or evaluated as an open service without a positive response.
+
 An inconclusive `inventory` preflight stops without expanding to all TCP ports. For `posture` and
 `thorough`, which already require all-TCP coverage, the requested all-TCP discovery may begin as a
 fallback and its result is reused as the main inventory rather than scanning the range twice. An open

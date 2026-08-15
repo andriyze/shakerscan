@@ -516,7 +516,8 @@ The `inventory` profile scans the top 100 TCP ports and a small UDP set; `postur
 inventory all 65,535 TCP ports plus a declared curated UDP set. Each scan checks priority TCP ports
 first, performs the requested discovery without version detection, and fingerprints only confirmed
 open ports. Reachability prioritizes previously observed, operator-hinted, policy-defined, and
-credential-bound TCP ports, then applies compact common and device-class-specific port sets. If that bounded check is silent, only an already
+credential-bound TCP ports, then applies compact common, device-class-specific, and major-TV-manufacturer
+port sets (Vizio, LG, Samsung, TCL, and Hisense). If that bounded check is silent, only an already
 all-TCP `posture` or `thorough` scan expands discovery; the same result becomes the main inventory,
 so the range is never scanned twice and silence alone never proves online status. Nmap timeout
 markers are parsed independently of its process exit code, so partial

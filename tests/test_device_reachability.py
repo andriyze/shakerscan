@@ -29,7 +29,10 @@ def test_host_discovery_requires_a_real_positive_reason():
 
 def test_common_reachability_tier_includes_connected_device_services():
     ports = set(device_reachability.REACHABILITY_TCP_PORTS)
-    assert {22, 80, 443, 554, 631, 1883, 5555, 7345, 8001, 8002, 8008, 8009, 8060, 8554, 9100}.issubset(ports)
+    assert {
+        22, 80, 443, 554, 631, 1883, 3000, 3001, 5555, 6466, 6467,
+        7345, 8001, 8002, 8008, 8009, 8060, 8554, 9000, 9100, 36669,
+    }.issubset(ports)
     assert len(ports) <= device_reachability.MAX_REACHABILITY_TCP_PORTS
 
 

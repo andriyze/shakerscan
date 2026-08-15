@@ -19145,6 +19145,8 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
         options = {
             "run_kind": "device_posture",
             "device_class": str(device["device_class"]),
+            "device_manufacturer": str(device["manufacturer"] or ""),
+            "device_model": str(device["model"] or ""),
             "device_profile": request.profile,
             "safety_profile": request.safety_profile,
             "confirm_authorized": True,
