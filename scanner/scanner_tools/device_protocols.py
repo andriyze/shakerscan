@@ -11,19 +11,26 @@ from typing import Any
 
 
 class _Collector(asyncio.DatagramProtocol):
-    def __init__(self, *, max_responses: int, max_bytes: int):
+    def __init__(self, *, max_responses: int, max_bytes: int, allowed_addresses: set[str]):
         self.max_responses = max_responses
         self.max_bytes = max_bytes
+        self.allowed_addresses = allowed_addresses
         self.responses: list[dict[str, Any]] = []
         self.total_bytes = 0
 
     def datagram_received(self, data: bytes, addr: tuple[str, int]) -> None:
+        try:
+            responder = str(ipaddress.ip_address(str(addr[0]).split("%", 1)[0]))
+        except ValueError:
+            return
+        if responder not in self.allowed_addresses:
+            return
         if len(self.responses) >= self.max_responses or self.total_bytes >= self.max_bytes:
             return
         remaining = max(0, self.max_bytes - self.total_bytes)
         bounded = bytes(data[:remaining])
         self.total_bytes += len(bounded)
-        self.responses.append({"data": bounded, "address": str(addr[0]), "port": int(addr[1])})
+        self.responses.append({"data": bounded, "address": responder, "port": int(addr[1])})
 
 
 async def _udp_exchange(
@@ -37,28 +44,53 @@ async def _udp_exchange(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Send one unicast datagram to the authorized locator and collect bounded replies."""
     loop = asyncio.get_running_loop()
-    collector = _Collector(max_responses=max_responses, max_bytes=max_bytes)
+    collector: _Collector | None = None
     transport = None
     error: str | None = None
+    target_address: str | None = None
     try:
-        transport, _ = await asyncio.wait_for(
-            loop.create_datagram_endpoint(lambda: collector, remote_addr=(locator, port)),
+        addresses = await asyncio.wait_for(
+            loop.getaddrinfo(locator, port, type=socket.SOCK_DGRAM),
             timeout=timeout,
         )
-        transport.sendto(payload)
+        resolved = next(
+            (item for item in addresses if item[0] in {socket.AF_INET, socket.AF_INET6}),
+            None,
+        )
+        if resolved is None:
+            raise OSError("no UDP address resolved for target")
+        family, _socktype, _protocol, _canonical, target_sockaddr = resolved
+        target_address = str(ipaddress.ip_address(str(target_sockaddr[0]).split("%", 1)[0]))
+        collector = _Collector(
+            max_responses=max_responses,
+            max_bytes=max_bytes,
+            allowed_addresses={target_address},
+        )
+        local_addr = ("::", 0) if family == socket.AF_INET6 else ("0.0.0.0", 0)
+        transport, _ = await asyncio.wait_for(
+            # Keep the socket unconnected: embedded SSDP/mDNS stacks sometimes
+            # answer a unicast request from a different source port. A connected
+            # UDP socket would let the kernel silently discard that valid reply.
+            loop.create_datagram_endpoint(lambda: collector, family=family, local_addr=local_addr),
+            timeout=timeout,
+        )
+        transport.sendto(payload, target_sockaddr)
         await asyncio.sleep(max(0.05, min(timeout, 3.0)))
     except (TimeoutError, OSError, socket.gaierror) as exc:
         error = f"{type(exc).__name__}: {exc}"[:300]
     finally:
         if transport is not None:
             transport.close()
-    return collector.responses, {
+    responses = collector.responses if collector is not None else []
+    response_bytes = collector.total_bytes if collector is not None else 0
+    return responses, {
         "complete": error is None,
         "target": locator,
         "port": port,
         "request_bytes": len(payload),
-        "response_count": len(collector.responses),
-        "response_bytes": collector.total_bytes,
+        "resolved_target_address": target_address,
+        "response_count": len(responses),
+        "response_bytes": response_bytes,
         "timeout_seconds": timeout,
         "error": error,
         "scope": "exact_target_unicast",

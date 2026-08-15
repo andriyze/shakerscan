@@ -137,6 +137,7 @@ def parse_nmap_evidence(
         "host_timed_out": False,
         "port_state_counts": {},
         "tcp_filtered_count": 0,
+        "udp_extraports_inconclusive_count": 0,
         "incomplete_reasons": [],
     }
     if not xml_text.strip():
@@ -207,6 +208,12 @@ def parse_nmap_evidence(
             scan_status["port_state_counts"][state] = int(scan_status["port_state_counts"].get(state, 0)) + count
             if scan_protocol == "tcp" and state in {"filtered", "open|filtered"}:
                 scan_status["tcp_filtered_count"] += count
+            if scan_protocol == "udp" and state == "open|filtered":
+                # Nmap normally collapses silent UDP ports into <extraports>.
+                # They have the same uncertainty as individually listed
+                # open|filtered ports, but do not have port ids that can be
+                # promoted by a protocol-specific response.
+                scan_status["udp_extraports_inconclusive_count"] += count
     if scan_status["host_timed_out"]:
         scan_status["incomplete_reasons"].append("nmap_host_timeout")
     if scan_status["finished_exit"] not in {"success", None}:
@@ -322,6 +329,9 @@ async def _run_nmap_stage(
         "inconclusive_count": len(inconclusive),
         "port_state_counts": dict(scan_status.get("port_state_counts") or {}),
         "tcp_filtered_count": int(scan_status.get("tcp_filtered_count") or 0),
+        "udp_extraports_inconclusive_count": int(
+            scan_status.get("udp_extraports_inconclusive_count") or 0
+        ),
         "incomplete_reasons": list(dict.fromkeys(incomplete_reasons)),
         "stderr": (stderr or "")[:500],
     }
@@ -413,15 +423,21 @@ async def _nmap_scan(
             and all(receipt.get("complete") for receipt in udp_receipts)
     )
     tcp_filtered_count = int(tcp_receipt.get("tcp_filtered_count") or 0)
+    udp_extraports_inconclusive_count = sum(
+        int(receipt.get("udp_extraports_inconclusive_count") or 0)
+        for receipt in udp_receipts
+    )
     tcp_visibility_complete = bool(tcp_receipt.get("complete") and tcp_filtered_count == 0)
-    uncertainty_present = bool(observations_by_key or tcp_filtered_count)
+    uncertainty_present = bool(
+        observations_by_key or tcp_filtered_count or udp_extraports_inconclusive_count
+    )
     incomplete_stages = [
         receipt["stage"] for receipt in receipts
         if receipt.get("required", True) and not receipt.get("complete")
     ]
     if tcp_filtered_count:
         incomplete_stages.append("tcp_scope_visibility")
-    if observations_by_key:
+    if observations_by_key or udp_extraports_inconclusive_count:
         incomplete_stages.append("udp_service_uncertainty")
     completeness = {
         "complete": bool(execution_complete and not uncertainty_present),
@@ -431,6 +447,7 @@ async def _nmap_scan(
         "tcp_filtered_ports_count": tcp_filtered_count,
         "tcp_fingerprinting_complete": all(receipt.get("complete") for receipt in fingerprint_receipts),
         "udp_discovery_complete": all(receipt.get("complete") for receipt in udp_receipts),
+        "udp_extraports_inconclusive_count": udp_extraports_inconclusive_count,
         "uncertainty_present": uncertainty_present,
         "incomplete_stages": incomplete_stages,
     }
@@ -667,8 +684,13 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
         protocol_results,
     )
     tcp_filtered_count = int(scan_completeness.get("tcp_filtered_ports_count") or 0)
-    scan_completeness["uncertainty_present"] = bool(tcp_filtered_count or inconclusive_observations)
-    if not inconclusive_observations:
+    udp_extraports_inconclusive_count = int(
+        scan_completeness.get("udp_extraports_inconclusive_count") or 0
+    )
+    scan_completeness["uncertainty_present"] = bool(
+        tcp_filtered_count or udp_extraports_inconclusive_count or inconclusive_observations
+    )
+    if not inconclusive_observations and not udp_extraports_inconclusive_count:
         scan_completeness["incomplete_stages"] = [
             stage for stage in list(scan_completeness.get("incomplete_stages") or [])
             if stage != "udp_service_uncertainty"

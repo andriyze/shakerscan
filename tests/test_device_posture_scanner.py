@@ -194,6 +194,36 @@ def test_udp_silence_prevents_allow_without_becoming_a_service(monkeypatch):
     assert "udp_service_uncertainty" in completeness["incomplete_stages"]
 
 
+def test_udp_extraports_silence_prevents_allow(monkeypatch):
+    def extraports_xml(protocol: str, state: str, count: int) -> str:
+        return (
+            "<?xml version='1.0'?><nmaprun scanner='nmap'>"
+            f"<scaninfo protocol='{protocol}'/><host><status state='up'/><address addr='10.0.0.4' addrtype='ipv4'/>"
+            f"<ports><extraports state='{state}' count='{count}'/></ports></host>"
+            "<runstats><finished elapsed='1.0' exit='success' summary='done'/><hosts up='1' down='0' total='1'/></runstats>"
+            "</nmaprun>"
+        )
+
+    async def fake_run(cmd, timeout=60, input_text=None, retry=0):
+        if "-sU" in cmd:
+            return extraports_xml("udp", "open|filtered", 15), "", 0
+        return extraports_xml("tcp", "closed", 100), "", 0
+
+    monkeypatch.setattr(device_posture, "run", fake_run)
+    services, observations, _, receipts, completeness = asyncio.run(
+        device_posture._nmap_scan("device.test", device_posture.PROFILES["inventory"]),
+    )
+    udp_receipt = next(receipt for receipt in receipts if receipt["transport"] == "udp")
+    assert services == []
+    assert observations == []
+    assert udp_receipt["udp_extraports_inconclusive_count"] == 15
+    assert completeness["udp_extraports_inconclusive_count"] == 15
+    assert completeness["execution_complete"] is True
+    assert completeness["uncertainty_present"] is True
+    assert completeness["complete"] is False
+    assert "udp_service_uncertainty" in completeness["incomplete_stages"]
+
+
 def test_require_policy_fails_closed_when_ssh_controls_are_unverified_or_weak():
     rule = {
         "action": "require",

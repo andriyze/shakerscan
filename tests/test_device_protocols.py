@@ -82,3 +82,43 @@ def test_fast_inventory_includes_core_device_discovery_protocols():
     ports = device_posture.PROFILES["inventory"].udp_ports
     assert 1900 in ports
     assert 5353 in ports
+
+
+def test_udp_exchange_accepts_target_reply_from_a_different_source_port():
+    class ReplyFromDifferentPort(asyncio.DatagramProtocol):
+        def datagram_received(self, data, addr):
+            async def reply():
+                loop = asyncio.get_running_loop()
+                transport, _ = await loop.create_datagram_endpoint(
+                    asyncio.DatagramProtocol,
+                    local_addr=("127.0.0.1", 0),
+                )
+                try:
+                    transport.sendto(b"reply", addr)
+                    await asyncio.sleep(0.02)
+                finally:
+                    transport.close()
+
+            asyncio.create_task(reply())
+
+    async def exercise():
+        loop = asyncio.get_running_loop()
+        server, _ = await loop.create_datagram_endpoint(
+            ReplyFromDifferentPort,
+            local_addr=("127.0.0.1", 0),
+        )
+        target_port = server.get_extra_info("sockname")[1]
+        try:
+            responses, receipt = await device_protocols._udp_exchange(
+                "127.0.0.1", target_port, b"probe", timeout=0.15,
+            )
+        finally:
+            server.close()
+        return target_port, responses, receipt
+
+    target_port, responses, receipt = asyncio.run(exercise())
+    assert receipt["complete"] is True
+    assert receipt["resolved_target_address"] == "127.0.0.1"
+    assert responses[0]["data"] == b"reply"
+    assert responses[0]["address"] == "127.0.0.1"
+    assert responses[0]["port"] != target_port

@@ -370,6 +370,36 @@ CREATE TABLE device_services (
     CONSTRAINT device_services_identity_unique UNIQUE (device_target_id, transport, port)
 );
 
+CREATE TABLE device_agent_runs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    device_target_id UUID NOT NULL REFERENCES device_targets(id) ON DELETE CASCADE,
+    objective TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'awaiting_planner',
+    planner_mode TEXT NOT NULL DEFAULT 'agent',
+    safety_profile TEXT NOT NULL DEFAULT 'safe_remote',
+    max_turns INTEGER NOT NULL DEFAULT 12 CHECK (max_turns BETWEEN 1 AND 30),
+    approval_receipt_id UUID,
+    state JSONB NOT NULL DEFAULT '{}'::jsonb,
+    planning_token UUID,
+    stop_reason TEXT,
+    result JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_by TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT device_agent_runs_status_check CHECK (
+        status IN ('awaiting_planner','planning','completed','cancelled','failed')
+    ),
+    CONSTRAINT device_agent_runs_safety_check CHECK (
+        safety_profile IN ('observe_only','safe_remote','authenticated_active','lab_invasive')
+    )
+);
+
+CREATE INDEX idx_device_agent_runs_device
+ON device_agent_runs(device_target_id, created_at DESC);
+
+CREATE INDEX idx_device_agent_runs_status
+ON device_agent_runs(status, updated_at DESC);
+
 -- ============================================================
 -- FINDINGS - Vulnerabilities discovered
 -- ============================================================

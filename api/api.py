@@ -18391,6 +18391,13 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
             raise HTTPException(status_code=404, detail="Connected device not found")
         if not device["is_active"]:
             raise HTTPException(status_code=409, detail="Connected device is inactive")
+        await _require_approval_receipt_if_policy_enabled(
+            conn,
+            request.approval_receipt_id,
+            action_name="device.scan",
+            risk_tier="active",
+            created_by="device_scan_endpoint",
+        )
         active = await conn.fetchval(
             "SELECT 1 FROM scans WHERE device_target_id=$1 AND run_kind='device_posture' AND status IN ('pending','queued','running') LIMIT 1",
             device_uuid,
@@ -20435,6 +20442,7 @@ async def _build_dashboard_action_center(conn, *, worker_snapshot: dict[str, Any
                 COUNT(*) FILTER (WHERE severity = 'high') AS high
             FROM findings
             WHERE status = 'active' AND severity IN ('critical', 'high')
+              AND COALESCE(source, '') <> 'device'
         """)
         blocker_map = _record_map(blockers)
         critical = int(blocker_map.get("critical") or 0)
@@ -20465,6 +20473,9 @@ async def _build_dashboard_action_center(conn, *, worker_snapshot: dict[str, Any
             FROM scans
             WHERE status = 'failed'
               AND (scan_role IS NULL OR scan_role <> 'shard')
+              AND device_target_id IS NULL
+              AND COALESCE(scan_role, '') <> 'device_web_origin'
+              AND COALESCE(run_kind, '') <> 'device_posture'
             ORDER BY created_at DESC
             LIMIT 5
         """)
@@ -20969,6 +20980,9 @@ async def dashboard():
                 WHERE (scan_role IS NULL OR scan_role <> 'shard')
                   AND COALESCE(run_kind, '') <> 'model_intake'
                   AND COALESCE(scan_type, '') <> 'model_intake'
+                  AND device_target_id IS NULL
+                  AND COALESCE(scan_role, '') <> 'device_web_origin'
+                  AND COALESCE(run_kind, '') <> 'device_posture'
                 ORDER BY
                     COALESCE(
                         'target:' || target_id::text,
@@ -20984,6 +20998,7 @@ async def dashboard():
             SELECT id, title, severity, status, tool, first_seen_at
             FROM findings
             WHERE status = 'active' AND severity IN ('critical', 'high')
+              AND COALESCE(source, '') <> 'device'
             ORDER BY
                 CASE severity
                     WHEN 'critical' THEN 1

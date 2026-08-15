@@ -2056,7 +2056,11 @@ async def run_scan(
         result = await run_device_posture_scan(target, dict(options or {}))
         if scan_id:
             await update_scan_progress(scan_id, "device_policy", 90, job_id=job_id)
-        return result
+        # Device protocol metadata is untrusted binary-adjacent input too. SSDP
+        # banners and mDNS TXT records commonly contain padding NULs, which
+        # PostgreSQL JSONB cannot store. Keep the same persistence boundary used
+        # by ordinary DAST results instead of returning before it.
+        return _strip_null_bytes(result) if isinstance(result, dict) else result
 
     if options.get("run_kind") in MODEL_INTAKE_RUN_KINDS:
         if scan_id:
