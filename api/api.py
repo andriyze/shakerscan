@@ -4121,6 +4121,7 @@ class DeviceLocatorChangeRequest(BaseModel):
     locator: str
     reason: Optional[str] = Field(default=None, max_length=500)
     confirm_same_device: bool = False
+    approval_receipt_id: Optional[str] = None
 
 
 class DevicePolicyCreate(BaseModel):
@@ -4155,6 +4156,7 @@ class DeviceCredentialProfileCreate(BaseModel):
     port: Optional[int] = Field(default=None, ge=1, le=65535)
     expires_at: Optional[datetime] = None
     metadata_json: dict[str, Any] = Field(default_factory=dict, max_length=50)
+    approval_receipt_id: Optional[str] = None
 
     @model_validator(mode="after")
     def validate_device_credential(self):
@@ -4178,6 +4180,7 @@ class DeviceCredentialProfileRotate(BaseModel):
     secondary_secret: Optional[str] = Field(default=None, max_length=16_384)
     expires_at: Optional[datetime] = None
     clear_expiry: bool = False
+    approval_receipt_id: Optional[str] = None
 
 
 class DeviceScanRequest(BaseModel):
@@ -18116,6 +18119,11 @@ async def rescan_model_intake_target(target_id: str, http_request: Request):
 # CONNECTED DEVICES
 # ============================================================
 
+_DEVICE_AGENT_PARENT_AUTHORITY: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "device_agent_parent_authority",
+    default=False,
+)
+
 def _device_posture_enabled() -> bool:
     return str(os.environ.get("DEVICE_POSTURE_ENABLED", "true")).strip().lower() not in {"0", "false", "no", "off"}
 
@@ -18217,7 +18225,7 @@ async def _change_device_primary_locator(
         """SELECT 1 FROM scans
            WHERE device_target_id=$1
              AND run_kind IN ('device_posture','device_probe')
-             AND status IN ('pending','queued','running') LIMIT 1""",
+             AND status IN ('pending','queued','running','cancelling') LIMIT 1""",
         device_uuid,
     ):
         raise HTTPException(
@@ -18234,7 +18242,7 @@ async def _change_device_primary_locator(
             detail="Finish or cancel the active AI device investigation before changing its address",
         )
     await conn.execute(
-        "UPDATE device_targets SET primary_locator=$1, updated_at=NOW() WHERE id=$2",
+        "UPDATE device_targets SET primary_locator=$1, locator_generation=locator_generation+1, updated_at=NOW() WHERE id=$2",
         locator,
         device_uuid,
     )
@@ -18268,6 +18276,7 @@ async def _change_device_primary_locator(
 def _public_device_credential_profile(row: Any) -> dict[str, Any]:
     payload = _decode_device_row(row)
     stored_secret = str(payload.pop("secret_value", "") or "")
+    payload.pop("secret_preview", None)
     status, refresh_required = _target_credential_profile_status(payload)
     payload["secret_configured"] = bool(stored_secret)
     payload["storage_encrypted"] = stored_secret.startswith("enc:fernet:")
@@ -18486,36 +18495,37 @@ async def create_device(request: DeviceTargetCreate):
     policy_uuid = _device_uuid(request.policy_id, "policy") if request.policy_id else None
     name = (request.name or locator).strip()
     async with db_pool.acquire() as conn:
-        if policy_uuid and not await conn.fetchval("SELECT 1 FROM device_policies WHERE id=$1 AND is_active=true", policy_uuid):
-            raise HTTPException(status_code=422, detail="policy_id must reference an active device policy")
-        try:
-            row = await conn.fetchrow(
-                """
-                INSERT INTO device_targets (
-                    name, primary_locator, device_class, manufacturer, model, firmware_version,
-                    stable_identity, identity_confidence, environment, policy_id, sensor_affinity,
-                    metadata_json, is_active
-                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *
-                """,
-                name, locator, request.device_class.strip().lower(), request.manufacturer, request.model,
-                request.firmware_version, request.stable_identity, request.identity_confidence,
-                request.environment.strip().lower(), policy_uuid, request.sensor_affinity,
-                json.dumps(request.metadata_json), request.is_active,
+        async with conn.transaction():
+            if policy_uuid and not await conn.fetchval("SELECT 1 FROM device_policies WHERE id=$1 AND is_active=true", policy_uuid):
+                raise HTTPException(status_code=422, detail="policy_id must reference an active device policy")
+            try:
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO device_targets (
+                        name, primary_locator, device_class, manufacturer, model, firmware_version,
+                        stable_identity, identity_confidence, environment, policy_id, sensor_affinity,
+                        metadata_json, is_active
+                    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *
+                    """,
+                    name, locator, request.device_class.strip().lower(), request.manufacturer, request.model,
+                    request.firmware_version, request.stable_identity, request.identity_confidence,
+                    request.environment.strip().lower(), policy_uuid, request.sensor_affinity,
+                    json.dumps(request.metadata_json), request.is_active,
+                )
+            except asyncpg.UniqueViolationError as exc:
+                raise HTTPException(status_code=409, detail="An active connected device already uses this locator") from exc
+            await conn.execute(
+                """INSERT INTO device_interfaces (device_target_id, interface_type, locator_type, locator)
+                   VALUES ($1,'network',$2,$3) ON CONFLICT DO NOTHING""",
+                row["id"], _device_locator_type(locator), locator,
             )
-        except asyncpg.UniqueViolationError as exc:
-            raise HTTPException(status_code=409, detail="A connected device already uses this locator") from exc
-        await conn.execute(
-            """INSERT INTO device_interfaces (device_target_id, interface_type, locator_type, locator)
-               VALUES ($1,'network',$2,$3) ON CONFLICT DO NOTHING""",
-            row["id"], _device_locator_type(locator), locator,
-        )
-        await conn.execute(
-            """INSERT INTO device_locator_history (
-                   device_target_id, previous_locator, locator, locator_type,
-                   change_reason, change_source
-               ) VALUES ($1,NULL,$2,$3,'Initial registered locator','registration')""",
-            row["id"], locator, _device_locator_type(locator),
-        )
+            await conn.execute(
+                """INSERT INTO device_locator_history (
+                       device_target_id, previous_locator, locator, locator_type,
+                       change_reason, change_source
+                   ) VALUES ($1,NULL,$2,$3,'Initial registered locator','registration')""",
+                row["id"], locator, _device_locator_type(locator),
+            )
     return {"device": _decode_device_row(row)}
 
 
@@ -18540,9 +18550,14 @@ async def create_device_credential(device_id: str, request: DeviceCredentialProf
     if not encryption_enabled():
         raise HTTPException(status_code=503, detail="Credential encryption is not configured")
     device_uuid = _device_uuid(device_id)
-    async with db_pool.acquire() as conn:
-        if not await conn.fetchval("SELECT 1 FROM device_targets WHERE id=$1 AND is_active=true", device_uuid):
+    async with db_pool.acquire() as conn, conn.transaction():
+        device = await conn.fetchrow("SELECT id, primary_locator FROM device_targets WHERE id=$1 AND is_active=true", device_uuid)
+        if not device:
             raise HTTPException(status_code=404, detail="Active connected device not found")
+        approval_context = await _validate_approval_receipt_for_action(
+            conn, request.approval_receipt_id, target_url=str(device["primary_locator"]),
+            action_name="device.credential.create", risk_tier="active", created_by="device_credential_endpoint",
+        )
         try:
             row = await conn.fetchrow(
                 """INSERT INTO device_credential_profiles (
@@ -18554,7 +18569,7 @@ async def create_device_credential(device_id: str, request: DeviceCredentialProf
                 request.auth_kind,
                 str(request.username or "").strip() or None,
                 _device_credential_secret_value(request.secret, request.secondary_secret),
-                _mask_ai_target_secret(request.secret),
+                None,
                 request.login_path,
                 request.port,
                 request.expires_at,
@@ -18562,7 +18577,15 @@ async def create_device_credential(device_id: str, request: DeviceCredentialProf
             )
         except asyncpg.UniqueViolationError as exc:
             raise HTTPException(status_code=409, detail="Device credential profile name already exists") from exc
-    return {"profile": _public_device_credential_profile(row)}
+        operation = await _record_command_result(
+            conn, command="device.credential.create", status="completed", risk_tier="active",
+            approval_receipt_id=(approval_context or {}).get("approval_receipt_id"),
+            scope_receipt_id=(approval_context or {}).get("scope_receipt_id"),
+            operator_message="Created a connected-device credential profile",
+            result_json={"device_target_id": str(device_uuid), "credential_profile_id": str(row["id"]), "auth_kind": request.auth_kind},
+            created_by="device_credential_endpoint",
+        )
+    return {"profile": _public_device_credential_profile(row), "operation_id": str(operation["id"])}
 
 
 @app.post("/devices/{device_id}/credentials/{profile_id}/rotate")
@@ -18575,14 +18598,20 @@ async def rotate_device_credential(
         raise HTTPException(status_code=503, detail="Credential encryption is not configured")
     device_uuid = _device_uuid(device_id)
     profile_uuid = _device_uuid(profile_id, "credential profile")
-    async with db_pool.acquire() as conn:
+    async with db_pool.acquire() as conn, conn.transaction():
         existing = await conn.fetchrow(
-            "SELECT auth_kind FROM device_credential_profiles WHERE id=$1 AND device_target_id=$2",
+            """SELECT cp.auth_kind, d.primary_locator FROM device_credential_profiles cp
+               JOIN device_targets d ON d.id=cp.device_target_id
+               WHERE cp.id=$1 AND cp.device_target_id=$2""",
             profile_uuid,
             device_uuid,
         )
         if not existing:
             raise HTTPException(status_code=404, detail="Device credential profile not found")
+        approval_context = await _validate_approval_receipt_for_action(
+            conn, request.approval_receipt_id, target_url=str(existing["primary_locator"]),
+            action_name="device.credential.rotate", risk_tier="active", created_by="device_credential_endpoint",
+        )
         if str(existing["auth_kind"]).startswith("web_") and ("\r" in request.secret or "\n" in request.secret):
             raise HTTPException(status_code=422, detail="Web credential values must not contain CR or LF")
         row = await conn.fetchrow(
@@ -18594,25 +18623,98 @@ async def rotate_device_credential(
             profile_uuid,
             device_uuid,
             _device_credential_secret_value(request.secret, request.secondary_secret),
-            _mask_ai_target_secret(request.secret),
+            None,
             request.clear_expiry,
             request.expires_at,
         )
-    return {"profile": _public_device_credential_profile(row)}
+        await conn.execute("DELETE FROM device_credential_attempts WHERE device_target_id=$1 AND credential_profile_id=$2", device_uuid, profile_uuid)
+        operation = await _record_command_result(
+            conn, command="device.credential.rotate", status="completed", risk_tier="active",
+            approval_receipt_id=(approval_context or {}).get("approval_receipt_id"),
+            scope_receipt_id=(approval_context or {}).get("scope_receipt_id"),
+            operator_message="Rotated a connected-device credential profile",
+            result_json={"device_target_id": str(device_uuid), "credential_profile_id": str(profile_uuid)},
+            created_by="device_credential_endpoint",
+        )
+    return {"profile": _public_device_credential_profile(row), "operation_id": str(operation["id"])}
 
 
 @app.delete("/devices/{device_id}/credentials/{profile_id}")
-async def deactivate_device_credential(device_id: str, profile_id: str):
-    async with db_pool.acquire() as conn:
+async def deactivate_device_credential(
+    device_id: str,
+    profile_id: str,
+    approval_receipt_id: Optional[str] = Query(default=None),
+):
+    device_uuid = _device_uuid(device_id)
+    profile_uuid = _device_uuid(profile_id, "credential profile")
+    async with db_pool.acquire() as conn, conn.transaction():
+        existing = await conn.fetchrow(
+            """SELECT d.primary_locator FROM device_credential_profiles cp
+               JOIN device_targets d ON d.id=cp.device_target_id
+               WHERE cp.id=$1 AND cp.device_target_id=$2""",
+            profile_uuid, device_uuid,
+        )
+        if not existing:
+            raise HTTPException(status_code=404, detail="Device credential profile not found")
+        approval_context = await _validate_approval_receipt_for_action(
+            conn, approval_receipt_id, target_url=str(existing["primary_locator"]),
+            action_name="device.credential.deactivate", risk_tier="active", created_by="device_credential_endpoint",
+        )
         row = await conn.fetchrow(
             """UPDATE device_credential_profiles SET is_active=false, updated_at=NOW()
                WHERE id=$1 AND device_target_id=$2 RETURNING *""",
-            _device_uuid(profile_id, "credential profile"),
-            _device_uuid(device_id),
+            profile_uuid,
+            device_uuid,
         )
-    if not row:
-        raise HTTPException(status_code=404, detail="Device credential profile not found")
-    return {"status": "deactivated", "profile": _public_device_credential_profile(row)}
+        operation = await _record_command_result(
+            conn, command="device.credential.deactivate", status="completed", risk_tier="active",
+            approval_receipt_id=(approval_context or {}).get("approval_receipt_id"),
+            scope_receipt_id=(approval_context or {}).get("scope_receipt_id"),
+            operator_message="Deactivated a connected-device credential profile",
+            result_json={"device_target_id": str(device_uuid), "credential_profile_id": str(profile_uuid)},
+            created_by="device_credential_endpoint",
+        )
+    return {"status": "deactivated", "profile": _public_device_credential_profile(row), "operation_id": str(operation["id"])}
+
+
+@app.post("/devices/{device_id}/credentials/{profile_id}/acknowledge-lockout")
+async def acknowledge_device_credential_lockout(
+    device_id: str,
+    profile_id: str,
+    approval_receipt_id: Optional[str] = Query(default=None),
+):
+    """Explicitly reset persisted authentication failures after operator review."""
+    device_uuid = _device_uuid(device_id)
+    profile_uuid = _device_uuid(profile_id, "credential profile")
+    async with db_pool.acquire() as conn, conn.transaction():
+        profile = await conn.fetchrow(
+            """SELECT d.primary_locator FROM device_credential_profiles cp
+               JOIN device_targets d ON d.id=cp.device_target_id
+               WHERE cp.id=$1 AND cp.device_target_id=$2""",
+            profile_uuid, device_uuid,
+        )
+        if not profile:
+            raise HTTPException(status_code=404, detail="Device credential profile not found")
+        approval_context = await _validate_approval_receipt_for_action(
+            conn, approval_receipt_id, target_url=str(profile["primary_locator"]),
+            action_name="device.credential.unlock", risk_tier="active", created_by="device_credential_endpoint",
+        )
+        removed = await conn.fetchval(
+            """WITH deleted AS (
+                   DELETE FROM device_credential_attempts
+                   WHERE device_target_id=$1 AND credential_profile_id=$2 RETURNING 1
+               ) SELECT COUNT(*) FROM deleted""",
+            device_uuid, profile_uuid,
+        )
+        operation = await _record_command_result(
+            conn, command="device.credential.unlock", status="completed", risk_tier="active",
+            approval_receipt_id=(approval_context or {}).get("approval_receipt_id"),
+            scope_receipt_id=(approval_context or {}).get("scope_receipt_id"),
+            operator_message="Acknowledged a connected-device credential lockout",
+            result_json={"device_target_id": str(device_uuid), "credential_profile_id": str(profile_uuid), "attempts_cleared": int(removed or 0)},
+            created_by="device_credential_endpoint",
+        )
+    return {"status": "acknowledged", "attempts_cleared": int(removed or 0), "operation_id": str(operation["id"])}
 
 
 @app.get("/devices/{device_id}")
@@ -18680,12 +18782,11 @@ async def get_device(
 async def update_device(device_id: str, request: DeviceTargetUpdate):
     device_uuid = _device_uuid(device_id)
     payload = request.model_dump(exclude_unset=True)
-    requested_locator = payload.pop("primary_locator", None) if "primary_locator" in payload else None
-    if requested_locator is not None:
-        try:
-            requested_locator = normalize_device_locator(requested_locator)
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if "primary_locator" in payload:
+        raise HTTPException(
+            status_code=422,
+            detail="Change a device address through POST /devices/{device_id}/locator with same-device confirmation",
+        )
     if "policy_id" in payload:
         payload["policy_id"] = _device_uuid(payload["policy_id"], "policy") if payload["policy_id"] else None
     if "metadata_json" in payload:
@@ -18706,14 +18807,6 @@ async def update_device(device_id: str, request: DeviceTargetUpdate):
             if payload.get("policy_id") and not await conn.fetchval("SELECT 1 FROM device_policies WHERE id=$1 AND is_active=true", payload["policy_id"]):
                 raise HTTPException(status_code=422, detail="policy_id must reference an active device policy")
             try:
-                if requested_locator is not None:
-                    await _change_device_primary_locator(
-                        conn,
-                        device_uuid,
-                        requested_locator,
-                        reason="Address changed through device update",
-                        source="device_patch",
-                    )
                 if payload:
                     values = list(payload.values()) + [device_uuid]
                     assignments = [f"{key}=${idx}" for idx, key in enumerate(payload, 1)]
@@ -18739,6 +18832,16 @@ async def change_device_locator(device_id: str, request: DeviceLocatorChangeRequ
     device_uuid = _device_uuid(device_id)
     async with db_pool.acquire() as conn:
         async with conn.transaction():
+            current = await conn.fetchrow(
+                "SELECT primary_locator FROM device_targets WHERE id=$1 FOR UPDATE",
+                device_uuid,
+            )
+            if not current:
+                raise HTTPException(status_code=404, detail="Connected device not found")
+            approval_context = await _validate_approval_receipt_for_action(
+                conn, request.approval_receipt_id, target_url=str(current["primary_locator"]),
+                action_name="device.locator.change", risk_tier="active", created_by="device_locator_endpoint",
+            )
             try:
                 row, history = await _change_device_primary_locator(
                     conn,
@@ -18748,11 +18851,20 @@ async def change_device_locator(device_id: str, request: DeviceLocatorChangeRequ
                     source="operator",
                 )
             except asyncpg.UniqueViolationError as exc:
-                raise HTTPException(status_code=409, detail="A connected device already uses this locator") from exc
+                raise HTTPException(status_code=409, detail="An active connected device already uses this locator") from exc
+            operation = await _record_command_result(
+                conn, command="device.locator.change", status="completed", risk_tier="active",
+                approval_receipt_id=(approval_context or {}).get("approval_receipt_id"),
+                scope_receipt_id=(approval_context or {}).get("scope_receipt_id"),
+                operator_message="Updated a connected-device address",
+                result_json={"device_target_id": str(device_uuid), "change_id": str(history["id"]) if history else None},
+                created_by="device_locator_endpoint",
+            )
     return {
         "status": "unchanged" if history is None else "changed",
         "device": _decode_device_row(row),
         "change": _decode_device_row(history) if history else None,
+        "operation_id": str(operation["id"]),
     }
 
 
@@ -18809,16 +18921,17 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
                 status_code=422,
                 detail="Credentialed device scans require safety_profile=authenticated_active",
             )
+        from_agent_session = _DEVICE_AGENT_PARENT_AUTHORITY.get()
         approval_context = await _validate_approval_receipt_for_action(
             conn,
             request.approval_receipt_id,
             target_url=str(device["primary_locator"]),
-            action_name="device.scan",
+            action_name="device.agent.session" if from_agent_session else "device.scan",
             risk_tier="active",
-            created_by="device_scan_endpoint",
+            created_by="device_agent_child_scan" if from_agent_session else "device_scan_endpoint",
         )
         active = await conn.fetchval(
-            "SELECT 1 FROM scans WHERE device_target_id=$1 AND run_kind IN ('device_posture','device_probe') AND status IN ('pending','queued','running') LIMIT 1",
+            "SELECT 1 FROM scans WHERE device_target_id=$1 AND run_kind IN ('device_posture','device_probe') AND status IN ('pending','queued','running','cancelling') LIMIT 1",
             device_uuid,
         )
         if active:
@@ -18865,14 +18978,20 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
         if approval_context:
             options.update(approval_context)
         try:
-            await conn.execute(
+            inserted_scan = await conn.fetchval(
                 """INSERT INTO scans (
                        id, target_id, ai_target_id, device_target_id, target_url, job_id, status,
                        options, scan_type, run_kind, subject_ref, scan_role
-                   ) VALUES ($1,NULL,NULL,$2,$3,$4,'pending',$5,'device_posture','device_posture',$6,'standalone')""",
+                   ) SELECT $1,NULL,NULL,$2,$3,$4,'pending',$5,'device_posture','device_posture',$6,'standalone'
+                     FROM device_targets d
+                    WHERE d.id=$2 AND d.primary_locator=$3 AND d.locator_generation=$7
+                    FOR KEY SHARE OF d
+                    RETURNING id""",
                 uuid.UUID(scan_id), device_uuid, device["primary_locator"], job_id,
-                json.dumps(options), f"device_target:{device_id}",
+                json.dumps(options), f"device_target:{device_id}", int(device["locator_generation"]),
             )
+            if not inserted_scan:
+                raise HTTPException(status_code=409, detail="Device address changed during submission; review it and retry")
         except asyncpg.UniqueViolationError as exc:
             raise HTTPException(status_code=409, detail="A connected-device scan is already active for this device") from exc
     job_data = {
@@ -18901,7 +19020,7 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
         "target": device["primary_locator"],
         "profile": request.profile,
         "safety_profile": request.safety_profile,
-        "ui_url": f"/devices/{device_id}?scan={scan_id}",
+        "ui_url": f"/scans/{scan_id}",
     }
 
 
@@ -18938,16 +19057,17 @@ async def verify_device_service(device_id: str, request: DeviceServiceVerifyRequ
             raise HTTPException(status_code=404, detail="Connected device not found")
         if not device["is_active"]:
             raise HTTPException(status_code=409, detail="Connected device is inactive")
+        from_agent_session = _DEVICE_AGENT_PARENT_AUTHORITY.get()
         approval_context = await _validate_approval_receipt_for_action(
             conn,
             request.approval_receipt_id,
             target_url=str(device["primary_locator"]),
-            action_name="device.verify_service",
+            action_name="device.agent.session" if from_agent_session else "device.verify_service",
             risk_tier="active",
-            created_by="device_service_verifier",
+            created_by="device_agent_child_probe" if from_agent_session else "device_service_verifier",
         )
         if await conn.fetchval(
-            "SELECT 1 FROM scans WHERE device_target_id=$1 AND run_kind IN ('device_posture','device_probe') AND status IN ('pending','queued','running') LIMIT 1",
+            "SELECT 1 FROM scans WHERE device_target_id=$1 AND run_kind IN ('device_posture','device_probe') AND status IN ('pending','queued','running','cancelling') LIMIT 1",
             device_uuid,
         ):
             raise HTTPException(status_code=409, detail="Connected-device traffic is already active for this device")
@@ -18972,14 +19092,20 @@ async def verify_device_service(device_id: str, request: DeviceServiceVerifyRequ
         if approval_context:
             options.update(approval_context)
         try:
-            await conn.execute(
+            inserted_scan = await conn.fetchval(
                 """INSERT INTO scans (
                        id, target_id, ai_target_id, device_target_id, target_url, job_id, status,
                        options, scan_type, run_kind, subject_ref, scan_role
-                   ) VALUES ($1,NULL,NULL,$2,$3,$4,'pending',$5,'device_probe','device_probe',$6,'standalone')""",
+                   ) SELECT $1,NULL,NULL,$2,$3,$4,'pending',$5,'device_probe','device_probe',$6,'standalone'
+                     FROM device_targets d
+                    WHERE d.id=$2 AND d.primary_locator=$3 AND d.locator_generation=$7
+                    FOR KEY SHARE OF d
+                    RETURNING id""",
                 uuid.UUID(scan_id), device_uuid, device["primary_locator"], job_id,
-                json.dumps(options), f"device_target:{device_id}",
+                json.dumps(options), f"device_target:{device_id}", int(device["locator_generation"]),
             )
+            if not inserted_scan:
+                raise HTTPException(status_code=409, detail="Device address changed during submission; review it and retry")
         except asyncpg.UniqueViolationError as exc:
             raise HTTPException(status_code=409, detail="Connected-device traffic is already active for this device") from exc
     job_data = {
@@ -19008,7 +19134,7 @@ async def verify_device_service(device_id: str, request: DeviceServiceVerifyRequ
         "transport": request.transport,
         "port": request.port,
         "expected_state": request.expected_state,
-        "ui_url": f"/devices/{device_id}?scan={scan_id}",
+        "ui_url": f"/scans/{scan_id}",
     }
 
 
@@ -19328,10 +19454,9 @@ async def _execute_device_agent_tool(
         return {"ok": True, "evidence_ref": _device_agent_add_evidence(state, payload), "data": payload}
 
     if name == "resolve_intel":
-        payload = device_agent.resolve_local_intel(
-            cpe=args.get("cpe"),
-            product=args.get("product"),
-            version=args.get("version"),
+        payload = await asyncio.to_thread(
+            device_agent.resolve_local_intel,
+            cpe=args.get("cpe"), product=args.get("product"), version=args.get("version"),
         )
         return {"ok": True, "evidence_ref": _device_agent_add_evidence(state, payload), "data": payload}
 
@@ -19640,14 +19765,22 @@ async def start_device_agent_session(device_id: str, request: DeviceAgentSession
                 """INSERT INTO device_agent_runs (
                        device_target_id, objective, safety_profile, max_turns,
                        approval_receipt_id, state, created_by
-                   ) VALUES ($1,$2,$3,$4,$5,$6,'device_agent_session') RETURNING *""",
+                   ) SELECT $1,$2,$3,$4,$5,$6,'device_agent_session'
+                       FROM device_targets d
+                      WHERE d.id=$1 AND d.primary_locator=$7 AND d.locator_generation=$8
+                      FOR KEY SHARE OF d
+                   RETURNING device_agent_runs.*""",
                 device_uuid,
                 request.objective,
                 profile.name,
                 request.max_turns,
                 _device_uuid(request.approval_receipt_id, "approval receipt") if request.approval_receipt_id else None,
                 json.dumps(state, default=str),
+                device["primary_locator"],
+                int(device["locator_generation"]),
             )
+            if not row:
+                raise HTTPException(status_code=409, detail="Device address changed during session creation; review it and retry")
         except asyncpg.UniqueViolationError as exc:
             raise HTTPException(status_code=409, detail="An AI-directed investigation is already active for this device") from exc
     return _device_agent_run_public(row)
@@ -19761,14 +19894,18 @@ async def submit_device_agent_reply(run_id: str, request: DeviceAgentReplyReques
                     if cost:
                         state["fragility_used"] = session_used + cost
                         daily_fragility_used += cost
-                    output = await _execute_device_agent_tool(
-                        device_target_id=device_target_id,
-                        safety_profile=safety_profile,
-                        approval_receipt_id=approval_receipt_id,
-                        state=state,
-                        name=name,
-                        args=args,
-                    )
+                    authority_token = _DEVICE_AGENT_PARENT_AUTHORITY.set(True)
+                    try:
+                        output = await _execute_device_agent_tool(
+                            device_target_id=device_target_id,
+                            safety_profile=safety_profile,
+                            approval_receipt_id=approval_receipt_id,
+                            state=state,
+                            name=name,
+                            args=args,
+                        )
+                    finally:
+                        _DEVICE_AGENT_PARENT_AUTHORITY.reset(authority_token)
                     if name in {"queue_device_scan", "verify_service_state"}:
                         queued_signatures.append(signature)
                         state["queued_scan_signatures"] = queued_signatures[-20:]
@@ -24822,16 +24959,23 @@ async def cancel_scan(scan_id: str):
                 detail=f"Cannot cancel scan with status '{scan['status']}'"
             )
 
-        # Update database
+        device_traffic_running = (
+            str(scan['run_kind'] or '') in {'device_posture', 'device_probe'}
+            and str(scan['status']) == 'running'
+        )
+        requested_status = 'cancelling' if device_traffic_running else 'cancelled'
+
+        # Device traffic stays locked in ``cancelling`` until the worker has
+        # reaped its in-flight process group and acknowledges terminal state.
         await conn.execute("""
             UPDATE scans
-            SET status = 'cancelled',
+            SET status = $2,
                 error_message = 'Cancelled by user',
-                completed_at = NOW(),
-                progress = 100,
-                current_phase = 'cancelled'
+                completed_at = CASE WHEN $2='cancelled' THEN NOW() ELSE NULL END,
+                progress = CASE WHEN $2='cancelled' THEN 100 ELSE progress END,
+                current_phase = $2
             WHERE id = $1
-        """, uuid.UUID(scan_id))
+        """, uuid.UUID(scan_id), requested_status)
 
         if scan['scan_role'] == 'parent' or str(scan['run_kind'] or '') == 'device_posture':
             # Fan out cancellation to queued/running child shards. Workers may
@@ -24857,9 +25001,9 @@ async def cancel_scan(scan_id: str):
 
     # Signal worker to stop via Redis (set cancel flag)
     # Workers should check this flag periodically
-    r.set(f"scan:{scan_id}:cancel", "1", ex=3600)  # Expires in 1 hour
+    r.set(f"scan:{scan_id}:cancel", "1", ex=86400)
     for child in child_rows:
-        r.set(f"scan:{str(child['id'])}:cancel", "1", ex=3600)
+        r.set(f"scan:{str(child['id'])}:cancel", "1", ex=86400)
 
     # Also update known job hashes in Redis so UI/queue status reflects the
     # cancellation immediately.
@@ -24869,9 +25013,9 @@ async def cancel_scan(scan_id: str):
             r.hset(
                 f"job:{job_id}",
                 mapping={
-                    'status': 'cancelled',
-                    'progress': '100',
-                    'current_phase': 'cancelled',
+                    'status': requested_status if job_id == scan['job_id'] else 'cancelled',
+                    'progress': '100' if requested_status == 'cancelled' or job_id != scan['job_id'] else str(0),
+                    'current_phase': requested_status if job_id == scan['job_id'] else 'cancelled',
                 },
             )
             r.expire(f"job:{job_id}", 86400)
@@ -24890,11 +25034,11 @@ async def cancel_scan(scan_id: str):
             )
 
     return {
-        "status": "cancelled",
+        "status": requested_status,
         "scan_id": scan_id,
         "target": scan['target_url'],
         "cancelled_child_shards": len(child_rows),
-        "message": "Scan cancelled successfully"
+        "message": "Cancellation requested; device traffic remains locked until the worker stops" if requested_status == "cancelling" else "Scan cancelled successfully"
     }
 
 
@@ -57502,6 +57646,21 @@ async def bulk_retest_findings(request: FindingsBulkRetestRequest):
     return response
 
 
+async def _refresh_device_active_finding_counts(conn: Any, device_ids: Sequence[Any]) -> None:
+    normalized = sorted({item for item in device_ids if item is not None}, key=str)
+    if not normalized:
+        return
+    await conn.execute(
+        """UPDATE device_targets d
+           SET active_findings_count=(
+               SELECT COUNT(*) FROM findings f
+               WHERE f.device_target_id=d.id AND f.status='active'
+           ), updated_at=NOW()
+           WHERE d.id=ANY($1::uuid[])""",
+        normalized,
+    )
+
+
 @app.patch("/findings/{finding_id:path}")
 async def update_finding(
     finding_id: str,
@@ -57542,7 +57701,7 @@ async def update_finding(
                     analyst_verdict_notes = CASE WHEN $3 IS NULL THEN analyst_verdict_notes ELSE COALESCE($2, analyst_verdict_notes) END,
                     updated_at = NOW()
                 WHERE id = $4
-                RETURNING id
+                RETURNING id, device_target_id
             """, request.status, request.notes, request.analyst_verdict, finding_uuid)
             if result:
                 updated_id = result['id']
@@ -57564,7 +57723,7 @@ async def update_finding(
                         analyst_verdict_notes = CASE WHEN $3 IS NULL THEN analyst_verdict_notes ELSE COALESCE($2, analyst_verdict_notes) END,
                         updated_at = NOW()
                     WHERE fingerprint = $4 AND scan_id = $5
-                    RETURNING id
+                    RETURNING id, device_target_id
                 """, request.status, request.notes, request.analyst_verdict, finding_id, scan_uuid)
             else:
                 result = await conn.fetchrow("""
@@ -57582,7 +57741,7 @@ async def update_finding(
                         SELECT id FROM findings WHERE fingerprint = $4
                         ORDER BY last_seen_at DESC LIMIT 1
                     )
-                    RETURNING id
+                    RETURNING id, device_target_id
                 """, request.status, request.notes, request.analyst_verdict, finding_id)
             if result:
                 updated_id = result['id']
@@ -57603,7 +57762,7 @@ async def update_finding(
                         analyst_verdict_notes = CASE WHEN $3 IS NULL THEN analyst_verdict_notes ELSE COALESCE($2, analyst_verdict_notes) END,
                         updated_at = NOW()
                     WHERE fingerprint = $4 AND scan_id = $5
-                    RETURNING id
+                    RETURNING id, device_target_id
                 """, request.status, request.notes, request.analyst_verdict, suffix, scan_uuid)
             else:
                 result = await conn.fetchrow("""
@@ -57621,13 +57780,14 @@ async def update_finding(
                         SELECT id FROM findings WHERE fingerprint = $4
                         ORDER BY last_seen_at DESC LIMIT 1
                     )
-                    RETURNING id
+                    RETURNING id, device_target_id
                 """, request.status, request.notes, request.analyst_verdict, suffix)
             if result:
                 updated_id = result['id']
 
         if not updated_id:
             raise HTTPException(status_code=404, detail="Finding not found")
+        await _refresh_device_active_finding_counts(conn, [result["device_target_id"]])
 
     return {'id': str(updated_id), 'status': request.status, 'analyst_verdict': request.analyst_verdict}
 
@@ -57642,7 +57802,7 @@ async def delete_finding(finding_id: str):
         try:
             finding_uuid = uuid.UUID(finding_id)
             result = await conn.fetchrow(
-                "DELETE FROM findings WHERE id = $1 RETURNING id", finding_uuid
+                "DELETE FROM findings WHERE id = $1 RETURNING id, device_target_id", finding_uuid
             )
             if result:
                 deleted_id = result['id']
@@ -57657,7 +57817,7 @@ async def delete_finding(finding_id: str):
                     SELECT id FROM findings WHERE fingerprint = $1
                     ORDER BY last_seen_at DESC LIMIT 1
                 )
-                RETURNING id
+                RETURNING id, device_target_id
             """, finding_id)
             if result:
                 deleted_id = result['id']
@@ -57671,13 +57831,14 @@ async def delete_finding(finding_id: str):
                     SELECT id FROM findings WHERE fingerprint = $1
                     ORDER BY last_seen_at DESC LIMIT 1
                 )
-                RETURNING id
+                RETURNING id, device_target_id
             """, suffix)
             if result:
                 deleted_id = result['id']
 
         if not deleted_id:
             raise HTTPException(status_code=404, detail="Finding not found")
+        await _refresh_device_active_finding_counts(conn, [result["device_target_id"]])
 
     return {'id': str(deleted_id), 'status': 'deleted'}
 
@@ -57718,7 +57879,7 @@ async def cleanup_findings(request: FindingsCleanup):
         else:
             # Use subquery to select IDs, then delete by ID
             ids = await conn.fetch(f"""
-                SELECT f.id
+                SELECT f.id, f.device_target_id
                 FROM findings f
                 LEFT JOIN targets t ON f.target_id = t.id
                 WHERE {where}
@@ -57727,6 +57888,9 @@ async def cleanup_findings(request: FindingsCleanup):
                 id_list = [r['id'] for r in ids]
                 await conn.execute(
                     "DELETE FROM findings WHERE id = ANY($1)", id_list
+                )
+                await _refresh_device_active_finding_counts(
+                    conn, [row["device_target_id"] for row in ids]
                 )
             return {'deleted': len(ids), 'dry_run': False}
 
@@ -57764,8 +57928,11 @@ async def bulk_update_findings(request: BulkFindingUpdateRequest):
                 notes = COALESCE($2, notes),
                 updated_at = NOW()
             WHERE id = ANY($3)
-            RETURNING id
+            RETURNING id, device_target_id
         """, request.status, request.notes, ids)
+        await _refresh_device_active_finding_counts(
+            conn, [row["device_target_id"] for row in updated_rows]
+        )
 
     return {
         'updated': len(updated_rows),

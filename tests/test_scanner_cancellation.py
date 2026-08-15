@@ -71,3 +71,19 @@ def test_shared_runner_cancellation_reaps_child_process_group(monkeypatch, tmp_p
         time.sleep(0.01)
     else:
         raise AssertionError(f"orphan child process remained alive: {child_pid}")
+
+
+def test_shared_runner_callback_cancellation_stops_process_without_signal_file(monkeypatch):
+    monkeypatch.delenv("SHAKERSCAN_CANCEL_FILE", raising=False)
+    checks = 0
+
+    async def cancelled():
+        nonlocal checks
+        checks += 1
+        return checks >= 2
+
+    _out, error, returncode = asyncio.run(
+        run([sys.executable, "-c", "import time; time.sleep(60)"], timeout=30, cancel_check=cancelled)
+    )
+    assert returncode == 130
+    assert "cancellation" in error

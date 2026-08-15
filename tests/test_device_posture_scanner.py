@@ -240,6 +240,7 @@ def test_require_policy_fails_closed_when_ssh_controls_are_unverified_or_weak():
 
     services[0]["ssh"] = {
         "scan_completed": True,
+        "auth_methods_complete": True,
         "password_auth_enabled": True,
         "weak_algorithms": ["mac_in:hmac-sha1"],
     }
@@ -257,6 +258,7 @@ def test_require_policy_passes_when_ssh_controls_are_proven():
         "service_name": "ssh",
         "ssh": {
             "scan_completed": True,
+            "auth_methods_complete": True,
             "password_auth_enabled": False,
             "weak_algorithms": [],
             "publickey_enabled": True,
@@ -271,6 +273,23 @@ def test_require_policy_passes_when_ssh_controls_are_proven():
     evaluated, findings = device_posture.evaluate_service_policy([service], [rule], policy_name="ssh-baseline")
     assert evaluated[0]["policy_disposition"] == "require"
     assert findings == []
+
+
+def test_scanner_rejects_resolved_credentials_under_safe_remote_before_network(monkeypatch):
+    async def unexpected_resolve(_locator):
+        raise AssertionError("resolver must not run before the credential safety boundary")
+
+    monkeypatch.setattr(device_posture, "resolve_device_address", unexpected_resolve)
+    with pytest.raises(ValueError, match="credentials are forbidden"):
+        asyncio.run(device_posture.run_device_posture_scan("tv.test", {
+            "device_profile": "inventory",
+            "safety_profile": "safe_remote",
+            "confirm_authorized": True,
+            "_resolved_device_credentials": [{
+                "role": "ssh", "profile_id": "fixture", "auth_kind": "ssh_password",
+                "username": "admin", "secret": "not-persisted",
+            }],
+        }))
 
 
 def test_web_detection_checks_nonstandard_ports(monkeypatch):

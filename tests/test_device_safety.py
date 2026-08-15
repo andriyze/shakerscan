@@ -49,3 +49,10 @@ def test_health_degradation_halts_future_actions_after_a_healthy_checkpoint():
     assert governor.receipt()["halt_reason"] == "device health degraded at final"
     with pytest.raises(PermissionError, match="device health degraded"):
         governor.authorize("another_probe", "readonly")
+
+
+def test_health_degradation_halts_after_indeterminate_baseline_when_ports_were_tested():
+    governor = device_safety.DeviceSafetyGovernor(device_safety.SAFETY_PROFILES["safe_remote"])
+    governor.record_health({"stage": "baseline", "status": "indeterminate", "attempted_tcp_ports": []})
+    governor.record_health({"stage": "post_inventory", "status": "degraded", "attempted_tcp_ports": [443]})
+    assert governor.halted is True

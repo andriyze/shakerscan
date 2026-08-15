@@ -183,7 +183,11 @@ class DeviceSafetyGovernor:
         self.health_checkpoints.append(current)
         if current.get("status") != "degraded":
             return
-        if any(item.get("status") == "healthy" for item in self.health_checkpoints[:-1]):
+        prior = self.health_checkpoints[:-1]
+        attempted_tcp_ports = bool(current.get("attempted_tcp_ports"))
+        if any(item.get("status") == "healthy" for item in prior) or (
+            attempted_tcp_ports and any(item.get("status") == "indeterminate" for item in prior)
+        ):
             self.halted = True
             self.halt_reason = f"device health degraded at {current.get('stage') or 'unknown stage'}"
 

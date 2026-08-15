@@ -145,7 +145,10 @@ async def run_device_service_probe(locator: str, options: dict[str, Any]) -> dic
         "nmap", "-Pn", "-n", scan_mode, "-sV", "--version-light", "--max-retries", "1",
         "--max-rate", "5", "--host-timeout", "90s", "-p", str(port), "-oX", "-", resolved_address,
     ]
-    stdout, stderr, exit_code = await run(command, timeout=MAX_PROBE_DURATION_SECONDS)
+    run_options: dict[str, Any] = {"timeout": MAX_PROBE_DURATION_SECONDS}
+    if callable(cancel_check):
+        run_options["cancel_check"] = cancel_check
+    stdout, stderr, exit_code = await run(command, **run_options)
     observation = _parse_single_port(stdout, transport=transport, port=port)
     if exit_code != 0:
         observation["complete"] = False

@@ -220,8 +220,8 @@ VALUES (
     'Safe baseline: forbid cleartext administration, flag unknown services, and require secure SSH.',
     'generic',
     '[
-      {"action":"deny","transport":"tcp","ports":[23,2323],"service":"telnet","severity":"critical","reason":"Cleartext remote administration is forbidden."},
-      {"action":"deny","transport":"tcp","ports":[21],"service":"ftp","severity":"high","reason":"Cleartext file transfer is forbidden."},
+      {"action":"deny","transport":"tcp","ports":[23,2323],"service":"any","severity":"critical","reason":"Cleartext remote administration is forbidden."},
+      {"action":"deny","transport":"tcp","ports":[21],"service":"any","severity":"high","reason":"Cleartext file transfer is forbidden."},
       {"action":"require","transport":"tcp","service":"ssh","requirements":{"password_auth":false,"weak_algorithms":false},"severity":"high"},
       {"action":"allow","transport":"tcp","service":"http","encrypted":false,"severity":"medium"},
       {"action":"allow","transport":"tcp","service":"https","encrypted":true},
@@ -238,8 +238,8 @@ VALUES
     'Fail-closed generic baseline: block cleartext administration, require hardened SSH, review cleartext web and unknown services.',
     'generic',
     '[
-      {"action":"deny","transport":"tcp","ports":[23,2323],"service":"telnet","severity":"critical","reason":"Cleartext remote administration is forbidden."},
-      {"action":"deny","transport":"tcp","ports":[21],"service":"ftp","severity":"high","reason":"Cleartext file transfer is forbidden."},
+      {"action":"deny","transport":"tcp","ports":[23,2323],"service":"any","severity":"critical","reason":"Cleartext remote administration is forbidden."},
+      {"action":"deny","transport":"tcp","ports":[21],"service":"any","severity":"high","reason":"Cleartext file transfer is forbidden."},
       {"action":"require","transport":"tcp","service":"ssh","requirements":{"password_auth":false,"weak_algorithms":false,"publickey_auth":true},"severity":"high"},
       {"action":"allow","transport":"tcp","service":"https","encrypted":true},
       {"action":"review","transport":"tcp","service":"http","encrypted":false,"severity":"medium","reason":"Cleartext device management should be isolated or upgraded to HTTPS."},
@@ -327,12 +327,14 @@ CREATE TABLE device_targets (
     last_score INTEGER,
     last_grade TEXT,
     active_findings_count INTEGER NOT NULL DEFAULT 0,
+    locator_generation INTEGER NOT NULL DEFAULT 1,
     is_active BOOLEAN NOT NULL DEFAULT true,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT device_targets_locator_unique UNIQUE (primary_locator),
     CONSTRAINT device_targets_identity_confidence_check CHECK (identity_confidence IN ('low','medium','high','verified'))
 );
+CREATE UNIQUE INDEX idx_device_targets_active_locator
+ON device_targets(primary_locator) WHERE is_active=true;
 
 CREATE TABLE device_interfaces (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -394,6 +396,19 @@ CREATE TABLE device_credential_profiles (
 CREATE INDEX idx_device_credential_profiles_active
 ON device_credential_profiles(device_target_id, is_active, expires_at);
 
+CREATE TABLE device_credential_attempts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    device_target_id UUID NOT NULL REFERENCES device_targets(id) ON DELETE CASCADE,
+    credential_profile_id UUID NOT NULL REFERENCES device_credential_profiles(id) ON DELETE CASCADE,
+    scan_id UUID REFERENCES scans(id) ON DELETE SET NULL,
+    outcome TEXT NOT NULL,
+    attempted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT device_credential_attempts_outcome_check CHECK (outcome IN ('succeeded','rejected','error')),
+    CONSTRAINT device_credential_attempts_scan_profile_unique UNIQUE (scan_id, credential_profile_id)
+);
+CREATE INDEX idx_device_credential_attempts_profile_time
+ON device_credential_attempts(credential_profile_id, attempted_at DESC);
+
 ALTER TABLE scans
 ADD COLUMN device_target_id UUID REFERENCES device_targets(id) ON DELETE SET NULL;
 
@@ -418,7 +433,7 @@ CREATE TABLE device_services (
     metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
     CONSTRAINT device_services_identity_unique UNIQUE (device_target_id, transport, port),
     CONSTRAINT device_services_transport_check CHECK (transport IN ('tcp','udp')),
-    CONSTRAINT device_services_state_check CHECK (state IN ('open','open|filtered')),
+    CONSTRAINT device_services_state_check CHECK (state IN ('open','open|filtered','not_observed')),
     CONSTRAINT device_services_policy_disposition_check CHECK (
         policy_disposition IS NULL OR policy_disposition IN ('allow','deny','review','require','not_evaluated')
     )
@@ -539,6 +554,22 @@ CREATE TABLE findings (
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+CREATE OR REPLACE FUNCTION refresh_device_active_findings_count()
+RETURNS TRIGGER AS $$
+BEGIN
+    UPDATE device_targets d
+    SET active_findings_count=(
+        SELECT COUNT(*) FROM findings f
+        WHERE f.device_target_id=d.id AND f.status='active'
+    ), updated_at=NOW()
+    WHERE d.id IN (OLD.device_target_id, NEW.device_target_id);
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER trg_refresh_device_active_findings_count
+AFTER INSERT OR UPDATE OF status, device_target_id OR DELETE ON findings
+FOR EACH ROW EXECUTE FUNCTION refresh_device_active_findings_count();
 
 -- ============================================================
 -- EVIDENCE OBJECTS - First-class durable evidence (hash, redaction
@@ -820,12 +851,12 @@ CREATE INDEX idx_targets_is_root ON targets(is_root) WHERE is_root = true;
 -- Scans
 CREATE INDEX idx_scans_target_id ON scans(target_id);
 CREATE INDEX idx_scans_ai_target_id ON scans(ai_target_id) WHERE ai_target_id IS NOT NULL;
-CREATE INDEX idx_scans_device_target_id ON scans(device_target_id) WHERE device_target_id IS NOT NULL;
+CREATE INDEX idx_scans_device_target_created ON scans(device_target_id, created_at DESC) WHERE device_target_id IS NOT NULL;
 CREATE UNIQUE INDEX idx_scans_one_active_device_traffic
 ON scans(device_target_id)
 WHERE device_target_id IS NOT NULL
   AND run_kind IN ('device_posture','device_probe')
-  AND status IN ('pending','queued','running');
+  AND status IN ('pending','queued','running','cancelling');
 CREATE INDEX idx_scans_run_kind ON scans(run_kind);
 CREATE INDEX idx_scans_status ON scans(status);
 CREATE INDEX idx_scans_created ON scans(created_at DESC);
@@ -946,7 +977,6 @@ CREATE INDEX idx_ai_targets_created ON ai_targets(created_at DESC);
 CREATE INDEX idx_findings_scan_id ON findings(scan_id);
 CREATE INDEX idx_findings_target_id ON findings(target_id);
 CREATE INDEX idx_findings_ai_target_id ON findings(ai_target_id) WHERE ai_target_id IS NOT NULL;
-CREATE INDEX idx_findings_device_target_id ON findings(device_target_id) WHERE device_target_id IS NOT NULL;
 CREATE UNIQUE INDEX idx_findings_device_fingerprint ON findings(device_target_id, fingerprint) WHERE device_target_id IS NOT NULL;
 CREATE INDEX idx_device_targets_active_updated ON device_targets(is_active, updated_at DESC);
 CREATE INDEX idx_device_services_target_seen ON device_services(device_target_id, last_seen_at DESC);

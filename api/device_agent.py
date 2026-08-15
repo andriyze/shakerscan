@@ -12,7 +12,8 @@ import json
 import hashlib
 import os
 import re
-from pathlib import Path
+import stat
+import threading
 from typing import Any
 
 try:
@@ -40,6 +41,59 @@ MAX_SCANS_PER_SESSION = 3
 MAX_FRAGILITY_PER_SESSION = 40
 MAX_FRAGILITY_PER_DEVICE_DAY = 80
 MAX_LOCAL_INTEL_BYTES = 32 * 1024 * 1024
+_LOCAL_INTEL_CACHE: dict[tuple[Any, ...], Any] = {}
+_LOCAL_INTEL_CACHE_LOCK = threading.Lock()
+
+
+class _LocalIntelTooLarge(ValueError):
+    def __init__(self, size_bytes: int):
+        super().__init__("local intelligence snapshot exceeds the size limit")
+        self.size_bytes = size_bytes
+
+
+def _read_local_intel_snapshot(path: str, expected_sha256: str) -> Any:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise OSError("local intelligence snapshot must be a regular file")
+        if before.st_size > MAX_LOCAL_INTEL_BYTES:
+            raise _LocalIntelTooLarge(before.st_size)
+        key = (path, expected_sha256, before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+        with _LOCAL_INTEL_CACHE_LOCK:
+            cached = _LOCAL_INTEL_CACHE.get(key)
+        if cached is not None:
+            return cached
+        chunks: list[bytes] = []
+        remaining = MAX_LOCAL_INTEL_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        content = b"".join(chunks)
+        after = os.fstat(descriptor)
+        if len(content) > MAX_LOCAL_INTEL_BYTES:
+            raise _LocalIntelTooLarge(len(content))
+        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+            after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns
+        ):
+            raise OSError("local intelligence snapshot changed while it was read")
+        actual_sha256 = hashlib.sha256(content).hexdigest()
+        if actual_sha256 != expected_sha256:
+            return {"_integrity_mismatch": actual_sha256}
+        parsed = json.loads(content.decode("utf-8"))
+        with _LOCAL_INTEL_CACHE_LOCK:
+            if len(_LOCAL_INTEL_CACHE) >= 4:
+                _LOCAL_INTEL_CACHE.pop(next(iter(_LOCAL_INTEL_CACHE)))
+            _LOCAL_INTEL_CACHE[key] = parsed
+        return parsed
+    finally:
+        os.close(descriptor)
 
 TOOL_TIERS = {
     "inspect_device": 0,
@@ -137,29 +191,21 @@ def resolve_local_intel(*, cpe: str | None, product: str | None, version: str | 
             "runtime_egress": False,
         }
     try:
-        snapshot_path = Path(path)
-        size_bytes = snapshot_path.stat().st_size
-        if size_bytes > MAX_LOCAL_INTEL_BYTES:
-            return {
-                "status": "snapshot_too_large",
-                "query": query,
-                "candidates": [],
-                "size_bytes": size_bytes,
-                "max_bytes": MAX_LOCAL_INTEL_BYTES,
-                "runtime_egress": False,
-            }
-        content = snapshot_path.read_bytes()
-        actual_sha256 = hashlib.sha256(content).hexdigest()
-        if actual_sha256 != expected_sha256:
+        raw = _read_local_intel_snapshot(path, expected_sha256)
+        if isinstance(raw, dict) and raw.get("_integrity_mismatch"):
             return {
                 "status": "integrity_mismatch",
                 "query": query,
                 "candidates": [],
                 "expected_sha256": expected_sha256,
-                "actual_sha256": actual_sha256,
+                "actual_sha256": raw["_integrity_mismatch"],
                 "runtime_egress": False,
             }
-        raw = json.loads(content.decode("utf-8"))
+    except _LocalIntelTooLarge as exc:
+        return {
+            "status": "snapshot_too_large", "query": query, "candidates": [],
+            "size_bytes": exc.size_bytes, "max_bytes": MAX_LOCAL_INTEL_BYTES, "runtime_egress": False,
+        }
     except (OSError, UnicodeError, ValueError) as exc:
         return {"status": "unavailable", "query": query, "candidates": [], "error": type(exc).__name__, "runtime_egress": False}
     records = raw if isinstance(raw, list) else raw.get("advisories", []) if isinstance(raw, dict) else []

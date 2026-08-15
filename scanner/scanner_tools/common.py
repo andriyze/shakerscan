@@ -241,6 +241,7 @@ async def run(
     timeout: int = 60,
     input_text: str | None = None,
     retry: int = 0,
+    cancel_check: Any = None,
 ) -> tuple[str, str, int]:
     """Execute command with optional retry logic (shared across modules).
 
@@ -324,30 +325,50 @@ async def run(
                     stderr=asyncio.subprocess.PIPE,
                     start_new_session=use_process_group,
                 )
-                cancel_watch = None
+                cancel_watchers: list[asyncio.Task] = []
+                cancelled_by_callback = False
+
+                async def _kill_child_group() -> None:
+                    if proc is None or proc.returncode is not None:
+                        return
+                    try:
+                        if use_process_group:
+                            os.killpg(proc.pid, signal.SIGKILL)
+                        else:
+                            proc.kill()
+                    except ProcessLookupError:
+                        pass
+
                 if os.environ.get("SHAKERSCAN_CANCEL_FILE"):
                     async def _cancel_child_group() -> None:
                         from .cancellation import wait_for_scanner_cancel
 
                         await wait_for_scanner_cancel()
-                        if proc is None or proc.returncode is not None:
-                            return
-                        try:
-                            if use_process_group:
-                                os.killpg(proc.pid, signal.SIGKILL)
-                            else:
-                                proc.kill()
-                        except ProcessLookupError:
-                            pass
+                        await _kill_child_group()
 
-                    cancel_watch = asyncio.create_task(_cancel_child_group())
+                    cancel_watchers.append(asyncio.create_task(_cancel_child_group()))
+
+                if callable(cancel_check):
+                    async def _cancel_from_callback() -> None:
+                        nonlocal cancelled_by_callback
+                        while proc is not None and proc.returncode is None:
+                            requested = cancel_check()
+                            if hasattr(requested, "__await__"):
+                                requested = await requested
+                            if bool(requested):
+                                cancelled_by_callback = True
+                                await _kill_child_group()
+                                return
+                            await asyncio.sleep(0.25)
+
+                    cancel_watchers.append(asyncio.create_task(_cancel_from_callback()))
                 try:
                     out_b, err_b = await asyncio.wait_for(
                         proc.communicate(input=input_text.encode() if input_text is not None else None),
                         timeout=timeout,
                     )
                     from .cancellation import scanner_cancel_requested
-                    if scanner_cancel_requested():
+                    if cancelled_by_callback or scanner_cancel_requested():
                         _record_subprocess_receipt(
                             cmd,
                             timeout_seconds=timeout,
@@ -395,8 +416,9 @@ async def run(
                     )
                     return "", f"timeout after {timeout}s", 124
                 finally:
-                    if cancel_watch is not None:
+                    for cancel_watch in cancel_watchers:
                         cancel_watch.cancel()
+                    for cancel_watch in cancel_watchers:
                         try:
                             await cancel_watch
                         except BaseException:

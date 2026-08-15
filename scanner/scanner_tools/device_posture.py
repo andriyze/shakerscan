@@ -358,8 +358,12 @@ async def _run_nmap_stage(
     stage: str,
     transport: str,
     timeout: int,
+    cancel_check: Any = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
-    stdout, stderr, exit_code = await run(cmd, timeout=timeout)
+    run_options: dict[str, Any] = {"timeout": timeout}
+    if callable(cancel_check):
+        run_options["cancel_check"] = cancel_check
+    stdout, stderr, exit_code = await run(cmd, **run_options)
     services, inconclusive, identity, scan_status = parse_nmap_evidence(stdout)
     incomplete_reasons = list(scan_status.get("incomplete_reasons") or [])
     if exit_code != 0:
@@ -419,6 +423,7 @@ async def _nmap_scan(
     ]
     priority_services, _priority_uncertain, priority_identity, priority_receipt = await _run_nmap_stage(
         priority_cmd, stage="tcp_priority_discovery", transport="tcp", timeout=210,
+        cancel_check=cancel_check,
     )
     priority_receipt["required"] = False
     receipts.append(priority_receipt)
@@ -437,6 +442,7 @@ async def _nmap_scan(
     ]
     tcp_services, _tcp_uncertain, tcp_identity, tcp_receipt = await _run_nmap_stage(
         tcp_cmd, stage="tcp_scope_discovery", transport="tcp", timeout=tcp_stage_timeout,
+        cancel_check=cancel_check,
     )
     receipts.append(tcp_receipt)
     tcp_receipt["required"] = True
@@ -464,6 +470,7 @@ async def _nmap_scan(
             stage=f"tcp_service_fingerprint_{batch_number}",
             transport="tcp",
             timeout=profile.fingerprint_timeout + 30,
+            cancel_check=cancel_check,
         )
         receipts.append(receipt)
         receipt["required"] = True
@@ -480,6 +487,7 @@ async def _nmap_scan(
         ]
         udp_services, udp_observations, udp_identity, udp_receipt = await _run_nmap_stage(
             udp_cmd, stage="udp_service_discovery", transport="udp", timeout=300,
+            cancel_check=cancel_check,
         )
         receipts.append(udp_receipt)
         udp_receipt["required"] = True
@@ -710,7 +718,9 @@ def _requirement_failures(rule: dict[str, Any], service: dict[str, Any]) -> list
 
     ssh = service.get("ssh") if isinstance(service.get("ssh"), dict) else {}
     ssh_requirements = {"password_auth", "weak_algorithms", "publickey_auth"} & set(requirements)
-    if ssh_requirements and not ssh.get("scan_completed"):
+    if ssh_requirements and (
+        not ssh.get("scan_completed") or not ssh.get("auth_methods_complete")
+    ):
         failures.append("SSH controls could not be verified")
         return failures
     if requirements.get("password_auth") is False and ssh.get("password_auth_enabled"):
@@ -803,7 +813,6 @@ def _device_decision(findings: list[dict[str, Any]], *, complete: bool) -> tuple
 
 async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict[str, Any]:
     locator = normalize_device_locator(locator)
-    resolved_address = await resolve_device_address(locator)
     profile_name = str(options.get("device_profile") or "posture").lower()
     if profile_name not in DEVICE_PROFILES:
         raise ValueError(f"device_profile must be one of: {', '.join(sorted(DEVICE_PROFILES))}")
@@ -823,7 +832,10 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
         dict(item) for item in options.get("_resolved_device_credentials", [])
         if isinstance(item, dict)
     ]
+    if resolved_credentials and not safety_profile.credentials_allowed:
+        raise ValueError(f"device credentials are forbidden by safety profile {safety_profile.name}")
     ssh_credentials = [item for item in resolved_credentials if item.get("role") == "ssh"]
+    resolved_address = await resolve_device_address(locator)
 
     async def ensure_active(stage: str) -> bool:
         if callable(cancel_check) and bool(await cancel_check()):
@@ -938,6 +950,7 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
             "ephemeral_state" if ssh_credentials else "readonly",
             side_effects="one operator-supplied authentication attempt" if ssh_credentials else "none",
         )
+        attempted_ssh_profiles: set[str] = set()
         for service in services:
             if service.get("transport") != "tcp" or str(service.get("service_name") or "").lower() not in SSH_SERVICE_NAMES:
                 continue
@@ -952,6 +965,9 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
                 item for item in ssh_credentials
                 if item.get("port") is None or int(item.get("port")) == service_port
             ), None)
+            credential_profile_id = str((ssh_credential or {}).get("profile_id") or "")
+            if credential_profile_id in attempted_ssh_profiles:
+                ssh_credential = None
             ssh_result = await full_ssh_scan(
                 resolved_address,
                 port=service_port,
@@ -959,7 +975,8 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
                 credential=ssh_credential,
             )
             if ssh_credential:
-                ssh_result["credential_profile_id"] = str(ssh_credential.get("profile_id") or "")
+                attempted_ssh_profiles.add(credential_profile_id)
+                ssh_result["credential_profile_id"] = credential_profile_id
             service["ssh"] = {key: value for key, value in ssh_result.items() if key != "findings"}
             for finding in ssh_result.get("findings") or []:
                 finding = dict(finding)
@@ -1027,7 +1044,11 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
         "scan_metadata": {
             "run_kind": "device_posture",
             "active_testing": False,
-            "credentials_attempted": False,
+            "credentials_attempted": any(
+                bool((service.get("ssh") or {}).get("authentication_attempted"))
+                for service in services
+                if isinstance(service, dict) and isinstance(service.get("ssh"), dict)
+            ),
             "device_coverage_profile": profile_name,
             "device_safety_profile": safety_profile.name,
             "credential_profile_refs": [

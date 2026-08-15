@@ -66,6 +66,7 @@ async def ssh_auth_methods(
     result: dict[str, Any] = {
         "banner": None,
         "auth_methods": [],
+        "auth_methods_complete": False,
         "password_auth_enabled": False,
         "keyboard_interactive_enabled": False,
         "publickey_enabled": False,
@@ -92,6 +93,7 @@ async def ssh_auth_methods(
         check_result = {
             "banner": None,
             "auth_methods": [],
+            "auth_methods_complete": False,
             "host_key": None,
             "negotiated_algorithms": {},
             "weak_algorithms": [],
@@ -139,16 +141,49 @@ async def ssh_auth_methods(
             check_result["weak_algorithms"] = weak
             check_result["weak_algorithm_severity"] = weak_severity
 
+            def _enumerate_methods(auth_transport: Any, username: str) -> tuple[list[str], bool]:
+                try:
+                    auth_transport.auth_none(username or "scanner_probe")
+                    return ["none"], True
+                except paramiko.BadAuthenticationType as exc:
+                    methods = sorted({str(item) for item in exc.allowed_types if str(item)})
+                    return methods, bool(methods)
+                except paramiko.AuthenticationException:
+                    return ["unknown"], False
+                except Exception:
+                    return ["unknown"], False
+
             if credential:
                 auth_kind = str(credential.get("auth_kind") or "")
                 username = str(credential.get("username") or "")
                 secret = str(credential.get("secret") or "")
+                # Authentication-method enumeration and the supplied credential
+                # attempt are independent observations. A fresh transport keeps
+                # auth_none state from contaminating the real attempt.
+                enum_transport = None
+                try:
+                    enum_sock = socket.create_connection((host, port), timeout=timeout)
+                    enum_transport = paramiko.Transport(enum_sock)
+                    enum_transport.banner_timeout = timeout
+                    enum_transport.handshake_timeout = timeout
+                    enum_transport.connect()
+                    methods, complete = _enumerate_methods(enum_transport, username)
+                    check_result["auth_methods"] = methods
+                    check_result["auth_methods_complete"] = complete
+                except Exception:
+                    check_result["auth_methods"] = ["unknown"]
+                    check_result["auth_methods_complete"] = False
+                finally:
+                    if enum_transport:
+                        try:
+                            enum_transport.close()
+                        except Exception:
+                            pass
                 check_result["authentication_attempted"] = True
                 check_result["authentication_method"] = auth_kind
                 try:
                     if auth_kind == "ssh_password":
                         transport.auth_password(username, secret, fallback=False)
-                        check_result["auth_methods"] = ["password"]
                     elif auth_kind == "ssh_private_key":
                         passphrase = credential.get("secondary_secret") or None
                         key = None
@@ -167,29 +202,28 @@ async def ssh_auth_methods(
                         if key is None:
                             raise ValueError("unsupported_private_key")
                         transport.auth_publickey(username, key)
-                        check_result["auth_methods"] = ["publickey"]
                     else:
                         raise ValueError("unsupported_auth_kind")
                     check_result["authentication_succeeded"] = bool(transport.is_authenticated())
                 except paramiko.BadAuthenticationType as e:
-                    check_result["auth_methods"] = list(e.allowed_types)
                     check_result["authentication_error"] = "authentication_method_rejected"
                 except paramiko.AuthenticationException:
                     check_result["authentication_error"] = "authentication_rejected"
                 except ValueError as e:
-                    check_result["authentication_error"] = str(e)
+                    sentinel = str(e)
+                    check_result["authentication_error"] = (
+                        sentinel
+                        if sentinel in {"unsupported_private_key", "unsupported_auth_kind"}
+                        else "authentication_error:ValueError"
+                    )
                 except Exception as e:
                     check_result["authentication_error"] = f"authentication_error:{type(e).__name__}"
             else:
                 # auth_none returns allowed types when auth fails. No password or
                 # key is guessed; this is the existing posture-only capability probe.
-                try:
-                    transport.auth_none("scanner_probe")
-                    check_result["auth_methods"] = ["none"]
-                except paramiko.BadAuthenticationType as e:
-                    check_result["auth_methods"] = list(e.allowed_types)
-                except paramiko.AuthenticationException:
-                    check_result["auth_methods"] = ["unknown"]
+                methods, complete = _enumerate_methods(transport, "scanner_probe")
+                check_result["auth_methods"] = methods
+                check_result["auth_methods_complete"] = complete
 
         except TimeoutError:
             check_result["error"] = f"Connection timeout after {timeout}s"
@@ -218,6 +252,7 @@ async def ssh_auth_methods(
     # Update result with check results
     result["banner"] = check_result.get("banner")
     result["auth_methods"] = check_result.get("auth_methods", [])
+    result["auth_methods_complete"] = bool(check_result.get("auth_methods_complete"))
     result["host_key"] = check_result.get("host_key")
     result["negotiated_algorithms"] = check_result.get("negotiated_algorithms", {})
     result["weak_algorithms"] = check_result.get("weak_algorithms", [])

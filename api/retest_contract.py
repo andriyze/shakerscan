@@ -2420,8 +2420,8 @@ async def run_schema_migrations(pool) -> None:
                     'Safe baseline: forbid cleartext administration, flag unknown services, and require secure SSH.',
                     'generic',
                     '[
-                      {"action":"deny","transport":"tcp","ports":[23,2323],"service":"telnet","severity":"critical","reason":"Cleartext remote administration is forbidden."},
-                      {"action":"deny","transport":"tcp","ports":[21],"service":"ftp","severity":"high","reason":"Cleartext file transfer is forbidden."},
+                      {"action":"deny","transport":"tcp","ports":[23,2323],"service":"any","severity":"critical","reason":"Cleartext remote administration is forbidden."},
+                      {"action":"deny","transport":"tcp","ports":[21],"service":"any","severity":"high","reason":"Cleartext file transfer is forbidden."},
                       {"action":"require","transport":"tcp","service":"ssh","requirements":{"password_auth":false,"weak_algorithms":false},"severity":"high"},
                       {"action":"allow","transport":"tcp","service":"http","encrypted":false,"severity":"medium"},
                       {"action":"allow","transport":"tcp","service":"https","encrypted":true},
@@ -2435,7 +2435,7 @@ async def run_schema_migrations(pool) -> None:
                 INSERT INTO device_policies (name, description, device_class, rules, is_builtin)
                 VALUES
                 ('connected-device-default-v2', 'Fail-closed generic baseline: block cleartext administration, require hardened SSH, review cleartext web and unknown services.', 'generic',
-                 '[{"action":"deny","transport":"tcp","ports":[23,2323],"service":"telnet","severity":"critical","reason":"Cleartext remote administration is forbidden."},{"action":"deny","transport":"tcp","ports":[21],"service":"ftp","severity":"high","reason":"Cleartext file transfer is forbidden."},{"action":"require","transport":"tcp","service":"ssh","requirements":{"password_auth":false,"weak_algorithms":false,"publickey_auth":true},"severity":"high"},{"action":"allow","transport":"tcp","service":"https","encrypted":true},{"action":"review","transport":"tcp","service":"http","encrypted":false,"severity":"medium","reason":"Cleartext device management should be isolated or upgraded to HTTPS."},{"action":"review","transport":"any","service":"unknown","severity":"medium","reason":"An unclassified listening service requires review."}]'::jsonb, true),
+                 '[{"action":"deny","transport":"tcp","ports":[23,2323],"service":"any","severity":"critical","reason":"Cleartext remote administration is forbidden."},{"action":"deny","transport":"tcp","ports":[21],"service":"any","severity":"high","reason":"Cleartext file transfer is forbidden."},{"action":"require","transport":"tcp","service":"ssh","requirements":{"password_auth":false,"weak_algorithms":false,"publickey_auth":true},"severity":"high"},{"action":"allow","transport":"tcp","service":"https","encrypted":true},{"action":"review","transport":"tcp","service":"http","encrypted":false,"severity":"medium","reason":"Cleartext device management should be isolated or upgraded to HTTPS."},{"action":"review","transport":"any","service":"unknown","severity":"medium","reason":"An unclassified listening service requires review."}]'::jsonb, true),
                 ('media-device-baseline-v1', 'Smart TV, streaming, and conference display service baseline.', 'media',
                  '[{"action":"deny","transport":"tcp","ports":[21,23,2323],"service":"any","severity":"critical","reason":"Legacy cleartext administration is forbidden."},{"action":"require","transport":"tcp","service":"ssh","requirements":{"password_auth":false,"weak_algorithms":false,"publickey_auth":true},"severity":"high"},{"action":"allow","transport":"tcp","service":"https","encrypted":true},{"action":"review","transport":"tcp","service":"http","encrypted":false,"severity":"medium","reason":"Cleartext media-device web management requires network isolation."},{"action":"allow","transport":"udp","ports":[1900],"service":"upnp"},{"action":"allow","transport":"udp","ports":[5353],"service":"mdns"},{"action":"review","transport":"any","service":"unknown","severity":"medium","reason":"Unexpected media-device service."}]'::jsonb, true),
                 ('camera-baseline-v1', 'IP camera and video endpoint baseline.', 'camera',
@@ -2447,10 +2447,26 @@ async def run_schema_migrations(pool) -> None:
                 ON CONFLICT (name) DO NOTHING
             """)
             await conn.execute("""
+                UPDATE device_policies AS policy
+                SET rules=(
+                    SELECT COALESCE(jsonb_agg(
+                        CASE
+                            WHEN rule->>'action'='deny'
+                             AND rule->>'transport'='tcp'
+                             AND (rule->'ports') ?| ARRAY['21','23','2323']
+                            THEN jsonb_set(rule, '{service}', '"any"'::jsonb, true)
+                            ELSE rule
+                        END
+                    ), '[]'::jsonb)
+                    FROM jsonb_array_elements(policy.rules) AS rule
+                ), updated_at=NOW()
+                WHERE policy.name IN ('connected-device-default-v1','connected-device-default-v2')
+            """)
+            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS device_targets (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     name TEXT NOT NULL,
-                    primary_locator TEXT NOT NULL UNIQUE,
+                    primary_locator TEXT NOT NULL,
                     device_class TEXT NOT NULL DEFAULT 'generic',
                     manufacturer TEXT,
                     model TEXT,
@@ -2466,11 +2482,22 @@ async def run_schema_migrations(pool) -> None:
                     last_score INTEGER,
                     last_grade TEXT,
                     active_findings_count INTEGER NOT NULL DEFAULT 0,
+                    locator_generation INTEGER NOT NULL DEFAULT 1,
                     is_active BOOLEAN NOT NULL DEFAULT true,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     CONSTRAINT device_targets_identity_confidence_check CHECK (identity_confidence IN ('low','medium','high','verified'))
                 )
+            """)
+            await conn.execute("""
+                ALTER TABLE device_targets
+                ADD COLUMN IF NOT EXISTS locator_generation INTEGER NOT NULL DEFAULT 1
+            """)
+            await conn.execute("ALTER TABLE device_targets DROP CONSTRAINT IF EXISTS device_targets_locator_unique")
+            await conn.execute("ALTER TABLE device_targets DROP CONSTRAINT IF EXISTS device_targets_primary_locator_key")
+            await conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_device_targets_active_locator
+                ON device_targets(primary_locator) WHERE is_active=true
             """)
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS device_interfaces (
@@ -2548,6 +2575,23 @@ async def run_schema_migrations(pool) -> None:
                 CREATE INDEX IF NOT EXISTS idx_device_credential_profiles_active
                 ON device_credential_profiles(device_target_id, is_active, expires_at)
             """)
+            await conn.execute("UPDATE device_credential_profiles SET secret_preview=NULL WHERE secret_preview IS NOT NULL")
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS device_credential_attempts (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    device_target_id UUID NOT NULL REFERENCES device_targets(id) ON DELETE CASCADE,
+                    credential_profile_id UUID NOT NULL REFERENCES device_credential_profiles(id) ON DELETE CASCADE,
+                    scan_id UUID REFERENCES scans(id) ON DELETE SET NULL,
+                    outcome TEXT NOT NULL,
+                    attempted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT device_credential_attempts_outcome_check CHECK (outcome IN ('succeeded','rejected','error')),
+                    CONSTRAINT device_credential_attempts_scan_profile_unique UNIQUE (scan_id, credential_profile_id)
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_device_credential_attempts_profile_time
+                ON device_credential_attempts(credential_profile_id, attempted_at DESC)
+            """)
             await conn.execute("""
                 ALTER TABLE scans
                 ADD COLUMN IF NOT EXISTS run_kind TEXT DEFAULT 'web_dast',
@@ -2558,6 +2602,26 @@ async def run_schema_migrations(pool) -> None:
             await conn.execute("""
                 ALTER TABLE findings
                 ADD COLUMN IF NOT EXISTS device_target_id UUID REFERENCES device_targets(id) ON DELETE CASCADE
+            """)
+            await conn.execute("""
+                CREATE OR REPLACE FUNCTION refresh_device_active_findings_count()
+                RETURNS TRIGGER AS $$
+                BEGIN
+                    UPDATE device_targets d
+                    SET active_findings_count=(
+                        SELECT COUNT(*) FROM findings f
+                        WHERE f.device_target_id=d.id AND f.status='active'
+                    ), updated_at=NOW()
+                    WHERE d.id IN (OLD.device_target_id, NEW.device_target_id);
+                    RETURN NULL;
+                END;
+                $$ LANGUAGE plpgsql
+            """)
+            await conn.execute("DROP TRIGGER IF EXISTS trg_refresh_device_active_findings_count ON findings")
+            await conn.execute("""
+                CREATE TRIGGER trg_refresh_device_active_findings_count
+                AFTER INSERT OR UPDATE OF status, device_target_id OR DELETE ON findings
+                FOR EACH ROW EXECUTE FUNCTION refresh_device_active_findings_count()
             """)
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS device_services (
@@ -2708,12 +2772,6 @@ async def run_schema_migrations(pool) -> None:
                         CHECK (transport IN ('tcp','udp')) NOT VALID;
                     END IF;
                     IF NOT EXISTS (
-                        SELECT 1 FROM pg_constraint WHERE conname = 'device_services_state_check'
-                    ) THEN
-                        ALTER TABLE device_services ADD CONSTRAINT device_services_state_check
-                        CHECK (state IN ('open','open|filtered')) NOT VALID;
-                    END IF;
-                    IF NOT EXISTS (
                         SELECT 1 FROM pg_constraint WHERE conname = 'device_services_policy_disposition_check'
                     ) THEN
                         ALTER TABLE device_services ADD CONSTRAINT device_services_policy_disposition_check
@@ -2728,6 +2786,16 @@ async def run_schema_migrations(pool) -> None:
                         CHECK (planner_mode IN ('agent')) NOT VALID;
                     END IF;
                 END $$;
+            """)
+            await conn.execute("""
+                ALTER TABLE device_services DROP CONSTRAINT IF EXISTS device_services_state_check
+            """)
+            await conn.execute("""
+                ALTER TABLE device_services ADD CONSTRAINT device_services_state_check
+                CHECK (state IN ('open','open|filtered','not_observed')) NOT VALID
+            """)
+            await conn.execute("""
+                ALTER TABLE device_services VALIDATE CONSTRAINT device_services_state_check
             """)
             await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_ai_targets_active_created
@@ -2756,6 +2824,7 @@ async def run_schema_migrations(pool) -> None:
                 ON scans(device_target_id, created_at DESC)
                 WHERE device_target_id IS NOT NULL
             """)
+            await conn.execute("DROP INDEX IF EXISTS idx_scans_device_target_id")
             await conn.execute("""
                 WITH ranked AS (
                     SELECT id, ROW_NUMBER() OVER (
@@ -2764,7 +2833,7 @@ async def run_schema_migrations(pool) -> None:
                     FROM scans
                     WHERE device_target_id IS NOT NULL
                       AND run_kind IN ('device_posture','device_probe')
-                      AND status IN ('pending','queued','running')
+                      AND status IN ('pending','queued','running','cancelling')
                 )
                 UPDATE scans
                 SET status='failed', error_message='Duplicate active device scan repaired during migration',
@@ -2779,13 +2848,9 @@ async def run_schema_migrations(pool) -> None:
                 ON scans(device_target_id)
                 WHERE device_target_id IS NOT NULL
                   AND run_kind IN ('device_posture','device_probe')
-                  AND status IN ('pending','queued','running')
+                  AND status IN ('pending','queued','running','cancelling')
             """)
-            await conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_findings_device_target_id
-                ON findings(device_target_id)
-                WHERE device_target_id IS NOT NULL
-            """)
+            await conn.execute("DROP INDEX IF EXISTS idx_findings_device_target_id")
             await conn.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_findings_device_fingerprint
                 ON findings(device_target_id, fingerprint)

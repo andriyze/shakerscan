@@ -72,12 +72,14 @@ try:
         normalize_endpoint_attempt,
     )
     from scanner_tools.build_fingerprint import hash_source_files, runtime_file_map
+    from scanner_tools.device_web import run_pinned_device_web_scan
 except ModuleNotFoundError:
     from scanner.scanner_tools.attempt_telemetry import (
         endpoint_attempt_schema_from_report,
         normalize_endpoint_attempt,
     )
     from scanner.scanner_tools.build_fingerprint import hash_source_files, runtime_file_map
+    from scanner.scanner_tools.device_web import run_pinned_device_web_scan
 from evidence_storage import serialize_evidence_content, store_evidence_content
 from artifact_storage import (
     ArtifactStorageError,
@@ -164,6 +166,8 @@ WORKER_REDIS_SOCKET_TIMEOUT_SECONDS = max(
     int(os.environ.get("WORKER_REDIS_SOCKET_TIMEOUT_SECONDS", "35")),
 )
 TOOL_RECEIPT_ADAPTER_VERSION = "2026-07-05.v1"
+DEVICE_SSH_AUTH_COOLDOWN_SECONDS = max(60, int(os.environ.get("DEVICE_SSH_AUTH_COOLDOWN_SECONDS", "1800")))
+DEVICE_SSH_AUTH_DAILY_FAILURE_CAP = max(1, int(os.environ.get("DEVICE_SSH_AUTH_DAILY_FAILURE_CAP", "3")))
 
 # Maximum allowed duration per scan type (minutes) - worker-side safety net
 MAX_SCAN_DURATION = {
@@ -1623,6 +1627,8 @@ async def _hydrate_device_scan_credentials(options: dict[str, Any], scan_id: str
     raw_refs = hydrated.get("device_credential_profiles")
     if not isinstance(raw_refs, list) or not raw_refs:
         return hydrated
+    if str(hydrated.get("safety_profile") or "") != "authenticated_active":
+        raise ValueError("device credentials require safety_profile=authenticated_active")
     refs = [dict(item) for item in raw_refs if isinstance(item, dict)][:2]
     roles = [str(item.get("role") or "") for item in refs]
     if len(roles) != len(set(roles)) or not all(role in {"ssh", "web"} for role in roles):
@@ -1643,7 +1649,26 @@ async def _hydrate_device_scan_credentials(options: dict[str, Any], scan_id: str
             scan_uuid,
             profile_ids,
         )
+        attempt_rows = await conn.fetch(
+            """WITH latest_success AS (
+                   SELECT credential_profile_id, MAX(attempted_at) AS succeeded_at
+                   FROM device_credential_attempts
+                   WHERE credential_profile_id=ANY($1::uuid[]) AND outcome='succeeded'
+                   GROUP BY credential_profile_id
+               )
+               SELECT a.credential_profile_id,
+                      COUNT(*) FILTER (WHERE a.outcome IN ('rejected','error')) AS failure_count,
+                      MAX(a.attempted_at) FILTER (WHERE a.outcome IN ('rejected','error')) AS last_failure_at
+               FROM device_credential_attempts a
+               LEFT JOIN latest_success s ON s.credential_profile_id=a.credential_profile_id
+               WHERE a.credential_profile_id=ANY($1::uuid[])
+                 AND a.attempted_at >= NOW() - INTERVAL '24 hours'
+                 AND (s.succeeded_at IS NULL OR a.attempted_at > s.succeeded_at)
+               GROUP BY a.credential_profile_id""",
+            profile_ids,
+        )
     by_id = {str(row["id"]): dict(row) for row in rows}
+    attempts_by_id = {str(row["credential_profile_id"]): dict(row) for row in attempt_rows}
     resolved: list[dict[str, Any]] = []
     for ref in refs:
         role = str(ref["role"])
@@ -1654,6 +1679,18 @@ async def _hydrate_device_scan_credentials(options: dict[str, Any], scan_id: str
         auth_kind = str(row.get("auth_kind") or "")
         if (role == "ssh") != auth_kind.startswith("ssh_"):
             raise ValueError(f"device {role} credential profile kind mismatch")
+        if role == "ssh":
+            attempt_state = attempts_by_id.get(profile_id, {})
+            failure_count = int(attempt_state.get("failure_count") or 0)
+            last_failure_at = attempt_state.get("last_failure_at")
+            if failure_count >= DEVICE_SSH_AUTH_DAILY_FAILURE_CAP:
+                raise ValueError("device SSH credential daily authentication failure cap is active")
+            if last_failure_at:
+                now = utc_now()
+                if last_failure_at.tzinfo is None:
+                    now = datetime.now()
+                if (now - last_failure_at).total_seconds() < DEVICE_SSH_AUTH_COOLDOWN_SECONDS:
+                    raise ValueError("device SSH credential authentication cooldown is active")
         raw_secret = str(decrypt_secret(row.get("secret_value")) or "")
         if not raw_secret or raw_secret.startswith("enc:fernet:"):
             raise ValueError(f"device {role} credential profile could not be decrypted")
@@ -1677,6 +1714,53 @@ async def _hydrate_device_scan_credentials(options: dict[str, Any], scan_id: str
         })
     hydrated["_resolved_device_credentials"] = resolved
     return hydrated
+
+
+async def _persist_device_credential_attempts(result: dict[str, Any], scan_id: str) -> None:
+    """Persist bounded authentication outcomes without retaining any credential value."""
+    posture = result.get("device_posture") if isinstance(result.get("device_posture"), dict) else {}
+    attempts: dict[str, str] = {}
+    for service in posture.get("services") or []:
+        ssh = service.get("ssh") if isinstance(service, dict) and isinstance(service.get("ssh"), dict) else {}
+        profile_id = str(ssh.get("credential_profile_id") or "")
+        if not profile_id or not ssh.get("authentication_attempted"):
+            continue
+        attempts[profile_id] = (
+            "succeeded" if ssh.get("authentication_succeeded")
+            else "rejected" if "rejected" in str(ssh.get("authentication_error") or "")
+            else "error"
+        )
+    children = posture.get("web_dast_children") if isinstance(posture.get("web_dast_children"), dict) else {}
+    for child in children.get("children") or []:
+        if not isinstance(child, dict) or not child.get("credentials_attempted"):
+            continue
+        profile_id = str(child.get("credential_profile_id") or "")
+        if profile_id:
+            attempts[profile_id] = "succeeded" if child.get("authenticated") else "rejected"
+    if not attempts:
+        return
+    try:
+        scan_uuid = uuid.UUID(str(scan_id))
+        profile_ids = [uuid.UUID(profile_id) for profile_id in attempts]
+    except ValueError:
+        return
+    async with db_pool.acquire() as conn:
+        device_target_id = await conn.fetchval("SELECT device_target_id FROM scans WHERE id=$1", scan_uuid)
+        if not device_target_id:
+            return
+        for profile_id in profile_ids:
+            await conn.execute(
+                """INSERT INTO device_credential_attempts (
+                       device_target_id, credential_profile_id, scan_id, outcome
+                   ) SELECT $1,$2,$3,$4
+                     WHERE EXISTS (
+                       SELECT 1 FROM device_credential_profiles
+                       WHERE id=$2 AND device_target_id=$1
+                     )
+                   ON CONFLICT (scan_id, credential_profile_id) DO UPDATE
+                   SET outcome=EXCLUDED.outcome, attempted_at=NOW()""",
+                device_target_id, profile_id, scan_uuid, attempts[str(profile_id)],
+            )
 
 
 async def _hydrate_ai_gate_options(options: dict[str, Any]) -> dict[str, Any]:
@@ -7085,6 +7169,35 @@ def _runtime_destination_records(result: dict[str, Any], options: dict[str, Any]
             record["resolved_host"] = str(resolved_host).strip()
         records.append(record)
 
+    if run_kind in {"device_posture", "device_probe"}:
+        posture = result.get("device_posture") if isinstance(result.get("device_posture"), dict) else {}
+        probe = result.get("device_probe") if isinstance(result.get("device_probe"), dict) else {}
+        locator = str(result.get("target") or "").strip()
+        resolved = str(result.get("resolved_target") or posture.get("resolved_target") or "").strip()
+        if locator:
+            formatted = f"[{locator}]" if ":" in locator and not locator.startswith("[") else locator
+            port = probe.get("port") if probe else None
+            destination_url = f"http://{formatted}{f':{int(port)}' if port else ''}/"
+            add(
+                "device_target",
+                destination_url,
+                source=run_kind,
+                resolved_ips=[resolved] if resolved else None,
+                resolved_host=locator,
+            )
+        for item in posture.get("runtime_destinations") or ():
+            if isinstance(item, dict):
+                add(
+                    str(item.get("label") or "device_web_child"),
+                    item.get("url"),
+                    item.get("final_url"),
+                    source=item.get("source") or "device_web_dast",
+                    redirect_urls=item.get("redirect_urls") or item.get("redirect_chain"),
+                    resolved_ips=item.get("resolved_ips") or item.get("remote_ip"),
+                    resolved_host=item.get("resolved_host"),
+                )
+        return records
+
     if run_kind in AI_GATE_RUN_KINDS:
         ai_gate = result.get("ai_gate") if isinstance(result.get("ai_gate"), dict) else {}
         for item in ai_gate.get("runtime_destinations") or ():
@@ -7600,6 +7713,15 @@ async def run_device_web_children(
                 "active_max_endpoints": 0,
             },
         }
+        for guard_key in (
+            "runtime_scope_guard",
+            "scope_receipt_id",
+            "approval_receipt_id",
+            "risk_tier",
+            "operation_plan_id",
+        ):
+            if parent_options.get(guard_key) is not None:
+                child_options[guard_key] = copy.deepcopy(parent_options[guard_key])
         async with db_pool.acquire() as conn:
             await conn.execute(
                 """
@@ -7631,26 +7753,13 @@ async def run_device_web_children(
         child_heartbeat_thread.start()
         started = utc_now()
         try:
-            runtime_child_options = dict(child_options)
-            if web_credential:
-                auth_kind = str(web_credential.get("auth_kind") or "")
-                if auth_kind == "web_authorization_header":
-                    runtime_child_options["auth_header"] = str(web_credential.get("secret") or "")
-                elif auth_kind == "web_cookie":
-                    runtime_child_options["auth_cookies"] = str(web_credential.get("secret") or "")
-                elif auth_kind == "web_form":
-                    runtime_child_options.update({
-                        "login_url": urllib.parse.urljoin(origin.rstrip("/") + "/", str(web_credential.get("login_path") or "/")),
-                        "login_username": str(web_credential.get("username") or ""),
-                        "login_password": str(web_credential.get("secret") or ""),
-                        "auto_auth": True,
-                    })
-            child_result = await run_scan(
-                origin,
-                runtime_child_options,
-                scan_id=child_scan_id,
-                job_id=child_job_id,
+            child_result = await run_pinned_device_web_scan(
+                origin_info,
+                profile=web_scan_type,
+                credential=web_credential,
+                cancel_check=lambda: asyncio.to_thread(_scan_cancel_requested, parent_scan_id),
             )
+            child_result = _apply_runtime_scope_guard_to_result(child_result, child_options)
             child_error = child_result.get("error") if isinstance(child_result, dict) else "invalid child result"
         except Exception as exc:
             child_result = _unexpected_scan_exception_result(origin, exc)
@@ -7661,29 +7770,47 @@ async def run_device_web_children(
         completed = utc_now()
         duration = int((completed - started).total_seconds())
         child_findings = child_result.get("findings") if isinstance(child_result.get("findings"), list) else []
+        child_http = child_result.get("http") if isinstance(child_result.get("http"), dict) else {}
+        child_runtime_destination = {
+            "label": f"device_web_child_{index}",
+            "url": str(child_http.get("request_url") or origin),
+            "final_url": str(child_http.get("final_url") or origin),
+            "redirect_chain": list(child_http.get("redirect_chain") or []),
+            "remote_ip": child_http.get("remote_ip") or origin_info.get("connect_address"),
+            "resolved_host": urllib.parse.urlsplit(origin).hostname,
+            "source": "device_web_dast",
+        }
         child_score = (child_result.get("result") or {}).get("score") if isinstance(child_result.get("result"), dict) else None
         child_grade = (child_result.get("result") or {}).get("grade") if isinstance(child_result.get("result"), dict) else None
         async with db_pool.acquire() as conn:
-            await conn.execute(
+            child_updated = await conn.fetchval(
                 """UPDATE scans SET status=$1, result=$2, score=$3, grade=$4,
                        findings_count=$5, error_message=$6, completed_at=$7,
                        duration_seconds=$8, progress=100, current_phase=$1
-                   WHERE id=$9""",
+                   WHERE id=$9 AND status NOT IN ('cancelled','failed')
+                   RETURNING id""",
                 "failed" if child_error else "completed", json.dumps(child_result), child_score,
                 child_grade, len(child_findings), str(child_error)[:2000] if child_error else None,
                 completed, duration, uuid.UUID(child_scan_id),
             )
+        if not child_updated:
+            child_error = "Cancelled by user"
+            child_findings = []
+            child_score = None
+            child_grade = None
         await persist_result_artifact(child_result, child_job_id, child_scan_id)
         child_entry = {
             "scan_id": child_scan_id,
             "origin": origin,
-            "status": "failed" if child_error else "completed",
+            "status": "cancelled" if not child_updated else "failed" if child_error else "completed",
             "score": child_score,
             "grade": child_grade,
             "findings_count": len(child_findings),
             "error": str(child_error)[:500] if child_error else None,
             "credential_profile_id": str(web_credential.get("profile_id") or "") if web_credential else None,
-            "authenticated": bool(web_credential),
+            "credentials_attempted": bool((child_result.get("device_web") or {}).get("credentials_attempted")),
+            "authenticated": bool((child_result.get("device_web") or {}).get("authentication_succeeded")),
+            "runtime_destination": child_runtime_destination,
         }
         child_summary["children"].append(child_entry)
         get_redis().hset(child_job_key, mapping={
@@ -7693,6 +7820,10 @@ async def run_device_web_children(
             "completed_at": completed.isoformat(),
         })
         get_redis().expire(child_job_key, 86400)
+        if not child_updated:
+            child_summary["cancelled"] = True
+            child_summary["truncated"] += len(selected) - index
+            break
         if child_error:
             child_summary["failed"] += 1
         else:
@@ -7724,7 +7855,18 @@ async def run_device_web_children(
         )
 
     result["findings"] = merged_findings
+    posture["runtime_destinations"] = [
+        child.get("runtime_destination")
+        for child in child_summary.get("children") or []
+        if isinstance(child, dict) and isinstance(child.get("runtime_destination"), dict)
+    ]
     posture["web_dast_children"] = child_summary
+    metadata = result.setdefault("scan_metadata", {})
+    metadata["credentials_attempted"] = bool(metadata.get("credentials_attempted")) or any(
+        bool(child.get("credentials_attempted"))
+        for child in child_summary.get("children") or []
+        if isinstance(child, dict)
+    )
     result["device_posture"] = posture
     _device_score_with_web_findings(result)
     return result
@@ -7929,6 +8071,8 @@ async def process_scan_job(job_data: dict):
         result['job_id'] = job_id
         result['scan_id'] = scan_id
         result = _apply_runtime_scope_guard_to_result(result, options)
+        if device_target_id and (options or {}).get("run_kind") == "device_posture":
+            await _persist_device_credential_attempts(result, scan_id)
 
         # Extract results (run_scan already strips NUL bytes from the whole result so
         # the scans.result write and findings rows can't crash on \x00; save_findings
@@ -7954,8 +8098,15 @@ async def process_scan_job(job_data: dict):
                 "SELECT status FROM scans WHERE id = $1",
                 uuid.UUID(scan_id)
             )
-            if current and current['status'] in ('failed', 'cancelled'):
-                terminal_status = current['status']
+            if current and current['status'] in ('failed', 'cancelled', 'cancelling'):
+                terminal_status = 'cancelled' if current['status'] == 'cancelling' else current['status']
+                if current['status'] == 'cancelling':
+                    await conn.execute(
+                        """UPDATE scans SET status='cancelled', completed_at=$2, progress=100,
+                                  current_phase='cancelled', error_message='Cancelled by user'
+                           WHERE id=$1 AND status='cancelling'""",
+                        uuid.UUID(scan_id), completed_at,
+                    )
                 print(f"[{job_id[:8]}] Scan already marked {terminal_status}, not overwriting scan row", flush=True)
                 # Don't save findings - stale checker already saved partial findings from checkpoint.
                 # Saving late-completing findings would cause inconsistency between scan report and /findings.
