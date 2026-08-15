@@ -22,6 +22,10 @@ def _graph():
             "origin": "https://tv.test:8443", "port": 8443, "tls": True,
             "status_line": "HTTP/1.1 200 OK", "peer_certificate_present": True,
         }],
+        protocol_observations=[{
+            "protocol": "ssdp", "transport": "udp", "port": 1900,
+            "confirmed": False, "responses": [], "receipt": {"complete": True},
+        }],
         tool_receipts=[{"stage": "tcp_scope_discovery", "complete": True}],
         safety_receipt={"health_checkpoints": [{"stage": "final", "status": "healthy"}]},
     )
@@ -36,6 +40,7 @@ def test_evidence_graph_is_stable_and_links_web_to_the_exact_service():
     assert kinds == {"device", "network_interface", "network_service", "web_origin"}
     assert any(edge["kind"] == "served_by" for edge in first["edges"])
     assert any(item["kind"] == "device_health" for item in first["observations"])
+    assert any(item["kind"] == "protocol_discovery" for item in first["observations"])
     uncertain = next(
         node for node in first["nodes"]
         if node["kind"] == "network_service" and node["attributes"].get("port") == 1900

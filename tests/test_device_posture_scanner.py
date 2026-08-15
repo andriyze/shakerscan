@@ -288,8 +288,12 @@ def test_device_scan_emits_independent_safety_and_normalized_evidence(monkeypatc
             "tls": True, "status_line": "HTTP/1.1 200 OK",
         }]
 
+    async def fake_protocols(locator, *, udp_ports):
+        return []
+
     monkeypatch.setattr(device_posture, "_nmap_scan", fake_nmap)
     monkeypatch.setattr(device_posture, "check_device_health", fake_health)
+    monkeypatch.setattr(device_posture, "discover_core_device_protocols", fake_protocols)
     monkeypatch.setattr(device_posture, "detect_web_origins", fake_origins)
     result = asyncio.run(device_posture.run_device_posture_scan("tv.test", {
         "device_profile": "inventory",

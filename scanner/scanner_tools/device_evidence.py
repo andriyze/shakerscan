@@ -24,6 +24,7 @@ def build_device_evidence_graph(
     services: list[dict[str, Any]],
     inconclusive_observations: list[dict[str, Any]],
     web_origins: list[dict[str, Any]],
+    protocol_observations: list[dict[str, Any]] | None = None,
     tool_receipts: list[dict[str, Any]],
     safety_receipt: dict[str, Any],
 ) -> dict[str, Any]:
@@ -142,6 +143,22 @@ def build_device_evidence_graph(
         service_id = service_ids.get(("tcp", int(origin.get("port") or 0)))
         if service_id:
             add_edge("served_by", origin_id, service_id, evidence=evidence_id)
+
+    for protocol in protocol_observations or []:
+        if not isinstance(protocol, dict):
+            continue
+        try:
+            port = int(protocol.get("port") or 0)
+        except (TypeError, ValueError):
+            port = 0
+        subject = service_ids.get((str(protocol.get("transport") or "udp"), port), device_id)
+        add_observation(
+            "protocol_discovery",
+            subject,
+            {key: value for key, value in protocol.items() if key != "receipt"},
+            source=f"device_protocol_{str(protocol.get('protocol') or 'unknown')}",
+            confidence="validated" if protocol.get("confirmed") else "observed",
+        )
 
     for receipt in tool_receipts:
         if not isinstance(receipt, dict):

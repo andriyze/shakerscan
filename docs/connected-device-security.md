@@ -74,6 +74,14 @@ checkpoints into stable nodes, edges, and observations. This is the compatibilit
 future protocol adapters and the AI-directed device investigator; adapters exchange normalized
 observations rather than requiring later stages to parse raw tool strings.
 
+The first protocol-aware adapters cover SSDP/UPnP discovery and mDNS/DNS-SD service enumeration.
+They send one bounded unicast discovery message to the exact authorized device rather than widening
+scope to a multicast segment. Responses, advertised service types, server metadata, USNs, DNS-SD
+records, and UPnP `LOCATION` values are normalized into the evidence graph. A cross-host `LOCATION`
+is recorded as out of scope and is never followed automatically. A valid application response can
+promote an Nmap `open|filtered` observation to a validated UDP service; silence remains inconclusive.
+Both adapters now run in the fast inventory profile as well as the all-TCP profiles.
+
 ## Web interfaces on any port
 
 ShakerScan does not assume ports 80 or 443. After service inventory, it sends a bounded HTTP probe to

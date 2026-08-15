@@ -542,6 +542,9 @@ stable `device-evidence/v1` node/edge/observation graph. The keyless device inve
 agent inspect device state, queue bounded deterministic scans, and query normalized evidence. Its
 target and safety profile are immutable, its tool/turn/scan budgets are server-enforced, and its
 debrief can create evidence-backed hypotheses but never authoritative findings.
+Core protocol adapters send bounded exact-target unicast SSDP and mDNS discovery probes, normalize
+UPnP and DNS-SD metadata, refuse to follow cross-host descriptor locations, and promote UDP
+`open|filtered` state only after a valid application response.
 
 ---
 

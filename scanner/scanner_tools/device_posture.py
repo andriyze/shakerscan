@@ -25,17 +25,20 @@ except ImportError:  # pragma: no cover - minimal host test environment
 try:
     from .common import run
     from .device_evidence import build_device_evidence_graph
+    from .device_protocols import discover_core_device_protocols
     from .device_safety import DeviceSafetyGovernor, check_device_health, validate_safety_request
     from .ssh_scanner import full_ssh_scan
 except ImportError:  # pragma: no cover - flat scanner runtime
     from common import run
     from device_evidence import build_device_evidence_graph
+    from device_protocols import discover_core_device_protocols
     from device_safety import DeviceSafetyGovernor, check_device_health, validate_safety_request
     from ssh_scanner import full_ssh_scan
 
 
 DEVICE_PROFILES = {"inventory", "posture", "thorough"}
 COMMON_UDP_PORTS = (53, 67, 68, 69, 123, 137, 138, 161, 162, 500, 1900, 4500, 5353, 5683, 47808)
+INVENTORY_UDP_PORTS = (53, 123, 161, 1900, 5353, 5683, 47808, 67)
 PRIORITY_TCP_PORTS = (
     21, 22, 23, 25, 53, 80, 81, 110, 111, 135, 139, 143, 443, 445, 554,
     631, 1883, 2323, 3000, 5000, 5357, 5683, 7000, 8000, 8008, 8009,
@@ -62,7 +65,7 @@ class DeviceScanProfile:
 
 
 PROFILES = {
-    "inventory": DeviceScanProfile("inventory", ("--top-ports", "100"), COMMON_UDP_PORTS[:8], "180s", 240, 20, 3, 180),
+    "inventory": DeviceScanProfile("inventory", ("--top-ports", "100"), INVENTORY_UDP_PORTS, "180s", 240, 20, 3, 180),
     "posture": DeviceScanProfile("posture", ("-p-",), COMMON_UDP_PORTS, "900s", 960, 64, 5, 300),
     "thorough": DeviceScanProfile("thorough", ("-p-",), COMMON_UDP_PORTS, "1200s", 1260, 128, 7, 600),
 }
@@ -245,6 +248,50 @@ def _merge_services(current: dict[tuple[str, int], dict[str, Any]], services: li
         merged["confidence"] = "confirmed"
         merged["policy_eligible"] = True
         current[key] = merged
+
+
+def merge_protocol_confirmations(
+    services: list[dict[str, Any]],
+    inconclusive: list[dict[str, Any]],
+    protocol_results: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Promote UDP service state only when a protocol adapter received a valid response."""
+    by_key = {(str(item.get("transport") or "tcp"), int(item["port"])): dict(item) for item in services}
+    uncertain = {(str(item.get("transport") or "udp"), int(item["port"])): dict(item) for item in inconclusive}
+    for protocol in protocol_results:
+        if not isinstance(protocol, dict) or not protocol.get("confirmed"):
+            continue
+        transport = str(protocol.get("transport") or "udp")
+        port = int(protocol.get("port") or 0)
+        if not 1 <= port <= 65535:
+            continue
+        name = str(protocol.get("protocol") or "unknown")
+        responses = list(protocol.get("responses") or [])
+        product = ""
+        if name == "ssdp" and responses:
+            product = str((responses[0] or {}).get("server") or "")[:500]
+        current = by_key.get((transport, port), {})
+        current.update({
+            "transport": transport,
+            "port": port,
+            "state": "open",
+            "state_reason": "application-response",
+            "service_name": "upnp" if name == "ssdp" else name,
+            "product": current.get("product") or product,
+            "confidence": "validated",
+            "policy_eligible": True,
+            "protocol_evidence": {
+                "protocol": name,
+                "response_count": len(responses),
+                "responses": responses,
+            },
+        })
+        by_key[(transport, port)] = current
+        uncertain.pop((transport, port), None)
+    return (
+        sorted(by_key.values(), key=lambda row: (str(row.get("transport")), int(row.get("port") or 0))),
+        sorted(uncertain.values(), key=lambda row: (str(row.get("transport")), int(row.get("port") or 0))),
+    )
 
 
 async def _run_nmap_stage(
@@ -607,6 +654,31 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
     safety.authorize("network_inventory", "readonly")
     profile = PROFILES[profile_name]
     services, inconclusive_observations, identity, tool_receipts, scan_completeness = await _nmap_scan(locator, profile)
+    safety.authorize("core_protocol_discovery", "readonly")
+    protocol_results = await discover_core_device_protocols(locator, udp_ports=profile.udp_ports)
+    for protocol in protocol_results:
+        receipt = protocol.get("receipt") if isinstance(protocol.get("receipt"), dict) else None
+        if receipt:
+            receipt["required"] = False
+            tool_receipts.append(receipt)
+    services, inconclusive_observations = merge_protocol_confirmations(
+        services,
+        inconclusive_observations,
+        protocol_results,
+    )
+    tcp_filtered_count = int(scan_completeness.get("tcp_filtered_ports_count") or 0)
+    scan_completeness["uncertainty_present"] = bool(tcp_filtered_count or inconclusive_observations)
+    if not inconclusive_observations:
+        scan_completeness["incomplete_stages"] = [
+            stage for stage in list(scan_completeness.get("incomplete_stages") or [])
+            if stage != "udp_service_uncertainty"
+        ]
+    scan_completeness["complete"] = bool(
+        scan_completeness.get("execution_complete") and not scan_completeness["uncertainty_present"]
+    )
+    scan_completeness["protocol_discovery_complete"] = all(
+        bool((protocol.get("receipt") or {}).get("complete")) for protocol in protocol_results
+    )
     known_tcp_ports = [
         int(service["port"])
         for service in services
@@ -661,6 +733,7 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
         services=services,
         inconclusive_observations=inconclusive_observations,
         web_origins=web_origins,
+        protocol_observations=protocol_results,
         tool_receipts=tool_receipts,
         safety_receipt=safety_receipt,
     )
@@ -675,6 +748,7 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
             "services": services,
             "inconclusive_observations": inconclusive_observations,
             "web_origins": web_origins,
+            "protocols": protocol_results,
             "policy": {"name": policy_name, "rules_count": len(rules)},
             "decision": {"decision": decision, "rationale": rationale, "policy_name": policy_name},
             "safety": safety_receipt,
