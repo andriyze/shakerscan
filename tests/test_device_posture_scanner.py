@@ -331,6 +331,15 @@ def test_device_scan_emits_independent_safety_and_normalized_evidence(monkeypatc
     async def fake_health(locator, *, stage, tcp_ports=(), timeout=1.5):
         return {"stage": stage, "status": "healthy" if tcp_ports else "indeterminate"}
 
+    async def fake_reachability(locator, resolved_address, **kwargs):
+        return {
+            "schema_version": "device-reachability/v1", "status": "online", "online": True,
+            "network_accessible": True, "service_accessible": True, "confidence": "high",
+            "reason": "fixture response", "locator": locator, "resolved_address": resolved_address,
+            "resolution_succeeded": True, "positive_signals": {"tcp_open_ports": [8443]},
+            "attempts": [], "nmap_host_discovery": {},
+        }
+
     async def fake_origins(locator, rows, **kwargs):
         return [{
             "origin": "https://tv.test:8443", "port": 8443, "scheme": "https",
@@ -344,6 +353,7 @@ def test_device_scan_emits_independent_safety_and_normalized_evidence(monkeypatc
     async def fake_resolve(_locator, **_kwargs):
         return "192.0.2.40"
     monkeypatch.setattr(device_posture, "resolve_device_address", fake_resolve)
+    monkeypatch.setattr(device_posture, "probe_device_reachability", fake_reachability)
     monkeypatch.setattr(device_posture, "check_device_health", fake_health)
     monkeypatch.setattr(device_posture, "discover_core_device_protocols", fake_protocols)
     monkeypatch.setattr(device_posture, "detect_web_origins", fake_origins)
@@ -360,6 +370,40 @@ def test_device_scan_emits_independent_safety_and_normalized_evidence(monkeypatc
     assert posture["evidence_graph"]["schema_version"] == "device-evidence/v1"
     assert result["scan_metadata"]["device_coverage_profile"] == "inventory"
     assert result["scan_metadata"]["device_safety_profile"] == "safe_remote"
+    assert posture["reachability"]["status"] == "online"
+
+
+def test_inconclusive_reachability_stops_before_inventory_and_has_no_grade(monkeypatch):
+    async def fake_resolve(_locator, **_kwargs):
+        return "192.0.2.55"
+
+    async def fake_reachability(locator, resolved_address, **kwargs):
+        return {
+            "schema_version": "device-reachability/v1", "status": "inconclusive", "online": None,
+            "network_accessible": False, "service_accessible": None, "confidence": "none",
+            "reason": "No direct response proved that the device is online.",
+            "locator": locator, "resolved_address": resolved_address, "resolution_succeeded": True,
+            "positive_signals": {"tcp_open_ports": [], "tcp_refused_ports": []},
+            "attempts": [], "nmap_host_discovery": {},
+        }
+
+    async def forbidden_inventory(*_args, **_kwargs):
+        raise AssertionError("inventory must not run without positive reachability")
+
+    monkeypatch.setattr(device_posture, "resolve_device_address", fake_resolve)
+    monkeypatch.setattr(device_posture, "probe_device_reachability", fake_reachability)
+    monkeypatch.setattr(device_posture, "_nmap_scan", forbidden_inventory)
+    result = asyncio.run(device_posture.run_device_posture_scan("tv.test", {
+        "device_profile": "posture",
+        "safety_profile": "safe_remote",
+        "confirm_authorized": True,
+        "include_web_dast": True,
+        "device_policy": {"name": "test", "rules": []},
+    }))
+    assert result["result"] == {"score": None, "grade": None}
+    assert result["device_posture"]["reachability"]["status"] == "inconclusive"
+    assert result["device_posture"]["completeness"]["reachability_confirmed"] is False
+    assert result["device_posture"]["decision"]["decision"] == "needs_review"
 
 
 def test_fingerprinting_is_capped_and_forces_incomplete_coverage(monkeypatch):

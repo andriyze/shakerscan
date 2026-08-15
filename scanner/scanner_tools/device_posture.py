@@ -27,6 +27,11 @@ except ImportError:  # pragma: no cover - minimal host test environment
 try:
     from .common import run
     from .device_evidence import build_device_evidence_graph
+    from .device_reachability import (
+        corroborate_device_reachability,
+        probe_device_reachability,
+        unresolved_reachability,
+    )
     from .device_shell import validate_shell_plan
     from .device_protocols import discover_core_device_protocols
     from .device_safety import DeviceSafetyGovernor, check_device_health, validate_safety_request
@@ -34,6 +39,11 @@ try:
 except ImportError:  # pragma: no cover - flat scanner runtime
     from common import run
     from device_evidence import build_device_evidence_graph
+    from device_reachability import (
+        corroborate_device_reachability,
+        probe_device_reachability,
+        unresolved_reachability,
+    )
     from device_shell import validate_shell_plan
     from device_protocols import discover_core_device_protocols
     from device_safety import DeviceSafetyGovernor, check_device_health, validate_safety_request
@@ -815,6 +825,122 @@ def _device_decision(findings: list[dict[str, Any]], *, complete: bool) -> tuple
     return "allow", "Confirmed listening services conform to policy."
 
 
+def _reachability_checkpoint(reachability: dict[str, Any], *, stage: str) -> dict[str, Any]:
+    status = str(reachability.get("status") or "inconclusive")
+    signals = reachability.get("positive_signals") if isinstance(reachability.get("positive_signals"), dict) else {}
+    return {
+        "stage": stage,
+        "status": "healthy" if status == "online" else "degraded" if status == "unreachable" else "indeterminate",
+        "reachability_status": status,
+        "resolution_succeeded": bool(reachability.get("resolution_succeeded")),
+        "addresses": [reachability.get("resolved_address")] if reachability.get("resolved_address") else [],
+        "attempted_tcp_ports": sorted({
+            int(probe.get("port"))
+            for attempt in reachability.get("attempts") or [] if isinstance(attempt, dict)
+            for probe in attempt.get("tcp_probes") or [] if isinstance(probe, dict) and probe.get("port") is not None
+        }),
+        "responsive_tcp_ports": sorted(set(
+            [int(port) for port in signals.get("tcp_open_ports") or []]
+            + [int(port) for port in signals.get("tcp_refused_ports") or []]
+        )),
+        "reason": reachability.get("reason"),
+    }
+
+
+def _reachability_only_result(
+    *,
+    locator: str,
+    resolved_address: str | None,
+    profile_name: str,
+    profile: DeviceScanProfile,
+    safety: DeviceSafetyGovernor,
+    reachability: dict[str, Any],
+    resolved_credentials: list[dict[str, Any]],
+    requested_capabilities: list[str],
+    policy_name: str,
+    policy_rules_count: int,
+) -> dict[str, Any]:
+    """Return an explicit no-score result when the device never proves it is online."""
+    incomplete_stage = (
+        "device_unreachable"
+        if reachability.get("status") == "unreachable"
+        else "device_reachability_inconclusive"
+    )
+    completeness = {
+        "complete": False,
+        "execution_complete": False,
+        "reachability_confirmed": False,
+        "reachability_status": reachability.get("status"),
+        "tcp_scope": "all_65535" if "-p-" in profile.tcp_args else "top_100",
+        "tcp_priority_ports": list(PRIORITY_TCP_PORTS),
+        "udp_ports_requested": list(profile.udp_ports),
+        "confirmed_services_count": 0,
+        "inconclusive_observations_count": 0,
+        "tool_receipts": [],
+        "incomplete_stages": [incomplete_stage],
+        "web_probe_cap": profile.web_probe_cap,
+        "web_probe_truncated": False,
+    }
+    safety_receipt = safety.receipt()
+    evidence_graph = build_device_evidence_graph(
+        locator=locator,
+        identity={"hostnames": [], "addresses": [], "os_matches": []},
+        services=[],
+        inconclusive_observations=[],
+        web_origins=[],
+        protocol_observations=[],
+        tool_receipts=[],
+        safety_receipt=safety_receipt,
+        reachability=reachability,
+    )
+    return {
+        "target": locator,
+        "resolved_target": resolved_address,
+        "result": {"score": None, "grade": None},
+        "findings": [],
+        "device_posture": {
+            "schema_version": "device-posture/v1",
+            "profile": profile_name,
+            "identity": {"hostnames": [], "addresses": [], "os_matches": []},
+            "resolved_target": resolved_address,
+            "reachability": reachability,
+            "services": [],
+            "inconclusive_observations": [],
+            "web_origins": [],
+            "protocols": [],
+            "policy": {"name": policy_name, "rules_count": policy_rules_count},
+            "decision": {
+                "decision": "needs_review",
+                "rationale": reachability.get("reason"),
+                "policy_name": policy_name,
+            },
+            "safety": safety_receipt,
+            "evidence_graph": evidence_graph,
+            "capability_coverage": [
+                {"capability_id": "scope-safety-health", "status": "failed"},
+                {"capability_id": "device-identity-attack-surface", "status": "blocked", "reason": incomplete_stage},
+                {"capability_id": "tcp-udp-network-discovery", "status": "blocked", "reason": incomplete_stage},
+                {"capability_id": "service-fingerprinting-crypto", "status": "blocked", "reason": incomplete_stage},
+                {"capability_id": "evidence-correlation-reporting", "status": "completed"},
+            ],
+            "requested_capabilities": requested_capabilities,
+            "completeness": completeness,
+        },
+        "scan_metadata": {
+            "run_kind": "device_posture",
+            "active_testing": False,
+            "credentials_attempted": False,
+            "device_coverage_profile": profile_name,
+            "device_safety_profile": safety.profile.name,
+            "device_reachability_status": reachability.get("status"),
+            "credential_profile_refs": [
+                {"role": item.get("role"), "profile_id": item.get("profile_id"), "auth_kind": item.get("auth_kind")}
+                for item in resolved_credentials
+            ],
+        },
+    }
+
+
 async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict[str, Any]:
     locator = normalize_device_locator(locator)
     profile_name = str(options.get("device_profile") or "posture").lower()
@@ -871,7 +997,10 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
         for port, fingerprint in (options.get("expected_ssh_host_keys") or {}).items()
         if str(port).isdigit() and 1 <= int(port) <= 65535 and str(fingerprint).startswith("SHA256:")
     }
-    resolved_address = await resolve_device_address(locator)
+    profile = PROFILES[profile_name]
+    policy = options.get("device_policy") if isinstance(options.get("device_policy"), dict) else {}
+    policy_name = str(policy.get("name") or "connected-device-default-v1")
+    rules = policy.get("rules") if isinstance(policy.get("rules"), list) else []
 
     async def ensure_active(stage: str) -> bool:
         if callable(cancel_check) and bool(await cancel_check()):
@@ -880,14 +1009,50 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
 
     await ensure_active("health baseline")
     safety.authorize("target_health_baseline", "readonly")
-    safety.record_health(await check_device_health(resolved_address, stage="baseline"))
+    try:
+        resolved_address = await resolve_device_address(locator)
+    except ValueError as exc:
+        reachability = unresolved_reachability(locator, exc)
+        safety.record_health(_reachability_checkpoint(reachability, stage="reachability_preflight"))
+        return _reachability_only_result(
+            locator=locator,
+            resolved_address=None,
+            profile_name=profile_name,
+            profile=profile,
+            safety=safety,
+            reachability=reachability,
+            resolved_credentials=resolved_credentials,
+            requested_capabilities=requested_capabilities,
+            policy_name=policy_name,
+            policy_rules_count=len(rules),
+        )
+    reachability = await probe_device_reachability(
+        locator,
+        resolved_address,
+        attempts=2,
+        timeout=1.0,
+        cancel_check=cancel_check,
+    )
+    safety.record_health(_reachability_checkpoint(reachability, stage="reachability_preflight"))
+    if reachability.get("status") != "online":
+        return _reachability_only_result(
+            locator=locator,
+            resolved_address=resolved_address,
+            profile_name=profile_name,
+            profile=profile,
+            safety=safety,
+            reachability=reachability,
+            resolved_credentials=resolved_credentials,
+            requested_capabilities=requested_capabilities,
+            policy_name=policy_name,
+            policy_rules_count=len(rules),
+        )
     safety.authorize("network_inventory", "readonly")
     safety.record_limit_enforcement(
         "nmap",
         max_concurrency=1,
         max_requests_per_second=safety_profile.max_requests_per_second,
     )
-    profile = PROFILES[profile_name]
     services, inconclusive_observations, identity, tool_receipts, scan_completeness = await _nmap_scan(
         resolved_address,
         profile,
@@ -1066,14 +1231,33 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
         scan_completeness["safety_halted"] = True
         scan_completeness.setdefault("incomplete_stages", []).append("device_health_degraded")
 
-    policy = options.get("device_policy") if isinstance(options.get("device_policy"), dict) else {}
-    policy_name = str(policy.get("name") or "connected-device-default-v1")
-    rules = policy.get("rules") if isinstance(policy.get("rules"), list) else []
+    reachability = corroborate_device_reachability(
+        reachability,
+        services=services,
+        tool_receipts=tool_receipts,
+        protocol_results=protocol_results,
+        health_checkpoints=safety_receipt.get("health_checkpoints") or [],
+        full_tcp_visibility=bool(
+            "-p-" in profile.tcp_args
+            and scan_completeness.get("tcp_discovery_complete")
+            and scan_completeness.get("tcp_visibility_complete")
+        ),
+    )
+    scan_completeness["reachability_confirmed"] = reachability.get("status") == "online"
+    scan_completeness["reachability_status"] = reachability.get("status")
+    if reachability.get("status") != "online":
+        scan_completeness["complete"] = False
+        scan_completeness["execution_complete"] = False
+        scan_completeness.setdefault("incomplete_stages", []).append("device_reachability_unconfirmed")
     services, policy_findings = evaluate_service_policy(services, rules, policy_name=policy_name)
     findings = policy_findings + ssh_findings
     complete = bool(scan_completeness.get("complete"))
     execution_complete = bool(scan_completeness.get("execution_complete", complete))
-    score, grade = _score(findings, complete=execution_complete)
+    score, grade = (
+        _score(findings, complete=execution_complete)
+        if reachability.get("status") == "online"
+        else (None, None)
+    )
     decision, rationale = _device_decision(findings, complete=complete)
     evidence_graph = build_device_evidence_graph(
         locator=locator,
@@ -1084,9 +1268,10 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
         protocol_observations=protocol_results,
         tool_receipts=tool_receipts,
         safety_receipt=safety_receipt,
+        reachability=reachability,
     )
     capability_coverage = [
-        {"capability_id": "scope-safety-health", "status": "completed" if not safety.halted else "failed"},
+        {"capability_id": "scope-safety-health", "status": "completed" if not safety.halted and reachability.get("status") == "online" else "failed"},
         {"capability_id": "device-identity-attack-surface", "status": "completed" if identity else "partial"},
         {"capability_id": "tcp-udp-network-discovery", "status": "completed" if scan_completeness.get("execution_complete") else "partial"},
         {"capability_id": "service-fingerprinting-crypto", "status": "completed" if services else "partial"},
@@ -1141,6 +1326,7 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
             "profile": profile_name,
             "identity": identity,
             "resolved_target": resolved_address,
+            "reachability": reachability,
             "services": services,
             "inconclusive_observations": inconclusive_observations,
             "web_origins": web_origins,
@@ -1174,6 +1360,7 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
             ),
             "device_coverage_profile": profile_name,
             "device_safety_profile": safety_profile.name,
+            "device_reachability_status": reachability.get("status"),
             "credential_profile_refs": [
                 {"role": item.get("role"), "profile_id": item.get("profile_id"), "auth_kind": item.get("auth_kind")}
                 for item in resolved_credentials

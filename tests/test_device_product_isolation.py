@@ -93,3 +93,26 @@ def test_device_uncertainty_requires_review_without_score_penalty():
     worker._device_score_with_web_findings(result)
     assert result["result"] == {"score": 100, "grade": "A"}
     assert result["device_posture"]["decision"]["decision"] == "needs_review"
+
+
+def test_device_unconfirmed_reachability_never_gets_a_score():
+    result = {
+        "result": {"score": 100, "grade": "A"},
+        "findings": [],
+        "device_posture": {
+            "reachability": {
+                "status": "inconclusive",
+                "reason": "No direct device response was received.",
+            },
+            "completeness": {"complete": False, "execution_complete": False},
+            "decision": {},
+        },
+    }
+
+    worker._device_score_with_web_findings(result)
+
+    assert result["result"] == {"score": None, "grade": None}
+    assert result["device_posture"]["decision"] == {
+        "decision": "needs_review",
+        "rationale": "No direct device response was received.",
+    }

@@ -124,6 +124,20 @@ def test_device_detail_scopes_udp_uncertainty_to_the_latest_posture_scan():
     assert "Not confirmed open" in ui
 
 
+def test_device_views_expose_last_scan_reachability_without_assuming_online():
+    api = (ROOT / "api" / "api.py").read_text()
+    worker = (ROOT / "api" / "worker.py").read_text()
+    detail_ui = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "page.tsx").read_text()
+    list_ui = (ROOT / "ui" / "src" / "app" / "devices" / "page.tsx").read_text()
+
+    assert "AS last_reachability" in api
+    assert '"reachability": device_payload.get("last_reachability")' in api
+    assert 'reachability.get("status") != "online"' in worker
+    assert "Device reachability not checked" in detail_ui
+    assert "service accessibility still being assessed" in detail_ui
+    assert "Reachability: not checked" in list_ui
+
+
 def test_device_findings_use_atomic_conflict_upsert():
     source = (ROOT / "api" / "worker.py").read_text()
     function = source[source.index("async def save_device_findings"):]

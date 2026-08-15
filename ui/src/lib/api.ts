@@ -1335,9 +1335,35 @@ export interface DeviceTarget {
   last_grade?: string | null
   active_findings_count: number
   services_count?: number
+  last_reachability?: DeviceReachability | null
   is_active: boolean
   created_at: string
   updated_at: string
+}
+
+export interface DeviceReachability {
+  schema_version: 'device-reachability/v1'
+  status: 'online' | 'unreachable' | 'inconclusive'
+  online: boolean | null
+  network_accessible: boolean | null
+  service_accessible: boolean | null
+  confidence: 'high' | 'medium' | 'none'
+  reason: string
+  checked_at?: string
+  locator: string
+  resolved_address?: string | null
+  resolution_succeeded: boolean
+  positive_signals?: {
+    tcp_open_ports?: number[]
+    tcp_refused_ports?: number[]
+    nmap_host_discovery?: boolean
+    nmap_reason?: string | null
+    confirmed_open_services?: number
+    closed_port_responses?: number
+    responsive_health_ports?: number[]
+    confirmed_protocols?: string[]
+  }
+  post_scan_corroborated?: boolean
 }
 
 export interface DeviceInterface {
@@ -1398,6 +1424,7 @@ export interface DeviceCredentialProfile {
 
 export interface DeviceDetailResponse {
   device: DeviceTarget
+  reachability?: DeviceReachability | null
   interfaces: DeviceInterface[]
   locator_history: DeviceLocatorHistory[]
   services: DeviceService[]

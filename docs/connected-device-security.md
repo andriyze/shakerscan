@@ -53,6 +53,21 @@ Every device action receives a declared safety class. The device safety governor
 permitted by the selected profile and records baseline, post-inventory, and final health checkpoints.
 If a previously healthy device degrades, the scan is halted and cannot produce an allow decision.
 
+Before any top-100 or all-port inventory begins, ShakerScan runs a bounded, multi-signal reachability
+preflight. It tries common device TCP ports twice and runs Nmap host discovery with ARP/ICMP plus
+TCP and curated UDP discovery probes. A successful TCP connection, an explicit refusal/reset, or a
+real Nmap response reason proves that a network stack answered. DNS resolution, Nmap's `user-set`
+assume-up reason, timeouts, and silence do not. The receipt distinguishes `online`, `unreachable`,
+and `inconclusive`, records the evidence and check time, and is shown on the device list and detail
+page. An inconclusive result may mean that the device is asleep, powered off, isolated, or filtering
+the scanner; it is never silently reclassified as offline or online.
+
+If online status is not positively proven, the expensive inventory and authenticated actions do not
+run. The scan records incomplete reachability evidence and produces neither a numeric score nor a
+grade. Post-scan open services, protocol replies, responsive health ports, and explicit closed-port
+responses corroborate the preflight. A completed all-TCP inventory can therefore distinguish an
+online device with no listening TCP services from a target whose reachability was never established.
+
 TCP assessment is staged. A bounded priority pass checks common administration, media, printing,
 messaging, and nonstandard web ports first. The requested top-100 or all-port discovery then runs
 without expensive version detection, and service/version fingerprinting runs only against ports
@@ -240,6 +255,8 @@ and policy boundary.
 
 - The scanner observes the network path visible from its device worker; NAT, firewall rules, VLANs,
   and client isolation can hide services.
+- A silent reachability check is inconclusive, not proof that a device is offline. Wake the device or
+  move the worker to a network path that can reach it, then scan again.
 - Service and OS fingerprints are evidence, not guaranteed product identity. Stable MAC identity is
   unavailable across routed networks and can be randomized.
 - UDP coverage is a declared curated set, not all 65,535 ports.

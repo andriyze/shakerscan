@@ -137,6 +137,7 @@ export default function DevicesPage() {
               <div className="min-w-0"><Link href={`/devices/${device.id}`} className="font-semibold text-white hover:text-blue-300">{device.name}</Link><p className="mt-1 truncate font-mono text-xs text-gray-400">{device.primary_locator}</p></div>
               {device.last_grade ? <span className="rounded-md bg-gray-800 px-2 py-1 text-sm font-bold text-gray-200">{device.last_grade}</span> : null}
             </div>
+            <div className="mt-3"><span className={`rounded-full px-2 py-1 text-xs ${device.last_reachability?.status === 'online' ? 'bg-emerald-500/15 text-emerald-300' : device.last_reachability?.status === 'unreachable' ? 'bg-red-500/15 text-red-300' : 'bg-amber-500/15 text-amber-300'}`}>{device.last_reachability ? `Reachability: ${device.last_reachability.status}` : 'Reachability: not checked'}</span></div>
             <div className="mt-4 grid grid-cols-3 gap-2 text-center text-xs">
               <div className="rounded bg-gray-950 p-2"><div className="text-lg font-semibold text-white">{device.services_count || 0}</div><div className="text-gray-500">services</div></div>
               <div className="rounded bg-gray-950 p-2"><div className="text-lg font-semibold text-white">{device.active_findings_count || 0}</div><div className="text-gray-500">findings</div></div>

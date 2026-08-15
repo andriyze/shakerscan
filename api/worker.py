@@ -7587,11 +7587,27 @@ async def _finish_broker_result_ingest(job_data: dict[str, Any]) -> None:
 
 def _device_score_with_web_findings(result: dict[str, Any]) -> None:
     findings = result.get("findings") if isinstance(result.get("findings"), list) else []
-    weights = {"critical": 30, "high": 18, "medium": 8, "low": 3, "info": 0}
-    score = max(0, 100 - sum(weights.get(str(item.get("severity") or "info").lower(), 0) for item in findings if isinstance(item, dict)))
     posture = result.get("device_posture") if isinstance(result.get("device_posture"), dict) else {}
+    reachability = posture.get("reachability") if isinstance(posture.get("reachability"), dict) else {}
     completeness = posture.get("completeness") if isinstance(posture.get("completeness"), dict) else {}
     children = posture.get("web_dast_children") if isinstance(posture.get("web_dast_children"), dict) else {}
+    # Older stored results predate the reachability receipt. Preserve their
+    # existing post-processing semantics, but fail closed whenever a current
+    # scan explicitly records that online status was not proven.
+    if reachability and reachability.get("status") != "online":
+        result.setdefault("result", {})["score"] = None
+        result["result"]["grade"] = None
+        decision = posture.get("decision") if isinstance(posture.get("decision"), dict) else {}
+        decision["decision"] = "needs_review"
+        decision["rationale"] = str(
+            reachability.get("reason")
+            or "Device reachability was not positively confirmed; no posture score was issued."
+        )
+        posture["decision"] = decision
+        result["device_posture"] = posture
+        return
+    weights = {"critical": 30, "high": 18, "medium": 8, "low": 3, "info": 0}
+    score = max(0, 100 - sum(weights.get(str(item.get("severity") or "info").lower(), 0) for item in findings if isinstance(item, dict)))
     execution_incomplete = not bool(completeness.get("execution_complete", completeness.get("complete", False)))
     incomplete = (
         not bool(completeness.get("complete", False))

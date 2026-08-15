@@ -18209,6 +18209,8 @@ def _validate_device_policy_rules(rules: list[dict[str, Any]]) -> list[dict[str,
 def _decode_device_row(row: Any) -> dict[str, Any]:
     payload = row_to_dict(row)
     payload["metadata_json"] = _decode_json_value(payload.get("metadata_json")) or {}
+    if "last_reachability" in payload:
+        payload["last_reachability"] = _decode_json_value(payload.get("last_reachability")) or None
     if "rules" in payload:
         payload["rules"] = _decode_json_value(payload.get("rules")) or []
     return payload
@@ -18542,7 +18544,8 @@ async def list_devices(
     async with db_pool.acquire() as conn:
         rows = await conn.fetch(
             f"""SELECT d.*, p.name AS policy_name,
-                       (SELECT COUNT(*) FROM device_services ds WHERE ds.device_target_id=d.id AND ds.state='open') AS services_count
+                       (SELECT COUNT(*) FROM device_services ds WHERE ds.device_target_id=d.id AND ds.state='open') AS services_count,
+                       (SELECT s.result->'device_posture'->'reachability' FROM scans s WHERE s.id=d.last_scan_id) AS last_reachability
                 FROM device_targets d LEFT JOIN device_policies p ON p.id=d.policy_id
                 WHERE {where} ORDER BY d.updated_at DESC LIMIT ${len(params)+1} OFFSET ${len(params)+2}""",
             *params, limit, offset,
@@ -18793,7 +18796,9 @@ async def get_device(
     device_uuid = _device_uuid(device_id)
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT d.*, p.name AS policy_name FROM device_targets d LEFT JOIN device_policies p ON p.id=d.policy_id WHERE d.id=$1",
+            """SELECT d.*, p.name AS policy_name,
+                      (SELECT s.result->'device_posture'->'reachability' FROM scans s WHERE s.id=d.last_scan_id) AS last_reachability
+               FROM device_targets d LEFT JOIN device_policies p ON p.id=d.policy_id WHERE d.id=$1""",
             device_uuid,
         )
         if not row:
@@ -18832,8 +18837,10 @@ async def get_device(
                ORDER BY created_at DESC LIMIT 20""",
             device_uuid,
         )
+    device_payload = _decode_device_row(row)
     return {
-        "device": _decode_device_row(row),
+        "device": device_payload,
+        "reachability": device_payload.get("last_reachability"),
         "interfaces": [_decode_device_row(item) for item in interfaces],
         "locator_history": [_decode_device_row(item) for item in locator_history],
         "services": [_decode_device_row(item) for item in services],

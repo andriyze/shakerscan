@@ -27,6 +27,7 @@ def build_device_evidence_graph(
     protocol_observations: list[dict[str, Any]] | None = None,
     tool_receipts: list[dict[str, Any]],
     safety_receipt: dict[str, Any],
+    reachability: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return normalized observations plus a deterministic entity graph.
 
@@ -75,6 +76,14 @@ def build_device_evidence_graph(
         return observation_id
 
     device_id = add_node("device", locator, {"primary_locator": locator})
+    if reachability:
+        add_observation(
+            "device_reachability",
+            device_id,
+            dict(reachability),
+            source="device_reachability_preflight",
+            confidence="validated" if reachability.get("status") == "online" else "inconclusive",
+        )
     for address in identity.get("addresses") or []:
         if not isinstance(address, dict) or not address.get("address"):
             continue
