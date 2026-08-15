@@ -6,7 +6,7 @@ governance, automation, UI, CLI, API, and agent-facing surfaces. The human-reada
 the behavior; the generated inventory in §17 enumerates every current public route, registry command,
 CLI flag, wrapper command, Make target, release gate, runtime configuration key, UI page, skill,
 agent, adapter, scanner module, and durable table.
-**Reconciled:** 2026-08-09
+**Reconciled:** 2026-08-15
 **Audience:** users, operators, AI coding agents, and engineers who need one place that explains the
 product's functionality end to end.
 
@@ -525,7 +525,11 @@ passive-only `quick`, `standard`, or `deep` Web DAST children with capped origin
 requests. Child findings retain device/origin provenance and never create Web targets.
 
 SSH checks run on the discovered port and collect auth methods, host-key evidence, negotiated
-algorithms, and weak-crypto signals without credential guessing. Ordered service policies support
+algorithms, and weak-crypto signals without credential guessing. An operator may bind one encrypted,
+device-scoped SSH password/private-key profile for one authentication attempt with no command
+execution. Discovered web origins may likewise use an encrypted authorization-header, cookie, or
+form-login profile. Credential values are decrypted only in the dedicated worker, never persisted in
+scan options/results, and never shown to the AI planner. Ordered service policies support
 allow, deny, review, and fail-closed required-control rules. Built-in generic, media, camera, printer,
 and network-appliance baselines can be copied or replaced with custom allowlists. `review` findings
 produce `needs_review`; deny/failed-require findings block. A complete report
@@ -534,14 +538,26 @@ and complete web-origin coverage. Bluetooth/BLE and other radio protocols remain
 capability-labeled sensor extension rather than an implied Docker-worker capability. See
 [`connected-device-security.md`](connected-device-security.md).
 
-Device coverage depth and action safety are independent. `observe_only` and `safe_remote` are
-available; authenticated and lab-invasive profiles are declared but fail closed until their
-dedicated collectors/runners are ready. Device reports carry `device-safety/v1` receipts plus a
+Device coverage depth and action safety are independent. `observe_only`, `safe_remote`, and
+`authenticated_active` are available; `lab_invasive` remains declared but fails closed until its
+dedicated runner is ready. Device reports carry `device-safety/v1` receipts plus a
 stable `device-evidence/v1` node/edge/observation graph. The keyless device investigator uses
 `POST /devices/{device_id}/agent/session` and `/device-agent/session/*` to let the current coding
-agent inspect device state, queue bounded deterministic scans, and query normalized evidence. Its
-target and safety profile are immutable, its tool/turn/scan budgets are server-enforced, and its
-debrief can create evidence-backed hypotheses but never authoritative findings.
+agent inspect device state, compare scans, recall prior hypotheses, query effective policy, use
+offline advisory candidates and protocol playbooks, queue bounded deterministic scans, and query
+normalized evidence. Its context pack treats network data as untrusted, its target and safety profile
+are immutable, and its tool/turn/scan/daily-device/fragility budgets are server-enforced and recorded
+in a durable action ledger. A health circuit breaker freezes new traffic while leaving read-only
+evidence tools available. Its debrief can create evidence-backed hypotheses but never authoritative
+findings.
+
+For a narrow hypothesis, `POST /devices/{device_id}/verify-service` and the agent's
+`verify_service_state` tool queue a `device_probe` on the same dedicated worker. The executor resolves
+and pins the registered locator once, invokes rate-limited Nmap against exactly one declared TCP or
+UDP port, checks health before and after, and returns a typed `satisfied`, `refuted`, or
+`inconclusive` invariant. Filtered, silent, malformed, timed-out, or missing-port output is never
+accepted as proof that a service is absent. Probe rows remain separate from Web DAST targets,
+findings, scores, device inventory, and ordinary DAST metrics.
 Core protocol adapters send bounded exact-target unicast SSDP and mDNS discovery probes, normalize
 UPnP and DNS-SD metadata, refuse to follow cross-host descriptor locations, and promote UDP
 `open|filtered` state only after a valid application response.
@@ -1062,7 +1078,12 @@ State-changing commands are not exposed. See [`docs/read-only-mcp.md`](read-only
 `GET /targets/{id}` · `PATCH /targets/{id}` · `DELETE /targets/{id}` · `POST /targets/{id}/scan`
 
 **Connected devices**: `GET /devices/readiness` · `GET|POST /devices` ·
-`GET|PATCH|DELETE /devices/{id}` · `POST /devices/{id}/scan` · `GET /device-scans` ·
+`GET|PATCH|DELETE /devices/{id}` · `POST /devices/{id}/scan` ·
+`POST /devices/{id}/verify-service` · `GET /device-scans` ·
+`GET|POST /devices/{id}/credentials` · `POST /devices/{id}/credentials/{profile_id}/rotate` ·
+`DELETE /devices/{id}/credentials/{profile_id}` ·
+`POST /devices/{id}/agent/session` · `GET /device-agent/session/{run_id}` ·
+`POST /device-agent/session/{run_id}/reply|cancel` ·
 `GET|POST /device-policies` · `PATCH /device-policies/{id}`
 
 **Continuous ASM**: `GET /asm/check-families` · `GET /targets/{id}/asm/endpoints` ·
@@ -1270,6 +1291,9 @@ never read into documentation.
 - `content-discovery`: builds generic and app-specific route/file/API lists and scanner/ffuf inputs.
 - `research-agent`: creates or continues bounded research episodes and Deep Hunt campaigns with one
   policy-controlled decision per observation.
+- `device-hunt`: drives one authorized connected-device investigation through immutable scope,
+  context, memory, fragility, health, and deterministic-evidence boundaries.
+- `device-triage`: explains and compares existing connected-device evidence without sending traffic.
 - `review-skills`: audits skills, commands, and subagents for broken references, unsafe prompts, and
   missing gates or output contracts.
 
@@ -1310,7 +1334,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Runtime environment keys | 333 | Python sources + Compose manifests |
 | Scanner modules | 100 | `scanner/scanner_tools/` |
 | UI pages | 34 | `ui/src/app/` |
-| Skills | 6 | `skills/` |
+| Skills | 8 | `skills/` |
 | Slash commands | 15 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
 | Durable tables | 71 | `db/init.sql` + migrations |
@@ -1414,13 +1438,22 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `POST` | `/device-policies` | `create_device_policy` |
 | `PATCH` | `/device-policies/{policy_id}` | `update_device_policy` |
 | `GET` | `/device-scans` | `list_device_scans` |
+| `GET` | `/device-agent/session/{run_id}` | `get_device_agent_session` |
+| `POST` | `/device-agent/session/{run_id}/cancel` | `cancel_device_agent_session` |
+| `POST` | `/device-agent/session/{run_id}/reply` | `submit_device_agent_reply` |
 | `GET` | `/devices` | `list_devices` |
 | `POST` | `/devices` | `create_device` |
 | `GET` | `/devices/readiness` | `get_device_readiness` |
 | `DELETE` | `/devices/{device_id}` | `deactivate_device` |
 | `GET` | `/devices/{device_id}` | `get_device` |
 | `PATCH` | `/devices/{device_id}` | `update_device` |
+| `POST` | `/devices/{device_id}/agent/session` | `start_device_agent_session` |
+| `GET` | `/devices/{device_id}/credentials` | `list_device_credentials` |
+| `POST` | `/devices/{device_id}/credentials` | `create_device_credential` |
+| `DELETE` | `/devices/{device_id}/credentials/{profile_id}` | `deactivate_device_credential` |
+| `POST` | `/devices/{device_id}/credentials/{profile_id}/rotate` | `rotate_device_credential` |
 | `POST` | `/devices/{device_id}/scan` | `scan_device` |
+| `POST` | `/devices/{device_id}/verify-service` | `verify_device_service` |
 | `GET` | `/discovery` | `list_discovery_runs` |
 | `POST` | `/discovery` | `start_discovery` |
 | `GET` | `/discovery/{discovery_id}` | `get_discovery` |
@@ -2295,6 +2328,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `/deep-hunt` | `ui/src/app/deep-hunt/page.tsx` |
 | `/deep-hunt/runs/{id}` | `ui/src/app/deep-hunt/runs/[id]/page.tsx` |
 | `/devices/{id}` | `ui/src/app/devices/[id]/page.tsx` |
+| `/devices/{id}/agent` | `ui/src/app/devices/[id]/agent/page.tsx` |
 | `/devices` | `ui/src/app/devices/page.tsx` |
 | `/devices/policies` | `ui/src/app/devices/policies/page.tsx` |
 | `/docs` | `ui/src/app/docs/page.tsx` |
@@ -2325,6 +2359,8 @@ Only key names and declaring sources are documented; secret values are never rea
 |---|---|---|
 | `ai-security-session` | Interactive Testing through ShakerScan's `/session` API. Use when asked to test manually, open an interactive browser session, exercise authentication workflows, or perform BOLA/IDOR endpoint replay. | `skills/ai-security-session/SKILL.md` |
 | `content-discovery` | Build target-specific content discovery seeds, path lists, and ShakerScan scan inputs from scan results, JS analysis, framework clues, and exposed docs. Use when asked for content discovery, wordlist generation, ffuf seeds, admin path discovery, hidden file discovery, route discovery, or custom endpoint seeding. | `skills/content-discovery/SKILL.md` |
+| `device-hunt` | Direct a bounded AI investigation of one registered and authorized connected device; deterministic scans and typed verifiers remain authoritative. | `skills/device-hunt/SKILL.md` |
+| `device-triage` | Explain, compare, and triage existing connected-device evidence without sending new traffic. | `skills/device-triage/SKILL.md` |
 | `js-analyze` | Analyze JavaScript bundles, frontend routes, browser-captured APIs, libraries, and secrets for a ShakerScan target or completed scan. Use when asked for JS analysis, route analysis, frontend endpoint discovery, library review, source-map hints, or to build `custom_endpoints` for a ShakerScan scan. | `skills/js-analyze/SKILL.md` |
 | `research-agent` | Run ShakerScan Deep Hunt—the current coding agent performs free-form, AI-driven exploration and bounded active exploitation through /agent/hunt/* while ShakerScan enforces target scope, approvals, budgets, evidence provenance, and deterministic finding verification. Use for “deep hunt”, “autonomous hunt”, or “investigate autonomously”; do not use for ordinary DAST scans. | `skills/research-agent/SKILL.md` |
 | `review-skills` | Review ShakerScan skills, commands, and subagents for broken references, invalid Claude Code configuration, prompt anti-patterns, missing hard gates, missing outputs, and weak operational guidance. Use when asked to audit, review, or quality-check the skill system itself. | `skills/review-skills/SKILL.md` |
@@ -2356,6 +2392,10 @@ Only key names and declaring sources are documented; secret values are never rea
 
 ### Scanner Module Inventory
 
+Connected-device modules additionally include `device_evidence.py`, `device_probe.py`,
+`device_protocols.py`, and `device_safety.py`; `device_posture.py` remains the broad inventory
+orchestrator.
+
 `access_control_checks.py`, `active_checks.py`, `active_enrichment_policy.py`, `active_prioritization.py`, `adaptive_throttle.py`, `ai_classifier.py`, `api_auth.py`, `api_security.py`, `approval_checks.py`, `asn_discovery.py`, `attack_chains.py`, `attempt_telemetry.py`, `auth_session.py`, `benchmark_summary.py`, `bola_comparison.py`, `bounded_exec.py`, `brand_protection.py`, `breach_check.py`, `build_fingerprint.py`, `cancellation.py`, `client_side.py`, `common.py`, `completion_status.py`, `compliance_mapper.py`, `coverage_tracker.py`, `credential_check.py`, `critical_checks.py`, `ct_monitor.py`, `data_exposure.py`, `deduplication_engine.py`, `deserialization_tests.py`, `device_posture.py`, `discovery.py`, `dns_enhanced.py`, `dom_xss_analyzer.py`, `domain_intel.py`, `exposure_markers.py`, `file_upload_tests.py`, `finding_correlator.py`, `finding_validator.py`, `focused_scope.py`, `form_login.py`, `github_recon.py`, `google_dorking.py`, `gopher_payloads.py`, `graphql_schema_recovery.py`, `grpc_discovery.py`, `gungnir.py`, `har_discovery.py`, `hash_routes.py`, `health_check.py`, `http_scanner.py`, `hunter_summary.py`, `infrastructure_checks.py`, `injection_extra_checks.py`, `ip_reputation.py`, `logging_checks.py`, `model_intake.py`, `model_intake_acquisition.py`, `model_intake_adapter_self_test.py`, `model_intake_admission.py`, `model_intake_archives.py`, `model_intake_attestation.py`, `model_intake_evaluation.py`, `model_intake_licenses.py`, `model_intake_providers.py`, `model_intake_registry.py`, `model_intake_retention.py`, `model_intake_runtime.py`, `model_intake_safetensors_runtime.py`, `model_intake_safetensors_selftest.py`, `model_intake_sandbox.py`, `model_intake_scanners.py`, `network_services.py`, `nmap.py`, `nuclei.py`, `oauth_auth.py`, `oauth_tests.py`, `phase4_checks.py`, `proof_of_exploit.py`, `race_condition_tests.py`, `remediation_kb.py`, `report_gating.py`, `request_meter.py`, `resource_propagation.py`, `sarif_output.py`, `scan_delta.py`, `signal_types.py`, `smtp_scanner.py`, `ssh_scanner.py`, `subdomain_discovery.py`, `subfinder.py`, `tech_discovery.py`, `tls_scanner.py`, `vendor_risk.py`, `verification_engine.py`, `verification_phase.py`, `wayback_discovery.py`, `webhook_checks.py`, `websocket_security.py`
 
 ### Durable Storage Inventory
@@ -2381,6 +2421,9 @@ Only key names and declaring sources are documented; secret values are never rea
 | `campaign_actions` | `api/retest_contract.py` |
 | `campaigns` | `api/retest_contract.py` |
 | `command_results` | `api/retest_contract.py` |
+| `device_agent_actions` | `db/init.sql` |
+| `device_agent_runs` | `db/init.sql` |
+| `device_credential_profiles` | `db/init.sql` |
 | `device_interfaces` | `db/init.sql` |
 | `device_policies` | `db/init.sql` |
 | `device_services` | `db/init.sql` |

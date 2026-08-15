@@ -298,7 +298,7 @@ and compatibility. It is not the Deep Hunt launcher.
 | Dashboard | Security posture, prioritized actions, recent activity, queue operations, worker freshness/scaling, and Gungnir |
 | Docs | In-app rendering of the installed README for setup, workflows, safety, and troubleshooting |
 | DAST Scans / New Scan | Submission, filters, cancellation, live logs, reports, proof, coverage, and PDF export |
-| Connected Devices | Separate device inventory, all-port posture, service policies, SSH checks, and discovered web interfaces |
+| Connected Devices | Separate device inventory, TCP/UDP posture, service policies, credentialed SSH/web checks, typed one-port verification, and AI-directed Device Hunt |
 | Targets / Exposure | Asset inventory, subdomains, exposure graph, and application graph |
 | Coverage (Continuous ASM) | Endpoint inventory, proof-family coverage, gaps, recommendations, and activity |
 | Findings / Exceptions Queue | Triage, notes, retests, replay, cleanup, accepted risk, and exception lifecycle |
