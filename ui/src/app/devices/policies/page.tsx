@@ -51,12 +51,18 @@ export default function DevicePoliciesPage() {
   async function save() {
     setSaving(true)
     try {
-      const normalized: DevicePolicyRule[] = rules.map(({ portsText, ...rule }) => ({
-        ...rule,
-        ports: portsText.trim() ? portsText.split(',').map((value) => Number(value.trim())).filter((value) => Number.isInteger(value)) : undefined,
-        service: rule.service?.trim().toLowerCase() || 'any',
-        reason: rule.reason?.trim() || undefined,
-      }))
+      const normalized: DevicePolicyRule[] = rules.map(({ portsText, ...rule }, index) => {
+        const segments = portsText === '' ? [] : portsText.split(',').map((value) => value.trim())
+        if (segments.some((value) => !/^\d+$/.test(value))) throw new Error(`Rule ${index + 1}: ports must be comma-separated whole numbers without empty entries`)
+        const ports = segments.map(Number)
+        if (ports.some((value) => value < 1 || value > 65535)) throw new Error(`Rule ${index + 1}: ports must be between 1 and 65535`)
+        return {
+          ...rule,
+          ports: ports.length ? ports : undefined,
+          service: rule.service?.trim().toLowerCase() || 'any',
+          reason: rule.reason?.trim() || undefined,
+        }
+      })
       if (editingPolicy) await updateDevicePolicy(editingPolicy.id, { ...form, rules: normalized })
       else await createDevicePolicy({ ...form, rules: normalized })
       setOpen(false)
@@ -84,7 +90,7 @@ export default function DevicePoliciesPage() {
       <PageHeader backHref="/devices" backLabel="Connected devices" title="Device Service Policies" description="Define which listening services are expected, forbidden, or require review for each class of connected device." icon={<ShieldCheck className="h-6 w-6" />} actions={<Button onClick={openCreate}><Plus className="h-4 w-4" /> New policy</Button>} />
       {loading ? <p className="text-sm text-gray-500">Loading policies…</p> : failed ? <ErrorState message="Could not load device policies" onRetry={load} /> : policies.length === 0 ? <EmptyState message="No device policies" hint="Create a service allowlist and deny policy for connected devices." /> : (
         <div className="space-y-4">{policies.map((policy) => <Card key={policy.id} className="p-4">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between"><div><div className="flex items-center gap-2"><h2 className="font-semibold text-white">{policy.name}</h2>{policy.is_builtin && <span className="rounded-full bg-blue-500/15 px-2 py-0.5 text-[10px] uppercase text-blue-300">Built in</span>}{!policy.is_active && <span className="rounded-full bg-gray-700 px-2 py-0.5 text-[10px] uppercase text-gray-400">Inactive</span>}</div><p className="mt-1 text-sm text-gray-400">{policy.description || 'No description'}</p></div><div className="flex items-center gap-2"><span className="mr-2 text-xs text-gray-500">{policy.device_class} · {policy.environment} · {policy.rules.length} rules</span>{!policy.is_builtin && <Button size="sm" variant="secondary" onClick={() => openEdit(policy)}><Pencil className="h-3.5 w-3.5" /> Edit</Button>}<Button size="sm" variant="ghost" onClick={() => togglePolicy(policy)}><Power className="h-3.5 w-3.5" /> {policy.is_active ? 'Deactivate' : 'Activate'}</Button></div></div>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between"><div><div className="flex items-center gap-2"><h2 className="font-semibold text-white">{policy.name}</h2>{policy.is_builtin && <span className="rounded-full bg-blue-500/15 px-2 py-0.5 text-[10px] uppercase text-blue-300">Built in</span>}{!policy.is_active && <span className="rounded-full bg-gray-700 px-2 py-0.5 text-[10px] uppercase text-gray-400">Inactive</span>}</div><p className="mt-1 text-sm text-gray-400">{policy.description || 'No description'}</p></div><div className="flex items-center gap-2"><span className="mr-2 text-xs text-gray-500">{policy.device_class} · {policy.environment} · {policy.rules.length} rules</span>{!policy.is_builtin && <Button size="sm" variant="secondary" onClick={() => openEdit(policy)}><Pencil className="h-3.5 w-3.5" /> Edit</Button>}<Button size="sm" variant="ghost" disabled={policy.is_builtin} title={policy.is_builtin ? 'Built-in safety policies cannot be deactivated' : undefined} onClick={() => togglePolicy(policy)}><Power className="h-3.5 w-3.5" /> {policy.is_active ? 'Deactivate' : 'Activate'}</Button></div></div>
           <div className="mt-4 overflow-x-auto"><table className="w-full text-left text-xs"><thead className="text-gray-600"><tr><th className="pb-2">Decision</th><th className="pb-2">Transport</th><th className="pb-2">Service</th><th className="pb-2">Ports</th><th className="pb-2">Reason</th></tr></thead><tbody className="divide-y divide-gray-800">{policy.rules.map((rule, index) => <tr key={index}><td className="py-2 font-medium text-gray-200">{rule.action}</td><td className="py-2 text-gray-400">{rule.transport || 'any'}</td><td className="py-2 text-gray-400">{rule.service || 'any'}</td><td className="py-2 font-mono text-gray-400">{rule.ports?.join(', ') || 'any'}</td><td className="py-2 text-gray-500">{rule.reason || '—'}</td></tr>)}</tbody></table></div>
         </Card>)}</div>
       )}

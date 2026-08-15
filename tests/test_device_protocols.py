@@ -40,6 +40,29 @@ def test_mdns_parser_extracts_ptr_service_records():
     }]
 
 
+def test_mdns_query_echo_and_empty_response_do_not_confirm_service(monkeypatch):
+    query = device_protocols.build_mdns_service_query()
+    empty_response = struct.pack("!HHHHHH", 0, 0x8400, 0, 0, 0, 0)
+    assert device_protocols.parse_mdns_response(query) is None
+    assert device_protocols.parse_mdns_response(empty_response) is None
+
+    async def fake_exchange(locator, port, payload, **kwargs):
+        return [
+            {"data": query, "address": locator, "port": port},
+            {"data": empty_response, "address": locator, "port": port},
+        ], {"complete": True, "scope": "exact_target_unicast"}
+
+    monkeypatch.setattr(device_protocols, "_udp_exchange", fake_exchange)
+    result = asyncio.run(device_protocols.discover_mdns("192.0.2.40"))
+    assert result["confirmed"] is False
+    services, observations = device_posture.merge_protocol_confirmations([], [{
+        "transport": "udp", "port": 5353, "state": "open|filtered",
+        "service_name": "mdns", "policy_eligible": False,
+    }], [result])
+    assert services == []
+    assert observations[0]["state"] == "open|filtered"
+
+
 def test_protocol_adapters_use_exact_target_unicast_and_bounded_receipts(monkeypatch):
     calls = []
 

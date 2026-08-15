@@ -14,6 +14,7 @@ import http.server
 import json
 import os
 import shutil
+import socket
 import socketserver
 import sys
 import threading
@@ -33,11 +34,6 @@ else:
 sys.path.insert(0, str(SCANNER_IMPORT_ROOT))
 
 from scanner_tools import device_posture  # noqa: E402
-
-
-HTTP_PORT = 18080
-UDP_OPEN_PORT = 19000
-UDP_CLOSED_CONTROL_PORT = 19001
 
 
 class _QuietHTTPHandler(http.server.BaseHTTPRequestHandler):
@@ -72,11 +68,11 @@ class _ReusableUDPServer(socketserver.ThreadingUDPServer):
     allow_reuse_address = True
 
 
-async def _calibrate() -> dict[str, object]:
+async def _calibrate(http_port: int, udp_open_port: int, udp_closed_control_port: int) -> dict[str, object]:
     profile = device_posture.DeviceScanProfile(
         "calibration",
-        ("-p", f"{HTTP_PORT},{HTTP_PORT + 1}"),
-        (UDP_OPEN_PORT, UDP_CLOSED_CONTROL_PORT),
+        ("-p", f"{http_port},{min(65535, http_port + 1)}"),
+        (udp_open_port, udp_closed_control_port),
         "30s",
         60,
         8,
@@ -91,14 +87,14 @@ async def _calibrate() -> dict[str, object]:
     observation_keys = {(item["transport"], int(item["port"])) for item in observations}
 
     errors = []
-    if ("tcp", HTTP_PORT) not in keys:
-        errors.append(f"missing confirmed TCP listener {HTTP_PORT}")
-    if ("udp", UDP_OPEN_PORT) not in keys:
-        errors.append(f"missing confirmed UDP responder {UDP_OPEN_PORT}")
-    if ("udp", UDP_CLOSED_CONTROL_PORT) in keys:
-        errors.append(f"closed UDP control {UDP_CLOSED_CONTROL_PORT} was reported open")
-    if not any(int(item.get("port") or 0) == HTTP_PORT for item in origins):
-        errors.append(f"HTTP was not detected on nonstandard TCP port {HTTP_PORT}")
+    if ("tcp", http_port) not in keys:
+        errors.append(f"missing confirmed TCP listener {http_port}")
+    if ("udp", udp_open_port) not in keys:
+        errors.append(f"missing confirmed UDP responder {udp_open_port}")
+    if ("udp", udp_closed_control_port) in keys:
+        errors.append(f"closed UDP control {udp_closed_control_port} was reported open")
+    if not any(int(item.get("port") or 0) == http_port for item in origins):
+        errors.append(f"HTTP was not detected on nonstandard TCP port {http_port}")
     if not completeness.get("complete"):
         errors.append(f"calibration scan was incomplete: {completeness.get('incomplete_stages')}")
 
@@ -129,8 +125,17 @@ def main() -> int:
         print(json.dumps({"status": "failed", "errors": ["UDP calibration requires root privileges"]}, indent=2))
         return 2
 
-    http_server = http.server.ThreadingHTTPServer(("127.0.0.1", HTTP_PORT), _QuietHTTPHandler)
-    udp_server = _ReusableUDPServer(("127.0.0.1", UDP_OPEN_PORT), _UDPResponder)
+    try:
+        http_server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _QuietHTTPHandler)
+        udp_server = _ReusableUDPServer(("127.0.0.1", 0), _UDPResponder)
+    except OSError as exc:
+        print(json.dumps({"status": "failed", "errors": [f"listener setup failed: {exc}"]}, indent=2))
+        return 2
+    http_port = int(http_server.server_address[1])
+    udp_open_port = int(udp_server.server_address[1])
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as control:
+        control.bind(("127.0.0.1", 0))
+        udp_closed_control_port = int(control.getsockname()[1])
     threads = [
         threading.Thread(target=http_server.serve_forever, daemon=True),
         threading.Thread(target=udp_server.serve_forever, daemon=True),
@@ -138,7 +143,7 @@ def main() -> int:
     for thread in threads:
         thread.start()
     try:
-        result = asyncio.run(_calibrate())
+        result = asyncio.run(_calibrate(http_port, udp_open_port, udp_closed_control_port))
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0 if result["status"] == "passed" else 1
     finally:

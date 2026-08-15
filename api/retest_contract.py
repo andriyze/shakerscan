@@ -2556,6 +2556,24 @@ async def run_schema_migrations(pool) -> None:
                 ON device_agent_runs(status, updated_at DESC)
             """)
             await conn.execute("""
+                WITH ranked AS (
+                    SELECT id, ROW_NUMBER() OVER (
+                        PARTITION BY device_target_id ORDER BY created_at, id
+                    ) AS position
+                    FROM device_agent_runs
+                    WHERE status IN ('awaiting_planner','planning')
+                )
+                UPDATE device_agent_runs
+                SET status='cancelled', stop_reason='migration_duplicate_active_session',
+                    planning_token=NULL, updated_at=NOW()
+                WHERE id IN (SELECT id FROM ranked WHERE position > 1)
+            """)
+            await conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_device_agent_runs_one_active_per_device
+                ON device_agent_runs(device_target_id)
+                WHERE status IN ('awaiting_planner','planning')
+            """)
+            await conn.execute("""
                 UPDATE scans SET run_kind = 'web_dast'
                 WHERE run_kind IS NULL
             """)
@@ -2590,6 +2608,44 @@ async def run_schema_migrations(pool) -> None:
                 END $$;
             """)
             await conn.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint WHERE conname = 'findings_device_target_id_fkey'
+                    ) THEN
+                        ALTER TABLE findings
+                        ADD CONSTRAINT findings_device_target_id_fkey
+                        FOREIGN KEY (device_target_id) REFERENCES device_targets(id) ON DELETE CASCADE;
+                    END IF;
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint WHERE conname = 'device_services_transport_check'
+                    ) THEN
+                        ALTER TABLE device_services ADD CONSTRAINT device_services_transport_check
+                        CHECK (transport IN ('tcp','udp')) NOT VALID;
+                    END IF;
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint WHERE conname = 'device_services_state_check'
+                    ) THEN
+                        ALTER TABLE device_services ADD CONSTRAINT device_services_state_check
+                        CHECK (state IN ('open','open|filtered')) NOT VALID;
+                    END IF;
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint WHERE conname = 'device_services_policy_disposition_check'
+                    ) THEN
+                        ALTER TABLE device_services ADD CONSTRAINT device_services_policy_disposition_check
+                        CHECK (policy_disposition IS NULL OR policy_disposition IN (
+                            'allow','deny','review','require','not_evaluated'
+                        )) NOT VALID;
+                    END IF;
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint WHERE conname = 'device_agent_runs_planner_mode_check'
+                    ) THEN
+                        ALTER TABLE device_agent_runs ADD CONSTRAINT device_agent_runs_planner_mode_check
+                        CHECK (planner_mode IN ('agent')) NOT VALID;
+                    END IF;
+                END $$;
+            """)
+            await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_ai_targets_active_created
                 ON ai_targets(is_active, created_at DESC)
             """)
@@ -2617,7 +2673,29 @@ async def run_schema_migrations(pool) -> None:
                 WHERE device_target_id IS NOT NULL
             """)
             await conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_findings_device_target
+                WITH ranked AS (
+                    SELECT id, ROW_NUMBER() OVER (
+                        PARTITION BY device_target_id ORDER BY created_at, id
+                    ) AS position
+                    FROM scans
+                    WHERE device_target_id IS NOT NULL
+                      AND run_kind='device_posture'
+                      AND status IN ('pending','queued','running')
+                )
+                UPDATE scans
+                SET status='failed', error_message='Duplicate active device scan repaired during migration',
+                    completed_at=NOW(), progress=100, current_phase='failed'
+                WHERE id IN (SELECT id FROM ranked WHERE position > 1)
+            """)
+            await conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_scans_one_active_device_posture
+                ON scans(device_target_id)
+                WHERE device_target_id IS NOT NULL
+                  AND run_kind='device_posture'
+                  AND status IN ('pending','queued','running')
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_findings_device_target_id
                 ON findings(device_target_id)
                 WHERE device_target_id IS NOT NULL
             """)

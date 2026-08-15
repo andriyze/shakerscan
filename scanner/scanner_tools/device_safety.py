@@ -137,6 +137,7 @@ class DeviceSafetyGovernor:
     def __init__(self, profile: DeviceSafetyProfile):
         self.profile = profile
         self.actions: list[dict[str, Any]] = []
+        self.limit_enforcements: list[dict[str, Any]] = []
         self.health_checkpoints: list[dict[str, Any]] = []
         self.halted = False
         self.halt_reason: str | None = None
@@ -160,6 +161,24 @@ class DeviceSafetyGovernor:
             raise PermissionError(f"device action {action_id} blocked: {reason}")
         return receipt
 
+    def record_limit_enforcement(
+        self,
+        component: str,
+        *,
+        max_concurrency: int | None = None,
+        max_requests_per_second: float | None = None,
+    ) -> None:
+        """Record the concrete limiter used by one scanner component."""
+        self.limit_enforcements.append({
+            "component": str(component),
+            "max_concurrency": int(max_concurrency) if max_concurrency is not None else None,
+            "max_requests_per_second": (
+                float(max_requests_per_second)
+                if max_requests_per_second is not None
+                else None
+            ),
+        })
+
     def record_health(self, checkpoint: dict[str, Any]) -> None:
         current = dict(checkpoint)
         self.health_checkpoints.append(current)
@@ -174,6 +193,7 @@ class DeviceSafetyGovernor:
             "schema_version": "device-safety/v1",
             "profile": asdict(self.profile),
             "actions": list(self.actions),
+            "limit_enforcements": list(self.limit_enforcements),
             "health_checkpoints": list(self.health_checkpoints),
             "halted": self.halted,
             "halt_reason": self.halt_reason,

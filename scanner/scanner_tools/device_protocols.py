@@ -225,6 +225,11 @@ def parse_mdns_response(data: bytes) -> dict[str, Any] | None:
     if len(data) < 12:
         return None
     transaction_id, flags, qdcount, ancount, nscount, arcount = struct.unpack("!HHHHHH", data[:12])
+    # Only an actual response with at least one answer can validate mDNS. Query
+    # echoes and empty response packets are attacker-influenced input, not proof
+    # of a listening DNS-SD service.
+    if not (flags & 0x8000) or ancount == 0:
+        return None
     cursor = 12
     try:
         for _ in range(min(qdcount, 64)):

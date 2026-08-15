@@ -12,7 +12,9 @@ import asyncio
 import hashlib
 import ipaddress
 import re
+import socket
 import ssl
+import time
 import urllib.parse
 from dataclasses import dataclass
 from typing import Any
@@ -37,6 +39,8 @@ except ImportError:  # pragma: no cover - flat scanner runtime
 
 
 DEVICE_PROFILES = {"inventory", "posture", "thorough"}
+MAX_FINGERPRINT_PORTS = 512
+DEFAULT_PROFILE_BUDGET_SECONDS = {"inventory": 120 * 60, "posture": 360 * 60, "thorough": 720 * 60}
 COMMON_UDP_PORTS = (53, 67, 68, 69, 123, 137, 138, 161, 162, 500, 1900, 4500, 5353, 5683, 47808)
 INVENTORY_UDP_PORTS = (53, 123, 161, 1900, 5353, 5683, 47808, 67)
 PRIORITY_TCP_PORTS = (
@@ -45,11 +49,11 @@ PRIORITY_TCP_PORTS = (
     8060, 8080, 8081, 8088, 8443, 8883, 8888, 9000, 9080, 9100, 9197,
     49152,
 )
-WEB_SERVICE_NAMES = {"http", "https", "http-proxy", "http-alt", "ssl/http", "https-alt"}
 SSH_SERVICE_NAMES = {"ssh", "ssh-alt"}
 _HTTP_STATUS = re.compile(rb"^HTTP/(?:1\.[01]|2(?:\.0)?)\s+\d{3}\b", re.I)
 _TIMEOUT_TEXT = re.compile(r"(?:host\s+)?timed?\s*out|host-timeout", re.I)
 _HOST_RE = re.compile(r"^(?=.{1,253}$)(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.?$")
+KNOWN_POLICY_REQUIREMENTS = {"encrypted", "password_auth", "weak_algorithms", "publickey_auth"}
 
 
 @dataclass(frozen=True)
@@ -86,7 +90,47 @@ def normalize_device_locator(value: Any) -> str:
         candidate = raw.rstrip(".").lower()
         if not _HOST_RE.fullmatch(candidate):
             raise ValueError("device locator must be one valid hostname or IP address")
+        labels = candidate.split(".")
+        legacy_ip_shaped = all(
+            re.fullmatch(r"(?:0x[0-9a-f]+|0[0-7]+|[0-9]+)", label) is not None
+            for label in labels
+        )
+        try:
+            socket.inet_aton(candidate)
+            legacy_ip_shaped = True
+        except OSError:
+            pass
+        if legacy_ip_shaped:
+            raise ValueError("device locator must use canonical IPv4 or IPv6 notation")
         return candidate
+
+
+async def resolve_device_address(locator: str, *, timeout: float = 5.0) -> str:
+    """Resolve once so every stage stays pinned to one authorized address."""
+    try:
+        return str(ipaddress.ip_address(locator))
+    except ValueError:
+        pass
+    loop = asyncio.get_running_loop()
+    try:
+        infos = await asyncio.wait_for(
+            loop.getaddrinfo(locator, None, type=socket.SOCK_STREAM),
+            timeout=timeout,
+        )
+    except (TimeoutError, OSError, socket.gaierror) as exc:
+        raise ValueError(f"device locator could not be resolved: {type(exc).__name__}") from exc
+    addresses = []
+    for info in infos:
+        try:
+            address = str(ipaddress.ip_address(str(info[4][0]).split("%", 1)[0]))
+        except (ValueError, IndexError, TypeError):
+            continue
+        if address not in addresses:
+            addresses.append(address)
+    if not addresses:
+        raise ValueError("device locator resolved to no usable IP address")
+    addresses.sort(key=lambda value: (ipaddress.ip_address(value).version, value))
+    return addresses[0]
 
 
 def _service_from_element(port_elem: Any) -> dict[str, Any]:
@@ -138,6 +182,7 @@ def parse_nmap_evidence(
         "port_state_counts": {},
         "tcp_filtered_count": 0,
         "udp_extraports_inconclusive_count": 0,
+        "malformed_port_count": 0,
         "incomplete_reasons": [],
     }
     if not xml_text.strip():
@@ -176,7 +221,13 @@ def parse_nmap_evidence(
         for osmatch in host_elem.findall("./os/osmatch")[:5]:
             identity["os_matches"].append({"name": osmatch.get("name"), "accuracy": osmatch.get("accuracy")})
         for port_elem in host_elem.findall("./ports/port"):
-            service = _service_from_element(port_elem)
+            try:
+                service = _service_from_element(port_elem)
+            except (TypeError, ValueError, AttributeError):
+                scan_status["malformed_port_count"] += 1
+                if "malformed_nmap_port" not in scan_status["incomplete_reasons"]:
+                    scan_status["incomplete_reasons"].append("malformed_nmap_port")
+                continue
             state = str(service["state"])
             scan_status["port_state_counts"][state] = int(scan_status["port_state_counts"].get(state, 0)) + 1
             if service["transport"] == "tcp" and state in {"filtered", "open|filtered"}:
@@ -249,7 +300,7 @@ def _merge_services(current: dict[tuple[str, int], dict[str, Any]], services: li
         previous = current.get(key, {})
         merged = dict(previous)
         for field, value in service.items():
-            if value not in {None, ""} or field not in merged:
+            if value is not None and value != "" or field not in merged:
                 merged[field] = value
         merged["state"] = "open"
         merged["confidence"] = "confirmed"
@@ -332,6 +383,7 @@ async def _run_nmap_stage(
         "udp_extraports_inconclusive_count": int(
             scan_status.get("udp_extraports_inconclusive_count") or 0
         ),
+        "malformed_port_count": int(scan_status.get("malformed_port_count") or 0),
         "incomplete_reasons": list(dict.fromkeys(incomplete_reasons)),
         "stderr": (stderr or "")[:500],
     }
@@ -341,14 +393,27 @@ async def _run_nmap_stage(
 async def _nmap_scan(
     locator: str,
     profile: DeviceScanProfile,
+    *,
+    deadline: float | None = None,
+    cancel_check: Any = None,
+    max_requests_per_second: float = 10.0,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
     receipts: list[dict[str, Any]] = []
     services_by_key: dict[tuple[str, int], dict[str, Any]] = {}
     observations_by_key: dict[tuple[str, int], dict[str, Any]] = {}
     identity: dict[str, Any] = {"hostnames": [], "addresses": [], "os_matches": []}
 
+    async def ensure_active(stage: str) -> bool:
+        if callable(cancel_check) and bool(await cancel_check()):
+            raise ValueError(f"connected-device scan cancelled before {stage}")
+        return deadline is None or time.monotonic() < deadline
+
+    request_rate = max(1.0, float(max_requests_per_second or 1.0))
+    rate_args = ["--max-rate", f"{request_rate:g}"]
+
+    await ensure_active("TCP priority discovery")
     priority_cmd = [
-        "nmap", "-Pn", "-n", "-sT", "-T4", "--max-retries", "1",
+        "nmap", "-Pn", "-n", "-sT", "-T4", "--max-retries", "1", *rate_args,
         "--host-timeout", "180s", "-p", ",".join(str(port) for port in PRIORITY_TCP_PORTS),
         "-oX", "-", locator,
     ]
@@ -360,24 +425,37 @@ async def _nmap_scan(
     _merge_services(services_by_key, priority_services)
     _merge_identity(identity, priority_identity)
 
+    await ensure_active("TCP scope discovery")
+    scope_port_count = 65_535 if "-p-" in profile.tcp_args else 100
+    rate_bound_timeout = int(scope_port_count / request_rate * 1.5) + 60
+    tcp_stage_timeout = max(profile.process_timeout, rate_bound_timeout)
+    if deadline is not None:
+        tcp_stage_timeout = max(60, min(tcp_stage_timeout, int(max(60, deadline - time.monotonic()))))
     tcp_cmd = [
-        "nmap", "-Pn", "-n", "-sT", "-T4", "--max-retries", "1",
-        "--host-timeout", profile.host_timeout, *profile.tcp_args, "-oX", "-", locator,
+        "nmap", "-Pn", "-n", "-sT", "-T4", "--max-retries", "1", *rate_args,
+        "--host-timeout", f"{max(30, tcp_stage_timeout - 15)}s", *profile.tcp_args, "-oX", "-", locator,
     ]
     tcp_services, _tcp_uncertain, tcp_identity, tcp_receipt = await _run_nmap_stage(
-        tcp_cmd, stage="tcp_scope_discovery", transport="tcp", timeout=profile.process_timeout,
+        tcp_cmd, stage="tcp_scope_discovery", transport="tcp", timeout=tcp_stage_timeout,
     )
     receipts.append(tcp_receipt)
     tcp_receipt["required"] = True
     _merge_services(services_by_key, tcp_services)
     _merge_identity(identity, tcp_identity)
 
-    tcp_ports = sorted(port for (transport, port) in services_by_key if transport == "tcp")
+    discovered_tcp_ports = sorted(port for (transport, port) in services_by_key if transport == "tcp")
+    priority_set = set(PRIORITY_TCP_PORTS)
+    tcp_ports = sorted(discovered_tcp_ports, key=lambda port: (port not in priority_set, port))[:MAX_FINGERPRINT_PORTS]
+    fingerprint_truncated_count = max(0, len(discovered_tcp_ports) - len(tcp_ports))
+    fingerprint_budget_exhausted = False
     fingerprint_receipts: list[dict[str, Any]] = []
     for batch_number, offset in enumerate(range(0, len(tcp_ports), 128), start=1):
+        if not await ensure_active(f"TCP fingerprint batch {batch_number}"):
+            fingerprint_budget_exhausted = True
+            break
         batch = tcp_ports[offset:offset + 128]
         fingerprint_cmd = [
-            "nmap", "-Pn", "-n", "-sT", "-sV", "--version-intensity", str(profile.fingerprint_intensity),
+            "nmap", "-Pn", "-n", "-sT", "-sV", "--version-intensity", str(profile.fingerprint_intensity), *rate_args,
             "--host-timeout", f"{profile.fingerprint_timeout}s", "-p", ",".join(str(port) for port in batch),
             "-oX", "-", locator,
         ]
@@ -393,9 +471,10 @@ async def _nmap_scan(
         _merge_services(services_by_key, fingerprinted)
         _merge_identity(identity, fingerprint_identity)
 
-    if profile.udp_ports:
+    udp_budget_exhausted = False
+    if profile.udp_ports and await ensure_active("UDP discovery"):
         udp_cmd = [
-            "nmap", "-Pn", "-n", "-sU", "-sV", "--version-intensity", "3",
+            "nmap", "-Pn", "-n", "-sU", "-sV", "--version-intensity", "3", *rate_args,
             "--max-retries", "1", "--host-timeout", "240s",
             "-p", ",".join(str(port) for port in profile.udp_ports), "-oX", "-", locator,
         ]
@@ -408,6 +487,18 @@ async def _nmap_scan(
         _merge_identity(identity, udp_identity)
         for observation in udp_observations:
             observations_by_key[("udp", int(observation["port"]))] = observation
+    elif profile.udp_ports:
+        udp_budget_exhausted = True
+        receipts.append({
+            "stage": "udp_service_discovery",
+            "transport": "udp",
+            "exit_code": None,
+            "complete": False,
+            "required": True,
+            "incomplete_reasons": ["overall_device_budget_exhausted"],
+            "confirmed_open_count": 0,
+            "inconclusive_count": 0,
+        })
 
     if not any(receipt.get("xml_parsed") for receipt in receipts if receipt.get("transport") == "tcp"):
         errors = "; ".join(
@@ -421,6 +512,9 @@ async def _nmap_scan(
             tcp_receipt.get("complete")
             and all(receipt.get("complete") for receipt in fingerprint_receipts)
             and all(receipt.get("complete") for receipt in udp_receipts)
+            and not fingerprint_truncated_count
+            and not fingerprint_budget_exhausted
+            and not udp_budget_exhausted
     )
     tcp_filtered_count = int(tcp_receipt.get("tcp_filtered_count") or 0)
     udp_extraports_inconclusive_count = sum(
@@ -439,13 +533,25 @@ async def _nmap_scan(
         incomplete_stages.append("tcp_scope_visibility")
     if observations_by_key or udp_extraports_inconclusive_count:
         incomplete_stages.append("udp_service_uncertainty")
+    if fingerprint_truncated_count:
+        incomplete_stages.append("tcp_fingerprint_truncated")
+    if fingerprint_budget_exhausted or udp_budget_exhausted:
+        incomplete_stages.append("overall_device_budget_exhausted")
     completeness = {
         "complete": bool(execution_complete and not uncertainty_present),
         "execution_complete": execution_complete,
         "tcp_discovery_complete": bool(tcp_receipt.get("complete")),
         "tcp_visibility_complete": tcp_visibility_complete,
         "tcp_filtered_ports_count": tcp_filtered_count,
-        "tcp_fingerprinting_complete": all(receipt.get("complete") for receipt in fingerprint_receipts),
+        "tcp_fingerprinting_complete": bool(
+            not fingerprint_truncated_count
+            and not fingerprint_budget_exhausted
+            and all(receipt.get("complete") for receipt in fingerprint_receipts)
+        ),
+        "tcp_fingerprint_port_cap": MAX_FINGERPRINT_PORTS,
+        "tcp_fingerprint_truncated_count": fingerprint_truncated_count,
+        "overall_budget_exhausted": bool(fingerprint_budget_exhausted or udp_budget_exhausted),
+        "max_requests_per_second_enforced": request_rate,
         "udp_discovery_complete": all(receipt.get("complete") for receipt in udp_receipts),
         "udp_extraports_inconclusive_count": udp_extraports_inconclusive_count,
         "uncertainty_present": uncertainty_present,
@@ -467,7 +573,14 @@ def _format_origin_host(locator: str) -> str:
         return locator
 
 
-async def _probe_http(locator: str, port: int, *, tls: bool, server_name: str | None = None, timeout: float = 3.0) -> dict[str, Any] | None:
+async def _probe_http(
+    connect_address: str,
+    port: int,
+    *,
+    tls: bool,
+    origin_locator: str | None = None,
+    timeout: float = 3.0,
+) -> dict[str, Any] | None:
     ssl_context = None
     if tls:
         ssl_context = ssl.create_default_context()
@@ -476,20 +589,22 @@ async def _probe_http(locator: str, port: int, *, tls: bool, server_name: str | 
     try:
         reader, writer = await asyncio.wait_for(
             asyncio.open_connection(
-                locator,
+                connect_address,
                 port,
                 ssl=ssl_context,
-                server_hostname=(server_name or locator) if tls else None,
+                server_hostname=(origin_locator or connect_address) if tls else None,
             ),
             timeout=timeout,
         )
-        host_header = server_name or _format_origin_host(locator)
+        host_header = _format_origin_host(
+            normalize_device_locator(origin_locator or connect_address)
+        )
         request = f"HEAD / HTTP/1.1\r\nHost: {host_header}\r\nUser-Agent: ShakerScan-Device/1\r\nConnection: close\r\n\r\n"
         writer.write(request.encode("ascii", "ignore"))
         await writer.drain()
         data = await asyncio.wait_for(reader.read(4096), timeout=timeout)
         ssl_object = writer.get_extra_info("ssl_object")
-        peer_cert = ssl_object.getpeercert() if ssl_object else None
+        peer_cert = ssl_object.getpeercert(binary_form=True) if ssl_object else None
         writer.close()
         try:
             await writer.wait_closed()
@@ -498,13 +613,13 @@ async def _probe_http(locator: str, port: int, *, tls: bool, server_name: str | 
         if not _HTTP_STATUS.match(data):
             return None
         status_line = data.split(b"\r\n", 1)[0].decode("latin-1", "replace")
-        origin = f"{'https' if tls else 'http'}://{_format_origin_host(locator)}:{port}"
+        origin = f"{'https' if tls else 'http'}://{_format_origin_host(origin_locator or connect_address)}:{port}"
         return {
             "origin": origin,
             "scheme": "https" if tls else "http",
-            "connect_address": locator,
+            "connect_address": connect_address,
             "host_header": host_header,
-            "sni": (server_name or locator) if tls else None,
+            "sni": (origin_locator or connect_address) if tls else None,
             "port": port,
             "status_line": status_line,
             "tls": tls,
@@ -514,10 +629,30 @@ async def _probe_http(locator: str, port: int, *, tls: bool, server_name: str | 
         return None
 
 
-async def detect_web_origins(locator: str, services: list[dict[str, Any]], *, cap: int = 64, advertised_name: str | None = None) -> list[dict[str, Any]]:
+async def detect_web_origins(
+    connect_address: str,
+    services: list[dict[str, Any]],
+    *,
+    cap: int = 64,
+    origin_locator: str | None = None,
+    max_concurrency: int = 8,
+    max_requests_per_second: float = 10.0,
+) -> list[dict[str, Any]]:
     """Detect HTTP on any open TCP port, independently of the port number."""
     tcp_services = [row for row in services if row.get("transport") == "tcp" and row.get("state") == "open"][:cap]
-    semaphore = asyncio.Semaphore(8)
+    semaphore = asyncio.Semaphore(max(1, int(max_concurrency)))
+    rate_lock = asyncio.Lock()
+    request_interval = 1.0 / max(0.1, float(max_requests_per_second))
+    next_request_at = 0.0
+
+    async def wait_for_rate_slot() -> None:
+        nonlocal next_request_at
+        async with rate_lock:
+            now = time.monotonic()
+            delay = max(0.0, next_request_at - now)
+            if delay:
+                await asyncio.sleep(delay)
+            next_request_at = max(now, next_request_at) + request_interval
 
     async def probe(service: dict[str, Any]) -> dict[str, Any] | None:
         async with semaphore:
@@ -526,7 +661,13 @@ async def detect_web_origins(locator: str, services: list[dict[str, Any]], *, ca
             tls_first = bool(service.get("tunnel") == "ssl" or hint in {"https", "ssl/http"})
             order = (True, False) if tls_first else (False, True)
             for use_tls in order:
-                found = await _probe_http(locator, port, tls=use_tls, server_name=advertised_name)
+                await wait_for_rate_slot()
+                found = await _probe_http(
+                    connect_address,
+                    port,
+                    tls=use_tls,
+                    origin_locator=origin_locator,
+                )
                 if found:
                     found["detected_service"] = hint or "unknown"
                     return found
@@ -560,6 +701,9 @@ def _rule_matches(rule: dict[str, Any], service: dict[str, Any]) -> bool:
 def _requirement_failures(rule: dict[str, Any], service: dict[str, Any]) -> list[str]:
     requirements = rule.get("requirements") if isinstance(rule.get("requirements"), dict) else {}
     failures: list[str] = []
+    unknown = sorted(set(requirements) - KNOWN_POLICY_REQUIREMENTS)
+    if unknown:
+        failures.append("unknown policy requirements: " + ", ".join(unknown))
     expected_encrypted = rule.get("encrypted", requirements.get("encrypted"))
     if expected_encrypted is not None and bool(service.get("encrypted")) != bool(expected_encrypted):
         failures.append("service encryption does not match policy")
@@ -659,6 +803,7 @@ def _device_decision(findings: list[dict[str, Any]], *, complete: bool) -> tuple
 
 async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict[str, Any]:
     locator = normalize_device_locator(locator)
+    resolved_address = await resolve_device_address(locator)
     profile_name = str(options.get("device_profile") or "posture").lower()
     if profile_name not in DEVICE_PROFILES:
         raise ValueError(f"device_profile must be one of: {', '.join(sorted(DEVICE_PROFILES))}")
@@ -666,13 +811,46 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
         raise ValueError("connected-device scans require confirm_authorized=true")
     safety_profile = validate_safety_request(options)
     safety = DeviceSafetyGovernor(safety_profile)
+    resolved_budget = options.get("resolved_budget") if isinstance(options.get("resolved_budget"), dict) else {}
+    try:
+        configured_minutes = int(resolved_budget.get("max_duration_minutes") or 0)
+    except (TypeError, ValueError):
+        configured_minutes = 0
+    budget_seconds = configured_minutes * 60 if configured_minutes > 0 else DEFAULT_PROFILE_BUDGET_SECONDS[profile_name]
+    deadline = time.monotonic() + max(60, budget_seconds)
+    cancel_check = options.get("_cancel_check")
+
+    async def ensure_active(stage: str) -> bool:
+        if callable(cancel_check) and bool(await cancel_check()):
+            raise ValueError(f"connected-device scan cancelled before {stage}")
+        return time.monotonic() < deadline
+
+    await ensure_active("health baseline")
     safety.authorize("target_health_baseline", "readonly")
-    safety.record_health(await check_device_health(locator, stage="baseline"))
+    safety.record_health(await check_device_health(resolved_address, stage="baseline"))
     safety.authorize("network_inventory", "readonly")
+    safety.record_limit_enforcement(
+        "nmap",
+        max_concurrency=1,
+        max_requests_per_second=safety_profile.max_requests_per_second,
+    )
     profile = PROFILES[profile_name]
-    services, inconclusive_observations, identity, tool_receipts, scan_completeness = await _nmap_scan(locator, profile)
+    services, inconclusive_observations, identity, tool_receipts, scan_completeness = await _nmap_scan(
+        resolved_address,
+        profile,
+        deadline=deadline,
+        cancel_check=cancel_check,
+        max_requests_per_second=safety_profile.max_requests_per_second,
+    )
     safety.authorize("core_protocol_discovery", "readonly")
-    protocol_results = await discover_core_device_protocols(locator, udp_ports=profile.udp_ports)
+    if await ensure_active("core protocol discovery"):
+        protocol_results = await discover_core_device_protocols(resolved_address, udp_ports=profile.udp_ports)
+    else:
+        protocol_results = []
+        scan_completeness["complete"] = False
+        scan_completeness["execution_complete"] = False
+        scan_completeness["overall_budget_exhausted"] = True
+        scan_completeness.setdefault("incomplete_stages", []).append("overall_device_budget_exhausted")
     for protocol in protocol_results:
         receipt = protocol.get("receipt") if isinstance(protocol.get("receipt"), dict) else None
         if receipt:
@@ -706,10 +884,29 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
         for service in services
         if service.get("transport") == "tcp" and service.get("state") == "open"
     ]
-    safety.record_health(await check_device_health(locator, stage="post_inventory", tcp_ports=known_tcp_ports))
+    if await ensure_active("post-inventory health check"):
+        safety.record_health(await check_device_health(resolved_address, stage="post_inventory", tcp_ports=known_tcp_ports))
     safety.authorize("web_origin_discovery", "readonly")
-    advertised_name = next(iter(identity.get("hostnames") or []), None)
-    web_origins = await detect_web_origins(locator, services, cap=profile.web_probe_cap, advertised_name=advertised_name)
+    safety.record_limit_enforcement(
+        "web_origin_probes",
+        max_concurrency=safety_profile.max_concurrency,
+        max_requests_per_second=safety_profile.max_requests_per_second,
+    )
+    if await ensure_active("web origin discovery"):
+        web_origins = await detect_web_origins(
+            resolved_address,
+            services,
+            cap=profile.web_probe_cap,
+            origin_locator=locator,
+            max_concurrency=safety_profile.max_concurrency,
+            max_requests_per_second=safety_profile.max_requests_per_second,
+        )
+    else:
+        web_origins = []
+        scan_completeness["complete"] = False
+        scan_completeness["execution_complete"] = False
+        scan_completeness["overall_budget_exhausted"] = True
+        scan_completeness.setdefault("incomplete_stages", []).append("overall_device_budget_exhausted")
     origin_by_port = {int(origin["port"]): origin for origin in web_origins}
     for service in services:
         origin = origin_by_port.get(int(service["port"])) if service.get("transport") == "tcp" else None
@@ -721,19 +918,35 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
             service["encrypted"] = True
 
     ssh_findings: list[dict[str, Any]] = []
-    safety.authorize("ssh_posture_handshake", "readonly")
-    for service in services:
-        if service.get("transport") != "tcp" or str(service.get("service_name") or "").lower() not in SSH_SERVICE_NAMES:
-            continue
-        ssh_result = await full_ssh_scan(locator, port=int(service["port"]), timeout=8)
-        service["ssh"] = {key: value for key, value in ssh_result.items() if key != "findings"}
-        for finding in ssh_result.get("findings") or []:
-            finding = dict(finding)
-            finding.setdefault("tool", "device_ssh")
-            finding["source"] = "device"
-            ssh_findings.append(finding)
+    if await ensure_active("post-web health check"):
+        safety.record_health(
+            await check_device_health(resolved_address, stage="post_web_discovery", tcp_ports=known_tcp_ports)
+        )
+    if safety.halted:
+        scan_completeness["complete"] = False
+        scan_completeness["execution_complete"] = False
+        scan_completeness["safety_halted"] = True
+        scan_completeness.setdefault("incomplete_stages", []).append("device_health_degraded")
+    else:
+        safety.authorize("ssh_posture_handshake", "readonly")
+        for service in services:
+            if service.get("transport") != "tcp" or str(service.get("service_name") or "").lower() not in SSH_SERVICE_NAMES:
+                continue
+            if not await ensure_active("SSH posture"):
+                scan_completeness["complete"] = False
+                scan_completeness["execution_complete"] = False
+                scan_completeness["overall_budget_exhausted"] = True
+                scan_completeness.setdefault("incomplete_stages", []).append("overall_device_budget_exhausted")
+                break
+            ssh_result = await full_ssh_scan(resolved_address, port=int(service["port"]), timeout=8)
+            service["ssh"] = {key: value for key, value in ssh_result.items() if key != "findings"}
+            for finding in ssh_result.get("findings") or []:
+                finding = dict(finding)
+                finding.setdefault("tool", "device_ssh")
+                finding["source"] = "device"
+                ssh_findings.append(finding)
 
-    safety.record_health(await check_device_health(locator, stage="final", tcp_ports=known_tcp_ports))
+    safety.record_health(await check_device_health(resolved_address, stage="final", tcp_ports=known_tcp_ports))
     safety_receipt = safety.receipt()
     if safety.halted:
         scan_completeness["complete"] = False
@@ -761,12 +974,14 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
     )
     return {
         "target": locator,
+        "resolved_target": resolved_address,
         "result": {"score": score, "grade": grade},
         "findings": findings,
         "device_posture": {
             "schema_version": "device-posture/v1",
             "profile": profile_name,
             "identity": identity,
+            "resolved_target": resolved_address,
             "services": services,
             "inconclusive_observations": inconclusive_observations,
             "web_origins": web_origins,

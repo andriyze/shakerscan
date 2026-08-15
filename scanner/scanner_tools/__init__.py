@@ -40,6 +40,7 @@ __all__ = [
     "credential_check",
     "ct_monitor",
     "device_evidence",
+    "device_posture",
     "device_protocols",
     "device_safety",
     "discovery",

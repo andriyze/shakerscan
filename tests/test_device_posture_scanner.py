@@ -276,7 +276,7 @@ def test_require_policy_passes_when_ssh_controls_are_proven():
 def test_web_detection_checks_nonstandard_ports(monkeypatch):
     calls = []
 
-    async def fake_probe(locator, port, *, tls, server_name=None, timeout=3.0):
+    async def fake_probe(locator, port, *, tls, origin_locator=None, timeout=3.0):
         calls.append((port, tls))
         if port == 49152 and tls:
             return {"origin": "https://10.0.0.8:49152", "port": port, "scheme": "https", "tls": True}
@@ -296,7 +296,7 @@ def test_device_scan_emits_independent_safety_and_normalized_evidence(monkeypatc
         "policy_eligible": True, "tunnel": "ssl",
     }]
 
-    async def fake_nmap(locator, profile):
+    async def fake_nmap(locator, profile, **kwargs):
         return services, [], {"addresses": [{"address": "192.0.2.40", "type": "ipv4"}], "hostnames": ["tv.test"]}, [], {
             "complete": True,
             "execution_complete": True,
@@ -312,7 +312,7 @@ def test_device_scan_emits_independent_safety_and_normalized_evidence(monkeypatc
     async def fake_health(locator, *, stage, tcp_ports=(), timeout=1.5):
         return {"stage": stage, "status": "healthy" if tcp_ports else "indeterminate"}
 
-    async def fake_origins(locator, rows, *, cap=64, advertised_name=None):
+    async def fake_origins(locator, rows, **kwargs):
         return [{
             "origin": "https://tv.test:8443", "port": 8443, "scheme": "https",
             "tls": True, "status_line": "HTTP/1.1 200 OK",
@@ -322,6 +322,9 @@ def test_device_scan_emits_independent_safety_and_normalized_evidence(monkeypatc
         return []
 
     monkeypatch.setattr(device_posture, "_nmap_scan", fake_nmap)
+    async def fake_resolve(_locator, **_kwargs):
+        return "192.0.2.40"
+    monkeypatch.setattr(device_posture, "resolve_device_address", fake_resolve)
     monkeypatch.setattr(device_posture, "check_device_health", fake_health)
     monkeypatch.setattr(device_posture, "discover_core_device_protocols", fake_protocols)
     monkeypatch.setattr(device_posture, "detect_web_origins", fake_origins)
@@ -338,6 +341,41 @@ def test_device_scan_emits_independent_safety_and_normalized_evidence(monkeypatc
     assert posture["evidence_graph"]["schema_version"] == "device-evidence/v1"
     assert result["scan_metadata"]["device_coverage_profile"] == "inventory"
     assert result["scan_metadata"]["device_safety_profile"] == "safe_remote"
+
+
+def test_fingerprinting_is_capped_and_forces_incomplete_coverage(monkeypatch):
+    fingerprinted_ports = []
+    open_ports = "".join(
+        f"<port protocol='tcp' portid='{port}'><state state='open' reason='syn-ack'/><service name='unknown'/></port>"
+        for port in range(1, 601)
+    )
+
+    async def fake_run(cmd, timeout=60, input_text=None, retry=0):
+        if "-sU" in cmd:
+            closed = "<port protocol='udp' portid='53'><state state='closed' reason='port-unreach'/><service name='domain'/></port>"
+            return _nmap_xml(closed), "", 0
+        if "-sV" in cmd:
+            ports_arg = cmd[cmd.index("-p") + 1]
+            batch = [int(value) for value in ports_arg.split(",")]
+            fingerprinted_ports.extend(batch)
+            ports = "".join(
+                f"<port protocol='tcp' portid='{port}'><state state='open' reason='syn-ack'/><service name='http'/></port>"
+                for port in batch
+            )
+            return _nmap_xml(ports), "", 0
+        return _nmap_xml(open_ports), "", 0
+
+    monkeypatch.setattr(device_posture, "run", fake_run)
+    services, _, _, _, completeness = asyncio.run(
+        device_posture._nmap_scan("device.test", device_posture.PROFILES["posture"]),
+    )
+    assert len(services) == 600
+    assert len(set(fingerprinted_ports)) == device_posture.MAX_FINGERPRINT_PORTS
+    assert completeness["tcp_fingerprint_truncated_count"] == 88
+    assert completeness["tcp_fingerprinting_complete"] is False
+    assert completeness["execution_complete"] is False
+    assert completeness["complete"] is False
+    assert "tcp_fingerprint_truncated" in completeness["incomplete_stages"]
 
 
 def test_device_worker_identity_and_queue_are_isolated_from_web_dast():
@@ -364,7 +402,7 @@ def test_device_inventory_only_retires_services_after_matching_complete_coverage
     assert 'completeness.get("udp_discovery_complete") and udp_ports_requested' in worker
     assert 'for service in [*services, *observations]:' in worker
     assert "ds.device_target_id=d.id AND ds.state='open'" in api
-    assert "device_target_id=$1 AND state='open' ORDER BY transport, port" in api
+    assert "device_target_id=$1 AND state='open'" in api
     assert "device_target_id=$1 AND state='open|filtered'" in api
     assert '"inconclusive_observations": [_decode_device_row(item) for item in observations]' in api
 

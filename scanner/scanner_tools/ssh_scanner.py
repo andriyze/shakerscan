@@ -17,6 +17,31 @@ except ImportError:
     HAS_PARAMIKO = False
 
 
+def classify_negotiated_ssh_algorithms(
+    negotiated: dict[str, Any],
+    *,
+    key_type: str,
+    key_bits: int,
+) -> tuple[list[str], str | None]:
+    """Classify negotiated legacy algorithms without requiring a live server."""
+    weak: list[str] = []
+    highest: str | None = None
+    high_markers = ("3des", "blowfish", "arcfour", "des-cbc", "hmac-md5", "ssh-dss")
+    for kind, algorithm in negotiated.items():
+        lowered = str(algorithm or "").lower()
+        if any(marker in lowered for marker in high_markers):
+            weak.append(f"{kind}:{algorithm}")
+            highest = "high"
+        elif "hmac-sha1" in lowered:
+            weak.append(f"{kind}:{algorithm}")
+            if highest is None:
+                highest = "medium"
+    if key_type == "ssh-rsa" and key_bits and key_bits < 2048:
+        weak.append(f"host_key:{key_type}-{key_bits}")
+        highest = "high"
+    return sorted(set(weak)), highest
+
+
 async def ssh_auth_methods(host: str, port: int = 22, timeout: int = 10) -> dict[str, Any]:
     """
     Check SSH authentication methods using Paramiko.
@@ -41,6 +66,7 @@ async def ssh_auth_methods(host: str, port: int = 22, timeout: int = 10) -> dict
         "host_key": None,
         "negotiated_algorithms": {},
         "weak_algorithms": [],
+        "weak_algorithm_severity": None,
         "port": port,
         "scan_completed": False,
         "error": None,
@@ -59,6 +85,7 @@ async def ssh_auth_methods(host: str, port: int = 22, timeout: int = 10) -> dict
             "host_key": None,
             "negotiated_algorithms": {},
             "weak_algorithms": [],
+            "weak_algorithm_severity": None,
             "error": None
         }
 
@@ -90,14 +117,13 @@ async def ssh_auth_methods(host: str, port: int = 22, timeout: int = 10) -> dict
                 "host_key": key_type,
             }
             check_result["negotiated_algorithms"] = negotiated
-            weak: list[str] = []
-            for kind, algorithm in negotiated.items():
-                lowered = str(algorithm or "").lower()
-                if any(marker in lowered for marker in ("3des", "blowfish", "arcfour", "des-cbc", "hmac-sha1", "hmac-md5", "ssh-dss")):
-                    weak.append(f"{kind}:{algorithm}")
-            if key_type == "ssh-rsa" and key_bits and key_bits < 2048:
-                weak.append(f"host_key:{key_type}-{key_bits}")
-            check_result["weak_algorithms"] = sorted(set(weak))
+            weak, weak_severity = classify_negotiated_ssh_algorithms(
+                negotiated,
+                key_type=key_type,
+                key_bits=key_bits,
+            )
+            check_result["weak_algorithms"] = weak
+            check_result["weak_algorithm_severity"] = weak_severity
 
             # auth_none returns allowed types when auth fails
             # We use a probe username - doesn't need to be valid
@@ -143,6 +169,7 @@ async def ssh_auth_methods(host: str, port: int = 22, timeout: int = 10) -> dict
     result["host_key"] = check_result.get("host_key")
     result["negotiated_algorithms"] = check_result.get("negotiated_algorithms", {})
     result["weak_algorithms"] = check_result.get("weak_algorithms", [])
+    result["weak_algorithm_severity"] = check_result.get("weak_algorithm_severity")
     result["error"] = check_result.get("error")
 
     if result["error"]:
@@ -188,7 +215,7 @@ async def ssh_auth_methods(host: str, port: int = 22, timeout: int = 10) -> dict
     if result["weak_algorithms"]:
         result["findings"].append({
             "title": "SSH Negotiated Weak Cryptographic Algorithm",
-            "severity": "high",
+            "severity": result["weak_algorithm_severity"] or "medium",
             "cwe": "CWE-327",
             "evidence": {
                 "host": host,

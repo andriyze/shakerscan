@@ -2053,7 +2053,11 @@ async def run_scan(
             from scanner_tools.device_posture import run_device_posture_scan
         except ImportError:
             from scanner.scanner_tools.device_posture import run_device_posture_scan
-        result = await run_device_posture_scan(target, dict(options or {}))
+        if str(os.environ.get("DEVICE_POSTURE_ENABLED", "true")).strip().lower() in {"0", "false", "no", "off"}:
+            raise ValueError("connected-device posture is disabled on this worker")
+        device_options = dict(options or {})
+        device_options["_cancel_check"] = lambda: asyncio.to_thread(_scan_cancel_requested, scan_id)
+        result = await run_device_posture_scan(target, device_options)
         if scan_id:
             await update_scan_progress(scan_id, "device_policy", 90, job_id=job_id)
         # Device protocol metadata is untrusted binary-adjacent input too. SSDP
@@ -3652,94 +3656,86 @@ async def save_device_findings(
     device_target_id: str,
     findings: list,
     *,
-    resolve_missing: bool = False,
+    resolve_posture_missing: bool = False,
+    resolve_web_missing: bool = False,
 ) -> int:
     """Persist findings in the device namespace without touching Web DAST targets."""
     scan_uuid = uuid.UUID(scan_id)
     device_uuid = uuid.UUID(device_target_id)
     saved = 0
-    seen_fingerprints: list[str] = []
+    seen_posture_fingerprints: list[str] = []
+    seen_web_fingerprints: list[str] = []
     async with db_pool.acquire() as conn:
         for finding in findings:
             fingerprint = str(finding.get("fingerprint") or generate_finding_fingerprint(finding))
-            seen_fingerprints.append(fingerprint)
+            if str(finding.get("tool") or "") in {"device_policy", "device_ssh", "device_posture"}:
+                seen_posture_fingerprints.append(fingerprint)
+            else:
+                seen_web_fingerprints.append(fingerprint)
             evidence_with_triage = _redact_finding_evidence(_build_evidence_with_triage(finding))
             evidence_json = json.dumps(evidence_with_triage) if evidence_with_triage else None
             recommendations = finding.get("ai_recommendations") or finding.get("recommendations")
             recommendation_json = json.dumps(recommendations) if recommendations else None
-            existing = await conn.fetchrow(
-                "SELECT id, status, resurfaced_count FROM findings WHERE device_target_id=$1 AND fingerprint=$2",
-                device_uuid, fingerprint,
+            finding_id = await conn.fetchval(
+                """
+                INSERT INTO findings (
+                    scan_id, target_id, ai_target_id, device_target_id, fingerprint,
+                    title, description, severity, cvss_score, tool, cwe, cwe_name,
+                    owasp, url, evidence, ai_verdict, ai_confidence, ai_rationale,
+                    ai_recommendations, ai_classification_source, source
+                ) VALUES ($1,NULL,NULL,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,'device')
+                ON CONFLICT (device_target_id, fingerprint) WHERE device_target_id IS NOT NULL
+                DO UPDATE SET
+                    status=CASE WHEN findings.status='resolved' THEN 'active' ELSE findings.status END,
+                    resolved_at=CASE WHEN findings.status='resolved' THEN NULL ELSE findings.resolved_at END,
+                    resurfaced_count=findings.resurfaced_count + CASE WHEN findings.status='resolved' THEN 1 ELSE 0 END,
+                    last_seen_at=NOW(), scan_id=EXCLUDED.scan_id, title=EXCLUDED.title,
+                    description=EXCLUDED.description, severity=EXCLUDED.severity,
+                    cvss_score=EXCLUDED.cvss_score, tool=EXCLUDED.tool, cwe=EXCLUDED.cwe,
+                    cwe_name=EXCLUDED.cwe_name, owasp=EXCLUDED.owasp, url=EXCLUDED.url,
+                    evidence=EXCLUDED.evidence, ai_verdict=EXCLUDED.ai_verdict,
+                    ai_confidence=EXCLUDED.ai_confidence, ai_rationale=EXCLUDED.ai_rationale,
+                    ai_recommendations=EXCLUDED.ai_recommendations,
+                    ai_classification_source=EXCLUDED.ai_classification_source,
+                    source='device', updated_at=NOW()
+                RETURNING id
+                """,
+                scan_uuid, device_uuid, fingerprint,
+                finding.get("title"), finding.get("description"), finding.get("severity", "info"),
+                finding.get("cvss_score"), finding.get("tool") or "device_posture", finding.get("cwe"),
+                finding.get("cwe_name"), finding.get("owasp"), finding.get("url"), evidence_json,
+                finding.get("ai_verdict"), finding.get("ai_confidence"), finding.get("ai_rationale"),
+                recommendation_json, finding.get("ai_classification_source"),
             )
-            values = (
-                scan_uuid,
-                finding.get("title"),
-                finding.get("description"),
-                finding.get("severity", "info"),
-                finding.get("cvss_score"),
-                finding.get("tool") or "device_posture",
-                finding.get("cwe"),
-                finding.get("cwe_name"),
-                finding.get("owasp"),
-                finding.get("url"),
-                evidence_json,
-                finding.get("ai_verdict"),
-                finding.get("ai_confidence"),
-                finding.get("ai_rationale"),
-                recommendation_json,
-                finding.get("ai_classification_source"),
-            )
-            if existing:
-                resurfaced = int(existing.get("resurfaced_count") or 0) + (1 if existing["status"] == "resolved" else 0)
-                await conn.execute(
-                    """
-                    UPDATE findings SET
-                        status=CASE WHEN status='resolved' THEN 'active' ELSE status END,
-                        resolved_at=CASE WHEN status='resolved' THEN NULL ELSE resolved_at END,
-                        resurfaced_count=$1, last_seen_at=NOW(), scan_id=$2, title=$3,
-                        description=$4, severity=$5, cvss_score=$6, tool=$7, cwe=$8,
-                        cwe_name=$9, owasp=$10, url=$11, evidence=$12, ai_verdict=$13,
-                        ai_confidence=$14, ai_rationale=$15, ai_recommendations=$16,
-                        ai_classification_source=$17, source='device', updated_at=NOW()
-                    WHERE id=$18
-                    """,
-                    resurfaced, *values, existing["id"],
-                )
-                finding_id = existing["id"]
-            else:
-                finding_id = await conn.fetchval(
-                    """
-                    INSERT INTO findings (
-                        scan_id, target_id, ai_target_id, device_target_id, fingerprint,
-                        title, description, severity, cvss_score, tool, cwe, cwe_name,
-                        owasp, url, evidence, ai_verdict, ai_confidence, ai_rationale,
-                        ai_recommendations, ai_classification_source, source
-                    ) VALUES ($1,NULL,NULL,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,'device')
-                    RETURNING id
-                    """,
-                    scan_uuid, device_uuid, fingerprint,
-                    finding.get("title"), finding.get("description"), finding.get("severity", "info"),
-                    finding.get("cvss_score"), finding.get("tool") or "device_posture", finding.get("cwe"),
-                    finding.get("cwe_name"), finding.get("owasp"), finding.get("url"), evidence_json,
-                    finding.get("ai_verdict"), finding.get("ai_confidence"), finding.get("ai_rationale"),
-                    recommendation_json, finding.get("ai_classification_source"),
-                )
             if finding_id:
                 saved += 1
                 await _persist_evidence_object(
                     conn, scan_uuid, finding_id, finding, evidence_with_triage,
                     tool_override=finding.get("tool") or "device_posture",
                 )
-        if resolve_missing:
+        if resolve_posture_missing:
             await conn.execute(
                 """
                 UPDATE findings
                 SET status='resolved', resolved_at=NOW(), updated_at=NOW()
                 WHERE device_target_id=$1 AND source='device' AND status='active'
+                  AND tool IN ('device_policy','device_ssh','device_posture')
                   AND NOT (fingerprint = ANY($2::text[]))
                 """,
                 device_uuid,
-                seen_fingerprints,
+                seen_posture_fingerprints,
+            )
+        if resolve_web_missing:
+            await conn.execute(
+                """
+                UPDATE findings
+                SET status='resolved', resolved_at=NOW(), updated_at=NOW()
+                WHERE device_target_id=$1 AND source='device' AND status='active'
+                  AND tool NOT IN ('device_policy','device_ssh','device_posture')
+                  AND NOT (fingerprint = ANY($2::text[]))
+                """,
+                device_uuid,
+                seen_web_fingerprints,
             )
     return saved
 
@@ -7477,6 +7473,10 @@ async def run_device_web_children(
     merged_findings = result.get("findings") if isinstance(result.get("findings"), list) else []
 
     for index, origin_info in enumerate(selected, start=1):
+        if _scan_cancel_requested(parent_scan_id):
+            child_summary["cancelled"] = True
+            child_summary["truncated"] += len(selected) - index + 1
+            break
         origin = str(origin_info["origin"])
         child_scan_id, child_job_id = str(uuid.uuid4()), str(uuid.uuid4())
         child_options = {
@@ -7512,6 +7512,21 @@ async def run_device_web_children(
                 f"device_target:{device_target_id}:web_origin:{hashlib.sha256(origin.encode()).hexdigest()[:20]}",
                 uuid.UUID(parent_scan_id),
             )
+        child_job_key = f"job:{child_job_id}"
+        child_heartbeat_stop = threading.Event()
+        get_redis().hset(child_job_key, mapping={
+            "status": "running",
+            "scan_id": child_scan_id,
+            "target": origin,
+            "started_at": utc_now_iso(),
+            "heartbeat": utc_now_iso(),
+        })
+        child_heartbeat_thread = threading.Thread(
+            target=send_heartbeats,
+            args=(child_job_id, child_heartbeat_stop),
+            daemon=True,
+        )
+        child_heartbeat_thread.start()
         started = utc_now()
         try:
             child_result = await run_scan(origin, child_options, scan_id=child_scan_id, job_id=child_job_id)
@@ -7519,6 +7534,9 @@ async def run_device_web_children(
         except Exception as exc:
             child_result = _unexpected_scan_exception_result(origin, exc)
             child_error = str(child_result.get("error") or exc)
+        finally:
+            child_heartbeat_stop.set()
+            child_heartbeat_thread.join(timeout=2)
         completed = utc_now()
         duration = int((completed - started).total_seconds())
         child_findings = child_result.get("findings") if isinstance(child_result.get("findings"), list) else []
@@ -7545,6 +7563,13 @@ async def run_device_web_children(
             "error": str(child_error)[:500] if child_error else None,
         }
         child_summary["children"].append(child_entry)
+        get_redis().hset(child_job_key, mapping={
+            "status": child_entry["status"],
+            "progress": "100",
+            "current_phase": child_entry["status"],
+            "completed_at": completed.isoformat(),
+        })
+        get_redis().expire(child_job_key, 86400)
         if child_error:
             child_summary["failed"] += 1
         else:
@@ -7977,9 +8002,12 @@ async def process_scan_job(job_data: dict):
                 posture = result.get("device_posture") if isinstance(result.get("device_posture"), dict) else {}
                 completeness = posture.get("completeness") if isinstance(posture.get("completeness"), dict) else {}
                 web_children = posture.get("web_dast_children") if isinstance(posture.get("web_dast_children"), dict) else {}
-                resolve_missing = bool(
+                resolve_posture_missing = bool(
                     completeness.get("complete")
                     and completeness.get("tcp_scope") == "all_65535"
+                )
+                resolve_web_missing = bool(
+                    resolve_posture_missing
                     and not completeness.get("web_probe_truncated")
                     and (options or {}).get("include_web_dast")
                     and web_children.get("enabled")
@@ -7991,7 +8019,8 @@ async def process_scan_job(job_data: dict):
                     scan_id,
                     device_target_id,
                     findings,
-                    resolve_missing=resolve_missing,
+                    resolve_posture_missing=resolve_posture_missing,
+                    resolve_web_missing=resolve_web_missing,
                 )
             except Exception as e:
                 print(f"[{job_id[:8]}] save_device_findings error: {e}", flush=True)

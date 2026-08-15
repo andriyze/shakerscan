@@ -609,6 +609,7 @@ function FindingDetailContent() {
     lastVerdictInconclusive && latestRetest && latestRetest.status !== 'queued' && latestRetest.status !== 'running' && latestRetest.retryable
   )
   const retestSupported = finding?.retest_supported !== false
+  const deviceFinding = finding ? getFindingSourceType(finding) === 'Device' : false
   const retestModes = finding?.retest_modes
   const dastRetestOptions = [
     { value: 'tiered', label: 'Tiered' },
@@ -670,7 +671,7 @@ function FindingDetailContent() {
           <h1 className="text-2xl font-bold text-white">Finding Detail</h1>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <button
+          {!deviceFinding && <button
             type="button"
             onClick={() => setAutonomousConfirmOpen(true)}
             disabled={!autonomousTargetUrl || autonomousLoading || hasPendingRetest || targetInactive}
@@ -687,8 +688,8 @@ function FindingDetailContent() {
           >
             <BrainCircuit className="h-4 w-4" />
             Verify finding
-          </button>
-          {(!autonomousTargetUrl || hasPendingRetest || targetInactive) && (
+          </button>}
+          {!deviceFinding && (!autonomousTargetUrl || hasPendingRetest || targetInactive) && (
             <span className={`max-w-64 text-xs leading-4 ${hasPendingRetest ? 'text-gray-500' : 'text-amber-300/80'}`}>
               {hasPendingRetest
                 ? 'Available after the current proof replay finishes.'
@@ -697,7 +698,7 @@ function FindingDetailContent() {
                   : autonomousUnsupportedReason(finding)}
             </span>
           )}
-          <div className="flex flex-wrap items-center gap-2 rounded-lg border border-gray-800 bg-gray-950/50 p-1">
+          {!deviceFinding && <div className="flex flex-wrap items-center gap-2 rounded-lg border border-gray-800 bg-gray-950/50 p-1">
             <span className="pl-1 text-[10px] font-semibold uppercase tracking-wider text-gray-500">Proof replay</span>
             <RetestVerdictBadge
               verdict={finding.last_verification_verdict}
@@ -722,7 +723,7 @@ function FindingDetailContent() {
             >
               {retestLoading ? 'Queueing...' : 'Retest Finding'}
             </button>
-          </div>
+          </div>}
           <button
             onClick={() => setDeleteConfirmOpen(true)}
             className="px-3 py-1.5 bg-red-900/50 text-red-400 rounded-lg text-sm hover:bg-red-900/80 transition-colors"

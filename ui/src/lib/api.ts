@@ -1372,8 +1372,24 @@ export interface DeviceDetailResponse {
   device: DeviceTarget
   interfaces: DeviceInterface[]
   services: DeviceService[]
+  services_total?: number
   inconclusive_observations?: DeviceService[]
-  scans: Scan[]
+  inconclusive_observations_total?: number
+  service_limit?: number
+  service_offset?: number
+  scans: Array<{
+    id: string
+    status: string
+    scan_type: string
+    run_kind: string
+    score?: number | null
+    grade?: string | null
+    findings_count?: number
+    progress?: number
+    current_phase?: string | null
+    created_at: string
+    completed_at?: string | null
+  }>
 }
 
 export interface ModelIntakeScanRequest {

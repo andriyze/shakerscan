@@ -128,6 +128,10 @@ CREATE TABLE scans (
 
     -- Error handling
     error_message TEXT,
+    CONSTRAINT scans_run_kind_check CHECK (run_kind IN (
+        'web_dast','ai_api','ai_widget','ai_rag','ai_trace','ai_mcp',
+        'model_intake','device_posture','device_web_dast'
+    )),
     retry_count INTEGER DEFAULT 0,
 
     -- Parallel scan orchestration (parent/shard/merge fan-out)
@@ -367,7 +371,12 @@ CREATE TABLE device_services (
     first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-    CONSTRAINT device_services_identity_unique UNIQUE (device_target_id, transport, port)
+    CONSTRAINT device_services_identity_unique UNIQUE (device_target_id, transport, port),
+    CONSTRAINT device_services_transport_check CHECK (transport IN ('tcp','udp')),
+    CONSTRAINT device_services_state_check CHECK (state IN ('open','open|filtered')),
+    CONSTRAINT device_services_policy_disposition_check CHECK (
+        policy_disposition IS NULL OR policy_disposition IN ('allow','deny','review','require','not_evaluated')
+    )
 );
 
 CREATE TABLE device_agent_runs (
@@ -391,7 +400,8 @@ CREATE TABLE device_agent_runs (
     ),
     CONSTRAINT device_agent_runs_safety_check CHECK (
         safety_profile IN ('observe_only','safe_remote','authenticated_active','lab_invasive')
-    )
+    ),
+    CONSTRAINT device_agent_runs_planner_mode_check CHECK (planner_mode IN ('agent'))
 );
 
 CREATE INDEX idx_device_agent_runs_device
@@ -399,6 +409,10 @@ ON device_agent_runs(device_target_id, created_at DESC);
 
 CREATE INDEX idx_device_agent_runs_status
 ON device_agent_runs(status, updated_at DESC);
+
+CREATE UNIQUE INDEX idx_device_agent_runs_one_active_per_device
+ON device_agent_runs(device_target_id)
+WHERE status IN ('awaiting_planner','planning');
 
 -- ============================================================
 -- FINDINGS - Vulnerabilities discovered
@@ -744,6 +758,11 @@ CREATE INDEX idx_targets_is_root ON targets(is_root) WHERE is_root = true;
 CREATE INDEX idx_scans_target_id ON scans(target_id);
 CREATE INDEX idx_scans_ai_target_id ON scans(ai_target_id) WHERE ai_target_id IS NOT NULL;
 CREATE INDEX idx_scans_device_target_id ON scans(device_target_id) WHERE device_target_id IS NOT NULL;
+CREATE UNIQUE INDEX idx_scans_one_active_device_posture
+ON scans(device_target_id)
+WHERE device_target_id IS NOT NULL
+  AND run_kind='device_posture'
+  AND status IN ('pending','queued','running');
 CREATE INDEX idx_scans_run_kind ON scans(run_kind);
 CREATE INDEX idx_scans_status ON scans(status);
 CREATE INDEX idx_scans_created ON scans(created_at DESC);

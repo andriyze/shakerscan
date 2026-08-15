@@ -46,13 +46,24 @@ export default function DeviceAgentPage() {
   useEffect(() => {
     if (!runId) return
     let stopped = false
-    const tick = () => getDeviceAgentSession(runId).then((value) => { if (!stopped) setSession(value) }).catch(() => undefined)
+    const tick = () => getDeviceAgentSession(runId).then((value) => {
+      if (stopped) return
+      if (value.device_target_id !== deviceId) {
+        setError('This investigation run belongs to a different connected device.')
+        setSession(null)
+        return
+      }
+      setError(null)
+      setSession(value)
+    }).catch((err) => {
+      if (!stopped) setError(err instanceof Error ? err.message : 'Could not load AI device investigation')
+    })
     tick()
     const timer = window.setInterval(() => {
       if (!TERMINAL.has(sessionRef.current?.status || '')) tick()
     }, 2500)
     return () => { stopped = true; window.clearInterval(timer) }
-  }, [runId])
+  }, [runId, deviceId])
 
   const example = useMemo(() => `investigate connected device ${data?.device.primary_locator || 'tv.lan'} with the AI device agent`, [data])
 
