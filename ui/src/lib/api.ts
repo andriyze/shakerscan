@@ -1224,6 +1224,7 @@ export interface Scan {
   completed_at?: string
   duration_seconds?: number
   error_message?: string
+  result?: Record<string, unknown> | null
   options?: Record<string, unknown> | null
   scan_role?: 'standalone' | 'parent' | 'shard' | string | null
   parent_scan_id?: string | null
@@ -4240,7 +4241,7 @@ export async function getScans(params?: {
   return res.json()
 }
 
-export async function getScan(id: string) {
+export async function getScan(id: string): Promise<Scan> {
   const res = await fetch(`${API_URL}/scans/${id}`)
   if (!res.ok) throw new Error('Failed to fetch scan')
   return res.json()

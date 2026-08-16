@@ -138,6 +138,24 @@ def test_device_detail_scopes_udp_uncertainty_to_the_latest_posture_scan():
     assert "Not confirmed open" in ui
 
 
+def test_device_detail_makes_exact_scan_open_ports_prominent():
+    api_client = (ROOT / "ui" / "src" / "lib" / "api.ts").read_text()
+    ui = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "page.tsx").read_text()
+
+    assert "useSearchParams" in ui
+    assert "searchParams.get('scan')" in ui
+    assert "getScan(selectedScanId)" in ui
+    assert "next.device_target_id !== deviceId" in ui
+    assert "Open ports in this scan" in ui
+    assert "Only services positively confirmed by the selected scan are shown." in ui
+    assert "Previously observed on this device" in ui
+    assert "This does not prove they are currently closed." in ui
+    assert "Confirmed responses only. Silent or ambiguous probes are never shown as open." in ui
+    assert "show open ports" in ui
+    assert "Track open ports" in ui
+    assert "export async function getScan(id: string): Promise<Scan>" in api_client
+
+
 def test_device_views_expose_last_scan_reachability_without_assuming_online():
     api = (ROOT / "api" / "api.py").read_text()
     worker = (ROOT / "api" / "worker.py").read_text()

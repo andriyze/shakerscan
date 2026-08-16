@@ -1,10 +1,10 @@
 'use client'
 
 import Link from 'next/link'
-import { useCallback, useEffect, useState } from 'react'
-import { useParams } from 'next/navigation'
-import { Bot, ChevronDown, ChevronUp, CircleHelp, Globe, KeyRound, MapPin, Pencil, Router, Wifi, WifiOff } from 'lucide-react'
-import { changeDeviceLocator, createDeviceCredential, deactivateDeviceCredential, formatDate, getDevice, getDeviceCredentials, renameDevice, scanDevice, type DeviceCredentialProfile, type DeviceDetailResponse } from '@/lib/api'
+import { Suspense, useCallback, useEffect, useState } from 'react'
+import { useParams, useSearchParams } from 'next/navigation'
+import { Bot, ChevronDown, ChevronUp, CircleHelp, ExternalLink, Globe, KeyRound, MapPin, Pencil, Router, Wifi, WifiOff } from 'lucide-react'
+import { changeDeviceLocator, createDeviceCredential, deactivateDeviceCredential, formatDate, getDevice, getDeviceCredentials, getScan, renameDevice, scanDevice, type DeviceCredentialProfile, type DeviceDetailResponse, type DeviceService, type Scan } from '@/lib/api'
 import { Button, Card, EmptyState, ErrorState, Field, Input, Modal, PageHeader, ScanStatusBadge, Select, TableSkeleton, Textarea, useToast } from '@/components/ui'
 
 const policyBadgeClass: Record<string, string> = {
@@ -23,9 +23,45 @@ function parsePortHints(value: string): number[] {
   return ports
 }
 
-export default function DeviceDetailPage() {
+function serviceKey(service: Pick<DeviceService, 'transport' | 'port'>): string {
+  return `${String(service.transport || 'tcp').toLowerCase()}/${Number(service.port)}`
+}
+
+function scanServices(scan: Scan | null, collection: 'services' | 'inconclusive_observations', expectedState: 'open' | 'open|filtered'): DeviceService[] {
+  const result = scan?.result
+  const posture = result && typeof result.device_posture === 'object' && result.device_posture !== null
+    ? result.device_posture as Record<string, unknown>
+    : null
+  const rows = Array.isArray(posture?.[collection]) ? posture[collection] as unknown[] : []
+  return rows.flatMap((raw, index) => {
+    if (!raw || typeof raw !== 'object') return []
+    const row = raw as Record<string, unknown>
+    const port = Number(row.port)
+    if (!Number.isInteger(port) || port < 1 || port > 65535 || String(row.state || expectedState) !== expectedState) return []
+    const transport = String(row.transport || 'tcp').toLowerCase()
+    return [{
+      id: String(row.id || `${scan?.id || 'scan'}-${transport}-${port}-${index}`),
+      transport,
+      port,
+      state: expectedState,
+      service_name: String(row.service_name || 'unknown'),
+      product: row.product ? String(row.product) : null,
+      version: row.version ? String(row.version) : null,
+      cpe: row.cpe ? String(row.cpe) : null,
+      encrypted: typeof row.encrypted === 'boolean' ? row.encrypted : null,
+      web_origin: row.web_origin ? String(row.web_origin) : null,
+      policy_disposition: row.policy_disposition ? String(row.policy_disposition) : null,
+      policy_reason: row.policy_reason ? String(row.policy_reason) : null,
+      last_seen_at: String(row.last_seen_at || scan?.completed_at || scan?.created_at || ''),
+    }]
+  }).sort((left, right) => left.transport.localeCompare(right.transport) || left.port - right.port)
+}
+
+function DeviceDetailContent() {
   const params = useParams()
+  const searchParams = useSearchParams()
   const deviceId = params.id as string
+  const selectedScanId = searchParams.get('scan')?.trim() || null
   const toast = useToast()
   const [data, setData] = useState<DeviceDetailResponse | null>(null)
   const [loading, setLoading] = useState(true)
@@ -43,6 +79,9 @@ export default function DeviceDetailPage() {
   const [renameName, setRenameName] = useState('')
   const [credentialForm, setCredentialForm] = useState({ name: '', auth_kind: 'ssh_password', username: '', secret: '', secondary_secret: '', login_path: '/login', port: '' })
   const [scanning, setScanning] = useState(false)
+  const [selectedScan, setSelectedScan] = useState<Scan | null>(null)
+  const [selectedScanLoading, setSelectedScanLoading] = useState(false)
+  const [selectedScanError, setSelectedScanError] = useState<string | null>(null)
   const [scan, setScan] = useState({ profile: 'inventory', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', port_hints: '', ssh_credential_profile_id: '', web_credential_profile_id: '', include_ssh_host_review: false, confirm_authorized: false })
 
   const load = useCallback(async () => {
@@ -53,6 +92,38 @@ export default function DeviceDetailPage() {
   }, [deviceId])
 
   useEffect(() => { load(); const timer = setInterval(load, 10_000); return () => clearInterval(timer) }, [load])
+
+  useEffect(() => {
+    let stopped = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+    if (!selectedScanId) {
+      setSelectedScan(null)
+      setSelectedScanError(null)
+      setSelectedScanLoading(false)
+      return () => undefined
+    }
+    setSelectedScanLoading(true)
+    const refresh = async () => {
+      try {
+        const next = await getScan(selectedScanId)
+        if (stopped) return
+        if (next.device_target_id !== deviceId || !['device_posture', 'device_probe'].includes(String(next.run_kind || next.scan_type))) {
+          setSelectedScan(null)
+          setSelectedScanError('That scan does not belong to this connected device.')
+          return
+        }
+        setSelectedScan(next)
+        setSelectedScanError(null)
+        if (!['completed', 'failed', 'cancelled'].includes(next.status)) timer = setTimeout(refresh, 5_000)
+      } catch (error) {
+        if (!stopped) setSelectedScanError(error instanceof Error ? error.message : 'Could not load the selected device scan')
+      } finally {
+        if (!stopped) setSelectedScanLoading(false)
+      }
+    }
+    refresh()
+    return () => { stopped = true; if (timer) clearTimeout(timer) }
+  }, [deviceId, selectedScanId])
 
   async function queueScan() {
     setScanning(true)
@@ -70,7 +141,7 @@ export default function DeviceDetailPage() {
         capability_ids: scan.include_ssh_host_review ? ['ssh-authenticated-host-review'] : undefined,
       })
       setScanOpen(false)
-      toast.success('Device scan queued', { link: { href: `/scans/${queued.scan_id}`, label: 'View report' } })
+      toast.success('Device scan queued', { link: { href: `/devices/${deviceId}?scan=${queued.scan_id}`, label: 'Track open ports' } })
       await load()
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Failed to queue scan')
@@ -132,8 +203,20 @@ export default function DeviceDetailPage() {
   if (loading) return <div className="mx-auto max-w-7xl"><TableSkeleton rows={6} /></div>
   if (failed || !data) return <div className="mx-auto max-w-7xl"><ErrorState message="Could not load connected device" onRetry={load} /></div>
   const { device, interfaces, services, scans, locator_history: locatorHistory } = data
-  const observations = data.inconclusive_observations || []
-  const observationTotal = data.inconclusive_observations_total ?? observations.length
+  const exactScanServices = selectedScanId ? scanServices(selectedScan, 'services', 'open') : []
+  const visibleServices = selectedScanId ? exactScanServices : services
+  const visibleServiceKeys = new Set(visibleServices.map(serviceKey))
+  const previouslyObservedServices = selectedScan
+    ? services.filter((service) => !visibleServiceKeys.has(serviceKey(service)))
+    : []
+  const tcpOpenCount = visibleServices.filter((service) => String(service.transport).toLowerCase() === 'tcp').length
+  const udpOpenCount = visibleServices.filter((service) => String(service.transport).toLowerCase() === 'udp').length
+  const webOpenCount = visibleServices.filter((service) => Boolean(service.web_origin)).length
+  const selectedScanTerminal = Boolean(selectedScan && ['completed', 'failed', 'cancelled'].includes(selectedScan.status))
+  const observations = selectedScanId
+    ? scanServices(selectedScan, 'inconclusive_observations', 'open|filtered')
+    : data.inconclusive_observations || []
+  const observationTotal = selectedScanId ? observations.length : data.inconclusive_observations_total ?? observations.length
   const reachability = data.reachability || device.last_reachability
   const reachabilityTone = reachability?.status === 'online'
     ? 'border-emerald-500/25 bg-emerald-500/5 text-emerald-100'
@@ -146,8 +229,49 @@ export default function DeviceDetailPage() {
     <div className="mx-auto max-w-7xl">
       <PageHeader backHref="/devices" backLabel="Connected devices" title={device.name} description={device.primary_locator} icon={<Router className="h-6 w-6" />} actions={<><Button variant="secondary" onClick={() => { setRenameName(device.name); setRenameOpen(true) }}><Pencil className="h-4 w-4" /> Rename</Button><Button variant="secondary" onClick={() => { setLocatorForm({ locator: device.primary_locator, reason: '', confirm_same_device: false }); setLocatorOpen(true) }}><MapPin className="h-4 w-4" /> Change address</Button><Link href={`/devices/${device.id}/agent`} className="inline-flex items-center gap-2 rounded-lg border border-violet-500/30 bg-violet-500/10 px-3 py-2 text-sm text-violet-200 hover:bg-violet-500/20"><Bot className="h-4 w-4" /> Device Hunt</Link><Link href={`/findings?source_type=device&device_target_id=${device.id}`} className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-200 hover:bg-gray-700">View findings</Link><Button onClick={() => { setScan({ profile: 'inventory', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', port_hints: '', ssh_credential_profile_id: '', web_credential_profile_id: '', include_ssh_host_review: false, confirm_authorized: false }); setScanOpen(true) }}>Scan device</Button></>} />
 
+      {selectedScanId && (
+        <Card className="mb-4 border-blue-500/25 bg-blue-500/5 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-sm font-medium text-blue-100">Viewing one device scan</p>
+              <p className="mt-1 text-xs text-gray-400">
+                {selectedScan ? `${selectedScan.status.replace(/_/g, ' ')} · ${formatDate(selectedScan.created_at)} · ${selectedScan.current_phase?.replace(/_/g, ' ') || selectedScan.scan_type}` : selectedScanLoading ? 'Loading scan evidence…' : selectedScanError || selectedScanId}
+              </p>
+            </div>
+            <div className="flex gap-2">
+              {selectedScan && <Link href={`/scans/${selectedScan.id}`} className="inline-flex items-center gap-1 rounded border border-blue-500/30 px-3 py-1.5 text-xs text-blue-200 hover:bg-blue-500/10">Full report <ExternalLink className="h-3.5 w-3.5" /></Link>}
+              <Link href={`/devices/${device.id}`} className="rounded border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800">Show known inventory</Link>
+            </div>
+          </div>
+        </Card>
+      )}
+
       <Card className={`mb-6 border p-4 ${reachabilityTone}`}>
         <div className="flex items-start gap-3"><ReachabilityIcon className="mt-0.5 h-5 w-5 shrink-0" /><div><p className="font-medium">{reachability ? `Device ${reachability.status === 'online' ? 'online' : reachability.status}` : 'Device reachability not checked'}</p><p className="mt-1 text-sm opacity-75">{reachability?.reason || 'Run a device scan to require a positive network response before port and policy checks begin.'}</p>{reachability?.status === 'online' && <p className="mt-2 text-xs opacity-70">Network accessible · {reachability.service_accessible === true ? 'at least one service responded' : reachability.service_accessible === false ? 'no listening TCP service found with complete visibility' : 'service accessibility still being assessed'} · {reachability.confidence} confidence</p>}</div></div>
+      </Card>
+
+      <Card className="mb-6 border-blue-500/25 bg-blue-500/5 p-5">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <p className="text-sm font-medium text-blue-200">{selectedScanId ? 'Open ports in this scan' : 'Known open ports'}</p>
+            <div className="mt-1 flex items-end gap-3"><span className="text-4xl font-semibold text-white">{visibleServices.length}</span><span className="pb-1 text-sm text-gray-400">confirmed listening service{visibleServices.length === 1 ? '' : 's'}</span></div>
+            <p className="mt-2 text-xs text-gray-500">{selectedScanId ? 'Only services positively confirmed by the selected scan are shown.' : 'The device inventory retains ports positively confirmed by completed scans.'}</p>
+          </div>
+          <div className="flex flex-wrap gap-2 text-xs">
+            <span className="rounded bg-gray-950/70 px-2.5 py-1.5 text-gray-300">TCP {tcpOpenCount}</span>
+            <span className="rounded bg-gray-950/70 px-2.5 py-1.5 text-gray-300">UDP {udpOpenCount}</span>
+            <span className="rounded bg-gray-950/70 px-2.5 py-1.5 text-gray-300">Web {webOpenCount}</span>
+          </div>
+        </div>
+        {visibleServices.length > 0 ? (
+          <div className="mt-4 flex flex-wrap gap-2">
+            {visibleServices.map((service) => <a key={service.id} href="#open-port-details" className="rounded-lg border border-blue-500/20 bg-gray-950/70 px-3 py-2 font-mono text-sm text-blue-100 hover:border-blue-400/50"><strong>{service.port}/{String(service.transport).toUpperCase()}</strong><span className="ml-2 font-sans text-xs text-gray-400">{service.service_name || 'unknown'}</span></a>)}
+          </div>
+        ) : selectedScanId && !selectedScanTerminal ? (
+          <p className="mt-4 rounded border border-gray-800 bg-gray-950/50 p-3 text-sm text-gray-400">{selectedScanError || 'Waiting for this scan to confirm listening services…'}</p>
+        ) : (
+          <p className="mt-4 rounded border border-gray-800 bg-gray-950/50 p-3 text-sm text-gray-400">No listening service was positively confirmed{selectedScanId ? ' by this scan' : ''}.</p>
+        )}
       </Card>
 
       <div className="mb-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
@@ -157,14 +281,25 @@ export default function DeviceDetailPage() {
         ].map(([label, value]) => <Card key={label} className="p-3"><p className="text-xs text-gray-500">{label}</p><p className="mt-1 truncate font-medium text-white">{value}</p></Card>)}
       </div>
 
-      <section className="mb-6">
-        <h2 className="mb-3 text-lg font-semibold text-white">Observed services</h2>
-        {services.length === 0 ? <EmptyState message="No service inventory yet" hint="Run a device scan to inventory listening TCP and UDP services." /> : (
-          <div className="overflow-hidden rounded-lg border border-gray-800"><div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead className="bg-gray-900 text-xs uppercase text-gray-500"><tr><th className="px-4 py-3">Port</th><th className="px-4 py-3">Service</th><th className="px-4 py-3">Product</th><th className="px-4 py-3">Policy</th><th className="px-4 py-3">Web interface</th><th className="px-4 py-3">Last seen</th></tr></thead><tbody className="divide-y divide-gray-800 bg-gray-950/50">{services.map((service) => (
+      <section id="open-port-details" className="mb-6 scroll-mt-6">
+        <h2 className="mb-1 text-lg font-semibold text-white">{selectedScanId ? 'Open-port details for this scan' : 'Known open-port details'}</h2>
+        <p className="mb-3 text-sm text-gray-500">Confirmed responses only. Silent or ambiguous probes are never shown as open.</p>
+        {visibleServices.length === 0 ? <EmptyState message="No confirmed open ports" hint={selectedScanId ? 'This scan has not confirmed a listening service.' : 'Run a device scan to inventory listening TCP and UDP services.'} /> : (
+          <div className="overflow-hidden rounded-lg border border-gray-800"><div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead className="bg-gray-900 text-xs uppercase text-gray-500"><tr><th className="px-4 py-3">Open port</th><th className="px-4 py-3">Service</th><th className="px-4 py-3">Product</th><th className="px-4 py-3">Policy</th><th className="px-4 py-3">Web interface</th><th className="px-4 py-3">Confirmed</th></tr></thead><tbody className="divide-y divide-gray-800 bg-gray-950/50">{visibleServices.map((service) => (
             <tr key={service.id}><td className="px-4 py-3 font-mono text-gray-200">{service.port}/{service.transport}</td><td className="px-4 py-3 text-white">{service.service_name}</td><td className="px-4 py-3 text-gray-400">{[service.product, service.version].filter(Boolean).join(' ') || '—'}</td><td className="px-4 py-3"><span className={`rounded-full px-2 py-1 text-xs ${policyBadgeClass[service.policy_disposition || ''] || 'bg-gray-700 text-gray-300'}`}>{service.policy_disposition || 'unreviewed'}</span></td><td className="px-4 py-3">{service.web_origin ? <a href={service.web_origin} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-blue-300 hover:text-blue-200"><Globe className="h-3.5 w-3.5" /> {service.web_origin}</a> : <span className="text-gray-600">—</span>}</td><td className="px-4 py-3 text-xs text-gray-500">{formatDate(service.last_seen_at)}</td></tr>
           ))}</tbody></table></div></div>
         )}
       </section>
+
+      {selectedScanId && previouslyObservedServices.length > 0 && (
+        <details className="mb-6 rounded-lg border border-gray-800 bg-gray-950/30">
+          <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-gray-300">Previously observed on this device ({previouslyObservedServices.length})</summary>
+          <div className="flex flex-wrap gap-2 border-t border-gray-800 p-4">
+            {previouslyObservedServices.map((service) => <span key={service.id} className="rounded border border-gray-800 bg-gray-950 px-2.5 py-1.5 font-mono text-xs text-gray-400">{service.port}/{String(service.transport).toUpperCase()} · <span className="font-sans">{service.service_name || 'unknown'}</span></span>)}
+          </div>
+          <p className="px-4 pb-4 text-xs text-gray-600">These ports were confirmed by an earlier scan, but not by the selected scan. This does not prove they are currently closed.</p>
+        </details>
+      )}
 
       {observations.length > 0 && (
         <section className="mb-6">
@@ -196,7 +331,7 @@ export default function DeviceDetailPage() {
 
       <div className="grid gap-6 lg:grid-cols-2">
         <section><h2 className="mb-3 text-lg font-semibold text-white">Interfaces and identity</h2><Card className="p-4"><div className="mb-4 border-b border-gray-800 pb-3"><p className="text-xs text-gray-500">Permanent device ID</p><p className="mt-1 break-all font-mono text-xs text-gray-300">{device.id}</p></div>{interfaces.length ? <div className="space-y-3">{interfaces.map((item) => <div key={item.id} className="flex items-start justify-between gap-3 border-b border-gray-800 pb-3 last:border-0 last:pb-0"><div><p className="font-mono text-sm text-white">{item.locator}{item.locator === device.primary_locator && <span className="ml-2 rounded bg-blue-500/15 px-1.5 py-0.5 text-[10px] text-blue-300">current</span>}</p><p className="text-xs text-gray-500">{item.hostname || item.locator_type}</p></div><div className="text-right text-xs text-gray-400"><p>{item.mac_address || 'No MAC observed'}</p><p>{item.network_zone || 'Zone not assigned'}</p></div></div>)}</div> : <p className="text-sm text-gray-500">No interfaces observed.</p>}</Card>{locatorHistory.length > 1 && <Card className="mt-3 p-4"><p className="mb-3 text-sm font-medium text-white">Address history</p><div className="space-y-2">{locatorHistory.slice(0, 8).map((entry) => <div key={entry.id} className="flex items-start justify-between gap-3 text-xs"><div><p className="font-mono text-gray-300">{entry.locator}</p><p className="text-gray-600">{entry.change_reason || entry.change_source}</p></div><p className="whitespace-nowrap text-gray-500">{formatDate(entry.changed_at)}</p></div>)}</div></Card>}</section>
-        <section><h2 className="mb-3 text-lg font-semibold text-white">Recent device scans</h2><Card className="p-4">{scans.length ? <div className="space-y-3">{scans.slice(0, 8).map((item) => <Link key={item.id} href={`/scans/${item.id}`} className="flex items-center justify-between gap-3 border-b border-gray-800 pb-3 last:border-0 last:pb-0 hover:text-blue-300"><div><p className="text-sm text-white">{item.current_phase?.replace(/_/g, ' ') || item.scan_type}</p><p className="text-xs text-gray-500">{formatDate(item.created_at)}</p></div><ScanStatusBadge status={item.status} /></Link>)}</div> : <p className="text-sm text-gray-500">No scans yet.</p>}</Card></section>
+        <section><h2 className="mb-3 text-lg font-semibold text-white">Recent device scans</h2><Card className="p-4">{scans.length ? <div className="space-y-3">{scans.slice(0, 8).map((item) => <div key={item.id} className="flex items-center justify-between gap-3 border-b border-gray-800 pb-3 last:border-0 last:pb-0"><Link href={`/devices/${device.id}?scan=${item.id}`} className="min-w-0 flex-1 hover:text-blue-300"><p className="truncate text-sm text-white">{item.current_phase?.replace(/_/g, ' ') || item.scan_type}</p><p className="text-xs text-gray-500">{formatDate(item.created_at)} · show open ports</p></Link><div className="flex items-center gap-2"><ScanStatusBadge status={item.status} /><Link href={`/scans/${item.id}`} aria-label="Open full scan report" title="Open full scan report" className="rounded p-1 text-gray-500 hover:bg-gray-800 hover:text-blue-300"><ExternalLink className="h-4 w-4" /></Link></div></div>)}</div> : <p className="text-sm text-gray-500">No scans yet.</p>}</Card></section>
       </div>
 
       <Modal open={scanOpen} title={`Scan ${device.name}`} onClose={() => setScanOpen(false)} footer={<><Button variant="secondary" onClick={() => setScanOpen(false)}>Cancel</Button><Button loading={scanning} disabled={!scan.confirm_authorized} onClick={queueScan}>Queue scan</Button></>}>
@@ -239,5 +374,13 @@ export default function DeviceDetailPage() {
         <Field label="Device name" required hint="This changes the display name only. Device identity, address, scans, policies, and credentials stay unchanged."><Input value={renameName} maxLength={160} autoFocus onChange={(event) => setRenameName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && renameName.trim() && renameName.trim() !== device.name) saveName() }} /></Field>
       </Modal>
     </div>
+  )
+}
+
+export default function DeviceDetailPage() {
+  return (
+    <Suspense fallback={<div className="mx-auto max-w-7xl"><TableSkeleton rows={6} /></div>}>
+      <DeviceDetailContent />
+    </Suspense>
   )
 }
