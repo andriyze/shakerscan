@@ -21,6 +21,32 @@ def _nmap_xml(ports: str = "", *, timed_out: bool = False, finished_exit: str = 
     )
 
 
+def _tcp_scope_result(ports: list[int], *, complete: bool = True):
+    services = [{
+        "transport": "tcp", "port": port, "state": "open",
+        "state_reason": "tcp-connect", "service_name": "unknown",
+        "product": "", "version": "", "extra_info": "", "tunnel": None,
+        "cpe": None, "confidence": "confirmed", "policy_eligible": True,
+        "discovery_tool": "naabu",
+    } for port in ports]
+    return services, [], {
+        "hostnames": [],
+        "addresses": [{"address": "10.0.0.4", "type": "ipv4", "vendor": None}],
+        "os_matches": [],
+    }, {
+        "stage": "tcp_scope_discovery", "tool": "naabu", "transport": "tcp",
+        "exit_code": 0 if complete else 124, "complete": complete, "parsed": True,
+        "confirmed_open_count": len(services), "inconclusive_count": 0,
+        "reachable_open_port_inventory_complete": complete,
+        "closed_filtered_classification_complete": False,
+        "silent_port_classification": "closed_or_filtered_not_distinguished",
+        "scope": "all_tcp", "required_port_count": 65535,
+        "completed_required_port_count": 65535 if complete else 57343,
+        "incomplete_reasons": [] if complete else ["incomplete_range:fixture"],
+        "chunk_receipts": [],
+    }
+
+
 def test_normalize_device_locator_accepts_one_host_and_rejects_scope_expansion():
     assert device_posture.normalize_device_locator("[2001:db8::1]") == "2001:db8::1"
     assert device_posture.normalize_device_locator("TV.LAN.") == "tv.lan"
@@ -103,32 +129,110 @@ def test_all_tcp_scope_uses_bounded_naabu_connect_discovery(monkeypatch):
     assert identity["addresses"][0]["address"] == "10.0.0.4"
     assert receipt["tool"] == "naabu"
     assert receipt["complete"] is True
-    command = commands[0]
-    assert command[command.index("-scan-type") + 1] == "c"
-    assert command[command.index("-top-ports") + 1] == "full"
-    assert command[command.index("-rate") + 1] == "250"
-    assert "-verify" in command
+    assert receipt["scope"] == "all_tcp"
+    assert receipt["required_port_count"] == 65535
+    assert receipt["completed_required_port_count"] == 65535
+    assert len(commands) == 9  # priority ports first, then eight bounded ranges
+    assert commands[0][commands[0].index("-p") + 1].split(",")[0] == "21"
+    assert commands[1][commands[1].index("-p") + 1] == "1-8192"
+    assert commands[-1][commands[-1].index("-p") + 1] == "57345-65535"
+    assert all(command[command.index("-scan-type") + 1] == "c" for command in commands)
+    assert all(command[command.index("-rate") + 1] == "250" for command in commands)
+    assert all(command[command.index("-c") + 1] == "313" for command in commands)
+    assert all("-verify" in command for command in commands)
 
 
-def test_failed_naabu_scope_falls_back_to_nmap(monkeypatch):
+def test_failed_naabu_scope_retries_ranges_without_nmap_and_preserves_partial_results(monkeypatch):
     commands = []
+    failed_once = False
 
     async def fake_run(cmd, timeout=60, input_text=None, retry=0):
+        nonlocal failed_once
         commands.append(cmd)
-        if cmd[0] == "naabu":
-            return "", "naabu failed", 1
-        port = "<port protocol='tcp' portid='443'><state state='open' reason='syn-ack'/><service name='https'/></port>"
-        return _nmap_xml(port), "", 0
+        port_spec = cmd[cmd.index("-p") + 1]
+        if port_spec == "1-8192" and not failed_once:
+            failed_once = True
+            return '{"host":"10.0.0.4","port":7345}\n', "naabu interrupted", 1
+        return "", "", 0
 
     monkeypatch.setattr(device_posture, "run", fake_run)
     monkeypatch.setattr(device_posture, "_naabu_available", lambda: True)
     services, _, _, receipt = asyncio.run(
         device_posture._run_tcp_scope_discovery("10.0.0.4", device_posture.PROFILES["posture"]),
     )
-    assert [service["port"] for service in services] == [443]
-    assert [command[0] for command in commands] == ["naabu", "nmap"]
-    assert receipt["fallback_from"]["tool"] == "naabu"
-    assert receipt["fallback_from"]["complete"] is False
+    assert [service["port"] for service in services] == [7345]
+    assert all(command[0] == "naabu" for command in commands)
+    assert len(commands) == 10
+    failed_attempts = [
+        item for item in receipt["chunk_receipts"]
+        if item["stage"] == "tcp_scope_range_1_of_8"
+    ]
+    assert [item["attempt"] for item in failed_attempts] == [1, 2]
+    assert failed_attempts[0]["complete"] is False
+    assert failed_attempts[1]["complete"] is True
+    assert receipt["complete"] is True
+
+
+def test_permanently_failed_naabu_range_is_partial_and_never_falls_back_to_nmap(monkeypatch):
+    commands = []
+
+    async def fake_run(cmd, timeout=60, input_text=None, retry=0):
+        commands.append(cmd)
+        port_spec = cmd[cmd.index("-p") + 1]
+        if port_spec == "1-8192":
+            Path(cmd[cmd.index("-o") + 1]).write_text(
+                '{"host":"10.0.0.4","port":7345}\n', encoding="utf-8",
+            )
+            return "", "timeout", 124
+        return "", "", 0
+
+    monkeypatch.setattr(device_posture, "run", fake_run)
+    monkeypatch.setattr(device_posture, "_naabu_available", lambda: True)
+    services, _, _, receipt = asyncio.run(
+        device_posture._run_tcp_scope_discovery("10.0.0.4", device_posture.PROFILES["posture"]),
+    )
+    assert [service["port"] for service in services] == [7345]
+    assert all(command[0] == "naabu" for command in commands)
+    assert receipt["complete"] is False
+    assert receipt["failed_required_stages"] == ["tcp_scope_range_1_of_8"]
+    assert receipt["completed_required_port_count"] == 65535 - 8192
+    failed_attempts = [
+        item for item in receipt["chunk_receipts"]
+        if item["stage"] == "tcp_scope_range_1_of_8"
+    ]
+    assert all(item["partial_output_recovered"] is True for item in failed_attempts)
+
+
+def test_health_callback_halts_later_ranges_without_losing_priority_results(monkeypatch):
+    commands = []
+    events = []
+
+    async def fake_run(cmd, timeout=60, input_text=None, retry=0):
+        commands.append(cmd)
+        return '{"host":"10.0.0.4","port":7345}\n', "", 0
+
+    async def stop_after_priority(event):
+        events.append(event)
+        return False
+
+    monkeypatch.setattr(device_posture, "run", fake_run)
+    monkeypatch.setattr(device_posture, "_naabu_available", lambda: True)
+    services, _, _, receipt = asyncio.run(device_posture._run_tcp_scope_discovery(
+        "10.0.0.4", device_posture.PROFILES["posture"], stage_callback=stop_after_priority,
+    ))
+    assert [service["port"] for service in services] == [7345]
+    assert len(commands) == 1
+    assert len(events) == 9
+    assert receipt["complete"] is False
+    assert receipt["completed_required_port_count"] == 0
+    assert receipt["failed_required_stages"] == [
+        f"tcp_scope_range_{index}_of_8" for index in range(1, 9)
+    ]
+    skipped = [
+        item for item in receipt["chunk_receipts"]
+        if "device_health_degraded" in item.get("incomplete_reasons", [])
+    ]
+    assert len(skipped) == 8
 
 
 def test_policy_defaults_to_review_and_honors_deny():
@@ -174,6 +278,9 @@ def test_device_decision_distinguishes_review_from_block():
 def test_staged_scan_preserves_priority_ports_and_separates_udp_uncertainty(monkeypatch):
     commands = []
 
+    async def fake_scope(*_args, **_kwargs):
+        return _tcp_scope_result([80, 443])
+
     async def fake_run(cmd, timeout=60, input_text=None, retry=0):
         commands.append(cmd)
         if "-sU" in cmd:
@@ -188,15 +295,10 @@ def test_staged_scan_preserves_priority_ports_and_separates_udp_uncertainty(monk
                 "<port protocol='tcp' portid='443'><state state='open' reason='syn-ack'/><service name='http' tunnel='ssl' product='Fixture TLS'/></port>"
             )
             return _nmap_xml(ports), "", 0
-        if "-p-" in cmd:
-            return _nmap_xml("", timed_out=True), "Host timed out", 0
-        ports = (
-            "<port protocol='tcp' portid='80'><state state='open' reason='syn-ack'/><service name='http'/></port>"
-            "<port protocol='tcp' portid='443'><state state='open' reason='syn-ack'/><service name='https'/></port>"
-        )
-        return _nmap_xml(ports), "", 0
+        raise AssertionError(f"unexpected scanner command: {cmd}")
 
     monkeypatch.setattr(device_posture, "run", fake_run)
+    monkeypatch.setattr(device_posture, "_run_tcp_scope_discovery", fake_scope)
     services, observations, _, receipts, completeness = asyncio.run(
         device_posture._nmap_scan("device.test", device_posture.PROFILES["posture"]),
     )
@@ -206,40 +308,45 @@ def test_staged_scan_preserves_priority_ports_and_separates_udp_uncertainty(monk
     ]
     assert [(item["transport"], item["port"]) for item in observations] == [("udp", 53)]
     assert completeness["complete"] is False
-    assert completeness["execution_complete"] is False
+    assert completeness["execution_complete"] is True
     assert completeness["uncertainty_present"] is True
-    assert completeness["tcp_discovery_complete"] is False
-    assert completeness["incomplete_stages"] == ["tcp_scope_discovery", "udp_service_uncertainty"]
-    assert receipts[0]["stage"] == "tcp_priority_discovery"
-    assert receipts[0]["required"] is False
-    broad_command = next(cmd for cmd in commands if "-p-" in cmd)
+    assert completeness["tcp_discovery_complete"] is True
+    assert completeness["incomplete_stages"] == ["udp_service_uncertainty"]
+    assert receipts[0]["stage"] == "tcp_scope_discovery"
     fingerprint_command = next(cmd for cmd in commands if "-sV" in cmd and "-sT" in cmd)
-    assert "-sV" not in broad_command
     assert fingerprint_command[fingerprint_command.index("-p") + 1] == "80,443"
+    assert all("-p-" not in command for command in commands)
 
 
-def test_successful_filtered_tcp_scope_cannot_produce_complete_coverage(monkeypatch):
+def test_complete_naabu_inventory_does_not_claim_closed_filtered_classification(monkeypatch):
+    async def fake_scope(*_args, **_kwargs):
+        return _tcp_scope_result([])
+
     async def fake_run(cmd, timeout=60, input_text=None, retry=0):
         if "-sU" in cmd:
             closed = "<port protocol='udp' portid='53'><state state='closed' reason='port-unreach'/><service name='domain'/></port>"
             return _nmap_xml(closed), "", 0
-        filtered = "<port protocol='tcp' portid='443'><state state='filtered' reason='no-response'/><service name='https'/></port>"
-        return _nmap_xml(filtered), "", 0
+        raise AssertionError(f"unexpected scanner command: {cmd}")
 
     monkeypatch.setattr(device_posture, "run", fake_run)
+    monkeypatch.setattr(device_posture, "_run_tcp_scope_discovery", fake_scope)
     services, observations, _, _, completeness = asyncio.run(
         device_posture._nmap_scan("device.test", device_posture.PROFILES["posture"]),
     )
     assert services == []
     assert observations == []
     assert completeness["execution_complete"] is True
-    assert completeness["tcp_visibility_complete"] is False
-    assert completeness["tcp_filtered_ports_count"] == 1
-    assert completeness["complete"] is False
-    assert "tcp_scope_visibility" in completeness["incomplete_stages"]
+    assert completeness["tcp_visibility_complete"] is True
+    assert completeness["tcp_closed_filtered_classification_complete"] is False
+    assert completeness["tcp_silent_port_classification"] == "closed_or_filtered_not_distinguished"
+    assert completeness["complete"] is True
+    assert "tcp_scope_visibility" not in completeness["incomplete_stages"]
 
 
 def test_udp_silence_prevents_allow_without_becoming_a_service(monkeypatch):
+    async def fake_scope(*_args, **_kwargs):
+        return _tcp_scope_result([])
+
     async def fake_run(cmd, timeout=60, input_text=None, retry=0):
         if "-sU" in cmd:
             uncertain = "<port protocol='udp' portid='1900'><state state='open|filtered' reason='no-response'/><service name='upnp'/></port>"
@@ -247,6 +354,7 @@ def test_udp_silence_prevents_allow_without_becoming_a_service(monkeypatch):
         return _nmap_xml(""), "", 0
 
     monkeypatch.setattr(device_posture, "run", fake_run)
+    monkeypatch.setattr(device_posture, "_run_tcp_scope_discovery", fake_scope)
     services, observations, _, _, completeness = asyncio.run(
         device_posture._nmap_scan("device.test", device_posture.PROFILES["posture"]),
     )
@@ -259,6 +367,9 @@ def test_udp_silence_prevents_allow_without_becoming_a_service(monkeypatch):
 
 
 def test_udp_extraports_silence_prevents_allow(monkeypatch):
+    async def fake_scope(*_args, **_kwargs):
+        return _tcp_scope_result([])
+
     def extraports_xml(protocol: str, state: str, count: int) -> str:
         return (
             "<?xml version='1.0'?><nmaprun scanner='nmap'>"
@@ -274,6 +385,7 @@ def test_udp_extraports_silence_prevents_allow(monkeypatch):
         return extraports_xml("tcp", "closed", 100), "", 0
 
     monkeypatch.setattr(device_posture, "run", fake_run)
+    monkeypatch.setattr(device_posture, "_run_tcp_scope_discovery", fake_scope)
     services, observations, _, receipts, completeness = asyncio.run(
         device_posture._nmap_scan("device.test", device_posture.PROFILES["inventory"]),
     )
@@ -613,10 +725,9 @@ def test_posture_fallback_silence_stays_inconclusive(monkeypatch):
 
 def test_fingerprinting_is_capped_and_forces_incomplete_coverage(monkeypatch):
     fingerprinted_ports = []
-    open_ports = "".join(
-        f"<port protocol='tcp' portid='{port}'><state state='open' reason='syn-ack'/><service name='unknown'/></port>"
-        for port in range(1, 601)
-    )
+
+    async def fake_scope(*_args, **_kwargs):
+        return _tcp_scope_result(list(range(1, 601)))
 
     async def fake_run(cmd, timeout=60, input_text=None, retry=0):
         if "-sU" in cmd:
@@ -631,9 +742,10 @@ def test_fingerprinting_is_capped_and_forces_incomplete_coverage(monkeypatch):
                 for port in batch
             )
             return _nmap_xml(ports), "", 0
-        return _nmap_xml(open_ports), "", 0
+        raise AssertionError(f"unexpected scanner command: {cmd}")
 
     monkeypatch.setattr(device_posture, "run", fake_run)
+    monkeypatch.setattr(device_posture, "_run_tcp_scope_discovery", fake_scope)
     services, _, _, _, completeness = asyncio.run(
         device_posture._nmap_scan("device.test", device_posture.PROFILES["posture"]),
     )

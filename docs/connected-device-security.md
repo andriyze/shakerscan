@@ -27,9 +27,9 @@ with `./scanner.sh devices stop`.
 
 | Profile | TCP inventory | UDP inventory | Typical use |
 |---|---|---|---|
-| `inventory` | Nmap top 100 TCP ports | Small common-device set | Fast reachability and first inventory |
-| `posture` | Naabu CONNECT discovery of all 65,535 TCP ports; Nmap fingerprints open ports | Curated discovery/management set | Normal device assessment |
-| `thorough` | Naabu CONNECT discovery of all 65,535 TCP ports; deeper Nmap fingerprinting | Curated discovery/management set | Higher-confidence service posture |
+| `inventory` | Naabu priority/device hints plus top 100 TCP ports; Nmap fingerprints open ports | Small common-device set | Fast reachability and first inventory |
+| `posture` | Chunked Naabu CONNECT discovery of all 65,535 TCP ports; Nmap fingerprints open ports | Curated discovery/management set | Normal device assessment |
+| `thorough` | Chunked Naabu CONNECT discovery of all 65,535 TCP ports; deeper Nmap fingerprinting | Curated discovery/management set | Higher-confidence service posture |
 
 Every profile is scoped to exactly one hostname or IP. URLs, CIDR ranges, paths, credentials, and
 shell-like locators are rejected. The operator must explicitly confirm authorization before a scan
@@ -76,13 +76,15 @@ remains inconclusive. Until online status is positively proven, authenticated an
 actions do not run, and the scan produces neither a numeric score nor a grade.
 
 TCP assessment is staged. A bounded priority pass checks common administration, media, printing,
-messaging, and nonstandard web ports first. Nmap handles the top-100 inventory profile. For all-port
-`posture` and `thorough` scans, Naabu performs a rate-limited CONNECT scan and Nmap runs expensive
-service/version fingerprinting only against confirmed-open ports. Naabu runs at a separate,
-device-safe port-probe ceiling from application-protocol request limits. If Naabu is unavailable or
-fails, the scanner records that receipt and falls back to the slower Nmap full-range path. A timed-out
-full-range pass remains explicitly incomplete while preserving ports already confirmed by the
-priority pass.
+messaging, and nonstandard web ports first. Naabu owns TCP discovery for every profile. The
+`inventory` profile follows the priority pass with its top-100 scope; `posture` and `thorough` divide
+all 65,535 ports into bounded ranges. Connect concurrency is derived from the configured probe rate
+and socket timeout so a silently filtered host cannot turn a nominally fast run into an hours-long
+one. Each failed range is retried once, while confirmed ports from every attempt are preserved.
+Cancellation and repeated health degradation are checked between ranges. Nmap never replaces a
+failed all-TCP Naabu run: it runs expensive service/version fingerprinting only against confirmed-open
+TCP ports and separately checks the curated UDP set. Missing Naabu is therefore an explicit worker
+readiness failure, and an incomplete range stays visible as partial coverage.
 
 The scanner records service name, product/version hints, CPE, transport, port, encryption state,
 hostnames, addresses, MAC/vendor evidence when visible, and bounded OS fingerprints. UDP coverage is
@@ -92,9 +94,11 @@ with `no-response` is retained as an inconclusive observation, not a listening s
 excluded from policy evaluation and scoring unless a protocol response confirms the port as open.
 Scan reports and device details present these observations in a separate uncertainty section, so an
 operator can inspect the raw evidence without mistaking UDP silence for an exposed service.
-Successful tool execution is reported separately from coverage confidence. Filtered TCP ports or
-unresolved UDP observations prevent an `allow` decision and preserve prior service history, but they
-do not become findings or reduce the vulnerability score merely because the network path was silent.
+Successful tool execution is reported separately from coverage semantics. A completed Naabu scope
+means the reachable open-port inventory is complete from the scanner's network vantage point; it
+does not claim that silent TCP ports were distinguished as closed versus filtered. Failed ranges and
+unresolved UDP observations prevent an `allow` decision and preserve prior service history. Silence
+does not become a service or finding and does not reduce the vulnerability score.
 
 Each report also carries a deterministic `device-evidence/v1` graph. It normalizes the device,
 interfaces, services, inconclusive observations, web origins, tool executions, and health

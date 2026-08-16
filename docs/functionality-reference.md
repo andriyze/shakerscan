@@ -512,17 +512,20 @@ assets in dedicated device, interface, and service tables. `device_posture` work
 worker capacity, and build-health registry, so it cannot change ordinary Web DAST worker freshness,
 target counts, scan lists, ASM state, or dashboard posture.
 
-The `inventory` profile scans the top 100 TCP ports with Nmap and a small UDP set; `posture` and
-`thorough` use bounded Naabu CONNECT discovery across all 65,535 TCP ports plus a declared curated
-UDP set, then use Nmap only to fingerprint confirmed-open ports. A Naabu failure is recorded and
-falls back to the slower Nmap full-range path. Each scan checks priority TCP ports first.
+Every profile uses Naabu for TCP discovery and Nmap only for confirmed-open TCP fingerprinting plus
+the declared curated UDP set. `inventory` scans priority/device-hint ports followed by Naabu's top
+100; `posture` and `thorough` divide all 65,535 TCP ports into bounded Naabu CONNECT ranges. Connect
+concurrency is derived from the probe rate and timeout, each failed range receives one bounded retry,
+and partial open-port evidence is preserved. There is no all-port Nmap fallback. Cancellation and
+device-health checks run between ranges, and progress is persisted per range.
 Reachability prioritizes previously observed, operator-hinted, policy-defined, and
 credential-bound TCP ports, then applies compact common, device-class-specific, and major-TV-manufacturer
 port sets (Vizio, LG, Samsung, TCL, and Hisense). If that bounded check is silent, only an already
 all-TCP `posture` or `thorough` scan expands discovery; the same result becomes the main inventory,
-so the range is never scanned twice and silence alone never proves online status. Nmap timeout
-markers are parsed independently of its process exit code, so partial
-all-port discovery cannot be reported complete. UDP `open|filtered`/`no-response` results are kept as
+so the range is never scanned twice and silence alone never proves online status. Each Naabu range
+has an independent receipt, so partial all-port discovery cannot be reported complete. A completed
+TCP scope proves reachable-open-port coverage from the scanner's vantage without claiming silent
+ports were distinguished as closed versus filtered. UDP `open|filtered`/`no-response` results are kept as
 inconclusive observations and excluded from service policy and scoring until a protocol response
 confirms them open. Nmap service/version/CPE output, addresses, hostnames, MAC/vendor evidence, and
 bounded OS hints are retained. The scanner recognizes

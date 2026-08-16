@@ -18428,6 +18428,15 @@ async def get_device_readiness():
         **readiness,
         "profiles": sorted(DEVICE_PROFILES),
         "coverage_profiles": sorted(DEVICE_PROFILES),
+        "profile_requirements": {
+            profile: {
+                "required_tools": ["naabu", "nmap"],
+                "tcp_discovery": "naabu",
+                "tcp_enrichment": "nmap_open_ports_only",
+                "udp_discovery": "nmap_curated_ports",
+            }
+            for profile in sorted(DEVICE_PROFILES)
+        },
         "safety_profiles": safety_profile_catalog(),
         "required_worker_tools": ["naabu", "nmap"],
         "optional_sensor_capabilities": ["bluetooth", "ble", "passive_traffic"],
@@ -19145,6 +19154,7 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
         options = {
             "run_kind": "device_posture",
             "device_class": str(device["device_class"]),
+            "device_name": str(device["name"] or ""),
             "device_manufacturer": str(device["manufacturer"] or ""),
             "device_model": str(device["model"] or ""),
             "device_profile": request.profile,

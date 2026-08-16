@@ -11,11 +11,15 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import ipaddress
+import inspect
 import json
+import math
+import os
 import re
 import shutil
 import socket
 import ssl
+import tempfile
 import time
 import urllib.parse
 from dataclasses import dataclass
@@ -56,7 +60,11 @@ except ImportError:  # pragma: no cover - flat scanner runtime
 
 DEVICE_PROFILES = {"inventory", "posture", "thorough"}
 MAX_FINGERPRINT_PORTS = 512
-NAABU_CONNECT_WORKERS = 25
+NAABU_FULL_TCP_CHUNK_SIZE = 8192
+NAABU_MIN_CONNECT_WORKERS = 32
+NAABU_MAX_CONNECT_WORKERS = 1024
+NAABU_TIMEOUT_MS = 1000
+NAABU_RETRY_TIMEOUT_MS = 1500
 DEFAULT_PROFILE_BUDGET_SECONDS = {"inventory": 120 * 60, "posture": 360 * 60, "thorough": 720 * 60}
 COMMON_UDP_PORTS = (53, 67, 68, 69, 123, 137, 138, 161, 162, 500, 1900, 4500, 5353, 5683, 47808)
 INVENTORY_UDP_PORTS = (53, 123, 161, 1900, 5353, 5683, 47808, 67)
@@ -378,53 +386,244 @@ def _naabu_available() -> bool:
     return bool(shutil.which("naabu") or shutil.which("/opt/tools/naabu"))
 
 
-async def _run_naabu_tcp_scope_discovery(
+def _naabu_connect_workers(rate: float, timeout_ms: int) -> int:
+    """Derive enough in-flight connects for the configured rate on silent hosts."""
+    required = math.ceil(max(1.0, float(rate)) * max(1, int(timeout_ms)) / 1000.0 * 1.25)
+    return max(NAABU_MIN_CONNECT_WORKERS, min(NAABU_MAX_CONNECT_WORKERS, required))
+
+
+async def _call_stage_callback(callback: Any, payload: dict[str, Any]) -> Any:
+    if not callable(callback):
+        return None
+    result = callback(dict(payload))
+    if inspect.isawaitable(result):
+        return await result
+    return result
+
+
+def _full_tcp_ranges() -> list[tuple[int, int]]:
+    return [
+        (start, min(65535, start + NAABU_FULL_TCP_CHUNK_SIZE - 1))
+        for start in range(1, 65536, NAABU_FULL_TCP_CHUNK_SIZE)
+    ]
+
+
+async def _run_naabu_chunk(
     locator: str,
     *,
-    timeout: int,
+    stage: str,
+    port_args: list[str],
+    port_count: int,
+    rate: int,
+    timeout_ms: int,
+    process_timeout: int,
+    attempt: int,
+    required_scope: bool,
     cancel_check: Any = None,
-    max_port_probes_per_second: float = 250.0,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
-    rate = max(1, int(max_port_probes_per_second or 1))
+) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    workers = _naabu_connect_workers(rate, timeout_ms)
+    output_handle = tempfile.NamedTemporaryFile(
+        mode="w", prefix="shakerscan-naabu-", suffix=".jsonl", delete=False,
+    )
+    output_path = output_handle.name
+    output_handle.close()
     cmd = [
-        "naabu", "-host", locator, "-Pn", "-scan-type", "c", "-top-ports", "full",
-        "-rate", str(rate), "-c", str(NAABU_CONNECT_WORKERS), "-retries", "1",
-        "-timeout", "1000", "-verify", "-json", "-silent", "-no-color",
-        "-disable-update-check", "-no-stdin",
+        "naabu", "-host", locator, "-Pn", "-scan-type", "c", *port_args,
+        "-rate", str(rate), "-c", str(workers), "-retries", "1",
+        "-timeout", str(timeout_ms), "-verify", "-json", "-silent", "-no-color",
+        "-disable-update-check", "-no-stdin", "-o", output_path,
     ]
-    run_options: dict[str, Any] = {"timeout": timeout}
+    run_options: dict[str, Any] = {"timeout": process_timeout}
     if callable(cancel_check):
         run_options["cancel_check"] = cancel_check
     started = time.monotonic()
-    stdout, stderr, exit_code = await run(cmd, **run_options)
-    services, parsed = parse_naabu_evidence(stdout, locator)
+    try:
+        stdout, stderr, exit_code = await run(cmd, **run_options)
+        try:
+            with open(output_path, encoding="utf-8", errors="replace") as output_file:
+                durable_output = output_file.read()
+        except OSError:
+            durable_output = ""
+    finally:
+        try:
+            os.unlink(output_path)
+        except OSError:
+            pass
+    evidence_output = durable_output if durable_output.strip() else stdout
+    services, parsed = parse_naabu_evidence(evidence_output, locator)
     incomplete_reasons: list[str] = []
     if exit_code != 0:
         incomplete_reasons.append(f"process_exit:{exit_code}")
     if not parsed["parsed"]:
         incomplete_reasons.append("malformed_naabu_jsonl")
-    complete = not incomplete_reasons
     receipt = {
-        "stage": "tcp_scope_discovery",
+        "stage": stage,
         "tool": "naabu",
         "transport": "tcp",
+        "attempt": attempt,
+        "required_scope": required_scope,
         "exit_code": exit_code,
-        "complete": complete,
+        "complete": not incomplete_reasons,
         "parsed": bool(parsed["parsed"]),
         "xml_parsed": False,
         "confirmed_open_count": len(services),
+        "partial_output_recovered": bool(exit_code != 0 and durable_output.strip()),
         "inconclusive_count": 0,
         "port_state_counts": {"open": len(services)},
-        "tcp_filtered_count": 0,
         "silent_port_classification": "closed_or_filtered_not_distinguished",
+        "closed_filtered_classification_complete": False,
         "malformed_port_count": int(parsed["malformed_line_count"]),
         "incomplete_reasons": incomplete_reasons,
         "elapsed_seconds": round(time.monotonic() - started, 3),
         "rate_limit_per_second": rate,
+        "connect_workers": workers,
+        "connect_timeout_ms": timeout_ms,
+        "process_timeout_seconds": process_timeout,
+        "port_count": port_count,
+        "port_spec": port_args[-1] if port_args else None,
         "scan_type": "connect",
         "stderr": (stderr or "")[:500],
     }
-    return services, [], parsed["identity"], receipt
+    return services, parsed["identity"], receipt
+
+
+async def _run_naabu_tcp_scope_discovery(
+    locator: str,
+    *,
+    full_tcp: bool,
+    priority_ports: tuple[int, ...],
+    deadline: float | None = None,
+    cancel_check: Any = None,
+    max_port_probes_per_second: float = 250.0,
+    stage_callback: Any = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    rate = max(1, int(max_port_probes_per_second or 1))
+    priority_spec = ",".join(str(port) for port in sorted(set(priority_ports)))
+    chunks: list[dict[str, Any]] = []
+    if priority_spec:
+        chunks.append({
+            "stage": "tcp_priority_discovery", "args": ["-p", priority_spec],
+            "count": len(set(priority_ports)), "required": not full_tcp,
+        })
+    if full_tcp:
+        ranges = _full_tcp_ranges()
+        for index, (start, end) in enumerate(ranges, start=1):
+            chunks.append({
+                "stage": f"tcp_scope_range_{index}_of_{len(ranges)}",
+                "args": ["-p", f"{start}-{end}"],
+                "count": end - start + 1, "required": True,
+            })
+    else:
+        chunks.append({
+            "stage": "tcp_scope_top_100", "args": ["-top-ports", "100"],
+            "count": 100, "required": True,
+        })
+
+    services_by_key: dict[tuple[str, int], dict[str, Any]] = {}
+    identity: dict[str, Any] = {"hostnames": [], "addresses": [], "os_matches": []}
+    child_receipts: list[dict[str, Any]] = []
+    failed_required_stages: list[str] = []
+    completed_required_ports = 0
+    total_required_ports = sum(int(chunk["count"]) for chunk in chunks if chunk["required"])
+    started = time.monotonic()
+    halted_by_callback = False
+
+    for index, chunk in enumerate(chunks, start=1):
+        if callable(cancel_check) and bool(await cancel_check()):
+            raise ValueError(f"connected-device scan cancelled before {chunk['stage']}")
+        remaining = int(deadline - time.monotonic()) if deadline is not None else None
+        if halted_by_callback or (remaining is not None and remaining < 30):
+            reason = "device_health_degraded" if halted_by_callback else "overall_device_budget_exhausted"
+            receipt = {
+                "stage": chunk["stage"], "tool": "naabu", "transport": "tcp",
+                "attempt": 1, "required_scope": bool(chunk["required"]),
+                "exit_code": None, "complete": False, "parsed": False,
+                "confirmed_open_count": 0, "inconclusive_count": 0,
+                "port_count": int(chunk["count"]), "port_spec": chunk["args"][-1],
+                "incomplete_reasons": [reason],
+            }
+            child_receipts.append(receipt)
+            if chunk["required"]:
+                failed_required_stages.append(str(chunk["stage"]))
+            await _call_stage_callback(stage_callback, {
+                "kind": "tcp_chunk", "stage": chunk["stage"], "chunk_index": index,
+                "chunk_count": len(chunks), "receipt": receipt, "known_tcp_ports": [],
+                "skip_health": True,
+            })
+            continue
+
+        process_timeout = max(45, math.ceil(int(chunk["count"]) / rate * 1.8) + 30)
+        if remaining is not None:
+            process_timeout = max(20, min(process_timeout, remaining))
+        attempt_services, attempt_identity, receipt = await _run_naabu_chunk(
+            locator, stage=str(chunk["stage"]), port_args=list(chunk["args"]),
+            port_count=int(chunk["count"]), rate=rate, timeout_ms=NAABU_TIMEOUT_MS,
+            process_timeout=process_timeout, attempt=1,
+            required_scope=bool(chunk["required"]), cancel_check=cancel_check,
+        )
+        _merge_services(services_by_key, attempt_services)
+        _merge_identity(identity, attempt_identity)
+        child_receipts.append(receipt)
+        final_receipt = receipt
+
+        if not receipt["complete"]:
+            remaining = int(deadline - time.monotonic()) if deadline is not None else None
+            retry_timeout = max(60, math.ceil(int(chunk["count"]) / rate * 2.25) + 45)
+            if remaining is None or remaining >= 30:
+                if remaining is not None:
+                    retry_timeout = max(20, min(retry_timeout, remaining))
+                retry_services, retry_identity, retry_receipt = await _run_naabu_chunk(
+                    locator, stage=str(chunk["stage"]), port_args=list(chunk["args"]),
+                    port_count=int(chunk["count"]), rate=rate,
+                    timeout_ms=NAABU_RETRY_TIMEOUT_MS, process_timeout=retry_timeout,
+                    attempt=2, required_scope=bool(chunk["required"]),
+                    cancel_check=cancel_check,
+                )
+                retry_receipt["retry_of_attempt"] = 1
+                _merge_services(services_by_key, retry_services)
+                _merge_identity(identity, retry_identity)
+                child_receipts.append(retry_receipt)
+                final_receipt = retry_receipt
+        if chunk["required"]:
+            if final_receipt["complete"]:
+                completed_required_ports += int(chunk["count"])
+            else:
+                failed_required_stages.append(str(chunk["stage"]))
+        callback_result = await _call_stage_callback(stage_callback, {
+            "kind": "tcp_chunk", "stage": chunk["stage"], "chunk_index": index,
+            "chunk_count": len(chunks), "receipt": final_receipt,
+            "known_tcp_ports": sorted(port for (_transport, port) in services_by_key),
+        })
+        halted_by_callback = callback_result is False
+
+    complete = not failed_required_stages
+    services = sorted(services_by_key.values(), key=lambda item: int(item["port"]))
+    receipt = {
+        "stage": "tcp_scope_discovery",
+        "tool": "naabu",
+        "transport": "tcp",
+        "exit_code": 0 if complete else None,
+        "complete": complete,
+        "parsed": any(bool(item.get("parsed")) for item in child_receipts),
+        "xml_parsed": False,
+        "confirmed_open_count": len(services),
+        "inconclusive_count": 0,
+        "port_state_counts": {"open": len(services)},
+        "silent_port_classification": "closed_or_filtered_not_distinguished",
+        "closed_filtered_classification_complete": False,
+        "reachable_open_port_inventory_complete": complete,
+        "malformed_port_count": sum(int(item.get("malformed_port_count") or 0) for item in child_receipts),
+        "incomplete_reasons": [f"incomplete_range:{stage}" for stage in failed_required_stages],
+        "elapsed_seconds": round(time.monotonic() - started, 3),
+        "rate_limit_per_second": rate,
+        "scan_type": "connect",
+        "scope": "all_tcp" if full_tcp else "top_100_plus_priority",
+        "required_port_count": total_required_ports,
+        "completed_required_port_count": completed_required_ports,
+        "failed_required_stages": failed_required_stages,
+        "chunk_receipts": child_receipts,
+    }
+    return services, [], identity, receipt
 
 
 def _merge_identity(current: dict[str, Any], incoming: dict[str, Any]) -> None:
@@ -544,50 +743,39 @@ async def _run_tcp_scope_discovery(
     cancel_check: Any = None,
     max_requests_per_second: float = 10.0,
     max_port_probes_per_second: float = 250.0,
+    extra_priority_ports: tuple[int, ...] = (),
+    stage_callback: Any = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
-    """Run the authoritative TCP scope once so a fallback can become inventory."""
-    request_rate = max(1.0, float(max_requests_per_second or 1.0))
-    if "-p-" in profile.tcp_args and _naabu_available():
-        scope_port_count = 65_535
-        port_probe_rate = max(1.0, float(max_port_probes_per_second or 1.0))
-        rate_bound_timeout = int(scope_port_count / port_probe_rate * 2.0) + 90
-        tcp_stage_timeout = max(profile.process_timeout, rate_bound_timeout)
-        if deadline is not None:
-            tcp_stage_timeout = max(60, min(tcp_stage_timeout, int(max(60, deadline - time.monotonic()))))
-        naabu_result = await _run_naabu_tcp_scope_discovery(
-            locator,
-            timeout=tcp_stage_timeout,
-            cancel_check=cancel_check,
-            max_port_probes_per_second=port_probe_rate,
-        )
-        if naabu_result[3].get("complete"):
-            return naabu_result
-        # Preserve the failed fast-discovery receipt on the authoritative Nmap
-        # fallback so reports explain why the slower path was used.
-        naabu_failure = dict(naabu_result[3])
-    else:
-        naabu_failure = None
-    scope_port_count = 65_535 if "-p-" in profile.tcp_args else 100
-    rate_bound_timeout = int(scope_port_count / request_rate * 1.5) + 60
-    tcp_stage_timeout = max(profile.process_timeout, rate_bound_timeout)
-    if deadline is not None:
-        tcp_stage_timeout = max(60, min(tcp_stage_timeout, int(max(60, deadline - time.monotonic()))))
-    tcp_cmd = [
-        "nmap", "-Pn", "-n", "-sT", "-T4", "--max-retries", "1",
-        "--max-rate", f"{request_rate:g}",
-        "--host-timeout", f"{max(30, tcp_stage_timeout - 15)}s", *profile.tcp_args,
-        "-oX", "-", locator,
-    ]
-    result = await _run_nmap_stage(
-        tcp_cmd,
-        stage="tcp_scope_discovery",
-        transport="tcp",
-        timeout=tcp_stage_timeout,
+    """Run Naabu as the authoritative TCP discovery engine.
+
+    Nmap is deliberately not an all-port fallback. On filtered devices that
+    path can take hours; missing Naabu is instead an explicit readiness error.
+    """
+    del max_requests_per_second
+    priority_ports = tuple(sorted(
+        set(PRIORITY_TCP_PORTS)
+        | set(REACHABILITY_TCP_PORTS)
+        | {int(port) for port in extra_priority_ports if 1 <= int(port) <= 65535}
+    ))
+    if not _naabu_available():
+        return [], [], {"hostnames": [], "addresses": [], "os_matches": []}, {
+            "stage": "tcp_scope_discovery", "tool": "naabu", "transport": "tcp",
+            "exit_code": None, "complete": False, "parsed": False,
+            "confirmed_open_count": 0, "inconclusive_count": 0,
+            "silent_port_classification": "not_scanned",
+            "closed_filtered_classification_complete": False,
+            "reachable_open_port_inventory_complete": False,
+            "incomplete_reasons": ["naabu_unavailable"], "chunk_receipts": [],
+        }
+    return await _run_naabu_tcp_scope_discovery(
+        locator,
+        full_tcp="-p-" in profile.tcp_args,
+        priority_ports=priority_ports,
+        deadline=deadline,
         cancel_check=cancel_check,
+        max_port_probes_per_second=max_port_probes_per_second,
+        stage_callback=stage_callback,
     )
-    if naabu_failure:
-        result[3]["fallback_from"] = naabu_failure
-    return result
 
 
 async def _nmap_scan(
@@ -599,6 +787,7 @@ async def _nmap_scan(
     max_requests_per_second: float = 10.0,
     max_port_probes_per_second: float = 250.0,
     extra_priority_ports: tuple[int, ...] = (),
+    stage_callback: Any = None,
     prefetched_tcp_scope: tuple[
         list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], dict[str, Any]
     ] | None = None,
@@ -622,20 +811,6 @@ async def _nmap_scan(
         | {int(port) for port in extra_priority_ports if 1 <= int(port) <= 65535}
     ))
     if prefetched_tcp_scope is None:
-        await ensure_active("TCP priority discovery")
-        priority_cmd = [
-            "nmap", "-Pn", "-n", "-sT", "-T4", "--max-retries", "1", *rate_args,
-            "--host-timeout", "180s", "-p", ",".join(str(port) for port in priority_ports),
-            "-oX", "-", locator,
-        ]
-        priority_services, _priority_uncertain, priority_identity, priority_receipt = await _run_nmap_stage(
-            priority_cmd, stage="tcp_priority_discovery", transport="tcp", timeout=210,
-            cancel_check=cancel_check,
-        )
-        priority_receipt["required"] = False
-        receipts.append(priority_receipt)
-        _merge_services(services_by_key, priority_services)
-        _merge_identity(identity, priority_identity)
         await ensure_active("TCP scope discovery")
         tcp_services, _tcp_uncertain, tcp_identity, tcp_receipt = await _run_tcp_scope_discovery(
             locator,
@@ -644,11 +819,17 @@ async def _nmap_scan(
             cancel_check=cancel_check,
             max_requests_per_second=request_rate,
             max_port_probes_per_second=max_port_probes_per_second,
+            extra_priority_ports=extra_priority_ports,
+            stage_callback=stage_callback,
         )
     else:
         tcp_services, _tcp_uncertain, tcp_identity, original_receipt = prefetched_tcp_scope
         tcp_receipt = dict(original_receipt)
         tcp_receipt["reused_from_reachability_fallback"] = True
+    for child_receipt in tcp_receipt.get("chunk_receipts") or []:
+        child_evidence = dict(child_receipt)
+        child_evidence["required"] = False
+        receipts.append(child_evidence)
     receipts.append(tcp_receipt)
     tcp_receipt["required"] = True
     _merge_services(services_by_key, tcp_services)
@@ -660,7 +841,14 @@ async def _nmap_scan(
     fingerprint_truncated_count = max(0, len(discovered_tcp_ports) - len(tcp_ports))
     fingerprint_budget_exhausted = False
     fingerprint_receipts: list[dict[str, Any]] = []
+    fingerprint_stage_allowed = (await _call_stage_callback(stage_callback, {
+        "kind": "phase", "stage": "device_service_fingerprinting",
+        "known_tcp_ports": discovered_tcp_ports,
+    })) is not False
+    fingerprint_stage_halted = not fingerprint_stage_allowed
     for batch_number, offset in enumerate(range(0, len(tcp_ports), 128), start=1):
+        if not fingerprint_stage_allowed:
+            break
         if not await ensure_active(f"TCP fingerprint batch {batch_number}"):
             fingerprint_budget_exhausted = True
             break
@@ -684,7 +872,12 @@ async def _nmap_scan(
         _merge_identity(identity, fingerprint_identity)
 
     udp_budget_exhausted = False
-    if profile.udp_ports and await ensure_active("UDP discovery"):
+    udp_stage_allowed = (await _call_stage_callback(stage_callback, {
+        "kind": "phase", "stage": "device_udp_discovery",
+        "known_tcp_ports": discovered_tcp_ports,
+    })) is not False
+    udp_stage_halted = not udp_stage_allowed
+    if profile.udp_ports and udp_stage_allowed and await ensure_active("UDP discovery"):
         udp_cmd = [
             "nmap", "-Pn", "-n", "-sU", "-sV", "--version-intensity", "3", *rate_args,
             "--max-retries", "1", "--host-timeout", "240s",
@@ -701,14 +894,16 @@ async def _nmap_scan(
         for observation in udp_observations:
             observations_by_key[("udp", int(observation["port"]))] = observation
     elif profile.udp_ports:
-        udp_budget_exhausted = True
+        udp_budget_exhausted = not udp_stage_halted
         receipts.append({
             "stage": "udp_service_discovery",
             "transport": "udp",
             "exit_code": None,
             "complete": False,
             "required": True,
-            "incomplete_reasons": ["overall_device_budget_exhausted"],
+            "incomplete_reasons": [
+                "device_health_degraded" if udp_stage_halted else "overall_device_budget_exhausted"
+            ],
             "confirmed_open_count": 0,
             "inconclusive_count": 0,
         })
@@ -728,13 +923,18 @@ async def _nmap_scan(
             and not fingerprint_truncated_count
             and not fingerprint_budget_exhausted
             and not udp_budget_exhausted
+            and not fingerprint_stage_halted
+            and not udp_stage_halted
     )
     tcp_filtered_count = int(tcp_receipt.get("tcp_filtered_count") or 0)
     udp_extraports_inconclusive_count = sum(
         int(receipt.get("udp_extraports_inconclusive_count") or 0)
         for receipt in udp_receipts
     )
-    tcp_visibility_complete = bool(tcp_receipt.get("complete") and tcp_filtered_count == 0)
+    tcp_visibility_complete = bool(
+        tcp_receipt.get("complete")
+        and tcp_receipt.get("reachable_open_port_inventory_complete")
+    )
     uncertainty_present = bool(
         observations_by_key or tcp_filtered_count or udp_extraports_inconclusive_count
     )
@@ -750,20 +950,31 @@ async def _nmap_scan(
         incomplete_stages.append("tcp_fingerprint_truncated")
     if fingerprint_budget_exhausted or udp_budget_exhausted:
         incomplete_stages.append("overall_device_budget_exhausted")
+    if fingerprint_stage_halted or udp_stage_halted:
+        incomplete_stages.append("device_health_degraded")
     completeness = {
         "complete": bool(execution_complete and not uncertainty_present),
         "execution_complete": execution_complete,
         "tcp_discovery_complete": bool(tcp_receipt.get("complete")),
         "tcp_visibility_complete": tcp_visibility_complete,
         "tcp_filtered_ports_count": tcp_filtered_count,
+        "tcp_closed_filtered_classification_complete": bool(
+            tcp_receipt.get("closed_filtered_classification_complete")
+        ),
+        "tcp_silent_port_classification": tcp_receipt.get("silent_port_classification"),
+        "tcp_scope": tcp_receipt.get("scope"),
+        "tcp_required_port_count": tcp_receipt.get("required_port_count"),
+        "tcp_completed_required_port_count": tcp_receipt.get("completed_required_port_count"),
         "tcp_fingerprinting_complete": bool(
             not fingerprint_truncated_count
             and not fingerprint_budget_exhausted
+            and not fingerprint_stage_halted
             and all(receipt.get("complete") for receipt in fingerprint_receipts)
         ),
         "tcp_fingerprint_port_cap": MAX_FINGERPRINT_PORTS,
         "tcp_fingerprint_truncated_count": fingerprint_truncated_count,
         "overall_budget_exhausted": bool(fingerprint_budget_exhausted or udp_budget_exhausted),
+        "safety_halted": bool(fingerprint_stage_halted or udp_stage_halted),
         "max_requests_per_second_enforced": request_rate,
         "max_port_probes_per_second_enforced": max_port_probes_per_second,
         "udp_discovery_complete": all(receipt.get("complete") for receipt in udp_receipts),
@@ -1150,6 +1361,7 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
     budget_seconds = configured_minutes * 60 if configured_minutes > 0 else DEFAULT_PROFILE_BUDGET_SECONDS[profile_name]
     deadline = time.monotonic() + max(60, budget_seconds)
     cancel_check = options.get("_cancel_check")
+    progress_callback = options.get("_progress_callback")
     resolved_credentials = [
         dict(item) for item in options.get("_resolved_device_credentials", [])
         if isinstance(item, dict)
@@ -1217,7 +1429,14 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
     ]
     device_class = str(options.get("device_class") or "generic").strip().lower()
     class_ports = DEVICE_CLASS_TCP_PORTS.get(device_class, DEVICE_CLASS_TCP_PORTS["generic"])
-    manufacturer = re.sub(r"[^a-z0-9]+", "", str(options.get("device_manufacturer") or "").lower())
+    manufacturer = re.sub(
+        r"[^a-z0-9]+", "",
+        " ".join([
+            str(options.get("device_manufacturer") or ""),
+            str(options.get("device_model") or ""),
+            str(options.get("device_name") or ""),
+        ]).lower(),
+    )
     manufacturer_ports = tuple(dict.fromkeys(
         port
         for vendor, ports in TV_MANUFACTURER_TCP_PORTS.items()
@@ -1260,6 +1479,47 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
             policy_name=policy_name,
             policy_rules_count=len(rules),
         )
+
+    async def scan_stage_callback(event: dict[str, Any]) -> bool | None:
+        kind = str(event.get("kind") or "")
+        if kind == "tcp_chunk":
+            chunk_index = max(0, int(event.get("chunk_index") or 0))
+            chunk_count = max(1, int(event.get("chunk_count") or 1))
+            progress = min(68, 15 + round(50 * chunk_index / chunk_count))
+            await _call_stage_callback(progress_callback, {
+                "phase": str(event.get("stage") or "device_tcp_discovery"),
+                "progress": progress,
+            })
+            if event.get("skip_health"):
+                return not safety.halted
+            known_ports = valid_ports(event.get("known_tcp_ports"))[:3]
+            checkpoint = await check_device_health(
+                resolved_address,
+                stage=f"after_{event.get('stage') or 'tcp_chunk'}",
+                tcp_ports=known_ports,
+            )
+            if checkpoint.get("status") == "degraded":
+                confirmation = await check_device_health(
+                    resolved_address,
+                    stage=f"confirm_{event.get('stage') or 'tcp_chunk'}",
+                    tcp_ports=known_ports,
+                    timeout=2.0,
+                )
+                confirmation["initial_checkpoint"] = checkpoint
+                checkpoint = confirmation
+            safety.record_health(checkpoint)
+            return not safety.halted
+        phase_progress = {
+            "device_service_fingerprinting": 70,
+            "device_udp_discovery": 78,
+        }
+        phase = str(event.get("stage") or "device_inventory")
+        await _call_stage_callback(progress_callback, {
+            "phase": phase,
+            "progress": phase_progress.get(phase, 15),
+        })
+        return not safety.halted
+
     reachability = await probe_device_reachability(
         locator,
         resolved_address,
@@ -1276,8 +1536,10 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
         safety.authorize("network_inventory", "readonly")
         inventory_authorized = True
         safety.record_limit_enforcement(
-            "naabu+nmap",
-            max_concurrency=1,
+            "naabu_tcp_connect",
+            max_concurrency=_naabu_connect_workers(
+                safety_profile.max_port_probes_per_second, NAABU_TIMEOUT_MS
+            ),
             max_requests_per_second=safety_profile.max_port_probes_per_second,
         )
         prefetched_tcp_scope = await _run_tcp_scope_discovery(
@@ -1287,6 +1549,8 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
             cancel_check=cancel_check,
             max_requests_per_second=safety_profile.max_requests_per_second,
             max_port_probes_per_second=safety_profile.max_port_probes_per_second,
+            extra_priority_ports=extra_priority_ports,
+            stage_callback=scan_stage_callback,
         )
         fallback_services, _fallback_uncertain, _fallback_identity, fallback_receipt = prefetched_tcp_scope
         reachability = corroborate_device_reachability(
@@ -1328,8 +1592,10 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
     if not inventory_authorized:
         safety.authorize("network_inventory", "readonly")
         safety.record_limit_enforcement(
-            "naabu+nmap",
-            max_concurrency=1,
+            "naabu_tcp_connect",
+            max_concurrency=_naabu_connect_workers(
+                safety_profile.max_port_probes_per_second, NAABU_TIMEOUT_MS
+            ),
             max_requests_per_second=safety_profile.max_port_probes_per_second,
         )
     services, inconclusive_observations, identity, tool_receipts, scan_completeness = await _nmap_scan(
@@ -1340,17 +1606,24 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
         max_requests_per_second=safety_profile.max_requests_per_second,
         max_port_probes_per_second=safety_profile.max_port_probes_per_second,
         extra_priority_ports=extra_priority_ports,
+        stage_callback=scan_stage_callback,
         prefetched_tcp_scope=prefetched_tcp_scope,
     )
-    safety.authorize("core_protocol_discovery", "readonly")
-    if await ensure_active("core protocol discovery"):
+    await _call_stage_callback(progress_callback, {"phase": "device_protocol_discovery", "progress": 82})
+    if not safety.halted:
+        safety.authorize("core_protocol_discovery", "readonly")
+    if not safety.halted and await ensure_active("core protocol discovery"):
         protocol_results = await discover_core_device_protocols(resolved_address, udp_ports=profile.udp_ports)
     else:
         protocol_results = []
         scan_completeness["complete"] = False
         scan_completeness["execution_complete"] = False
-        scan_completeness["overall_budget_exhausted"] = True
-        scan_completeness.setdefault("incomplete_stages", []).append("overall_device_budget_exhausted")
+        if safety.halted:
+            scan_completeness["safety_halted"] = True
+            scan_completeness.setdefault("incomplete_stages", []).append("device_health_degraded")
+        else:
+            scan_completeness["overall_budget_exhausted"] = True
+            scan_completeness.setdefault("incomplete_stages", []).append("overall_device_budget_exhausted")
     for protocol in protocol_results:
         receipt = protocol.get("receipt") if isinstance(protocol.get("receipt"), dict) else None
         if receipt:
@@ -1386,13 +1659,15 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
     ]
     if await ensure_active("post-inventory health check"):
         safety.record_health(await check_device_health(resolved_address, stage="post_inventory", tcp_ports=known_tcp_ports))
-    safety.authorize("web_origin_discovery", "readonly")
-    safety.record_limit_enforcement(
-        "web_origin_probes",
-        max_concurrency=safety_profile.max_concurrency,
-        max_requests_per_second=safety_profile.max_requests_per_second,
-    )
-    if await ensure_active("web origin discovery"):
+    if not safety.halted:
+        safety.authorize("web_origin_discovery", "readonly")
+        await _call_stage_callback(progress_callback, {"phase": "device_web_discovery", "progress": 85})
+        safety.record_limit_enforcement(
+            "web_origin_probes",
+            max_concurrency=safety_profile.max_concurrency,
+            max_requests_per_second=safety_profile.max_requests_per_second,
+        )
+    if not safety.halted and await ensure_active("web origin discovery"):
         web_origins = await detect_web_origins(
             resolved_address,
             services,
@@ -1405,8 +1680,12 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
         web_origins = []
         scan_completeness["complete"] = False
         scan_completeness["execution_complete"] = False
-        scan_completeness["overall_budget_exhausted"] = True
-        scan_completeness.setdefault("incomplete_stages", []).append("overall_device_budget_exhausted")
+        if safety.halted:
+            scan_completeness["safety_halted"] = True
+            scan_completeness.setdefault("incomplete_stages", []).append("device_health_degraded")
+        else:
+            scan_completeness["overall_budget_exhausted"] = True
+            scan_completeness.setdefault("incomplete_stages", []).append("overall_device_budget_exhausted")
     origin_by_port = {int(origin["port"]): origin for origin in web_origins}
     for service in services:
         origin = origin_by_port.get(int(service["port"])) if service.get("transport") == "tcp" else None
@@ -1428,6 +1707,7 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
         scan_completeness["safety_halted"] = True
         scan_completeness.setdefault("incomplete_stages", []).append("device_health_degraded")
     else:
+        await _call_stage_callback(progress_callback, {"phase": "device_ssh_posture", "progress": 88})
         safety.authorize(
             "ssh_posture_handshake",
             "ephemeral_state" if ssh_credentials else "readonly",
@@ -1530,6 +1810,9 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
         scan_completeness["complete"] = False
         scan_completeness["execution_complete"] = False
         scan_completeness.setdefault("incomplete_stages", []).append("device_reachability_unconfirmed")
+    scan_completeness["incomplete_stages"] = list(dict.fromkeys(
+        str(stage) for stage in scan_completeness.get("incomplete_stages") or []
+    ))
     services, policy_findings = evaluate_service_policy(services, rules, policy_name=policy_name)
     findings = policy_findings + ssh_findings
     complete = bool(scan_completeness.get("complete"))

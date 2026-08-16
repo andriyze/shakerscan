@@ -2227,6 +2227,18 @@ async def run_scan(
             raise ValueError("connected-device posture is disabled on this worker")
         device_options = dict(options or {})
         device_options["_cancel_check"] = lambda: asyncio.to_thread(_scan_cancel_requested, scan_id)
+
+        async def _device_progress(event: dict[str, Any]) -> None:
+            if not scan_id:
+                return
+            phase = str(event.get("phase") or "device_inventory")
+            try:
+                progress = max(10, min(89, int(event.get("progress") or 10)))
+            except (TypeError, ValueError):
+                progress = 10
+            await update_scan_progress(scan_id, phase, progress, job_id=job_id)
+
+        device_options["_progress_callback"] = _device_progress
         result = await run_device_posture_scan(target, device_options)
         if scan_id:
             await update_scan_progress(scan_id, "device_policy", 90, job_id=job_id)

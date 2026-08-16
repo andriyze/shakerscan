@@ -1173,7 +1173,8 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
               <div className="mb-3 flex flex-wrap gap-2 text-xs text-gray-400">
                 <span>TCP scope: {String(deviceCompleteness.tcp_scope || 'unknown').replace(/_/g, ' ')}</span>
                 <span>TCP discovery: {deviceCompleteness.tcp_discovery_complete ? 'complete' : 'partial'}</span>
-                <span>TCP visibility: {deviceCompleteness.tcp_visibility_complete ? 'clear' : `${Number(deviceCompleteness.tcp_filtered_ports_count || 0)} filtered`}</span>
+                <span>Open-port inventory: {deviceCompleteness.tcp_visibility_complete ? 'complete' : 'partial'}</span>
+                <span>Silent TCP ports: {deviceCompleteness.tcp_closed_filtered_classification_complete ? 'classified' : 'closed/filtered not distinguished'}</span>
                 <span>Fingerprinting: {deviceCompleteness.tcp_fingerprinting_complete ? 'complete' : 'partial'}</span>
                 <span>UDP probes: {deviceCompleteness.udp_discovery_complete ? 'complete' : 'partial'}</span>
               </div>
