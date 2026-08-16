@@ -226,6 +226,31 @@ an in-flight operation from switching hosts. Prefer a stable local DNS/mDNS name
 reliable; automatic MAC- or sensor-assisted relocation can be added later only with verified
 identity evidence.
 
+## Imported API requests
+
+The device page accepts Postman Collection v2 JSON plus an optional Postman environment JSON. The
+original documents can contain tokens, cookies, authorization headers, IDs, and request bodies, so
+ShakerScan encrypts the complete payload and publishes only a redacted request inventory. Postman
+pre-request and test scripts are counted but never executed.
+
+During a device scan, selected collections are decrypted only inside the dedicated device worker.
+Variables and supported Postman authentication definitions are resolved in memory. Every socket is
+still pinned to an HTTP(S) origin positively discovered on the registered device; an imported URL,
+redirect, variable, or environment value cannot send the scanner to another host. Collection URL
+ports are also added to reachability priority hints.
+
+Quick coverage replays saved safe methods. Standard adds an authentication-removal comparison for
+safe authenticated requests. Deep also places a bounded marker into one existing GET query
+parameter and reports only direct reflection. POST, PUT, PATCH, and DELETE are skipped by default;
+exact replay requires the `authenticated_active` safety profile and a separate explicit confirmation
+for that scan or Device Hunt session. Imported file bodies and unsupported body modes are skipped
+with a request-level reason. Results retain redacted per-request status, timing, body size/hash,
+header names, skipped reasons, and request-aware findings without persisting request secrets.
+
+The device detail page displays a structured activity feed while a selected scan is running. It
+shows reachability, discovery, fingerprinting, web/API execution counts, failures, findings, and
+safety stops while suppressing command noise, payloads, and secrets.
+
 ## Device Hunt
 
 **Device Hunt** is ShakerScan's keyless, turn-based agentic workflow for one connected device—the
@@ -244,8 +269,9 @@ an investigation. The catalog guides planning. Registered deterministic capabili
 their contracts; the SSH shell capability additionally requires a separately user-confirmed immutable
 plan.
 
-The Device Hunt tools can inspect the registered device and capability pack, queue a deterministic device scan,
-inspect a device-owned scan, query normalized graph evidence, and retain bounded notes. A run is fixed
+The Device Hunt tools can inspect the registered device, capability pack, and user-bound redacted
+request collections; queue a deterministic device or request-aware scan; inspect a device-owned
+scan; query normalized graph evidence; and retain bounded notes. A run is fixed
 to one `device_target_id` and one safety profile at creation. Tool arguments contain no locator,
 credential, arbitrary URL, local-host shell, plugin, or safety-escalation field. The planner can only
 propose remote-device SSH commands; confirmation is not a planner tool. Sessions are capped at 30 turns,
@@ -279,6 +305,9 @@ and policy boundary.
   worker's network path, so only a protocol response is treated as confirmed open.
 - No credential guessing, firmware extraction, destructive protocol testing, radio probing, or active
   XSS/SQLi is performed by the device workflow.
+- Postman scripts and imported external hosts never execute. State-changing request replay is
+  disabled unless the user explicitly binds collections and grants that fixed authority under an
+  authenticated-active scan or Device Hunt session.
 - Fixed authenticated host collection accepts only server-owned read-only bundles. Agent-authored
   remote SSH commands execute only after an earlier host key is pinned and a user separately confirms
   the exact digest-bound plan; local-host shell is never exposed.

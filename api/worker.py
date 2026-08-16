@@ -1716,6 +1716,63 @@ async def _hydrate_device_scan_credentials(options: dict[str, Any], scan_id: str
     return hydrated
 
 
+async def _hydrate_device_request_collections(options: dict[str, Any], scan_id: str) -> dict[str, Any]:
+    """Resolve encrypted device-bound Postman documents only in worker memory."""
+    hydrated = dict(options or {})
+    refs = [dict(item) for item in hydrated.get("device_request_collections") or [] if isinstance(item, dict)][:8]
+    if not refs:
+        return hydrated
+    if not hydrated.get("confirm_request_replay") or not hydrated.get("include_web_dast"):
+        raise ValueError("imported device requests require confirmed Web DAST execution")
+    try:
+        collection_ids = [uuid.UUID(str(item.get("collection_id") or "")) for item in refs]
+        scan_uuid = uuid.UUID(str(scan_id))
+    except ValueError as exc:
+        raise ValueError("invalid device request collection reference") from exc
+    if len(collection_ids) != len(set(collection_ids)):
+        raise ValueError("duplicate device request collection reference")
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT c.id, c.name, c.document_sha256, c.encrypted_payload
+               FROM scans s
+               JOIN device_request_collections c ON c.device_target_id=s.device_target_id
+               WHERE s.id=$1 AND c.id=ANY($2::uuid[]) AND c.is_active=true""",
+            scan_uuid, collection_ids,
+        )
+    by_id = {str(row["id"]): dict(row) for row in rows}
+    resolved: list[dict[str, Any]] = []
+    total_bytes = 0
+    for ref in refs:
+        collection_id = str(ref.get("collection_id") or "")
+        row = by_id.get(collection_id)
+        if row is None:
+            raise ValueError("device request collection is unavailable")
+        raw = str(decrypt_secret(row.get("encrypted_payload")) or "")
+        if not raw or raw.startswith("enc:fernet:"):
+            raise ValueError("device request collection could not be decrypted")
+        total_bytes += len(raw.encode("utf-8"))
+        if total_bytes > 7 * 1024 * 1024:
+            raise ValueError("selected device request collections exceed the execution size limit")
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError("device request collection has an invalid encrypted payload") from exc
+        digest = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+        ).hexdigest()
+        expected = str(ref.get("document_sha256") or row.get("document_sha256") or "")
+        if digest != expected or digest != str(row.get("document_sha256") or ""):
+            raise ValueError("device request collection integrity check failed")
+        resolved.append({
+            "collection_id": collection_id,
+            "name": str(row.get("name") or ref.get("name") or "Imported requests"),
+            "document_sha256": digest,
+            "payload": payload,
+        })
+    hydrated["_resolved_device_request_collections"] = resolved
+    return hydrated
+
+
 async def _persist_device_credential_attempts(result: dict[str, Any], scan_id: str) -> None:
     """Persist bounded authentication outcomes without retaining any credential value."""
     posture = result.get("device_posture") if isinstance(result.get("device_posture"), dict) else {}
@@ -2237,6 +2294,9 @@ async def run_scan(
             except (TypeError, ValueError):
                 progress = 10
             await update_scan_progress(scan_id, phase, progress, job_id=job_id)
+            _append_device_activity(
+                scan_id, kind="phase", phase=phase, progress=progress,
+            )
 
         device_options["_progress_callback"] = _device_progress
         result = await run_device_posture_scan(target, device_options)
@@ -7138,6 +7198,57 @@ async def update_scan_progress(scan_id: str, phase: str, progress: int, job_id: 
             pass
 
 
+_DEVICE_ACTIVITY_MESSAGES = {
+    "device_inventory": "Starting device reachability and inventory checks",
+    "device_tcp_discovery": "Scanning the requested TCP port scope",
+    "tcp_priority_discovery": "Checking common and device-specific TCP ports",
+    "device_service_fingerprinting": "Fingerprinting confirmed listening services",
+    "device_udp_discovery": "Checking curated UDP services",
+    "device_protocol_discovery": "Testing device protocols such as SSDP and mDNS",
+    "device_web_discovery": "Detecting HTTP and HTTPS on confirmed ports",
+    "device_ssh_posture": "Reviewing SSH posture on confirmed SSH services",
+    "device_policy": "Evaluating device policy and evidence completeness",
+    "device_web_dast": "Testing discovered web and API interfaces",
+    "completed": "Connected-device scan completed",
+    "failed": "Connected-device scan failed",
+}
+
+
+def _append_device_activity(
+    scan_id: str,
+    *,
+    kind: str,
+    phase: str,
+    message: str | None = None,
+    progress: int | None = None,
+    details: dict[str, Any] | None = None,
+) -> None:
+    """Persist bounded, secret-free device events for the user-facing live feed."""
+    safe_details = {}
+    for key, value in (details or {}).items():
+        if key in {
+            "confirmed_services", "web_origins", "origin", "status", "error_type",
+            "executed_requests", "skipped_requests", "findings_count", "collection_count",
+        }:
+            safe_details[str(key)] = value
+    event = {
+        "timestamp": utc_now_iso(),
+        "kind": str(kind)[:80],
+        "phase": str(phase)[:120],
+        "message": str(message or _DEVICE_ACTIVITY_MESSAGES.get(phase) or phase.replace("_", " ").capitalize())[:500],
+        "progress": max(0, min(100, int(progress))) if progress is not None else None,
+        "details": safe_details,
+    }
+    try:
+        redis_client = get_redis()
+        key = f"scan:{scan_id}:device_activity"
+        redis_client.rpush(key, json.dumps(event, separators=(",", ":"), default=str))
+        redis_client.ltrim(key, -250, -1)
+        redis_client.expire(key, SCAN_LOG_TTL_SECONDS)
+    except Exception:
+        pass
+
+
 def _runtime_scope_guard_applies(options: dict[str, Any]) -> bool:
     guard = (options or {}).get("runtime_scope_guard")
     return isinstance(guard, dict) and bool(guard.get("requires_runtime_destination_check"))
@@ -7672,12 +7783,16 @@ async def run_device_web_children(
     parent_options: dict[str, Any],
     result: dict[str, Any],
 ) -> dict[str, Any]:
-    """Run bounded passive Web DAST children without creating Web targets."""
+    """Run bounded device-owned web and imported-request checks without creating Web targets."""
     posture = result.get("device_posture") if isinstance(result.get("device_posture"), dict) else {}
     origins = posture.get("web_origins") if isinstance(posture.get("web_origins"), list) else []
     limit = max(0, min(int(parent_options.get("max_web_origins") or 0), 32))
     enabled = bool(parent_options.get("include_web_dast")) and limit > 0
     selected = [origin for origin in origins if isinstance(origin, dict) and origin.get("origin")][:limit] if enabled else []
+    request_collections = [
+        dict(item) for item in parent_options.get("_resolved_device_request_collections", [])
+        if isinstance(item, dict)
+    ][:8]
     child_summary = {
         "enabled": enabled,
         "requested": len(selected),
@@ -7689,6 +7804,21 @@ async def run_device_web_children(
     }
     if not selected:
         posture["web_dast_children"] = child_summary
+        posture["imported_request_assessment"] = {
+            "collections": [
+                {
+                    "collection_id": str(item.get("collection_id") or ""),
+                    "name": str(item.get("name") or "Imported requests"),
+                    "document_sha256": str(item.get("document_sha256") or ""),
+                }
+                for item in request_collections
+            ],
+            "executed": 0,
+            "skipped": 0,
+            "findings_count": 0,
+            "reason": "no_discovered_web_origin" if request_collections else None,
+            "allow_state_changing_requests": bool(parent_options.get("allow_state_changing_requests")),
+        }
         result["device_posture"] = posture
         _device_score_with_web_findings(result)
         return result
@@ -7697,6 +7827,14 @@ async def run_device_web_children(
     if web_scan_type not in {"quick", "standard", "deep"}:
         web_scan_type = "standard"
     await update_scan_progress(parent_scan_id, "device_web_dast", 92, job_id=parent_job_id)
+    _append_device_activity(
+        parent_scan_id,
+        kind="web",
+        phase="device_web_dast",
+        progress=92,
+        message=f"Testing {len(selected)} discovered web interface(s)",
+        details={"web_origins": len(selected), "collection_count": len(request_collections)},
+    )
     merged_findings = result.get("findings") if isinstance(result.get("findings"), list) else []
     web_credentials = [
         dict(item) for item in parent_options.get("_resolved_device_credentials", [])
@@ -7709,6 +7847,14 @@ async def run_device_web_children(
             child_summary["truncated"] += len(selected) - index + 1
             break
         origin = str(origin_info["origin"])
+        _append_device_activity(
+            parent_scan_id,
+            kind="web_origin",
+            phase="device_web_dast",
+            progress=min(98, 92 + int((index - 1) / max(1, len(selected)) * 6)),
+            message="Running bounded web and imported-request checks",
+            details={"origin": origin},
+        )
         origin_port = int(origin_info.get("port") or urllib.parse.urlsplit(origin).port or 0)
         web_credential = next((
             item for item in web_credentials
@@ -7733,6 +7879,15 @@ async def run_device_web_children(
                 }
                 if web_credential else None
             ),
+            "device_request_collection_refs": [
+                {
+                    "collection_id": str(item.get("collection_id") or ""),
+                    "name": str(item.get("name") or "Imported requests"),
+                    "document_sha256": str(item.get("document_sha256") or ""),
+                }
+                for item in request_collections
+            ],
+            "allow_state_changing_requests": bool(parent_options.get("allow_state_changing_requests")),
             "request_budget_mode": "enforce",
             "custom_budget": {
                 "max_duration_minutes": 20 if web_scan_type == "deep" else 10,
@@ -7785,6 +7940,9 @@ async def run_device_web_children(
                 origin_info,
                 profile=web_scan_type,
                 credential=web_credential,
+                request_collections=request_collections,
+                allow_state_changing_requests=bool(parent_options.get("allow_state_changing_requests")),
+                default_origin=index == 1,
                 cancel_check=lambda: asyncio.to_thread(_scan_cancel_requested, parent_scan_id),
             )
             child_result = _apply_runtime_scope_guard_to_result(child_result, child_options)
@@ -7838,6 +7996,11 @@ async def run_device_web_children(
             "credential_profile_id": str(web_credential.get("profile_id") or "") if web_credential else None,
             "credentials_attempted": bool((child_result.get("device_web") or {}).get("credentials_attempted")),
             "authenticated": bool((child_result.get("device_web") or {}).get("authentication_succeeded")),
+            "imported_requests": {
+                key: value
+                for key, value in (((child_result.get("device_web") or {}).get("imported_requests") or {}).items())
+                if key in {"executed", "skipped", "skipped_actionable", "routed_elsewhere", "findings_count", "cancelled", "profile", "request_limit"}
+            },
             "runtime_destination": child_runtime_destination,
         }
         child_summary["children"].append(child_entry)
@@ -7854,8 +8017,29 @@ async def run_device_web_children(
             break
         if child_error:
             child_summary["failed"] += 1
+            _append_device_activity(
+                parent_scan_id,
+                kind="warning",
+                phase="device_web_dast",
+                message="A discovered web interface check failed",
+                details={"origin": origin, "status": child_entry["status"], "error_type": child_entry.get("error")},
+            )
         else:
             child_summary["completed"] += 1
+            imported_activity = child_entry.get("imported_requests") or {}
+            _append_device_activity(
+                parent_scan_id,
+                kind="web_result",
+                phase="device_web_dast",
+                message="Completed web and API checks for a discovered interface",
+                details={
+                    "origin": origin,
+                    "status": child_entry["status"],
+                    "executed_requests": int(imported_activity.get("executed") or 0),
+                    "skipped_requests": int(imported_activity.get("skipped") or 0),
+                    "findings_count": len(child_findings),
+                },
+            )
             for finding in child_findings:
                 if not isinstance(finding, dict):
                     continue
@@ -7889,12 +8073,30 @@ async def run_device_web_children(
         if isinstance(child, dict) and isinstance(child.get("runtime_destination"), dict)
     ]
     posture["web_dast_children"] = child_summary
+    posture["imported_request_assessment"] = {
+        "collections": [
+            {
+                "collection_id": str(item.get("collection_id") or ""),
+                "name": str(item.get("name") or "Imported requests"),
+                "document_sha256": str(item.get("document_sha256") or ""),
+            }
+            for item in request_collections
+        ],
+        "executed": sum(int((child.get("imported_requests") or {}).get("executed") or 0) for child in child_summary.get("children") or []),
+        "skipped": sum(int((child.get("imported_requests") or {}).get("skipped_actionable") or 0) for child in child_summary.get("children") or []),
+        "routed_elsewhere": sum(int((child.get("imported_requests") or {}).get("routed_elsewhere") or 0) for child in child_summary.get("children") or []),
+        "findings_count": sum(int((child.get("imported_requests") or {}).get("findings_count") or 0) for child in child_summary.get("children") or []),
+        "allow_state_changing_requests": bool(parent_options.get("allow_state_changing_requests")),
+    }
     metadata = result.setdefault("scan_metadata", {})
     metadata["credentials_attempted"] = bool(metadata.get("credentials_attempted")) or any(
         bool(child.get("credentials_attempted"))
         for child in child_summary.get("children") or []
         if isinstance(child, dict)
     )
+    if parent_options.get("allow_state_changing_requests"):
+        metadata["active_testing"] = True
+        metadata["state_changing_requests_authorized"] = True
     result["device_posture"] = posture
     _device_score_with_web_findings(result)
     return result
@@ -7954,6 +8156,7 @@ async def process_scan_job(job_data: dict):
         'heartbeat': now.isoformat()
     })
     r.delete(f"scan:{scan_id}:logs")
+    r.delete(f"scan:{scan_id}:device_activity")
 
     # Update database
     target_id = None
@@ -8074,8 +8277,21 @@ async def process_scan_job(job_data: dict):
                 options = await _hydrate_managed_scan_credentials(options, scan_id)
                 if device_target_id and (options or {}).get("run_kind") == "device_posture":
                     options = await _hydrate_device_scan_credentials(options, scan_id)
+                    options = await _hydrate_device_request_collections(options, scan_id)
                 result = await run_scan(target, options, scan_id=scan_id, job_id=job_id)
                 if device_target_id and (options or {}).get("run_kind") == "device_posture":
+                    posture_result = result.get("device_posture") if isinstance(result, dict) and isinstance(result.get("device_posture"), dict) else {}
+                    _append_device_activity(
+                        scan_id,
+                        kind="inventory",
+                        phase="device_inventory_complete",
+                        message="Device inventory completed; preparing web and API checks",
+                        progress=91,
+                        details={
+                            "confirmed_services": len(posture_result.get("services") or []),
+                            "web_origins": len(posture_result.get("web_origins") or []),
+                        },
+                    )
                     result = await run_device_web_children(
                         parent_scan_id=scan_id,
                         device_target_id=device_target_id,
@@ -8150,6 +8366,19 @@ async def process_scan_job(job_data: dict):
                     'current_phase': 'terminated' if terminal_status == 'failed' else 'cancelled'
                 })
                 r.expire(job_key, 86400)
+                if device_target_id and (options or {}).get("run_kind") == "device_posture":
+                    _append_device_activity(
+                        scan_id,
+                        kind="error" if terminal_status == "failed" else "cancelled",
+                        phase=terminal_status,
+                        message=(
+                            "Device scan failed before its late result could be accepted"
+                            if terminal_status == "failed"
+                            else "Device scan cancelled"
+                        ),
+                        progress=100,
+                        details={"status": terminal_status},
+                    )
                 return
 
             await _record_internal_executor_tool_receipt(
@@ -8468,6 +8697,26 @@ async def process_scan_job(job_data: dict):
             'auto_retests_queued': str(auto_retests.get("queued", 0)),
         })
         r.expire(job_key, 86400)
+
+        if device_target_id and (options or {}).get("run_kind") == "device_posture":
+            final_posture = result.get("device_posture") if isinstance(result.get("device_posture"), dict) else {}
+            imported = final_posture.get("imported_request_assessment") if isinstance(final_posture.get("imported_request_assessment"), dict) else {}
+            _append_device_activity(
+                scan_id,
+                kind="error" if error else "complete",
+                phase=status,
+                message="Device scan failed" if error else "Device scan completed",
+                progress=100,
+                details={
+                    "status": status,
+                    "confirmed_services": len(final_posture.get("services") or []),
+                    "web_origins": len(final_posture.get("web_origins") or []),
+                    "executed_requests": int(imported.get("executed") or 0),
+                    "skipped_requests": int(imported.get("skipped") or 0),
+                    "findings_count": len(findings),
+                    "error_type": str(error)[:100] if error else None,
+                },
+            )
 
         print(
             f"[{job_id[:8]}] Completed: {target} | Score: {score} | Grade: {grade} | "

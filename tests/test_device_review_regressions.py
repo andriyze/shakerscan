@@ -154,7 +154,7 @@ def test_device_detail_makes_exact_scan_open_ports_prominent():
     assert "This does not prove they are currently closed." in ui
     assert "Confirmed responses only. Silent or ambiguous probes are never shown as open." in ui
     assert "show open ports" in ui
-    assert "Track open ports" in ui
+    assert "Track scan activity" in ui
     assert "export async function getScan(id: string): Promise<Scan>" in api_client
 
 
@@ -258,6 +258,43 @@ def test_device_auth_requires_authenticated_safety_and_never_enters_agent_transc
     assert "Credentialed device investigations require safety_profile=authenticated_active" in api
     assert '"credentials_visible_to_planner": False' in api
     assert 'device credentials require safety_profile=authenticated_active' in worker
+
+
+def test_device_request_collections_are_encrypted_pinned_and_agent_bounded():
+    api = (ROOT / "api" / "api.py").read_text()
+    worker = (ROOT / "api" / "worker.py").read_text()
+    agent = (ROOT / "api" / "device_agent.py").read_text()
+    schema = (ROOT / "db" / "init.sql").read_text()
+    web = (ROOT / "scanner" / "scanner_tools" / "device_web.py").read_text()
+    ui = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "page.tsx").read_text()
+    hunt = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "agent" / "page.tsx").read_text()
+
+    assert "CREATE TABLE device_request_collections" in schema
+    assert "encrypted_payload TEXT NOT NULL" in schema
+    assert '@app.post("/devices/{device_id}/request-collections")' in api
+    assert "Encrypted storage is required for device request collections" in api
+    assert 'summary = _json_object(payload.get("summary_json"))' in api
+    assert "WHERE device_request_collections.is_active=false" in api
+    assert "_hydrate_device_request_collections" in worker
+    assert 'hydrated["_resolved_device_request_collections"]' in worker
+    assert "external_host_blocked" in web
+    assert "state_changing_request_not_confirmed" in web
+    assert '"inspect_request_collections"' in agent
+    assert "include_imported_requests" in agent
+    assert '"request_collection_secrets_visible_to_planner": False' in api
+    assert "Import Postman JSON" in ui
+    assert "Use real imported API requests" in ui
+    assert "Bind imported API requests" in hunt
+
+
+def test_device_scan_activity_is_structured_and_user_facing():
+    api = (ROOT / "api" / "api.py").read_text()
+    worker = (ROOT / "api" / "worker.py").read_text()
+    ui = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "page.tsx").read_text()
+    assert '@app.get("/scans/{scan_id}/device-activity")' in api
+    assert "_append_device_activity" in worker
+    assert "Meaningful events only; commands, payloads, and secrets are hidden." in ui
+    assert "getDeviceScanActivity" in ui
 
 
 def test_legacy_policy_upgrade_matches_numeric_json_port_arrays():

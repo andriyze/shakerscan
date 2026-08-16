@@ -3,8 +3,8 @@
 import Link from 'next/link'
 import { Suspense, useCallback, useEffect, useState } from 'react'
 import { useParams, useSearchParams } from 'next/navigation'
-import { Bot, ChevronDown, ChevronUp, CircleHelp, ExternalLink, Globe, KeyRound, MapPin, Pencil, Router, Wifi, WifiOff } from 'lucide-react'
-import { changeDeviceLocator, createDeviceCredential, deactivateDeviceCredential, formatDate, getDevice, getDeviceCredentials, getScan, renameDevice, scanDevice, type DeviceCredentialProfile, type DeviceDetailResponse, type DeviceService, type Scan } from '@/lib/api'
+import { Activity, Bot, ChevronDown, ChevronUp, CircleHelp, ExternalLink, FileJson, Globe, KeyRound, MapPin, Pencil, Router, Trash2, Upload, Wifi, WifiOff } from 'lucide-react'
+import { changeDeviceLocator, createDeviceCredential, createDeviceRequestCollection, deactivateDeviceCredential, deactivateDeviceRequestCollection, formatDate, getDevice, getDeviceCredentials, getDeviceRequestCollections, getDeviceScanActivity, getScan, renameDevice, scanDevice, type DeviceCredentialProfile, type DeviceDetailResponse, type DeviceRequestCollection, type DeviceScanActivity, type DeviceService, type Scan } from '@/lib/api'
 import { Button, Card, EmptyState, ErrorState, Field, Input, Modal, PageHeader, ScanStatusBadge, Select, TableSkeleton, Textarea, useToast } from '@/components/ui'
 
 const policyBadgeClass: Record<string, string> = {
@@ -68,9 +68,13 @@ function DeviceDetailContent() {
   const [failed, setFailed] = useState(false)
   const [scanOpen, setScanOpen] = useState(false)
   const [credentialOpen, setCredentialOpen] = useState(false)
+  const [requestImportOpen, setRequestImportOpen] = useState(false)
   const [locatorOpen, setLocatorOpen] = useState(false)
   const [renameOpen, setRenameOpen] = useState(false)
   const [credentials, setCredentials] = useState<DeviceCredentialProfile[]>([])
+  const [requestCollections, setRequestCollections] = useState<DeviceRequestCollection[]>([])
+  const [requestImportSaving, setRequestImportSaving] = useState(false)
+  const [requestImport, setRequestImport] = useState<{ name: string; collection: Record<string, unknown> | null; collectionFile: string; environment: Record<string, unknown> | null; environmentFile: string }>({ name: '', collection: null, collectionFile: '', environment: null, environmentFile: '' })
   const [credentialSaving, setCredentialSaving] = useState(false)
   const [locatorSaving, setLocatorSaving] = useState(false)
   const [renameSaving, setRenameSaving] = useState(false)
@@ -82,12 +86,13 @@ function DeviceDetailContent() {
   const [selectedScan, setSelectedScan] = useState<Scan | null>(null)
   const [selectedScanLoading, setSelectedScanLoading] = useState(false)
   const [selectedScanError, setSelectedScanError] = useState<string | null>(null)
-  const [scan, setScan] = useState({ profile: 'inventory', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', port_hints: '', ssh_credential_profile_id: '', web_credential_profile_id: '', include_ssh_host_review: false, confirm_authorized: false })
+  const [scanActivity, setScanActivity] = useState<DeviceScanActivity | null>(null)
+  const [scan, setScan] = useState({ profile: 'inventory', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', port_hints: '', ssh_credential_profile_id: '', web_credential_profile_id: '', include_ssh_host_review: false, request_collection_ids: [] as string[], confirm_request_replay: false, allow_state_changing_requests: false, confirm_authorized: false })
 
   const load = useCallback(async () => {
     try {
-      const [device, credentialData] = await Promise.all([getDevice(deviceId), getDeviceCredentials(deviceId)])
-      setData(device); setCredentials(credentialData.profiles || []); setFailed(false)
+      const [device, credentialData, collectionData] = await Promise.all([getDevice(deviceId), getDeviceCredentials(deviceId), getDeviceRequestCollections(deviceId)])
+      setData(device); setCredentials(credentialData.profiles || []); setRequestCollections(collectionData.collections || []); setFailed(false)
     } catch { setFailed(true) } finally { setLoading(false) }
   }, [deviceId])
 
@@ -125,6 +130,22 @@ function DeviceDetailContent() {
     return () => { stopped = true; if (timer) clearTimeout(timer) }
   }, [deviceId, selectedScanId])
 
+  useEffect(() => {
+    let stopped = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+    if (!selectedScanId) { setScanActivity(null); return () => undefined }
+    const refresh = async () => {
+      try {
+        const activity = await getDeviceScanActivity(selectedScanId)
+        if (stopped) return
+        setScanActivity(activity)
+        if (!['completed', 'failed', 'cancelled'].includes(activity.status)) timer = setTimeout(refresh, 3_000)
+      } catch { if (!stopped) setScanActivity(null) }
+    }
+    refresh()
+    return () => { stopped = true; if (timer) clearTimeout(timer) }
+  }, [selectedScanId])
+
   async function queueScan() {
     setScanning(true)
     try {
@@ -138,14 +159,51 @@ function DeviceDetailContent() {
         port_hints: parsePortHints(scan.port_hints),
         ssh_credential_profile_id: scan.ssh_credential_profile_id || undefined,
         web_credential_profile_id: scan.web_credential_profile_id || undefined,
+        request_collection_ids: scan.request_collection_ids,
+        confirm_request_replay: scan.request_collection_ids.length > 0 && scan.confirm_request_replay,
+        allow_state_changing_requests: scan.request_collection_ids.length > 0 && scan.allow_state_changing_requests,
         capability_ids: scan.include_ssh_host_review ? ['ssh-authenticated-host-review'] : undefined,
       })
       setScanOpen(false)
-      toast.success('Device scan queued', { link: { href: `/devices/${deviceId}?scan=${queued.scan_id}`, label: 'Track open ports' } })
+      toast.success('Device scan queued', { link: { href: `/devices/${deviceId}?scan=${queued.scan_id}`, label: 'Track scan activity' } })
       await load()
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Failed to queue scan')
     } finally { setScanning(false) }
+  }
+
+  async function readJsonFile(file: File): Promise<Record<string, unknown>> {
+    if (file.size > 5 * 1024 * 1024) throw new Error('JSON file is larger than 5 MiB')
+    let parsed: unknown
+    try { parsed = JSON.parse(await file.text()) } catch { throw new Error(`${file.name} is not valid JSON`) }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error(`${file.name} must contain one JSON object`)
+    return parsed as Record<string, unknown>
+  }
+
+  async function chooseRequestFile(file: File | undefined, kind: 'collection' | 'environment') {
+    if (!file) return
+    try {
+      const parsed = await readJsonFile(file)
+      if (kind === 'collection') setRequestImport({ ...requestImport, collection: parsed, collectionFile: file.name })
+      else setRequestImport({ ...requestImport, environment: parsed, environmentFile: file.name })
+    } catch (error) { toast.error(error instanceof Error ? error.message : 'Could not read JSON file') }
+  }
+
+  async function saveRequestCollection() {
+    if (!requestImport.collection) return
+    setRequestImportSaving(true)
+    try {
+      const result = await createDeviceRequestCollection(deviceId, {
+        name: requestImport.name.trim() || undefined,
+        collection: requestImport.collection,
+        environment: requestImport.environment || undefined,
+      })
+      setRequestImportOpen(false)
+      setRequestImport({ name: '', collection: null, collectionFile: '', environment: null, environmentFile: '' })
+      toast.success(`Imported ${result.collection.summary.request_count} API request${result.collection.summary.request_count === 1 ? '' : 's'}`)
+      await load()
+    } catch (error) { toast.error(error instanceof Error ? error.message : 'Failed to import request collection') }
+    finally { setRequestImportSaving(false) }
   }
 
   async function saveCredential() {
@@ -217,7 +275,13 @@ function DeviceDetailContent() {
     ? scanServices(selectedScan, 'inconclusive_observations', 'open|filtered')
     : data.inconclusive_observations || []
   const observationTotal = selectedScanId ? observations.length : data.inconclusive_observations_total ?? observations.length
-  const reachability = data.reachability || device.last_reachability
+  const selectedPosture = selectedScan?.result && typeof selectedScan.result.device_posture === 'object' && selectedScan.result.device_posture !== null
+    ? selectedScan.result.device_posture as Record<string, unknown>
+    : null
+  const selectedReachability = selectedPosture?.reachability && typeof selectedPosture.reachability === 'object'
+    ? selectedPosture.reachability as unknown as typeof data.reachability
+    : null
+  const reachability = selectedScanId ? selectedReachability : data.reachability || device.last_reachability
   const reachabilityTone = reachability?.status === 'online'
     ? 'border-emerald-500/25 bg-emerald-500/5 text-emerald-100'
     : reachability?.status === 'unreachable'
@@ -227,7 +291,7 @@ function DeviceDetailContent() {
 
   return (
     <div className="mx-auto max-w-7xl">
-      <PageHeader backHref="/devices" backLabel="Connected devices" title={device.name} description={device.primary_locator} icon={<Router className="h-6 w-6" />} actions={<><Button variant="secondary" onClick={() => { setRenameName(device.name); setRenameOpen(true) }}><Pencil className="h-4 w-4" /> Rename</Button><Button variant="secondary" onClick={() => { setLocatorForm({ locator: device.primary_locator, reason: '', confirm_same_device: false }); setLocatorOpen(true) }}><MapPin className="h-4 w-4" /> Change address</Button><Link href={`/devices/${device.id}/agent`} className="inline-flex items-center gap-2 rounded-lg border border-violet-500/30 bg-violet-500/10 px-3 py-2 text-sm text-violet-200 hover:bg-violet-500/20"><Bot className="h-4 w-4" /> Device Hunt</Link><Link href={`/findings?source_type=device&device_target_id=${device.id}`} className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-200 hover:bg-gray-700">View findings</Link><Button onClick={() => { setScan({ profile: 'inventory', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', port_hints: '', ssh_credential_profile_id: '', web_credential_profile_id: '', include_ssh_host_review: false, confirm_authorized: false }); setScanOpen(true) }}>Scan device</Button></>} />
+      <PageHeader backHref="/devices" backLabel="Connected devices" title={device.name} description={device.primary_locator} icon={<Router className="h-6 w-6" />} actions={<><Button variant="secondary" onClick={() => { setRenameName(device.name); setRenameOpen(true) }}><Pencil className="h-4 w-4" /> Rename</Button><Button variant="secondary" onClick={() => { setLocatorForm({ locator: device.primary_locator, reason: '', confirm_same_device: false }); setLocatorOpen(true) }}><MapPin className="h-4 w-4" /> Change address</Button><Link href={`/devices/${device.id}/agent`} className="inline-flex items-center gap-2 rounded-lg border border-violet-500/30 bg-violet-500/10 px-3 py-2 text-sm text-violet-200 hover:bg-violet-500/20"><Bot className="h-4 w-4" /> Device Hunt</Link><Link href={`/findings?source_type=device&device_target_id=${device.id}`} className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-200 hover:bg-gray-700">View findings</Link><Button onClick={() => { setScan({ profile: 'inventory', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', port_hints: '', ssh_credential_profile_id: '', web_credential_profile_id: '', include_ssh_host_review: false, request_collection_ids: [], confirm_request_replay: false, allow_state_changing_requests: false, confirm_authorized: false }); setScanOpen(true) }}>Scan device</Button></>} />
 
       {selectedScanId && (
         <Card className="mb-4 border-blue-500/25 bg-blue-500/5 p-4">
@@ -242,6 +306,24 @@ function DeviceDetailContent() {
               {selectedScan && <Link href={`/scans/${selectedScan.id}`} className="inline-flex items-center gap-1 rounded border border-blue-500/30 px-3 py-1.5 text-xs text-blue-200 hover:bg-blue-500/10">Full report <ExternalLink className="h-3.5 w-3.5" /></Link>}
               <Link href={`/devices/${device.id}`} className="rounded border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800">Show known inventory</Link>
             </div>
+          </div>
+        </Card>
+      )}
+
+      {selectedScanId && scanActivity && (
+        <Card className="mb-6 overflow-hidden p-0">
+          <div className="flex items-center justify-between border-b border-gray-800 px-4 py-3">
+            <div className="flex items-center gap-2"><Activity className={`h-4 w-4 ${selectedScanTerminal ? 'text-emerald-300' : 'animate-pulse text-blue-300'}`} /><div><p className="text-sm font-medium text-white">Scan activity</p><p className="text-xs text-gray-500">Meaningful events only; commands, payloads, and secrets are hidden.</p></div></div>
+            <span className="text-xs text-gray-400">{scanActivity.progress}%</span>
+          </div>
+          <div className="max-h-80 divide-y divide-gray-800/70 overflow-y-auto">
+            {scanActivity.events.slice(-20).map((event, index) => {
+              const details = event.details || {}
+              return <div key={`${event.timestamp}-${event.phase}-${index}`} className="flex gap-3 px-4 py-3">
+                <span className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${event.kind === 'error' || event.kind === 'warning' ? 'bg-amber-400' : event.kind === 'complete' ? 'bg-emerald-400' : 'bg-blue-400'}`} />
+                <div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><p className="text-sm text-gray-200">{event.message}</p>{typeof event.progress === 'number' && <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-400">{event.progress}%</span>}</div><div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-gray-500">{Object.entries(details).filter(([, value]) => value !== null && value !== undefined && value !== '').map(([key, value]) => <span key={key}>{key.replace(/_/g, ' ')}: <strong className="font-medium text-gray-400">{String(value)}</strong></span>)}<span>{formatDate(event.timestamp)}</span></div></div>
+              </div>
+            })}
           </div>
         </Card>
       )}
@@ -325,6 +407,11 @@ function DeviceDetailContent() {
       )}
 
       <section className="mb-6">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-3"><div><h2 className="text-lg font-semibold text-white">API request collections</h2><p className="text-sm text-gray-500">Import Postman JSON so scans test real device endpoints, methods, parameters, headers, and bodies—not just ports.</p></div><Button size="sm" variant="secondary" onClick={() => setRequestImportOpen(true)}><Upload className="h-4 w-4" /> Import Postman JSON</Button></div>
+        <Card className="p-4">{requestCollections.length ? <div className="space-y-4">{requestCollections.map((collection) => <div key={collection.id} className="rounded-lg border border-gray-800 bg-gray-950/40 p-4"><div className="flex flex-wrap items-start justify-between gap-3"><div className="flex min-w-0 gap-3"><FileJson className="mt-0.5 h-5 w-5 shrink-0 text-orange-300" /><div className="min-w-0"><p className="truncate text-sm font-medium text-white">{collection.name}</p><p className="mt-1 text-xs text-gray-500">{collection.summary.request_count} requests · {collection.summary.safe_request_count} safe methods · {collection.summary.state_changing_request_count} state-changing · encrypted</p><div className="mt-2 flex flex-wrap gap-1.5">{Object.entries(collection.summary.methods).map(([method, count]) => <span key={method} className="rounded bg-gray-800 px-2 py-0.5 font-mono text-[10px] text-gray-300">{method} {count}</span>)}{collection.summary.port_hints.map((port) => <span key={port} className="rounded bg-blue-500/10 px-2 py-0.5 text-[10px] text-blue-300">port {port}</span>)}</div></div></div><Button size="sm" variant="ghost" onClick={async () => { try { await deactivateDeviceRequestCollection(deviceId, collection.id); toast.success('Request collection removed'); await load() } catch (error) { toast.error(error instanceof Error ? error.message : 'Failed to remove collection') } }}><Trash2 className="h-4 w-4" /> Remove</Button></div><details className="mt-3 border-t border-gray-800 pt-3"><summary className="cursor-pointer text-xs font-medium text-gray-400">Preview redacted request inventory</summary><div className="mt-3 max-h-64 space-y-2 overflow-y-auto">{collection.summary.requests.map((request) => <div key={request.id} className="flex flex-wrap items-center gap-2 rounded bg-gray-900/70 px-3 py-2 text-xs"><span className={`rounded px-1.5 py-0.5 font-mono ${request.safe_method ? 'bg-emerald-500/10 text-emerald-300' : 'bg-amber-500/10 text-amber-300'}`}>{request.method}</span><span className="min-w-0 flex-1 truncate font-mono text-gray-300">{request.url}</span><span className="text-gray-600">{request.auth_type}</span></div>)}</div>{collection.summary.scripts_ignored > 0 && <p className="mt-3 text-xs text-amber-300">{collection.summary.scripts_ignored} Postman script{collection.summary.scripts_ignored === 1 ? ' was' : 's were'} ignored and will never execute.</p>}</details></div>)}</div> : <div className="flex items-center gap-3"><FileJson className="h-5 w-5 text-gray-600" /><div><p className="text-sm text-gray-400">No request collections imported</p><p className="text-xs text-gray-600">Port discovery can find a web server, but request collections tell ShakerScan how the device API is actually used.</p></div></div>}</Card>
+      </section>
+
+      <section className="mb-6">
         <div className="mb-3 flex items-center justify-between"><div><h2 className="text-lg font-semibold text-white">Authentication profiles</h2><p className="text-sm text-gray-500">Encrypted, device-bound credentials are resolved only inside the device worker. The AI planner never sees secret values.</p></div><Button size="sm" variant="secondary" onClick={() => setCredentialOpen(true)}><KeyRound className="h-4 w-4" /> Add credential</Button></div>
         <Card className="p-4">{credentials.length ? <div className="space-y-3">{credentials.map((profile) => <div key={profile.id} className="flex items-center justify-between gap-3 border-b border-gray-800 pb-3 last:border-0 last:pb-0"><div><p className="text-sm font-medium text-white">{profile.name}</p><p className="text-xs text-gray-500">{profile.auth_kind.replace(/_/g, ' ')}{profile.username ? ` · ${profile.username}` : ''}{profile.port ? ` · port ${profile.port}` : ''} · {profile.status}</p></div><Button size="sm" variant="ghost" onClick={async () => { try { await deactivateDeviceCredential(deviceId, profile.id); toast.success('Credential deactivated'); await load() } catch (error) { toast.error(error instanceof Error ? error.message : 'Failed to deactivate credential') } }}>Deactivate</Button></div>)}</div> : <p className="text-sm text-gray-500">No credentials configured. Unauthenticated scans remain available.</p>}</Card>
       </section>
@@ -334,17 +421,28 @@ function DeviceDetailContent() {
         <section><h2 className="mb-3 text-lg font-semibold text-white">Recent device scans</h2><Card className="p-4">{scans.length ? <div className="space-y-3">{scans.slice(0, 8).map((item) => <div key={item.id} className="flex items-center justify-between gap-3 border-b border-gray-800 pb-3 last:border-0 last:pb-0"><Link href={`/devices/${device.id}?scan=${item.id}`} className="min-w-0 flex-1 hover:text-blue-300"><p className="truncate text-sm text-white">{item.current_phase?.replace(/_/g, ' ') || item.scan_type}</p><p className="text-xs text-gray-500">{formatDate(item.created_at)} · show open ports</p></Link><div className="flex items-center gap-2"><ScanStatusBadge status={item.status} /><Link href={`/scans/${item.id}`} aria-label="Open full scan report" title="Open full scan report" className="rounded p-1 text-gray-500 hover:bg-gray-800 hover:text-blue-300"><ExternalLink className="h-4 w-4" /></Link></div></div>)}</div> : <p className="text-sm text-gray-500">No scans yet.</p>}</Card></section>
       </div>
 
-      <Modal open={scanOpen} title={`Scan ${device.name}`} onClose={() => setScanOpen(false)} footer={<><Button variant="secondary" onClick={() => setScanOpen(false)}>Cancel</Button><Button loading={scanning} disabled={!scan.confirm_authorized} onClick={queueScan}>Queue scan</Button></>}>
+      <Modal open={scanOpen} title={`Scan ${device.name}`} onClose={() => setScanOpen(false)} footer={<><Button variant="secondary" onClick={() => setScanOpen(false)}>Cancel</Button><Button loading={scanning} disabled={!scan.confirm_authorized || (scan.request_collection_ids.length > 0 && !scan.confirm_request_replay)} onClick={queueScan}>Queue scan</Button></>}>
         <div className="space-y-4">
           <Field label="Coverage"><Select value={scan.profile} onChange={(event) => setScan({ ...scan, profile: event.target.value })}><option value="inventory">Inventory — top 100 TCP ports + curated UDP, lightest</option><option value="posture">Posture — all 65,535 TCP ports + curated UDP, slower</option><option value="thorough">Thorough — all 65,535 TCP ports + deeper fingerprints, heaviest</option></Select></Field>
           {scan.profile !== 'inventory' && <p className="rounded border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-amber-200">This profile checks every TCP port and can take hours on slow or filtered devices. Start with Inventory unless complete port coverage is required.</p>}
           <Field label="Known TCP ports (optional)" hint="Previously observed and policy-defined ports are included automatically."><Input value={scan.port_hints} onChange={(event) => setScan({ ...scan, port_hints: event.target.value })} placeholder="7345, 9443" /></Field>
-          <Field label="Safety level" hint="Safety is independent from port coverage."><Select value={scan.safety_profile} onChange={(event) => { const safety_profile = event.target.value; setScan({ ...scan, safety_profile, include_web_dast: safety_profile === 'observe_only' ? false : scan.include_web_dast, ssh_credential_profile_id: safety_profile === 'authenticated_active' ? scan.ssh_credential_profile_id : '', web_credential_profile_id: safety_profile === 'authenticated_active' ? scan.web_credential_profile_id : '', include_ssh_host_review: safety_profile === 'authenticated_active' ? scan.include_ssh_host_review : false }) }}><option value="observe_only">Observe only — discovery and fingerprints</option><option value="safe_remote">Safe remote — bounded non-destructive checks</option><option value="authenticated_active">Authenticated active — supplied SSH/web credentials</option><option value="lab_invasive" disabled>Lab invasive — dedicated runner required</option></Select></Field>
+          <Field label="Safety level" hint="Safety is independent from port coverage."><Select value={scan.safety_profile} onChange={(event) => { const safety_profile = event.target.value; setScan({ ...scan, safety_profile, include_web_dast: safety_profile === 'observe_only' ? false : scan.include_web_dast, ssh_credential_profile_id: safety_profile === 'authenticated_active' ? scan.ssh_credential_profile_id : '', web_credential_profile_id: safety_profile === 'authenticated_active' ? scan.web_credential_profile_id : '', include_ssh_host_review: safety_profile === 'authenticated_active' ? scan.include_ssh_host_review : false, allow_state_changing_requests: safety_profile === 'authenticated_active' ? scan.allow_state_changing_requests : false }) }}><option value="observe_only">Observe only — discovery and fingerprints</option><option value="safe_remote">Safe remote — bounded non-destructive checks</option><option value="authenticated_active">Authenticated active — supplied SSH/web credentials</option><option value="lab_invasive" disabled>Lab invasive — dedicated runner required</option></Select></Field>
           {scan.safety_profile === 'authenticated_active' && <div className="grid gap-4 sm:grid-cols-2"><Field label="SSH credential"><Select value={scan.ssh_credential_profile_id} onChange={(event) => setScan({ ...scan, ssh_credential_profile_id: event.target.value, include_ssh_host_review: event.target.value ? scan.include_ssh_host_review : false })}><option value="">No SSH authentication</option>{credentials.filter((profile) => profile.auth_kind.startsWith('ssh_') && profile.execution_compatible).map((profile) => <option key={profile.id} value={profile.id}>{profile.name}{profile.port ? ` · ${profile.port}` : ''}</option>)}</Select></Field><Field label="Web credential"><Select value={scan.web_credential_profile_id} onChange={(event) => setScan({ ...scan, web_credential_profile_id: event.target.value })}><option value="">No web authentication</option>{credentials.filter((profile) => profile.auth_kind.startsWith('web_') && profile.execution_compatible).map((profile) => <option key={profile.id} value={profile.id}>{profile.name}{profile.port ? ` · ${profile.port}` : ''}</option>)}</Select></Field></div>}
           {scan.safety_profile === 'authenticated_active' && <label className="flex items-start gap-3 rounded-lg border border-violet-500/20 bg-violet-500/5 p-3 text-sm text-gray-300"><input type="checkbox" checked={scan.include_ssh_host_review} disabled={!scan.ssh_credential_profile_id} onChange={(event) => setScan({ ...scan, include_ssh_host_review: event.target.checked })} className="mt-1" /><span><strong className="block text-white">Collect read-only SSH host evidence</strong>Runs only server-owned identity, listener, process, account, hardening, package, and update bundles. Commands and output are bounded and secrets are redacted.</span></label>}
-          <label className="flex items-start gap-3 rounded-lg border border-gray-800 bg-gray-950 p-3 text-sm text-gray-300"><input type="checkbox" checked={scan.include_web_dast} disabled={scan.safety_profile === 'observe_only'} onChange={(event) => setScan({ ...scan, include_web_dast: event.target.checked })} className="mt-1" /><span><strong className="block text-white">Check web interfaces on every discovered port</strong>{scan.safety_profile === 'observe_only' ? 'Observe-only discovers origins without launching Web DAST children.' : 'Runs bounded passive Web DAST as hidden device-owned checks.'}</span></label>
-          {scan.include_web_dast && <Field label="Web coverage"><Select value={scan.web_scan_type} onChange={(event) => setScan({ ...scan, web_scan_type: event.target.value })}><option value="quick">Quick</option><option value="standard">Standard</option><option value="deep">Deep passive</option></Select></Field>}
+          <label className="flex items-start gap-3 rounded-lg border border-gray-800 bg-gray-950 p-3 text-sm text-gray-300"><input type="checkbox" checked={scan.include_web_dast} disabled={scan.safety_profile === 'observe_only'} onChange={(event) => setScan({ ...scan, include_web_dast: event.target.checked })} className="mt-1" /><span><strong className="block text-white">Check web interfaces on every discovered port</strong>{scan.safety_profile === 'observe_only' ? 'Observe-only discovers origins without launching Web DAST children.' : 'Runs bounded web and imported API-request checks as hidden device-owned work.'}</span></label>
+          {scan.include_web_dast && <Field label="Web coverage"><Select value={scan.web_scan_type} onChange={(event) => setScan({ ...scan, web_scan_type: event.target.value })}><option value="quick">Quick</option><option value="standard">Standard request-aware</option><option value="deep">Deep request-aware</option></Select></Field>}
+          {scan.include_web_dast && requestCollections.length > 0 && <div className="rounded-lg border border-orange-500/20 bg-orange-500/5 p-4"><p className="text-sm font-medium text-orange-100">Use real imported API requests</p><p className="mt-1 text-xs text-gray-400">Selected collections are resolved in the worker and pinned to web origins discovered on this device.</p><div className="mt-3 space-y-2">{requestCollections.map((collection) => { const checked = scan.request_collection_ids.includes(collection.id); return <label key={collection.id} className="flex items-start gap-3 rounded border border-gray-800 bg-gray-950/60 p-3 text-sm text-gray-300"><input type="checkbox" checked={checked} onChange={(event) => { const ids = event.target.checked ? [...scan.request_collection_ids, collection.id] : scan.request_collection_ids.filter((id) => id !== collection.id); setScan({ ...scan, request_collection_ids: ids, confirm_request_replay: ids.length ? scan.confirm_request_replay : false, allow_state_changing_requests: ids.length ? scan.allow_state_changing_requests : false }) }} className="mt-1" /><span><strong className="block text-white">{collection.name}</strong>{collection.summary.request_count} requests · {collection.summary.state_changing_request_count} POST/PUT/PATCH/DELETE</span></label>})}</div>{scan.request_collection_ids.length > 0 && <div className="mt-3 space-y-2"><label className="flex items-start gap-3 text-sm text-amber-100"><input type="checkbox" checked={scan.confirm_request_replay} onChange={(event) => setScan({ ...scan, confirm_request_replay: event.target.checked })} className="mt-1" /><span>I authorize replay of safe imported requests against this device. Collection scripts are ignored and secrets stay encrypted.</span></label><label className={`flex items-start gap-3 text-sm ${scan.safety_profile === 'authenticated_active' ? 'text-red-200' : 'text-gray-600'}`}><input type="checkbox" checked={scan.allow_state_changing_requests} disabled={scan.safety_profile !== 'authenticated_active'} onChange={(event) => setScan({ ...scan, allow_state_changing_requests: event.target.checked })} className="mt-1" /><span><strong className="block">Also replay POST, PUT, PATCH, and DELETE exactly as saved</strong>This can change device state. It requires Authenticated active safety and is never enabled by the AI itself.</span></label></div>}</div>}
           <label className="flex items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-sm text-amber-100"><input type="checkbox" checked={scan.confirm_authorized} onChange={(event) => setScan({ ...scan, confirm_authorized: event.target.checked })} className="mt-1" />I confirm I am authorized to scan this device and its listening services{scan.ssh_credential_profile_id || scan.web_credential_profile_id ? ', and I authorize one bounded attempt with each selected credential' : ''}.</label>
+        </div>
+      </Modal>
+
+      <Modal open={requestImportOpen} title="Import Postman request collection" onClose={() => setRequestImportOpen(false)} footer={<><Button variant="secondary" onClick={() => setRequestImportOpen(false)}>Cancel</Button><Button loading={requestImportSaving} disabled={!requestImport.collection} onClick={saveRequestCollection}>Import requests</Button></>}>
+        <div className="space-y-4">
+          <p className="text-sm text-gray-400">Upload a Postman Collection v2 JSON file and, optionally, its environment JSON. ShakerScan encrypts both documents, shows only a redacted inventory, and binds execution to this device.</p>
+          <Field label="Display name (optional)"><Input value={requestImport.name} onChange={(event) => setRequestImport({ ...requestImport, name: event.target.value })} placeholder="LG TV local API" /></Field>
+          <Field label="Postman collection JSON" required hint="Up to 5 MiB and 500 requests."><label className="flex cursor-pointer items-center justify-between rounded-lg border border-dashed border-gray-700 bg-gray-950 p-4 hover:border-orange-500/50"><span className="flex items-center gap-3"><Upload className="h-5 w-5 text-orange-300" /><span><strong className="block text-sm text-white">{requestImport.collectionFile || 'Choose collection file'}</strong><span className="text-xs text-gray-500">Postman Collection v2.0 or v2.1 JSON</span></span></span><input type="file" accept="application/json,.json" className="sr-only" onChange={(event) => chooseRequestFile(event.target.files?.[0], 'collection')} /></label></Field>
+          <Field label="Postman environment JSON (optional)" hint="Variable values may contain secrets and are encrypted at rest."><label className="flex cursor-pointer items-center justify-between rounded-lg border border-dashed border-gray-700 bg-gray-950 p-4 hover:border-blue-500/50"><span className="flex items-center gap-3"><FileJson className="h-5 w-5 text-blue-300" /><span><strong className="block text-sm text-white">{requestImport.environmentFile || 'Choose environment file'}</strong><span className="text-xs text-gray-500">baseUrl, tokens, IDs, and other variables</span></span></span><input type="file" accept="application/json,.json" className="sr-only" onChange={(event) => chooseRequestFile(event.target.files?.[0], 'environment')} /></label></Field>
+          <div className="rounded border border-emerald-500/20 bg-emerald-500/5 p-3 text-xs text-emerald-100"><strong className="block">Safe import boundary</strong>Postman pre-request and test scripts are counted but never executed. Imported hosts cannot redirect scanning away from this registered device. Header values, body contents, cookies, tokens, and environment values are not exposed in the UI or Device Hunt.</div>
         </div>
       </Modal>
 

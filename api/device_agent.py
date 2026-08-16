@@ -27,6 +27,7 @@ except ModuleNotFoundError:  # pragma: no cover - package import in host tests
 CALLABLE_TOOL_NAMES = {
     "inspect_device",
     "inspect_capabilities",
+    "inspect_request_collections",
     "propose_ssh_shell",
     "queue_device_scan",
     "inspect_device_scan",
@@ -103,6 +104,7 @@ def _read_local_intel_snapshot(path: str, expected_sha256: str) -> Any:
 TOOL_TIERS = {
     "inspect_device": 0,
     "inspect_capabilities": 0,
+    "inspect_request_collections": 0,
     "inspect_device_scan": 0,
     "query_device_evidence": 0,
     "diff_scans": 0,
@@ -135,7 +137,7 @@ PROTOCOL_PLAYBOOKS = {
     },
     "http": {
         "summary": "Embedded web administration often runs on nonstandard ports and may be cleartext or weakly authenticated.",
-        "safe_next_steps": ["Use the discovered origin in a bounded passive web child", "Compare TLS and response status across scans"],
+        "safe_next_steps": ["Use the discovered origin in a bounded device-owned web child", "Compare TLS and response status across scans"],
         "policy_questions": ["Is cleartext administration isolated?", "Is the interface authenticated with an operator-supplied profile?"],
     },
     "https": {
@@ -164,6 +166,8 @@ def tool_fragility_cost(name: str, args: dict[str, Any]) -> int:
     coverage = str(args.get("coverage_profile") or "inventory")
     cost = {"inventory": 5, "posture": 12, "thorough": 18}.get(coverage, 12)
     if args.get("include_web_dast"):
+        cost += 4
+    if args.get("include_imported_requests"):
         cost += 4
     if args.get("capability_ids"):
         cost += 6
@@ -262,6 +266,11 @@ def tool_schemas() -> list[dict[str, Any]]:
             "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
         },
         {
+            "name": "inspect_request_collections",
+            "description": "Read redacted Postman request inventories bound to this investigation. Secret values, tokens, cookies, bodies, and environment values are never returned.",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+        {
             "name": "queue_device_scan",
             "description": (
                 "Queue one deterministic device scan on the already-selected device. "
@@ -273,6 +282,7 @@ def tool_schemas() -> list[dict[str, Any]]:
                     "coverage_profile": {"type": "string", "enum": ["inventory", "posture", "thorough"]},
                     "include_web_dast": {"type": "boolean"},
                     "web_scan_type": {"type": "string", "enum": ["quick", "standard", "deep"]},
+                    "include_imported_requests": {"type": "boolean"},
                     "reason": {"type": "string", "maxLength": 500},
                     "capability_ids": {
                         "type": "array",
@@ -388,6 +398,7 @@ def render_contract() -> str:
         "You are directing an authorized investigation of exactly one registered connected device.",
         "ShakerScan fixes the device locator and safety profile. Never invent another target or local-host shell/network access.",
         "Remote-device SSH commands may be proposed only with propose_ssh_shell. Proposal is not execution: show exact commands and wait for separate user confirmation in ShakerScan.",
+        "Imported Postman requests may be inspected only through inspect_request_collections and executed only when they were bound and user-confirmed at session creation; the planner never receives their secret values.",
         "Start from existing evidence, choose the smallest useful scan, inspect its result, and stop when the objective is answered.",
         "A queued scan is asynchronous: use inspect_device_scan on a later turn; do not repeatedly queue equivalent scans.",
         "Only deterministic scanner findings are findings. Your final leads are hypotheses and must cite real devref_N evidence references.",
@@ -423,8 +434,9 @@ def validate_tool_call(call: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     allowed_fields = {
         "inspect_device": set(),
         "inspect_capabilities": set(),
+        "inspect_request_collections": set(),
         "propose_ssh_shell": {"port", "commands", "timeout_seconds", "purpose", "risk_summary"},
-        "queue_device_scan": {"coverage_profile", "include_web_dast", "web_scan_type", "reason", "capability_ids"},
+        "queue_device_scan": {"coverage_profile", "include_web_dast", "web_scan_type", "include_imported_requests", "reason", "capability_ids"},
         "inspect_device_scan": {"scan_id"},
         "query_device_evidence": {"scan_id", "collection", "kind", "limit"},
         "diff_scans": {"scan_a", "scan_b"},
@@ -458,6 +470,7 @@ def validate_tool_call(call: dict[str, Any]) -> tuple[str, dict[str, Any]]:
             "coverage_profile": coverage,
             "include_web_dast": bool(args.get("include_web_dast", True)),
             "web_scan_type": web_type,
+            "include_imported_requests": bool(args.get("include_imported_requests", False)),
             "reason": reason[:500],
             "capability_ids": capability_ids,
         }

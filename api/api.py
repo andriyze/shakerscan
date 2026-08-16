@@ -72,6 +72,11 @@ except ModuleNotFoundError:
     from scanner.scanner_tools import device_shell
 
 try:
+    from scanner_tools.device_postman import PostmanCollectionError, validate_and_summarize as validate_device_request_collection
+except ModuleNotFoundError:
+    from scanner.scanner_tools.device_postman import PostmanCollectionError, validate_and_summarize as validate_device_request_collection
+
+try:
     from scanner_tools.model_intake_acquisition import acquisition_policy as _model_acquisition_policy
     from scanner_tools.model_intake_acquisition import download_http as _model_download_http
 except ModuleNotFoundError:
@@ -4189,6 +4194,23 @@ class DeviceCredentialProfileRotate(BaseModel):
     approval_receipt_id: Optional[str] = None
 
 
+class DeviceRequestCollectionCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: Optional[str] = Field(default=None, max_length=160)
+    collection: dict[str, Any]
+    environment: Optional[dict[str, Any]] = None
+
+
+class DeviceRequestCollectionUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: Optional[str] = Field(default=None, min_length=1, max_length=160)
+    collection: Optional[dict[str, Any]] = None
+    environment: Optional[dict[str, Any]] = None
+    clear_environment: bool = False
+
+
 class DeviceScanRequest(BaseModel):
     profile: Literal["inventory", "posture", "thorough"] = "inventory"
     safety_profile: Literal["observe_only", "safe_remote", "authenticated_active", "lab_invasive"] = "safe_remote"
@@ -4204,6 +4226,9 @@ class DeviceScanRequest(BaseModel):
     )
     ssh_credential_profile_id: Optional[str] = None
     web_credential_profile_id: Optional[str] = None
+    request_collection_ids: list[str] = Field(default_factory=list, max_length=8)
+    confirm_request_replay: bool = False
+    allow_state_changing_requests: bool = False
     capability_ids: list[str] = Field(default_factory=list, max_length=8)
     approval_receipt_id: Optional[str] = None
 
@@ -4235,6 +4260,9 @@ class DeviceAgentSessionStartRequest(BaseModel):
     confirm_authorized: bool = False
     ssh_credential_profile_id: Optional[str] = None
     web_credential_profile_id: Optional[str] = None
+    request_collection_ids: list[str] = Field(default_factory=list, max_length=8)
+    confirm_request_replay: bool = False
+    allow_state_changing_requests: bool = False
     approval_receipt_id: Optional[str] = None
 
 
@@ -18326,6 +18354,53 @@ def _device_credential_secret_value(secret: str, secondary_secret: str | None) -
     }))
 
 
+def _public_device_request_collection(row: Any, *, include_requests: bool = True) -> dict[str, Any]:
+    payload = _decode_device_row(row)
+    payload.pop("encrypted_payload", None)
+    summary = _json_object(payload.get("summary_json"))
+    if not include_requests:
+        summary = {key: value for key, value in summary.items() if key != "requests"}
+    payload["summary"] = summary
+    payload.pop("summary_json", None)
+    payload["storage_encrypted"] = str(row.get("encrypted_payload") or "").startswith("enc:fernet:")
+    return payload
+
+
+async def _validate_device_request_collection_refs(
+    conn: Any,
+    device_target_id: uuid.UUID,
+    raw_ids: list[str],
+) -> list[dict[str, Any]]:
+    if not raw_ids:
+        return []
+    ids = [_device_uuid(value, "request collection") for value in raw_ids]
+    if len(ids) != len(set(ids)):
+        raise HTTPException(status_code=422, detail="request_collection_ids must be unique")
+    rows = await conn.fetch(
+        """SELECT id, name, document_sha256, summary_json
+           FROM device_request_collections
+           WHERE device_target_id=$1 AND id=ANY($2::uuid[]) AND is_active=true""",
+        device_target_id,
+        ids,
+    )
+    by_id = {row["id"]: row for row in rows}
+    if len(by_id) != len(ids):
+        raise HTTPException(status_code=422, detail="One or more active request collections are unavailable for this device")
+    refs = []
+    for collection_id in ids:
+        row = by_id[collection_id]
+        summary = _decode_json_value(row["summary_json"]) or {}
+        refs.append({
+            "collection_id": str(row["id"]),
+            "name": str(row["name"]),
+            "document_sha256": str(row["document_sha256"]),
+            "request_count": int(summary.get("request_count") or 0),
+            "state_changing_request_count": int(summary.get("state_changing_request_count") or 0),
+            "port_hints": [int(port) for port in summary.get("port_hints") or [] if 1 <= int(port) <= 65535][:128],
+        })
+    return refs
+
+
 async def _validate_device_credential_refs(
     conn: Any,
     device_target_id: uuid.UUID,
@@ -18808,6 +18883,129 @@ async def acknowledge_device_credential_lockout(
     return {"status": "acknowledged", "attempts_cleared": int(removed or 0), "operation_id": str(operation["id"])}
 
 
+@app.get("/devices/{device_id}/request-collections")
+async def list_device_request_collections(device_id: str, include_inactive: bool = False):
+    device_uuid = _device_uuid(device_id)
+    async with db_pool.acquire() as conn:
+        if not await conn.fetchval("SELECT 1 FROM device_targets WHERE id=$1", device_uuid):
+            raise HTTPException(status_code=404, detail="Connected device not found")
+        rows = await conn.fetch(
+            """SELECT * FROM device_request_collections
+               WHERE device_target_id=$1 AND ($2 OR is_active=true)
+               ORDER BY updated_at DESC, name""",
+            device_uuid, include_inactive,
+        )
+    return {"collections": [_public_device_request_collection(row) for row in rows], "count": len(rows)}
+
+
+@app.get("/devices/{device_id}/request-collections/{collection_id}")
+async def get_device_request_collection(device_id: str, collection_id: str):
+    device_uuid = _device_uuid(device_id)
+    collection_uuid = _device_uuid(collection_id, "request collection")
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM device_request_collections WHERE id=$1 AND device_target_id=$2",
+            collection_uuid, device_uuid,
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="Device request collection not found")
+    return {"collection": _public_device_request_collection(row)}
+
+
+@app.post("/devices/{device_id}/request-collections")
+async def create_device_request_collection(device_id: str, request: DeviceRequestCollectionCreate):
+    device_uuid = _device_uuid(device_id)
+    try:
+        payload, summary = validate_device_request_collection(
+            request.collection, request.environment, requested_name=request.name,
+        )
+    except PostmanCollectionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    encrypted_payload = encrypt_secret(json.dumps(payload, separators=(",", ":"), ensure_ascii=False))
+    if not str(encrypted_payload or "").startswith("enc:fernet:"):
+        raise HTTPException(status_code=503, detail="Encrypted storage is required for device request collections")
+    try:
+        async with db_pool.acquire() as conn:
+            if not await conn.fetchval("SELECT 1 FROM device_targets WHERE id=$1 AND is_active=true", device_uuid):
+                raise HTTPException(status_code=404, detail="Active connected device not found")
+            row = await conn.fetchrow(
+                """INSERT INTO device_request_collections (
+                       device_target_id, name, document_sha256, encrypted_payload, summary_json
+                   ) VALUES ($1,$2,$3,$4,$5)
+                   ON CONFLICT (device_target_id, name) DO UPDATE SET
+                       document_sha256=EXCLUDED.document_sha256,
+                       encrypted_payload=EXCLUDED.encrypted_payload,
+                       summary_json=EXCLUDED.summary_json,
+                       is_active=true,
+                       updated_at=NOW()
+                   WHERE device_request_collections.is_active=false
+                   RETURNING *""",
+                device_uuid, summary["name"], summary["document_sha256"],
+                encrypted_payload, json.dumps(summary),
+            )
+    except asyncpg.UniqueViolationError as exc:
+        raise HTTPException(status_code=409, detail="This device already has a request collection with that name") from exc
+    if not row:
+        raise HTTPException(status_code=409, detail="This device already has an active request collection with that name")
+    return {"collection": _public_device_request_collection(row)}
+
+
+@app.patch("/devices/{device_id}/request-collections/{collection_id}")
+async def update_device_request_collection(device_id: str, collection_id: str, request: DeviceRequestCollectionUpdate):
+    device_uuid = _device_uuid(device_id)
+    collection_uuid = _device_uuid(collection_id, "request collection")
+    async with db_pool.acquire() as conn:
+        current = await conn.fetchrow(
+            "SELECT * FROM device_request_collections WHERE id=$1 AND device_target_id=$2",
+            collection_uuid, device_uuid,
+        )
+    if not current:
+        raise HTTPException(status_code=404, detail="Device request collection not found")
+    try:
+        existing = json.loads(str(decrypt_secret(current["encrypted_payload"]) or ""))
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=500, detail="Stored request collection could not be decrypted") from exc
+    collection = request.collection if request.collection is not None else existing.get("collection")
+    environment = None if request.clear_environment else request.environment if request.environment is not None else existing.get("environment")
+    try:
+        payload, summary = validate_device_request_collection(
+            collection, environment, requested_name=request.name or str(current["name"]),
+        )
+    except PostmanCollectionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    encrypted_payload = encrypt_secret(json.dumps(payload, separators=(",", ":"), ensure_ascii=False))
+    if not str(encrypted_payload or "").startswith("enc:fernet:"):
+        raise HTTPException(status_code=503, detail="Encrypted storage is required for device request collections")
+    try:
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """UPDATE device_request_collections
+                   SET name=$1, document_sha256=$2, encrypted_payload=$3,
+                       summary_json=$4, is_active=true, updated_at=NOW()
+                   WHERE id=$5 AND device_target_id=$6 RETURNING *""",
+                summary["name"], summary["document_sha256"], encrypted_payload,
+                json.dumps(summary), collection_uuid, device_uuid,
+            )
+    except asyncpg.UniqueViolationError as exc:
+        raise HTTPException(status_code=409, detail="This device already has a request collection with that name") from exc
+    return {"collection": _public_device_request_collection(row)}
+
+
+@app.delete("/devices/{device_id}/request-collections/{collection_id}")
+async def deactivate_device_request_collection(device_id: str, collection_id: str):
+    device_uuid = _device_uuid(device_id)
+    collection_uuid = _device_uuid(collection_id, "request collection")
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """UPDATE device_request_collections SET is_active=false, updated_at=NOW()
+               WHERE id=$1 AND device_target_id=$2 RETURNING *""",
+            collection_uuid, device_uuid,
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="Device request collection not found")
+    return {"status": "deactivated", "collection": _public_device_request_collection(row)}
+
+
 @app.get("/devices/{device_id}")
 async def get_device(
     device_id: str,
@@ -18995,6 +19193,14 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
         )
     if not request.confirm_authorized:
         raise HTTPException(status_code=409, detail="Re-submit with confirm_authorized=true after confirming permission to scan this device")
+    if request.request_collection_ids and not request.include_web_dast:
+        raise HTTPException(status_code=422, detail="Imported request collections require include_web_dast=true")
+    if request.request_collection_ids and not request.confirm_request_replay:
+        raise HTTPException(status_code=409, detail="Confirm execution of the selected imported requests for this scan")
+    if request.allow_state_changing_requests and not request.request_collection_ids:
+        raise HTTPException(status_code=422, detail="State-changing request replay requires at least one request collection")
+    if request.allow_state_changing_requests and request.safety_profile != "authenticated_active":
+        raise HTTPException(status_code=422, detail="POST, PUT, PATCH, and DELETE replay requires authenticated_active safety")
     try:
         safety_contract = validate_safety_request({
             "safety_profile": request.safety_profile,
@@ -19028,6 +19234,9 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
             device_uuid,
             ssh_profile_id=request.ssh_credential_profile_id,
             web_profile_id=request.web_credential_profile_id,
+        )
+        request_collection_refs = await _validate_device_request_collection_refs(
+            conn, device_uuid, request.request_collection_ids,
         )
         if credential_refs and not safety_contract.credentials_allowed:
             raise HTTPException(
@@ -19151,6 +19360,12 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
             for ref in credential_refs
             if ref.get("port") is not None and 1 <= int(ref["port"]) <= 65535
         ))
+        collection_tcp_ports = list(dict.fromkeys(
+            int(port)
+            for ref in request_collection_refs
+            for port in ref.get("port_hints") or []
+            if 1 <= int(port) <= 65535
+        ))
         options = {
             "run_kind": "device_posture",
             "device_class": str(device["device_class"]),
@@ -19165,12 +19380,16 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
             "web_scan_type": request.web_scan_type,
             "max_web_origins": request.max_web_origins,
             "device_credential_profiles": credential_refs,
+            "device_request_collections": request_collection_refs,
+            "confirm_request_replay": bool(request.confirm_request_replay),
+            "allow_state_changing_requests": bool(request.allow_state_changing_requests),
             "device_capability_ids": capability_ids,
             "device_reachability_port_hints": {
                 "user": request.port_hints,
                 "observed": observed_tcp_ports,
                 "policy": policy_tcp_ports,
                 "credential": credential_tcp_ports,
+                "request_collection": collection_tcp_ports,
             },
             "expected_ssh_host_keys": expected_ssh_host_keys,
             "device_shell_plan": approved_shell_plan if "agent-confirmed-ssh-shell" in capability_ids else None,
@@ -19569,6 +19788,9 @@ def _device_agent_run_public(row: Any) -> dict[str, Any]:
             "target_fixed": True,
             "safety_profile_fixed": True,
             "credentials_visible_to_planner": False,
+            "request_collection_secrets_visible_to_planner": False,
+            "request_collections_bound": len(state.get("device_request_collections") or []),
+            "state_changing_requests_authorized": bool(state.get("allow_state_changing_requests")),
             "agent_findings_authoritative": False,
             "remote_shell_scope": "registered_device_only",
             "remote_shell_requires_exact_user_confirmation": True,
@@ -19692,6 +19914,8 @@ def _bounded_device_scan_result(row: Any) -> dict[str, Any]:
         "services": bounded_services,
         "inconclusive_observations": list(posture.get("inconclusive_observations") or [])[:100],
         "web_origins": list(posture.get("web_origins") or [])[:32],
+        "web_dast_children": posture.get("web_dast_children"),
+        "imported_request_assessment": posture.get("imported_request_assessment"),
         "capability_coverage": list(posture.get("capability_coverage") or [])[:50],
         "requested_capabilities": list(posture.get("requested_capabilities") or [])[:20],
         "findings": [{
@@ -19789,6 +20013,28 @@ async def _execute_device_agent_tool(
 
     if name == "inspect_capabilities":
         payload = await get_device_capabilities(str(device_target_id))
+        return {"ok": True, "evidence_ref": _device_agent_add_evidence(state, payload), "data": payload}
+
+    if name == "inspect_request_collections":
+        bound_ids = [
+            _device_uuid(str(ref.get("collection_id") or ""), "request collection")
+            for ref in state.get("device_request_collections", [])
+            if isinstance(ref, dict) and ref.get("collection_id")
+        ]
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT * FROM device_request_collections
+                   WHERE device_target_id=$1 AND id=ANY($2::uuid[]) AND is_active=true
+                   ORDER BY name""",
+                device_target_id, bound_ids,
+            ) if bound_ids else []
+        payload = {
+            "collections": [_public_device_request_collection(row) for row in rows],
+            "count": len(rows),
+            "bound_to_investigation": True,
+            "secret_values_visible": False,
+            "state_changing_requests_authorized": bool(state.get("allow_state_changing_requests")),
+        }
         return {"ok": True, "evidence_ref": _device_agent_add_evidence(state, payload), "data": payload}
 
     if name == "lookup_protocol_playbook":
@@ -19921,6 +20167,12 @@ async def _execute_device_agent_tool(
         if int(state.get("scans_queued") or 0) >= device_agent.MAX_SCANS_PER_SESSION:
             raise HTTPException(status_code=409, detail="Connected-device agent scan budget exhausted")
         include_web_dast = bool(args.get("include_web_dast")) and safety_profile != "observe_only"
+        use_imported = bool(args.get("include_imported_requests"))
+        collection_refs = [ref for ref in state.get("device_request_collections", []) if isinstance(ref, dict)] if use_imported else []
+        if use_imported and not collection_refs:
+            raise HTTPException(status_code=409, detail="No request collection was bound and confirmed for this Device Hunt")
+        if use_imported and not include_web_dast:
+            raise HTTPException(status_code=422, detail="Imported requests require include_web_dast=true")
         queued = await scan_device(str(device_target_id), DeviceScanRequest(
             profile=args["coverage_profile"],
             safety_profile=safety_profile,
@@ -19936,6 +20188,9 @@ async def _execute_device_agent_tool(
                 str(ref.get("profile_id")) for ref in state.get("device_credential_profiles", [])
                 if isinstance(ref, dict) and ref.get("role") == "web"
             ), None),
+            request_collection_ids=[str(ref.get("collection_id")) for ref in collection_refs],
+            confirm_request_replay=use_imported,
+            allow_state_changing_requests=bool(state.get("allow_state_changing_requests")) if use_imported else False,
             capability_ids=list(args.get("capability_ids") or []),
             approval_receipt_id=approval_receipt_id,
         ))
@@ -20047,6 +20302,12 @@ async def start_device_agent_session(device_id: str, request: DeviceAgentSession
         raise HTTPException(status_code=503, detail="Connected-device posture is disabled")
     if not request.confirm_authorized:
         raise HTTPException(status_code=409, detail="Confirm authorization before starting an AI-directed device investigation")
+    if request.request_collection_ids and not request.confirm_request_replay:
+        raise HTTPException(status_code=409, detail="Confirm execution of imported requests before binding them to Device Hunt")
+    if request.allow_state_changing_requests and not request.request_collection_ids:
+        raise HTTPException(status_code=422, detail="State-changing request replay requires a bound request collection")
+    if request.allow_state_changing_requests and request.safety_profile != "authenticated_active":
+        raise HTTPException(status_code=422, detail="State-changing imported requests require authenticated_active safety")
     try:
         profile = validate_safety_request({
             "safety_profile": request.safety_profile,
@@ -20067,6 +20328,9 @@ async def start_device_agent_session(device_id: str, request: DeviceAgentSession
             device_uuid,
             ssh_profile_id=request.ssh_credential_profile_id,
             web_profile_id=request.web_credential_profile_id,
+        )
+        request_collection_refs = await _validate_device_request_collection_refs(
+            conn, device_uuid, request.request_collection_ids,
         )
         if credential_refs and not profile.credentials_allowed:
             raise HTTPException(
@@ -20092,7 +20356,17 @@ async def start_device_agent_session(device_id: str, request: DeviceAgentSession
             max_turns=request.max_turns,
         )
         state["device_credential_profiles"] = credential_refs
+        state["device_request_collections"] = request_collection_refs
+        state["confirm_request_replay"] = bool(request.confirm_request_replay)
+        state["allow_state_changing_requests"] = bool(request.allow_state_changing_requests)
         context_pack = await _build_device_agent_context_pack(conn, device, credential_refs, request.max_turns)
+        context_pack["request_collections"] = {
+            "bound": len(request_collection_refs),
+            "request_count": sum(int(ref.get("request_count") or 0) for ref in request_collection_refs),
+            "state_changing_request_count": sum(int(ref.get("state_changing_request_count") or 0) for ref in request_collection_refs),
+            "state_changing_authorized": bool(request.allow_state_changing_requests),
+            "secret_values_visible_to_planner": False,
+        }
         state["messages"].insert(1, {
             "role": "system",
             "content": (
@@ -25508,6 +25782,53 @@ async def get_scan_logs(scan_id: str, limit: int = Query(200, ge=1, le=1000)):
         "lines": lines,
         "count": len(lines),
         "limit": limit,
+    }
+
+
+@app.get("/scans/{scan_id}/device-activity")
+async def get_scan_device_activity(scan_id: str, limit: int = Query(100, ge=1, le=250)):
+    try:
+        scan_uuid = uuid.UUID(str(scan_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid scan ID") from exc
+    async with db_pool.acquire() as conn:
+        scan = await conn.fetchrow(
+            """SELECT id, device_target_id, run_kind, status, progress, current_phase,
+                      created_at, started_at, completed_at
+               FROM scans WHERE id=$1""",
+            scan_uuid,
+        )
+    if not scan or not scan["device_target_id"] or str(scan["run_kind"] or "") not in {"device_posture", "device_probe"}:
+        raise HTTPException(status_code=404, detail="Connected-device scan not found")
+    try:
+        raw = get_redis().lrange(f"scan:{scan_id}:device_activity", -limit, -1)
+    except Exception:
+        raw = []
+    events = []
+    for item in raw:
+        try:
+            text = item.decode("utf-8", "replace") if isinstance(item, bytes) else str(item)
+            event = json.loads(text)
+            if isinstance(event, dict):
+                events.append(event)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+    if not events:
+        events.append({
+            "timestamp": (scan["started_at"] or scan["created_at"]).isoformat(),
+            "kind": "status",
+            "phase": str(scan["current_phase"] or scan["status"]),
+            "message": str(scan["current_phase"] or scan["status"]).replace("_", " ").capitalize(),
+            "progress": int(scan["progress"] or 0),
+            "details": {"status": str(scan["status"])},
+        })
+    return {
+        "scan_id": str(scan["id"]),
+        "status": str(scan["status"]),
+        "progress": int(scan["progress"] or 0),
+        "current_phase": scan["current_phase"],
+        "events": events,
+        "count": len(events),
     }
 
 

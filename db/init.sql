@@ -396,6 +396,23 @@ CREATE TABLE device_credential_profiles (
 CREATE INDEX idx_device_credential_profiles_active
 ON device_credential_profiles(device_target_id, is_active, expires_at);
 
+CREATE TABLE device_request_collections (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    device_target_id UUID NOT NULL REFERENCES device_targets(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    format TEXT NOT NULL DEFAULT 'postman_collection',
+    document_sha256 TEXT NOT NULL,
+    encrypted_payload TEXT NOT NULL,
+    summary_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    is_active BOOLEAN NOT NULL DEFAULT true,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT device_request_collections_format_check CHECK (format IN ('postman_collection')),
+    CONSTRAINT device_request_collections_name_unique UNIQUE (device_target_id, name)
+);
+CREATE INDEX idx_device_request_collections_active
+ON device_request_collections(device_target_id, is_active, updated_at DESC);
+
 CREATE TABLE device_credential_attempts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     device_target_id UUID NOT NULL REFERENCES device_targets(id) ON DELETE CASCADE,

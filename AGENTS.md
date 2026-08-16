@@ -66,7 +66,7 @@ flags, skills, agents, adapters, modules, and durable tables) plus architecture/
 - **Evidence (`/evidence`)**: browse evidence instances, inspect objects, export content-free manifests/bundles, and run immutable-preview, approval-gated retention cleanup.
 - **New Scan (`/scan/new`)**: scan type grid (6 types with duration/description), coverage budget selector (`fast`, `balanced`, `thorough`, `exhaustive`), advanced option toggles (Active Testing, Nuclei Templates, Subdomain Discovery, Enhanced DNS, JS Dependency Scanning, JS Secret Scanning), and optional custom budget overrides. Warning for active testing types.
 - **Targets (`/targets`)**: hierarchical tree (root domains with collapsible subdomains), filter by discovery source/grade/has-findings, sort by domain/last-scanned/findings/score/date, search. Actions: add target, scan individual (dropdown), scan all in domain set, discover subdomains, create schedule (icon link). Shows subdomain count, scan count, findings count, grade per target.
-- **Connected Devices (`/devices`, `/devices/{id}`, `/devices/policies`)**: separate TV/camera/printer/router/appliance inventory, dedicated worker readiness, positive multi-signal reachability preflight, top-100 or all-TCP posture scans, curated UDP discovery, service/version/CPE evidence, SSH posture on discovered ports, an agent-visible Smart TV capability pack, optional host-key-pinned read-only SSH host review, AI-proposed remote SSH plans that remain inert until a user confirms the exact immutable commands, ordered allow/deny/review/required-control policies, and passive Web DAST handoff for HTTP(S) found on any port. The agentic workflow is **Device Hunt** at `/devices/{id}/agent`; it is separate from web-focused Deep Hunt. Silence is inconclusive and receives no score or grade. Device scans and hidden web children never create Web targets or alter ordinary DAST/ASM metrics.
+- **Connected Devices (`/devices`, `/devices/{id}`, `/devices/policies`)**: separate TV/camera/printer/router/appliance inventory, dedicated worker readiness, positive multi-signal reachability preflight, top-100 or all-TCP posture scans, curated UDP discovery, service/version/CPE evidence, SSH posture on discovered ports, encrypted Postman collection/environment imports with redacted previews and device-pinned request-aware DAST, meaningful live scan activity, an agent-visible Smart TV capability pack, optional host-key-pinned read-only SSH host review, AI-proposed remote SSH plans that remain inert until a user confirms the exact immutable commands, ordered allow/deny/review/required-control policies, and Web/API handoff for HTTP(S) found on any port. The agentic workflow is **Device Hunt** at `/devices/{id}/agent`; it can inspect and use only user-bound request collections while secrets remain worker-only. It is separate from web-focused Deep Hunt. Silence is inconclusive and receives no score or grade. Device scans and hidden web children never create Web targets or alter ordinary DAST/ASM metrics.
   Device worker capacity is opt-in (`./scanner.sh devices start|stop|status|logs`) so existing DAST worker slots and memory are unchanged.
 - **Schedules (`/schedules`)**: create/toggle/delete recurring daily/weekly normal scans and typed ASM coverage waves (`asm_improve`). Evidence cleanup is intentionally interactive-only; legacy `evidence_retention_sweep` schedules are disabled and cannot be created or resumed.
 - **Findings (`/findings`)**: filter by DAST, Deep Hunt, Interactive, AI Gate, Model Intake, ASM, or Manual source plus severity/status/last-seen/domain/search; sort by severity/first-seen/last-seen/CVSS; bulk cleanup with dry-run preview.
@@ -377,7 +377,8 @@ curl -X POST http://localhost:8080/targets/{target_id}/scan \
 Connected devices are a separate product namespace, not Web DAST targets. Before queueing a scan,
 confirm the operator owns the exact device or is explicitly authorized to test it. Device scans may
 inventory all 65,535 TCP ports; they never guess credentials, and their optional web children are
-bounded to passive `quick`, `standard`, or `deep` checks.
+bounded to request-aware `quick`, `standard`, or `deep` checks. Imported Postman scripts never
+execute, and every request remains pinned to a discovered origin on the device.
 
 ```bash
 # Check dedicated worker/tool readiness
@@ -392,6 +393,16 @@ curl -X POST http://localhost:8080/devices \
 curl -X POST http://localhost:8080/devices/{device_id}/scan \
   -H "Content-Type: application/json" \
   -d '{"profile":"posture","confirm_authorized":true,"include_web_dast":true,"web_scan_type":"standard"}'
+
+# Import a Postman collection (and optional environment), then select its returned ID
+curl -X POST http://localhost:8080/devices/{device_id}/request-collections \
+  -H "Content-Type: application/json" \
+  -d '{"collection":{"info":{"name":"TV API"},"item":[{"name":"Status","request":{"method":"GET","url":"{{baseUrl}}/api/status"}}]},"environment":{"values":[{"key":"baseUrl","value":"https://tv.example.lan:3001"}]}}'
+
+# Replay safe imported requests and run request-aware checks
+curl -X POST http://localhost:8080/devices/{device_id}/scan \
+  -H "Content-Type: application/json" \
+  -d '{"profile":"inventory","confirm_authorized":true,"include_web_dast":true,"web_scan_type":"standard","request_collection_ids":["{collection_id}"],"confirm_request_replay":true}'
 
 # Inspect separate device inventory and policies
 curl http://localhost:8080/devices/{device_id}
@@ -408,7 +419,10 @@ requests to autonomously investigate a TV, camera, printer, router, NAS, or appl
 `device-hunt` skill, `POST /devices/{device_id}/agent/session`, and `/device-agent/session/*`. Do not
 route them to web-focused Deep Hunt or ordinary DAST. The internal API retains `device-agent` for
 compatibility. Scope, safety profile, credentials, traffic budgets, health circuit breaker, evidence
-authority, and explicit SSH shell confirmation remain server-enforced.
+authority, imported-request binding, and explicit SSH shell confirmation remain server-enforced.
+`inspect_request_collections` exposes only redacted structure. Device Hunt may set
+`include_imported_requests=true` only for collections the user bound and confirmed when creating the
+session; it cannot enable state-changing replay itself.
 
 ### Continuous ASM
 

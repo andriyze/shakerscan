@@ -1450,6 +1450,7 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
         *valid_ports(hint_payload.get("user")),
         *valid_ports(hint_payload.get("observed")),
         *valid_ports(hint_payload.get("credential")),
+        *valid_ports(hint_payload.get("request_collection")),
         *credential_priority_ports,
         *valid_ports(hint_payload.get("policy")),
         *policy_ports,

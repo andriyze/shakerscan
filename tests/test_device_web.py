@@ -9,8 +9,21 @@ from scanner_tools import device_web  # noqa: E402
 
 
 class _Reader:
-    async def read(self, _limit):
+    def __init__(self):
+        self.remaining = b""
+
+    async def readuntil(self, _separator):
         return b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+
+    async def readexactly(self, count):
+        data, self.remaining = self.remaining[:count], self.remaining[count:]
+        return data
+
+    async def readline(self):
+        return b"0\r\n"
+
+    async def read(self, _limit):
+        return b""
 
 
 class _Writer:
@@ -74,3 +87,38 @@ def test_device_web_cancellation_interrupts_an_inflight_request(monkeypatch):
         "host_header": "tv.example.test:8008",
     }, profile="quick", cancel_check=cancelled))
     assert result["error"] == "Cancelled by user"
+
+
+def test_device_web_finishes_content_length_response_without_waiting_for_server_close(monkeypatch):
+    class KeepAliveReader:
+        async def readuntil(self, _separator):
+            return b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\n"
+
+        async def readexactly(self, count):
+            assert count == 2
+            return b"OK"
+
+    async def fake_open_connection(*_args, **_kwargs):
+        return KeepAliveReader(), _Writer()
+
+    monkeypatch.setattr(device_web.asyncio, "open_connection", fake_open_connection)
+    result = asyncio.run(device_web.run_pinned_device_web_scan({
+        "origin": "https://192.0.2.10:3001",
+        "connect_address": "192.0.2.10",
+        "port": 3001,
+    }, profile="quick"))
+    assert result["http"]["status_code"] == 200
+    assert result["device_web"]["observations"][0]["body_bytes"] == 2
+
+
+def test_public_response_headers_redact_redirect_secrets_and_auth_challenges():
+    public = device_web._public_response_headers({
+        "location": "https://device.test/callback?token=secret-token",
+        "www-authenticate": 'Digest realm="device", nonce="secret-nonce"',
+        "set-cookie": "session=secret-cookie; Secure",
+    })
+
+    assert "secret-token" not in public["location"]
+    assert "%3Credacted%3E" in public["location"]
+    assert "www-authenticate" not in public
+    assert public["set-cookie"] == "<redacted>"

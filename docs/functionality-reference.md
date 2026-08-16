@@ -66,7 +66,7 @@ triaged, filtered, and reported through the same workflow.
 
 Connected-device posture is a deliberately separate plane: it inventories network services, applies
 device service policies, checks discovered SSH, and hands HTTP(S) interfaces on any port to bounded
-passive Web DAST children without creating Web targets or changing ordinary DAST metrics.
+device-owned Web/API children without creating Web targets or changing ordinary DAST metrics.
 
 ---
 
@@ -530,8 +530,12 @@ inconclusive observations and excluded from service policy and scoring until a p
 confirms them open. Nmap service/version/CPE output, addresses, hostnames, MAC/vendor evidence, and
 bounded OS hints are retained. The scanner recognizes
 HTTP and TLS on discovered TCP ports rather than assuming 80/443, then optionally runs hidden,
-passive-only `quick`, `standard`, or `deep` Web DAST children with capped origins, time, URLs, and
-requests. Child findings retain device/origin provenance and never create Web targets.
+request-aware `quick`, `standard`, or `deep` Web/API children with capped origins, time, URLs, and
+requests. Operators can upload encrypted Postman Collection/environment JSON, review a redacted
+request inventory, and bind selected collections to a scan. Safe requests can be replayed normally;
+POST/PUT/PATCH/DELETE require authenticated-active safety plus explicit confirmation. Imported
+scripts never execute and every socket remains pinned to a discovered origin on the device. Child
+findings retain device/origin/request provenance and never create Web targets.
 
 SSH checks run on the discovered port and collect auth methods, host-key evidence, negotiated
 algorithms, and weak-crypto signals without credential guessing. An operator may bind one encrypted,
@@ -552,13 +556,17 @@ Device coverage depth and action safety are independent. `observe_only`, `safe_r
 dedicated runner is ready. Device reports carry `device-safety/v1` receipts plus a
 stable `device-evidence/v1` node/edge/observation graph. The keyless device investigator uses
 `POST /devices/{device_id}/agent/session` and `/device-agent/session/*` to let the current coding
-agent inspect device state, compare scans, recall prior hypotheses, query effective policy, use
+agent inspect device state, inspect redacted user-bound request collections, compare scans, recall prior hypotheses, query effective policy, use
 size-capped SHA-256-pinned offline advisory candidates and protocol playbooks, queue bounded deterministic scans, and query
 normalized evidence. Its context pack treats network data as untrusted, its target and safety profile
 are immutable, and its tool/turn/scan/daily-device/fragility budgets are server-enforced and recorded
 in a durable action ledger. A health circuit breaker freezes new traffic while leaving read-only
 evidence tools available. Its debrief can create evidence-backed hypotheses but never authoritative
 findings.
+
+The selected device-scan view polls a structured, secret-free activity stream showing meaningful
+reachability, discovery, fingerprint, protocol, Web/API request, finding, and safety events instead
+of exposing raw command output.
 
 For a narrow hypothesis, `POST /devices/{device_id}/verify-service` and the agent's
 `verify_service_state` tool queue a `device_probe` on the same dedicated worker. The executor resolves
@@ -1474,6 +1482,11 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `POST` | `/devices/{device_id}/credentials/{profile_id}/acknowledge-lockout` | `acknowledge_device_credential_lockout` |
 | `POST` | `/devices/{device_id}/credentials/{profile_id}/rotate` | `rotate_device_credential` |
 | `POST` | `/devices/{device_id}/locator` | `change_device_locator` |
+| `GET` | `/devices/{device_id}/request-collections` | `list_device_request_collections` |
+| `POST` | `/devices/{device_id}/request-collections` | `create_device_request_collection` |
+| `GET` | `/devices/{device_id}/request-collections/{collection_id}` | `get_device_request_collection` |
+| `PATCH` | `/devices/{device_id}/request-collections/{collection_id}` | `update_device_request_collection` |
+| `DELETE` | `/devices/{device_id}/request-collections/{collection_id}` | `deactivate_device_request_collection` |
 | `POST` | `/devices/{device_id}/scan` | `scan_device` |
 | `POST` | `/devices/{device_id}/verify-service` | `verify_device_service` |
 | `GET` | `/discovery` | `list_discovery_runs` |
@@ -1622,6 +1635,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `POST` | `/scans/{scan_id}/cancel` | `cancel_scan` |
 | `GET` | `/scans/{scan_id}/deployment-decision` | `get_scan_deployment_decision` |
 | `GET` | `/scans/{scan_id}/logs` | `get_scan_logs` |
+| `GET` | `/scans/{scan_id}/device-activity` | `get_scan_device_activity` |
 | `GET` | `/scans/{scan_id}/queue-delivery` | `get_scan_queue_delivery` |
 | `GET` | `/scans/{scan_id}/result` | `get_scan_result` |
 | `GET` | `/schedules` | `list_schedules` |

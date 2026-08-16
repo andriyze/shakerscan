@@ -36,7 +36,7 @@ session hook automatically.
 | [`js-analyze`](js-analyze/SKILL.md) | Frontend routes, browser-captured APIs, libraries, source-map hints, and secret candidates |
 | [`content-discovery`](content-discovery/SKILL.md) | High-signal route/file seeds, `custom_list`, and `custom_endpoints` |
 | [`research-agent`](research-agent/SKILL.md) | Deep Hunt: AI-driven exploration, bounded active testing, evidence, and deterministic promotion |
-| [`device-hunt`](device-hunt/SKILL.md) | Device Hunt: AI-directed investigation of one authorized connected device with bounded scans, evidence, and explicit SSH confirmation |
+| [`device-hunt`](device-hunt/SKILL.md) | Device Hunt: AI-directed investigation of one authorized connected device with bounded scans, encrypted/redacted Postman request inventories, evidence, and explicit SSH confirmation |
 | [`review-skills`](review-skills/SKILL.md) | Audit the skills, slash commands, and specialized agents |
 
 Each modern skill is a directory with:

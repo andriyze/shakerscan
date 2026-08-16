@@ -1423,6 +1423,62 @@ export interface DeviceCredentialProfile {
   execution_compatible: boolean
 }
 
+export interface DeviceRequestCollectionRequest {
+  id: string
+  name: string
+  folder?: string
+  method: string
+  url: string
+  header_names: string[]
+  body_mode: string
+  auth_type: string
+  safe_method: boolean
+  supported: boolean
+}
+
+export interface DeviceRequestCollection {
+  id: string
+  device_target_id: string
+  name: string
+  format: 'postman_collection'
+  document_sha256: string
+  is_active: boolean
+  storage_encrypted: boolean
+  created_at: string
+  updated_at: string
+  summary: {
+    schema_version: 'device-request-collection/v1'
+    name: string
+    request_count: number
+    safe_request_count: number
+    state_changing_request_count: number
+    unsupported_request_count: number
+    methods: Record<string, number>
+    port_hints: number[]
+    scripts_ignored: number
+    environment_variable_names: string[]
+    collection_variable_names: string[]
+    requests: DeviceRequestCollectionRequest[]
+    secrets_redacted: true
+  }
+}
+
+export interface DeviceScanActivity {
+  scan_id: string
+  status: string
+  progress: number
+  current_phase?: string | null
+  events: Array<{
+    timestamp: string
+    kind: string
+    phase: string
+    message: string
+    progress?: number | null
+    details?: Record<string, unknown>
+  }>
+  count: number
+}
+
 export interface DeviceDetailResponse {
   device: DeviceTarget
   reachability?: DeviceReachability | null
@@ -5056,6 +5112,9 @@ export interface DeviceAgentSession {
     target_fixed: boolean
     safety_profile_fixed: boolean
     credentials_visible_to_planner: boolean
+    request_collection_secrets_visible_to_planner?: boolean
+    request_collections_bound?: number
+    state_changing_requests_authorized?: boolean
     agent_findings_authoritative: boolean
     remote_shell_scope?: 'registered_device_only'
     remote_shell_requires_exact_user_confirmation?: boolean
@@ -5210,6 +5269,9 @@ export async function scanDevice(deviceId: string, payload: {
   port_hints?: number[]
   ssh_credential_profile_id?: string
   web_credential_profile_id?: string
+  request_collection_ids?: string[]
+  confirm_request_replay?: boolean
+  allow_state_changing_requests?: boolean
   capability_ids?: string[]
 }): Promise<{ scan_id: string; job_id: string; status: string; ui_url: string }> {
   const res = await fetch(`${API_URL}/devices/${encodeURIComponent(deviceId)}/scan`, {
@@ -5221,6 +5283,37 @@ export async function scanDevice(deviceId: string, payload: {
   return res.json()
 }
 
+export async function getDeviceRequestCollections(deviceId: string): Promise<{ collections: DeviceRequestCollection[]; count: number }> {
+  const res = await fetch(`${API_URL}/devices/${encodeURIComponent(deviceId)}/request-collections`, { cache: 'no-store' })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load imported request collections'))
+  return res.json()
+}
+
+export async function createDeviceRequestCollection(deviceId: string, payload: {
+  name?: string
+  collection: Record<string, unknown>
+  environment?: Record<string, unknown>
+}): Promise<{ collection: DeviceRequestCollection }> {
+  const res = await fetch(`${API_URL}/devices/${encodeURIComponent(deviceId)}/request-collections`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to import Postman collection'))
+  return res.json()
+}
+
+export async function deactivateDeviceRequestCollection(deviceId: string, collectionId: string): Promise<void> {
+  const res = await fetch(`${API_URL}/devices/${encodeURIComponent(deviceId)}/request-collections/${encodeURIComponent(collectionId)}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to remove imported request collection'))
+}
+
+export async function getDeviceScanActivity(scanId: string): Promise<DeviceScanActivity> {
+  const res = await fetch(`${API_URL}/scans/${encodeURIComponent(scanId)}/device-activity?limit=100`, { cache: 'no-store' })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load device scan activity'))
+  return res.json()
+}
+
 export async function startDeviceAgentSession(deviceId: string, payload: {
   objective: string
   safety_profile: 'observe_only' | 'safe_remote' | 'authenticated_active'
@@ -5229,6 +5322,9 @@ export async function startDeviceAgentSession(deviceId: string, payload: {
   approval_receipt_id?: string
   ssh_credential_profile_id?: string
   web_credential_profile_id?: string
+  request_collection_ids?: string[]
+  confirm_request_replay?: boolean
+  allow_state_changing_requests?: boolean
 }): Promise<DeviceAgentSession> {
   const res = await fetch(`${API_URL}/devices/${encodeURIComponent(deviceId)}/agent/session`, {
     method: 'POST',
