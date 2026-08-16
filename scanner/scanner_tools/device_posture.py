@@ -65,6 +65,7 @@ NAABU_MIN_CONNECT_WORKERS = 32
 NAABU_MAX_CONNECT_WORKERS = 1024
 NAABU_TIMEOUT_MS = 1000
 NAABU_RETRY_TIMEOUT_MS = 1500
+NAABU_INPUT_READ_TIMEOUT = "1s"
 DEFAULT_PROFILE_BUDGET_SECONDS = {"inventory": 120 * 60, "posture": 360 * 60, "thorough": 720 * 60}
 COMMON_UDP_PORTS = (53, 67, 68, 69, 123, 137, 138, 161, 162, 500, 1900, 4500, 5353, 5683, 47808)
 INVENTORY_UDP_PORTS = (53, 123, 161, 1900, 5353, 5683, 47808, 67)
@@ -430,7 +431,8 @@ async def _run_naabu_chunk(
     cmd = [
         "naabu", "-host", locator, "-Pn", "-scan-type", "c", *port_args,
         "-rate", str(rate), "-c", str(workers), "-retries", "1",
-        "-timeout", str(timeout_ms), "-verify", "-json", "-silent", "-no-color",
+        "-timeout", f"{timeout_ms}ms", "-input-read-timeout", NAABU_INPUT_READ_TIMEOUT,
+        "-verify", "-json", "-silent", "-no-color",
         "-disable-update-check", "-no-stdin", "-o", output_path,
     ]
     run_options: dict[str, Any] = {"timeout": process_timeout}
@@ -478,6 +480,7 @@ async def _run_naabu_chunk(
         "rate_limit_per_second": rate,
         "connect_workers": workers,
         "connect_timeout_ms": timeout_ms,
+        "input_read_timeout": NAABU_INPUT_READ_TIMEOUT,
         "process_timeout_seconds": process_timeout,
         "port_count": port_count,
         "port_spec": port_args[-1] if port_args else None,

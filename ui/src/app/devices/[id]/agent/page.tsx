@@ -11,6 +11,7 @@ import {
   getDeviceCapabilities,
   getDeviceAgentSession,
   getDeviceCredentials,
+  listDeviceAgentSessions,
   startDeviceAgentSession,
   type DeviceCredentialProfile,
   type DeviceAgentSession,
@@ -38,6 +39,7 @@ export default function DeviceAgentPage() {
   const [maxTurns, setMaxTurns] = useState('12')
   const [confirmed, setConfirmed] = useState(false)
   const [loading, setLoading] = useState(true)
+  const [restoringRun, setRestoringRun] = useState(true)
   const [starting, setStarting] = useState(false)
   const [cancelling, setCancelling] = useState(false)
   const [confirmingPlan, setConfirmingPlan] = useState<string | null>(null)
@@ -56,7 +58,30 @@ export default function DeviceAgentPage() {
   }, [deviceId])
 
   useEffect(() => { loadDevice() }, [loadDevice])
-  useEffect(() => { setRunId(new URLSearchParams(window.location.search).get('run')) }, [])
+  useEffect(() => {
+    let stopped = false
+    const restore = async () => {
+      const requestedRunId = new URLSearchParams(window.location.search).get('run')
+      if (requestedRunId) {
+        if (!stopped) { setRunId(requestedRunId); setRestoringRun(false) }
+        return
+      }
+      try {
+        const recent = await listDeviceAgentSessions({ device_target_id: deviceId, limit: 20 })
+        const active = recent.runs.find((run) => !TERMINAL.has(run.status))
+        if (!stopped && active) {
+          setRunId(active.id)
+          window.history.replaceState(null, '', `${window.location.pathname}?run=${encodeURIComponent(active.id)}`)
+        }
+      } catch (err) {
+        if (!stopped) setError(err instanceof Error ? err.message : 'Could not restore active Device Hunt')
+      } finally {
+        if (!stopped) setRestoringRun(false)
+      }
+    }
+    restore()
+    return () => { stopped = true }
+  }, [deviceId])
   useEffect(() => {
     if (!runId) return
     let stopped = false
@@ -101,6 +126,7 @@ export default function DeviceAgentPage() {
       })
       setSession(value)
       setRunId(value.id)
+      window.history.replaceState(null, '', `${window.location.pathname}?run=${encodeURIComponent(value.id)}`)
       toast.success('Device Hunt started — continue it from your coding agent')
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Could not start Device Hunt'
@@ -130,7 +156,7 @@ export default function DeviceAgentPage() {
     } finally { setConfirmingPlan(null) }
   }
 
-  if (loading) return <Skeleton className="h-96" />
+  if (loading || restoringRun) return <Skeleton className="h-96" />
   if (!data) return <ErrorState message={error || 'Could not load connected device'} onRetry={loadDevice} />
 
   return (

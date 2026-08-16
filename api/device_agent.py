@@ -253,7 +253,7 @@ def tool_schemas() -> list[dict[str, Any]]:
     return [
         {
             "name": "inspect_device",
-            "description": "Read the selected device identity, current services, policy, recent scans, and findings summary.",
+            "description": "Read the selected device identity, confirmed-open services, separately labeled inconclusive observations, policy, recent scans, and findings summary.",
             "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
         },
         {

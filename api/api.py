@@ -19885,7 +19885,7 @@ async def _execute_device_agent_tool(
             )
             if not device or not device["is_active"]:
                 raise HTTPException(status_code=404, detail="Active connected device not found")
-            services = await conn.fetch(
+            service_rows = await conn.fetch(
                 "SELECT transport, port, state, service_name, product, version, cpe, encrypted, web_origin, policy_disposition, policy_reason, last_seen_at FROM device_services WHERE device_target_id=$1 ORDER BY state='open' DESC, transport, port LIMIT 200",
                 device_target_id,
             )
@@ -19897,9 +19897,19 @@ async def _execute_device_agent_tool(
                 "SELECT severity, COUNT(*) AS count FROM findings WHERE device_target_id=$1 AND status='active' GROUP BY severity",
                 device_target_id,
             )
+        decoded_services = [row_to_dict(row) for row in service_rows]
+        confirmed_services = [row for row in decoded_services if str(row.get("state") or "") == "open"]
+        inconclusive_observations = [row for row in decoded_services if str(row.get("state") or "") != "open"]
         payload = {
             "device": _decode_device_row(device),
-            "services": [row_to_dict(row) for row in services],
+            # Keep the established key, but make its semantics unambiguous:
+            # Device Hunt must never treat open|filtered UDP silence as a listener.
+            "services": confirmed_services,
+            "inconclusive_observations": inconclusive_observations,
+            "service_state_summary": {
+                "confirmed_open": len(confirmed_services),
+                "inconclusive": len(inconclusive_observations),
+            },
             "recent_scans": [row_to_dict(row) for row in scans],
             "active_findings_by_severity": {str(row["severity"]): int(row["count"]) for row in severity_rows},
         }

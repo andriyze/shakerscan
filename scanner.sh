@@ -356,9 +356,11 @@ configure_access_mode() {
 }
 
 docker_info_available() {
+    local direct_error=""
     DOCKER_NEEDS_SUDO=0
+    DOCKER_INFO_ERROR=""
 
-    if docker info > /dev/null 2>&1; then
+    if direct_error="$(docker info 2>&1 >/dev/null)"; then
         return 0
     fi
 
@@ -367,7 +369,19 @@ docker_info_available() {
         return 0
     fi
 
+    DOCKER_INFO_ERROR="$direct_error"
     return 1
+}
+
+docker_access_denied() {
+    case "${DOCKER_INFO_ERROR:-}" in
+        *"permission denied"*|*"Permission denied"*|*"access denied"*|*"Access denied"*|*"operation not permitted"*|*"Operation not permitted"*)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 has_docker_compose_v2() {
@@ -1256,6 +1270,12 @@ ensure_command_dependencies() {
 
     if command_needs_docker_runtime "$cmd"; then
         if ! docker_info_available; then
+            if docker_access_denied; then
+                echo -e "${RED}Error: Docker is running, but this user cannot access the Docker daemon.${NC}"
+                echo "Details: ${DOCKER_INFO_ERROR}"
+                echo "Fix Docker socket access (or Docker group membership on Linux), then retry."
+                return 1
+            fi
             detect_platform
             if [ "$PLATFORM" = "linux" ] && [ "$PLATFORM_WSL" -ne 1 ]; then
                 echo -e "${YELLOW}Docker daemon is not running. Attempting to start Docker...${NC}"
@@ -1641,6 +1661,11 @@ wait_for_docker_daemon() {
         if docker_info_available; then
             return 0
         fi
+        if docker_access_denied; then
+            echo -e "${RED}Error: Docker is running, but this user cannot access the Docker daemon.${NC}"
+            echo "Details: ${DOCKER_INFO_ERROR}"
+            return 1
+        fi
         sleep 2
         elapsed=$((elapsed + 2))
         if [ $((elapsed % 10)) -eq 0 ]; then
@@ -1767,7 +1792,7 @@ print_help() {
     echo "  mcp                Start the read-only Command Arsenal MCP stdio adapter"
     echo "  research <id> [N]  Run up to N bounded Codex decisions for a research episode"
     echo "  gungnir <cmd>      CT monitor: start, stop, status, logs"
-    echo "  devices <cmd>      Opt-in device worker: start, stop, status, logs"
+    echo "  devices <cmd>      Opt-in device worker: start, stop, restart, status, logs"
     echo "  fleet init [...]   Initialize a WireGuard or outbound-HTTPS broker fleet"
     echo "  fleet preflight    Validate fleet prerequisites without changing state"
     echo "  fleet join-token   Mint a bounded ready-to-paste worker join command"
@@ -1909,6 +1934,12 @@ reload_services() {
     for w in $scaled; do
         docker restart "$w" >/dev/null 2>&1 || true
     done
+
+    # Preserve opt-in isolation while keeping an already-running device worker
+    # on the same live source as the API and ordinary workers.
+    if [ "$(running_device_worker_count)" -gt 0 ]; then
+        compose --profile devices restart device-worker || return 1
+    fi
 
     # Verify host<->container parity for the single-file-mounted modules.
     local host_sha cont_sha drift=0 worker
@@ -2529,6 +2560,7 @@ rebuild_images() {
     local SERVICE_DESC="all services"
     local REFRESH_WORKERS=1
     local existing_workers
+    local existing_device_workers
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -2570,6 +2602,7 @@ rebuild_images() {
     fi
 
     existing_workers="$(running_scan_worker_count)"
+    existing_device_workers="$(running_device_worker_count)"
 
     if [ "$SERVICES" = "ui" ]; then
         compose build $NO_CACHE ui
@@ -2584,6 +2617,7 @@ rebuild_images() {
 
     if [ "$REFRESH_WORKERS" -eq 1 ]; then
         refresh_workers_after_rebuild "$existing_workers"
+        refresh_device_worker_after_rebuild "$existing_device_workers"
     fi
 
     echo -e "${GREEN}Rebuild complete${NC}"
@@ -2595,6 +2629,9 @@ rebuild_images() {
     else
         echo -e "${BLUE}Local-build mode recorded. Run './scanner.sh restart' to use the new local images.${NC}"
         echo -e "${BLUE}Use scanner.sh rather than raw 'docker compose up' so remote-access trust is re-derived.${NC}"
+    fi
+    if [ "$REFRESH_WORKERS" -eq 1 ] && [ "${existing_device_workers:-0}" -gt 0 ]; then
+        echo -e "${BLUE}The running connected-device worker was also recreated from the rebuilt image.${NC}"
     fi
     echo -e "${BLUE}Use './scanner.sh restart --prebuilt' only when you intentionally want Docker Hub images.${NC}"
 }
@@ -2612,6 +2649,25 @@ refresh_workers_after_rebuild() {
 
     remove_scan_worker_containers "Recreating worker containers from rebuilt image..."
     compose up --no-build -d --force-recreate --scale worker="$desired_count" worker
+}
+
+running_device_worker_count() {
+    local project="${COMPOSE_PROJECT_NAME:-shakerscan}"
+    local count
+    count="$(docker ps \
+        --filter "label=com.docker.compose.project=$project" \
+        --filter "label=com.docker.compose.service=device-worker" \
+        --format '{{.Names}}' 2>/dev/null | wc -l | tr -d '[:space:]')"
+    echo "${count:-0}"
+}
+
+refresh_device_worker_after_rebuild() {
+    local running_count="${1:-0}"
+    if [ "$running_count" -lt 1 ]; then
+        return 0
+    fi
+    echo -e "${YELLOW}Recreating connected-device worker from rebuilt image...${NC}"
+    compose --profile devices up --no-build -d --force-recreate device-worker
 }
 
 reset_database() {
@@ -2929,6 +2985,12 @@ devices_cmd() {
             echo -e "${GREEN}Connected-device worker started${NC}"
             echo "Readiness: $(api_base_url)/devices/readiness"
             ;;
+        restart)
+            echo -e "${GREEN}Restarting isolated connected-device worker from the selected image...${NC}"
+            compose --profile devices up --no-build -d --force-recreate device-worker
+            echo -e "${GREEN}Connected-device worker restarted${NC}"
+            echo "Readiness: $(api_base_url)/devices/readiness"
+            ;;
         stop)
             echo -e "${YELLOW}Stopping connected-device worker...${NC}"
             compose --profile devices stop device-worker
@@ -2944,7 +3006,7 @@ devices_cmd() {
             compose --profile devices logs --tail=100 device-worker ${FOLLOW:-}
             ;;
         *)
-            echo "Usage: ./scanner.sh devices {start|stop|status|logs}"
+            echo "Usage: ./scanner.sh devices {start|stop|restart|status|logs}"
             return 1
             ;;
     esac
@@ -3072,7 +3134,7 @@ if [ "$COMMAND_HELP_ONLY" -eq 1 ]; then
             exit 0
             ;;
         devices)
-            echo "Usage: ./scanner.sh devices {start|stop|status|logs}"
+            echo "Usage: ./scanner.sh devices {start|stop|restart|status|logs}"
             exit 0
             ;;
         *)

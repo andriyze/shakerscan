@@ -5245,6 +5245,21 @@ export async function getDeviceAgentSession(runId: string): Promise<DeviceAgentS
   return res.json()
 }
 
+export async function listDeviceAgentSessions(params: {
+  device_target_id?: string
+  status?: DeviceAgentStatus
+  limit?: number
+} = {}): Promise<{ runs: DeviceAgentSession[]; count: number }> {
+  const search = new URLSearchParams()
+  if (params.device_target_id) search.set('device_target_id', params.device_target_id)
+  if (params.status) search.set('status', params.status)
+  if (params.limit) search.set('limit', String(params.limit))
+  const suffix = search.size ? `?${search.toString()}` : ''
+  const res = await fetch(`${API_URL}/device-agent/runs${suffix}`, { cache: 'no-store' })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to list Device Hunt runs'))
+  return res.json()
+}
+
 export async function replyDeviceAgentSession(runId: string, reply: string): Promise<DeviceAgentSession> {
   const res = await fetch(`${API_URL}/device-agent/session/${encodeURIComponent(runId)}/reply`, {
     method: 'POST',

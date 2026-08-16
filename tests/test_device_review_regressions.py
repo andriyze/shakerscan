@@ -39,6 +39,8 @@ def test_device_agent_revalidates_the_session_receipt_on_every_turn():
     assert "_validate_approval_receipt_for_action" in start
     assert "_validate_approval_receipt_for_action" in reply
     assert 'action_name="device.agent.session"' in reply
+    assert '"inconclusive_observations": inconclusive_observations' in source
+    assert '"confirmed_open": len(confirmed_services)' in source
 
 
 def test_device_agent_shell_is_immutable_user_confirmed_and_remote_only():
@@ -183,6 +185,18 @@ def test_device_hunt_is_the_consistent_user_facing_agent_name():
     assert "name: device-hunt" in skill and "ShakerScan Device Hunt" in skill
     assert "[`device-hunt`](device-hunt/SKILL.md)" in skill_index
     assert "## Device Hunt" in product_model
+
+
+def test_device_hunt_ui_restores_active_runs_and_persists_new_run_urls():
+    api_client = (ROOT / "ui" / "src" / "lib" / "api.ts").read_text()
+    hunt_ui = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "agent" / "page.tsx").read_text()
+
+    assert "export async function listDeviceAgentSessions" in api_client
+    assert "device_target_id" in api_client
+    assert "listDeviceAgentSessions({ device_target_id: deviceId" in hunt_ui
+    assert "recent.runs.find((run) => !TERMINAL.has(run.status))" in hunt_ui
+    assert "window.history.replaceState" in hunt_ui
+    assert "?run=${encodeURIComponent(value.id)}" in hunt_ui
 
 
 def test_device_findings_use_atomic_conflict_upsert():

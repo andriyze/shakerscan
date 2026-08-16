@@ -140,6 +140,8 @@ def test_all_tcp_scope_uses_bounded_naabu_connect_discovery(monkeypatch):
     assert all(command[command.index("-rate") + 1] == "250" for command in commands)
     assert all(command[command.index("-c") + 1] == "313" for command in commands)
     assert all("-verify" in command for command in commands)
+    assert all(command[command.index("-timeout") + 1] == "1000ms" for command in commands)
+    assert all(command[command.index("-input-read-timeout") + 1] == "1s" for command in commands)
 
 
 def test_failed_naabu_scope_retries_ranges_without_nmap_and_preserves_partial_results(monkeypatch):
@@ -768,9 +770,13 @@ def test_device_worker_identity_and_queue_are_isolated_from_web_dast():
     assert "base_queue_keys = [DEVICE_QUEUE_NAME]" in worker
     assert "device-worker:" in compose
     assert 'profiles: ["devices"]' in compose
+    assert "hostname: shakerscan-device-worker" in compose
     assert "DEVICE_ONLY_WORKER=true" in compose
     assert "compose --profile devices up --no-build -d device-worker" in launcher
     assert "compose --profile devices up -d --build device-worker" not in launcher
+    assert "compose --profile devices up --no-build -d --force-recreate device-worker" in launcher
+    assert "refresh_device_worker_after_rebuild \"$existing_device_workers\"" in launcher
+    assert "Usage: ./scanner.sh devices {start|stop|restart|status|logs}" in launcher
 
 
 def test_device_inventory_only_retires_services_after_matching_complete_coverage():

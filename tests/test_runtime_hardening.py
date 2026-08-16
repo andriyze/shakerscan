@@ -562,8 +562,21 @@ def test_scanner_sh_restart_and_rebuild_recreate_api_scaled_workers():
     assert "refresh_workers_after_rebuild" in script
     assert 'existing_workers="$(running_scan_worker_count)"' in script
     assert 'refresh_workers_after_rebuild "$existing_workers"' in script
+    assert 'existing_device_workers="$(running_device_worker_count)"' in script
+    assert 'refresh_device_worker_after_rebuild "$existing_device_workers"' in script
+    assert 'if [ "$(running_device_worker_count)" -gt 0 ]; then' in script
+    assert "compose --profile devices restart device-worker" in script
+    assert "Docker is running, but this user cannot access the Docker daemon" in script
     assert 'compose up --no-build -d --force-recreate model-intake-sandbox' in script
     assert 'compose up --no-build -d --force-recreate --scale worker="$desired_count" worker' in script
+
+
+def test_local_and_release_device_workers_use_stable_readiness_identity():
+    source_compose = (ROOT / "docker-compose.yml").read_text()
+    release_compose = (ROOT / "docker-compose.release.yml").read_text()
+
+    assert "hostname: shakerscan-device-worker" in source_compose
+    assert "hostname: shakerscan-device-worker" in release_compose
 
 
 def test_scanner_sh_status_prints_urls_and_reload_rejects_prebuilt_mode():

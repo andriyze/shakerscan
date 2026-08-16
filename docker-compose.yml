@@ -472,6 +472,7 @@ services:
   device-worker:
     profiles: ["devices"]
     init: true
+    hostname: shakerscan-device-worker
     image: ${SCANNER_LOCAL_WORKER_IMAGE:-shakerscan-worker:latest}
     extra_hosts:
       - "host.docker.internal:host-gateway"

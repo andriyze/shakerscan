@@ -18,6 +18,7 @@ def test_device_agent_contract_has_only_bounded_device_tools():
     assert "local-host shell" in device_agent.render_contract().lower()
     assert "separate user confirmation" in device_agent.render_contract().lower()
     assert "queue_device_scan" in device_agent.render_contract()
+    assert "separately labeled inconclusive observations" in device_agent.render_contract()
     assert "devref_1" in device_agent.render_contract()
 
 

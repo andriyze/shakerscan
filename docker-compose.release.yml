@@ -404,6 +404,7 @@ services:
   device-worker:
     profiles: ["devices"]
     init: true
+    hostname: shakerscan-device-worker
     image: ${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}:${SCANNER_IMAGE_TAG:-latest}
     environment:
       - PYTHONUNBUFFERED=1
