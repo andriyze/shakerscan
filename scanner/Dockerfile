@@ -81,19 +81,6 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
 # --- Stage 2: Runtime with Playwright (Chromium) ---
 FROM mcr.microsoft.com/playwright/python:v1.62.0-noble@sha256:aa81288e738725378becba5b3e06cb0f3a7f012a610e87e8d767a090ea3f740d
 
-# Bake the human release/build identity into the image itself. Standalone
-# Compose overrides this at runtime, while broker-fleet workers deliberately
-# receive no operator-authored environment file; without the baked default a
-# released remote worker stamped every scan as "dev".
-ARG SCANNER_VERSION=dev
-ARG SCANNER_SOURCE_REVISION=unknown
-ENV SCANNER_VERSION=${SCANNER_VERSION}
-ENV SHAKERSCAN_BUILD_VERSION=${SCANNER_VERSION}
-ENV SHAKERSCAN_SOURCE_REVISION=${SCANNER_SOURCE_REVISION}
-RUN mkdir -p /opt/shakerscan && \
-    python3 -c 'import json, os, pathlib; p=pathlib.Path("/opt/shakerscan/release-manifest.json"); p.write_text(json.dumps({"schema_version":"shakerscan-release-identity/v1","version":os.environ["SHAKERSCAN_BUILD_VERSION"],"source_revision":os.environ["SHAKERSCAN_SOURCE_REVISION"]},sort_keys=True)+"\n")' && \
-    chmod 0444 /opt/shakerscan/release-manifest.json
-
 # System deps for network tooling and additional scanners
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl nmap openssl bind9-dnsutils jq git bash make gcc \
@@ -402,6 +389,21 @@ RUN if [ "$INSTALL_DOCKER_CLI" = "1" ]; then \
         rm -rf /tmp/docker.tgz /tmp/docker; \
         docker --version; \
     fi
+
+# Bake the human release/build identity into the image itself. Keep this late
+# in the Dockerfile: a new source revision must not invalidate OS packages,
+# Python dependencies, scanner tools, and vulnerability databases. Standalone
+# Compose overrides this at runtime, while broker-fleet workers deliberately
+# receive no operator-authored environment file; without the baked default a
+# released remote worker stamped every scan as "dev".
+ARG SCANNER_VERSION=dev
+ARG SCANNER_SOURCE_REVISION=unknown
+ENV SCANNER_VERSION=${SCANNER_VERSION}
+ENV SHAKERSCAN_BUILD_VERSION=${SCANNER_VERSION}
+ENV SHAKERSCAN_SOURCE_REVISION=${SCANNER_SOURCE_REVISION}
+RUN mkdir -p /opt/shakerscan && \
+    python3 -c 'import json, os, pathlib; p=pathlib.Path("/opt/shakerscan/release-manifest.json"); p.write_text(json.dumps({"schema_version":"shakerscan-release-identity/v1","version":os.environ["SHAKERSCAN_BUILD_VERSION"],"source_revision":os.environ["SHAKERSCAN_SOURCE_REVISION"]},sort_keys=True)+"\n")' && \
+    chmod 0444 /opt/shakerscan/release-manifest.json
 
 # Entry point
 COPY scanner/entrypoint.sh /app/entrypoint.sh

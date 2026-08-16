@@ -61,6 +61,8 @@ def test_scanner_image_bakes_release_identity_for_broker_workers():
     assert "ARG SCANNER_SOURCE_REVISION=unknown" in dockerfile
     assert "ENV SCANNER_VERSION=${SCANNER_VERSION}" in dockerfile
     assert "release-manifest.json" in dockerfile
+    assert dockerfile.index("ARG SCANNER_VERSION=dev") > dockerfile.index("COPY api/*.py /app/")
+    assert dockerfile.index("ARG SCANNER_VERSION=dev") > dockerfile.index("RUN pip install")
     assert "release_identity.py --verify" in (ROOT / "scanner" / "entrypoint.sh").read_text()
     assert compose.count("SCANNER_VERSION: ${SCANNER_VERSION:-dev}") >= 5
     assert workflow.count("SCANNER_VERSION=${{ needs.meta.outputs.version }}") == 4
