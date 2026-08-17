@@ -2646,6 +2646,70 @@ class _CandidateProofPool:
         return False
 
 
+def test_device_service_candidate_requires_open_probe_and_deny_policy(monkeypatch):
+    candidate_id = "11111111-1111-4111-8111-111111111110"
+
+    class _ServiceCandidateConn:
+        def __init__(self):
+            self.calls = 0
+
+        async def fetchrow(self, _query, *_args):
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "canonical_locus": {"transport": "tcp", "port": 3000},
+                    "verifier_contract_id": "device.service_exposure",
+                }
+            return {
+                "state": "open",
+                "service_name": "http",
+                "product": "",
+                "version": "",
+                "cpe": None,
+                "policy_disposition": "deny",
+                "policy_reason": "Test policy denies cleartext management.",
+            }
+
+    class _ServiceCandidatePool:
+        def __init__(self):
+            self.conn = _ServiceCandidateConn()
+
+        def acquire(self):
+            return self
+
+        async def __aenter__(self):
+            return self.conn
+
+        async def __aexit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(worker, "db_pool", _ServiceCandidatePool())
+    result = {
+        "device_probe": {
+            "transport": "tcp",
+            "port": 3000,
+            "observation": {"state": "open", "complete": True},
+            "verification": {"verdict": "satisfied"},
+            "safety": {"halted": False},
+        },
+        "findings": [],
+    }
+    settlement = asyncio.run(worker.prepare_device_candidate_probe_result(
+        result=result,
+        options={
+            "candidate_id": candidate_id,
+            "proof_contract_id": "device.service_exposure",
+        },
+        device_target_id="22222222-2222-4222-8222-222222222222",
+        target="tv.example.test",
+    ))
+
+    assert settlement["status"] == "verified"
+    assert settlement["proof"]["promotable"] is True
+    assert result["findings"][-1]["tool"] == "device_candidate_verifier"
+    assert result["findings"][-1]["evidence"]["candidate_id"] == candidate_id
+
+
 def test_device_tls_candidate_requires_fresh_strict_identity_failure(monkeypatch):
     candidate_id = "11111111-1111-4111-8111-111111111111"
     monkeypatch.setattr(worker, "db_pool", _CandidateProofPool(
@@ -2769,6 +2833,33 @@ def test_nonpromoted_device_candidate_settlement_is_durable():
     assert result == verification_id
     assert any("INSERT INTO evidence_instances" in query for query, _ in conn.executed)
     assert any("latest_verification_id" in query for query, _ in conn.executed)
+    candidate_update = next(args for query, args in conn.executed if "latest_verification_id" in query)
+    assert candidate_update[3] == "33333333-3333-4333-8333-333333333333"
+
+
+def test_promoted_device_candidate_settlement_casts_scan_uuid_before_text_binding():
+    class _Conn:
+        def __init__(self):
+            self.executed = []
+
+        async def execute(self, query, *args):
+            self.executed.append((query, args))
+            return "OK"
+
+    conn = _Conn()
+    result = asyncio.run(worker.persist_device_candidate_settlement(
+        conn,
+        scan_id="33333333-3333-4333-8333-333333333333",
+        device_target_id="22222222-2222-4222-8222-222222222222",
+        settlement={
+            "candidate_id": "11111111-1111-4111-8111-111111111111",
+            "status": "verified",
+            "proof": {"contract_id": "device.service_exposure", "verdict": "verified"},
+        },
+    ))
+
+    assert result is None
+    assert conn.executed[0][1][1] == "33333333-3333-4333-8333-333333333333"
 
 
 def test_device_advisory_lifecycle_resolves_only_an_observed_stale_service(monkeypatch):

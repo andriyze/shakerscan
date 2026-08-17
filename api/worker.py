@@ -4014,7 +4014,7 @@ async def save_device_findings(
                                        jsonb_build_object('finding_id',$3::text),
                                    updated_at=NOW()
                                WHERE id=$1 AND plane='device' AND device_target_id=$4""",
-                            candidate_uuid, verification_id, finding_id, device_uuid,
+                            candidate_uuid, verification_id, str(finding_id), device_uuid,
                         )
                         await conn.execute(
                             """UPDATE findings
@@ -4407,7 +4407,7 @@ async def persist_device_candidate_settlement(
                    jsonb_build_object('scan_id',$2::text,'proof',$3::jsonb,'gate_reason',$4::text),
                    updated_at=NOW()
                WHERE id=$1 AND status IN ('verification_queued','verifying','inconclusive')""",
-            candidate_id, scan_uuid, json.dumps(settlement.get("proof") or {}),
+            candidate_id, str(scan_uuid), json.dumps(settlement.get("proof") or {}),
             settlement.get("gate_reason"),
         )
         return None
@@ -4459,7 +4459,7 @@ async def persist_device_candidate_settlement(
            WHERE id=$1""",
         candidate_id,
         status if status in {"refuted", "inconclusive", "blocked"} else "inconclusive",
-        verification_id, scan_uuid, json.dumps(proof),
+        verification_id, str(scan_uuid), json.dumps(proof),
         settlement.get("gate_reason") or settlement.get("error"),
     )
     return verification_id
@@ -9389,8 +9389,12 @@ async def process_scan_job(job_data: dict):
                                 "error": "probe_failed",
                             },
                         )
-                    except (ValueError, asyncpg.PostgresError):
-                        pass
+                    except (ValueError, asyncpg.PostgresError) as candidate_error:
+                        print(
+                            f"[{job_id[:8]}] device candidate settlement failed: "
+                            f"{type(candidate_error).__name__}: {candidate_error}",
+                            flush=True,
+                        )
                 await asm_inventory.finish_campaign(conn, campaign_id, status='failed')
             else:
                 metadata = result.get("scan_metadata") if isinstance(result.get("scan_metadata"), dict) else {}
@@ -9431,8 +9435,12 @@ async def process_scan_job(job_data: dict):
                             device_target_id=device_target_id,
                             settlement=candidate_settlement,
                         )
-                    except (ValueError, asyncpg.PostgresError):
-                        pass
+                    except (ValueError, asyncpg.PostgresError) as candidate_error:
+                        print(
+                            f"[{job_id[:8]}] device candidate settlement failed: "
+                            f"{type(candidate_error).__name__}: {candidate_error}",
+                            flush=True,
+                        )
                 if (options or {}).get("run_kind") in MODEL_INTAKE_RUN_KINDS:
                     try:
                         admission = await persist_model_intake_admission(

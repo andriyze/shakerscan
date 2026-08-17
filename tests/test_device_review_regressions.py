@@ -206,6 +206,19 @@ def test_device_findings_use_atomic_conflict_upsert():
     assert "ON CONFLICT (device_target_id, fingerprint)" in function
     assert "DO UPDATE SET" in function
     assert "SELECT id, status, resurfaced_count FROM findings" not in function
+    assert "candidate_uuid, verification_id, str(finding_id), device_uuid" in function
+
+
+def test_device_service_verifier_carries_candidate_contract_to_the_worker():
+    source = (ROOT / "api" / "api.py").read_text()
+    function = source[source.index('async def verify_device_service') :]
+    function = function[: function.index('\n\n@app.get("/device-scans")')]
+
+    assert 'candidate_uuid = _device_uuid(request.candidate_id, "candidate")' in function
+    assert '"candidate_id": str(candidate_uuid) if candidate_uuid else None' in function
+    assert '"proof_contract_id": str(candidate["verifier_contract_id"] or "")' in function
+    assert "SET status='verification_queued'" in function
+    assert "Candidate verification must use its exact transport/port locus" in function
 
 
 def test_device_children_have_redis_identity_and_dedicated_heartbeats():

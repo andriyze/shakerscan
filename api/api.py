@@ -19664,6 +19664,7 @@ async def verify_device_service(device_id: str, request: DeviceServiceVerifyRequ
         raise HTTPException(status_code=422, detail="observe_only cannot send a service verification probe")
 
     device_uuid = _device_uuid(device_id)
+    candidate_uuid = _device_uuid(request.candidate_id, "candidate") if request.candidate_id else None
     scan_id, job_id = str(uuid.uuid4()), str(uuid.uuid4())
     async with db_pool.acquire() as conn:
         device = await conn.fetchrow("SELECT * FROM device_targets WHERE id=$1", device_uuid)
@@ -19671,6 +19672,34 @@ async def verify_device_service(device_id: str, request: DeviceServiceVerifyRequ
             raise HTTPException(status_code=404, detail="Connected device not found")
         if not device["is_active"]:
             raise HTTPException(status_code=409, detail="Connected device is inactive")
+        candidate = None
+        if candidate_uuid:
+            candidate = await conn.fetchrow(
+                """SELECT canonical_locus, verifier_contract_id
+                   FROM investigation_candidates
+                   WHERE id=$1 AND plane='device' AND device_target_id=$2
+                     AND status IN ('new','inconclusive','blocked')
+                   FOR UPDATE""",
+                candidate_uuid, device_uuid,
+            )
+            if not candidate:
+                raise HTTPException(status_code=404, detail="Verifiable device candidate not found for this device")
+            if str(candidate["verifier_contract_id"] or "") != "device.service_exposure":
+                raise HTTPException(status_code=422, detail="This candidate does not use the service-state verifier")
+            locus = _decode_json_value(candidate["canonical_locus"]) or {}
+            try:
+                locus_port = int(locus.get("port") or 0)
+            except (TypeError, ValueError):
+                locus_port = 0
+            if (
+                str(locus.get("transport") or "").lower() != request.transport
+                or locus_port != request.port
+                or request.expected_state != "open"
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail="Candidate verification must use its exact transport/port locus and expected open state",
+                )
         from_agent_session = _DEVICE_AGENT_PARENT_AUTHORITY.get()
         approval_context = await _validate_approval_receipt_for_action(
             conn,
@@ -19696,6 +19725,8 @@ async def verify_device_service(device_id: str, request: DeviceServiceVerifyRequ
             "confirm_authorized": True,
             "confirm_lab_invasive": request.confirm_lab_invasive,
             "approval_receipt_id": request.approval_receipt_id,
+            "candidate_id": str(candidate_uuid) if candidate_uuid else None,
+            "proof_contract_id": str(candidate["verifier_contract_id"] or "") if candidate else None,
             "resolved_budget": {
                 "scan_type": "device_probe",
                 "budget_profile": "single_service",
@@ -19720,6 +19751,17 @@ async def verify_device_service(device_id: str, request: DeviceServiceVerifyRequ
             )
             if not inserted_scan:
                 raise HTTPException(status_code=409, detail="Device address changed during submission; review it and retry")
+            if candidate_uuid:
+                await conn.execute(
+                    """UPDATE investigation_candidates
+                       SET status='verification_queued',
+                           verification_context=verification_context || jsonb_build_object(
+                               'scan_id',$2::text,'job_id',$3::text,
+                               'contract_id',$4::text
+                           ), updated_at=NOW()
+                       WHERE id=$1""",
+                    candidate_uuid, scan_id, job_id, str(candidate["verifier_contract_id"] or ""),
+                )
         except asyncpg.UniqueViolationError as exc:
             raise HTTPException(status_code=409, detail="Connected-device traffic is already active for this device") from exc
     job_data = {
