@@ -378,7 +378,7 @@ def _public_response_headers(headers: dict[str, str]) -> dict[str, str]:
 
 
 def _security_header_findings(
-    *, origin: str, response_url: str, status: int, headers: dict[str, str], authenticated: bool,
+    *, origin: str, response_url: str, status: int, headers: dict[str, str], protected_access: bool,
 ) -> list[dict[str, Any]]:
     """Build contextual embedded-management header findings from one concrete response."""
     if not 200 <= int(status or 0) < 400:
@@ -403,7 +403,7 @@ def _security_header_findings(
                 "status": int(status),
                 "content_type": content_type[:200],
                 "missing_headers": missing,
-                "authenticated_request": bool(authenticated),
+                "protected_access_verified": bool(protected_access),
             },
         }
         # One finding per origin/header control, rather than one duplicate per probed path.
@@ -448,7 +448,7 @@ def _security_header_findings(
                 "Return X-Content-Type-Options: nosniff on management and API responses.",
                 ["x-content-type-options: nosniff"],
             )
-    if authenticated:
+    if protected_access:
         cache_control = normalized.get("cache-control", "").lower()
         if "no-store" not in cache_control and "private" not in cache_control:
             add(
@@ -475,6 +475,43 @@ def _security_header_findings(
                 [f"set-cookie: {item}" for item in missing_cookie],
             )
     return findings
+
+
+def _protected_access_evidence(
+    anonymous: dict[str, Any] | None,
+    credentialed: dict[str, Any],
+) -> dict[str, Any]:
+    """Prove accepted credentials by crossing an anonymous access boundary.
+
+    A supplied Authorization/Cookie header and a 2xx public page prove only that credentials were
+    attempted. Promotion requires the same root resource to deny or redirect anonymous access and
+    then become accessible with the credential-derived request context.
+    """
+    if not isinstance(anonymous, dict):
+        return {"verified": False, "reason": "anonymous_control_unavailable"}
+    anonymous_status = int(anonymous.get("status") or 0)
+    credentialed_status = int(credentialed.get("status") or 0)
+    anonymous_location = str((anonymous.get("headers") or {}).get("location") or "")
+    credentialed_location = str((credentialed.get("headers") or {}).get("location") or "")
+    anonymous_login_redirect = (
+        anonymous_status in {301, 302, 303, 307, 308}
+        and bool(re.search(r"(?:^|[/_-])(login|signin|auth)(?:[/?#_-]|$)", anonymous_location, re.I))
+    )
+    credentialed_login_redirect = (
+        credentialed_status in {301, 302, 303, 307, 308}
+        and bool(re.search(r"(?:^|[/_-])(login|signin|auth)(?:[/?#_-]|$)", credentialed_location, re.I))
+    )
+    anonymous_denied = anonymous_status in {401, 403} or anonymous_login_redirect
+    credentialed_access = 200 <= credentialed_status < 400 and not credentialed_login_redirect
+    return {
+        "verified": bool(anonymous_denied and credentialed_access),
+        "anonymous_status": anonymous_status,
+        "credentialed_status": credentialed_status,
+        "anonymous_denial_kind": (
+            "status" if anonymous_status in {401, 403}
+            else "login_redirect" if anonymous_login_redirect else None
+        ),
+    }
 
 
 def _request_finding(
@@ -801,6 +838,8 @@ async def run_pinned_device_web_scan(
     credentials_attempted = False
     credentials_withheld = False
     authentication_succeeded = False
+    protected_access: dict[str, Any] = {"verified": False, "reason": "credentials_not_attempted"}
+    anonymous_root: dict[str, Any] | None = None
     cancelled = False
     if (
         credential and scheme == "https" and tls_assessment is not None
@@ -840,10 +879,26 @@ async def run_pinned_device_web_scan(
                 login = {"status": 0, "headers": {}}
                 cancelled = True
             credentials_attempted = True
-            authentication_succeeded = 200 <= int(login.get("status") or 0) < 400
             cookie = str((login.get("headers") or {}).get("set-cookie") or "").split(";", 1)[0]
             if cookie:
                 request_headers["Cookie"] = cookie
+
+    # A credential-attempted response needs a same-resource anonymous control before it can be
+    # called authenticated. This safe GET is deliberately content-free in the returned evidence.
+    if credentials_attempted and not cancelled:
+        try:
+            anonymous_root = await _cancelable_request(
+                cancel_check,
+                connect_address=connect_address,
+                hostname=hostname,
+                port=port,
+                scheme=scheme,
+                method="GET",
+                path="/",
+                headers={},
+            )
+        except _DeviceWebCancelled:
+            cancelled = True
 
     observations: list[dict[str, Any]] = []
     header_findings: dict[str, dict[str, Any]] = {}
@@ -883,12 +938,15 @@ async def run_pinned_device_web_scan(
                 "truncated": response["truncated"],
                 "elapsed_ms": response["elapsed_ms"],
             })
+            if credentials_attempted and current_path == "/":
+                protected_access = _protected_access_evidence(anonymous_root, response)
+                authentication_succeeded = bool(protected_access.get("verified"))
             for finding in _security_header_findings(
                 origin=origin,
                 response_url=response_url,
                 status=int(response["status"]),
                 headers=dict(response["headers"]),
-                authenticated=bool(request_headers),
+                protected_access=authentication_succeeded,
             ):
                 header_findings.setdefault(str(finding["fingerprint"]), finding)
             if tls_assessment is not None and isinstance(response.get("tls"), dict):
@@ -916,8 +974,6 @@ async def run_pinned_device_web_scan(
 
     root = next((item for item in observations if item.get("path") == "/"), observations[0] if observations else {})
     status_code = int(root.get("status") or 0)
-    if credentials_attempted and not authentication_succeeded:
-        authentication_succeeded = 200 <= status_code < 400 and status_code not in {401, 403}
     imported_result = None
     imported_findings: list[dict[str, Any]] = []
     if request_collections and not cancelled:
@@ -960,6 +1016,7 @@ async def run_pinned_device_web_scan(
             "credentials_attempted": credentials_attempted,
             "credentials_withheld": credentials_withheld,
             "authentication_succeeded": authentication_succeeded,
+            "protected_access_evidence": protected_access,
             "tls_assessment": tls_assessment,
             "imported_requests": imported_result,
         },

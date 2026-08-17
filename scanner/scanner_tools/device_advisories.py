@@ -7,10 +7,18 @@ import json
 import os
 import re
 import stat
+import urllib.parse
+from dataclasses import dataclass
 from typing import Any
 
 
 MAX_SNAPSHOT_BYTES = 32 * 1024 * 1024
+BUNDLED_SNAPSHOT_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "data",
+    "device_advisories.json",
+)
+BUNDLED_SNAPSHOT_SHA256 = "3c9c66b400f2fe2d931066d9f92fd2cbb3de5030e50ec1570eef0fc018cdfb0a"
 
 
 def load_verified_snapshot(
@@ -19,6 +27,9 @@ def load_verified_snapshot(
     """Load a regular, no-symlink advisory snapshot only when its pinned digest matches."""
     location = str(path or "").strip()
     expected = str(expected_sha256 or "").strip().lower()
+    if not location and not expected:
+        location = BUNDLED_SNAPSHOT_PATH
+        expected = BUNDLED_SNAPSHOT_SHA256
     if not location:
         return {"status": "not_configured", "advisories": []}
     if not re.fullmatch(r"[0-9a-f]{64}", expected):
@@ -112,17 +123,74 @@ def version_in_range(version: Any, advisory: dict[str, Any]) -> bool | None:
     return True
 
 
-def _cpe_identity(value: Any) -> tuple[str, str, str] | None:
+@dataclass(frozen=True)
+class _CPEComponent:
+    value: str
+    wildcard: bool = False
+    not_applicable: bool = False
+
+
+def _split_cpe23_components(value: str) -> list[str]:
+    """Split a formatted CPE while preserving escaped delimiters for normalization."""
+    components: list[str] = []
+    current: list[str] = []
+    escaped = False
+    for character in value:
+        if escaped:
+            current.extend(("\\", character))
+            escaped = False
+        elif character == "\\":
+            escaped = True
+        elif character == ":":
+            components.append("".join(current))
+            current = []
+        else:
+            current.append(character)
+    if escaped:
+        current.append("\\")
+    components.append("".join(current))
+    return components
+
+
+def _cpe_component(raw: Any, *, uri_binding: bool = False) -> _CPEComponent:
+    value = urllib.parse.unquote(str(raw or "")) if uri_binding else str(raw or "")
+    if value == "*":
+        return _CPEComponent("", wildcard=True)
+    if value == "-":
+        return _CPEComponent("", not_applicable=True)
+    if not uri_binding:
+        value = re.sub(r"\\(.)", r"\1", value)
+    return _CPEComponent(value.strip().lower())
+
+
+def _cpe_identity(value: Any) -> tuple[_CPEComponent, _CPEComponent, _CPEComponent, _CPEComponent] | None:
+    """Return part/vendor/product/version without collapsing CPE wildcard semantics."""
     text = str(value or "").strip()
-    parts = text.split(":")
-    if len(parts) >= 6 and parts[0] == "cpe" and parts[1] == "2.3":
-        return parts[3].lower(), parts[4].lower(), parts[5]
+    if text.startswith("cpe:2.3:"):
+        components = _split_cpe23_components(text[len("cpe:2.3:"):])
+        if len(components) >= 4:
+            return tuple(_cpe_component(item) for item in components[:4])  # type: ignore[return-value]
     # Retain compatibility with the still-common CPE 2.2 URI binding.
     if text.startswith("cpe:/"):
-        uri_parts = text[5:].split(":")
-        if len(uri_parts) >= 3:
-            return uri_parts[1].lower(), uri_parts[2].lower(), uri_parts[3] if len(uri_parts) > 3 else ""
+        components = text[5:].split(":")
+        if len(components) >= 3:
+            padded = (components + [""])[:4]
+            return tuple(_cpe_component(item, uri_binding=True) for item in padded)  # type: ignore[return-value]
     return None
+
+
+def _concrete_identity_matches(
+    query: tuple[_CPEComponent, ...], advisory: tuple[_CPEComponent, ...],
+) -> bool:
+    # A high-confidence software identity requires the same concrete CPE part, vendor, and
+    # product. Wildcards remain useful for version evaluation but cannot erase the application /
+    # operating-system boundary or manufacture an exact product claim.
+    return all(
+        not left.wildcard and not left.not_applicable
+        and not right.wildcard and not right.not_applicable
+        and bool(left.value) and left.value == right.value
+        for left, right in zip(query[:3], advisory[:3])
+    )
 
 
 def match_advisories(
@@ -132,7 +200,11 @@ def match_advisories(
     query_cpe = str(cpe or "").strip()
     query_identity = _cpe_identity(query_cpe)
     query_product = str(product or "").strip().lower()
-    query_version = str(version or "").strip() or (query_identity[2] if query_identity else "")
+    query_version = str(version or "").strip()
+    if not query_version and query_identity:
+        identity_version = query_identity[3]
+        if not identity_version.wildcard and not identity_version.not_applicable:
+            query_version = identity_version.value
     matches: list[dict[str, Any]] = []
     for raw in list(records or [])[:100_000]:
         if not isinstance(raw, dict):
@@ -141,7 +213,7 @@ def match_advisories(
         advisory_identity = _cpe_identity(advisory_cpe)
         exact_identity = bool(
             query_identity and advisory_identity
-            and query_identity[:2] == advisory_identity[:2]
+            and _concrete_identity_matches(query_identity, advisory_identity)
         )
         heuristic_identity = bool(
             not exact_identity and query_product
@@ -149,10 +221,28 @@ def match_advisories(
         )
         if not exact_identity and not heuristic_identity:
             continue
-        affected = version_in_range(query_version, raw)
+        evaluation_record = raw
+        if advisory_identity and not any(
+            raw.get(key) not in (None, "") for key in (
+                "version", "version_start_including", "version_start_excluding",
+                "version_end_including", "version_end_excluding",
+            )
+        ):
+            advisory_version = advisory_identity[3]
+            if not advisory_version.wildcard and not advisory_version.not_applicable and advisory_version.value:
+                evaluation_record = {**raw, "version": advisory_version.value}
+        affected = version_in_range(query_version, evaluation_record)
         if affected is False:
             continue
-        exact_and_bounded = exact_identity and affected is True and bool(query_version)
+        has_version_constraint = any(
+            evaluation_record.get(key) not in (None, "", "*", "-") for key in (
+                "version", "version_start_including", "version_start_excluding",
+                "version_end_including", "version_end_excluding",
+            )
+        )
+        exact_and_bounded = (
+            exact_identity and affected is True and bool(query_version) and has_version_constraint
+        )
         matches.append({
             "advisory_id": str(raw.get("advisory_id") or raw.get("cve") or "")[:100],
             "title": str(raw.get("title") or "")[:500],
@@ -166,10 +256,10 @@ def match_advisories(
             "proof_basis": "advisory_matched" if exact_and_bounded else "signal_only",
             "promotable": exact_and_bounded,
             "version_range": {
-                key: raw.get(key) for key in (
+                    key: evaluation_record.get(key) for key in (
                     "version", "version_start_including", "version_start_excluding",
                     "version_end_including", "version_end_excluding",
-                ) if raw.get(key) not in (None, "")
+                ) if evaluation_record.get(key) not in (None, "")
             },
         })
         if len(matches) >= max(1, min(int(limit), 200)):

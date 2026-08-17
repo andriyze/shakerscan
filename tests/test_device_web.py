@@ -158,7 +158,7 @@ def test_device_management_header_findings_are_contextual_and_deduplicable():
             "content-type": "text/html; charset=utf-8",
             "set-cookie": "session=secret; Path=/",
         },
-        authenticated=True,
+        protected_access=True,
     )
     titles = {finding["title"] for finding in findings}
 
@@ -176,8 +176,74 @@ def test_hsts_is_not_recommended_for_literal_ip_device_origin():
         response_url="https://192.0.2.10/",
         status=200,
         headers={"content-type": "application/json"},
-        authenticated=False,
+        protected_access=False,
     )
 
     assert not any("HSTS" in finding["title"] for finding in findings)
     assert not any("Content Security Policy" in finding["title"] for finding in findings)
+
+
+def test_invalid_credentials_on_public_root_are_attempted_not_accepted(monkeypatch):
+    async def public_response(**_kwargs):
+        return {
+            "status": 200,
+            "headers": {"content-type": "application/json"},
+            "body": b"{}",
+            "truncated": False,
+            "elapsed_ms": 1,
+        }
+
+    monkeypatch.setattr(device_web, "_request", public_response)
+    result = asyncio.run(device_web.run_pinned_device_web_scan({
+        "origin": "http://tv.example.test:8008",
+        "connect_address": "192.0.2.10",
+        "port": 8008,
+        "host_header": "tv.example.test:8008",
+    }, profile="quick", credential={
+        "auth_kind": "web_authorization_header",
+        "secret": "Bearer invalid",
+    }))
+
+    assert result["device_web"]["credentials_attempted"] is True
+    assert result["device_web"]["authentication_succeeded"] is False
+    assert result["device_web"]["protected_access_evidence"]["verified"] is False
+    assert not any(
+        finding["title"] == "Authenticated device response lacks private cache controls"
+        for finding in result["findings"]
+    )
+
+
+def test_anonymous_denial_then_credentialed_access_proves_authentication(monkeypatch):
+    async def protected_response(**kwargs):
+        authenticated = bool(kwargs.get("headers", {}).get("Authorization"))
+        return {
+            "status": 200 if authenticated else 401,
+            "headers": {"content-type": "application/json"},
+            "body": b"{}" if authenticated else b"denied",
+            "truncated": False,
+            "elapsed_ms": 1,
+        }
+
+    monkeypatch.setattr(device_web, "_request", protected_response)
+    result = asyncio.run(device_web.run_pinned_device_web_scan({
+        "origin": "http://tv.example.test:8008",
+        "connect_address": "192.0.2.10",
+        "port": 8008,
+        "host_header": "tv.example.test:8008",
+    }, profile="quick", credential={
+        "auth_kind": "web_authorization_header",
+        "secret": "Bearer valid",
+    }))
+
+    evidence = result["device_web"]["protected_access_evidence"]
+    assert result["device_web"]["authentication_succeeded"] is True
+    assert evidence == {
+        "verified": True,
+        "anonymous_status": 401,
+        "credentialed_status": 200,
+        "anonymous_denial_kind": "status",
+    }
+    assert any(
+        finding["title"] == "Authenticated device response lacks private cache controls"
+        for finding in result["findings"]
+    )

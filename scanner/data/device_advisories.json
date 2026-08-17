@@ -1,0 +1,62 @@
+{
+  "schema_version": "shakerscan-device-advisories/v1",
+  "generated_at": "2026-08-17T00:00:00Z",
+  "source": "NIST National Vulnerability Database CPE configurations",
+  "advisories": [
+    {
+      "cve": "CVE-2017-17562",
+      "title": "Embedthis GoAhead CGI remote code execution",
+      "severity": "high",
+      "cpe": "cpe:2.3:a:embedthis:goahead:*:*:*:*:*:*:*:*",
+      "product": "GoAhead",
+      "version_end_excluding": "3.6.5",
+      "reference": "https://nvd.nist.gov/vuln/detail/CVE-2017-17562"
+    },
+    {
+      "cve": "CVE-2018-19052",
+      "title": "lighttpd mod_alias path traversal",
+      "severity": "high",
+      "cpe": "cpe:2.3:a:lighttpd:lighttpd:*:*:*:*:*:*:*:*",
+      "product": "lighttpd",
+      "version_end_excluding": "1.4.50",
+      "reference": "https://nvd.nist.gov/vuln/detail/CVE-2018-19052"
+    },
+    {
+      "cve": "CVE-2018-25103",
+      "title": "lighttpd request parsing use-after-free",
+      "severity": "medium",
+      "cpe": "cpe:2.3:a:lighttpd:lighttpd:*:*:*:*:*:*:*:*",
+      "product": "lighttpd",
+      "version_end_including": "1.4.50",
+      "reference": "https://nvd.nist.gov/vuln/detail/CVE-2018-25103"
+    },
+    {
+      "cve": "CVE-2022-41556",
+      "title": "lighttpd HTTP request body memory exhaustion",
+      "severity": "high",
+      "cpe": "cpe:2.3:a:lighttpd:lighttpd:*:*:*:*:*:*:*:*",
+      "product": "lighttpd",
+      "version_start_including": "1.4.56",
+      "version_end_excluding": "1.4.67",
+      "reference": "https://nvd.nist.gov/vuln/detail/CVE-2022-41556"
+    },
+    {
+      "cve": "CVE-2021-3448",
+      "title": "dnsmasq DNSSEC validation flaw",
+      "severity": "medium",
+      "cpe": "cpe:2.3:a:thekelleys:dnsmasq:*:*:*:*:*:*:*:*",
+      "product": "dnsmasq",
+      "version_end_excluding": "2.85",
+      "reference": "https://nvd.nist.gov/vuln/detail/CVE-2021-3448"
+    },
+    {
+      "cve": "CVE-2019-14834",
+      "title": "dnsmasq DHCP response memory exhaustion",
+      "severity": "medium",
+      "cpe": "cpe:2.3:a:thekelleys:dnsmasq:*:*:*:*:*:*:*:*",
+      "product": "dnsmasq",
+      "version_end_excluding": "2.81",
+      "reference": "https://nvd.nist.gov/vuln/detail/CVE-2019-14834"
+    }
+  ]
+}

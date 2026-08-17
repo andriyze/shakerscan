@@ -294,6 +294,8 @@ COPY scanner/scanner_tools /app/scanner_tools
 COPY scanner/wordlists /app/wordlists
 COPY scanner/payloads /app/payloads
 COPY scanner/data /app/data
+ENV DEVICE_INTEL_DB_PATH=/app/data/device_advisories.json
+ENV DEVICE_INTEL_DB_SHA256=3c9c66b400f2fe2d931066d9f92fd2cbb3de5030e50ec1570eef0fc018cdfb0a
 
 # Copy API/worker files used by prebuilt images.
 # Globbed (like the scanner modules above) so the image can't drift from the

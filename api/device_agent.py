@@ -24,9 +24,17 @@ except ModuleNotFoundError:  # pragma: no cover - package import in host tests
     from api import agent_text_toolcalls
 
 try:
-    from scanner_tools.device_advisories import match_advisories
+    from scanner_tools.device_advisories import (
+        BUNDLED_SNAPSHOT_PATH,
+        BUNDLED_SNAPSHOT_SHA256,
+        match_advisories,
+    )
 except ModuleNotFoundError:  # pragma: no cover - package import in host tests
-    from scanner.scanner_tools.device_advisories import match_advisories
+    from scanner.scanner_tools.device_advisories import (
+        BUNDLED_SNAPSHOT_PATH,
+        BUNDLED_SNAPSHOT_SHA256,
+        match_advisories,
+    )
 
 
 CALLABLE_TOOL_NAMES = {
@@ -252,6 +260,9 @@ def resolve_local_intel(*, cpe: str | None, product: str | None, version: str | 
     """Search a hash-pinned local advisory JSON snapshot; never uses runtime egress."""
     path = str(os.environ.get("DEVICE_INTEL_DB_PATH") or "").strip()
     expected_sha256 = str(os.environ.get("DEVICE_INTEL_DB_SHA256") or "").strip().lower()
+    if not path and not expected_sha256:
+        path = BUNDLED_SNAPSHOT_PATH
+        expected_sha256 = BUNDLED_SNAPSHOT_SHA256
     query = {"cpe": str(cpe or "")[:500], "product": str(product or "")[:300], "version": str(version or "")[:200]}
     if not path:
         return {"status": "not_configured", "query": query, "candidates": [], "runtime_egress": False}

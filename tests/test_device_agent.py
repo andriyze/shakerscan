@@ -156,6 +156,20 @@ def test_device_agent_local_intel_has_no_runtime_egress(tmp_path, monkeypatch):
     assert rejected["candidates"] == []
 
 
+def test_device_agent_uses_bundled_intel_when_env_is_unset(monkeypatch):
+    monkeypatch.delenv("DEVICE_INTEL_DB_PATH", raising=False)
+    monkeypatch.delenv("DEVICE_INTEL_DB_SHA256", raising=False)
+    result = device_agent.resolve_local_intel(
+        cpe="cpe:2.3:a:embedthis:goahead:3.6.4:*:*:*:*:*:*:*",
+        product=None,
+        version=None,
+    )
+    assert result["status"] == "available"
+    assert result["snapshot_sha256"] == device_agent.BUNDLED_SNAPSHOT_SHA256
+    assert result["candidates"][0]["advisory_id"] == "CVE-2017-17562"
+    assert result["candidates"][0]["promotable"] is True
+
+
 def test_protocol_playbook_never_infers_unknown_service_from_port_alone():
     known = device_agent.lookup_protocol_playbook("ssdp", 1900)
     assert known["status"] == "available"
