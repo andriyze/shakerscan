@@ -498,7 +498,12 @@ def test_precision_policy_does_not_cap_verified_vendor_dom_xss():
             "evidence": {
                 "file": "https://cdn.jsdelivr.net/npm/example/widget.js",
                 "verified": True,
-                "browser_proof": {"payload_executed": True},
+                "browser_proof": {
+                    "proof_producer": "shakerscan",
+                    "proven": True,
+                    "evidence_type": "dom_execution",
+                    "technique": "headless_xss_dialog",
+                },
                 "payload": "<svg onload=alert(1)>",
             },
         }
@@ -873,13 +878,34 @@ def test_proven_browser_proof_is_trusted_as_verified_xss():
         "title": "DOM XSS in Hash Route",
         "severity": "high",
         "cvss_score": 7.4,
-        "browser_proof": {"proven": True, "technique": "headless_xss_dialog", "confidence": 0.99},
+        "browser_proof": {
+            "proof_producer": "shakerscan",
+            "proven": True,
+            "evidence_type": "dom_execution",
+            "technique": "headless_xss_dialog",
+            "confidence": 0.99,
+        },
         "poe_result": {"proven": True, "confidence": 0.99},
         "evidence": {"payload": "<img src=x onerror=alert(1)>"},
     }
     validation = validate_xss(finding, response_body="<html>search results</html>")
     assert validation.verified is True
     assert getattr(validation, "downgrade_to", None) is None
+
+
+def test_negative_browser_execution_prose_never_promotes_xss():
+    for detail in ("no execution proof available", "payload executed: false"):
+        finding = {
+            "tool": "dom_xss",
+            "title": "DOM XSS",
+            "severity": "high",
+            "evidence": {"payload": "<svg onload=alert(1)>", "detail": detail},
+        }
+        validation = validate_xss(finding, response_body="<html>safe</html>")
+        adjusted = apply_dast_precision_policy([finding])[0]
+        assert validation.verified is False
+        assert adjusted["verified"] is False
+        assert adjusted.get("proof_state") != "exploited"
 
 
 def test_nonverified_dalfox_result_remains_a_candidate():

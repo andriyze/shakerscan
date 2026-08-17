@@ -15,8 +15,10 @@ def _proof(**overrides):
         "schema_version": "proof-contract/v2",
         "contract_id": "device.service_exposure",
         "contract_version": "1.0.0",
-        "reexecution": {"performed": True, "verifier_build": "worker:test"},
-        "predicate": {"verdict": "verified", "promotable": True, "missing": []},
+        "reexecution": {"required": True, "performed": True, "verifier_build": "worker:test"},
+        "predicate": {"satisfied": True, "missing": []},
+        "verdict": "verified",
+        "promotable": True,
     }
     proof.update(overrides)
     return proof
@@ -29,7 +31,7 @@ def test_complete_proof_contract_v2_is_deterministic_proof():
 def test_incomplete_or_unreexecuted_proof_contract_v2_fails_closed():
     proof = _proof(reexecution={"performed": False, "verifier_build": "worker:test"})
     assert has_deterministic_exploit_proof({"proof_contract_v2": proof}) is False
-    proof = _proof(predicate={"verdict": "supported_unverified", "promotable": False, "missing": ["control"]})
+    proof = _proof(predicate={"satisfied": False, "missing": ["control"]}, verdict="supported_unverified", promotable=False)
     assert has_deterministic_exploit_proof({"proof_contract_v2": proof}) is False
 
 
@@ -41,7 +43,7 @@ def test_generic_differential_label_is_not_deterministic_proof():
 def test_invalid_supplied_v2_contract_blocks_legacy_boolean_fallback():
     finding = {
         "proof_of_exploitation": True,
-        "proof_contract_v2": _proof(predicate={"verdict": "verified", "promotable": False, "missing": []}),
+        "proof_contract_v2": _proof(predicate={"satisfied": True, "missing": []}, promotable=False),
     }
     assert has_deterministic_exploit_proof(finding) is False
 
@@ -55,5 +57,19 @@ def test_legacy_deterministic_result_can_be_normalized_to_v2():
     }
     contract = build_dast_proof_contract_v2(finding)
     assert contract["schema_version"] == "proof-contract/v2"
-    assert contract["predicate"]["verdict"] == "verified"
+    assert contract["predicate"]["satisfied"] is True
+    assert contract["verdict"] == "verified"
     assert contract["reexecution"]["performed"] is True
+
+
+def test_legacy_adapter_is_honest_when_no_live_reexecution_occurred():
+    contract = build_dast_proof_contract_v2({
+        "tool": "forced_browsing",
+        "proof_of_exploitation": True,
+    })
+    assert contract["reexecution"] == {
+        "required": False,
+        "performed": False,
+        "verifier_build": "forced_browsing",
+    }
+    assert contract["controls"][0]["legacy_adapter"] is True

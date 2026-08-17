@@ -29,16 +29,6 @@ _DETERMINISTIC_PROOF_TYPES = {
     "repeated_semantic_response_diff",
 }
 
-_BROWSER_EXECUTION_MARKERS = (
-    "payload executed",
-    "dialog fired",
-    "dialog triggered",
-    "console proof",
-    "dom proof",
-    "execution proof",
-)
-
-
 def _as_float(value: Any, default: float = 0.0) -> float:
     try:
         return float(value)
@@ -55,17 +45,24 @@ def _truthy(value: Any) -> bool:
 
 
 def _has_browser_execution_proof(finding: dict[str, Any], evidence: dict[str, Any]) -> bool:
-    """Return True only for positive browser execution proof, not failed attempts."""
+    """Trust only a structured positive result from ShakerScan's browser verifier.
+
+    Free text is never proof: phrases such as ``no execution proof available`` and
+    ``payload executed: false`` previously contained positive-looking substrings and could
+    promote a negative observation.
+    """
     for proof in (finding.get("browser_proof"), evidence.get("browser_proof")):
-        if isinstance(proof, dict):
-            if _truthy(proof.get("proven")) or _truthy(proof.get("payload_executed")) or _truthy(proof.get("executed")):
-                return True
-        elif isinstance(proof, str):
-            proof_text = proof.lower()
-            if any(marker in proof_text for marker in _BROWSER_EXECUTION_MARKERS):
-                return True
-    evidence_text = str(evidence).lower()
-    return any(marker in evidence_text for marker in _BROWSER_EXECUTION_MARKERS)
+        if not isinstance(proof, dict) or proof.get("proven") is not True:
+            continue
+        evidence_type = str(proof.get("evidence_type") or "").strip().lower()
+        technique = str(proof.get("technique") or "").strip().lower()
+        if (
+            proof.get("proof_producer") == "shakerscan"
+            and evidence_type in {"dom_execution", "browser_execution"}
+            and technique.startswith("headless_xss_")
+        ):
+            return True
+    return False
 
 
 def _has_verified_proof_contract_v2(finding: dict[str, Any]) -> bool:
@@ -74,16 +71,48 @@ def _has_verified_proof_contract_v2(finding: dict[str, Any]) -> bool:
         proof = _as_dict(_as_dict(finding.get("evidence")).get("proof_contract_v2"))
     predicate = _as_dict(proof.get("predicate"))
     reexecution = _as_dict(proof.get("reexecution"))
+    reexecution_required = reexecution.get("required", True) is not False
+    reexecution_ok = (
+        reexecution.get("performed") is True
+        if reexecution_required
+        else reexecution.get("performed") in {False, True}
+    )
     return bool(
         proof.get("schema_version") == "proof-contract/v2"
         and str(proof.get("contract_id") or "").strip()
         and str(proof.get("contract_version") or "").strip()
         and str(reexecution.get("verifier_build") or "").strip()
-        and reexecution.get("performed") is True
-        and predicate.get("verdict") == "verified"
-        and predicate.get("promotable") is True
+        and reexecution_ok
+        and proof.get("verdict") == "verified"
+        and proof.get("promotable") is True
+        and predicate.get("satisfied") is True
         and not list(predicate.get("missing") or [])
     )
+
+
+def _legacy_reexecution_evidence(finding: dict[str, Any]) -> tuple[bool, str | None]:
+    """Derive a live verifier replay from structured legacy producer output.
+
+    This compatibility boundary may normalize a real replay, but must never invent one.
+    """
+    evidence = _as_dict(finding.get("evidence"))
+    validation = _as_dict(finding.get("validation"))
+    poe = _as_dict(finding.get("poe_result")) or _as_dict(finding.get("poe"))
+    for container in (finding, evidence, validation, poe):
+        if any(
+            container.get(key) is True
+            for key in ("reexecuted_at_handoff", "reexecution_performed", "reexecuted", "replayed")
+        ):
+            return True, str(container.get("verifier_build") or finding.get("tool") or "dast-verifier")[:200]
+    if _has_browser_execution_proof(finding, evidence):
+        proof = _as_dict(finding.get("browser_proof")) or _as_dict(evidence.get("browser_proof"))
+        return True, str(proof.get("verifier_build") or proof.get("technique") or "headless-xss-verifier")[:200]
+    proof_type = _proof_type(finding)
+    if proof_type in {"repeated_semantic_response_diff", "cross_principal_replay", "write_cross_principal_replay"}:
+        return True, str(validation.get("verifier_build") or finding.get("tool") or proof_type)[:200]
+    if poe.get("proven") is True and str(poe.get("evidence_type") or "").strip().lower() in _DETERMINISTIC_PROOF_TYPES:
+        return True, str(poe.get("verifier_build") or finding.get("tool") or "proof-of-exploit")[:200]
+    return False, None
 
 
 def _proof_type(finding: dict[str, Any]) -> str:
@@ -162,6 +191,7 @@ def build_dast_proof_contract_v2(finding: dict[str, Any]) -> dict[str, Any] | No
         ),
         "evidence_level": str(validation.get("evidence_level") or "")[:80] or None,
     }]
+    reexecuted, verifier_build = _legacy_reexecution_evidence(finding)
     return {
         "schema_version": "proof-contract/v2",
         "contract_id": f"dast.{basis}"[:160],
@@ -169,19 +199,25 @@ def build_dast_proof_contract_v2(finding: dict[str, Any]) -> dict[str, Any] | No
         "family": str(finding.get("family") or finding.get("tool") or "dast")[:80],
         "subject": {key: value for key, value in subject.items() if value is not None},
         "reexecution": {
-            "performed": True,
-            "verifier_build": str(
-                validation.get("verifier_build") or finding.get("tool") or "dast-verifier"
-            )[:200],
+            "required": False,
+            "performed": reexecuted,
+            "verifier_build": verifier_build or str(validation.get("verifier_build") or finding.get("tool") or "dast-verifier")[:200],
         },
         "controls": [{"legacy_adapter": True, "normalization_boundary": "dast_precision_policy"}],
         "observations": observations,
         "proof_basis": basis,
         "predicate": {
-            "verdict": "verified",
-            "promotable": True,
+            "satisfied": True,
+            "reason": "trusted deterministic producer output normalized",
+            "requirements": ["deterministic_proof"],
+            "met": ["deterministic_proof"],
             "missing": [],
+            "refuted_by": [],
         },
+        "verdict": "verified",
+        "promotable": True,
+        "traffic_receipt_id": None,
+        "tool_receipt_ids": [],
     }
 
 

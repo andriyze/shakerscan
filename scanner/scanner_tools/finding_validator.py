@@ -195,23 +195,18 @@ def _finding_has_execution_proof(finding: dict[str, Any]) -> bool:
     the evidence text (a bare "browser proof"/"dialog" substring is ambiguous —
     a failed attempt logs those too — so only execution-confirming phrases count).
     """
-    poe = finding.get("poe_result")
-    if isinstance(poe, dict) and poe.get("proven") is True:
-        return True
-    bp = finding.get("browser_proof")
-    if isinstance(bp, dict) and bp.get("proven") is True:
-        return True
-    evidence = finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}
-    evidence_text = str(evidence).lower()
-    proof_markers = (
-        "payload executed",
-        "dialog fired",
-        "dialog triggered",
-        "console proof",
-        "dom proof",
-        "execution proof",
-    )
-    return any(marker in evidence_text for marker in proof_markers)
+    for proof in (finding.get("browser_proof"), finding.get("poe_result")):
+        if not isinstance(proof, dict) or proof.get("proven") is not True:
+            continue
+        evidence_type = str(proof.get("evidence_type") or "").strip().lower()
+        technique = str(proof.get("technique") or "").strip().lower()
+        if (
+            proof.get("proof_producer") == "shakerscan"
+            and evidence_type in {"dom_execution", "browser_execution"}
+            and technique.startswith("headless_xss_")
+        ):
+            return True
+    return False
 
 
 def validate_xss(

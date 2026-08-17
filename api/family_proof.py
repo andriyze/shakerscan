@@ -253,6 +253,7 @@ def build_proof_contract_result(
         "family": predicate["family"],
         "subject": subject if isinstance(subject, dict) else {},
         "reexecution": {
+            "required": bool(require_reexecution),
             "performed": bool(predicate.get("reexecuted_at_handoff")),
             "verifier_build": str(verifier_build or "")[:200],
         },
@@ -284,7 +285,7 @@ def proof_contract_promotion_gate(result: dict[str, Any] | None) -> tuple[bool, 
     if not str(payload.get("contract_version") or "").strip():
         return False, "missing_contract_version"
     reexecution = payload.get("reexecution") if isinstance(payload.get("reexecution"), dict) else {}
-    if reexecution.get("performed") is not True:
+    if reexecution.get("required", True) is not False and reexecution.get("performed") is not True:
         return False, "not_reexecuted_at_handoff"
     if not str(reexecution.get("verifier_build") or "").strip():
         return False, "missing_verifier_build"
