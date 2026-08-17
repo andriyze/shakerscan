@@ -16,6 +16,7 @@ left to the model.
 from __future__ import annotations
 
 import json
+import ipaddress
 import re
 import urllib.parse
 from typing import Any, Optional
@@ -172,7 +173,7 @@ def _tmpl_nuclei(url: str, opts: dict[str, Any]) -> list[str]:
     if not _SEV_RE.match(severity):
         severity = "high,critical"
     args = ["-target", url, "-severity", severity, "-silent", "-jsonl",
-            "-timeout", "8", "-retries", "1", "-no-color", "-disable-update-check"]
+            "-timeout", "8", "-retries", "1", "-no-color", "-disable-update-check", "-disable-redirects"]
     args += ["-rate-limit", "5", "-bulk-size", "5", "-concurrency", "5"]
     tags = str(opts.get("tags") or "").strip().lower()
     if _TAGS_RE.match(tags):
@@ -195,7 +196,7 @@ def _tmpl_katana(url: str, opts: dict[str, Any]) -> list[str]:
     # origin), 8s per-request timeout, jsonl output. No tunables.
     return ["-u", url, "-js-crawl", "-depth", "2", "-concurrency", "5",
             "-rate-limit", "5", "-crawl-duration", "30s", "-field-scope", "fqdn",
-            "-timeout", "8", "-silent", "-jsonl"]
+            "-timeout", "8", "-disable-redirects", "-silent", "-jsonl"]
 
 
 def _tmpl_ffuf(url: str, opts: dict[str, Any]) -> list[str]:
@@ -271,11 +272,51 @@ def coerce_run_tool(args: dict[str, Any]) -> tuple[str, Any, dict[str, Any]]:
     return name, args.get("target"), options
 
 
-def build_scanner_argv(name: str, url: str, options: dict[str, Any]) -> tuple[str, list[str], int]:
+def _pinned_scanner_url(url: str, pinned_address: str) -> tuple[str, str, str]:
+    parsed = urllib.parse.urlsplit(url)
+    try:
+        address = str(ipaddress.ip_address(str(pinned_address or "").strip()))
+    except ValueError as exc:
+        raise AgentToolError("scanner pinned address must be an IP address") from exc
+    hostname = str(parsed.hostname or "").rstrip(".")
+    if not hostname:
+        raise AgentToolError("scanner target is missing a hostname")
+    port = parsed.port
+    display_address = f"[{address}]" if ":" in address else address
+    pinned_netloc = display_address + (f":{port}" if port is not None else "")
+    default_port = 443 if parsed.scheme.lower() == "https" else 80
+    host_display = f"[{hostname}]" if ":" in hostname else hostname
+    host_header = host_display if port in (None, default_port) else f"{host_display}:{port}"
+    return urllib.parse.urlunsplit((parsed.scheme, pinned_netloc, parsed.path or "/", parsed.query, "")), hostname, host_header
+
+
+def build_scanner_argv(
+    name: str,
+    url: str,
+    options: dict[str, Any],
+    *,
+    pinned_address: str | None = None,
+) -> tuple[str, list[str], int]:
     """Return (binary, argv, timeout_ms) for a scanner run. The binary name is NOT in argv
     (passed separately to the subprocess); every flag is hardcoded in the template."""
     template = SCANNER_ARG_TEMPLATES[name]
-    return template["binary"], template["build"](url, options or {}), int(template["default_timeout_ms"])
+    execution_url = url
+    pin_args: list[str] = []
+    if pinned_address:
+        execution_url, hostname, host_header = _pinned_scanner_url(url, pinned_address)
+        if name == "httpx":
+            pin_args = ["-H", f"Host: {host_header}", "-sni-name", hostname]
+        elif name == "nuclei":
+            pin_args = ["-H", f"Host: {host_header}", "-sni", hostname]
+        elif name == "katana":
+            pin_args = ["-H", f"Host: {host_header}"]
+        elif name == "ffuf":
+            pin_args = ["-H", f"Host: {host_header}", "-sni", hostname]
+    return (
+        template["binary"],
+        template["build"](execution_url, options or {}) + pin_args,
+        int(template["default_timeout_ms"]),
+    )
 
 
 def scanner_request_reservation(name: str, options: dict[str, Any] | None = None) -> int:
@@ -324,6 +365,22 @@ def validate_scanner_execution_target(registered_target: str, execution_target: 
     return urllib.parse.urlunsplit(
         (execution.scheme.lower(), execution.netloc, execution.path or "/", execution.query, "")
     )
+
+
+def validate_pinned_scanner_address(pinned_address: Any, authorized_addresses: Any) -> str:
+    try:
+        pinned = str(ipaddress.ip_address(str(pinned_address or "").strip()))
+    except ValueError as exc:
+        raise AgentToolError("scanner job has no valid pinned address") from exc
+    authorized: set[str] = set()
+    for raw in list(authorized_addresses or [])[:32]:
+        try:
+            authorized.add(str(ipaddress.ip_address(str(raw).strip())))
+        except ValueError:
+            continue
+    if pinned not in authorized:
+        raise AgentToolError("scanner pinned address is outside the authorized resolution set")
+    return pinned
 
 
 _REQUEST_COUNTER_KEYS: frozenset[str] = frozenset({

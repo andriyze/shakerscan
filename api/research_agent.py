@@ -85,6 +85,7 @@ DEFAULT_BUDGET_LIMITS = {
     "actions": 5,
     "active_actions": 0,
     "requests": 0,
+    "wire_requests": 0,
     "seconds": 300,
     "model_tokens": 30000,
 }
@@ -109,6 +110,7 @@ def normalize_budget_limits(value: Any, *, max_steps: int) -> dict[str, int]:
         "actions": 25,
         "active_actions": 10,
         "requests": 500,
+        "wire_requests": 3600,
         "seconds": 3600,
         "model_tokens": 500000,
     }
@@ -129,7 +131,7 @@ def normalize_budget_used(value: Any) -> dict[str, int]:
     raw = value if isinstance(value, dict) else {}
     return {
         key: max(0, int(raw.get(key) or 0))
-        for key in ("steps", "actions", "active_actions", "requests", "seconds", "model_tokens")
+        for key in ("steps", "actions", "active_actions", "requests", "wire_requests", "seconds", "model_tokens")
     }
 
 

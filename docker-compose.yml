@@ -467,6 +467,55 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # Dedicated low-latency lane for Deep Hunt scanner tools. Ordinary workers may also
+  # consume this queue, but this worker never leases a multi-minute DAST scan first.
+  agent-tool-worker:
+    init: true
+    hostname: shakerscan-agent-tool-worker
+    image: ${SCANNER_LOCAL_WORKER_IMAGE:-shakerscan-worker:latest}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    build:
+      context: .
+      dockerfile: scanner/Dockerfile
+      network: ${SHAKERSCAN_BUILD_NETWORK:-default}
+      args:
+        SCANNER_VERSION: ${SCANNER_VERSION:-dev}
+        SCANNER_SOURCE_REVISION: ${GIT_COMMIT:-unknown}
+    environment:
+      - PYTHONUNBUFFERED=1
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379
+      - DATABASE_URL=postgresql://scanner:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/scanner
+      - RESULTS_DIR=/results
+      - SCANNER_VERSION=${SCANNER_VERSION:-dev}
+      - GIT_COMMIT=${GIT_COMMIT:-dev}
+      - AGENT_TOOL_ONLY_WORKER=true
+      - AGENT_TOOL_QUEUE_NAME=${AGENT_TOOL_QUEUE_NAME:-agent_tool_jobs}
+      - SHAKERSCAN_QUEUE_CONSUMER_GROUP=${SHAKERSCAN_QUEUE_CONSUMER_GROUP:-shakerscan-workers}
+      - SHAKERSCAN_QUEUE_VISIBILITY_TIMEOUT_SECONDS=${SHAKERSCAN_QUEUE_VISIBILITY_TIMEOUT_SECONDS:-300}
+      - SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_SECONDS=${SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_SECONDS:-30}
+      - SHAKERSCAN_QUEUE_MAX_DELIVERY_ATTEMPTS=${SHAKERSCAN_QUEUE_MAX_DELIVERY_ATTEMPTS:-5}
+      - SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_FAILURE_LIMIT=${SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_FAILURE_LIMIT:-3}
+    volumes:
+      - ./scanner:/app/_src/scanner:ro
+      - ./api:/app/_src/api:ro
+      - ./results:/results
+    command: ["python3", "/app/worker.py"]
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 2G
+        reservations:
+          cpus: '0.25'
+          memory: 512M
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
   # Connected-device scans have dedicated capacity so full-port inventories and
   # bounded web-origin children cannot consume ordinary Web DAST worker slots.
   device-worker:

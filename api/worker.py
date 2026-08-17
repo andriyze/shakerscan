@@ -123,7 +123,12 @@ RESULTS_DIR = Path(os.environ.get('RESULTS_DIR', '/results'))
 QUEUE_NAME = 'scan_jobs'
 DEVICE_QUEUE_NAME = os.environ.get("DEVICE_QUEUE_NAME", "device_scan_jobs")
 DEVICE_ONLY_WORKER = str(os.environ.get("DEVICE_ONLY_WORKER", "false")).strip().lower() in {"1", "true", "yes", "on"}
-WORKER_BUILD_REGISTRY_KEY = "shakerscan:device_worker_build" if DEVICE_ONLY_WORKER else "shakerscan:worker_build"
+AGENT_TOOL_ONLY_WORKER = str(os.environ.get("AGENT_TOOL_ONLY_WORKER", "false")).strip().lower() in {"1", "true", "yes", "on"}
+WORKER_BUILD_REGISTRY_KEY = (
+    "shakerscan:device_worker_build" if DEVICE_ONLY_WORKER
+    else "shakerscan:agent_tool_worker_build" if AGENT_TOOL_ONLY_WORKER
+    else "shakerscan:worker_build"
+)
 RETEST_QUEUE_NAME = os.environ.get("RETEST_QUEUE_NAME", "retest_jobs")
 BROKER_INGEST_QUEUE_NAME = os.environ.get("BROKER_INGEST_QUEUE_NAME", "broker_ingest_jobs")
 AGENT_TOOL_QUEUE_NAME = os.environ.get("AGENT_TOOL_QUEUE_NAME", "agent_tool_jobs")
@@ -12865,6 +12870,49 @@ _AGENT_TOOL_RESULT_TTL_SECONDS = max(
 )
 
 
+def _terminate_agent_tool_process_group(proc: asyncio.subprocess.Process) -> None:
+    if proc.returncode is not None:
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (AttributeError, ProcessLookupError, PermissionError, OSError):
+        proc.kill()
+
+
+async def _read_agent_tool_streams(
+    proc: asyncio.subprocess.Process,
+    *,
+    max_bytes: int,
+    overflow: asyncio.Event,
+) -> tuple[bytes, bytes]:
+    """Drain both pipes while retaining at most ``max_bytes`` in aggregate."""
+    lock = asyncio.Lock()
+    retained = 0
+
+    async def read_one(stream: asyncio.StreamReader | None) -> bytes:
+        nonlocal retained
+        if stream is None:
+            return b""
+        chunks: list[bytes] = []
+        while True:
+            chunk = await stream.read(8192)
+            if not chunk:
+                break
+            async with lock:
+                remaining = max(0, max_bytes - retained)
+                if remaining:
+                    kept = chunk[:remaining]
+                    chunks.append(kept)
+                    retained += len(kept)
+                if len(chunk) > remaining:
+                    overflow.set()
+        return b"".join(chunks)
+
+    stdout_task = asyncio.create_task(read_one(proc.stdout))
+    stderr_task = asyncio.create_task(read_one(proc.stderr))
+    return tuple(await asyncio.gather(stdout_task, stderr_task))  # type: ignore[return-value]
+
+
 async def process_agent_scanner_tool_job(job_data: dict[str, Any]) -> None:
     """Execute one fixed-template Deep Hunt scanner outside the API process.
 
@@ -12894,8 +12942,11 @@ async def process_agent_scanner_tool_job(job_data: dict[str, Any]) -> None:
             str(job_data.get("registered_target") or ""),
             str(job_data.get("execution_target") or ""),
         )
+        pinned_address = agent_tools.validate_pinned_scanner_address(
+            job_data.get("pinned_address"), job_data.get("authorized_addresses"),
+        )
         binary, argv, template_timeout_ms = agent_tools.build_scanner_argv(
-            name, execution_target, options
+            name, execution_target, options, pinned_address=pinned_address,
         )
         requested_timeout = int(job_data.get("timeout_ms") or template_timeout_ms)
         timeout_ms = max(1_000, min(template_timeout_ms, requested_timeout))
@@ -12904,24 +12955,44 @@ async def process_agent_scanner_tool_job(job_data: dict[str, Any]) -> None:
             *argv,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
-        communicate = asyncio.create_task(proc.communicate())
+        overflow = asyncio.Event()
+        read_streams = asyncio.create_task(
+            _read_agent_tool_streams(proc, max_bytes=_AGENT_TOOL_OUTPUT_BYTES, overflow=overflow)
+        )
+        wait_process = asyncio.create_task(proc.wait())
         deadline = asyncio.get_running_loop().time() + timeout_ms / 1000.0
-        while not communicate.done():
+        while not wait_process.done():
             if redis_client.exists(cancel_key):
                 status, error = "cancelled", "cancelled"
-                proc.kill()
+                _terminate_agent_tool_process_group(proc)
+                break
+            if overflow.is_set():
+                status, error = "failed", "output_limit_exceeded"
+                _terminate_agent_tool_process_group(proc)
                 break
             if asyncio.get_running_loop().time() >= deadline:
                 status, error = "timeout", "timeout"
-                proc.kill()
+                _terminate_agent_tool_process_group(proc)
                 break
-            await asyncio.sleep(0.25)
-        out, err = await communicate
+            await asyncio.sleep(0.05)
+        await wait_process
+        out, err = await read_streams
         returncode = proc.returncode
-        stdout = (out or b"")[:_AGENT_TOOL_OUTPUT_BYTES].decode("utf-8", "replace")
+        stdout = (out or b"").decode("utf-8", "replace")
+        pinned_url, _pinned_host, _pinned_header = agent_tools._pinned_scanner_url(
+            execution_target, pinned_address,
+        )
+        original_origin = urllib.parse.urlunsplit((*urllib.parse.urlsplit(execution_target)[:2], "", "", ""))
+        pinned_origin = urllib.parse.urlunsplit((*urllib.parse.urlsplit(pinned_url)[:2], "", "", ""))
+        stdout = stdout.replace(pinned_origin, original_origin)
+        if overflow.is_set() and status not in {"cancelled", "timeout"}:
+            status, error = "failed", "output_limit_exceeded"
         if status not in {"cancelled", "timeout"}:
-            if returncode not in (0, None) and not stdout.strip():
+            if error == "output_limit_exceeded":
+                status = "failed"
+            elif returncode not in (0, None) and not stdout.strip():
                 status = "failed"
                 error = redact_text((err or b"").decode("utf-8", "replace")[:300]) or f"exit_{returncode}"
             else:
@@ -12932,7 +13003,7 @@ async def process_agent_scanner_tool_job(job_data: dict[str, Any]) -> None:
         error = f"contract:{str(exc)[:240]}"
     except asyncio.CancelledError:
         if proc is not None and proc.returncode is None:
-            proc.kill()
+            _terminate_agent_tool_process_group(proc)
             await proc.wait()
         raise
     except Exception as exc:  # noqa: BLE001 - publish a bounded operational result
@@ -13219,6 +13290,8 @@ async def async_main():
     device_queue_enabled = str(os.environ.get("DEVICE_SCAN_WORKER_ENABLED", "false")).strip().lower() in {"1", "true", "yes", "on"}
     if DEVICE_ONLY_WORKER:
         base_queue_keys = [DEVICE_QUEUE_NAME]
+    elif AGENT_TOOL_ONLY_WORKER:
+        base_queue_keys = [AGENT_TOOL_QUEUE_NAME]
     else:
         base_queue_keys = [QUEUE_NAME, RETEST_QUEUE_NAME, BROKER_INGEST_QUEUE_NAME, AGENT_TOOL_QUEUE_NAME]
         if device_queue_enabled:

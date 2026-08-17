@@ -78,3 +78,13 @@ def test_scanner_image_contains_runtime_device_catalog():
 
     assert "COPY scanner/data /app/data" in dockerfile
     assert (ROOT / "scanner" / "data" / "device_api_catalog.json").is_file()
+
+
+def test_release_compose_has_dedicated_agent_tool_fast_lane():
+    release = (ROOT / "docker-compose.release.yml").read_text()
+    local = (ROOT / "docker-compose.yml").read_text()
+
+    for compose in (release, local):
+        assert "agent-tool-worker:" in compose
+        assert "AGENT_TOOL_ONLY_WORKER=true" in compose
+        assert "AGENT_TOOL_QUEUE_NAME=" in compose

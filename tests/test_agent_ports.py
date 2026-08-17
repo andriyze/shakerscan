@@ -423,8 +423,45 @@ def test_worker_scanner_target_revalidation_is_same_host_and_http_only():
         at.validate_scanner_execution_target("https://example.test", "https://evil.test/")
     with pytest.raises(at.AgentToolError, match=r"HTTP\(S\)"):
         at.validate_scanner_execution_target("https://example.test", "file:///etc/passwd")
+
+
+def test_scanner_execution_is_address_pinned_with_original_host_and_sni():
+    _binary, argv, _timeout = at.build_scanner_argv(
+        "nuclei", "https://example.test:8443/admin", {}, pinned_address="203.0.113.7",
+    )
+    assert argv[argv.index("-target") + 1] == "https://203.0.113.7:8443/admin"
+    assert "Host: example.test:8443" in argv
+    assert argv[argv.index("-sni") + 1] == "example.test"
+    assert "-disable-redirects" in argv
+    assert at.validate_pinned_scanner_address(
+        "203.0.113.7", ["203.0.113.7", "2001:db8::7"],
+    ) == "203.0.113.7"
+    with pytest.raises(at.AgentToolError, match="outside the authorized"):
+        at.validate_pinned_scanner_address("127.0.0.1", ["203.0.113.7"])
+
+
+def test_deep_hunt_has_a_separately_enforced_wire_budget():
+    source = open(os.path.join(os.path.dirname(__file__), "..", "api", "api.py"), encoding="utf-8").read()
+    assert '"budget_exhausted": "wire_requests"' in source
+    assert "wire_request_budget_limit" in source
+    assert "wire_requests_reserved\") or 0) + wire_request_reservation" in source
     with pytest.raises(at.AgentToolError, match="user information"):
         at.validate_scanner_execution_target("https://example.test", "https://user@example.test/")
+
+
+def test_hunt_dns_authorization_is_frozen_in_session_state():
+    api_path = os.path.join(os.path.dirname(__file__), "..", "api", "api.py")
+    source = open(api_path, encoding="utf-8").read()
+    seed_start = source.index("async def _agent_seed_state(")
+    apply_start = source.index("async def _agent_apply_reply(")
+    http_start = source.index("async def _agent_tool_http_request(")
+    run_tool_start = source.index("async def _agent_tool_run_tool(")
+    assert (
+        'state["authorized_target_addresses"] = await '
+        '_resolve_agent_target_addresses(target_url)'
+    ) in source[seed_start:apply_start]
+    assert "await _resolve_agent_target_addresses" not in source[http_start:run_tool_start]
+    assert 'authorized_addresses=state.get("authorized_target_addresses") or []' in source
 
 
 def test_scanner_request_settlement_distinguishes_exact_from_observed():

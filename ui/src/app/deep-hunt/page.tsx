@@ -437,7 +437,10 @@ function SessionMonitor({
             <Outcome label="HTTP evidence" value={session.result.http_evidence_count} />
           </div>
           <div className="grid grid-cols-3 gap-2 text-center">
-            <Outcome label="Wire reserved" value={session.result.wire_requests_reserved ?? session.result.request_units_used} />
+            <Outcome
+              label="Wire budget"
+              value={`${session.result.wire_requests_reserved ?? session.result.request_units_used}/${session.result.wire_request_budget_limit ?? '—'}`}
+            />
             <Outcome
               label={session.result.wire_requests_actual == null ? 'Wire observed ≥' : 'Wire actual'}
               value={session.result.wire_requests_actual ?? session.result.wire_requests_observed_minimum ?? 0}
@@ -445,7 +448,7 @@ function SessionMonitor({
             <Outcome label="Unsettled tools" value={session.result.wire_request_unsettled_tools ?? 0} />
           </div>
           <p className="text-[10px] leading-4 text-gray-600">
-            Scanner calls reserve worst-case traffic before execution. Exact worker counters refund unused units; observed-only tools remain conservatively charged.
+            Scanner calls reserve worst-case traffic before execution, and the cumulative wire ceiling is enforced before dispatch. Actual or minimum-observed traffic is reported separately.
           </p>
         </div>
       ) : null}

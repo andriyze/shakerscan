@@ -23,6 +23,7 @@ import re
 import secrets
 import shlex
 import shutil
+import socket
 import subprocess
 import threading
 import time
@@ -28839,7 +28840,7 @@ RESEARCH_LAUNCH_PROFILES: dict[str, dict[str, Any]] = {
         "execution_mode": "read_only", "max_risk_tier": "read_only",
         "max_steps": 8,
         "budget_limits": {
-            "steps": 8, "actions": 7, "active_actions": 0, "requests": 0,
+            "steps": 8, "actions": 7, "active_actions": 0, "requests": 0, "wire_requests": 0,
             "seconds": 600, "model_tokens": 75000,
         },
     },
@@ -28847,7 +28848,7 @@ RESEARCH_LAUNCH_PROFILES: dict[str, dict[str, Any]] = {
         "execution_mode": "gated", "max_risk_tier": "active",
         "max_steps": 15,
         "budget_limits": {
-            "steps": 15, "actions": 14, "active_actions": 6, "requests": 250,
+            "steps": 15, "actions": 14, "active_actions": 6, "requests": 250, "wire_requests": 1800,
             "seconds": 1800, "model_tokens": 150000,
         },
     },
@@ -28855,7 +28856,7 @@ RESEARCH_LAUNCH_PROFILES: dict[str, dict[str, Any]] = {
         "execution_mode": "gated", "max_risk_tier": "active",
         "max_steps": 25,
         "budget_limits": {
-            "steps": 25, "actions": 24, "active_actions": 10, "requests": 500,
+            "steps": 25, "actions": 24, "active_actions": 10, "requests": 500, "wire_requests": 2700,
             "seconds": 3600, "model_tokens": 250000,
         },
     },
@@ -28863,7 +28864,7 @@ RESEARCH_LAUNCH_PROFILES: dict[str, dict[str, Any]] = {
         "execution_mode": "gated", "max_risk_tier": "credential",
         "max_steps": 25,
         "budget_limits": {
-            "steps": 25, "actions": 24, "active_actions": 12, "requests": 500,
+            "steps": 25, "actions": 24, "active_actions": 12, "requests": 500, "wire_requests": 3600,
             "seconds": 3600, "model_tokens": 500000,
         },
     },
@@ -28904,12 +28905,13 @@ def _research_planner_kind(mode: str) -> str:
     }.get(mode, "interactive_agent")
 
 
-RESEARCH_BUDGET_KEYS = ("steps", "actions", "active_actions", "requests", "seconds", "model_tokens")
+RESEARCH_BUDGET_KEYS = ("steps", "actions", "active_actions", "requests", "wire_requests", "seconds", "model_tokens")
 RESEARCH_PREFLIGHT_RESERVED_COST = {
     "steps": 0,
     "actions": 1,
     "active_actions": 1,
     "requests": 500,
+    "wire_requests": 0,
     "seconds": 3600,
     "model_tokens": 0,
 }
@@ -30702,6 +30704,38 @@ _AGENT_TOOL_MAX_QUERY_ROWS = 100
 _AGENT_TOOL_HTTP_TIMEOUT_SECONDS = 15
 
 
+async def _resolve_agent_target_addresses(url: str) -> list[str]:
+    """Resolve once at authorization time; execution connects only to this address set."""
+    parsed = urllib.parse.urlsplit(str(url or ""))
+    hostname = str(parsed.hostname or "").strip().rstrip(".")
+    if not hostname:
+        raise HTTPException(status_code=400, detail="Deep Hunt target has no resolvable hostname")
+    try:
+        return [str(ipaddress.ip_address(hostname))]
+    except ValueError:
+        pass
+    port = int(parsed.port or (443 if parsed.scheme.lower() == "https" else 80))
+    try:
+        records = await asyncio.get_running_loop().getaddrinfo(
+            hostname, port, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP,
+        )
+    except OSError as exc:
+        raise HTTPException(status_code=422, detail="Deep Hunt target DNS resolution failed") from exc
+    addresses: list[str] = []
+    for record in records:
+        try:
+            address = str(ipaddress.ip_address(str(record[4][0]).split("%", 1)[0]))
+        except (IndexError, ValueError):
+            continue
+        if address not in addresses:
+            addresses.append(address)
+        if len(addresses) >= 16:
+            break
+    if not addresses:
+        raise HTTPException(status_code=422, detail="Deep Hunt target DNS returned no usable address")
+    return addresses
+
+
 async def _agent_tool_http_request(
     target_uuid: uuid.UUID,
     target_url: str,
@@ -30711,6 +30745,7 @@ async def _agent_tool_http_request(
     allow_write: bool,
     approval_receipt_id: Optional[str] = None,
     hypothesis_id: Optional[str] = None,
+    authorized_addresses: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     import httpx  # container-local; api.py has no top-level httpx dependency
 
@@ -30736,8 +30771,17 @@ async def _agent_tool_http_request(
             args.get("origin"),
         )
         url = _provision_same_origin_url(request_origin, path)
+        frozen_addresses = list(authorized_addresses or [])[:16]
+        if not frozen_addresses:
+            raise agent_tools.AgentToolError("hunt has no frozen target resolution set")
+        pinned_address = agent_tools.validate_pinned_scanner_address(
+            frozen_addresses[0], frozen_addresses,
+        )
+        pinned_url, sni_hostname, host_header = agent_tools._pinned_scanner_url(url, pinned_address)
     except HTTPException as exc:
         return {"ok": False, "error": f"scope: {exc.detail}"}
+    except agent_tools.AgentToolError as exc:
+        return {"ok": False, "error": f"scope: {exc}"}
 
     auth_headers: dict[str, Any] = {}
     cookies: dict[str, Any] = {}
@@ -30760,6 +30804,7 @@ async def _agent_tool_http_request(
         "query_keys": sorted(query or {}),
         "as_principal": slot,
         "body_kind": "json" if json_body is not None else "form" if form_body is not None else None,
+        "pinned_address": pinned_address,
     }
     started_at = datetime.now(timezone.utc)
     started = time.perf_counter()
@@ -30770,11 +30815,12 @@ async def _agent_tool_http_request(
         timeout = httpx.Timeout(_AGENT_TOOL_HTTP_TIMEOUT_SECONDS)
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=False) as client:
             request = client.build_request(
-                method, url, params=query,
-                headers={**headers, **auth_headers}, cookies=cookies,
+                method, pinned_url, params=query,
+                headers={**headers, **auth_headers, "Host": host_header}, cookies=cookies,
                 json=json_body if json_body is not None else None,
                 data=form_body if form_body is not None else None,
             )
+            request.extensions["sni_hostname"] = sni_hostname
             response = await client.send(request, stream=True)
             chunks: list[bytes] = []
             received = 0
@@ -30935,6 +30981,8 @@ async def _enqueue_agent_scanner_tool(
     registered_target: str,
     options: dict[str, Any],
     timeout_ms: int,
+    pinned_address: str,
+    authorized_addresses: list[str],
 ) -> dict[str, Any]:
     """Queue fixed-template scanner work and await its bounded worker result.
 
@@ -30953,6 +31001,8 @@ async def _enqueue_agent_scanner_tool(
         "registered_target": registered_target,
         "scanner_options": options,
         "timeout_ms": timeout_ms,
+        "pinned_address": pinned_address,
+        "authorized_addresses": authorized_addresses[:16],
         "submitted_at": utc_now_iso(),
         "_base_queue_name": AGENT_TOOL_QUEUE_NAME,
     }
@@ -30998,6 +31048,7 @@ async def _agent_tool_run_tool(
     allow_active: bool,
     approval_receipt_id: Optional[str] = None,
     hypothesis_id: Optional[str] = None,
+    authorized_addresses: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     """Run a bounded external scanner via a hardcoded argv template (port of T3MP3ST
     adapterToCustomTool): the model picks tool + target only; every flag is fixed; the
@@ -31014,7 +31065,18 @@ async def _agent_tool_run_tool(
     except HTTPException as exc:
         return {"ok": False, "error": f"scope: {exc.detail}"}
 
-    binary, argv, timeout_ms = agent_tools.build_scanner_argv(name, url, options)
+    try:
+        frozen_addresses = list(authorized_addresses or [])[:16]
+        if not frozen_addresses:
+            raise agent_tools.AgentToolError("hunt has no frozen target resolution set")
+        pinned_address = agent_tools.validate_pinned_scanner_address(
+            frozen_addresses[0], frozen_addresses,
+        )
+    except agent_tools.AgentToolError as exc:
+        return {"ok": False, "error": f"scope: {exc}"}
+    binary, argv, timeout_ms = agent_tools.build_scanner_argv(
+        name, url, options, pinned_address=pinned_address,
+    )
     started_at = datetime.now(timezone.utc)
     try:
         worker_result = await _enqueue_agent_scanner_tool(
@@ -31023,6 +31085,8 @@ async def _agent_tool_run_tool(
             registered_target=target_url,
             options=options,
             timeout_ms=timeout_ms,
+            pinned_address=pinned_address,
+            authorized_addresses=frozen_addresses,
         )
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": f"run_tool_fault:{type(exc).__name__}"}
@@ -31070,6 +31134,7 @@ async def _agent_tool_run_tool(
                         "wire_requests_observed_minimum": wire_requests_observed,
                         "wire_request_counter_source": settlement.get("source"),
                         "execution_plane": "worker_queue",
+                        "pinned_address": pinned_address,
                         "typed_parser": typed_output.get("parser"),
                         "typed_record_count": typed_output.get("record_count"),
                     },
@@ -31138,6 +31203,7 @@ async def _execute_agent_tool(
     approval_receipt_id: Optional[str] = None,
     results: Optional[dict[str, Any]] = None,
     hypothesis_id: Optional[str] = None,
+    authorized_addresses: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     """Dispatch one agent tool call. Guard errors are returned (not raised) so the ReAct
     loop can feed them back to the model as an error-recovery message."""
@@ -31149,6 +31215,7 @@ async def _execute_agent_tool(
                 target_uuid, target_url, args, created_by=created_by,
                 allow_write=allow_write, approval_receipt_id=approval_receipt_id,
                 hypothesis_id=hypothesis_id,
+                authorized_addresses=authorized_addresses,
             )
         if name == "query_kb":
             kind, flt = agent_tools.coerce_query_kb(args)
@@ -31162,6 +31229,7 @@ async def _execute_agent_tool(
                 target_uuid, target_url, args, created_by=created_by,
                 allow_active=allow_active, approval_receipt_id=approval_receipt_id,
                 hypothesis_id=hypothesis_id,
+                authorized_addresses=authorized_addresses,
             )
     except agent_tools.AgentToolError as exc:
         return {"ok": False, "error": str(exc)}
@@ -31197,6 +31265,7 @@ async def execute_agent_tool_endpoint(target_id: str, req: AgentToolExecuteReque
     result = await _execute_agent_tool(
         target_uuid, str(target["url"]), name, req.arguments,
         created_by="agent_tool_endpoint", allow_write=False, allow_active=False,
+        authorized_addresses=await _resolve_agent_target_addresses(str(target["url"])),
     )
     return {"target_id": str(target_uuid), "tool": name, "result": result}
 
@@ -31499,6 +31568,7 @@ def _agent_new_state(objective: str, messages: list[dict[str, Any]], included: l
         "tool_calls_made": 0,
         "request_units_used": 0,
         "wire_requests_reserved": 0,
+        "wire_request_budget_limit": None,
         "wire_requests_actual_confirmed": 0,
         "wire_requests_observed_minimum": 0,
         "wire_request_unsettled_tools": 0,
@@ -31555,6 +31625,10 @@ async def _agent_seed_state(
     state = _agent_new_state(objective, messages, pack["included"])
     state["target_url"] = target_url
     state["target_origins"] = _normalized_web_origins(target_url, target_origins or [])
+    # Freeze the DNS authorization set once, at hunt creation. Every direct request and
+    # external scanner invocation connects to one of these exact addresses, so DNS changes
+    # during a session cannot redirect an authorized public target into a private service.
+    state["authorized_target_addresses"] = await _resolve_agent_target_addresses(target_url)
     if source_excerpt and isinstance(source_excerpt.get("stats"), dict):
         state["source_ingest"] = source_excerpt["stats"]
     return state
@@ -31685,6 +31759,7 @@ async def _agent_apply_reply(
 
         action_limit = state.get("action_budget_limit")
         request_limit = state.get("request_budget_limit")
+        wire_request_limit = state.get("wire_request_budget_limit")
         active_limit = state.get("active_action_budget_limit")
         if action_limit is not None and int(state["tool_calls_made"]) >= int(action_limit):
             state["events"].append({"iteration": iteration, "budget_exhausted": "actions"})
@@ -31692,6 +31767,17 @@ async def _agent_apply_reply(
         if request_limit is not None and int(state["request_units_used"]) + request_units > int(request_limit):
             state["events"].append({"iteration": iteration, "budget_exhausted": "requests"})
             return {"stop": True, "stop_reason": "budget_exhausted:requests"}
+        if (
+            wire_request_limit is not None
+            and int(state.get("wire_requests_reserved") or 0) + wire_request_reservation
+            > int(wire_request_limit)
+        ):
+            state["events"].append({
+                "iteration": iteration,
+                "budget_exhausted": "wire_requests",
+                "reservation_rejected": wire_request_reservation,
+            })
+            return {"stop": True, "stop_reason": "budget_exhausted:wire_requests"}
         if active_limit is not None and int(state["active_actions_used"]) + active_units > int(active_limit):
             state["events"].append({"iteration": iteration, "budget_exhausted": "active_actions"})
             return {"stop": True, "stop_reason": "budget_exhausted:active_actions"}
@@ -31715,6 +31801,7 @@ async def _agent_apply_reply(
                 allow_write=allow_write, allow_active=allow_active,
                 approval_receipt_id=approval_receipt_id,
                 results=state["results_store"], hypothesis_id=hypothesis_id,
+                authorized_addresses=state.get("authorized_target_addresses") or [],
             )
             if should_stop is None:
                 result = (
@@ -31873,6 +31960,7 @@ async def _agent_run_summary_receipt(
                         "iterations": state["iterations"],
                         "tool_calls_made": state["tool_calls_made"],
                         "wire_requests_reserved": int(state.get("wire_requests_reserved") or 0),
+                        "wire_request_budget_limit": state.get("wire_request_budget_limit"),
                         "wire_requests_actual_confirmed": int(state.get("wire_requests_actual_confirmed") or 0),
                         "wire_requests_observed_minimum": int(state.get("wire_requests_observed_minimum") or 0),
                         "wire_request_unsettled_tools": int(state.get("wire_request_unsettled_tools") or 0),
@@ -32248,6 +32336,7 @@ async def _agent_finalize_and_persist(
     allow_write: bool = False,
     cancelled_check: Optional[Any] = None,
     request_budget_limit: Optional[int] = None,
+    wire_request_budget_limit: Optional[int] = None,
     action_budget_limit: Optional[int] = None,
     active_action_budget_limit: Optional[int] = None,
     seconds_budget_limit: Optional[int] = None,
@@ -32323,6 +32412,11 @@ async def _agent_finalize_and_persist(
         "tool_calls_made": state["tool_calls_made"],
         "request_units_used": int(state.get("request_units_used") or 0),
         "wire_requests_reserved": int(state.get("wire_requests_reserved") or 0),
+        "wire_request_budget_limit": (
+            wire_request_budget_limit
+            if wire_request_budget_limit is not None
+            else state.get("wire_request_budget_limit")
+        ),
         "wire_requests_actual": None if unsettled_tool_count else actual_confirmed,
         "wire_requests_actual_confirmed": actual_confirmed,
         "wire_requests_observed_minimum": int(state.get("wire_requests_observed_minimum") or 0),
@@ -32367,6 +32461,7 @@ async def _run_agent_hunt(
     allow_active: bool = False,
     should_stop: Optional[Any] = None,
     request_budget_limit: Optional[int] = None,
+    wire_request_budget_limit: Optional[int] = None,
     action_budget_limit: Optional[int] = None,
     active_action_budget_limit: Optional[int] = None,
     wall_time_budget_seconds: Optional[int] = None,
@@ -32380,6 +32475,7 @@ async def _run_agent_hunt(
         target_origins=target_origins,
     )
     state["request_budget_limit"] = request_budget_limit
+    state["wire_request_budget_limit"] = wire_request_budget_limit
     state["action_budget_limit"] = action_budget_limit
     state["active_action_budget_limit"] = active_action_budget_limit
     deadline_monotonic = (
@@ -32401,6 +32497,7 @@ async def _run_agent_hunt(
             allow_write=allow_write,
             cancelled_check=should_stop,
             request_budget_limit=request_budget_limit,
+            wire_request_budget_limit=wire_request_budget_limit,
             action_budget_limit=action_budget_limit,
             active_action_budget_limit=active_action_budget_limit,
             seconds_budget_limit=wall_time_budget_seconds,
@@ -32530,6 +32627,7 @@ async def _run_agent_hunt(
         approval_receipt_id=approval_receipt_id, hypothesis_id=hypothesis_id, persist=persist,
         allow_write=allow_write, cancelled_check=should_stop,
         request_budget_limit=request_budget_limit,
+        wire_request_budget_limit=wire_request_budget_limit,
         action_budget_limit=action_budget_limit,
         active_action_budget_limit=active_action_budget_limit,
         seconds_budget_limit=wall_time_budget_seconds,
@@ -32580,10 +32678,19 @@ async def _run_agent_hunt_for_episode(episode_id: str) -> dict[str, Any]:
                 row["id"],
             )
         return {"accepted": True, "agent_loop": True, "error": "target_deactivated", "episode_id": episode_id}
+    raw_budget_limits = _decode_json_value(row["budget_limits"]) or {}
     budget = _research_normalize_budget_limits(
-        _decode_json_value(row["budget_limits"]) or {},
-        max_steps=int((_decode_json_value(row["budget_limits"]) or {}).get("steps") or 1),
+        raw_budget_limits,
+        max_steps=int(raw_budget_limits.get("steps") or 1),
     )
+    # Episodes created before the wire ceiling existed must not become either unbounded or
+    # unusable after an upgrade. Derive one conservative, finite compatibility ceiling once
+    # from their already-authorized request allowance.
+    if "wire_requests" not in raw_budget_limits:
+        request_allowance = max(0, int(budget.get("requests") or 0))
+        budget["wire_requests"] = (
+            min(3600, max(450, request_allowance * 7)) if request_allowance else 0
+        )
     budget_used_before = _research_normalize_budget_used(
         _decode_json_value(row["budget_used"]) or {}
     )
@@ -32613,6 +32720,10 @@ async def _run_agent_hunt_for_episode(episode_id: str) -> dict[str, Any]:
     remaining_requests = max(
         0,
         int(budget.get("requests") or 0) - int(budget_used_before.get("requests") or 0),
+    )
+    remaining_wire_requests = max(
+        0,
+        int(budget.get("wire_requests") or 0) - int(budget_used_before.get("wire_requests") or 0),
     )
     remaining_seconds = max(
         0,
@@ -32666,6 +32777,7 @@ async def _run_agent_hunt_for_episode(episode_id: str) -> dict[str, Any]:
         allow_write=allow, allow_active=allow, approval_receipt_id=approval_receipt_id,
         persist=True, should_stop=_episode_cancelled,
         request_budget_limit=remaining_requests,
+        wire_request_budget_limit=remaining_wire_requests,
         action_budget_limit=remaining_actions,
         active_action_budget_limit=remaining_active_actions,
         wall_time_budget_seconds=remaining_seconds,
@@ -32678,6 +32790,7 @@ async def _run_agent_hunt_for_episode(episode_id: str) -> dict[str, Any]:
     iterations = int(result.get("iterations") or 0)
     tool_calls = int(result.get("tool_calls_made") or 0)
     request_units = int(result.get("request_units_used") or 0)
+    wire_requests = int(result.get("wire_requests_reserved") or 0)
     active_actions = int(result.get("active_actions_used") or 0)
     verify_requests = int(result.get("auto_verify_requests_reserved") or 0)
     verify_actions = int(result.get("auto_verify_actions_reserved") or 0)
@@ -32706,6 +32819,7 @@ async def _run_agent_hunt_for_episode(episode_id: str) -> dict[str, Any]:
             "actions": int(used.get("actions") or 0) + tool_calls + verify_actions,
             "active_actions": int(used.get("active_actions") or 0) + active_actions + verify_active_actions,
             "requests": int(used.get("requests") or 0) + request_units + verify_requests,
+            "wire_requests": int(used.get("wire_requests") or 0) + wire_requests,
             "seconds": int(used.get("seconds") or 0) + elapsed_seconds + verify_seconds,
             "model_tokens": int(used.get("model_tokens") or 0) + model_tokens}
     async with db_pool.acquire() as conn:
@@ -32965,6 +33079,7 @@ async def start_agent_hunt_session(target_id: str, req: AgentHuntSessionStartReq
     # capability and its boundary.
     state["action_budget_limit"] = req.max_iterations * _AGENT_MAX_TOOLS_PER_TURN
     state["request_budget_limit"] = min(400, req.max_iterations * 12)
+    state["wire_request_budget_limit"] = min(3600, max(450, req.max_iterations * 90))
     state["active_action_budget_limit"] = min(24, req.max_iterations)
     capability_message = (
         "Deep Hunt authorization is active for this target. You may use bounded active run_tool "
@@ -33059,6 +33174,8 @@ async def submit_agent_hunt_reply(run_id: str, req: AgentHuntReplyRequest):
                 state.get("target_url"),
             )
             max_iterations = int(row["max_iterations"] or _AGENT_HUNT_DEFAULT_ITERATIONS)
+            if state.get("wire_request_budget_limit") is None:
+                state["wire_request_budget_limit"] = min(3600, max(450, max_iterations * 90))
             allow_write = bool(row["allow_write"])
             allow_active = bool(row["allow_active"])
             # Revalidate Deep Hunt authority on every turn. An expired, revoked, wrong-target,
@@ -33093,6 +33210,12 @@ async def submit_agent_hunt_reply(run_id: str, req: AgentHuntReplyRequest):
 
     # --- Phase 2: run the turn UNLOCKED (target HTTP / subprocesses live here) ---
     try:
+        # One-time compatibility migration for sessions created before DNS pinning shipped.
+        # Resolution happens after the row lock is released and is then persisted with the
+        # updated state; it is never refreshed for subsequent tool calls.
+        if not state.get("authorized_target_addresses"):
+            state["authorized_target_addresses"] = await _resolve_agent_target_addresses(target_url)
+
         async def _turn_cancelled() -> bool:
             async with db_pool.acquire() as conn:
                 return not bool(await conn.fetchval(

@@ -3904,6 +3904,7 @@ export interface AgentHuntResult {
   tool_calls_made: number
   request_units_used: number
   wire_requests_reserved?: number
+  wire_request_budget_limit?: number | null
   wire_requests_actual?: number | null
   wire_requests_actual_confirmed?: number
   wire_requests_observed_minimum?: number

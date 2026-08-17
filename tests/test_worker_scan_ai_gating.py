@@ -2541,19 +2541,24 @@ def test_agent_scanner_tool_job_rebuilds_argv_and_publishes_settlement(monkeypat
             self.values.pop(key, None)
 
     class _Process:
-        returncode = 0
+        pid = 12345
 
-        async def communicate(self):
-            return json.dumps({
+        def __init__(self):
+            self.returncode = 0
+            self.stdout = asyncio.StreamReader()
+            self.stderr = asyncio.StreamReader()
+            self.stdout.feed_data(json.dumps({
                 "url": "https://example.test/admin?token=secret",
                 "status_code": 200,
-            }).encode(), b""
-
-        def kill(self):
-            self.returncode = -9
+            }).encode())
+            self.stdout.feed_eof()
+            self.stderr.feed_eof()
 
         async def wait(self):
             return self.returncode
+
+        def kill(self):
+            self.returncode = -9
 
     redis = _Redis()
     captured = {}
@@ -2573,10 +2578,15 @@ def test_agent_scanner_tool_job_rebuilds_argv_and_publishes_settlement(monkeypat
         "execution_target": "https://example.test/admin?token=secret",
         "scanner_options": {},
         "timeout_ms": 30_000,
+        "pinned_address": "203.0.113.7",
+        "authorized_addresses": ["203.0.113.7"],
     }))
 
     assert captured["cmd"][0] == "httpx"
     assert "-json" in captured["cmd"] and "-silent" in captured["cmd"]
+    assert captured["kwargs"]["start_new_session"] is True
+    assert "203.0.113.7" in " ".join(captured["cmd"])
+    assert "Host: example.test" in captured["cmd"]
     result = json.loads(redis.values["agent_tool_result:agent-job-1"])
     assert result["status"] == "success"
     assert result["settlement"]["mode"] == "exact"
@@ -2621,6 +2631,55 @@ def test_agent_scanner_tool_job_refuses_cross_host_without_spawning(monkeypatch)
     assert result["settlement"] == {
         "mode": "exact", "actual": 0, "observed_minimum": 0, "source": "not_executed"
     }
+
+
+def test_agent_scanner_tool_streams_and_fails_closed_at_output_limit(monkeypatch):
+    class _Redis:
+        def __init__(self):
+            self.values = {}
+
+        def exists(self, _key): return False
+        def set(self, key, value, ex=None): self.values[key] = value
+        def hset(self, *_args, **_kwargs): return True
+        def expire(self, *_args): return True
+        def delete(self, *_args): return True
+
+    class _Process:
+        pid = 12346
+
+        def __init__(self):
+            self.returncode = 0
+            self.stdout = asyncio.StreamReader()
+            self.stderr = asyncio.StreamReader()
+            self.stdout.feed_data(b"X" * 4096)
+            self.stdout.feed_eof()
+            self.stderr.feed_eof()
+
+        async def wait(self): return self.returncode
+        def kill(self): self.returncode = -9
+
+    async def _exec(*_cmd, **_kwargs): return _Process()
+
+    redis = _Redis()
+    monkeypatch.setattr(worker, "get_redis", lambda: redis)
+    monkeypatch.setattr(worker, "_AGENT_TOOL_OUTPUT_BYTES", 128)
+    monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", _exec)
+    asyncio.run(worker.process_agent_scanner_tool_job({
+        "job_id": "agent-job-output-limit",
+        "type": "agent_scanner_tool",
+        "tool_name": "httpx",
+        "registered_target": "https://example.test",
+        "execution_target": "https://example.test/",
+        "scanner_options": {},
+        "timeout_ms": 30_000,
+        "pinned_address": "203.0.113.7",
+        "authorized_addresses": ["203.0.113.7"],
+    }))
+
+    result = json.loads(redis.values["agent_tool_result:agent-job-output-limit"])
+    assert result["status"] == "failed"
+    assert result["error"] == "output_limit_exceeded"
+    assert sum(len(line) for line in result["output_lines"]) <= 128
 
 
 class _CandidateProofConn:
