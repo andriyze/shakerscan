@@ -700,9 +700,12 @@ def validate_exposed_file(
 
 # Patterns indicating successful SSRF (actual internal access)
 SSRF_CONFIRMED_PATTERNS = [
-    r'"AccessKeyId"\s*:\s*"[A-Z0-9]{12,}".*"SecretAccessKey"\s*:',
-    r'\bi-[a-f0-9]{8,17}\b',  # Concrete AWS instance identifier.
-    r'root:[^\r\n:]*:0:0:',  # Concrete /etc/passwd row.
+    ("aws_iam_credentials", r'"AccessKeyId"\s*:\s*"[A-Z0-9]{12,}".*?"SecretAccessKey"\s*:\s*"[^"\r\n]{16,}"'),
+    ("aws_instance_id", r'\bi-[a-f0-9]{8,17}\b'),
+    ("gcp_oauth_token", r'"access_token"\s*:\s*"ya29\.[A-Za-z0-9._~-]{8,}"'),
+    ("azure_managed_identity_token", r'"access_token"\s*:\s*"eyJ[A-Za-z0-9._~-]{16,}".*?"expires_(?:in|on)"\s*:'),
+    ("azure_instance_document", r'"compute"\s*:\s*\{.*?"vmId"\s*:\s*"[0-9a-f-]{16,}".*?"subscriptionId"\s*:'),
+    ("passwd_root_record", r'root:[^\r\n:]*:0:0:'),
 ]
 
 # Patterns that suggest SSRF but need more verification
@@ -743,14 +746,35 @@ def validate_ssrf(
         )
 
     # Check for confirmed SSRF patterns
-    for pattern in SSRF_CONFIRMED_PATTERNS:
-        if re.search(pattern, response_body, re.I):
+    for signature, pattern in SSRF_CONFIRMED_PATTERNS:
+        if re.search(pattern, response_body, re.I | re.S):
             return ValidationResult(
                 verified=True,
                 confidence=0.95,
-                evidence=f"Internal data accessed: {pattern}",
+                evidence=f"Internal data accessed: {signature}",
                 reason="Confirmed SSRF - internal data retrieved"
             )
+
+    # Metadata directory listings are concrete only when several independent keys are
+    # returned together. A bare ``ami-id`` or metadata hostname may simply be reflected input.
+    normalized_lines = {
+        line.strip().lower().rstrip("/")
+        for line in response_body.splitlines()
+        if line.strip()
+    }
+    aws_index_markers = {
+        "ami-id", "ami-launch-index", "ami-manifest-path", "instance-id",
+        "instance-type", "local-hostname", "local-ipv4", "public-hostname",
+        "public-ipv4", "security-groups", "iam",
+    }
+    gcp_index_markers = {"attributes", "instance", "project", "service-accounts", "zone"}
+    if len(normalized_lines & aws_index_markers) >= 3 or len(normalized_lines & gcp_index_markers) >= 3:
+        return ValidationResult(
+            verified=True,
+            confidence=0.93,
+            evidence="Internal metadata directory listing returned multiple provider keys",
+            reason="Confirmed SSRF - cloud metadata index retrieved",
+        )
 
     # Check for possible SSRF patterns (lower confidence)
     for pattern in SSRF_POSSIBLE_PATTERNS:

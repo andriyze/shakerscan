@@ -41,6 +41,7 @@ def test_boolean_sqli_requires_repeated_stable_semantic_differential():
         [_response(false_body), _response(false_body)],
         true_payload="' OR '1'='1",
         false_payload="' OR '1'='2",
+        mutation_responses=[_response(baseline), _response(baseline)],
     )
 
     assert result["proven"] is True
@@ -54,6 +55,7 @@ def test_boolean_sqli_rejects_dynamic_baselines_and_length_only_changes():
         [_response(json.dumps({"data": []})), _response(json.dumps({"data": []}))],
         true_payload="TRUE",
         false_payload="FALSE",
+        mutation_responses=[_response(json.dumps({"data": [1]})), _response(json.dumps({"data": [1]}))],
     )
     length_only = _evaluate_boolean_sqli_differential(
         [_response("A" * 1000), _response("A" * 1000)],
@@ -61,6 +63,7 @@ def test_boolean_sqli_rejects_dynamic_baselines_and_length_only_changes():
         [_response("B" * 700), _response("B" * 700)],
         true_payload="TRUE",
         false_payload="FALSE",
+        mutation_responses=[_response("A" * 1000), _response("A" * 1000)],
     )
 
     assert dynamic["proven"] is False
@@ -76,9 +79,77 @@ def test_boolean_sqli_rejects_reflected_predicate_payload():
         [_response("FALSE empty"), _response("FALSE empty")],
         true_payload="TRUE",
         false_payload="FALSE",
+        mutation_responses=[_response("normal"), _response("normal")],
     )
 
     assert result == {"proven": False, "reason": "true_payload_reflected"}
+
+
+def test_boolean_sqli_rejects_unrelated_stable_json_clusters():
+    baseline = '{"normal":"baseline-baseline-baseline"}'
+    true_body = '{"aaaaaaaa":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}'
+    false_body = '{"zzzzzzzz":"ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ"}'
+
+    result = _evaluate_boolean_sqli_differential(
+        [_response(baseline), _response(baseline)],
+        [_response(true_body), _response(true_body)],
+        [_response(false_body), _response(false_body)],
+        true_payload="TRUE",
+        false_payload="FALSE",
+        mutation_responses=[_response(baseline), _response(baseline)],
+    )
+
+    assert result["proven"] is False
+    assert result["reason"] == "length_only_differential"
+
+
+def test_boolean_sqli_accepts_json_baseline_contained_in_true_cluster():
+    baseline = json.dumps({"data": [{"id": 1, "name": "owned"}]})
+    true_body = json.dumps({"data": [
+        {"id": 1, "name": "owned"},
+        {"id": 2, "name": "other"},
+        {"id": 3, "name": "third"},
+    ]})
+    false_body = json.dumps({"data": []})
+
+    result = _evaluate_boolean_sqli_differential(
+        [_response(baseline), _response(baseline)],
+        [_response(true_body), _response(true_body)],
+        [_response(false_body), _response(false_body)],
+        true_payload="TRUE",
+        false_payload="FALSE",
+        mutation_responses=[_response(baseline), _response(baseline)],
+    )
+
+    assert result["proven"] is True
+
+
+def test_boolean_sqli_normalizes_html_csrf_and_created_at_controls():
+    def html(body):
+        return {"body": body, "status_code": 200, "headers": {"content-type": "text/html"}}
+
+    baseline_a = '<form><input name="_csrf" value="token-aaaaaaaa"><p>one row</p></form>'
+    baseline_b = '<form><input name="_csrf" value="token-bbbbbbbb"><p>one row</p></form>'
+    false_a = '<html><body><h1>No matching records</h1></body></html>'
+    false_b = '<html><body><h1>No matching records</h1></body></html>'
+    result = _evaluate_boolean_sqli_differential(
+        [html(baseline_a), html(baseline_b)],
+        [html(baseline_a), html(baseline_b)],
+        [html(false_a), html(false_b)],
+        true_payload="TRUE",
+        false_payload="FALSE",
+        mutation_responses=[html(baseline_a), html(baseline_b)],
+    )
+    assert result["proven"] is True
+
+    json_a = _response(json.dumps({"data": [1], "created_at": "2026-01-01T00:00:00Z"}))
+    json_b = _response(json.dumps({"data": [1], "created_at": "2026-01-02T00:00:00Z"}))
+    stable = _evaluate_boolean_sqli_differential(
+        [json_a, json_b], [json_a, json_b],
+        [_response(json.dumps({"data": []})), _response(json.dumps({"data": []}))],
+        true_payload="TRUE", false_payload="FALSE", mutation_responses=[json_a, json_b],
+    )
+    assert stable["proven"] is True
 
 
 def test_curl_response_parser_uses_final_redirect_response_body():

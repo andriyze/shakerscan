@@ -958,6 +958,22 @@ def test_ssrf_target_string_without_callback_or_content_is_not_verified():
     assert validation.verified is False
 
 
+def test_ssrf_verifies_structured_cloud_metadata_without_trusting_reflected_hosts():
+    bodies = [
+        '''{\n  "Code": "Success",\n  "AccessKeyId": "AKIAIOSFODNN7EXAMPLE",\n  "SecretAccessKey": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"\n}''',
+        '{"access_token":"ya29.a0AfH6SM-example-token","expires_in":3599,"token_type":"Bearer"}',
+        '{"access_token":"eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.example-token","expires_in":"3599"}',
+        'ami-id\nami-launch-index\ninstance-id\niam/\n',
+    ]
+    for body in bodies:
+        assert validate_ssrf({"tool": "ssrf_probe", "evidence": {}}, body).verified is True
+
+    assert validate_ssrf(
+        {"tool": "ssrf_probe", "evidence": {}},
+        "requested http://metadata.google.internal/computeMetadata/v1/",
+    ).verified is False
+
+
 def test_sqli_error_indicator_is_strong_but_not_verified():
     finding = {
         "tool": "active_sqli",
