@@ -4542,8 +4542,18 @@ async def correlate_device_advisory_lifecycle(
                     evidence_refs=[],
                     source_kind="automatic_device_advisory_correlation",
                 )
+                advisory_context = {
+                    "snapshot_sha256": str(snapshot.get("snapshot_sha256") or ""),
+                    "advisory": match,
+                    "service": {
+                        "transport": service.get("transport"), "port": service.get("port"),
+                        "service_name": service.get("service_name"), "product": product,
+                        "version": version, "cpe": cpe,
+                    },
+                }
                 candidate_record = await investigation_candidates.upsert_candidate(
                     conn, candidate, created_by="device_advisory_correlation",
+                    observation_context=advisory_context,
                 )
                 current_candidate_ids.add(uuid.UUID(candidate_record["id"]))
                 summary["candidates"] += 1
@@ -4553,15 +4563,11 @@ async def correlate_device_advisory_lifecycle(
                            'snapshot_sha256',$2::text,'advisory',$3::jsonb,
                            'service',$4::jsonb
                        ), updated_at=NOW()
-                       WHERE id=$1""",
+                       WHERE id=$1 AND status NOT IN ('verified','refuted','expired')""",
                     uuid.UUID(candidate_record["id"]),
                     str(snapshot.get("snapshot_sha256") or ""),
                     json.dumps(match),
-                    json.dumps({
-                        "transport": service.get("transport"), "port": service.get("port"),
-                        "service_name": service.get("service_name"), "product": product,
-                        "version": version, "cpe": cpe,
-                    }),
+                    json.dumps(advisory_context["service"]),
                 )
                 if not match.get("promotable"):
                     continue

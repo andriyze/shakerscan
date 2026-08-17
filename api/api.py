@@ -19089,13 +19089,15 @@ async def list_investigation_candidates(
         raise HTTPException(status_code=422, detail="device candidates cannot use target_id")
     async with db_pool.acquire() as conn:
         rows = await conn.fetch(
-            """SELECT *, COUNT(*) OVER() AS total_count
-               FROM investigation_candidates
-               WHERE ($1::text IS NULL OR plane=$1)
-                 AND ($2::uuid IS NULL OR target_id=$2)
-                 AND ($3::uuid IS NULL OR device_target_id=$3)
-                 AND ($4::text IS NULL OR status=$4)
-               ORDER BY last_seen_at DESC, id DESC
+            """SELECT c.*, COUNT(*) OVER() AS total_count,
+                      (SELECT COUNT(*) FROM investigation_candidate_observations o
+                       WHERE o.candidate_id=c.id) AS observation_count
+               FROM investigation_candidates c
+               WHERE ($1::text IS NULL OR c.plane=$1)
+                 AND ($2::uuid IS NULL OR c.target_id=$2)
+                 AND ($3::uuid IS NULL OR c.device_target_id=$3)
+                 AND ($4::text IS NULL OR c.status=$4)
+               ORDER BY c.last_seen_at DESC, c.id DESC
                LIMIT $5 OFFSET $6""",
             normalized_plane, target_uuid, device_uuid, normalized_status, limit, offset,
         )
@@ -19131,6 +19133,14 @@ async def get_investigation_candidate(candidate_id: str):
                ORDER BY created_at DESC LIMIT 100""",
             candidate_uuid,
         )
+        observations = await conn.fetch(
+            """SELECT id, research_episode_id, agent_hunt_run_id, device_agent_run_id,
+                      source_kind, title, claim, claimed_severity, evidence_refs,
+                      verifier_contract_id, observation_context, created_by, observed_at
+               FROM investigation_candidate_observations
+               WHERE candidate_id=$1 ORDER BY observed_at DESC, id DESC LIMIT 250""",
+            candidate_uuid,
+        )
     verification_payloads = []
     for item in verifications:
         payload = row_to_dict(item)
@@ -19141,8 +19151,15 @@ async def get_investigation_candidate(candidate_id: str):
         payload = row_to_dict(item)
         payload["proof_observation"] = _decode_json_value(payload.get("proof_observation")) or {}
         evidence_payloads.append(payload)
+    observation_payloads = []
+    for item in observations:
+        payload = row_to_dict(item)
+        payload["evidence_refs"] = _decode_json_value(payload.get("evidence_refs")) or []
+        payload["observation_context"] = _decode_json_value(payload.get("observation_context")) or {}
+        observation_payloads.append(payload)
     return {
         "candidate": _public_investigation_candidate(row),
+        "observations": observation_payloads,
         "verifications": verification_payloads,
         "evidence": evidence_payloads,
     }
@@ -21388,6 +21405,7 @@ async def submit_device_agent_reply(run_id: str, request: DeviceAgentReplyReques
                         )
                         candidate_record = await investigation_candidates.upsert_candidate(
                             conn, candidate, created_by=f"device_agent_session:{run_id}",
+                            observation_context={"lead": lead},
                         )
                         persisted_leads.append({
                             **lead,
@@ -31432,6 +31450,8 @@ async def _persist_agent_suspected_finding(
     gate: dict[str, Any],
     *,
     run_receipt_id: Optional[str],
+    research_episode_id: Optional[str],
+    agent_hunt_run_id: Optional[str],
     known_keys: set[str],
 ) -> dict[str, Any]:
     """Persist a provenance-gated model claim as a non-authoritative investigation candidate.
@@ -31503,6 +31523,8 @@ async def _persist_agent_suspected_finding(
     candidate = investigation_candidates.normalize_candidate(
         plane="web",
         target_id=str(target_uuid),
+        research_episode_id=research_episode_id,
+        agent_hunt_run_id=agent_hunt_run_id,
         family=family or retest_family or "unknown",
         locus={
             "method": method,
@@ -31516,30 +31538,32 @@ async def _persist_agent_suspected_finding(
         verifier_contract_id=(f"web.{retest_family}" if retest_family else None),
         source_kind="deep_hunt",
     )
+    candidate_context = {
+        "target_url": concrete_url,
+        "method": method,
+        "route": url_path,
+        "parameter": finding_param,
+        "payload": finding_payload,
+        "retest_type": retest_family,
+        "predicate": finding.get("predicate"),
+        "proof": finding.get("details"),
+        "remediation": finding.get("remediation"),
+        "agent_run_receipt_id": run_receipt_id,
+        "net_new_vs_known": net_new,
+        "cvss": finding.get("cvss"),
+        "cwe": finding.get("cwe"),
+        "legacy_fingerprint": fingerprint,
+        "evidence": evidence_json,
+    }
     candidate_record = await investigation_candidates.upsert_candidate(
         conn, candidate, created_by="autonomous_agent",
+        observation_context=candidate_context,
     )
     await conn.execute(
         """UPDATE investigation_candidates
            SET verification_context=verification_context || $2::jsonb, updated_at=NOW()
-           WHERE id=$1""",
-        uuid.UUID(candidate_record["id"]), json.dumps({
-            "target_url": concrete_url,
-            "method": method,
-            "route": url_path,
-            "parameter": finding_param,
-            "payload": finding_payload,
-            "retest_type": retest_family,
-            "predicate": finding.get("predicate"),
-            "proof": finding.get("details"),
-            "remediation": finding.get("remediation"),
-            "agent_run_receipt_id": run_receipt_id,
-            "net_new_vs_known": net_new,
-            "cvss": finding.get("cvss"),
-            "cwe": finding.get("cwe"),
-            "legacy_fingerprint": fingerprint,
-            "evidence": evidence_json,
-        }, default=str),
+           WHERE id=$1 AND status NOT IN ('verified','refuted','expired')""",
+        uuid.UUID(candidate_record["id"]), json.dumps(candidate_context, default=str),
     )
     return {
         "id": candidate_record["id"],
@@ -31983,6 +32007,8 @@ async def _agent_persist_suspected_findings(
     target_uuid: uuid.UUID,
     target_url: str,
     receipt_id: Optional[str],
+    research_episode_id: Optional[str] = None,
+    agent_hunt_run_id: Optional[str] = None,
 ) -> list[dict[str, Any]]:
     """Persist gate-passing claims as candidates; blocked overclaims are never persisted."""
     persisted: list[dict[str, Any]] = []
@@ -31995,7 +32021,10 @@ async def _agent_persist_suspected_findings(
                 async with conn.transaction():
                     record = await _persist_agent_suspected_finding(
                         conn, target_uuid, target_url, entry["finding"], entry["gate"],
-                        run_receipt_id=receipt_id, known_keys=known_keys,
+                        run_receipt_id=receipt_id,
+                        research_episode_id=research_episode_id,
+                        agent_hunt_run_id=agent_hunt_run_id,
+                        known_keys=known_keys,
                     )
                 entry["persisted"] = record
                 persisted.append(record)
@@ -32340,6 +32369,8 @@ async def _agent_finalize_and_persist(
     action_budget_limit: Optional[int] = None,
     active_action_budget_limit: Optional[int] = None,
     seconds_budget_limit: Optional[int] = None,
+    research_episode_id: Optional[str] = None,
+    agent_hunt_run_id: Optional[str] = None,
 ) -> dict[str, Any]:
     """Gate -> receipt -> persist -> (auto-verify) -> assemble the run result. Shared final stage of
     both drivers, so a keyless hunt produces the identical result shape as configured_ai."""
@@ -32356,6 +32387,8 @@ async def _agent_finalize_and_persist(
     if persist and gated_findings:
         persisted = await _agent_persist_suspected_findings(
             gated_findings, target_uuid=target_uuid, target_url=target_url, receipt_id=receipt_id,
+            research_episode_id=research_episode_id,
+            agent_hunt_run_id=agent_hunt_run_id,
         )
         remaining_requests = (
             None if request_budget_limit is None
@@ -32467,6 +32500,8 @@ async def _run_agent_hunt(
     wall_time_budget_seconds: Optional[int] = None,
     model_token_budget_limit: Optional[int] = None,
     target_origins: Optional[list[str]] = None,
+    research_episode_id: Optional[str] = None,
+    agent_hunt_run_id: Optional[str] = None,
 ) -> dict[str, Any]:
     run_started = time.monotonic()
     state = await _agent_seed_state(
@@ -32501,6 +32536,8 @@ async def _run_agent_hunt(
             action_budget_limit=action_budget_limit,
             active_action_budget_limit=active_action_budget_limit,
             seconds_budget_limit=wall_time_budget_seconds,
+            research_episode_id=research_episode_id,
+            agent_hunt_run_id=agent_hunt_run_id,
         )
     planner_errors = 0
     for i in range(max_iterations):
@@ -32631,6 +32668,8 @@ async def _run_agent_hunt(
         action_budget_limit=action_budget_limit,
         active_action_budget_limit=active_action_budget_limit,
         seconds_budget_limit=wall_time_budget_seconds,
+        research_episode_id=research_episode_id,
+        agent_hunt_run_id=agent_hunt_run_id,
     )
 
 
@@ -32782,6 +32821,8 @@ async def _run_agent_hunt_for_episode(episode_id: str) -> dict[str, Any]:
         active_action_budget_limit=remaining_active_actions,
         wall_time_budget_seconds=remaining_seconds,
         model_token_budget_limit=remaining_model_tokens,
+        research_episode_id=str(row["id"]),
+        agent_hunt_run_id=str(checkpoint_run_id),
     )
     suspected = sum(1 for g in result.get("findings", []) if g.get("tier") == "suspected")
     net_new = int(result.get("net_new_count") or 0)
@@ -33261,7 +33302,8 @@ async def submit_agent_hunt_reply(run_id: str, req: AgentHuntReplyRequest):
                 state, target_uuid=target_uuid, target_url=target_url,
                 created_by=f"agent_hunt_session:{run_id}", approval_receipt_id=approval_receipt_id,
                 hypothesis_id=None, persist=True, allow_write=allow_write,
-                cancelled_check=_turn_cancelled)
+                cancelled_check=_turn_cancelled,
+                agent_hunt_run_id=str(run_uuid))
     except Exception:
         # Release the claim so the session can retry this turn, then surface the error.
         async with db_pool.acquire() as conn:

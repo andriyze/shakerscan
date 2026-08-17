@@ -20,6 +20,7 @@ import {
   SourceTypeBadge,
   TableSkeleton,
   useToast,
+  buttonClasses,
 } from '@/components/ui'
 
 const PAGE_SIZE = 50
@@ -363,9 +364,14 @@ function FindingsContent() {
           </>
         }
         actions={
-          <Button variant="secondary" onClick={() => { setShowCleanup(!showCleanup); setCleanupPreview(null) }}>
-            Advanced cleanup
-          </Button>
+          <>
+            <Link href="/findings/candidates" className={buttonClasses('secondary')}>
+              Investigation candidates
+            </Link>
+            <Button variant="secondary" onClick={() => { setShowCleanup(!showCleanup); setCleanupPreview(null) }}>
+              Advanced cleanup
+            </Button>
+          </>
         }
       />
 

@@ -6,9 +6,11 @@ from api import investigation_candidates as candidates
 
 
 def test_web_and_device_candidate_boundaries_are_mutually_exclusive():
+    web_run_id = str(uuid.uuid4())
     web = candidates.normalize_candidate(
         plane="web",
         target_id=str(uuid.uuid4()),
+        agent_hunt_run_id=web_run_id,
         family="sql-injection",
         locus={"method": "get", "route": "/search", "parameter": "q"},
         title="SQLi candidate",
@@ -28,6 +30,7 @@ def test_web_and_device_candidate_boundaries_are_mutually_exclusive():
     assert web["family"] == "sqli"
     assert web["canonical_locus"]["method"] == "GET"
     assert web["evidence_refs"] == ["resp_1", "resp_2"]
+    assert web["agent_hunt_run_id"] == web_run_id
     assert device["target_id"] is None
     assert device["device_target_id"] is not None
     assert device["family"] == "device_service_exposure"
@@ -80,16 +83,24 @@ def test_candidate_upsert_never_claims_authority():
     candidate_id = uuid.uuid4()
 
     class FakeConnection:
+        def __init__(self):
+            self.observation_args = None
+
         async def fetchrow(self, query, *args):
             assert "investigation_candidates" in query
             return {
                 "id": candidate_id,
                 "status": "new",
-                "fingerprint": args[13],
+                "fingerprint": candidate["fingerprint"],
                 "created_at": None,
                 "updated_at": None,
                 "inserted": True,
             }
+
+        async def execute(self, query, *args):
+            assert "investigation_candidate_observations" in query
+            self.observation_args = args
+            return "INSERT 0 1"
 
     candidate = candidates.normalize_candidate(
         plane="device",
@@ -99,12 +110,26 @@ def test_candidate_upsert_never_claims_authority():
         title="HTTP exposed",
         claim="Observed by Device Hunt",
     )
-    result = asyncio.run(candidates.upsert_candidate(FakeConnection(), candidate, created_by="test"))
+    connection = FakeConnection()
+    result = asyncio.run(candidates.upsert_candidate(connection, candidate, created_by="test"))
 
     assert result["id"] == str(candidate_id)
     assert result["authoritative"] is False
     assert result["status"] == "new"
     assert result["inserted"] is True
+    assert connection.observation_args[0] == candidate_id
+
+
+def test_terminal_upsert_is_immutable_and_every_sighting_appends_an_observation():
+    source = open(candidates.__file__, encoding="utf-8").read()
+    assert source.count("investigation_candidates.status IN ('verified','refuted','expired')") >= 5
+    assert "INSERT INTO investigation_candidate_observations" in source
+    assert "agent_hunt_run_id" in source
+
+    migration_path = os.path.join(os.path.dirname(__file__), "..", "api", "retest_contract.py")
+    migration = open(migration_path, encoding="utf-8").read()
+    assert "CREATE TABLE IF NOT EXISTS investigation_candidate_observations" in migration
+    assert "REFERENCES agent_hunt_runs(id) ON DELETE SET NULL" in migration
 
 
 def test_candidate_read_api_exposes_lifecycle_without_promotion_authority():

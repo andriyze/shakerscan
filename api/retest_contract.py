@@ -2767,6 +2767,7 @@ async def run_schema_migrations(pool) -> None:
                     target_id UUID REFERENCES targets(id) ON DELETE CASCADE,
                     device_target_id UUID REFERENCES device_targets(id) ON DELETE CASCADE,
                     research_episode_id UUID REFERENCES research_episodes(id) ON DELETE SET NULL,
+                    agent_hunt_run_id UUID REFERENCES agent_hunt_runs(id) ON DELETE SET NULL,
                     device_agent_run_id UUID REFERENCES device_agent_runs(id) ON DELETE SET NULL,
                     family TEXT NOT NULL,
                     canonical_locus JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -2817,6 +2818,48 @@ async def run_schema_migrations(pool) -> None:
             await conn.execute("""
                 ALTER TABLE investigation_candidates
                 ADD COLUMN IF NOT EXISTS verification_context JSONB NOT NULL DEFAULT '{}'::jsonb
+            """)
+            await conn.execute("""
+                ALTER TABLE investigation_candidates
+                ADD COLUMN IF NOT EXISTS agent_hunt_run_id UUID REFERENCES agent_hunt_runs(id) ON DELETE SET NULL
+            """)
+            # Every hunt observation is immutable and retains its own run provenance even when the
+            # canonical family+locus candidate already exists. This prevents global dedupe from
+            # erasing which run made which claim and preserves later observations of terminal rows.
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS investigation_candidate_observations (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    candidate_id UUID NOT NULL REFERENCES investigation_candidates(id) ON DELETE CASCADE,
+                    research_episode_id UUID REFERENCES research_episodes(id) ON DELETE SET NULL,
+                    agent_hunt_run_id UUID REFERENCES agent_hunt_runs(id) ON DELETE SET NULL,
+                    device_agent_run_id UUID REFERENCES device_agent_runs(id) ON DELETE SET NULL,
+                    source_kind TEXT NOT NULL DEFAULT 'hunt',
+                    title TEXT NOT NULL,
+                    claim TEXT NOT NULL,
+                    claimed_severity TEXT NOT NULL DEFAULT 'info',
+                    evidence_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    verifier_contract_id TEXT,
+                    observation_context JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_by TEXT,
+                    observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT investigation_candidate_observation_severity_check CHECK (
+                        claimed_severity IN ('critical','high','medium','low','info')
+                    )
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_investigation_candidate_observations_candidate
+                ON investigation_candidate_observations(candidate_id, observed_at DESC)
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_investigation_candidate_observations_web_run
+                ON investigation_candidate_observations(agent_hunt_run_id, observed_at DESC)
+                WHERE agent_hunt_run_id IS NOT NULL
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_investigation_candidate_observations_device_run
+                ON investigation_candidate_observations(device_agent_run_id, observed_at DESC)
+                WHERE device_agent_run_id IS NOT NULL
             """)
             # Before Investigation Candidates existed, Deep Hunt placed unverified model
             # claims in ``findings`` with tool=autonomous_agent. Move those provisional
@@ -2897,6 +2940,24 @@ async def run_schema_migrations(pool) -> None:
                     "INSERT INTO app_schema_migrations(name) VALUES ($1) ON CONFLICT DO NOTHING",
                     LEGACY_AUTONOMOUS_CANDIDATE_MIGRATION,
                 )
+            # Backfill exactly one source observation for candidates created before the observation
+            # ledger (including legacy candidates inserted immediately above). New writes append an
+            # observation transactionally in ``upsert_candidate``.
+            await conn.execute("""
+                INSERT INTO investigation_candidate_observations (
+                    candidate_id, research_episode_id, agent_hunt_run_id, device_agent_run_id,
+                    source_kind, title, claim, claimed_severity, evidence_refs,
+                    verifier_contract_id, observation_context, created_by, observed_at
+                )
+                SELECT c.id, c.research_episode_id, c.agent_hunt_run_id, c.device_agent_run_id,
+                       c.source_kind, c.title, c.claim, c.claimed_severity, c.evidence_refs,
+                       c.verifier_contract_id, c.verification_context, c.created_by, c.first_seen_at
+                FROM investigation_candidates c
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM investigation_candidate_observations o
+                    WHERE o.candidate_id=c.id
+                )
+            """)
             await conn.execute("""
                 UPDATE scans SET run_kind = 'web_dast'
                 WHERE run_kind IS NULL

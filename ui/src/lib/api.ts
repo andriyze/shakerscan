@@ -5100,6 +5100,7 @@ export interface InvestigationCandidate {
   target_id?: string | null
   device_target_id?: string | null
   research_episode_id?: string | null
+  agent_hunt_run_id?: string | null
   device_agent_run_id?: string | null
   family: string
   canonical_locus: Record<string, string | number>
@@ -5113,6 +5114,7 @@ export interface InvestigationCandidate {
   latest_verification_id?: string | null
   authoritative: false
   promotion_ready: boolean
+  observation_count?: number
   last_seen_at: string
   created_at: string
   updated_at: string

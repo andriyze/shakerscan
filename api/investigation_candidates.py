@@ -16,6 +16,7 @@ STATUSES = frozenset({
     "new", "verification_queued", "verifying", "verified", "refuted",
     "inconclusive", "blocked", "expired",
 })
+TERMINAL_STATUSES = frozenset({"verified", "refuted", "expired"})
 SEVERITIES = frozenset({"critical", "high", "medium", "low", "info"})
 
 DEVICE_VERIFIER_CONTRACTS: dict[str, str] = {
@@ -93,6 +94,7 @@ def normalize_candidate(
     target_id: str | None = None,
     device_target_id: str | None = None,
     research_episode_id: str | None = None,
+    agent_hunt_run_id: str | None = None,
     device_agent_run_id: str | None = None,
     family: Any,
     locus: Any,
@@ -135,6 +137,7 @@ def normalize_candidate(
         "target_id": str(target_id) if target_id else None,
         "device_target_id": str(device_target_id) if device_target_id else None,
         "research_episode_id": str(research_episode_id) if research_episode_id else None,
+        "agent_hunt_run_id": str(agent_hunt_run_id) if agent_hunt_run_id else None,
         "device_agent_run_id": str(device_agent_run_id) if device_agent_run_id else None,
         "family": normalized_family,
         "canonical_locus": normalized_locus,
@@ -153,32 +156,65 @@ def normalize_candidate(
     }
 
 
-async def upsert_candidate(conn: Any, candidate: dict[str, Any], *, created_by: str) -> dict[str, Any]:
-    """Insert or refresh a candidate without granting it finding or proof authority."""
+async def upsert_candidate(
+    conn: Any,
+    candidate: dict[str, Any],
+    *,
+    created_by: str,
+    observation_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Insert/refresh a candidate and append one immutable, run-bound observation.
+
+    Verified/refuted/expired candidate assertions are immutable. A later hunt may update only
+    ``last_seen_at`` on the canonical row while its distinct claim and provenance remain in the
+    observation ledger.
+    """
     row = await conn.fetchrow(
         """INSERT INTO investigation_candidates (
-               plane, target_id, device_target_id, research_episode_id, device_agent_run_id,
+               plane, target_id, device_target_id, research_episode_id, agent_hunt_run_id,
+               device_agent_run_id,
                family, canonical_locus, title, claim, claimed_severity, evidence_refs,
                verifier_contract_id, source_kind, fingerprint, status, created_by
            ) VALUES (
-               $1,$2::uuid,$3::uuid,$4::uuid,$5::uuid,$6,$7::jsonb,$8,$9,$10,$11::jsonb,
-               $12,$13,$14,'new',$15
+               $1,$2::uuid,$3::uuid,$4::uuid,$5::uuid,$6::uuid,$7,$8::jsonb,$9,$10,$11,$12::jsonb,
+               $13,$14,$15,'new',$16
            )
            ON CONFLICT (fingerprint) DO UPDATE SET
-               title=EXCLUDED.title,
-               claim=EXCLUDED.claim,
-               claimed_severity=EXCLUDED.claimed_severity,
-               evidence_refs=EXCLUDED.evidence_refs,
-               verifier_contract_id=COALESCE(EXCLUDED.verifier_contract_id, investigation_candidates.verifier_contract_id),
+               title=CASE WHEN investigation_candidates.status IN ('verified','refuted','expired')
+                          THEN investigation_candidates.title ELSE EXCLUDED.title END,
+               claim=CASE WHEN investigation_candidates.status IN ('verified','refuted','expired')
+                          THEN investigation_candidates.claim ELSE EXCLUDED.claim END,
+               claimed_severity=CASE WHEN investigation_candidates.status IN ('verified','refuted','expired')
+                          THEN investigation_candidates.claimed_severity ELSE EXCLUDED.claimed_severity END,
+               evidence_refs=CASE WHEN investigation_candidates.status IN ('verified','refuted','expired')
+                          THEN investigation_candidates.evidence_refs ELSE EXCLUDED.evidence_refs END,
+               verifier_contract_id=CASE WHEN investigation_candidates.status IN ('verified','refuted','expired')
+                          THEN investigation_candidates.verifier_contract_id
+                          ELSE COALESCE(EXCLUDED.verifier_contract_id, investigation_candidates.verifier_contract_id) END,
                last_seen_at=NOW(),
                updated_at=NOW()
            RETURNING id, status, fingerprint, created_at, updated_at, (xmax = 0) AS inserted""",
         candidate["plane"], candidate.get("target_id"), candidate.get("device_target_id"),
-        candidate.get("research_episode_id"), candidate.get("device_agent_run_id"),
-        candidate["family"], json.dumps(candidate["canonical_locus"]), candidate["title"],
+        candidate.get("research_episode_id"), candidate.get("agent_hunt_run_id"),
+        candidate.get("device_agent_run_id"), candidate["family"],
+        json.dumps(candidate["canonical_locus"]), candidate["title"], candidate["claim"],
+        candidate["claimed_severity"], json.dumps(candidate["evidence_refs"]),
+        candidate.get("verifier_contract_id"), candidate.get("source_kind"), candidate["fingerprint"],
+        str(created_by or "hunt")[:120],
+    )
+    await conn.execute(
+        """INSERT INTO investigation_candidate_observations (
+               candidate_id, research_episode_id, agent_hunt_run_id, device_agent_run_id,
+               source_kind, title, claim, claimed_severity, evidence_refs,
+               verifier_contract_id, observation_context, created_by
+           ) VALUES (
+               $1,$2::uuid,$3::uuid,$4::uuid,$5,$6,$7,$8,$9::jsonb,$10,$11::jsonb,$12
+           )""",
+        row["id"], candidate.get("research_episode_id"), candidate.get("agent_hunt_run_id"),
+        candidate.get("device_agent_run_id"), candidate.get("source_kind"), candidate["title"],
         candidate["claim"], candidate["claimed_severity"], json.dumps(candidate["evidence_refs"]),
-        candidate.get("verifier_contract_id"), candidate.get("source_kind"),
-        candidate["fingerprint"], str(created_by or "hunt")[:120],
+        candidate.get("verifier_contract_id"), json.dumps(observation_context or {}),
+        str(created_by or "hunt")[:120],
     )
     return {
         "id": str(row["id"]),
