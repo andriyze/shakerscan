@@ -293,6 +293,7 @@ COPY scanner/*.py /app/
 COPY scanner/scanner_tools /app/scanner_tools
 COPY scanner/wordlists /app/wordlists
 COPY scanner/payloads /app/payloads
+COPY scanner/data /app/data
 
 # Copy API/worker files used by prebuilt images.
 # Globbed (like the scanner modules above) so the image can't drift from the

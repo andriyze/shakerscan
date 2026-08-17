@@ -71,3 +71,10 @@ def test_scanner_image_bakes_release_identity_for_broker_workers():
     assert "0.0.0-intentional-mismatch" in workflow
     assert "accepted an intentionally wrong deployment identity" in workflow
     assert 'baked SCANNER_VERSION=$baked_version; expected $VERSION' in workflow
+
+
+def test_scanner_image_contains_runtime_device_catalog():
+    dockerfile = (ROOT / "scanner" / "Dockerfile").read_text()
+
+    assert "COPY scanner/data /app/data" in dockerfile
+    assert (ROOT / "scanner" / "data" / "device_api_catalog.json").is_file()
