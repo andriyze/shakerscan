@@ -20,6 +20,7 @@ RETEST_QUEUE_SCHEMA_VERSION = 1
 ASM_ENDPOINT_FINGERPRINT_MIGRATION = "asm_endpoint_fingerprint_v2"
 CAMPAIGN_SCAN_FINDING_LINKS_MIGRATION = "campaign_scan_finding_links_v1"
 TARGET_HOST_IDENTITY_MIGRATION = "target_host_identity_v1"
+LEGACY_AUTONOMOUS_CANDIDATE_MIGRATION = "legacy_autonomous_candidates_v1"
 
 
 class SchemaMigrationError(RuntimeError):
@@ -2817,6 +2818,85 @@ async def run_schema_migrations(pool) -> None:
                 ALTER TABLE investigation_candidates
                 ADD COLUMN IF NOT EXISTS verification_context JSONB NOT NULL DEFAULT '{}'::jsonb
             """)
+            # Before Investigation Candidates existed, Deep Hunt placed unverified model
+            # claims in ``findings`` with tool=autonomous_agent. Move those provisional
+            # records into the candidate ledger once and retire the old rows so findings
+            # once again means a proof-promoted security result. The migration deliberately
+            # excludes exploited rows: those already crossed the deterministic proof gate.
+            applied = await conn.fetchval(
+                "SELECT 1 FROM app_schema_migrations WHERE name = $1",
+                LEGACY_AUTONOMOUS_CANDIDATE_MIGRATION,
+            )
+            if not applied:
+                await conn.execute("""
+                    INSERT INTO investigation_candidates (
+                        plane, target_id, family, canonical_locus, title, claim,
+                        claimed_severity, evidence_refs, verifier_contract_id,
+                        verification_context, source_kind, fingerprint, status,
+                        created_by, first_seen_at, last_seen_at, created_at, updated_at
+                    )
+                    SELECT
+                        'web', f.target_id,
+                        COALESCE(NULLIF(f.evidence->>'family',''), 'unknown'),
+                        jsonb_strip_nulls(jsonb_build_object(
+                            'method', NULLIF(upper(COALESCE(f.evidence->>'method','')), ''),
+                            'route', COALESCE(NULLIF(f.evidence->>'route',''), NULLIF(f.url,'')),
+                            'parameter', NULLIF(f.evidence->>'param','')
+                        )),
+                        f.title, COALESCE(NULLIF(f.description,''), f.title),
+                        CASE WHEN f.severity IN ('critical','high','medium','low','info')
+                             THEN f.severity ELSE 'info' END,
+                        CASE WHEN jsonb_typeof(f.evidence->'evidence_refs')='array'
+                             THEN f.evidence->'evidence_refs' ELSE '[]'::jsonb END,
+                        CASE WHEN NULLIF(f.evidence->>'retest_type','') IS NOT NULL
+                             THEN 'web.' || lower(f.evidence->>'retest_type') ELSE NULL END,
+                        jsonb_build_object(
+                            'legacy_finding_id', f.id::text,
+                            'target_url', f.url,
+                            'method', f.evidence->>'method',
+                            'route', f.evidence->>'route',
+                            'parameter', f.evidence->>'param',
+                            'payload', f.evidence->>'payload',
+                            'retest_type', f.evidence->>'retest_type',
+                            'proof', f.evidence->'proof',
+                            'remediation', f.evidence->'remediation',
+                            'evidence', f.evidence
+                        ),
+                        'legacy_deep_hunt',
+                        md5('legacy-autonomous-candidate:' || f.id::text)
+                            || md5('legacy-autonomous-candidate:v2:' || f.id::text),
+                        CASE
+                            WHEN f.last_verification_status IN ('queued','running')
+                                THEN 'inconclusive'
+                            ELSE 'new'
+                        END,
+                        'schema_migration',
+                        COALESCE(f.first_seen_at, f.created_at, NOW()),
+                        COALESCE(f.last_seen_at, f.updated_at, NOW()),
+                        COALESCE(f.created_at, NOW()), NOW()
+                    FROM findings f
+                    WHERE f.target_id IS NOT NULL
+                      AND f.source='autonomous'
+                      AND f.tool='autonomous_agent'
+                      AND COALESCE(f.last_verification_verdict,'') <> 'exploited'
+                    ON CONFLICT (fingerprint) DO NOTHING
+                """)
+                await conn.execute("""
+                    UPDATE findings
+                    SET status='resolved', resolved_at=COALESCE(resolved_at,NOW()),
+                        notes=concat_ws(E'\n', NULLIF(notes,''),
+                            'Migrated to Investigation Candidates; this unverified claim is not a finding.'),
+                        updated_at=NOW()
+                    WHERE target_id IS NOT NULL
+                      AND source='autonomous'
+                      AND tool='autonomous_agent'
+                      AND COALESCE(last_verification_verdict,'') <> 'exploited'
+                      AND status='active'
+                """)
+                await conn.execute(
+                    "INSERT INTO app_schema_migrations(name) VALUES ($1) ON CONFLICT DO NOTHING",
+                    LEGACY_AUTONOMOUS_CANDIDATE_MIGRATION,
+                )
             await conn.execute("""
                 UPDATE scans SET run_kind = 'web_dast'
                 WHERE run_kind IS NULL
@@ -4041,8 +4121,9 @@ def build_retest_job_payload(
     *,
     job_id: str,
     verification_id: str,
-    finding_id: str,
     submitted_at: str,
+    finding_id: str | None = None,
+    candidate_id: str | None = None,
     trigger: str | None = None,
     attempt: int = 1,
 ) -> dict[str, Any]:
@@ -4051,10 +4132,13 @@ def build_retest_job_payload(
         "queue_schema_version": RETEST_QUEUE_SCHEMA_VERSION,
         "job_id": str(job_id),
         "verification_id": str(verification_id),
-        "finding_id": str(finding_id),
         "submitted_at": str(submitted_at),
         "attempt": max(1, int(attempt)),
     }
+    if finding_id:
+        payload["finding_id"] = str(finding_id)
+    if candidate_id:
+        payload["candidate_id"] = str(candidate_id)
     if trigger:
         payload["trigger"] = str(trigger)
     return payload
@@ -4075,12 +4159,18 @@ def validate_retest_job_payload(payload: Any) -> tuple[bool, str]:
     if schema_version_int != RETEST_QUEUE_SCHEMA_VERSION:
         return False, "unsupported_queue_schema_version"
 
-    for field in ("job_id", "verification_id", "finding_id", "submitted_at"):
+    for field in ("job_id", "verification_id", "submitted_at"):
         value = payload.get(field)
         if not isinstance(value, str) or not value.strip():
             return False, f"missing_{field}"
 
-    for field in ("verification_id", "finding_id"):
+    if not payload.get("finding_id") and not payload.get("candidate_id"):
+        return False, "missing_retest_subject"
+    if payload.get("finding_id") and payload.get("candidate_id"):
+        return False, "ambiguous_retest_subject"
+    for field in ("verification_id", "finding_id", "candidate_id"):
+        if not payload.get(field):
+            continue
         try:
             uuid.UUID(str(payload[field]))
         except (ValueError, TypeError):

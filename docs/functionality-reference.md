@@ -846,10 +846,11 @@ report reserved traffic, exact settled traffic when the scanner exposes it, and 
 traffic otherwise. Scanner subprocesses run on the worker plane, which independently rebuilds fixed
 argv and revalidates the target host; the API never spawns them. Model-token budgets bound the configured-provider loop only; a keyless
 session uses its token budget to size the seed context pack, because the server cannot meter an
-external coding agent's tokens. A debrief can persist only evidence-backed **Suspected** findings;
-each is paired with a durable non-authoritative candidate whose lifecycle is linked to the server
-verification record and typed evidence. Supported families reach **Verified** only through
-server-run deterministic proof. The compatibility `/research/*`
+external coding agent's tokens. A debrief persists evidence-backed claims only as durable,
+non-authoritative investigation candidates outside the findings table. Candidate lifecycle is linked
+to the server verification record and typed evidence. A finding is materialized only after a
+supported family reaches **Verified** through server-run deterministic proof. Legacy unverified
+`autonomous_agent` rows are migrated into the candidate ledger and retired. The compatibility `/research/*`
 controller remains available for specialized guided verification and is not the Deep Hunt launcher.
 
 Web target identity is host-level: scheme and port variants share one target record and durable
@@ -884,8 +885,8 @@ audited sensitive access only when the server policy allows it.
 
 ## 12. Cross-cutting: findings, exposure graph, workers, queue
 
-**Findings lifecycle**: every DAST, connected-device, Deep Hunt, Interactive, AI Gate, ASM, manual, and model-intake
-result lands in one
+**Findings lifecycle**: every proof-promoted DAST, connected-device, Deep Hunt, Interactive, AI Gate,
+ASM, manual, and model-intake result lands in one
 `findings` table, de-duplicated by `(target_id, fingerprint)`. Findings have a status
 (`active` / `resolved` / `false_positive` / `accepted_risk`), CVSS, CWE/OWASP tags, evidence,
 optional AI verdict fields, and verification history. The UI exposes DAST, Deep Hunt, Interactive,
@@ -1371,7 +1372,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Scanner wrapper commands | 28 | `scanner.sh` |
 | Make targets | 13 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
-| Runtime environment keys | 341 | Python sources + Compose manifests |
+| Runtime environment keys | 344 | Python sources + Compose manifests |
 | Scanner modules | 111 | `scanner/scanner_tools/` |
 | UI pages | 35 | `ui/src/app/` |
 | Skills | 8 | `skills/` |
@@ -2034,6 +2035,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | Environment key | Referenced by |
 |---|---|
 | `ABUSEIPDB_API_KEY` | `scanner/scanner.py` |
+| `AGENT_TOOL_QUEUE_NAME` | `api/api.py`, `api/worker.py` |
 | `AI_API_KEY` | `api/ai_gate_scan.py`, `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner.py` |
 | `AI_CLASSIFY_CHAIN_BUDGET_SECONDS` | `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner_tools/ai_classifier.py` |
 | `AI_CLASSIFY_CIRCUIT_COOLDOWN_SECONDS` | `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner_tools/ai_classifier.py` |
@@ -2113,8 +2115,8 @@ Only key names and declaring sources are documented; secret values are never rea
 | `DATABASE_URL` | `api/api.py`, `api/gungnir_worker.py`, `api/model_intake_signer_service.py`, `api/worker.py`, `scanner/gungnir_worker.py`, `scripts/model_intake_workflow_smoke.py`, `scripts/upgrade_schema_smoke.py` |
 | `DEFAULT_ASM_ENABLED` | `api/api.py` |
 | `DEFAULT_RESEARCH_PLANNER_MODE` | `api/api.py` |
-| `DEVICE_INTEL_DB_PATH` | `api/device_agent.py` |
-| `DEVICE_INTEL_DB_SHA256` | `api/device_agent.py` |
+| `DEVICE_INTEL_DB_PATH` | `api/api.py`, `api/device_agent.py`, `api/worker.py` |
+| `DEVICE_INTEL_DB_SHA256` | `api/api.py`, `api/device_agent.py`, `api/worker.py` |
 | `DEVICE_ONLY_WORKER` | `api/worker.py` |
 | `DEVICE_POSTURE_ENABLED` | `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `DEVICE_QUEUE_NAME` | `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
@@ -2301,6 +2303,8 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SCAN_SETTINGS_KEY` | `api/api.py` |
 | `SCAN_SHUTDOWN_GRACE_SECONDS` | `scanner/scanner.py` |
 | `SCAN_VERIFICATION_MAX` | `scanner/scanner.py` |
+| `SHAKERSCAN_AGENT_TOOL_OUTPUT_BYTES` | `api/worker.py` |
+| `SHAKERSCAN_AGENT_TOOL_RESULT_TTL_SECONDS` | `api/worker.py` |
 | `SHAKERSCAN_API_PORT` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_API_URL` | `api/model_intake_admission_webhook.py`, `scripts/shakerscan_mcp.py` |
 | `SHAKERSCAN_ASM_DISPATCH_INTERVAL` | `api/api.py` |

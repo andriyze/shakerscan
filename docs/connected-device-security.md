@@ -300,15 +300,21 @@ propose remote-device SSH commands; confirmation is not a planner tool. Sessions
 36 tool actions, six calls per turn, and three queued scans. Concurrent agent sessions and concurrent
 device scans for the same device fail closed.
 
-Device Hunt cannot create authoritative findings. A final AI debrief may retain evidence-backed,
+Device Hunt cannot create authoritative findings directly. A final AI debrief may retain evidence-backed,
 typed candidates only when they cite real `devref_N` references created by device context,
 scan-result, or evidence-graph reads. Candidates have a durable lifecycle (`new`, queued/verifying,
 verified, refuted, inconclusive, blocked, or expired), a canonical device locus, and a registered
 verifier contract; notes, queue acknowledgements, and model prose are not proof. The
-`verify_candidate` tool resolves scope and probe inputs from the persisted candidate. The first
-promotion path covers policy-denied service exposure: only a fresh protocol-level open observation,
-the persisted deny disposition, a healthy safety receipt, and a satisfied server-owned Proof Contract
-v2 can atomically create the device finding, verification record, and typed evidence instance.
+`verify_candidate` tool resolves scope and probe inputs from the persisted candidate. Registered
+server-owned verifiers cover policy-denied service exposure, strict TLS identity failure,
+authenticated-versus-anonymous imported-request equivalence with a negative control, pinned-host-key
+SSH policy violations, and exact CPE/version matches against a SHA-256-pinned offline advisory
+snapshot. Each promotion requires fresh or hash-pinned deterministic evidence satisfying Proof
+Contract v2 before it can create a device finding, verification record, and typed evidence instance.
+Control-authorization claims abstain and remain blocked unless an exact before/after/cleanup contract
+exists; Device Hunt never invents a safe mutation. Every posture scan re-correlates the pinned
+advisory snapshot, and resolves an old advisory finding only when the same service locus was observed
+again and no longer matches. Silence is never treated as remediation.
 
 ## Wireless and non-IP extensions
 

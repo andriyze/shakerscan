@@ -2,8 +2,71 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 import re
+import stat
 from typing import Any
+
+
+MAX_SNAPSHOT_BYTES = 32 * 1024 * 1024
+
+
+def load_verified_snapshot(
+    path: Any, expected_sha256: Any, *, max_bytes: int = MAX_SNAPSHOT_BYTES,
+) -> dict[str, Any]:
+    """Load a regular, no-symlink advisory snapshot only when its pinned digest matches."""
+    location = str(path or "").strip()
+    expected = str(expected_sha256 or "").strip().lower()
+    if not location:
+        return {"status": "not_configured", "advisories": []}
+    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+        return {"status": "untrusted_snapshot", "advisories": [], "error": "sha256_required"}
+    descriptor: int | None = None
+    try:
+        flags = os.O_RDONLY | (getattr(os, "O_NOFOLLOW", 0))
+        descriptor = os.open(location, flags)
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            return {"status": "unavailable", "advisories": [], "error": "not_regular_file"}
+        if before.st_size > max(1, int(max_bytes)):
+            return {
+                "status": "snapshot_too_large", "advisories": [],
+                "size_bytes": before.st_size, "max_bytes": max_bytes,
+            }
+        raw = bytearray()
+        while len(raw) <= max_bytes:
+            chunk = os.read(descriptor, min(1024 * 1024, max_bytes + 1 - len(raw)))
+            if not chunk:
+                break
+            raw.extend(chunk)
+        after = os.fstat(descriptor)
+        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+            after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns
+        ):
+            return {"status": "unavailable", "advisories": [], "error": "snapshot_changed_during_read"}
+        if len(raw) > max_bytes:
+            return {"status": "snapshot_too_large", "advisories": [], "size_bytes": len(raw), "max_bytes": max_bytes}
+        actual = hashlib.sha256(raw).hexdigest()
+        if actual != expected:
+            return {
+                "status": "integrity_mismatch", "advisories": [],
+                "expected_sha256": expected, "actual_sha256": actual,
+            }
+        decoded = json.loads(bytes(raw).decode("utf-8"))
+        records = decoded if isinstance(decoded, list) else decoded.get("advisories", []) if isinstance(decoded, dict) else []
+        records = [item for item in records if isinstance(item, dict)][:100_000]
+        return {
+            "status": "available", "advisories": records,
+            "snapshot_sha256": actual, "record_count": len(records),
+            "generated_at": decoded.get("generated_at") if isinstance(decoded, dict) else None,
+        }
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+        return {"status": "unavailable", "advisories": [], "error": type(exc).__name__}
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 def _version_parts(value: Any) -> tuple[tuple[int, Any], ...]:

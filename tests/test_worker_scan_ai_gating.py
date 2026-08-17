@@ -2623,6 +2623,210 @@ def test_agent_scanner_tool_job_refuses_cross_host_without_spawning(monkeypatch)
     }
 
 
+class _CandidateProofConn:
+    def __init__(self, locus, contract_id):
+        self.locus = locus
+        self.contract_id = contract_id
+
+    async def fetchrow(self, _query, *_args):
+        return {"canonical_locus": self.locus, "verifier_contract_id": self.contract_id}
+
+
+class _CandidateProofPool:
+    def __init__(self, locus, contract_id):
+        self.conn = _CandidateProofConn(locus, contract_id)
+
+    def acquire(self):
+        return self
+
+    async def __aenter__(self):
+        return self.conn
+
+    async def __aexit__(self, *_args):
+        return False
+
+
+def test_device_tls_candidate_requires_fresh_strict_identity_failure(monkeypatch):
+    candidate_id = "11111111-1111-4111-8111-111111111111"
+    monkeypatch.setattr(worker, "db_pool", _CandidateProofPool(
+        {"scheme": "https", "port": 8443}, "device.tls",
+    ))
+    result = {
+        "device_posture": {
+            "web_dast_children": {"children": [{
+                "origin": "https://tv.example.test:8443",
+                "tls_assessment": {"trusted": False, "verification_error": "unknown CA"},
+            }]},
+        },
+        "findings": [],
+    }
+    settlement = asyncio.run(worker.prepare_device_candidate_posture_result(
+        result=result,
+        options={"candidate_id": candidate_id, "proof_contract_id": "device.tls"},
+        device_target_id="22222222-2222-4222-8222-222222222222",
+        target="tv.example.test",
+    ))
+    assert settlement["status"] == "verified"
+    assert settlement["proof"]["family"] == "device_tls"
+    assert result["findings"][-1]["tool"] == "device_candidate_verifier"
+
+
+def test_device_auth_candidate_requires_bound_negative_control(monkeypatch):
+    candidate_id = "11111111-1111-4111-8111-111111111112"
+    monkeypatch.setattr(worker, "db_pool", _CandidateProofPool(
+        {"collection_id": "collection-1", "request_id": "request-1"},
+        "device.auth_bypass",
+    ))
+    result = {"device_posture": {}, "findings": [{
+        "tool": "device_request_dast",
+        "url": "https://tv.example.test/api/private",
+        "evidence": {
+            "collection_id": "collection-1", "request_id": "request-1",
+            "authenticated_status": 200, "anonymous_status": 200,
+            "response_match": True,
+            "authenticated_body_sha256": "a" * 64,
+            "anonymous_body_sha256": "a" * 64,
+            "negative_control_status": 404,
+            "negative_control_differs": True,
+            "generic_response_shell": False,
+        },
+    }]}
+    settlement = asyncio.run(worker.prepare_device_candidate_posture_result(
+        result=result,
+        options={"candidate_id": candidate_id, "proof_contract_id": "device.auth_bypass"},
+        device_target_id="22222222-2222-4222-8222-222222222222",
+        target="tv.example.test",
+    ))
+    assert settlement["status"] == "verified"
+    assert settlement["proof"]["proof_basis"] == "authenticated_anonymous_negative_control"
+
+
+def test_device_ssh_candidate_requires_pin_negotiation_and_policy_violation(monkeypatch):
+    candidate_id = "11111111-1111-4111-8111-111111111113"
+    pinned = "SHA256:" + "a" * 43
+    monkeypatch.setattr(worker, "db_pool", _CandidateProofPool(
+        {"transport": "tcp", "port": 22}, "device.ssh_posture",
+    ))
+    result = {"device_posture": {"services": [{
+        "transport": "tcp", "port": 22, "policy_disposition": "require",
+        "policy_reason": "SSH negotiated a weak cryptographic algorithm.",
+        "ssh": {
+            "scan_completed": True,
+            "host_key": {"fingerprint_sha256": pinned},
+            "negotiated_algorithms": {"cipher_in": "3des-cbc"},
+            "weak_algorithms": ["cipher:3des-cbc"],
+        },
+    }]}, "findings": []}
+    settlement = asyncio.run(worker.prepare_device_candidate_posture_result(
+        result=result,
+        options={
+            "candidate_id": candidate_id,
+            "proof_contract_id": "device.ssh_posture",
+            "expected_ssh_host_keys": {"22": pinned},
+        },
+        device_target_id="22222222-2222-4222-8222-222222222222",
+        target="tv.example.test",
+    ))
+    assert settlement["status"] == "verified"
+    assert settlement["proof"]["family"] == "device_ssh_posture"
+
+
+def test_nonpromoted_device_candidate_settlement_is_durable():
+    verification_id = uuid.uuid4()
+
+    class _Conn:
+        def __init__(self):
+            self.executed = []
+
+        async def fetchval(self, query, *_args):
+            assert "INSERT INTO finding_verifications" in query
+            return verification_id
+
+        async def execute(self, query, *args):
+            self.executed.append((query, args))
+            return "OK"
+
+    conn = _Conn()
+    proof = {
+        "family": "device_tls",
+        "contract_id": "device.tls",
+        "contract_version": "1.0.0",
+        "proof_basis": "strict_tls_handshake",
+        "verdict": "refuted",
+    }
+    result = asyncio.run(worker.persist_device_candidate_settlement(
+        conn,
+        scan_id="33333333-3333-4333-8333-333333333333",
+        device_target_id="22222222-2222-4222-8222-222222222222",
+        settlement={
+            "candidate_id": "11111111-1111-4111-8111-111111111111",
+            "status": "refuted",
+            "proof": proof,
+            "gate_reason": "strict handshake succeeded",
+        },
+    ))
+
+    assert result == verification_id
+    assert any("INSERT INTO evidence_instances" in query for query, _ in conn.executed)
+    assert any("latest_verification_id" in query for query, _ in conn.executed)
+
+
+def test_device_advisory_lifecycle_resolves_only_an_observed_stale_service(monkeypatch):
+    prior_candidate_id = uuid.uuid4()
+
+    class _Conn:
+        def __init__(self):
+            self.executed = []
+
+        async def fetch(self, query, *_args):
+            assert "family='device_firmware_advisory'" in query
+            return [{
+                "id": prior_candidate_id,
+                "canonical_locus": {"transport": "tcp", "port": 443},
+            }]
+
+        async def execute(self, query, *args):
+            self.executed.append((query, args))
+            return "OK"
+
+        async def fetchval(self, query, *_args):
+            assert "UPDATE findings" in query
+            return 1
+
+    class _Pool:
+        def __init__(self):
+            self.conn = _Conn()
+
+        def acquire(self):
+            return self
+
+        async def __aenter__(self):
+            return self.conn
+
+        async def __aexit__(self, *_args):
+            return False
+
+    pool = _Pool()
+    monkeypatch.setattr(worker, "db_pool", pool)
+    monkeypatch.setattr(worker.device_advisories, "load_verified_snapshot", lambda *_args: {
+        "status": "available", "snapshot_sha256": "a" * 64,
+        "generated_at": "2026-08-16T00:00:00Z", "advisories": [],
+    })
+    result = {"device_posture": {"services": [{
+        "transport": "tcp", "port": 443, "state": "open",
+        "service_name": "https", "product": "fixed-product", "version": "2.0",
+        "cpe": "cpe:2.3:a:vendor:fixed-product:2.0:*:*:*:*:*:*:*",
+    }]}, "findings": []}
+
+    summary = asyncio.run(worker.correlate_device_advisory_lifecycle(
+        result=result,
+        device_target_id="22222222-2222-4222-8222-222222222222",
+    ))
+
+    assert summary["resolved_stale_matches"] == 1
+    assert any("status='refuted'" in query for query, _ in pool.conn.executed)
+
+
 def test_run_scan_maps_explicit_standard_to_standard_flag(monkeypatch):
     captured = {}
 

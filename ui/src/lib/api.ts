@@ -3971,6 +3971,7 @@ export interface AgentSuspectedFinding {
   family: string | null
   net_new_vs_known: boolean | null
   trust_tier: string
+  candidate_status?: InvestigationCandidateStatus
 }
 
 export interface AgentTwoTierFindings {
@@ -3981,6 +3982,7 @@ export interface AgentTwoTierFindings {
 
 export interface AgentVerifyResult {
   finding_id: string
+  candidate_id?: string
   verified: boolean
   verified_finding_id: string | null
   upgraded_in_place?: boolean

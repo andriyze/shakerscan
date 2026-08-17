@@ -247,7 +247,7 @@ function DeepHuntPage() {
           <div className="flex items-center gap-2 text-sm text-blue-300"><Compass className="h-4 w-4" />AI Investigator</div>
           <h1 className="mt-1 text-2xl font-bold tracking-tight text-white">Deep Hunt</h1>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-gray-400">
-            Your coding agent explores freely, runs bounded active probes, and backs every claim with real tool output. Evidence-backed leads begin <span className="text-amber-300">suspected</span>; supported proof workflows promote them to <span className="text-emerald-300">verified</span>.
+            Your coding agent explores freely, runs bounded active probes, and backs every claim with real tool output. Evidence-backed leads remain non-authoritative <span className="text-amber-300">candidates</span>; supported proof workflows create <span className="text-emerald-300">verified findings</span>.
           </p>
         </div>
         <div className="flex flex-col items-start gap-1.5 sm:items-end">
@@ -645,8 +645,8 @@ function TwoTierFindings({
         <Card className="p-4">
           <div className="mb-3 flex items-center gap-2">
             <span className="h-2 w-2 rounded-full bg-amber-400" />
-            <h3 className="text-sm font-semibold text-white">Suspected</h3>
-            <span className="text-xs text-gray-500">agent leads, not yet proven</span>
+            <h3 className="text-sm font-semibold text-white">Candidates</h3>
+            <span className="text-xs text-gray-500">isolated from findings until proven</span>
           </div>
           {suspected.length ? (
             <div className="divide-y divide-gray-800">
@@ -654,8 +654,8 @@ function TwoTierFindings({
                 <div key={finding.id} className="flex items-center gap-3 py-2">
                   <SeverityBadge severity={finding.severity} />
                   <div className="min-w-0 flex-1">
-                    <Link href={`/findings/${finding.id}`} className="block truncate text-sm text-gray-200 hover:text-white">{finding.title}</Link>
-                    {finding.family ? <span className="text-[11px] text-gray-500">{finding.family.replace(/_/g, ' ')}{finding.net_new_vs_known ? ' · net-new' : ''}</span> : null}
+                    <span className="block truncate text-sm text-gray-200">{finding.title}</span>
+                    {finding.family ? <span className="text-[11px] text-gray-500">{finding.family.replace(/_/g, ' ')}{finding.net_new_vs_known ? ' · net-new' : ''}{finding.candidate_status ? ` · ${finding.candidate_status.replace(/_/g, ' ')}` : ''}</span> : null}
                   </div>
                   <Button
                     variant="secondary"
@@ -670,7 +670,7 @@ function TwoTierFindings({
               ))}
             </div>
           ) : (
-            <p className="py-6 text-center text-xs text-gray-600">No suspected leads yet.</p>
+            <p className="py-6 text-center text-xs text-gray-600">No investigation candidates yet.</p>
           )}
         </Card>
       </div>

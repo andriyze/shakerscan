@@ -148,23 +148,23 @@ investigation candidate keyed by target, family, and canonical operation. Suppor
 are linked to the existing deterministic retest pipeline; its final verdict updates the candidate
 lifecycle and writes a typed evidence instance. The model cannot perform that transition.
 
-## The verification bridge (SUSPECTED → VERIFIED)
+## The verification bridge (candidate → VERIFIED finding)
 
 Three promotion paths, routed by family. The paths differ in what supplies the verdict, never in who
 may assert it — the server always does.
 
 | Path | Families | Mechanism |
 |---|---|---|
-| **A — deterministic DAST retest** | xss, sqli, nosqli, ssrf, path_traversal, open_redirect, ssti, command_injection, cors (route-only) | The SUSPECTED lead carries `retest_type` + `param` + `payload` in evidence; it is auto-queued as a `deterministic` retest job. The worker prover is the **sole arbiter**; the finding stays SUSPECTED until the prover writes `verdict='exploited'`. The model supplies only the injection point, never a verdict. |
+| **A — deterministic DAST retest** | xss, sqli, nosqli, ssrf, path_traversal, open_redirect, ssti, command_injection, cors (route-only) | The candidate carries `retest_type` + `param` + `payload` in its verification context and is auto-queued as a `deterministic` retest job. The worker prover is the **sole arbiter**; no finding exists until the prover writes `verdict='exploited'`. The model supplies only the injection point, never a verdict. |
 | **B — family_proof moat** | bola, auth_bypass, data_exposure, mass_assignment | A two-run workflow dispatched through the unchanged arsenal moat (distinct-principal / control differential), guarded by a cross-process advisory lock. |
-| **C — invariant contract** | access_control, field_constraint, workflow | Uses the same moat machinery as B, but the predicate comes from an operator-**approved** `target_invariant_contracts` row (`source="invariant"`). **No approved contract → HTTP 422 → the finding stays SUSPECTED.** The server never guesses policy; a draft contract cannot promote. The `workflow_transition` contract requires a `probe_state` at approval time. |
+| **C — invariant contract** | access_control, field_constraint, workflow | Uses the same moat machinery as B, but the predicate comes from an operator-**approved** `target_invariant_contracts` row (`source="invariant"`). **No approved contract → HTTP 422 → the candidate remains non-authoritative.** The server never guesses policy; a draft contract cannot promote. The `workflow_transition` contract requires a `probe_state` at approval time. |
 
 ### `family` is a closed vocabulary
 
 A debrief's `family` must be a value some promoter accepts — the moat set above, or a Path-A DAST
 type. `agent_text_toolcalls.ADVERTISED_FAMILIES` is that vocabulary, and the rendered contract
 enumerates it exactly (no open `…`). A family outside it passes the provenance gate, persists as
-SUSPECTED, and can then never be promoted by any path.
+as a non-authoritative candidate, and can then never be promoted by any path.
 
 Two spellings the system itself used to invite are the reason this is pinned by
 `test_every_advertised_debrief_family_is_promotable`, which asserts the contract and the promoters

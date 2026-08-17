@@ -687,12 +687,40 @@ async def _run_imported_requests(
                         and hashlib.sha256(anonymous_body).digest() == hashlib.sha256(response_body).digest()
                         and len(anonymous_body) == len(response_body)
                     ):
+                        negative_path = (
+                            "/.shakerscan-auth-negative-"
+                            + hashlib.sha256(
+                                f"{collection_id}:{imported.get('id')}".encode()
+                            ).hexdigest()[:16]
+                        )
+                        negative = await _cancelable_request(
+                            cancel_check,
+                            connect_address=connect_address, hostname=hostname, port=port, scheme=scheme,
+                            method="GET", path=negative_path, headers=stripped_headers, body=b"",
+                            timeout=min(8.0, max(0.1, deadline - time.monotonic())),
+                        )
+                        negative_body = bytes(negative.get("body") or b"")
+                        negative_differs = bool(
+                            int(negative.get("status") or 0) != int(anonymous.get("status") or 0)
+                            or hashlib.sha256(negative_body).digest() != hashlib.sha256(anonymous_body).digest()
+                        )
                         findings.append(_request_finding(
                             title="Imported authenticated request also succeeds without credentials", severity="medium",
                             description="Removing imported authorization material produced the same successful response. This may indicate a public endpoint or missing access control and requires review.",
                             recommendation="Confirm whether this endpoint is intentionally public; otherwise enforce authentication and authorization server-side.",
                             url=request_url, collection_id=collection_id, request_id=str(imported.get("id") or ""),
-                            evidence={"method": method, "authenticated_status": observation["status"], "anonymous_status": int(anonymous.get("status") or 0), "response_match": True, "verdict": "review_required"},
+                            evidence={
+                                "method": method,
+                                "authenticated_status": observation["status"],
+                                "anonymous_status": int(anonymous.get("status") or 0),
+                                "response_match": True,
+                                "authenticated_body_sha256": hashlib.sha256(response_body).hexdigest(),
+                                "anonymous_body_sha256": hashlib.sha256(anonymous_body).hexdigest(),
+                                "negative_control_status": int(negative.get("status") or 0),
+                                "negative_control_differs": negative_differs,
+                                "generic_response_shell": not negative_differs,
+                                "verdict": "review_required",
+                            },
                         ))
                 except Exception:
                     pass

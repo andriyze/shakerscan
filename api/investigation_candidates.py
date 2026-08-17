@@ -18,6 +18,15 @@ STATUSES = frozenset({
 })
 SEVERITIES = frozenset({"critical", "high", "medium", "low", "info"})
 
+DEVICE_VERIFIER_CONTRACTS: dict[str, str] = {
+    "device_service_exposure": "device.service_exposure",
+    "device_tls": "device.tls",
+    "device_auth_bypass": "device.auth_bypass",
+    "device_control_authorization": "device.control_authorization",
+    "device_firmware_advisory": "device.firmware_advisory",
+    "device_ssh_posture": "device.ssh_posture",
+}
+
 
 def canonical_family(value: Any) -> str:
     normalized = str(value or "unknown").strip().lower().replace("-", "_").replace(" ", "_")
@@ -26,6 +35,11 @@ def canonical_family(value: Any) -> str:
         "sql_injection": "sqli",
         "cross_site_scripting": "xss",
         "information_disclosure": "data_exposure",
+        "service_exposure": "device_service_exposure",
+        "tls": "device_tls",
+        "firmware_advisory": "device_firmware_advisory",
+        "ssh_posture": "device_ssh_posture",
+        "control_authorization": "device_control_authorization",
     }
     return aliases.get(normalized, normalized)[:80] or "unknown"
 
@@ -34,7 +48,9 @@ def canonical_locus(value: Any) -> dict[str, Any]:
     source = value if isinstance(value, dict) else {}
     allowed = (
         "method", "route", "url", "parameter", "object_id", "transport", "port",
-        "service_name", "operation_id", "capability_id",
+        "service_name", "operation_id", "capability_id", "scheme",
+        "collection_id", "request_id", "advisory_id", "cpe", "version",
+        "host_key_fingerprint",
     )
     result: dict[str, Any] = {}
     for key in allowed:
@@ -105,6 +121,15 @@ def normalize_candidate(
     ))[:100]
     normalized_locus = canonical_locus(locus)
     normalized_family = canonical_family(family)
+    if normalized_plane == "device":
+        normalized_family = {
+            "auth_bypass": "device_auth_bypass",
+        }.get(normalized_family, normalized_family)
+    normalized_verifier = (
+        DEVICE_VERIFIER_CONTRACTS.get(normalized_family)
+        if normalized_plane == "device"
+        else (str(verifier_contract_id).strip()[:160] if verifier_contract_id else None)
+    )
     return {
         "plane": normalized_plane,
         "target_id": str(target_id) if target_id else None,
@@ -117,9 +142,7 @@ def normalize_candidate(
         "claim": str(claim or title or "Investigation candidate").strip()[:8000],
         "claimed_severity": normalized_severity,
         "evidence_refs": refs,
-        "verifier_contract_id": (
-            str(verifier_contract_id).strip()[:160] if verifier_contract_id else None
-        ),
+        "verifier_contract_id": normalized_verifier,
         "source_kind": str(source_kind or "hunt").strip()[:80],
         "fingerprint": candidate_fingerprint(
             plane=normalized_plane,
@@ -149,7 +172,7 @@ async def upsert_candidate(conn: Any, candidate: dict[str, Any], *, created_by: 
                verifier_contract_id=COALESCE(EXCLUDED.verifier_contract_id, investigation_candidates.verifier_contract_id),
                last_seen_at=NOW(),
                updated_at=NOW()
-           RETURNING id, status, fingerprint, created_at, updated_at""",
+           RETURNING id, status, fingerprint, created_at, updated_at, (xmax = 0) AS inserted""",
         candidate["plane"], candidate.get("target_id"), candidate.get("device_target_id"),
         candidate.get("research_episode_id"), candidate.get("device_agent_run_id"),
         candidate["family"], json.dumps(candidate["canonical_locus"]), candidate["title"],
@@ -161,5 +184,6 @@ async def upsert_candidate(conn: Any, candidate: dict[str, Any], *, created_by: 
         "id": str(row["id"]),
         "status": str(row["status"]),
         "fingerprint": str(row["fingerprint"]),
+        "inserted": bool(row.get("inserted", False)),
         "authoritative": False,
     }

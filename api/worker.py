@@ -56,6 +56,7 @@ import parallel_scan
 import asm_inventory
 import family_proof
 import agent_tools
+import investigation_candidates
 from model_intake_admissions import persist_from_result as persist_model_intake_admission
 from job_queue import (
     DEFAULT_WORKER_TOOL_COMMANDS,
@@ -75,6 +76,7 @@ try:
     )
     from scanner_tools.build_fingerprint import hash_source_files, runtime_file_map
     from scanner_tools.device_web import run_pinned_device_web_scan
+    from scanner_tools import device_advisories
 except ModuleNotFoundError:
     from scanner.scanner_tools.attempt_telemetry import (
         endpoint_attempt_schema_from_report,
@@ -82,6 +84,7 @@ except ModuleNotFoundError:
     )
     from scanner.scanner_tools.build_fingerprint import hash_source_files, runtime_file_map
     from scanner.scanner_tools.device_web import run_pinned_device_web_scan
+    from scanner.scanner_tools import device_advisories
 from evidence_storage import serialize_evidence_content, store_evidence_content
 from artifact_storage import (
     ArtifactStorageError,
@@ -3980,13 +3983,13 @@ async def save_device_findings(
                                ) VALUES (
                                    $1,$2,$3,$4,'device_candidate_verifier','completed','success',
                                    'verified','Server-owned proof contract satisfied',
-                                   'device_service_exposure',$5,$5,$6::jsonb,1.00,
+                                   $10,$5,$5,$6::jsonb,1.00,
                                    'deterministic',$7,$8,$9,NOW(),NOW(),NOW()
                                ) RETURNING id""",
                             finding_id, candidate_uuid, scan_uuid, device_uuid,
                             str(finding.get("url") or f"device://{device_target_id}"),
                             json.dumps(proof), proof.get("contract_id"), proof.get("contract_version"),
-                            proof.get("proof_basis"),
+                            proof.get("proof_basis"), str(proof.get("family") or "device_candidate"),
                         )
                         proof_hash = hashlib.sha256(
                             json.dumps(proof, sort_keys=True, separators=(",", ":")).encode()
@@ -4172,6 +4175,504 @@ async def prepare_device_candidate_probe_result(
         ).hexdigest()
         result.setdefault("findings", []).append(finding)
     return settlement
+
+
+async def prepare_device_candidate_posture_result(
+    *, result: dict[str, Any], options: dict[str, Any], device_target_id: str, target: str,
+) -> dict[str, Any] | None:
+    """Evaluate TLS, imported-request auth, or SSH candidates from one fresh posture run."""
+    candidate_id = str((options or {}).get("candidate_id") or "").strip()
+    contract_id = str((options or {}).get("proof_contract_id") or "").strip()
+    contract_families = {
+        "device.tls": "device_tls",
+        "device.auth_bypass": "device_auth_bypass",
+        "device.ssh_posture": "device_ssh_posture",
+    }
+    family = contract_families.get(contract_id)
+    if not candidate_id or not family:
+        return None
+    try:
+        candidate_uuid = uuid.UUID(candidate_id)
+        device_uuid = uuid.UUID(device_target_id)
+    except ValueError:
+        return None
+    async with db_pool.acquire() as conn:
+        candidate = await conn.fetchrow(
+            """SELECT canonical_locus, verifier_contract_id
+               FROM investigation_candidates
+               WHERE id=$1 AND plane='device' AND device_target_id=$2""",
+            candidate_uuid, device_uuid,
+        )
+    if not candidate or str(candidate["verifier_contract_id"] or "") != contract_id:
+        return None
+    locus = parse_json_field(candidate["canonical_locus"]) or {}
+    posture = result.get("device_posture") if isinstance(result.get("device_posture"), dict) else {}
+    observations: list[dict[str, Any]] = []
+    controls: list[dict[str, Any]] = []
+    evidence: dict[str, Any] = {"reexecuted_at_handoff": True}
+    subject: dict[str, Any] = {"device_target_id": device_target_id}
+    title = "Connected-device candidate was deterministically verified"
+    description = "A fresh connected-device posture run satisfied the registered proof contract."
+    severity = "medium"
+    recommendation = "Review and remediate the verified connected-device control failure."
+    url = f"device://{device_target_id}"
+    proof_basis = "device_posture_observation"
+
+    if family == "device_tls":
+        children = ((posture.get("web_dast_children") or {}).get("children") or [])
+        expected_port = int(locus.get("port") or 0)
+        expected_scheme = str(locus.get("scheme") or "https").lower()
+        selected = None
+        for child in children:
+            if not isinstance(child, dict):
+                continue
+            parsed = urllib.parse.urlsplit(str(child.get("origin") or ""))
+            child_port = int(parsed.port or (443 if parsed.scheme == "https" else 80))
+            if parsed.scheme == expected_scheme and (not expected_port or child_port == expected_port):
+                selected = child
+                break
+        assessment = selected.get("tls_assessment") if isinstance(selected, dict) and isinstance(selected.get("tls_assessment"), dict) else {}
+        origin = str((selected or {}).get("origin") or "")
+        evidence.update({
+            "strict_handshake_failed": bool(assessment) and assessment.get("trusted") is False,
+            "endpoint_identity_bound": bool(selected and origin),
+            "recent_observation": bool(selected),
+            "strict_handshake_succeeded": assessment.get("trusted") is True,
+        })
+        subject.update({"origin": origin or None, "port": expected_port or None})
+        observations.append({"origin": origin or None, **assessment})
+        controls.append({"locus_matches": bool(selected), "pinned_destination": True})
+        title = "Device HTTPS identity verification failed"
+        description = "A fresh strict TLS handshake failed for the exact device HTTPS origin."
+        recommendation = "Install or pin a certificate trusted for the device hostname."
+        url = origin or url
+        proof_basis = "strict_tls_handshake"
+    elif family == "device_auth_bypass":
+        collection_id = str(locus.get("collection_id") or "")
+        request_id = str(locus.get("request_id") or "")
+        selected_finding = None
+        for finding in result.get("findings") or []:
+            if not isinstance(finding, dict) or str(finding.get("tool") or "") != "device_request_dast":
+                continue
+            finding_evidence = finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}
+            if collection_id and str(finding_evidence.get("collection_id") or "") != collection_id:
+                continue
+            if request_id and str(finding_evidence.get("request_id") or "") != request_id:
+                continue
+            if finding_evidence.get("response_match") is True:
+                selected_finding = finding
+                break
+        auth_evidence = selected_finding.get("evidence") if isinstance(selected_finding, dict) and isinstance(selected_finding.get("evidence"), dict) else {}
+        evidence.update({
+            "protected_resource_established": bool(
+                selected_finding
+                and 200 <= int(auth_evidence.get("authenticated_status") or 0) < 300
+                and collection_id
+                and request_id
+            ),
+            "anonymous_semantic_equivalence": bool(
+                auth_evidence.get("response_match")
+                and auth_evidence.get("authenticated_body_sha256")
+                == auth_evidence.get("anonymous_body_sha256")
+            ),
+            "negative_control": bool(auth_evidence.get("negative_control_differs")),
+            "anonymous_access_denied": int(auth_evidence.get("anonymous_status") or 0) in {401, 403},
+            "generic_response_shell": bool(auth_evidence.get("generic_response_shell")),
+        })
+        url = str((selected_finding or {}).get("url") or url)
+        subject.update({"collection_id": collection_id or None, "request_id": request_id or None, "url": url})
+        observations.append({key: auth_evidence.get(key) for key in (
+            "authenticated_status", "anonymous_status", "response_match",
+            "negative_control_status", "negative_control_differs",
+        )})
+        controls.append({"exact_collection_bound": bool(collection_id), "exact_request_bound": bool(request_id)})
+        title = "Device API authentication bypass reproduced"
+        description = "A bound imported authenticated request returned the same semantic response anonymously, while a negative route control differed."
+        recommendation = "Require authentication and authorization for the exact device API operation."
+        proof_basis = "authenticated_anonymous_negative_control"
+    else:
+        expected_port = int(locus.get("port") or 0)
+        service = next((
+            item for item in posture.get("services") or []
+            if isinstance(item, dict)
+            and str(item.get("transport") or "") == "tcp"
+            and int(item.get("port") or 0) == expected_port
+        ), None)
+        ssh = service.get("ssh") if isinstance(service, dict) and isinstance(service.get("ssh"), dict) else {}
+        host_key = ssh.get("host_key") if isinstance(ssh.get("host_key"), dict) else {}
+        actual_key = str(host_key.get("fingerprint_sha256") or "")
+        expected_key = str(
+            (options.get("expected_ssh_host_keys") or {}).get(str(expected_port)) or ""
+        )
+        weak_algorithms = list(ssh.get("weak_algorithms") or [])
+        policy_disposition = str((service or {}).get("policy_disposition") or "")
+        policy_reason = str((service or {}).get("policy_reason") or "")
+        violation = bool(
+            policy_disposition == "deny"
+            or (policy_disposition == "require" and weak_algorithms)
+            or (weak_algorithms and "weak" in policy_reason.lower())
+        )
+        evidence.update({
+            "pinned_host_key": bool(expected_key and actual_key == expected_key),
+            "negotiated_posture": bool(ssh.get("scan_completed") and ssh.get("negotiated_algorithms")),
+            "policy_violation": violation,
+            "policy_requirements_satisfied": bool(ssh.get("scan_completed") and not violation),
+            "host_key_changed": bool(expected_key and actual_key and actual_key != expected_key),
+        })
+        subject.update({"transport": "tcp", "port": expected_port, "host_key_fingerprint": actual_key or None})
+        observations.append({
+            "host_key_fingerprint": actual_key or None,
+            "negotiated_algorithms": ssh.get("negotiated_algorithms") or {},
+            "weak_algorithms": weak_algorithms,
+            "policy_disposition": policy_disposition or None,
+        })
+        controls.append({"expected_host_key_fingerprint": expected_key or None, "policy_reason": policy_reason[:500]})
+        title = "Device SSH cryptographic posture violates policy"
+        description = "A fresh, host-key-pinned SSH negotiation reproduced a policy violation."
+        recommendation = "Disable the policy-violating SSH algorithms and preserve the pinned host identity."
+        url = f"ssh://{target}:{expected_port}"
+        proof_basis = "pinned_ssh_negotiation"
+
+    proof = family_proof.build_proof_contract_result(
+        family,
+        evidence,
+        contract_id=contract_id,
+        contract_version="1.0.0",
+        verifier_build=str(_worker_build_fingerprint() or "unknown"),
+        subject=subject,
+        observations=observations,
+        controls=controls,
+        proof_basis=proof_basis,
+    )
+    promotable, gate_reason = family_proof.proof_contract_promotion_gate(proof)
+    settlement = {
+        "candidate_id": candidate_id,
+        "status": "verified" if promotable else (
+            "refuted" if proof["verdict"] == "refuted" else "inconclusive"
+        ),
+        "proof": proof,
+        "gate_reason": gate_reason,
+    }
+    result["candidate_verification"] = settlement
+    if promotable:
+        finding = {
+            "type": title,
+            "title": title,
+            "severity": severity,
+            "description": description,
+            "recommendation": recommendation,
+            "url": url,
+            "tool": "device_candidate_verifier",
+            "source": "device",
+            "cwe": family_proof.FAMILY_CONTRACTS[family]["cwe"],
+            "verified": True,
+            "proof_state": "verified",
+            "proof_contract_v2": proof,
+            "evidence": {"candidate_id": candidate_id, "proof_contract_v2": proof},
+        }
+        finding["fingerprint"] = hashlib.sha256(
+            json.dumps([title, device_target_id, subject], sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        result.setdefault("findings", []).append(finding)
+    return settlement
+
+
+async def persist_device_candidate_settlement(
+    conn: Any,
+    *,
+    scan_id: str,
+    device_target_id: str,
+    settlement: dict[str, Any],
+) -> uuid.UUID | None:
+    """Persist every non-promoted device verifier outcome, including refutation and faults.
+
+    Promoted outcomes are finalized by ``save_device_findings`` so their verification and evidence
+    can reference the newly materialized finding. Everything else still gets a durable verification
+    record and, when present, an immutable proof observation.
+    """
+    candidate_text = str(settlement.get("candidate_id") or "").strip()
+    if not candidate_text:
+        return None
+    try:
+        candidate_id = uuid.UUID(candidate_text)
+        device_id = uuid.UUID(device_target_id)
+        scan_uuid = uuid.UUID(scan_id)
+    except ValueError:
+        return None
+    status = str(settlement.get("status") or "inconclusive")
+    if status == "verified":
+        await conn.execute(
+            """UPDATE investigation_candidates
+               SET status='verifying', verification_context=verification_context ||
+                   jsonb_build_object('scan_id',$2::text,'proof',$3::jsonb,'gate_reason',$4::text),
+                   updated_at=NOW()
+               WHERE id=$1 AND status IN ('verification_queued','verifying','inconclusive')""",
+            candidate_id, scan_uuid, json.dumps(settlement.get("proof") or {}),
+            settlement.get("gate_reason"),
+        )
+        return None
+    proof = settlement.get("proof") if isinstance(settlement.get("proof"), dict) else {}
+    contract_id = str(
+        proof.get("contract_id") or settlement.get("proof_contract_id") or "device.unknown"
+    )
+    verdict = str(proof.get("verdict") or status)
+    result_status = "refuted" if status == "refuted" else "inconclusive"
+    verification_id = await conn.fetchval(
+        """INSERT INTO finding_verifications (
+               finding_id, candidate_id, scan_id, device_target_id, requested_by,
+               status, result_status, verdict, verdict_reason, finding_type,
+               target_url, original_url, proof, verification_mode, contract_id,
+               contract_version, proof_basis, started_at, completed_at, updated_at
+           ) VALUES (
+               NULL,$1,$2,$3,'device_candidate_verifier','completed',$4,$5,$6,$7,$8,$8,
+               $9::jsonb,'deterministic',$10,$11,$12,NOW(),NOW(),NOW()
+           ) RETURNING id""",
+        candidate_id, scan_uuid, device_id, result_status, verdict,
+        str(settlement.get("gate_reason") or settlement.get("error") or "Verifier did not promote")[:1000],
+        str(proof.get("family") or "device_candidate"), f"device://{device_target_id}",
+        json.dumps(proof), contract_id,
+        str(proof.get("contract_version") or "1.0.0"),
+        str(proof.get("proof_basis") or "device_verifier_outcome"),
+    )
+    if proof:
+        proof_hash = hashlib.sha256(
+            json.dumps(proof, sort_keys=True, separators=(",", ":"), default=str).encode()
+        ).hexdigest()
+        await conn.execute(
+            """INSERT INTO evidence_instances (
+                   candidate_id, scan_id, device_target_id, proof_observation, hash,
+                   proof_state, evidence_strength, contract_id, contract_version,
+                   proof_basis, created_by
+               ) VALUES ($1,$2,$3,$4::jsonb,$5,$6,'signal',$7,$8,$9,
+                         'device_candidate_verifier')""",
+            candidate_id, scan_uuid, device_id, json.dumps(proof), proof_hash,
+            status if status in {"refuted", "inconclusive"} else "inconclusive",
+            contract_id, str(proof.get("contract_version") or "1.0.0"),
+            str(proof.get("proof_basis") or "device_verifier_outcome"),
+        )
+    await conn.execute(
+        """UPDATE investigation_candidates
+           SET status=$2, latest_verification_id=$3,
+               verification_context=verification_context || jsonb_build_object(
+                   'scan_id',$4::text,'proof',$5::jsonb,'gate_reason',$6::text
+               ), updated_at=NOW()
+           WHERE id=$1""",
+        candidate_id,
+        status if status in {"refuted", "inconclusive", "blocked"} else "inconclusive",
+        verification_id, scan_uuid, json.dumps(proof),
+        settlement.get("gate_reason") or settlement.get("error"),
+    )
+    return verification_id
+
+
+async def correlate_device_advisory_lifecycle(
+    *, result: dict[str, Any], device_target_id: str,
+) -> dict[str, Any]:
+    """Create advisory candidates on every posture scan and promote exact pinned matches only."""
+    snapshot = device_advisories.load_verified_snapshot(
+        os.environ.get("DEVICE_INTEL_DB_PATH"),
+        os.environ.get("DEVICE_INTEL_DB_SHA256"),
+    )
+    posture = result.get("device_posture") if isinstance(result.get("device_posture"), dict) else {}
+    summary = {
+        "status": snapshot.get("status"),
+        "snapshot_sha256": snapshot.get("snapshot_sha256"),
+        "snapshot_generated_at": snapshot.get("generated_at"),
+        "services_evaluated": 0,
+        "candidates": 0,
+        "exact_matches": 0,
+        "resolved_stale_matches": 0,
+        "runtime_egress": False,
+    }
+    posture["advisory_correlation"] = summary
+    result["device_posture"] = posture
+    if snapshot.get("status") != "available":
+        return summary
+    records = snapshot.get("advisories") or []
+    device_uuid = uuid.UUID(device_target_id)
+    findings = result.setdefault("findings", [])
+    evaluated_loci: set[tuple[str, int]] = set()
+    current_candidate_ids: set[uuid.UUID] = set()
+    async with db_pool.acquire() as conn:
+        for service in posture.get("services") or []:
+            if not isinstance(service, dict):
+                continue
+            cpe = str(service.get("cpe") or "").strip()
+            product = str(service.get("product") or service.get("service_name") or "").strip()
+            version = str(service.get("version") or "").strip()
+            if not cpe and not product:
+                continue
+            try:
+                evaluated_loci.add((
+                    str(service.get("transport") or "tcp").lower(),
+                    int(service.get("port") or 0),
+                ))
+            except (TypeError, ValueError):
+                continue
+            summary["services_evaluated"] += 1
+            matches = device_advisories.match_advisories(
+                records, cpe=cpe or None, product=product or None, version=version or None,
+                limit=50,
+            )
+            for match in matches:
+                advisory_id = str(match.get("advisory_id") or "unknown")
+                candidate = investigation_candidates.normalize_candidate(
+                    plane="device",
+                    device_target_id=device_target_id,
+                    family="device_firmware_advisory",
+                    locus={
+                        "transport": service.get("transport"),
+                        "port": service.get("port"),
+                        "service_name": service.get("service_name"),
+                        "advisory_id": advisory_id,
+                        "cpe": cpe,
+                        "version": version,
+                    },
+                    title=str(match.get("title") or advisory_id or "Firmware advisory candidate"),
+                    claim=(
+                        f"Offline advisory {advisory_id} matched {cpe or product} "
+                        f"version {version or 'unknown'}."
+                    ),
+                    severity=str(match.get("severity") or "info").lower(),
+                    evidence_refs=[],
+                    source_kind="automatic_device_advisory_correlation",
+                )
+                candidate_record = await investigation_candidates.upsert_candidate(
+                    conn, candidate, created_by="device_advisory_correlation",
+                )
+                current_candidate_ids.add(uuid.UUID(candidate_record["id"]))
+                summary["candidates"] += 1
+                await conn.execute(
+                    """UPDATE investigation_candidates
+                       SET verification_context=verification_context || jsonb_build_object(
+                           'snapshot_sha256',$2::text,'advisory',$3::jsonb,
+                           'service',$4::jsonb
+                       ), updated_at=NOW()
+                       WHERE id=$1""",
+                    uuid.UUID(candidate_record["id"]),
+                    str(snapshot.get("snapshot_sha256") or ""),
+                    json.dumps(match),
+                    json.dumps({
+                        "transport": service.get("transport"), "port": service.get("port"),
+                        "service_name": service.get("service_name"), "product": product,
+                        "version": version, "cpe": cpe,
+                    }),
+                )
+                if not match.get("promotable"):
+                    continue
+                proof = family_proof.build_proof_contract_result(
+                    "device_firmware_advisory",
+                    {
+                        "exact_product_identity": bool(cpe and match.get("match_type") == "exact_cpe_version_range"),
+                        "version_in_affected_range": match.get("version_evaluation") == "affected",
+                        "advisory_snapshot_verified": True,
+                        "version_outside_affected_range": False,
+                        "heuristic_product_match": match.get("match_type") == "heuristic_product",
+                        "reexecuted_at_handoff": True,
+                    },
+                    contract_id="device.firmware_advisory",
+                    contract_version="1.0.0",
+                    verifier_build=str(_worker_build_fingerprint() or "unknown"),
+                    subject={
+                        "device_target_id": device_target_id,
+                        "advisory_id": advisory_id,
+                        "cpe": cpe,
+                        "version": version,
+                        "transport": str(service.get("transport") or "tcp"),
+                        "port": int(service.get("port") or 0),
+                    },
+                    observations=[match],
+                    controls=[{
+                        "snapshot_sha256": snapshot.get("snapshot_sha256"),
+                        "runtime_egress": False,
+                    }],
+                    proof_basis="hash_pinned_offline_advisory_match",
+                )
+                promotable, _gate_reason = family_proof.proof_contract_promotion_gate(proof)
+                if not promotable:
+                    continue
+                summary["exact_matches"] += 1
+                severity = str(match.get("severity") or "medium").lower()
+                if severity not in {"critical", "high", "medium", "low", "info"}:
+                    severity = "medium"
+                title = f"Affected connected-device software: {advisory_id}"
+                finding = {
+                    "type": "Device firmware advisory",
+                    "title": title,
+                    "severity": severity,
+                    "description": (
+                        f"The exact observed CPE and version matched the affected range in the "
+                        f"hash-pinned offline advisory snapshot for {advisory_id}."
+                    ),
+                    "recommendation": "Apply the vendor-fixed firmware or isolate the affected service until remediation.",
+                    "url": str(match.get("reference") or f"device://{device_target_id}"),
+                    "tool": "device_candidate_verifier",
+                    "source": "device",
+                    "cwe": "CWE-1104",
+                    "verified": True,
+                    "proof_state": "verified",
+                    "proof_contract_v2": proof,
+                    "evidence": {
+                        "candidate_id": candidate_record["id"],
+                        "advisory_id": advisory_id,
+                        "snapshot_sha256": snapshot.get("snapshot_sha256"),
+                        "proof_contract_v2": proof,
+                    },
+                }
+                finding["fingerprint"] = hashlib.sha256(
+                    f"device-advisory|{device_target_id}|{advisory_id}|{cpe}|{version}".encode()
+                ).hexdigest()
+                findings.append(finding)
+        # Re-evaluate prior verified advisory candidates only when their exact service locus was
+        # observed in this run. If the pinned snapshot no longer matches that observed service
+        # (fixed version, withdrawn record, or changed identity), retire the candidate and resolve
+        # its generated finding. An unscanned or silent port is never treated as remediation.
+        prior_verified = await conn.fetch(
+            """SELECT id, canonical_locus
+               FROM investigation_candidates
+               WHERE plane='device' AND device_target_id=$1
+                 AND family='device_firmware_advisory' AND status='verified'""",
+            device_uuid,
+        )
+        for prior in prior_verified:
+            prior_id = prior["id"]
+            if prior_id in current_candidate_ids:
+                continue
+            prior_locus = parse_json_field(prior["canonical_locus"]) or {}
+            try:
+                prior_key = (
+                    str(prior_locus.get("transport") or "tcp").lower(),
+                    int(prior_locus.get("port") or 0),
+                )
+            except (TypeError, ValueError):
+                continue
+            if prior_key not in evaluated_loci:
+                continue
+            await conn.execute(
+                """UPDATE investigation_candidates
+                   SET status='refuted', verification_context=verification_context ||
+                       jsonb_build_object(
+                           'lifecycle_reason','no_longer_matches_pinned_snapshot',
+                           'snapshot_sha256',$2::text,
+                           'reevaluated_at',NOW()::text
+                       ), updated_at=NOW()
+                   WHERE id=$1""",
+                prior_id, str(snapshot.get("snapshot_sha256") or ""),
+            )
+            resolved = await conn.fetchval(
+                """WITH changed AS (
+                       UPDATE findings
+                       SET status='resolved', resolved_at=NOW(), updated_at=NOW(),
+                           notes=concat_ws(E'\n',NULLIF(notes,''),
+                               'Resolved automatically: the observed service no longer matches the pinned advisory snapshot.')
+                       WHERE device_target_id=$1 AND status='active'
+                         AND evidence->>'candidate_id'=$2::text
+                       RETURNING id
+                   ) SELECT COUNT(*) FROM changed""",
+                device_uuid, prior_id,
+            )
+            summary["resolved_stale_matches"] += int(resolved or 0)
+    return summary
 
 
 async def persist_device_inventory(scan_id: str, device_target_id: str, result: dict[str, Any]) -> None:
@@ -6136,6 +6637,10 @@ async def process_finding_retest_job(job_data: dict):
                 except Exception:
                     finding_uuid = None
                 try:
+                    candidate_uuid = uuid.UUID(str(job_data.get("candidate_id")))
+                except Exception:
+                    candidate_uuid = None
+                try:
                     await conn.execute("""
                         UPDATE finding_verifications
                         SET status = 'failed',
@@ -6165,6 +6670,17 @@ async def process_finding_retest_job(job_data: dict):
                             """,
                             finding_uuid,
                         )
+                    if candidate_uuid is not None:
+                        await conn.execute(
+                            """UPDATE investigation_candidates
+                               SET status='inconclusive',
+                                   verification_context=verification_context || jsonb_build_object(
+                                       'error','retest_slot_exhausted',
+                                       'verification_id',$2::text
+                                   ), updated_at=NOW()
+                               WHERE id=$1""",
+                            candidate_uuid, uuid.UUID(verification_id),
+                        )
                 except Exception:
                     pass
             print(
@@ -6177,10 +6693,11 @@ async def process_finding_retest_job(job_data: dict):
         requeued_payload = build_retest_job_payload(
             job_id=job_id,
             verification_id=verification_id,
-            finding_id=str(job_data["finding_id"]),
             submitted_at=str(job_data["submitted_at"]),
             trigger=trigger,
             attempt=attempt,
+            finding_id=str(job_data.get("finding_id") or "") or None,
+            candidate_id=str(job_data.get("candidate_id") or "") or None,
         )
         if requested_mode in {"ai", "deterministic"}:
             requeued_payload["mode"] = requested_mode
@@ -6205,12 +6722,20 @@ async def process_finding_retest_job(job_data: dict):
     try:
         async with db_pool.acquire() as conn:
             verification = await conn.fetchrow("""
-                SELECT fv.*, f.title, f.tool, f.evidence, f.url as finding_url,
+                SELECT fv.*,
+                       COALESCE(f.title, c.title) AS title,
+                       COALESCE(f.tool, 'investigation_candidate') AS tool,
+                       COALESCE(f.evidence, c.verification_context) AS evidence,
+                       COALESCE(f.url, fv.original_url, fv.target_url) AS finding_url,
+                       COALESCE(f.severity, c.claimed_severity) AS severity,
+                       c.family AS candidate_family,
+                       c.canonical_locus AS candidate_locus,
                        s.target_url as source_scan_target_url,
                        s.options as source_scan_options,
                        s.scan_type as source_scan_type
                 FROM finding_verifications fv
-                JOIN findings f ON fv.finding_id = f.id
+                LEFT JOIN findings f ON fv.finding_id = f.id
+                LEFT JOIN investigation_candidates c ON fv.candidate_id = c.id
                 LEFT JOIN scans s ON fv.scan_id = s.id
                 WHERE fv.id = $1
             """, uuid.UUID(verification_id))
@@ -6269,6 +6794,13 @@ async def process_finding_retest_job(job_data: dict):
                     updated_at = NOW()
                 WHERE id = $1
             """, verification["finding_id"])
+            if verification.get("candidate_id"):
+                await conn.execute(
+                    """UPDATE investigation_candidates
+                       SET status='verifying', latest_verification_id=$2, updated_at=NOW()
+                       WHERE id=$1""",
+                    verification["candidate_id"], verification["id"],
+                )
 
             # Check if this is a forced AI-only retest (mode=ai from API)
             ai_runtime = _load_runtime_ai_settings()
@@ -6342,7 +6874,7 @@ async def process_finding_retest_job(job_data: dict):
             )
 
             finding_severity = str(verification.get("severity") or "").lower()
-            if not finding_severity:
+            if not finding_severity and verification.get("finding_id"):
                 # Look up severity from the finding itself
                 f_row = await conn.fetchrow("SELECT severity FROM findings WHERE id = $1", verification["finding_id"])
                 finding_severity = str(f_row["severity"]).lower() if f_row else ""
@@ -6463,6 +6995,68 @@ async def process_finding_retest_job(job_data: dict):
             # low-confidence "false_positive" (single enforcement point).
             result = _enforce_verdict_invariants(result)
 
+            if (
+                verification.get("candidate_id")
+                and not verification.get("finding_id")
+                and str(result.get("verdict") or "").lower() == "exploited"
+            ):
+                candidate_context = parse_json_field(verification.get("evidence")) or {}
+                candidate_locus = parse_json_field(verification.get("candidate_locus")) or {}
+                finding_url = str(
+                    verification.get("original_url")
+                    or verification.get("target_url")
+                    or verification.get("finding_url")
+                    or ""
+                )
+                family_name = str(
+                    verification.get("candidate_family")
+                    or verification.get("finding_type")
+                    or "verified_candidate"
+                )
+                fingerprint = hashlib.sha256(json.dumps({
+                    "target_id": str(verification.get("target_id") or ""),
+                    "family": family_name,
+                    "locus": candidate_locus,
+                    "source": "deep_hunt_candidate_retest",
+                }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+                finding_id = await conn.fetchval(
+                    """INSERT INTO findings (
+                           target_id, fingerprint, title, description, severity, tool, cwe,
+                           url, evidence, notes, source, status,
+                           last_verification_status, last_verification_verdict,
+                           last_verification_confidence, last_verified_at, verification_count
+                       ) VALUES ($1,$2,$3,$4,$5,'autonomous_workflow',$6,$7,$8::jsonb,
+                                 'Created only after deterministic candidate verification.',
+                                 'autonomous','active','completed','exploited',$9,NOW(),1)
+                       ON CONFLICT (target_id, fingerprint) WHERE target_id IS NOT NULL
+                       DO UPDATE SET status='active', resolved_at=NULL, last_seen_at=NOW(),
+                           evidence=EXCLUDED.evidence, tool='autonomous_workflow',
+                           last_verification_status='completed',
+                           last_verification_verdict='exploited',
+                           last_verification_confidence=EXCLUDED.last_verification_confidence,
+                           last_verified_at=NOW(), updated_at=NOW()
+                       RETURNING id""",
+                    verification.get("target_id"), fingerprint,
+                    str(verification.get("title") or "Verified Deep Hunt candidate")[:300],
+                    str(candidate_context.get("proof") or verification.get("title") or "Verified candidate")[:8000],
+                    finding_severity if finding_severity in SEVERITY_ORDER else "high",
+                    str(candidate_context.get("cwe") or "")[:32] or None,
+                    finding_url,
+                    json.dumps({
+                        "candidate_id": str(verification.get("candidate_id")),
+                        "family": family_name,
+                        "canonical_locus": candidate_locus,
+                        "deterministic_retest": _redact_finding_evidence(result.get("proof") or {}),
+                    }),
+                    result.get("confidence"),
+                )
+                await conn.execute(
+                    "UPDATE finding_verifications SET finding_id=$2 WHERE id=$1",
+                    verification["id"], finding_id,
+                )
+                verification = dict(verification)
+                verification["finding_id"] = finding_id
+
             completed_at = utc_now()
             verification_mode = result.get("verification_mode", "deterministic")
             ai_plan_json = json.dumps(ai_result.get("ai_plan")) if ai_result and ai_result.get("ai_plan") else None
@@ -6575,10 +7169,12 @@ async def process_finding_retest_job(job_data: dict):
             candidate = await conn.fetchrow(
                 """SELECT id, verifier_contract_id
                    FROM investigation_candidates
-                   WHERE plane='web'
-                     AND verification_context->>'finding_id'=$1::text
+                   WHERE plane='web' AND (
+                         id=$2::uuid
+                         OR verification_context->>'finding_id'=$1::text
+                   )
                    ORDER BY last_seen_at DESC, id DESC LIMIT 1""",
-                verification["finding_id"],
+                verification["finding_id"], verification.get("candidate_id"),
             )
             if candidate:
                 final_candidate_verdict = str(result.get("verdict") or "").lower()
@@ -6697,6 +7293,25 @@ async def process_finding_retest_job(job_data: dict):
             f"{result.get('verdict') or result.get('result_status')} (mode={verification_mode})",
             flush=True,
         )
+    except Exception as exc:
+        candidate_value = job_data.get("candidate_id")
+        if candidate_value:
+            try:
+                async with db_pool.acquire() as conn:
+                    await conn.execute(
+                        """UPDATE investigation_candidates
+                           SET status='inconclusive',
+                               verification_context=verification_context || jsonb_build_object(
+                                   'error',$2::text,'verification_id',$3::text
+                               ), updated_at=NOW()
+                           WHERE id=$1""",
+                        uuid.UUID(str(candidate_value)),
+                        f"worker_error:{type(exc).__name__}"[:160],
+                        verification_id,
+                    )
+            except Exception:
+                pass
+        raise
     finally:
         _release_retest_slot(r)
 
@@ -6903,7 +7518,7 @@ async def reap_stale_retests(now: datetime | None = None) -> dict[str, int]:
     async with db_pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT id, finding_id, job_id, attempt_count
+            SELECT id, finding_id, candidate_id, job_id, attempt_count
             FROM finding_verifications
             WHERE status = 'running'
               AND started_at IS NOT NULL
@@ -6918,6 +7533,7 @@ async def reap_stale_retests(now: datetime | None = None) -> dict[str, int]:
         for row in rows:
             verification_id = row["id"]
             finding_id = row["finding_id"]
+            candidate_id = row["candidate_id"]
             old_job_id = str(row["job_id"] or "")
             attempt_count = max(1, int(row["attempt_count"] or 1))
             stale_reason = (
@@ -6931,10 +7547,11 @@ async def reap_stale_retests(now: datetime | None = None) -> dict[str, int]:
                 payload = build_retest_job_payload(
                     job_id=new_job_id,
                     verification_id=str(verification_id),
-                    finding_id=str(finding_id),
                     submitted_at=now.isoformat(),
                     trigger="stale_watchdog_requeue",
                     attempt=next_attempt,
+                    finding_id=str(finding_id) if finding_id else None,
+                    candidate_id=str(candidate_id) if candidate_id else None,
                 )
                 valid, reason = validate_retest_job_payload(payload)
                 if valid:
@@ -7073,7 +7690,7 @@ async def requeue_circuit_recovered_retests() -> dict[str, int]:
         async with db_pool.acquire() as conn:
             cutoff = utc_now() - timedelta(hours=RETEST_INCONCLUSIVE_RETRY_AFTER_HOURS)
             rows = await conn.fetch("""
-                SELECT fv.id, fv.finding_id, fv.retry_class, fv.attempt_count
+                SELECT fv.id, fv.finding_id, fv.candidate_id, fv.retry_class, fv.attempt_count
                 FROM finding_verifications fv
                 WHERE fv.verdict = 'inconclusive'
                   AND fv.retry_class IN ('transient', 'rate_limited')
@@ -7085,16 +7702,18 @@ async def requeue_circuit_recovered_retests() -> dict[str, int]:
 
             for row in rows:
                 verification_id = str(row["id"])
-                finding_id = str(row["finding_id"])
+                finding_id = str(row["finding_id"]) if row["finding_id"] else None
+                candidate_id = str(row["candidate_id"]) if row["candidate_id"] else None
                 job_id = f"circuit-recovery-{uuid.uuid4().hex[:12]}"
                 now_iso = utc_now_iso()
                 payload = build_retest_job_payload(
                     job_id=job_id,
                     verification_id=verification_id,
-                    finding_id=finding_id,
                     submitted_at=now_iso,
                     trigger="circuit_recovery",
                     attempt=int(row["attempt_count"] or 0) + 1,
+                    finding_id=finding_id,
+                    candidate_id=candidate_id,
                 )
                 enqueue_job(r, RETEST_QUEUE_NAME, payload)
                 requeued += 1
@@ -8255,6 +8874,11 @@ async def run_device_web_children(
             "credential_profile_id": str(web_credential.get("profile_id") or "") if web_credential else None,
             "credentials_attempted": bool((child_result.get("device_web") or {}).get("credentials_attempted")),
             "authenticated": bool((child_result.get("device_web") or {}).get("authentication_succeeded")),
+            "tls_assessment": {
+                key: value
+                for key, value in (((child_result.get("device_web") or {}).get("tls_assessment") or {}).items())
+                if key in {"trusted", "verification_error", "verification_code", "protocol", "cipher"}
+            },
             "imported_requests": {
                 key: value
                 for key, value in (((child_result.get("device_web") or {}).get("imported_requests") or {}).items())
@@ -8561,6 +9185,33 @@ async def process_scan_job(job_data: dict):
                         parent_options=options,
                         result=result,
                     )
+                    if (options or {}).get("candidate_id"):
+                        try:
+                            await prepare_device_candidate_posture_result(
+                                result=result,
+                                options=options,
+                                device_target_id=device_target_id,
+                                target=str(target or ""),
+                            )
+                        except Exception as candidate_error:
+                            result["candidate_verification"] = {
+                                "candidate_id": str((options or {}).get("candidate_id") or "") or None,
+                                "status": "inconclusive",
+                                "error": f"candidate_verifier_fault:{type(candidate_error).__name__}",
+                            }
+                    try:
+                        await correlate_device_advisory_lifecycle(
+                            result=result,
+                            device_target_id=device_target_id,
+                        )
+                    except Exception as advisory_error:
+                        posture_result = result.get("device_posture") if isinstance(result.get("device_posture"), dict) else {}
+                        posture_result["advisory_correlation"] = {
+                            "status": "error",
+                            "error": f"advisory_correlation_fault:{type(advisory_error).__name__}",
+                            "runtime_egress": False,
+                        }
+                        result["device_posture"] = posture_result
         except ValueError as e:
             # Validation errors (e.g., incompatible options like public+smart)
             result = {
@@ -8727,15 +9378,16 @@ async def process_scan_job(job_data: dict):
                 candidate_id = str((options or {}).get("candidate_id") or "")
                 if candidate_id:
                     try:
-                        await conn.execute(
-                            """UPDATE investigation_candidates
-                               SET status='inconclusive',
-                                   verification_context=verification_context || jsonb_build_object(
-                                       'scan_id',$2::text,'error','probe_failed'
-                                   ),
-                                   updated_at=NOW()
-                               WHERE id=$1 AND status IN ('verification_queued','verifying')""",
-                            uuid.UUID(candidate_id), scan_id,
+                        await persist_device_candidate_settlement(
+                            conn,
+                            scan_id=scan_id,
+                            device_target_id=device_target_id,
+                            settlement={
+                                "candidate_id": candidate_id,
+                                "status": "inconclusive",
+                                "proof_contract_id": str((options or {}).get("proof_contract_id") or "device.unknown"),
+                                "error": "probe_failed",
+                            },
                         )
                     except (ValueError, asyncpg.PostgresError):
                         pass
@@ -8773,25 +9425,11 @@ async def process_scan_job(job_data: dict):
                 candidate_id = str(candidate_settlement.get("candidate_id") or "")
                 if candidate_id:
                     try:
-                        await conn.execute(
-                            """UPDATE investigation_candidates
-                               SET status=$2,
-                                   verification_context=verification_context || jsonb_build_object(
-                                       'scan_id',$3::text,
-                                       'proof',$4::jsonb,
-                                       'gate_reason',$5::text
-                                   ),
-                                   updated_at=NOW()
-                               WHERE id=$1 AND status IN ('verification_queued','verifying','inconclusive')""",
-                            uuid.UUID(candidate_id),
-                            (
-                                "verifying"
-                                if str(candidate_settlement.get("status") or "") == "verified"
-                                else str(candidate_settlement.get("status") or "inconclusive")
-                            ),
-                            scan_id,
-                            json.dumps(candidate_settlement.get("proof") or {}),
-                            candidate_settlement.get("gate_reason"),
+                        await persist_device_candidate_settlement(
+                            conn,
+                            scan_id=scan_id,
+                            device_target_id=device_target_id,
+                            settlement=candidate_settlement,
                         )
                     except (ValueError, asyncpg.PostgresError):
                         pass

@@ -431,6 +431,7 @@ function AssetDetailDrawer({
   // CTA. "scan" queues the kind-appropriate scan directly for every kind.
   function recTarget(rkind: string): { href?: string; onClick?: () => void } {
     if (rkind === 'findings') return { href: asset!.findings_href }
+    if (rkind === 'deep_hunt') return { onClick: startAutonomousInvestigation }
     if (rkind === 'latest_scan' && asset!.latest_scan_href) return { href: asset!.latest_scan_href }
     if (rkind === 'scan') return { onClick: () => onScan(asset!) }
     return {}

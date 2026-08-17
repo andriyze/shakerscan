@@ -1,3 +1,6 @@
+import hashlib
+import json
+
 from scanner.scanner_tools import device_advisories
 
 
@@ -42,3 +45,16 @@ def test_out_of_range_or_heuristic_product_match_cannot_promote():
 def test_embedded_version_comparison_handles_numeric_segments():
     assert device_advisories.compare_versions("2.10.0", "2.9.9") > 0
     assert device_advisories.compare_versions("1.0", "1.0.0") == 0
+
+
+def test_snapshot_loader_requires_pinned_digest_and_rejects_mismatch(tmp_path):
+    path = tmp_path / "device-advisories.json"
+    path.write_text(json.dumps({"generated_at": "2026-08-16T00:00:00Z", "advisories": [{"cve": "CVE-1"}]}))
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    loaded = device_advisories.load_verified_snapshot(path, digest)
+    assert loaded["status"] == "available"
+    assert loaded["snapshot_sha256"] == digest
+    assert loaded["record_count"] == 1
+    assert device_advisories.load_verified_snapshot(path, "0" * 64)["status"] == "integrity_mismatch"
+    assert device_advisories.load_verified_snapshot(path, "")["status"] == "untrusted_snapshot"

@@ -12,11 +12,13 @@ from retest_contract import (  # noqa: E402
     AI_ONLY_RETEST_TYPES,
     SUPPORTED_RETEST_TYPES,
     VerificationPolicy,
+    build_retest_job_payload,
     build_replay_commands,
     get_attempt_ladder,
     infer_retest_inputs,
     infer_type_from_title_tool,
     normalize_retest_type,
+    validate_retest_job_payload,
 )
 
 
@@ -24,6 +26,19 @@ def test_auto_fp_policy_is_off_by_default():
     p = VerificationPolicy.from_env(overrides={})
     assert p.auto_fp_on_retest is False
     assert p.auto_fp_min_confidence == 0.9
+
+
+def test_retest_queue_contract_accepts_exactly_one_subject_kind():
+    candidate = build_retest_job_payload(
+        job_id="job-1",
+        verification_id="11111111-1111-4111-8111-111111111111",
+        candidate_id="22222222-2222-4222-8222-222222222222",
+        submitted_at="2026-08-16T00:00:00+00:00",
+    )
+    assert validate_retest_job_payload(candidate) == (True, "")
+    assert "finding_id" not in candidate
+    ambiguous = {**candidate, "finding_id": "33333333-3333-4333-8333-333333333333"}
+    assert validate_retest_job_payload(ambiguous) == (False, "ambiguous_retest_subject")
 
 
 def test_auto_fp_policy_reads_overrides_and_clamps_confidence():

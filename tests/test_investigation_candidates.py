@@ -30,6 +30,30 @@ def test_web_and_device_candidate_boundaries_are_mutually_exclusive():
     assert web["evidence_refs"] == ["resp_1", "resp_2"]
     assert device["target_id"] is None
     assert device["device_target_id"] is not None
+    assert device["family"] == "device_service_exposure"
+    assert device["verifier_contract_id"] == "device.service_exposure"
+
+
+def test_device_verifier_contract_is_server_selected_for_every_supported_family():
+    device_id = str(uuid.uuid4())
+    expected = {
+        "tls": "device.tls",
+        "auth_bypass": "device.auth_bypass",
+        "control_authorization": "device.control_authorization",
+        "firmware_advisory": "device.firmware_advisory",
+        "ssh_posture": "device.ssh_posture",
+    }
+    for family, contract in expected.items():
+        normalized = candidates.normalize_candidate(
+            plane="device",
+            device_target_id=device_id,
+            family=family,
+            locus={"transport": "tcp", "port": 443},
+            title=family,
+            claim="candidate",
+            verifier_contract_id="model.supplied.contract.must.not_win",
+        )
+        assert normalized["verifier_contract_id"] == contract
 
 
 def test_candidate_fingerprint_is_stable_and_target_bound():
@@ -64,6 +88,7 @@ def test_candidate_upsert_never_claims_authority():
                 "fingerprint": args[13],
                 "created_at": None,
                 "updated_at": None,
+                "inserted": True,
             }
 
     candidate = candidates.normalize_candidate(
@@ -79,6 +104,7 @@ def test_candidate_upsert_never_claims_authority():
     assert result["id"] == str(candidate_id)
     assert result["authoritative"] is False
     assert result["status"] == "new"
+    assert result["inserted"] is True
 
 
 def test_candidate_read_api_exposes_lifecycle_without_promotion_authority():
@@ -89,3 +115,19 @@ def test_candidate_read_api_exposes_lifecycle_without_promotion_authority():
     assert 'payload["authoritative"] = False' in api_source
     assert "FROM finding_verifications WHERE candidate_id=$1" in api_source
     assert "FROM evidence_instances WHERE candidate_id=$1" in api_source
+
+
+def test_deep_hunt_claim_persistence_is_candidate_only_and_legacy_rows_are_migrated():
+    root = os.path.join(os.path.dirname(__file__), "..")
+    api_source = open(os.path.join(root, "api", "api.py"), encoding="utf-8").read()
+    start = api_source.index("async def _persist_agent_suspected_finding")
+    end = api_source.index("\ndef _agent_new_state", start)
+    persistence_source = api_source[start:end]
+    assert "upsert_candidate" in persistence_source
+    assert "INSERT INTO findings" not in persistence_source
+
+    migration_source = open(
+        os.path.join(root, "api", "retest_contract.py"), encoding="utf-8"
+    ).read()
+    assert 'LEGACY_AUTONOMOUS_CANDIDATE_MIGRATION = "legacy_autonomous_candidates_v1"' in migration_source
+    assert "Migrated to Investigation Candidates; this unverified claim is not a finding." in migration_source
