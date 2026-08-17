@@ -266,11 +266,13 @@ def test_device_request_collections_are_encrypted_pinned_and_agent_bounded():
     agent = (ROOT / "api" / "device_agent.py").read_text()
     schema = (ROOT / "db" / "init.sql").read_text()
     web = (ROOT / "scanner" / "scanner_tools" / "device_web.py").read_text()
+    formats = (ROOT / "scanner" / "scanner_tools" / "device_request_formats.py").read_text()
     ui = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "page.tsx").read_text()
     hunt = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "agent" / "page.tsx").read_text()
 
     assert "CREATE TABLE device_request_collections" in schema
     assert "encrypted_payload TEXT NOT NULL" in schema
+    assert "'postman_collection','har','openapi'" in schema
     assert '@app.post("/devices/{device_id}/request-collections")' in api
     assert "Encrypted storage is required for device request collections" in api
     assert 'summary = _json_object(payload.get("summary_json"))' in api
@@ -279,10 +281,14 @@ def test_device_request_collections_are_encrypted_pinned_and_agent_bounded():
     assert 'hydrated["_resolved_device_request_collections"]' in worker
     assert "external_host_blocked" in web
     assert "state_changing_request_not_confirmed" in web
+    assert "resolve_imported_requests" in web
+    assert 'format_name="har"' in formats
+    assert 'format_name="openapi"' in formats
+    assert "external_refs_ignored" in formats
     assert '"inspect_request_collections"' in agent
     assert "include_imported_requests" in agent
     assert '"request_collection_secrets_visible_to_planner": False' in api
-    assert "Import Postman JSON" in ui
+    assert "Import API requests" in ui
     assert "Use real imported API requests" in ui
     assert "Bind imported API requests" in hunt
 

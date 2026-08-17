@@ -267,7 +267,7 @@ def tool_schemas() -> list[dict[str, Any]]:
         },
         {
             "name": "inspect_request_collections",
-            "description": "Read redacted Postman request inventories bound to this investigation. Secret values, tokens, cookies, bodies, and environment values are never returned.",
+            "description": "Read redacted Postman, HAR, OpenAPI, or Swagger request inventories bound to this investigation. Secret values, tokens, cookies, bodies, and environment values are never returned.",
             "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
         },
         {
@@ -398,7 +398,7 @@ def render_contract() -> str:
         "You are directing an authorized investigation of exactly one registered connected device.",
         "ShakerScan fixes the device locator and safety profile. Never invent another target or local-host shell/network access.",
         "Remote-device SSH commands may be proposed only with propose_ssh_shell. Proposal is not execution: show exact commands and wait for separate user confirmation in ShakerScan.",
-        "Imported Postman requests may be inspected only through inspect_request_collections and executed only when they were bound and user-confirmed at session creation; the planner never receives their secret values.",
+        "Imported Postman, HAR, OpenAPI, or Swagger requests may be inspected only through inspect_request_collections and executed only when they were bound and user-confirmed at session creation; the planner never receives their secret values.",
         "Start from existing evidence, choose the smallest useful scan, inspect its result, and stop when the objective is answered.",
         "A queued scan is asynchronous: use inspect_device_scan on a later turn; do not repeatedly queue equivalent scans.",
         "Only deterministic scanner findings are findings. Your final leads are hypotheses and must cite real devref_N evidence references.",

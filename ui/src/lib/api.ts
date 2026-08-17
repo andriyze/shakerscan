@@ -1440,7 +1440,7 @@ export interface DeviceRequestCollection {
   id: string
   device_target_id: string
   name: string
-  format: 'postman_collection'
+  format: 'postman_collection' | 'har' | 'openapi'
   document_sha256: string
   is_active: boolean
   storage_encrypted: boolean
@@ -1456,6 +1456,12 @@ export interface DeviceRequestCollection {
     methods: Record<string, number>
     port_hints: number[]
     scripts_ignored: number
+    har_version?: string
+    spec_version?: string
+    external_refs_ignored?: number
+    invalid_refs_ignored?: number
+    captured_response_bodies_ignored?: boolean
+    generated_examples?: boolean
     environment_variable_names: string[]
     collection_variable_names: string[]
     requests: DeviceRequestCollectionRequest[]
@@ -5291,15 +5297,17 @@ export async function getDeviceRequestCollections(deviceId: string): Promise<{ c
 
 export async function createDeviceRequestCollection(deviceId: string, payload: {
   name?: string
-  collection: Record<string, unknown>
+  format?: 'auto' | 'postman_collection' | 'har' | 'openapi'
+  document: Record<string, unknown>
   environment?: Record<string, unknown>
+  base_url?: string
 }): Promise<{ collection: DeviceRequestCollection }> {
   const res = await fetch(`${API_URL}/devices/${encodeURIComponent(deviceId)}/request-collections`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   })
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to import Postman collection'))
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to import API request document'))
   return res.json()
 }
 

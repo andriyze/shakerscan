@@ -72,9 +72,9 @@ except ModuleNotFoundError:
     from scanner.scanner_tools import device_shell
 
 try:
-    from scanner_tools.device_postman import PostmanCollectionError, validate_and_summarize as validate_device_request_collection
+    from scanner_tools.device_request_formats import RequestImportError, validate_request_document as validate_device_request_collection
 except ModuleNotFoundError:
-    from scanner.scanner_tools.device_postman import PostmanCollectionError, validate_and_summarize as validate_device_request_collection
+    from scanner.scanner_tools.device_request_formats import RequestImportError, validate_request_document as validate_device_request_collection
 
 try:
     from scanner_tools.model_intake_acquisition import acquisition_policy as _model_acquisition_policy
@@ -4198,17 +4198,36 @@ class DeviceRequestCollectionCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: Optional[str] = Field(default=None, max_length=160)
-    collection: dict[str, Any]
+    format: Literal["auto", "postman_collection", "har", "openapi"] = "auto"
+    document: Optional[dict[str, Any]] = None
+    collection: Optional[dict[str, Any]] = None
     environment: Optional[dict[str, Any]] = None
+    base_url: Optional[str] = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def validate_request_document(self):
+        if (self.document is None) == (self.collection is None):
+            raise ValueError("provide exactly one document (or the legacy collection field)")
+        return self
 
 
 class DeviceRequestCollectionUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: Optional[str] = Field(default=None, min_length=1, max_length=160)
+    format: Optional[Literal["auto", "postman_collection", "har", "openapi"]] = None
+    document: Optional[dict[str, Any]] = None
     collection: Optional[dict[str, Any]] = None
     environment: Optional[dict[str, Any]] = None
     clear_environment: bool = False
+    base_url: Optional[str] = Field(default=None, max_length=2000)
+    clear_base_url: bool = False
+
+    @model_validator(mode="after")
+    def validate_request_document(self):
+        if self.document is not None and self.collection is not None:
+            raise ValueError("provide document or the legacy collection field, not both")
+        return self
 
 
 class DeviceScanRequest(BaseModel):
@@ -18377,7 +18396,7 @@ async def _validate_device_request_collection_refs(
     if len(ids) != len(set(ids)):
         raise HTTPException(status_code=422, detail="request_collection_ids must be unique")
     rows = await conn.fetch(
-        """SELECT id, name, document_sha256, summary_json
+        """SELECT id, name, format, document_sha256, summary_json
            FROM device_request_collections
            WHERE device_target_id=$1 AND id=ANY($2::uuid[]) AND is_active=true""",
         device_target_id,
@@ -18393,6 +18412,7 @@ async def _validate_device_request_collection_refs(
         refs.append({
             "collection_id": str(row["id"]),
             "name": str(row["name"]),
+            "format": str(row["format"]),
             "document_sha256": str(row["document_sha256"]),
             "request_count": int(summary.get("request_count") or 0),
             "state_changing_request_count": int(summary.get("state_changing_request_count") or 0),
@@ -18917,9 +18937,13 @@ async def create_device_request_collection(device_id: str, request: DeviceReques
     device_uuid = _device_uuid(device_id)
     try:
         payload, summary = validate_device_request_collection(
-            request.collection, request.environment, requested_name=request.name,
+            request.document if request.document is not None else request.collection,
+            request.environment,
+            requested_name=request.name,
+            import_format=request.format,
+            base_url=request.base_url,
         )
-    except PostmanCollectionError as exc:
+    except RequestImportError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     encrypted_payload = encrypt_secret(json.dumps(payload, separators=(",", ":"), ensure_ascii=False))
     if not str(encrypted_payload or "").startswith("enc:fernet:"):
@@ -18930,9 +18954,10 @@ async def create_device_request_collection(device_id: str, request: DeviceReques
                 raise HTTPException(status_code=404, detail="Active connected device not found")
             row = await conn.fetchrow(
                 """INSERT INTO device_request_collections (
-                       device_target_id, name, document_sha256, encrypted_payload, summary_json
-                   ) VALUES ($1,$2,$3,$4,$5)
+                       device_target_id, name, format, document_sha256, encrypted_payload, summary_json
+                   ) VALUES ($1,$2,$3,$4,$5,$6)
                    ON CONFLICT (device_target_id, name) DO UPDATE SET
+                       format=EXCLUDED.format,
                        document_sha256=EXCLUDED.document_sha256,
                        encrypted_payload=EXCLUDED.encrypted_payload,
                        summary_json=EXCLUDED.summary_json,
@@ -18940,7 +18965,7 @@ async def create_device_request_collection(device_id: str, request: DeviceReques
                        updated_at=NOW()
                    WHERE device_request_collections.is_active=false
                    RETURNING *""",
-                device_uuid, summary["name"], summary["document_sha256"],
+                device_uuid, summary["name"], summary["format"], summary["document_sha256"],
                 encrypted_payload, json.dumps(summary),
             )
     except asyncpg.UniqueViolationError as exc:
@@ -18965,13 +18990,19 @@ async def update_device_request_collection(device_id: str, collection_id: str, r
         existing = json.loads(str(decrypt_secret(current["encrypted_payload"]) or ""))
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=500, detail="Stored request collection could not be decrypted") from exc
-    collection = request.collection if request.collection is not None else existing.get("collection")
+    supplied_document = request.document if request.document is not None else request.collection
+    existing_document = existing.get("document") if isinstance(existing.get("document"), dict) else existing.get("collection")
+    document = supplied_document if supplied_document is not None else existing_document
     environment = None if request.clear_environment else request.environment if request.environment is not None else existing.get("environment")
+    existing_format = str(existing.get("format") or current.get("format") or "postman_collection")
+    import_format = request.format or ("auto" if supplied_document is not None else existing_format)
+    base_url = None if request.clear_base_url else request.base_url if request.base_url is not None else existing.get("base_url")
     try:
         payload, summary = validate_device_request_collection(
-            collection, environment, requested_name=request.name or str(current["name"]),
+            document, environment, requested_name=request.name or str(current["name"]),
+            import_format=import_format, base_url=base_url,
         )
-    except PostmanCollectionError as exc:
+    except RequestImportError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     encrypted_payload = encrypt_secret(json.dumps(payload, separators=(",", ":"), ensure_ascii=False))
     if not str(encrypted_payload or "").startswith("enc:fernet:"):
@@ -18980,10 +19011,10 @@ async def update_device_request_collection(device_id: str, collection_id: str, r
         async with db_pool.acquire() as conn:
             row = await conn.fetchrow(
                 """UPDATE device_request_collections
-                   SET name=$1, document_sha256=$2, encrypted_payload=$3,
-                       summary_json=$4, is_active=true, updated_at=NOW()
-                   WHERE id=$5 AND device_target_id=$6 RETURNING *""",
-                summary["name"], summary["document_sha256"], encrypted_payload,
+                   SET name=$1, format=$2, document_sha256=$3, encrypted_payload=$4,
+                       summary_json=$5, is_active=true, updated_at=NOW()
+                   WHERE id=$6 AND device_target_id=$7 RETURNING *""",
+                summary["name"], summary["format"], summary["document_sha256"], encrypted_payload,
                 json.dumps(summary), collection_uuid, device_uuid,
             )
     except asyncpg.UniqueViolationError as exc:

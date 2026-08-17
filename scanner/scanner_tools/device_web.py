@@ -21,8 +21,8 @@ from .device_postman import (
     STATE_CHANGING_METHODS,
     public_request_url,
     redacted_header_names,
-    resolve_requests,
 )
+from .device_request_formats import resolve_imported_requests
 
 
 MAX_RESPONSE_BYTES = 256 * 1024
@@ -299,6 +299,7 @@ async def _run_imported_requests(
     profile: str,
     allow_state_changing_requests: bool,
     default_origin: bool,
+    base_headers: dict[str, str] | None,
     cancel_check: Any,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     origin = str(origin_info.get("origin") or "")
@@ -316,7 +317,7 @@ async def _run_imported_requests(
         collection_id = str(collection.get("collection_id") or "")
         collection_name = str(collection.get("name") or "Imported requests")
         try:
-            requests = resolve_requests(collection.get("payload") or {})
+            requests = resolve_imported_requests(collection.get("payload") or {})
         except Exception as exc:
             skipped.append({"collection_id": collection_id, "reason": f"collection_resolution_failed:{type(exc).__name__}"})
             continue
@@ -348,7 +349,12 @@ async def _run_imported_requests(
                         "observations": observations, "skipped_requests": skipped[:500],
                     }, findings
             attempted += 1
-            headers = _safe_request_headers(dict(imported.get("headers") or {}))
+            headers = dict(base_headers or {})
+            headers.update(dict(imported.get("headers") or {}))
+            headers = _safe_request_headers(headers)
+            has_sensitive_material = bool(imported.get("has_sensitive_material")) or any(
+                str(key).lower() in {"authorization", "cookie", "x-api-key", "api-key"} for key in headers
+            )
             body = imported.get("body") if isinstance(imported.get("body"), bytes) else b""
             path = _origin_request_path(str(imported.get("url") or ""))
             try:
@@ -387,7 +393,7 @@ async def _run_imported_requests(
             observations.append(observation)
             request_url = urllib.parse.urlunsplit((scheme, parsed_origin.netloc, path.split("?", 1)[0], path.partition("?")[2], ""))
             response_headers = {str(key).lower(): str(value) for key, value in dict(response.get("headers") or {}).items()}
-            if scheme == "http" and imported.get("has_sensitive_material"):
+            if scheme == "http" and has_sensitive_material:
                 findings.append(_request_finding(
                     title="Sensitive imported API request uses cleartext HTTP", severity="high",
                     description="A saved API request containing authentication or another sensitive header was replayed over unencrypted HTTP.",
@@ -598,6 +604,7 @@ async def run_pinned_device_web_scan(
             profile=profile,
             allow_state_changing_requests=allow_state_changing_requests,
             default_origin=default_origin,
+            base_headers=request_headers,
             cancel_check=cancel_check,
         )
         cancelled = cancelled or bool(imported_result.get("cancelled"))

@@ -1717,7 +1717,7 @@ async def _hydrate_device_scan_credentials(options: dict[str, Any], scan_id: str
 
 
 async def _hydrate_device_request_collections(options: dict[str, Any], scan_id: str) -> dict[str, Any]:
-    """Resolve encrypted device-bound Postman documents only in worker memory."""
+    """Resolve encrypted device-bound request documents only in worker memory."""
     hydrated = dict(options or {})
     refs = [dict(item) for item in hydrated.get("device_request_collections") or [] if isinstance(item, dict)][:8]
     if not refs:

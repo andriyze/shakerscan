@@ -531,10 +531,12 @@ confirms them open. Nmap service/version/CPE output, addresses, hostnames, MAC/v
 bounded OS hints are retained. The scanner recognizes
 HTTP and TLS on discovered TCP ports rather than assuming 80/443, then optionally runs hidden,
 request-aware `quick`, `standard`, or `deep` Web/API children with capped origins, time, URLs, and
-requests. Operators can upload encrypted Postman Collection/environment JSON, review a redacted
-request inventory, and bind selected collections to a scan. Safe requests can be replayed normally;
+requests. Operators can upload encrypted Postman Collection/environment, HAR 1.2, OpenAPI 3.x, or
+Swagger 2.0 JSON, review a redacted request inventory, and bind selected collections to a scan.
+Safe requests can be replayed normally;
 POST/PUT/PATCH/DELETE require authenticated-active safety plus explicit confirmation. Imported
-scripts never execute and every socket remains pinned to a discovered origin on the device. Child
+Postman scripts, HAR responses, and external OpenAPI references never execute, and every socket
+remains pinned to a discovered origin on the device. Child
 findings retain device/origin/request provenance and never create Web targets.
 
 SSH checks run on the discovered port and collect auth methods, host-key evidence, negotiated

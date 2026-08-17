@@ -228,16 +228,22 @@ identity evidence.
 
 ## Imported API requests
 
-The device page accepts Postman Collection v2 JSON plus an optional Postman environment JSON. The
-original documents can contain tokens, cookies, authorization headers, IDs, and request bodies, so
-ShakerScan encrypts the complete payload and publishes only a redacted request inventory. Postman
-pre-request and test scripts are counted but never executed.
+The device page accepts Postman Collection v2 JSON plus an optional environment, HAR 1.2 traffic,
+OpenAPI 3.x, and Swagger 2.0 JSON. Imported documents can contain tokens, cookies, authorization
+headers, IDs, request bodies, and captured responses, so ShakerScan encrypts the complete payload
+and publishes only a redacted request inventory. Postman pre-request/test scripts and HAR responses
+are never executed.
 
 During a device scan, selected collections are decrypted only inside the dedicated device worker.
-Variables and supported Postman authentication definitions are resolved in memory. Every socket is
-still pinned to an HTTP(S) origin positively discovered on the registered device; an imported URL,
-redirect, variable, or environment value cannot send the scanner to another host. Collection URL
-ports are also added to reachability priority hints.
+Postman variables and authentication definitions are resolved in memory. HAR preserves captured
+request order, headers, cookies, and bodies. OpenAPI/Swagger generates bounded examples from
+examples, defaults, enums, and schemas; only local JSON Pointer references are resolved, and no
+external reference is fetched. An optional device base URL can supply a missing specification
+server. A separately bound web credential can be inherited in worker memory without entering the
+document or Device Hunt transcript. Every socket is still pinned to an HTTP(S) origin positively
+discovered on the registered device; an imported URL, server declaration, redirect, variable, or
+environment value cannot send the scanner to another host. Imported URL ports are also added to
+reachability priority hints.
 
 Quick coverage replays saved safe methods. Standard adds an authentication-removal comparison for
 safe authenticated requests. Deep also places a bounded marker into one existing GET query
@@ -305,7 +311,8 @@ and policy boundary.
   worker's network path, so only a protocol response is treated as confirmed open.
 - No credential guessing, firmware extraction, destructive protocol testing, radio probing, or active
   XSS/SQLi is performed by the device workflow.
-- Postman scripts and imported external hosts never execute. State-changing request replay is
+- Postman scripts, HAR responses, external OpenAPI references, and imported external hosts never
+  execute. State-changing request replay is
   disabled unless the user explicitly binds collections and grants that fixed authority under an
   authenticated-active scan or Device Hunt session.
 - Fixed authenticated host collection accepts only server-owned read-only bundles. Agent-authored

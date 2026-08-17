@@ -50,9 +50,10 @@ authoritative; AI leads are evidence-cited hypotheses.
 
 Device Hunt may propose exact remote-device SSH commands only when an authenticated profile and
 pinned host key are available. A proposal is inert until the user separately confirms the immutable
-command plan in the UI. Imported Postman request collections are encrypted and pinned to the device;
-Device Hunt sees only their redacted request inventory and can include them in a scan only when the
-user fixed that authority at session start. Postman scripts never execute, and state-changing HTTP
+command plan in the UI. Imported Postman, HAR 1.2, OpenAPI 3.x, and Swagger 2.0 request documents
+are encrypted and pinned to the device; Device Hunt sees only their redacted request inventory and
+can include them in a scan only when the user fixed that authority at session start. Postman scripts,
+HAR responses, and external specification references never execute, and state-changing HTTP
 methods require a separate authenticated-active approval. The internal `device-agent` API name
 remains for compatibility; UI and documentation use **Device Hunt**.
 

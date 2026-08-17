@@ -2598,9 +2598,15 @@ async def run_schema_migrations(pool) -> None:
                     is_active BOOLEAN NOT NULL DEFAULT true,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    CONSTRAINT device_request_collections_format_check CHECK (format IN ('postman_collection')),
+                    CONSTRAINT device_request_collections_format_check CHECK (format IN ('postman_collection','har','openapi')),
                     CONSTRAINT device_request_collections_name_unique UNIQUE (device_target_id, name)
                 )
+            """)
+            await conn.execute("ALTER TABLE device_request_collections DROP CONSTRAINT IF EXISTS device_request_collections_format_check")
+            await conn.execute("""
+                ALTER TABLE device_request_collections
+                ADD CONSTRAINT device_request_collections_format_check
+                CHECK (format IN ('postman_collection','har','openapi'))
             """)
             await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_device_request_collections_active
