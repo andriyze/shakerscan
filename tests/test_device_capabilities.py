@@ -53,5 +53,6 @@ def test_vendor_name_alone_does_not_overstate_platform_detection():
     )
     assert result["detected_platform"] is None
     tizen = next(item for item in result["items"] if item["id"] == "tizen-tv-platform-review")
-    assert tizen["state"] == "planned"
-    assert "platform_not_confirmed" in tizen["blockers"]
+    assert tizen["state"] == "ready"
+    assert tizen["implementation"] == "partial"
+    assert "platform_not_confirmed" not in tizen["blockers"]

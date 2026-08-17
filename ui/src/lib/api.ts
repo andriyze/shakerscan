@@ -5278,6 +5278,7 @@ export async function scanDevice(deviceId: string, payload: {
   request_collection_ids?: string[]
   confirm_request_replay?: boolean
   allow_state_changing_requests?: boolean
+  allow_untrusted_tls_credentials?: boolean
   capability_ids?: string[]
 }): Promise<{ scan_id: string; job_id: string; status: string; ui_url: string }> {
   const res = await fetch(`${API_URL}/devices/${encodeURIComponent(deviceId)}/scan`, {
@@ -5333,6 +5334,7 @@ export async function startDeviceAgentSession(deviceId: string, payload: {
   request_collection_ids?: string[]
   confirm_request_replay?: boolean
   allow_state_changing_requests?: boolean
+  allow_untrusted_tls_credentials?: boolean
 }): Promise<DeviceAgentSession> {
   const res = await fetch(`${API_URL}/devices/${encodeURIComponent(deviceId)}/agent/session`, {
     method: 'POST',

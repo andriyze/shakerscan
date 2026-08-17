@@ -28,6 +28,7 @@ def build_device_evidence_graph(
     tool_receipts: list[dict[str, Any]],
     safety_receipt: dict[str, Any],
     reachability: dict[str, Any] | None = None,
+    application_surface: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return normalized observations plus a deterministic entity graph.
 
@@ -153,10 +154,12 @@ def build_device_evidence_graph(
                 confidence="correlated" if shell_execution.get("status") == "completed" else "observed",
             )
 
+    origin_ids: dict[str, str] = {}
     for origin in web_origins:
         if not isinstance(origin, dict) or not origin.get("origin"):
             continue
         origin_id = add_node("web_origin", origin["origin"], dict(origin))
+        origin_ids[str(origin["origin"])] = origin_id
         evidence_id = add_observation(
             "http_response",
             origin_id,
@@ -171,6 +174,35 @@ def build_device_evidence_graph(
         service_id = service_ids.get(("tcp", int(origin.get("port") or 0)))
         if service_id:
             add_edge("served_by", origin_id, service_id, evidence=evidence_id)
+
+    for endpoint in (application_surface or {}).get("observations") or []:
+        if not isinstance(endpoint, dict) or not endpoint.get("id"):
+            continue
+        endpoint_key = [
+            locator,
+            endpoint.get("platform"),
+            endpoint.get("origin"),
+            endpoint.get("method"),
+            endpoint.get("path"),
+        ]
+        endpoint_id = add_node(
+            "device_api_endpoint",
+            endpoint_key,
+            {
+                key: value for key, value in endpoint.items()
+                if key not in {"descriptor"}
+            },
+            confidence="validated" if endpoint.get("outcome") == "confirmed" else "observed",
+        )
+        evidence_id = add_observation(
+            "application_endpoint",
+            endpoint_id,
+            dict(endpoint),
+            source=str(endpoint.get("source") or "device_application_probe"),
+            confidence="validated" if endpoint.get("outcome") == "confirmed" else "observed",
+        )
+        origin_id = origin_ids.get(str(endpoint.get("origin") or ""))
+        add_edge("exposes_api", origin_id or device_id, endpoint_id, evidence=evidence_id)
 
     for protocol in protocol_observations or []:
         if not isinstance(protocol, dict):

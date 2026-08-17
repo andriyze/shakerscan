@@ -538,6 +538,12 @@ POST/PUT/PATCH/DELETE require authenticated-active safety plus explicit confirma
 Postman scripts, HAR responses, and external OpenAPI references never execute, and every socket
 remains pinned to a discovered origin on the device. Child
 findings retain device/origin/request provenance and never create Web targets.
+Before those children, ShakerScan parses same-device SSDP/UPnP descriptors and runs a versioned,
+bounded application catalog for Roku, Vizio, Samsung, LG, Philips, Cast/DIAL, Panasonic, and Sony
+interfaces. Confirmed cleartext APIs, unauthenticated privacy-sensitive reads, software disclosure,
+TLS trust failures, cookie/CORS defects, and authenticated-versus-anonymous response equivalence are
+reported as device findings. Untrusted device TLS remains scannable, but credentials and imported
+secrets are withheld unless the operator grants a separate authenticated-active override.
 
 SSH checks run on the discovered port and collect auth methods, host-key evidence, negotiated
 algorithms, and weak-crypto signals without credential guessing. An operator may bind one encrypted,

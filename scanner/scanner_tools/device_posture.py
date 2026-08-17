@@ -33,6 +33,7 @@ except ImportError:  # pragma: no cover - minimal host test environment
 try:
     from .common import run
     from .device_evidence import build_device_evidence_graph
+    from .device_application import discover_device_application_surface, enrich_ssdp_descriptions
     from .device_reachability import (
         REACHABILITY_TCP_PORTS,
         corroborate_device_reachability,
@@ -46,6 +47,7 @@ try:
 except ImportError:  # pragma: no cover - flat scanner runtime
     from common import run
     from device_evidence import build_device_evidence_graph
+    from device_application import discover_device_application_surface, enrich_ssdp_descriptions
     from device_reachability import (
         REACHABILITY_TCP_PORTS,
         corroborate_device_reachability,
@@ -71,14 +73,14 @@ COMMON_UDP_PORTS = (53, 67, 68, 69, 123, 137, 138, 161, 162, 500, 1900, 4500, 53
 INVENTORY_UDP_PORTS = (53, 123, 161, 1900, 5353, 5683, 47808, 67)
 PRIORITY_TCP_PORTS = (
     21, 22, 23, 25, 53, 80, 81, 110, 111, 135, 139, 143, 443, 445, 554,
-    631, 1883, 2323, 3000, 5000, 5357, 5683, 7000, 8000, 8008, 8009,
+    631, 1883, 1925, 1926, 2323, 3000, 5000, 5357, 5683, 7000, 8000, 8008, 8009,
     8060, 8080, 8081, 8088, 8443, 8883, 8888, 9000, 9080, 9100, 9197,
     49152,
 )
 DEVICE_CLASS_TCP_PORTS = {
     "generic": (),
     "media": (
-        3001, 5555, 6466, 6467, 7000, 7001, 7100, 7345, 8001, 8002,
+        1925, 1926, 3001, 5555, 6466, 6467, 7000, 7001, 7100, 7345, 8001, 8002,
         8008, 8009, 8060, 8200, 9080, 9197, 32400, 55000, 56789,
     ),
     "camera": (554, 1935, 5000, 8000, 8554, 8899, 9000, 34567, 37777),
@@ -101,12 +103,23 @@ TV_MANUFACTURER_TCP_PORTS = {
     "tcl": (5555, 6466, 6467, 8008, 8009, 8060),
     # Hisense ships VIDAA plus Google/Android and Roku variants.
     "hisense": (5555, 6466, 6467, 8008, 8009, 8060, 36669),
+    "philips": (1925, 1926),
+    "roku": (8060,),
+    "sony": (80, 443),
+    "panasonic": (55000,),
 }
 SSH_SERVICE_NAMES = {"ssh", "ssh-alt"}
 _HTTP_STATUS = re.compile(rb"^HTTP/(?:1\.[01]|2(?:\.0)?)\s+\d{3}\b", re.I)
 _TIMEOUT_TEXT = re.compile(r"(?:host\s+)?timed?\s*out|host-timeout", re.I)
 _HOST_RE = re.compile(r"^(?=.{1,253}$)(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.?$")
 KNOWN_POLICY_REQUIREMENTS = {"encrypted", "password_auth", "weak_algorithms", "publickey_auth"}
+DEFAULT_DENIED_DEVICE_DESTINATIONS = (
+    "169.254.169.254/32",  # AWS/GCP/OpenStack metadata
+    "169.254.170.2/32",    # AWS container credentials
+    "100.100.100.200/32",  # Alibaba metadata
+    "168.63.129.16/32",    # Azure host virtual service
+    "fd00:ec2::254/128",   # AWS IPv6 metadata
+)
 
 
 @dataclass(frozen=True)
@@ -182,8 +195,45 @@ async def resolve_device_address(locator: str, *, timeout: float = 5.0) -> str:
             addresses.append(address)
     if not addresses:
         raise ValueError("device locator resolved to no usable IP address")
-    addresses.sort(key=lambda value: (ipaddress.ip_address(value).version, value))
+    addresses.sort(key=lambda value: (
+        ipaddress.ip_address(value).version,
+        int(ipaddress.ip_address(value)),
+    ))
     return addresses[0]
+
+
+def validate_device_destination(address: str) -> str:
+    """Reject infrastructure control-plane destinations, not authorized public devices."""
+    parsed = ipaddress.ip_address(address)
+    if parsed.is_unspecified or parsed.is_multicast:
+        raise ValueError("device destination is not a unicast host address")
+    if os.environ.get("SHAKERSCAN_DEVICE_ALLOW_METADATA_TARGETS", "").strip().lower() in {"1", "true", "yes"}:
+        return str(parsed)
+    configured = [
+        item.strip()
+        for item in os.environ.get("SHAKERSCAN_DEVICE_DENY_CIDRS", "").split(",")
+        if item.strip()
+    ]
+    networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+    for raw in (*DEFAULT_DENIED_DEVICE_DESTINATIONS, *configured):
+        try:
+            networks.append(ipaddress.ip_network(raw, strict=False))
+        except ValueError as exc:
+            raise ValueError(f"invalid SHAKERSCAN_DEVICE_DENY_CIDRS entry: {raw}") from exc
+    if any(parsed.version == network.version and parsed in network for network in networks):
+        raise ValueError("device destination is denied because it is an infrastructure metadata or configured control-plane address")
+    return str(parsed)
+
+
+def manufacturer_priority_ports(manufacturer: str, model: str) -> tuple[int, ...]:
+    """Match normalized product tokens exactly; display names are not evidence."""
+    tokens = set(re.findall(r"[a-z0-9]+", f"{manufacturer} {model}".lower()))
+    return tuple(dict.fromkeys(
+        port
+        for vendor, ports in TV_MANUFACTURER_TCP_PORTS.items()
+        if vendor in tokens
+        for port in ports
+    ))
 
 
 def _service_from_element(port_elem: Any) -> dict[str, Any]:
@@ -1432,20 +1482,10 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
     ]
     device_class = str(options.get("device_class") or "generic").strip().lower()
     class_ports = DEVICE_CLASS_TCP_PORTS.get(device_class, DEVICE_CLASS_TCP_PORTS["generic"])
-    manufacturer = re.sub(
-        r"[^a-z0-9]+", "",
-        " ".join([
-            str(options.get("device_manufacturer") or ""),
-            str(options.get("device_model") or ""),
-            str(options.get("device_name") or ""),
-        ]).lower(),
+    manufacturer_ports = manufacturer_priority_ports(
+        str(options.get("device_manufacturer") or ""),
+        str(options.get("device_model") or ""),
     )
-    manufacturer_ports = tuple(dict.fromkeys(
-        port
-        for vendor, ports in TV_MANUFACTURER_TCP_PORTS.items()
-        if vendor in manufacturer
-        for port in ports
-    ))
     reachability_port_hints = list(dict.fromkeys([
         *valid_ports(hint_payload.get("user")),
         *valid_ports(hint_payload.get("observed")),
@@ -1483,6 +1523,7 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
             policy_name=policy_name,
             policy_rules_count=len(rules),
         )
+    validate_device_destination(resolved_address)
 
     async def scan_stage_callback(event: dict[str, Any]) -> bool | None:
         kind = str(event.get("kind") or "")
@@ -1638,6 +1679,35 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
         inconclusive_observations,
         protocol_results,
     )
+    descriptor_enrichment: dict[str, Any] = {
+        "observations": [], "services": [], "web_origins": [], "identity": {},
+        "receipt": {"stage": "device_upnp_description", "complete": True, "required": False, "attempted": 0},
+    }
+    if not safety.halted and await ensure_active("UPnP device descriptions"):
+        safety.authorize("upnp_device_description", "readonly")
+        safety.record_limit_enforcement(
+            "upnp_device_description",
+            max_concurrency=1,
+            max_requests_per_second=safety_profile.max_requests_per_second,
+        )
+        descriptor_enrichment = await enrich_ssdp_descriptions(
+            connect_address=resolved_address,
+            protocols=protocol_results,
+        )
+        descriptor_receipt = descriptor_enrichment.get("receipt")
+        if isinstance(descriptor_receipt, dict):
+            tool_receipts.append(descriptor_receipt)
+        service_map = {
+            (str(item.get("transport") or "tcp"), int(item["port"])): dict(item)
+            for item in services
+        }
+        _merge_services(service_map, [
+            item for item in descriptor_enrichment.get("services") or [] if isinstance(item, dict)
+        ])
+        services = sorted(service_map.values(), key=lambda row: (row["transport"], row["port"]))
+        descriptor_identity = descriptor_enrichment.get("identity")
+        if isinstance(descriptor_identity, dict) and descriptor_identity:
+            identity.setdefault("device_metadata", {}).update(descriptor_identity)
     tcp_filtered_count = int(scan_completeness.get("tcp_filtered_ports_count") or 0)
     udp_extraports_inconclusive_count = int(
         scan_completeness.get("udp_extraports_inconclusive_count") or 0
@@ -1672,7 +1742,7 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
             max_requests_per_second=safety_profile.max_requests_per_second,
         )
     if not safety.halted and await ensure_active("web origin discovery"):
-        web_origins = await detect_web_origins(
+        detected_web_origins = await detect_web_origins(
             resolved_address,
             services,
             cap=profile.web_probe_cap,
@@ -1680,6 +1750,16 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
             max_concurrency=safety_profile.max_concurrency,
             max_requests_per_second=safety_profile.max_requests_per_second,
         )
+        web_origin_map = {
+            str(item.get("origin")): dict(item)
+            for item in descriptor_enrichment.get("web_origins") or []
+            if isinstance(item, dict) and item.get("origin")
+        }
+        for item in detected_web_origins:
+            if isinstance(item, dict) and item.get("origin"):
+                previous = web_origin_map.get(str(item["origin"]), {})
+                web_origin_map[str(item["origin"])] = {**previous, **item}
+        web_origins = sorted(web_origin_map.values(), key=lambda item: (int(item.get("port") or 0), str(item.get("scheme") or "")))
     else:
         web_origins = []
         scan_completeness["complete"] = False
@@ -1699,6 +1779,56 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
             service["web_origin"] = origin["origin"]
         elif service.get("tunnel") == "ssl":
             service["encrypted"] = True
+
+    application_surface: dict[str, Any] = {
+        "schema_version": "device-application-surface/v1",
+        "platforms": [], "observations": list(descriptor_enrichment.get("observations") or []),
+        "controlled_operations": [], "skipped_probes": [],
+        "summary": {"requests_executed": int((descriptor_enrichment.get("receipt") or {}).get("attempted") or 0)},
+    }
+    if not safety.halted:
+        safety.authorize("device_application_discovery", "readonly")
+        await _call_stage_callback(progress_callback, {"phase": "device_application_discovery", "progress": 87})
+        safety.record_limit_enforcement(
+            "device_application_discovery",
+            max_concurrency=1,
+            max_requests_per_second=safety_profile.max_requests_per_second,
+        )
+    if not safety.halted and await ensure_active("device application discovery"):
+        application_surface = await discover_device_application_surface(
+            connect_address=resolved_address,
+            origin_locator=locator,
+            profile=profile_name,
+            safety_profile=safety_profile.name,
+            device_name=str(options.get("device_name") or ""),
+            manufacturer=str(options.get("device_manufacturer") or ""),
+            model=str(options.get("device_model") or ""),
+            identity=identity,
+            services=services,
+            web_origins=web_origins,
+            protocols=protocol_results,
+            descriptor_enrichment=descriptor_enrichment,
+        )
+        application_summary = application_surface.get("summary") if isinstance(application_surface.get("summary"), dict) else {}
+        tool_receipts.append({
+            "stage": "device_application_discovery",
+            "complete": True,
+            "required": False,
+            "catalog_version": application_surface.get("catalog_version"),
+            "requests_executed": int(application_summary.get("requests_executed") or 0),
+            "confirmed_endpoints": int(application_summary.get("confirmed_endpoints") or 0),
+            "authentication_boundaries": int(application_summary.get("authentication_boundaries") or 0),
+        })
+        await _call_stage_callback(progress_callback, {
+            "phase": "device_application_discovery",
+            "progress": 87,
+            "details": {
+                "platforms": int(application_summary.get("candidate_platforms") or 0),
+                "api_endpoints": int(application_summary.get("responding_endpoints") or 0),
+                "auth_boundaries": int(application_summary.get("authentication_boundaries") or 0),
+                "available_control_families": int(application_summary.get("available_control_families") or 0),
+            },
+        })
 
     ssh_findings: list[dict[str, Any]] = []
     if await ensure_active("post-web health check"):
@@ -1818,7 +1948,10 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
         str(stage) for stage in scan_completeness.get("incomplete_stages") or []
     ))
     services, policy_findings = evaluate_service_policy(services, rules, policy_name=policy_name)
-    findings = policy_findings + ssh_findings
+    application_findings = [
+        dict(item) for item in application_surface.get("findings") or [] if isinstance(item, dict)
+    ]
+    findings = policy_findings + ssh_findings + application_findings
     complete = bool(scan_completeness.get("complete"))
     execution_complete = bool(scan_completeness.get("execution_complete", complete))
     score, grade = (
@@ -1837,13 +1970,17 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
         tool_receipts=tool_receipts,
         safety_receipt=safety_receipt,
         reachability=reachability,
+        application_surface=application_surface,
     )
+    application_summary = application_surface.get("summary") if isinstance(application_surface.get("summary"), dict) else {}
     capability_coverage = [
         {"capability_id": "scope-safety-health", "status": "completed" if not safety.halted and reachability.get("status") == "online" else "failed"},
         {"capability_id": "device-identity-attack-surface", "status": "completed" if identity else "partial"},
         {"capability_id": "tcp-udp-network-discovery", "status": "completed" if scan_completeness.get("execution_complete") else "partial"},
         {"capability_id": "service-fingerprinting-crypto", "status": "completed" if services else "partial"},
         {"capability_id": "smart-tv-lan-protocols", "status": "partial" if protocol_results else "not_observed"},
+        {"capability_id": "device-api-surface-discovery", "status": "completed" if application_summary.get("requests_executed") else "not_observed"},
+        {"capability_id": "api-graphql-websocket-testing", "status": "partial" if application_summary.get("responding_endpoints") else "not_observed"},
         {"capability_id": "web-ui-dast", "status": "completed" if web_origins else "not_observed"},
         {"capability_id": "evidence-correlation-reporting", "status": "completed"},
     ]
@@ -1899,6 +2036,19 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
             "inconclusive_observations": inconclusive_observations,
             "web_origins": web_origins,
             "protocols": protocol_results,
+            "application_surface": application_surface,
+            "runtime_destinations": [
+                {
+                    "label": f"device_application_{index}",
+                    "url": str(item.get("origin") or ""),
+                    "final_url": str(item.get("origin") or ""),
+                    "source": "device_application_probe",
+                    "resolved_ips": [resolved_address],
+                    "resolved_host": urllib.parse.urlsplit(str(item.get("origin") or "")).hostname,
+                }
+                for index, item in enumerate(application_surface.get("observations") or [], start=1)
+                if isinstance(item, dict) and item.get("origin")
+            ][:64],
             "policy": {"name": policy_name, "rules_count": len(rules)},
             "decision": {"decision": decision, "rationale": rationale, "policy_name": policy_name},
             "safety": safety_receipt,
@@ -1911,6 +2061,8 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
                 "tcp_priority_ports": sorted(set(PRIORITY_TCP_PORTS) | set(extra_priority_ports)),
                 "udp_ports_requested": list(profile.udp_ports),
                 "confirmed_services_count": len(services),
+                "application_endpoints_responding": int(application_summary.get("responding_endpoints") or 0),
+                "application_platforms_confirmed": int(application_summary.get("confirmed_platforms") or 0),
                 "inconclusive_observations_count": len(inconclusive_observations),
                 "tool_receipts": tool_receipts,
                 "web_probe_cap": profile.web_probe_cap,

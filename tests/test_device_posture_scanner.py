@@ -760,6 +760,37 @@ def test_fingerprinting_is_capped_and_forces_incomplete_coverage(monkeypatch):
     assert "tcp_fingerprint_truncated" in completeness["incomplete_stages"]
 
 
+def test_device_destination_denies_metadata_but_allows_authorized_public_hosts(monkeypatch):
+    monkeypatch.delenv("SHAKERSCAN_DEVICE_ALLOW_METADATA_TARGETS", raising=False)
+    monkeypatch.delenv("SHAKERSCAN_DEVICE_DENY_CIDRS", raising=False)
+    with pytest.raises(ValueError, match="metadata"):
+        device_posture.validate_device_destination("169.254.169.254")
+    assert device_posture.validate_device_destination("8.8.8.8") == "8.8.8.8"
+
+
+def test_device_destination_supports_operator_deny_cidrs(monkeypatch):
+    monkeypatch.setenv("SHAKERSCAN_DEVICE_DENY_CIDRS", "203.0.113.0/24")
+    with pytest.raises(ValueError, match="configured control-plane"):
+        device_posture.validate_device_destination("203.0.113.10")
+
+
+def test_multi_address_resolution_uses_numeric_ip_order(monkeypatch):
+    class FakeLoop:
+        async def getaddrinfo(self, *_args, **_kwargs):
+            return [
+                (2, 1, 6, "", ("10.0.0.10", 0)),
+                (2, 1, 6, "", ("10.0.0.9", 0)),
+            ]
+
+    monkeypatch.setattr(device_posture.asyncio, "get_running_loop", lambda: FakeLoop())
+    assert asyncio.run(device_posture.resolve_device_address("tv.local")) == "10.0.0.9"
+
+
+def test_vendor_port_hints_require_exact_manufacturer_or_model_tokens():
+    assert 8001 not in device_posture.manufacturer_priority_ports("NotSamsung-compatible", "Generic")
+    assert 8001 in device_posture.manufacturer_priority_ports("Samsung", "Tizen TV")
+
+
 def test_device_worker_identity_and_queue_are_isolated_from_web_dast():
     root = Path(__file__).resolve().parents[1]
     worker = (root / "api" / "worker.py").read_text(encoding="utf-8")

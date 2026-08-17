@@ -561,14 +561,19 @@ def test_scanner_sh_restart_and_rebuild_recreate_api_scaled_workers():
     assert 'remove_scan_worker_containers "Removing API-scaled worker containers left outside Compose..."' in script
     assert "refresh_workers_after_rebuild" in script
     assert 'existing_workers="$(running_scan_worker_count)"' in script
-    assert 'refresh_workers_after_rebuild "$existing_workers"' in script
+    assert 'refresh_workers_after_rebuild "$existing_workers" "$existing_model_intake_sandbox"' in script
     assert 'existing_device_workers="$(running_device_worker_count)"' in script
     assert 'refresh_device_worker_after_rebuild "$existing_device_workers"' in script
     assert 'if [ "$(running_device_worker_count)" -gt 0 ]; then' in script
     assert "compose --profile devices restart device-worker" in script
     assert "Docker is running, but this user cannot access the Docker daemon" in script
-    assert 'compose up --no-build -d --force-recreate model-intake-sandbox' in script
+    assert 'compose up --no-build -d --no-deps --force-recreate model-intake-sandbox' in script
     assert 'compose up --no-build -d --force-recreate --scale worker="$desired_count" worker' in script
+    assert 'refresh_running_service_after_rebuild api "$existing_api"' in script
+    assert 'refresh_running_service_after_rebuild ui "$existing_ui"' in script
+    assert 'refresh_running_service_after_rebuild model-intake-signer "$existing_model_intake_signer"' in script
+    assert 'compose up --no-build -d --no-deps --force-recreate "$service"' in script
+    assert "Run './scanner.sh restart' if you also need to recreate API/UI containers." not in script
 
 
 def test_local_and_release_device_workers_use_stable_readiness_identity():

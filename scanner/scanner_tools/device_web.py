@@ -28,6 +28,7 @@ from .device_request_formats import resolve_imported_requests
 MAX_RESPONSE_BYTES = 256 * 1024
 MAX_REDIRECTS = 5
 IMPORTED_REQUEST_LIMITS = {"quick": 50, "standard": 200, "deep": 500}
+IMPORTED_REQUEST_TIME_BUDGETS = {"quick": 60.0, "standard": 180.0, "deep": 480.0}
 PROFILE_PATHS = {
     "quick": ("/",),
     "standard": ("/", "/.well-known/security.txt", "/robots.txt"),
@@ -113,17 +114,30 @@ async def _read_response(reader: asyncio.StreamReader, timeout: float, *, expect
         while len(chunks) <= MAX_RESPONSE_BYTES:
             line = await asyncio.wait_for(reader.readline(), timeout=timeout)
             size_text = line.split(b";", 1)[0].strip()
+            if len(size_text) > 16:
+                truncated = True
+                break
             try:
                 size = int(size_text, 16)
             except ValueError:
                 break
             if size == 0:
                 break
-            chunk = await asyncio.wait_for(reader.readexactly(size), timeout=timeout)
-            await asyncio.wait_for(reader.readexactly(2), timeout=timeout)
+            remaining = MAX_RESPONSE_BYTES + 1 - len(chunks)
+            if remaining <= 0:
+                truncated = True
+                break
+            wanted = min(size, remaining)
+            chunk = await asyncio.wait_for(reader.readexactly(wanted), timeout=timeout)
             chunks.extend(chunk)
+            if size > wanted:
+                # Do not consume a device-controlled multi-gigabyte chunk merely
+                # to find its terminator. The caller closes this exact socket.
+                truncated = True
+                break
+            await asyncio.wait_for(reader.readexactly(2), timeout=timeout)
         body = bytes(chunks)
-        truncated = len(body) > MAX_RESPONSE_BYTES
+        truncated = truncated or len(body) > MAX_RESPONSE_BYTES
     else:
         chunks = bytearray(body)
         while len(chunks) <= MAX_RESPONSE_BYTES:
@@ -166,6 +180,17 @@ async def _request(
         ),
         timeout=timeout,
     )
+    tls_info: dict[str, Any] | None = None
+    get_extra_info = getattr(writer, "get_extra_info", None)
+    ssl_object = get_extra_info("ssl_object") if callable(get_extra_info) else None
+    if ssl_object is not None:
+        peer_der = ssl_object.getpeercert(binary_form=True) or b""
+        cipher = ssl_object.cipher()
+        tls_info = {
+            "protocol": ssl_object.version(),
+            "cipher": cipher[0] if cipher else None,
+            "peer_certificate_sha256": hashlib.sha256(peer_der).hexdigest() if peer_der else None,
+        }
     request_headers = {
         "Host": _host_header(hostname, port, scheme),
         "User-Agent": "ShakerScan-Device/1",
@@ -197,7 +222,92 @@ async def _request(
         "body": response_body,
         "truncated": truncated,
         "elapsed_ms": round((time.monotonic() - started) * 1000, 2),
+        "tls": tls_info,
     }
+
+
+async def _assess_tls_trust(
+    *, connect_address: str, hostname: str, port: int, timeout: float = 8.0,
+) -> dict[str, Any]:
+    """Perform a separate strict handshake without sending an HTTP request."""
+    context = ssl.create_default_context()
+    writer: asyncio.StreamWriter | None = None
+    try:
+        _reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(
+                connect_address, port, ssl=context, server_hostname=hostname,
+            ),
+            timeout=timeout,
+        )
+        get_extra_info = getattr(writer, "get_extra_info", None)
+        ssl_object = get_extra_info("ssl_object") if callable(get_extra_info) else None
+        cipher = ssl_object.cipher() if ssl_object is not None else None
+        return {
+            "trusted": True,
+            "verification_error": None,
+            "protocol": ssl_object.version() if ssl_object is not None else None,
+            "cipher": cipher[0] if cipher else None,
+        }
+    except ssl.SSLCertVerificationError as exc:
+        return {
+            "trusted": False,
+            "verification_error": str(exc.verify_message or "certificate verification failed")[:500],
+            "verification_code": int(exc.verify_code),
+        }
+    except Exception as exc:
+        return {
+            "trusted": False,
+            "verification_error": f"strict_tls_handshake_failed:{type(exc).__name__}",
+        }
+    finally:
+        if writer is not None:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+
+async def request_pinned_device_http(
+    *,
+    connect_address: str,
+    hostname: str,
+    port: int,
+    scheme: str,
+    method: str = "GET",
+    path: str = "/",
+    headers: dict[str, str] | None = None,
+    body: bytes = b"",
+    timeout: float = 8.0,
+) -> dict[str, Any]:
+    """Send one exact-destination HTTP request for a server-owned device adapter.
+
+    This is deliberately narrower than the imported-request executor.  Callers
+    must provide a request selected from ShakerScan's immutable device catalog;
+    the socket remains pinned to ``connect_address`` while ``hostname`` is used
+    only for Host and TLS SNI.
+    """
+    normalized_scheme = str(scheme or "").strip().lower()
+    normalized_method = str(method or "").strip().upper()
+    if normalized_scheme not in {"http", "https"}:
+        raise ValueError("device adapter scheme must be http or https")
+    if normalized_method not in {"GET", "HEAD", "POST"}:
+        raise ValueError("device adapter method is not permitted")
+    if not isinstance(path, str) or not path.startswith("/") or "\r" in path or "\n" in path:
+        raise ValueError("device adapter path must be one relative HTTP path")
+    if not 1 <= int(port) <= 65535:
+        raise ValueError("device adapter port is invalid")
+    return await _request(
+        connect_address=str(connect_address),
+        hostname=str(hostname),
+        port=int(port),
+        scheme=normalized_scheme,
+        method=normalized_method,
+        path=path,
+        headers=dict(headers or {}),
+        body=bytes(body),
+        timeout=float(timeout),
+    )
 
 
 def _origin_request_path(url: str) -> str:
@@ -300,6 +410,9 @@ async def _run_imported_requests(
     allow_state_changing_requests: bool,
     default_origin: bool,
     base_headers: dict[str, str] | None,
+    tls_assessment: dict[str, Any] | None,
+    allow_untrusted_tls_credentials: bool,
+    deadline: float,
     cancel_check: Any,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     origin = str(origin_info.get("origin") or "")
@@ -322,6 +435,9 @@ async def _run_imported_requests(
             skipped.append({"collection_id": collection_id, "reason": f"collection_resolution_failed:{type(exc).__name__}"})
             continue
         for imported in requests:
+            if time.monotonic() >= deadline:
+                skipped.append({"collection_id": collection_id, "request_id": imported.get("id"), "reason": "profile_time_budget"})
+                continue
             if attempted >= limit:
                 skipped.append({"collection_id": collection_id, "request_id": imported.get("id"), "reason": "profile_request_limit"})
                 continue
@@ -348,20 +464,35 @@ async def _run_imported_requests(
                         "executed": len(observations), "skipped": len(skipped), "cancelled": True,
                         "observations": observations, "skipped_requests": skipped[:500],
                     }, findings
-            attempted += 1
             headers = dict(base_headers or {})
             headers.update(dict(imported.get("headers") or {}))
             headers = _safe_request_headers(headers)
             has_sensitive_material = bool(imported.get("has_sensitive_material")) or any(
                 str(key).lower() in {"authorization", "cookie", "x-api-key", "api-key"} for key in headers
             )
+            if (
+                scheme == "https" and has_sensitive_material
+                and tls_assessment is not None and not tls_assessment.get("trusted")
+                and not allow_untrusted_tls_credentials
+            ):
+                skipped.append({
+                    "collection_id": collection_id,
+                    "request_id": imported.get("id"),
+                    "name": imported.get("name"),
+                    "method": method,
+                    "reason": "untrusted_tls_credentials_not_confirmed",
+                })
+                continue
+            attempted += 1
             body = imported.get("body") if isinstance(imported.get("body"), bytes) else b""
             path = _origin_request_path(str(imported.get("url") or ""))
             try:
+                remaining = max(0.1, deadline - time.monotonic())
                 response = await _cancelable_request(
                     cancel_check,
                     connect_address=connect_address, hostname=hostname, port=port, scheme=scheme,
                     method=method, path=path, headers=headers, body=body,
+                    timeout=min(8.0, remaining),
                 )
             except _DeviceWebCancelled:
                 return {
@@ -401,11 +532,28 @@ async def _run_imported_requests(
                     url=request_url, collection_id=collection_id, request_id=str(imported.get("id") or ""),
                     evidence={"method": method, "status": observation["status"], "request_header_names": observation["request_header_names"]},
                 ))
+            if (
+                scheme == "https" and has_sensitive_material
+                and tls_assessment is not None and not tls_assessment.get("trusted")
+                and allow_untrusted_tls_credentials
+            ):
+                findings.append(_request_finding(
+                    title="Sensitive API request sent over unverified TLS", severity="high",
+                    description="The operator explicitly permitted a saved request containing authentication material to be sent even though the device certificate could not be verified.",
+                    recommendation="Pin a trusted device certificate or isolate the management path before sending reusable secrets.",
+                    url=request_url, collection_id=collection_id, request_id=str(imported.get("id") or ""),
+                    evidence={
+                        "method": method,
+                        "status": observation["status"],
+                        "tls_verification_error": tls_assessment.get("verification_error"),
+                        "operator_override": True,
+                    },
+                ))
             if response_headers.get("access-control-allow-origin") == "*" and response_headers.get("access-control-allow-credentials", "").lower() == "true":
                 findings.append(_request_finding(
-                    title="Device API combines wildcard CORS with credentials", severity="high",
-                    description="The API response permits any origin while also allowing browser credentials.",
-                    recommendation="Allow only explicitly trusted management origins and do not combine wildcard origins with credentials.",
+                    title="Device API returns an invalid wildcard credentialed CORS policy", severity="low",
+                    description="The API combines a wildcard origin with credential allowance. Browsers reject this combination, so it is a configuration defect rather than proof of cross-origin credential theft.",
+                    recommendation="Allow only explicitly trusted management origins and verify that untrusted Origin values are never reflected with credentials.",
                     url=request_url, collection_id=collection_id, request_id=str(imported.get("id") or ""),
                     evidence={"method": method, "status": observation["status"], "acao": "*", "credentials": True},
                 ))
@@ -431,6 +579,7 @@ async def _run_imported_requests(
                         cancel_check,
                         connect_address=connect_address, hostname=hostname, port=port, scheme=scheme,
                         method=method, path=path, headers=stripped_headers, body=body,
+                        timeout=min(8.0, max(0.1, deadline - time.monotonic())),
                     )
                     anonymous_body = bytes(anonymous.get("body") or b"")
                     if (
@@ -453,12 +602,14 @@ async def _run_imported_requests(
         "origin": origin,
         "profile": profile,
         "request_limit": limit,
+        "time_budget_seconds": IMPORTED_REQUEST_TIME_BUDGETS.get(profile, IMPORTED_REQUEST_TIME_BUDGETS["standard"]),
         "executed": len(observations),
         "skipped": len(skipped),
         "skipped_actionable": sum(1 for item in skipped if item.get("reason") not in {"different_discovered_origin", "relative_request_bound_to_primary_origin"}),
         "routed_elsewhere": sum(1 for item in skipped if item.get("reason") in {"different_discovered_origin", "relative_request_bound_to_primary_origin"}),
         "cancelled": False,
         "allow_state_changing_requests": allow_state_changing_requests,
+        "allow_untrusted_tls_credentials": allow_untrusted_tls_credentials,
         "observations": observations,
         "skipped_requests": skipped[:500],
         "findings_count": len(findings),
@@ -472,6 +623,7 @@ async def run_pinned_device_web_scan(
     credential: dict[str, Any] | None = None,
     request_collections: list[dict[str, Any]] | None = None,
     allow_state_changing_requests: bool = False,
+    allow_untrusted_tls_credentials: bool = False,
     default_origin: bool = False,
     cancel_check: Any = None,
 ) -> dict[str, Any]:
@@ -495,10 +647,39 @@ async def run_pinned_device_web_scan(
         raise ValueError("device web origin hostname does not match pinned discovery evidence")
 
     request_headers: dict[str, str] = {}
+    tls_assessment = await _assess_tls_trust(
+        connect_address=connect_address, hostname=hostname, port=port,
+    ) if scheme == "https" else None
+    tls_findings: list[dict[str, Any]] = []
+    if tls_assessment is not None and not tls_assessment.get("trusted"):
+        tls_finding = {
+            "type": "Device TLS assessment",
+            "title": "Device HTTPS trust could not be established",
+            "severity": "medium",
+            "description": "The strict TLS handshake or certificate verification failed for this device web interface. Non-secret assessment remains available, but credentials are withheld unless the operator explicitly accepts the interception risk.",
+            "recommendation": "Install or pin a certificate trusted for the device hostname, or isolate the management interface on a trusted network.",
+            "url": public_request_url(origin),
+            "tool": "device_tls",
+            "source": "device",
+            "evidence": {
+                "verification_error": tls_assessment.get("verification_error"),
+                "credentials_withheld_by_default": True,
+            },
+        }
+        tls_finding["fingerprint"] = hashlib.sha256(
+            json.dumps([tls_finding["title"], tls_finding["url"]], separators=(",", ":")).encode()
+        ).hexdigest()
+        tls_findings.append(tls_finding)
     credentials_attempted = False
+    credentials_withheld = False
     authentication_succeeded = False
     cancelled = False
-    if credential:
+    if (
+        credential and scheme == "https" and tls_assessment is not None
+        and not tls_assessment.get("trusted") and not allow_untrusted_tls_credentials
+    ):
+        credentials_withheld = True
+    elif credential:
         kind = str(credential.get("auth_kind") or "")
         secret = str(credential.get("secret") or "")
         if kind == "web_authorization_header":
@@ -568,11 +749,16 @@ async def run_pinned_device_web_scan(
                 "url": response_url,
                 "path": current_path,
                 "status": response["status"],
-                "headers": response["headers"],
+                "headers": _public_response_headers(response["headers"]),
                 "body_bytes": len(response["body"]),
                 "truncated": response["truncated"],
                 "elapsed_ms": response["elapsed_ms"],
             })
+            if tls_assessment is not None and isinstance(response.get("tls"), dict):
+                tls_assessment.update({
+                    key: value for key, value in response["tls"].items()
+                    if value is not None
+                })
             location = str(response["headers"].get("location") or "")
             if response["status"] not in {301, 302, 303, 307, 308} or not location:
                 final_url = response_url
@@ -598,6 +784,9 @@ async def run_pinned_device_web_scan(
     imported_result = None
     imported_findings: list[dict[str, Any]] = []
     if request_collections and not cancelled:
+        request_deadline = time.monotonic() + IMPORTED_REQUEST_TIME_BUDGETS.get(
+            profile, IMPORTED_REQUEST_TIME_BUDGETS["standard"],
+        )
         imported_result, imported_findings = await _run_imported_requests(
             origin_info=origin_info,
             request_collections=request_collections,
@@ -605,6 +794,9 @@ async def run_pinned_device_web_scan(
             allow_state_changing_requests=allow_state_changing_requests,
             default_origin=default_origin,
             base_headers=request_headers,
+            tls_assessment=tls_assessment,
+            allow_untrusted_tls_credentials=allow_untrusted_tls_credentials,
+            deadline=request_deadline,
             cancel_check=cancel_check,
         )
         cancelled = cancelled or bool(imported_result.get("cancelled"))
@@ -621,7 +813,7 @@ async def run_pinned_device_web_scan(
             "status_code": status_code,
         },
         "result": {"score": None, "grade": None},
-        "findings": imported_findings,
+        "findings": tls_findings + imported_findings,
         "device_web": {
             "schema_version": "device-web-pinned/v1",
             "origin": origin,
@@ -629,7 +821,9 @@ async def run_pinned_device_web_scan(
             "profile": profile,
             "observations": observations,
             "credentials_attempted": credentials_attempted,
+            "credentials_withheld": credentials_withheld,
             "authentication_succeeded": authentication_succeeded,
+            "tls_assessment": tls_assessment,
             "imported_requests": imported_result,
         },
         "scan_metadata": {
@@ -637,6 +831,8 @@ async def run_pinned_device_web_scan(
             "active_testing": bool(allow_state_changing_requests),
             "state_changing_requests_authorized": bool(allow_state_changing_requests),
             "credentials_attempted": credentials_attempted,
+            "credentials_withheld": credentials_withheld,
+            "allow_untrusted_tls_credentials": allow_untrusted_tls_credentials,
             "pinned_destination": True,
         },
         "error": error,

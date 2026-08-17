@@ -2296,6 +2296,7 @@ async def run_scan(
             await update_scan_progress(scan_id, phase, progress, job_id=job_id)
             _append_device_activity(
                 scan_id, kind="phase", phase=phase, progress=progress,
+                details=event.get("details") if isinstance(event.get("details"), dict) else None,
             )
 
         device_options["_progress_callback"] = _device_progress
@@ -3999,6 +4000,10 @@ async def persist_device_inventory(scan_id: str, device_target_id: str, result: 
     hostnames = [str(item) for item in identity.get("hostnames") or [] if str(item).strip()]
     mac = next((str(item.get("address")) for item in addresses if item.get("type") == "mac" and item.get("address")), None)
     vendor = next((str(item.get("vendor")) for item in addresses if item.get("vendor")), None)
+    device_metadata = identity.get("device_metadata") if isinstance(identity.get("device_metadata"), dict) else {}
+    descriptor_manufacturer = str(device_metadata.get("manufacturer") or "").strip() or None
+    descriptor_model = str(device_metadata.get("model_name") or device_metadata.get("model_number") or "").strip() or None
+    descriptor_udn = str(device_metadata.get("udn") or "").strip() or None
     async with db_pool.acquire() as conn:
         async with conn.transaction():
             current = await conn.fetchrow("SELECT primary_locator, stable_identity FROM device_targets WHERE id=$1 FOR UPDATE", device_uuid)
@@ -4067,7 +4072,7 @@ async def persist_device_inventory(scan_id: str, device_target_id: str, result: 
                         if key not in {"transport", "port", "state", "service_name", "product", "version", "cpe", "encrypted", "web_origin", "policy_disposition", "policy_reason"}
                     }),
                 )
-            stable_identity = current["stable_identity"] or (f"mac:{mac.lower()}" if mac else None)
+            stable_identity = current["stable_identity"] or (f"mac:{mac.lower()}" if mac else f"upnp:{descriptor_udn}" if descriptor_udn else None)
             identity_confidence = "high" if mac else "medium" if addresses else "low"
             await conn.execute(
                 """UPDATE device_targets SET
@@ -4077,9 +4082,10 @@ async def persist_device_inventory(scan_id: str, device_target_id: str, result: 
                            WHEN $2='high' THEN 'high'
                            WHEN identity_confidence='low' THEN $2
                            ELSE identity_confidence END,
-                       manufacturer=COALESCE(manufacturer,$3), updated_at=NOW()
+                       manufacturer=COALESCE(manufacturer,$3),
+                       model=COALESCE(model,$5), updated_at=NOW()
                    WHERE id=$4""",
-                stable_identity, identity_confidence, vendor, device_uuid,
+                stable_identity, identity_confidence, descriptor_manufacturer or vendor, device_uuid, descriptor_model,
             )
 
 
@@ -7206,6 +7212,7 @@ _DEVICE_ACTIVITY_MESSAGES = {
     "device_udp_discovery": "Checking curated UDP services",
     "device_protocol_discovery": "Testing device protocols such as SSDP and mDNS",
     "device_web_discovery": "Detecting HTTP and HTTPS on confirmed ports",
+    "device_application_discovery": "Identifying device platforms and testing known APIs",
     "device_ssh_posture": "Reviewing SSH posture on confirmed SSH services",
     "device_policy": "Evaluating device policy and evidence completeness",
     "device_web_dast": "Testing discovered web and API interfaces",
@@ -7229,6 +7236,7 @@ def _append_device_activity(
         if key in {
             "confirmed_services", "web_origins", "origin", "status", "error_type",
             "executed_requests", "skipped_requests", "findings_count", "collection_count",
+            "platforms", "api_endpoints", "auth_boundaries", "available_control_families",
         }:
             safe_details[str(key)] = value
     event = {
@@ -7818,6 +7826,7 @@ async def run_device_web_children(
             "findings_count": 0,
             "reason": "no_discovered_web_origin" if request_collections else None,
             "allow_state_changing_requests": bool(parent_options.get("allow_state_changing_requests")),
+            "allow_untrusted_tls_credentials": bool(parent_options.get("allow_untrusted_tls_credentials")),
         }
         result["device_posture"] = posture
         _device_score_with_web_findings(result)
@@ -7942,6 +7951,7 @@ async def run_device_web_children(
                 credential=web_credential,
                 request_collections=request_collections,
                 allow_state_changing_requests=bool(parent_options.get("allow_state_changing_requests")),
+                allow_untrusted_tls_credentials=bool(parent_options.get("allow_untrusted_tls_credentials")),
                 default_origin=index == 1,
                 cancel_check=lambda: asyncio.to_thread(_scan_cancel_requested, parent_scan_id),
             )
@@ -8068,6 +8078,9 @@ async def run_device_web_children(
 
     result["findings"] = merged_findings
     posture["runtime_destinations"] = [
+        item for item in posture.get("runtime_destinations") or []
+        if isinstance(item, dict)
+    ] + [
         child.get("runtime_destination")
         for child in child_summary.get("children") or []
         if isinstance(child, dict) and isinstance(child.get("runtime_destination"), dict)

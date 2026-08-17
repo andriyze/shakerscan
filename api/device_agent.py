@@ -155,6 +155,54 @@ PROTOCOL_PLAYBOOKS = {
         "safe_next_steps": ["Compare IPP exposure with the printer policy", "Prefer IPPS and restrict job submission to print networks"],
         "policy_questions": ["Is unencrypted IPP permitted?", "Can untrusted network segments reach the print service?"],
     },
+    "roku_ecp": {
+        "summary": "Roku ECP exposes read queries and user-confirmed remote/application controls over TCP/8060.",
+        "safe_next_steps": ["Run catalog discovery for device identity", "Use an exact confirmed request to test remote or application controls", "Compare paired, disabled, and permitted mobile-control states"],
+        "policy_questions": ["Is ECP limited to the intended local segment?", "Do control settings reject unauthorized clients as configured?"],
+    },
+    "lg_webos": {
+        "summary": "LG webOS uses SSAP over WS/3000 or WSS/3001; SSAP message URIs are not HTTP paths.",
+        "safe_next_steps": ["Confirm the WebSocket transport handshake", "Bind a captured pairing/control flow for authenticated-active testing", "Test permission and token lifecycle with exact user-confirmed requests"],
+        "policy_questions": ["Is secure WSS preferred?", "Are pairing grants scoped, revocable, and bound to the approved client?"],
+    },
+    "samsung_tizen": {
+        "summary": "Samsung Tizen commonly exposes API metadata and paired WebSocket remote-control channels on TCP/8001 and 8002.",
+        "safe_next_steps": ["Inspect /api/v2 identity evidence", "Bind the exact WebSocket/API flow before control testing", "Compare unpaired and paired authorization behavior"],
+        "policy_questions": ["Does the TV require an on-device approval?", "Are tokens rejected after revocation?"],
+    },
+    "vizio_smartcast": {
+        "summary": "Vizio SmartCast commonly exposes HTTPS APIs on TCP/7345 or legacy 9000 with pairing and control operations.",
+        "safe_next_steps": ["Inspect safe status/version endpoints", "Import an exact paired flow for authenticated-active testing", "Use before/after evidence for settings or control actions"],
+        "policy_questions": ["Are control requests authenticated?", "Are pairing tokens scoped and revocable?"],
+    },
+    "philips_jointspace": {
+        "summary": "Philips JointSPACE exposes read and control APIs on TCP/1925 and secured variants on 1926.",
+        "safe_next_steps": ["Identify the supported API version", "Inspect system identity and authentication boundary", "Exercise exact controls only after user confirmation"],
+        "policy_questions": ["Is the secured interface required?", "Are legacy unauthenticated controls disabled or isolated?"],
+    },
+    "google_cast_dial": {
+        "summary": "Google Cast and DIAL expose device descriptions and application-control surfaces, commonly around TCP/8008, 8009, and 8443.",
+        "safe_next_steps": ["Parse same-device descriptors", "Inventory application surfaces", "Use exact confirmed launch/control requests for active testing"],
+        "policy_questions": ["Are control services restricted to the intended network?", "Do application actions enforce the expected sender/session state?"],
+    },
+    "sony_bravia": {
+        "summary": "Sony BRAVIA exposes JSON-RPC and IRCC operations over HTTP(S); read-only RPCs often use POST.",
+        "safe_next_steps": ["Confirm Sony platform evidence before RPC", "Run the server-owned read-only identity RPC", "Bind PSK and exact control calls for authenticated-active tests"],
+        "policy_questions": ["Is PSK or another authorization boundary enforced?", "Are control operations isolated from untrusted LAN clients?"],
+    },
+    "panasonic_viera": {
+        "summary": "Panasonic VIERA may expose HTTP descriptors and SOAP remote/media control services on TCP/55000.",
+        "safe_next_steps": ["Inspect descriptor schemas", "Bind exact SOAP actions and bodies", "Record before/after device state for control tests"],
+        "policy_questions": ["Are SOAP control operations authenticated or network-isolated?", "Are unsafe actions rejected for unauthorized clients?"],
+    },
+}
+
+PORT_PLAYBOOKS = {
+    1925: "philips_jointspace", 1926: "philips_jointspace",
+    3000: "lg_webos", 3001: "lg_webos",
+    7345: "vizio_smartcast", 8060: "roku_ecp",
+    8001: "samsung_tizen", 8002: "samsung_tizen",
+    8008: "google_cast_dial",
 }
 
 
@@ -178,6 +226,8 @@ def lookup_protocol_playbook(service_name: str, port: int | None = None) -> dict
     normalized = str(service_name or "unknown").strip().lower()
     aliases = {"ssdp": "upnp", "ssl/http": "https", "http-alt": "http", "ipps": "ipp"}
     key = aliases.get(normalized, normalized)
+    if key not in PROTOCOL_PLAYBOOKS and port in PORT_PLAYBOOKS:
+        key = PORT_PLAYBOOKS[int(port)]
     playbook = PROTOCOL_PLAYBOOKS.get(key)
     if not playbook:
         return {
@@ -399,6 +449,7 @@ def render_contract() -> str:
         "ShakerScan fixes the device locator and safety profile. Never invent another target or local-host shell/network access.",
         "Remote-device SSH commands may be proposed only with propose_ssh_shell. Proposal is not execution: show exact commands and wait for separate user confirmation in ShakerScan.",
         "Imported Postman, HAR, OpenAPI, or Swagger requests may be inspected only through inspect_request_collections and executed only when they were bound and user-confirmed at session creation; the planner never receives their secret values.",
+        "Catalogued pairing, control, and mutation families are supported through exact bound requests under authenticated_active safety. Safe discovery does not mean those capabilities are unsupported.",
         "Start from existing evidence, choose the smallest useful scan, inspect its result, and stop when the objective is answered.",
         "A queued scan is asynchronous: use inspect_device_scan on a later turn; do not repeatedly queue equivalent scans.",
         "Only deterministic scanner findings are findings. Your final leads are hypotheses and must cite real devref_N evidence references.",

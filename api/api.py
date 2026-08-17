@@ -4248,6 +4248,7 @@ class DeviceScanRequest(BaseModel):
     request_collection_ids: list[str] = Field(default_factory=list, max_length=8)
     confirm_request_replay: bool = False
     allow_state_changing_requests: bool = False
+    allow_untrusted_tls_credentials: bool = False
     capability_ids: list[str] = Field(default_factory=list, max_length=8)
     approval_receipt_id: Optional[str] = None
 
@@ -4282,6 +4283,7 @@ class DeviceAgentSessionStartRequest(BaseModel):
     request_collection_ids: list[str] = Field(default_factory=list, max_length=8)
     confirm_request_replay: bool = False
     allow_state_changing_requests: bool = False
+    allow_untrusted_tls_credentials: bool = False
     approval_receipt_id: Optional[str] = None
 
 
@@ -19012,7 +19014,7 @@ async def update_device_request_collection(device_id: str, collection_id: str, r
             row = await conn.fetchrow(
                 """UPDATE device_request_collections
                    SET name=$1, format=$2, document_sha256=$3, encrypted_payload=$4,
-                       summary_json=$5, is_active=true, updated_at=NOW()
+                       summary_json=$5, updated_at=NOW()
                    WHERE id=$6 AND device_target_id=$7 RETURNING *""",
                 summary["name"], summary["format"], summary["document_sha256"], encrypted_payload,
                 json.dumps(summary), collection_uuid, device_uuid,
@@ -19232,6 +19234,10 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
         raise HTTPException(status_code=422, detail="State-changing request replay requires at least one request collection")
     if request.allow_state_changing_requests and request.safety_profile != "authenticated_active":
         raise HTTPException(status_code=422, detail="POST, PUT, PATCH, and DELETE replay requires authenticated_active safety")
+    if request.allow_untrusted_tls_credentials and request.safety_profile != "authenticated_active":
+        raise HTTPException(status_code=422, detail="Untrusted-TLS credential replay requires authenticated_active safety")
+    if request.allow_untrusted_tls_credentials and not (request.web_credential_profile_id or request.request_collection_ids):
+        raise HTTPException(status_code=422, detail="Untrusted-TLS credential replay requires a web credential or imported request collection")
     try:
         safety_contract = validate_safety_request({
             "safety_profile": request.safety_profile,
@@ -19414,6 +19420,7 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
             "device_request_collections": request_collection_refs,
             "confirm_request_replay": bool(request.confirm_request_replay),
             "allow_state_changing_requests": bool(request.allow_state_changing_requests),
+            "allow_untrusted_tls_credentials": bool(request.allow_untrusted_tls_credentials),
             "device_capability_ids": capability_ids,
             "device_reachability_port_hints": {
                 "user": request.port_hints,
@@ -19822,6 +19829,7 @@ def _device_agent_run_public(row: Any) -> dict[str, Any]:
             "request_collection_secrets_visible_to_planner": False,
             "request_collections_bound": len(state.get("device_request_collections") or []),
             "state_changing_requests_authorized": bool(state.get("allow_state_changing_requests")),
+            "untrusted_tls_credentials_authorized": bool(state.get("allow_untrusted_tls_credentials")),
             "agent_findings_authoritative": False,
             "remote_shell_scope": "registered_device_only",
             "remote_shell_requires_exact_user_confirmation": True,
@@ -19945,6 +19953,7 @@ def _bounded_device_scan_result(row: Any) -> dict[str, Any]:
         "services": bounded_services,
         "inconclusive_observations": list(posture.get("inconclusive_observations") or [])[:100],
         "web_origins": list(posture.get("web_origins") or [])[:32],
+        "application_surface": posture.get("application_surface"),
         "web_dast_children": posture.get("web_dast_children"),
         "imported_request_assessment": posture.get("imported_request_assessment"),
         "capability_coverage": list(posture.get("capability_coverage") or [])[:50],
@@ -20222,6 +20231,7 @@ async def _execute_device_agent_tool(
             request_collection_ids=[str(ref.get("collection_id")) for ref in collection_refs],
             confirm_request_replay=use_imported,
             allow_state_changing_requests=bool(state.get("allow_state_changing_requests")) if use_imported else False,
+            allow_untrusted_tls_credentials=bool(state.get("allow_untrusted_tls_credentials")),
             capability_ids=list(args.get("capability_ids") or []),
             approval_receipt_id=approval_receipt_id,
         ))
@@ -20339,6 +20349,10 @@ async def start_device_agent_session(device_id: str, request: DeviceAgentSession
         raise HTTPException(status_code=422, detail="State-changing request replay requires a bound request collection")
     if request.allow_state_changing_requests and request.safety_profile != "authenticated_active":
         raise HTTPException(status_code=422, detail="State-changing imported requests require authenticated_active safety")
+    if request.allow_untrusted_tls_credentials and request.safety_profile != "authenticated_active":
+        raise HTTPException(status_code=422, detail="Untrusted-TLS credential replay requires authenticated_active safety")
+    if request.allow_untrusted_tls_credentials and not (request.web_credential_profile_id or request.request_collection_ids):
+        raise HTTPException(status_code=422, detail="Untrusted-TLS credential replay requires a web credential or imported request collection")
     try:
         profile = validate_safety_request({
             "safety_profile": request.safety_profile,
@@ -20390,12 +20404,14 @@ async def start_device_agent_session(device_id: str, request: DeviceAgentSession
         state["device_request_collections"] = request_collection_refs
         state["confirm_request_replay"] = bool(request.confirm_request_replay)
         state["allow_state_changing_requests"] = bool(request.allow_state_changing_requests)
+        state["allow_untrusted_tls_credentials"] = bool(request.allow_untrusted_tls_credentials)
         context_pack = await _build_device_agent_context_pack(conn, device, credential_refs, request.max_turns)
         context_pack["request_collections"] = {
             "bound": len(request_collection_refs),
             "request_count": sum(int(ref.get("request_count") or 0) for ref in request_collection_refs),
             "state_changing_request_count": sum(int(ref.get("state_changing_request_count") or 0) for ref in request_collection_refs),
             "state_changing_authorized": bool(request.allow_state_changing_requests),
+            "untrusted_tls_credentials_authorized": bool(request.allow_untrusted_tls_credentials),
             "secret_values_visible_to_planner": False,
         }
         state["messages"].insert(1, {

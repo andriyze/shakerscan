@@ -2561,6 +2561,10 @@ rebuild_images() {
     local REFRESH_WORKERS=1
     local existing_workers
     local existing_device_workers
+    local existing_api
+    local existing_ui
+    local existing_model_intake_signer
+    local existing_model_intake_sandbox
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -2603,6 +2607,10 @@ rebuild_images() {
 
     existing_workers="$(running_scan_worker_count)"
     existing_device_workers="$(running_device_worker_count)"
+    existing_api="$(running_compose_service_count api)"
+    existing_ui="$(running_compose_service_count ui)"
+    existing_model_intake_signer="$(running_compose_service_count model-intake-signer)"
+    existing_model_intake_sandbox="$(running_compose_service_count model-intake-sandbox)"
 
     if [ "$SERVICES" = "ui" ]; then
         compose build $NO_CACHE ui
@@ -2616,18 +2624,27 @@ rebuild_images() {
     printf "local\n" > "$LOCAL_BUILD_MARKER"
 
     if [ "$REFRESH_WORKERS" -eq 1 ]; then
-        refresh_workers_after_rebuild "$existing_workers"
+        refresh_workers_after_rebuild "$existing_workers" "$existing_model_intake_sandbox"
         refresh_device_worker_after_rebuild "$existing_device_workers"
+    fi
+
+    if [ "$SERVICES" = "ui" ]; then
+        refresh_running_service_after_rebuild ui "$existing_ui"
+    elif [ "$SERVICES" = "api worker" ]; then
+        refresh_running_service_after_rebuild api "$existing_api"
+    else
+        refresh_running_service_after_rebuild api "$existing_api"
+        refresh_running_service_after_rebuild ui "$existing_ui"
+        refresh_running_service_after_rebuild model-intake-signer "$existing_model_intake_signer"
     fi
 
     echo -e "${GREEN}Rebuild complete${NC}"
     echo ""
     if [ "$REFRESH_WORKERS" -eq 1 ] && [ "${existing_workers:-0}" -gt 0 ]; then
-        echo -e "${BLUE}Local-build mode recorded. Running worker containers were recreated from the rebuilt image.${NC}"
-        echo -e "${BLUE}Run './scanner.sh restart' if you also need to recreate API/UI containers.${NC}"
+        echo -e "${BLUE}Local-build mode recorded. Running services were recreated from the rebuilt images.${NC}"
         echo -e "${BLUE}Use scanner.sh rather than raw 'docker compose up' so remote-access trust is re-derived.${NC}"
     else
-        echo -e "${BLUE}Local-build mode recorded. Run './scanner.sh restart' to use the new local images.${NC}"
+        echo -e "${BLUE}Local-build mode recorded. Any running rebuilt services were recreated; stopped services remain stopped.${NC}"
         echo -e "${BLUE}Use scanner.sh rather than raw 'docker compose up' so remote-access trust is re-derived.${NC}"
     fi
     if [ "$REFRESH_WORKERS" -eq 1 ] && [ "${existing_device_workers:-0}" -gt 0 ]; then
@@ -2638,10 +2655,13 @@ rebuild_images() {
 
 refresh_workers_after_rebuild() {
     local desired_count="${1:-0}"
+    local sandbox_running_count="${2:-0}"
     # The sandbox shares the rebuilt worker image tag but is not part of the
     # worker scale set. Recreate it explicitly so it cannot keep executing the
     # pre-rebuild image ID behind the updated tag.
-    compose up --no-build -d --force-recreate model-intake-sandbox
+    if [ "$sandbox_running_count" -gt 0 ]; then
+        compose up --no-build -d --no-deps --force-recreate model-intake-sandbox
+    fi
     if [ "$desired_count" -lt 1 ]; then
         remove_scan_worker_containers "Removing stale stopped worker containers after rebuild..."
         return 0
@@ -2649,6 +2669,29 @@ refresh_workers_after_rebuild() {
 
     remove_scan_worker_containers "Recreating worker containers from rebuilt image..."
     compose up --no-build -d --force-recreate --scale worker="$desired_count" worker
+}
+
+running_compose_service_count() {
+    local service="$1"
+    local project="${COMPOSE_PROJECT_NAME:-shakerscan}"
+    local count
+    count="$(docker ps \
+        --filter "label=com.docker.compose.project=$project" \
+        --filter "label=com.docker.compose.service=$service" \
+        --format '{{.Names}}' 2>/dev/null | wc -l | tr -d '[:space:]')"
+    echo "${count:-0}"
+}
+
+refresh_running_service_after_rebuild() {
+    local service="$1"
+    local running_count="${2:-0}"
+    if [ "$running_count" -lt 1 ]; then
+        return 0
+    fi
+    echo -e "${YELLOW}Recreating $service from rebuilt image...${NC}"
+    # Dependencies retain their state and data. Only the service whose image
+    # was rebuilt is replaced.
+    compose up --no-build -d --no-deps --force-recreate "$service"
 }
 
 running_device_worker_count() {

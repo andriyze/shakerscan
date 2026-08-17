@@ -23,6 +23,10 @@ MAX_ENVIRONMENT_BYTES = 2 * 1024 * 1024
 MAX_REQUESTS = 500
 MAX_HEADERS = 100
 MAX_BODY_BYTES = 512 * 1024
+MAX_EXPANDED_VALUE_CHARS = MAX_BODY_BYTES
+MAX_VARIABLE_MAP_CHARS = 8 * 1024 * 1024
+MAX_URL_CHARS = 64 * 1024
+MAX_HEADER_VALUE_CHARS = 64 * 1024
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 STATE_CHANGING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 SUPPORTED_METHODS = SAFE_METHODS | STATE_CHANGING_METHODS
@@ -66,14 +70,20 @@ def _variable_map(collection: dict[str, Any], environment: dict[str, Any] | None
             if isinstance(value, (dict, list)):
                 value = json.dumps(value, separators=(",", ":"))
             values[key] = str(value if value is not None else "")
+            if len(values[key]) > MAX_EXPANDED_VALUE_CHARS:
+                raise PostmanCollectionError("Postman variable exceeds the expanded-value limit")
     # Postman variables frequently reference other variables (for example,
     # baseUrl -> scheme + host + port). Resolve a bounded number of passes so
     # imports behave like Postman without allowing recursive expansion loops.
     for _ in range(8):
         changed = False
+        total_size = sum(len(key) + len(value) for key, value in values.items())
         for key, value in list(values.items()):
             rendered, _ = _substitute(value, values)
             if rendered != value:
+                total_size += len(rendered) - len(value)
+                if total_size > MAX_VARIABLE_MAP_CHARS:
+                    raise PostmanCollectionError("Postman variable expansion exceeds the total size limit")
                 values[key] = rendered
                 changed = True
         if not changed:
@@ -112,21 +122,38 @@ def _substitute_path_variables(value: str, variables: dict[str, str]) -> tuple[s
         return match.group(0)
 
     path = re.sub(r"(?<=/):([A-Za-z_][A-Za-z0-9_.-]*)", replace, parsed.path)
-    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, parsed.fragment)), sorted(unresolved)
+    rendered = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, parsed.fragment))
+    if len(rendered) > MAX_URL_CHARS:
+        raise PostmanCollectionError("Postman URL exceeds the expanded size limit")
+    return rendered, sorted(unresolved)
 
 
 def _substitute(value: Any, variables: dict[str, str]) -> tuple[str, list[str]]:
     text = str(value or "")
+    if len(text) > MAX_EXPANDED_VALUE_CHARS:
+        raise PostmanCollectionError("Postman expanded value exceeds the size limit")
     unresolved: set[str] = set()
-
-    def replace(match: re.Match[str]) -> str:
+    rendered: list[str] = []
+    rendered_size = 0
+    cursor = 0
+    for match in _VARIABLE_RE.finditer(text):
+        prefix = text[cursor:match.start()]
         key = match.group(1).strip()
         if key in variables:
-            return variables[key]
-        unresolved.add(key)
-        return match.group(0)
-
-    return _VARIABLE_RE.sub(replace, text), sorted(unresolved)
+            replacement = variables[key]
+        else:
+            unresolved.add(key)
+            replacement = match.group(0)
+        rendered_size += len(prefix) + len(replacement)
+        if rendered_size > MAX_EXPANDED_VALUE_CHARS:
+            raise PostmanCollectionError("Postman variable expansion exceeds the size limit")
+        rendered.extend((prefix, replacement))
+        cursor = match.end()
+    suffix = text[cursor:]
+    if rendered_size + len(suffix) > MAX_EXPANDED_VALUE_CHARS:
+        raise PostmanCollectionError("Postman variable expansion exceeds the size limit")
+    rendered.append(suffix)
+    return "".join(rendered), sorted(unresolved)
 
 
 def _url_raw(url: Any) -> str:
@@ -185,6 +212,26 @@ def _walk_items(
             yield folder + (name,), request, request_auth
 
 
+def _redacted_label(value: Any) -> str:
+    text = str(value or "")
+    return re.sub(r"(?<![A-Za-z0-9])[A-Za-z0-9_=-]{24,}(?![A-Za-z0-9])", "<redacted>", text)[:300]
+
+
+def _redacted_path(path: str) -> str:
+    segments = path.split("/")
+    previous_sensitive = False
+    output: list[str] = []
+    for segment in segments:
+        decoded = urllib.parse.unquote(segment)
+        high_entropy = bool(re.fullmatch(r"[A-Za-z0-9_.~+=-]{24,}", decoded))
+        if segment and (previous_sensitive or high_entropy):
+            output.append("<redacted>")
+        else:
+            output.append(segment)
+        previous_sensitive = bool(segment and _SENSITIVE_NAME_RE.search(decoded))
+    return "/".join(output)
+
+
 def _redacted_url(raw: str) -> str:
     if not raw:
         return ""
@@ -194,6 +241,7 @@ def _redacted_url(raw: str) -> str:
         return raw[:1000]
     if not parsed.scheme and not parsed.netloc:
         path, separator, query = raw.partition("?")
+        path = _redacted_path(path)
         if not separator:
             return path[:1000]
         pairs = urllib.parse.parse_qsl(query, keep_blank_values=True)
@@ -202,7 +250,7 @@ def _redacted_url(raw: str) -> str:
     if parsed.port:
         host = f"{host}:{parsed.port}"
     query = urllib.parse.urlencode([(key, "<redacted>") for key, _ in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)])
-    return urllib.parse.urlunsplit((parsed.scheme, host, parsed.path or "/", query, ""))[:1000]
+    return urllib.parse.urlunsplit((parsed.scheme, host, _redacted_path(parsed.path or "/"), query, ""))[:1000]
 
 
 def validate_and_summarize(
@@ -261,8 +309,8 @@ def validate_and_summarize(
         ignored_scripts += len(request.get("event") or [])
         requests.append({
             "id": request_id,
-            "name": path[-1],
-            "folder": " / ".join(path[:-1]),
+            "name": _redacted_label(path[-1]),
+            "folder": " / ".join(_redacted_label(item) for item in path[:-1]),
             "method": method,
             "url": _redacted_url(raw_url),
             "header_names": sorted({str(item.get("key") or "")[:120] for item in headers if item.get("key")})[:MAX_HEADERS],
@@ -322,6 +370,8 @@ def _request_headers(request: dict[str, Any], auth: Any, variables: dict[str, st
             continue
         value, missing = _substitute(item.get("value"), variables)
         unresolved.update(missing)
+        if len(value) > MAX_HEADER_VALUE_CHARS:
+            raise PostmanCollectionError("Postman header value exceeds the expanded size limit")
         if "\r" not in value and "\n" not in value:
             headers[key] = value
         if len(headers) >= MAX_HEADERS:
@@ -361,6 +411,8 @@ def _request_body(request: dict[str, Any], variables: dict[str, str]) -> tuple[b
             value, missing_value = _substitute(item.get("value"), variables)
             unresolved.update(missing_key + missing_value)
             pairs.append((key, value))
+            if sum(len(pair_key) + len(pair_value) for pair_key, pair_value in pairs) > MAX_BODY_BYTES:
+                return b"", content_type, sorted(unresolved), "request_body_exceeds_512_kib"
         rendered = urllib.parse.urlencode(pairs).encode()
         content_type = "application/x-www-form-urlencoded"
     elif mode == "formdata":
@@ -381,6 +433,8 @@ def _request_body(request: dict[str, Any], variables: dict[str, str]) -> tuple[b
             if part_type:
                 header += f"Content-Type: {part_type}\r\n"
             parts.append(header.encode("utf-8") + b"\r\n" + value.encode("utf-8") + b"\r\n")
+            if sum(len(part) for part in parts) > MAX_BODY_BYTES:
+                return b"", content_type, sorted(unresolved), "request_body_exceeds_512_kib"
         rendered = b"".join(parts) + f"--{boundary}--\r\n".encode()
         content_type = f"multipart/form-data; boundary={boundary}"
     elif mode == "graphql":
@@ -413,6 +467,8 @@ def resolve_requests(payload: dict[str, Any]) -> list[dict[str, Any]]:
         raw_template = _url_raw(request.get("url"))
         request_variables = _url_variables(request.get("url"), variables)
         url, unresolved_url = _substitute(raw_template, request_variables)
+        if len(url) > MAX_URL_CHARS:
+            raise PostmanCollectionError("Postman URL exceeds the expanded size limit")
         url, unresolved_path = _substitute_path_variables(url, request_variables)
         headers, unresolved_headers = _request_headers(request, auth, request_variables)
         body, content_type, unresolved_body, body_error = _request_body(request, request_variables)
@@ -424,9 +480,9 @@ def resolve_requests(payload: dict[str, Any]) -> list[dict[str, Any]]:
             separator = "&" if "?" in url else "?"
             url += separator + urllib.parse.urlencode([(auth_values["key"], auth_values.get("value", ""))])
         resolved.append({
-            "id": hashlib.sha256(json.dumps([list(path), method, raw_template], separators=(",", ":")).encode()).hexdigest()[:24],
-            "name": path[-1],
-            "folder": " / ".join(path[:-1]),
+            "id": hashlib.sha256(json.dumps([list(path), method, raw_template], separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()[:24],
+            "name": _redacted_label(path[-1]),
+            "folder": " / ".join(_redacted_label(item) for item in path[:-1]),
             "method": method,
             "url": url,
             "url_template": raw_template,

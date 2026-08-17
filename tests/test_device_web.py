@@ -61,8 +61,11 @@ def test_device_web_connects_to_pinned_address_with_registered_host_and_sni(monk
         "host_header": "tv.example.test:8443",
     }, profile="quick"))
 
-    assert calls == [("192.0.2.10", 8443, "tv.example.test")]
-    assert b"Host: tv.example.test:8443\r\n" in writers[0].data
+    assert calls == [
+        ("192.0.2.10", 8443, "tv.example.test"),
+        ("192.0.2.10", 8443, "tv.example.test"),
+    ]
+    assert b"Host: tv.example.test:8443\r\n" in writers[1].data
     assert result["http"]["remote_ip"] == "192.0.2.10"
     assert result["scan_metadata"]["pinned_destination"] is True
 
@@ -122,3 +125,25 @@ def test_public_response_headers_redact_redirect_secrets_and_auth_challenges():
     assert "%3Credacted%3E" in public["location"]
     assert "www-authenticate" not in public
     assert public["set-cookie"] == "<redacted>"
+
+
+def test_chunked_response_never_reads_a_device_controlled_huge_chunk():
+    class HugeChunkReader:
+        requested = []
+
+        async def readuntil(self, _separator):
+            return b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+
+        async def readline(self):
+            return b"ffffffff\r\n"
+
+        async def readexactly(self, count):
+            self.requested.append(count)
+            return b"x" * count
+
+    reader = HugeChunkReader()
+    status, _headers, body, truncated = asyncio.run(device_web._read_response(reader, 1.0))
+    assert status == 200
+    assert reader.requested == [device_web.MAX_RESPONSE_BYTES + 1]
+    assert len(body) == device_web.MAX_RESPONSE_BYTES
+    assert truncated is True

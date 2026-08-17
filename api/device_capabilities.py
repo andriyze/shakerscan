@@ -19,16 +19,18 @@ CAPABILITY_CATALOG: tuple[dict[str, Any], ...] = (
     {"id": "ssh-authenticated-host-review", "title": "SSH-authenticated host review", "group": "host", "implementation": "available", "executor": "device_posture", "minimum_profile": "authenticated_active", "requires": ["confirmed_ssh", "ssh_credential"]},
     {"id": "agent-confirmed-ssh-shell", "title": "User-confirmed AI SSH shell", "group": "host", "implementation": "available", "executor": "device_posture", "minimum_profile": "authenticated_active", "requires": ["confirmed_ssh", "ssh_credential", "user_confirmation"], "notes": "The agent may propose exact commands; every immutable plan requires separate user confirmation before execution."},
     {"id": "web-ui-dast", "title": "Web interface DAST", "group": "application", "implementation": "available", "executor": "device_web_dast", "minimum_profile": "safe_remote", "requires": ["web_origin"]},
+    {"id": "device-api-surface-discovery", "title": "Known device API and application discovery", "group": "application", "implementation": "available", "executor": "device_application", "minimum_profile": "safe_remote", "notes": "Uses a versioned server-owned catalog for safe transport, descriptor, identity, status, and read-only RPC probes."},
+    {"id": "authenticated-device-api-actions", "title": "User-confirmed device API actions", "group": "application", "implementation": "available", "executor": "device_request_dast", "minimum_profile": "authenticated_active", "notes": "Exact Postman, HAR, or OpenAPI requests can exercise pairing, control, and mutation flows after explicit user confirmation; the agent never receives secrets."},
     {"id": "api-graphql-websocket-testing", "title": "API, RPC, GraphQL, and WebSocket testing", "group": "application", "implementation": "partial", "executor": "device_web_dast", "minimum_profile": "safe_remote", "requires": ["web_origin"]},
-    {"id": "auth-session-pairing-access-control", "title": "Authentication, session, and pairing review", "group": "application", "implementation": "planned", "executor": None, "minimum_profile": "safe_remote"},
+    {"id": "auth-session-pairing-access-control", "title": "Authentication, session, and pairing review", "group": "application", "implementation": "partial", "executor": "device_request_dast", "minimum_profile": "authenticated_active", "notes": "Exact captured flows are executable with explicit confirmation; automated state modeling and restoration remain incomplete."},
     {"id": "smart-tv-lan-protocols", "title": "Smart-TV LAN protocols", "group": "protocol", "implementation": "partial", "executor": "device_protocols", "minimum_profile": "observe_only", "notes": "SSDP/UPnP discovery and mDNS/DNS-SD are implemented."},
-    {"id": "casting-remote-control-testing", "title": "Casting and remote-control testing", "group": "protocol", "implementation": "planned", "executor": None, "minimum_profile": "safe_remote", "device_classes": ["media"]},
+    {"id": "casting-remote-control-testing", "title": "Casting and remote-control testing", "group": "protocol", "implementation": "partial", "executor": "device_request_dast", "minimum_profile": "authenticated_active", "device_classes": ["media"], "notes": "Catalog discovery and exact user-confirmed requests are available; protocol-native state journals are still being expanded."},
     {"id": "wireless-bluetooth-wifi-direct", "title": "Wireless, Bluetooth, and Wi-Fi Direct", "group": "sensor", "implementation": "sensor_required", "executor": None, "minimum_profile": "safe_remote", "requires": ["radio_sensor"]},
     {"id": "firmware-update-supply-chain", "title": "Firmware, OTA, and supply-chain review", "group": "artifact", "implementation": "planned", "executor": None, "minimum_profile": "observe_only"},
     {"id": "component-sbom-cve-applicability", "title": "SBOM and CVE applicability", "group": "artifact", "implementation": "partial", "executor": "local_intel", "minimum_profile": "observe_only", "notes": "Pinned local advisory correlation is available; SBOM and reachability proof are planned."},
     {"id": "android-tv-platform-review", "title": "Android TV / Google TV platform review", "group": "platform", "implementation": "planned", "executor": None, "minimum_profile": "authenticated_active", "platform": "android"},
-    {"id": "tizen-tv-platform-review", "title": "Tizen TV platform review", "group": "platform", "implementation": "planned", "executor": None, "minimum_profile": "authenticated_active", "platform": "tizen"},
-    {"id": "webos-tv-platform-review", "title": "webOS TV platform review", "group": "platform", "implementation": "planned", "executor": None, "minimum_profile": "authenticated_active", "platform": "webos"},
+    {"id": "tizen-tv-platform-review", "title": "Tizen TV platform review", "group": "platform", "implementation": "partial", "executor": "device_application", "minimum_profile": "safe_remote", "platform": "tizen"},
+    {"id": "webos-tv-platform-review", "title": "webOS TV platform review", "group": "platform", "implementation": "partial", "executor": "device_application", "minimum_profile": "safe_remote", "platform": "webos"},
     {"id": "media-parser-fuzzing", "title": "Media and parser fuzzing", "group": "lab", "implementation": "lab_only", "executor": None, "minimum_profile": "lab_invasive", "requires": ["lab_runner", "recovery_proof"]},
     {"id": "privacy-telemetry-cloud-review", "title": "Privacy, telemetry, sensors, and cloud review", "group": "ecosystem", "implementation": "planned", "executor": None, "minimum_profile": "safe_remote"},
     {"id": "companion-app-ecosystem-review", "title": "Companion application and ecosystem review", "group": "ecosystem", "implementation": "planned", "executor": None, "minimum_profile": "safe_remote"},
@@ -85,7 +87,7 @@ def capability_catalog_for_device(
         applicable = not required_class or device_class in required_class
         if item_platform and platform and item_platform != platform:
             applicable = False
-        if item_platform and platform is None:
+        if item_platform and platform is None and item.get("implementation") == "planned":
             blockers.append("platform_not_confirmed")
         for requirement in item.get("requires") or []:
             if requirement == "confirmed_ssh" and not has_ssh:

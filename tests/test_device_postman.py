@@ -117,6 +117,9 @@ def test_imported_requests_are_pinned_skip_mutations_and_never_follow_external_h
         return {"status": 200, "headers": {"content-type": "application/json"}, "body": b'{"ok":true}', "truncated": False, "elapsed_ms": 1.0}
 
     monkeypatch.setattr(device_web, "_request", fake_request)
+    async def trusted_tls(**_kwargs):
+        return {"trusted": True, "verification_error": None}
+    monkeypatch.setattr(device_web, "_assess_tls_trust", trusted_tls)
     payload, _ = device_postman.validate_and_summarize(
         _collection(), {"values": [{"key": "token", "value": "top-secret-token"}]},
     )
@@ -171,3 +174,75 @@ def test_state_changing_authority_is_visible_in_child_provenance(monkeypatch):
     assert result["device_web"]["imported_requests"]["executed"] == 1
     assert result["scan_metadata"]["active_testing"] is True
     assert result["scan_metadata"]["state_changing_requests_authorized"] is True
+
+
+def test_untrusted_tls_withholds_imported_secrets_until_operator_override(monkeypatch):
+    calls = []
+
+    async def fake_request(**kwargs):
+        calls.append(kwargs)
+        return {"status": 200, "headers": {}, "body": b"ok", "truncated": False, "elapsed_ms": 1.0}
+
+    async def untrusted_tls(**_kwargs):
+        return {"trusted": False, "verification_error": "self-signed certificate"}
+
+    monkeypatch.setattr(device_web, "_request", fake_request)
+    monkeypatch.setattr(device_web, "_assess_tls_trust", untrusted_tls)
+    payload, _ = device_postman.validate_and_summarize(
+        _collection(), {"values": [{"key": "token", "value": "top-secret-token"}]},
+    )
+    origin = {"origin": "https://192.0.2.10:3001", "connect_address": "192.0.2.10", "port": 3001}
+    bound = [{"collection_id": "c1", "payload": payload}]
+
+    withheld = asyncio.run(device_web.run_pinned_device_web_scan(
+        origin, profile="quick", request_collections=bound, default_origin=True,
+    ))
+    assert withheld["device_web"]["imported_requests"]["executed"] == 0
+    assert any(
+        item["reason"] == "untrusted_tls_credentials_not_confirmed"
+        for item in withheld["device_web"]["imported_requests"]["skipped_requests"]
+    )
+    assert not any(call.get("path", "").startswith("/api/status") for call in calls)
+
+    calls.clear()
+    allowed = asyncio.run(device_web.run_pinned_device_web_scan(
+        origin, profile="quick", request_collections=bound, default_origin=True,
+        allow_untrusted_tls_credentials=True,
+    ))
+    assert allowed["device_web"]["imported_requests"]["executed"] == 1
+    assert any(item["title"] == "Sensitive API request sent over unverified TLS" for item in allowed["findings"])
+    assert any(call.get("path", "").startswith("/api/status") for call in calls)
+
+
+def test_postman_redacts_secret_path_segments_names_and_bounds_expansion():
+    secret = "aabbccddeeff00112233445566778899"
+    collection = {
+        "info": {"name": "Path secrets"},
+        "item": [{
+            "name": f"Request {secret}",
+            "request": {"method": "GET", "url": f"https://tv.local/api/token/{secret}"},
+        }],
+    }
+    _payload, summary = device_postman.validate_and_summarize(collection)
+    assert secret not in str(summary)
+    assert "<redacted>" in summary["requests"][0]["url"]
+
+    expanding = {
+        "info": {"name": "Expansion"},
+        "variable": [
+            {"key": "seed", "value": "x" * 200_000},
+            {"key": "double", "value": "{{seed}}{{seed}}{{seed}}"},
+        ],
+        "item": [{"name": "Status", "request": {"method": "GET", "url": "http://tv/{{double}}"}}],
+    }
+    with pytest.raises(device_postman.PostmanCollectionError, match="size limit"):
+        device_postman.validate_and_summarize(expanding)
+
+
+def test_non_ascii_request_ids_match_preview_and_worker_resolution():
+    collection = {
+        "info": {"name": "Unicode"},
+        "item": [{"name": "Télécommande", "request": {"method": "GET", "url": "http://tv.local/état"}}],
+    }
+    payload, summary = device_postman.validate_and_summarize(collection)
+    assert summary["requests"][0]["id"] == device_postman.resolve_requests(payload)[0]["id"]

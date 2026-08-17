@@ -245,13 +245,29 @@ discovered on the registered device; an imported URL, server declaration, redire
 environment value cannot send the scanner to another host. Imported URL ports are also added to
 reachability priority hints.
 
-Quick coverage replays saved safe methods. Standard adds an authentication-removal comparison for
-safe authenticated requests. Deep also places a bounded marker into one existing GET query
-parameter and reports only direct reflection. POST, PUT, PATCH, and DELETE are skipped by default;
+Quick coverage replays saved safe methods. Standard and Deep add an authentication-removal comparison
+for safe authenticated requests. POST, PUT, PATCH, and DELETE are skipped by default;
 exact replay requires the `authenticated_active` safety profile and a separate explicit confirmation
 for that scan or Device Hunt session. Imported file bodies and unsupported body modes are skipped
 with a request-level reason. Results retain redacted per-request status, timing, body size/hash,
 header names, skipped reasons, and request-aware findings without persisting request secrets.
+
+HTTPS interfaces are assessed with a separate strict certificate handshake. Self-signed and otherwise
+untrusted device TLS does not hide the interface: non-secret checks continue and create a TLS finding.
+Web credentials and secret-bearing imported requests are withheld unless the operator separately
+permits their use over unverified TLS under `authenticated_active`; the AI cannot enable that override.
+Response cookies, authentication challenges, URL query values, token-like path segments, and
+token-like request names are redacted before persistence.
+
+After service discovery, a server-owned platform catalog recognizes Roku ECP, Vizio SmartCast,
+Samsung Tizen, LG webOS, Philips JointSPACE, Google Cast/DIAL, Panasonic VIERA, and Sony BRAVIA.
+Same-device SSDP descriptions are fetched and parsed to recover device identity, service schemas,
+control URLs, and nonstandard web origins. Bounded read-only platform probes then confirm application
+endpoints and authentication boundaries. Cleartext device APIs, unauthenticated privacy-sensitive
+reads, exposed version details, TLS failures, cookie defects, CORS behavior, and authenticated-versus-
+anonymous response equivalence become device findings with request evidence. Control and mutation
+families remain fully testable through exact confirmed imported requests and Device Hunt authority;
+they are not silently treated as unsupported merely because automatic discovery is read-only.
 
 The device detail page displays a structured activity feed while a selected scan is running. It
 shows reachability, discovery, fingerprinting, web/API execution counts, failures, findings, and
@@ -309,6 +325,8 @@ and policy boundary.
 - UDP coverage is a declared curated set, not all 65,535 ports.
 - UDP silence is inconclusive. Firewalls can make closed and open UDP ports look identical from the
   worker's network path, so only a protocol response is treated as confirmed open.
+- Cloud metadata/control-plane addresses are denied by default after DNS is pinned. Authorized public
+  devices remain supported; operators can extend the deny CIDRs for their environment.
 - No credential guessing, firmware extraction, destructive protocol testing, radio probing, or active
   XSS/SQLi is performed by the device workflow.
 - Postman scripts, HAR responses, external OpenAPI references, and imported external hosts never

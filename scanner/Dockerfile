@@ -83,7 +83,7 @@ FROM mcr.microsoft.com/playwright/python:v1.62.0-noble@sha256:aa81288e738725378b
 
 # System deps for network tooling and additional scanners
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl nmap openssl bind9-dnsutils jq git bash make gcc \
+    ca-certificates curl nmap openssl bind9-dnsutils jq git bash make gcc libpcap0.8 \
     iputils-ping dnsutils procps coreutils \
     nikto masscan python3-pip \
     whois netcat-openbsd traceroute \

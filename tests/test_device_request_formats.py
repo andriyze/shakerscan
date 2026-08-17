@@ -137,6 +137,9 @@ def test_har_replay_stays_pinned_and_inherits_bound_web_credential(monkeypatch):
         return {"status": 200, "headers": {}, "body": b"ok", "truncated": False, "elapsed_ms": 1.0}
 
     monkeypatch.setattr(device_web, "_request", fake_request)
+    async def trusted_tls(**_kwargs):
+        return {"trusted": True, "verification_error": None}
+    monkeypatch.setattr(device_web, "_assess_tls_trust", trusted_tls)
     document = _har()
     document["log"]["entries"][0]["request"]["method"] = "GET"
     document["log"]["entries"][0]["request"]["headers"] = []

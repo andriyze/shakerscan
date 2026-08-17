@@ -277,6 +277,9 @@ def test_device_request_collections_are_encrypted_pinned_and_agent_bounded():
     assert "Encrypted storage is required for device request collections" in api
     assert 'summary = _json_object(payload.get("summary_json"))' in api
     assert "WHERE device_request_collections.is_active=false" in api
+    update_start = api.index('@app.patch("/devices/{device_id}/request-collections/{collection_id}")')
+    update_end = api.index('@app.delete("/devices/{device_id}/request-collections/{collection_id}")', update_start)
+    assert "is_active=true" not in api[update_start:update_end]
     assert "_hydrate_device_request_collections" in worker
     assert 'hydrated["_resolved_device_request_collections"]' in worker
     assert "external_host_blocked" in web
@@ -291,6 +294,9 @@ def test_device_request_collections_are_encrypted_pinned_and_agent_bounded():
     assert "Import API requests" in ui
     assert "Use real imported API requests" in ui
     assert "Bind imported API requests" in hunt
+    assert "libpcap0.8" in (ROOT / "scanner" / "Dockerfile").read_text()
+    assert "allow_untrusted_tls_credentials" in api
+    assert "untrusted_tls_credentials_not_confirmed" in web
 
 
 def test_device_scan_activity_is_structured_and_user_facing():

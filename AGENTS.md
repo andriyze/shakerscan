@@ -379,7 +379,10 @@ confirm the operator owns the exact device or is explicitly authorized to test i
 inventory all 65,535 TCP ports; they never guess credentials, and their optional web children are
 bounded to request-aware `quick`, `standard`, or `deep` checks. Imported Postman scripts, HAR
 responses, and external OpenAPI references never execute, and every request remains pinned to a
-discovered origin on the device.
+discovered origin on the device. Same-device SSDP descriptions and a versioned TV/device API catalog
+turn confirmed application behavior into device findings. Untrusted HTTPS remains observable, but
+credentials and imported secrets are withheld unless the operator explicitly authorizes that risk
+under `authenticated_active`; Device Hunt cannot grant the override itself.
 
 ```bash
 # Check dedicated worker/tool readiness

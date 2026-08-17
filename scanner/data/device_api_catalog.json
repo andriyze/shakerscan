@@ -1,0 +1,125 @@
+{
+  "schema_version": "device-api-catalog/v1",
+  "catalog_version": "2026-08-16",
+  "platforms": [
+    {
+      "id": "roku_ecp",
+      "title": "Roku External Control Protocol",
+      "markers": ["roku", "roku:ecp"],
+      "port_hints": [8060],
+      "probes": [
+        {"id": "roku-device-info", "title": "Device identity", "transport": "http", "ports": [8060], "method": "GET", "path": "/query/device-info", "minimum_profile": "inventory", "action_class": "read_only", "data_class": "device_identity", "response_terms": ["<device-info", "<vendor-name>roku"]},
+        {"id": "roku-apps", "title": "Installed applications", "transport": "http", "ports": [8060], "method": "GET", "path": "/query/apps", "minimum_profile": "thorough", "action_class": "privacy_sensitive_read", "data_class": "installed_applications", "response_terms": ["<apps", "<app"]},
+        {"id": "roku-media-player", "title": "Current media state", "transport": "http", "ports": [8060], "method": "GET", "path": "/query/media-player", "minimum_profile": "thorough", "action_class": "privacy_sensitive_read", "data_class": "current_media", "response_terms": ["<player"]}
+      ],
+      "controlled_operations": [
+        {"family": "remote_keys", "action_class": "ephemeral_control", "examples": ["/keypress/<KEY>", "/keydown/<KEY>", "/keyup/<KEY>"]},
+        {"family": "application_launch", "action_class": "ephemeral_control", "examples": ["/launch/<CHANNEL_ID>", "/exit-app/<CHANNEL_ID>"]},
+        {"family": "application_input", "action_class": "ephemeral_control", "examples": ["/input?<PARAMETERS>"]}
+      ]
+    },
+    {
+      "id": "vizio_smartcast",
+      "title": "Vizio SmartCast",
+      "markers": ["vizio", "smartcast"],
+      "port_hints": [7345, 9000],
+      "probes": [
+        {"id": "vizio-power-mode", "title": "Power-mode status", "transport": "https", "ports": [7345, 9000], "method": "GET", "path": "/state/device/power_mode", "minimum_profile": "inventory", "action_class": "read_only", "data_class": "device_status", "response_terms": ["power_mode", "item_name", "hashval"]},
+        {"id": "vizio-version", "title": "Firmware version", "transport": "https", "ports": [7345, 9000], "method": "GET", "path": "/menu_native/dynamic/tv_settings/system/system_information/tv_information/version", "minimum_profile": "posture", "action_class": "read_only", "data_class": "software_version", "response_terms": ["version", "items"]}
+      ],
+      "controlled_operations": [
+        {"family": "pairing", "action_class": "persistent_pairing", "examples": ["/pairing/start", "/pairing/pair", "/pairing/cancel"]},
+        {"family": "remote_keys", "action_class": "ephemeral_control", "examples": ["/key_command/"]},
+        {"family": "application_launch", "action_class": "ephemeral_control", "examples": ["/app/launch"]},
+        {"family": "settings", "action_class": "persistent_mutation", "examples": ["/menu_native/dynamic/tv_settings/<SETTING>"]}
+      ]
+    },
+    {
+      "id": "samsung_tizen",
+      "title": "Samsung Tizen local API",
+      "markers": ["samsung", "tizen"],
+      "port_hints": [8001, 8002],
+      "probes": [
+        {"id": "samsung-api-v2", "title": "TV API identity", "transport": "http", "ports": [8001], "method": "GET", "path": "/api/v2/", "minimum_profile": "inventory", "action_class": "read_only", "data_class": "device_identity", "response_terms": ["device", "modelname", "isSupport"]}
+      ],
+      "controlled_operations": [
+        {"family": "remote_control_websocket", "action_class": "paired_ephemeral_control", "examples": ["ws://<DEVICE>:8001/api/v2/channels/samsung.remote.control", "wss://<DEVICE>:8002/api/v2/channels/samsung.remote.control"]},
+        {"family": "application_control", "action_class": "ephemeral_control", "examples": ["/api/v2/applications/<APP_ID>", "/ws/apps/<APP_NAME>"]}
+      ]
+    },
+    {
+      "id": "lg_webos",
+      "title": "LG webOS SSAP",
+      "markers": ["lg", "webos", "web os"],
+      "port_hints": [3000, 3001],
+      "probes": [
+        {"id": "lg-ssap-ws", "title": "SSAP WebSocket transport", "transport": "ws", "ports": [3000], "method": "GET", "path": "/", "minimum_profile": "inventory", "action_class": "transport_handshake", "data_class": "protocol_identity", "response_terms": []},
+        {"id": "lg-ssap-wss", "title": "Secure SSAP WebSocket transport", "transport": "wss", "ports": [3001], "method": "GET", "path": "/", "minimum_profile": "inventory", "action_class": "transport_handshake", "data_class": "protocol_identity", "response_terms": []}
+      ],
+      "controlled_operations": [
+        {"family": "ssap_inventory", "action_class": "paired_read", "examples": ["ssap://api/getServiceList", "ssap://com.webos.service.update/getCurrentSWInformation", "ssap://tv/getExternalInputList"]},
+        {"family": "remote_and_media_control", "action_class": "paired_ephemeral_control", "examples": ["ssap://audio/volumeUp", "ssap://media.controls/play", "ssap://tv/channelUp"]},
+        {"family": "application_and_input_control", "action_class": "paired_ephemeral_control", "examples": ["ssap://system.launcher/launch", "ssap://tv/switchInput", "ssap://com.webos.service.ime/sendEnterKey"]},
+        {"family": "power_and_settings", "action_class": "persistent_or_disruptive", "examples": ["ssap://system/turnOff", "ssap://audio/setVolume"]}
+      ]
+    },
+    {
+      "id": "philips_jointspace",
+      "title": "Philips JointSPACE",
+      "markers": ["philips", "jointspace"],
+      "port_hints": [1925, 1926],
+      "probes": [
+        {"id": "philips-v1-system", "title": "JointSPACE v1 system identity", "transport": "http", "ports": [1925], "method": "GET", "path": "/1/system", "minimum_profile": "inventory", "action_class": "read_only", "data_class": "device_identity", "response_terms": ["menulanguage", "name", "model"]},
+        {"id": "philips-v6-system-http", "title": "JointSPACE v6 system identity", "transport": "http", "ports": [1925], "method": "GET", "path": "/6/system", "minimum_profile": "posture", "action_class": "read_only", "data_class": "device_identity", "response_terms": ["menulanguage", "name", "model"]},
+        {"id": "philips-v6-system-https", "title": "Secured JointSPACE v6 identity", "transport": "https", "ports": [1926], "method": "GET", "path": "/6/system", "minimum_profile": "inventory", "action_class": "read_only", "data_class": "device_identity", "response_terms": ["menulanguage", "name", "model"]}
+      ],
+      "controlled_operations": [
+        {"family": "pairing", "action_class": "persistent_pairing", "examples": ["/6/pair/request", "/6/pair/grant"]},
+        {"family": "remote_and_activity_control", "action_class": "ephemeral_control", "examples": ["/6/input/key", "/6/activities/launch"]},
+        {"family": "audio_and_ambilight", "action_class": "persistent_mutation", "examples": ["/6/audio/volume", "/6/ambilight/power", "/6/ambilight/mode"]}
+      ]
+    },
+    {
+      "id": "google_cast_dial",
+      "title": "Google Cast and DIAL",
+      "markers": ["chromecast", "google cast", "google tv", "dial"],
+      "port_hints": [8008, 8443],
+      "probes": [
+        {"id": "cast-device-description", "title": "Cast/DIAL device description", "transport": "http", "ports": [8008], "method": "GET", "path": "/ssdp/device-desc.xml", "minimum_profile": "inventory", "action_class": "read_only", "data_class": "device_identity", "response_terms": ["<device", "friendlyName", "manufacturer"]},
+        {"id": "cast-eureka-info", "title": "Cast build identity", "transport": "http", "ports": [8008], "method": "GET", "path": "/setup/eureka_info?params=name,build_info", "minimum_profile": "posture", "action_class": "read_only", "data_class": "software_version", "response_terms": ["build_info", "name"]}
+      ],
+      "controlled_operations": [
+        {"family": "dial_applications", "action_class": "ephemeral_control", "examples": ["/apps/<APP_NAME>"]},
+        {"family": "cast_v2", "action_class": "paired_ephemeral_control", "examples": ["cast-v2://<DEVICE>:8009"]}
+      ]
+    },
+    {
+      "id": "panasonic_viera",
+      "title": "Panasonic VIERA HTTP/SOAP",
+      "markers": ["panasonic", "viera"],
+      "port_hints": [55000],
+      "probes": [
+        {"id": "panasonic-network-remote-description", "title": "Network remote descriptor", "transport": "http", "ports": [55000], "method": "GET", "path": "/nrc/ddd.xml", "minimum_profile": "inventory", "action_class": "read_only", "data_class": "service_schema", "response_terms": ["<device", "NetworkControl"]},
+        {"id": "panasonic-media-renderer-description", "title": "Media renderer descriptor", "transport": "http", "ports": [55000], "method": "GET", "path": "/dmr/ddd.xml", "minimum_profile": "posture", "action_class": "read_only", "data_class": "service_schema", "response_terms": ["<device", "MediaRenderer"]}
+      ],
+      "controlled_operations": [
+        {"family": "soap_remote_control", "action_class": "ephemeral_control", "examples": ["/nrc/control_0"]},
+        {"family": "soap_media_renderer", "action_class": "ephemeral_control", "examples": ["/dmr/control_0"]}
+      ]
+    },
+    {
+      "id": "sony_bravia",
+      "title": "Sony BRAVIA JSON-RPC and IRCC",
+      "markers": ["sony", "bravia"],
+      "port_hints": [80, 443],
+      "probes": [
+        {"id": "sony-system-information", "title": "BRAVIA system identity", "transport": "auto_http", "ports": [80, 443], "method": "POST", "path": "/sony/system", "minimum_profile": "posture", "action_class": "read_only_rpc", "data_class": "device_identity", "requires_platform_evidence": true, "content_type": "application/json", "body": "{\"method\":\"getSystemInformation\",\"params\":[],\"id\":1,\"version\":\"1.0\"}", "response_terms": ["result", "model", "serial"]}
+      ],
+      "controlled_operations": [
+        {"family": "ircc_remote_control", "action_class": "ephemeral_control", "examples": ["/sony/IRCC"]},
+        {"family": "application_and_input_control", "action_class": "ephemeral_control", "examples": ["/sony/appControl", "/sony/avContent"]},
+        {"family": "system_and_audio_mutation", "action_class": "persistent_or_disruptive", "examples": ["/sony/system", "/sony/audio"]}
+      ]
+    }
+  ]
+}
