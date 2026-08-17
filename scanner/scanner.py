@@ -4194,11 +4194,12 @@ async def build_report(target: str,
                 grade_result["grade_reliable"] = False
                 grade_result["grade_warning"] = "Grade may be inaccurate - required scan modules did not complete"
                 grade_result["coverage_issues"] = coverage["issues"]
-                grade_result["original_grade"] = grade_result["grade"]
-                grade_result["grade"] = grade_result["grade"] + "*"
+                grade_result["original_grade"] = grade_result.get("original_grade") or grade_result["grade"].rstrip("*")
+                if not grade_result["grade"].endswith("*"):
+                    grade_result["grade"] = grade_result["grade"] + "*"
                 grade_result["summary"] = f"[INCOMPLETE] {grade_result['summary']}"
             else:
-                grade_result["grade_reliable"] = True
+                grade_result.setdefault("grade_reliable", True)
             report["result"] = grade_result
 
             checks_skipped = []
@@ -12812,11 +12813,12 @@ async def build_report(target: str,
             grade_result["grade_warning"] = "Grade may be inaccurate - required scan modules did not complete"
         grade_result["coverage_issues"] = coverage["issues"]
         # Optionally set grade to None or add indicator
-        grade_result["original_grade"] = grade_result["grade"]
-        grade_result["grade"] = grade_result["grade"] + "*"  # Mark with asterisk
+        grade_result["original_grade"] = grade_result.get("original_grade") or grade_result["grade"].rstrip("*")
+        if not grade_result["grade"].endswith("*"):
+            grade_result["grade"] = grade_result["grade"] + "*"  # Mark with asterisk
         grade_result["summary"] = f"[INCOMPLETE] {grade_result['summary']}"
     else:
-        grade_result["grade_reliable"] = True
+        grade_result.setdefault("grade_reliable", True)
 
     report["result"] = grade_result
     # Surface active-execution honesty at the report top level too, so the scans
@@ -14998,11 +15000,12 @@ async def cli_main():
                 grade_result["grade_reliable"] = False
                 grade_result["grade_warning"] = "Grade may be inaccurate - required scan modules did not complete"
                 grade_result["coverage_issues"] = coverage.get("issues", [])
-                grade_result["original_grade"] = grade_result["grade"]
-                grade_result["grade"] = grade_result["grade"] + "*"
+                grade_result["original_grade"] = grade_result.get("original_grade") or grade_result["grade"].rstrip("*")
+                if not grade_result["grade"].endswith("*"):
+                    grade_result["grade"] = grade_result["grade"] + "*"
                 grade_result["summary"] = f"[INCOMPLETE] {grade_result['summary']}"
             else:
-                grade_result["grade_reliable"] = True
+                grade_result.setdefault("grade_reliable", True)
             if prior_focused_result:
                 for key in (
                     "score",

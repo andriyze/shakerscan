@@ -117,28 +117,7 @@ def _has_deterministic_proof(
     reachability, heuristic confidence, or AI support. The verified tier now
     requires explicit exploit/proof provenance.
     """
-    evidence_level = str(validation.get("evidence_level") or "").strip().lower()
-    proof_type = str(
-        finding.get("proof_type")
-        or evidence.get("proof_type")
-        or validation.get("proof_type")
-        or validation.get("poe_technique")
-        or ""
-    ).strip().lower()
-    return (
-        _truthy(validation.get("poe_proven"))
-        or _truthy(poe.get("proven"))
-        or _truthy(poe_result.get("proven"))
-        or _truthy(finding.get("proof_of_exploitation"))
-        or _truthy(evidence.get("proof_of_exploitation"))
-        or _truthy(evidence.get("payload_executed"))
-        or _truthy(evidence.get("executed"))
-        or bool(finding.get("extraction_evidence") or evidence.get("extraction_evidence"))
-        or bool(finding.get("extracted_data") or evidence.get("extracted_data"))
-        or _has_browser_execution_proof(finding, evidence)
-        or proof_type in _DETERMINISTIC_PROOF_TYPES
-        or (_truthy(validation.get("verified")) and evidence_level in _CONFIRMED_EVIDENCE_LEVELS)
-    )
+    return has_deterministic_exploit_proof(finding)
 
 # Support both package import (from scanner.findings) and script import (python3 findings.py)
 try:
@@ -160,6 +139,7 @@ try:
     )
     from .ai_verdict_policy import (
         ai_confidence,
+        build_dast_proof_contract_v2,
         has_deterministic_exploit_proof,
         is_trusted_ai_false_positive,
         is_trusted_ai_true_positive,
@@ -187,6 +167,7 @@ except ImportError:
     )
     from ai_verdict_policy import (
         ai_confidence,
+        build_dast_proof_contract_v2,
         has_deterministic_exploit_proof,
         is_trusted_ai_false_positive,
         is_trusted_ai_true_positive,
@@ -551,6 +532,14 @@ def apply_dast_precision_policy(
             or _truthy(validation.get("verified"))
         )
         heuristic_verified = _has_deterministic_proof(finding, evidence, validation, poe, poe_result)
+        if heuristic_verified and "proof_contract_v2" not in finding:
+            contract = build_dast_proof_contract_v2(finding)
+            if contract:
+                finding["proof_contract_v2"] = contract
+                if isinstance(evidence, dict):
+                    evidence["proof_contract_v2"] = contract
+                    finding["evidence"] = evidence
+            heuristic_verified = has_deterministic_exploit_proof(finding)
 
         # AI verdict adjusts heuristic gating, but NEVER promotes to `verified`
         # (docs proposed-next-steps §8 — one proof taxonomy: AI is supporting

@@ -705,12 +705,34 @@ def grade(report: dict[str, Any]) -> dict[str, Any]:
             "F"
         )
 
+    unproven_high_critical = [
+        finding for finding in findings
+        if str(finding.get("severity") or "").lower() in {"high", "critical"}
+        and not has_deterministic_exploit_proof(finding)
+        and not is_trusted_ai_false_positive(finding)
+    ]
+    grade_reliable = not unproven_high_critical
+    published_letter = f"{letter}*" if not grade_reliable else letter
+    summary_prefix = "[REVIEW REQUIRED] " if not grade_reliable else ""
+    if unproven_high_critical:
+        notes.append(
+            f"{len(unproven_high_critical)} high/critical finding(s) remain unproven; "
+            "the headline grade is provisional."
+        )
+
     return {
         "score": score,
-        "grade": letter,
+        "grade": published_letter,
+        "original_grade": letter if not grade_reliable else None,
+        "grade_reliable": grade_reliable,
+        "grade_warning": (
+            "High/critical findings require deterministic verification before the grade is reliable"
+            if not grade_reliable else None
+        ),
+        "suspected_high_critical_count": len(unproven_high_critical),
         "notes": notes,
         "remediation": remediation[:10],
-        "summary": f"Security Grade: {letter} ({score}/100) - {len(findings)} issue(s) found" + (f" ({total_fp_count} likely FP)" if total_fp_count else ""),
+        "summary": summary_prefix + f"Security Grade: {published_letter} ({score}/100) - {len(findings)} issue(s) found" + (f" ({total_fp_count} likely FP)" if total_fp_count else ""),
         "cvss_metrics": {
             "average": avg_cvss,
             "maximum": max_cvss,

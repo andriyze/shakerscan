@@ -498,7 +498,7 @@ def test_precision_policy_does_not_cap_verified_vendor_dom_xss():
             "evidence": {
                 "file": "https://cdn.jsdelivr.net/npm/example/widget.js",
                 "verified": True,
-                "payload_executed": True,
+                "browser_proof": {"payload_executed": True},
                 "payload": "<svg onload=alert(1)>",
             },
         }
@@ -554,6 +554,7 @@ def test_registry_contract_accepts_complete_sqli_runtime_proof():
     assert adjusted["verified"] is True
     assert adjusted["severity"] == "critical"
     assert adjusted["registry_contract"]["contract_satisfied"] is True
+    assert adjusted["proof_contract_v2"]["schema_version"] == "proof-contract/v2"
 
 
 def test_precision_policy_keeps_dom_xss_on_target_app_bundle():
@@ -681,7 +682,26 @@ def test_grade_ceiling_ignores_unverified_suspected_high_findings():
 
     result = grade(_healthy_grade_report([suspected]))
 
-    assert result["grade"] in {"A", "B"}
+    assert result["original_grade"] in {"A", "B"}
+    assert result["grade"] in {"A*", "B*"}
+    assert result["grade_reliable"] is False
+    assert result["suspected_high_critical_count"] == 1
+
+
+def test_grade_is_reliable_when_high_finding_has_deterministic_proof():
+    confirmed = {
+        "tool": "smart_sqli",
+        "title": "Confirmed SQL injection",
+        "severity": "high",
+        "cvss_score": 8.8,
+        "proof_type": "data_extraction",
+    }
+
+    result = grade(_healthy_grade_report([confirmed]))
+
+    assert result["grade"].endswith("*") is False
+    assert result["grade_reliable"] is True
+    assert result["suspected_high_critical_count"] == 0
 
 
 def test_grade_does_not_full_weight_generic_verified_without_proof():
@@ -783,7 +803,8 @@ def test_grade_only_discounts_trusted_ai_false_positives():
         {**base, "ai_classification_source": "provider"}
     ]))
 
-    assert untrusted["grade"] == "C"
+    assert untrusted["grade"] == "C*"
+    assert untrusted["grade_reliable"] is False
     assert trusted["grade"] == "A"
     assert "likely FP" not in untrusted["summary"]
     assert "likely FP" in trusted["summary"]
