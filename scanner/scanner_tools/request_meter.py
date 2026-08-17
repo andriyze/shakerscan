@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import threading
 import urllib.parse
 from typing import Any
@@ -155,17 +156,21 @@ class RequestMeter:
             }
 
 
-_request_meter = RequestMeter(limit=None, target_host=None, mode="off")
+_default_request_meter = RequestMeter(limit=None, target_host=None, mode="off")
+_request_meter_context: contextvars.ContextVar[RequestMeter | None] = contextvars.ContextVar(
+    "shakerscan_request_meter",
+    default=None,
+)
 
 
 def configure_request_meter(**kwargs: Any) -> RequestMeter:
-    global _request_meter
-    _request_meter = RequestMeter(**kwargs)
-    return _request_meter
+    meter = RequestMeter(**kwargs)
+    _request_meter_context.set(meter)
+    return meter
 
 
 def get_request_meter() -> RequestMeter:
-    return _request_meter
+    return _request_meter_context.get() or _default_request_meter
 
 
 def install_async_client_metering() -> dict[str, bool]:

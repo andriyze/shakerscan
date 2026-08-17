@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import Any
 
 FAMILY_PROOF_VERSION = "family-proof-2026-07-14.v3"
+PROOF_CONTRACT_SCHEMA_VERSION = "proof-contract/v2"
 
 VERDICTS = frozenset({"verified", "supported_unverified", "refuted", "inconclusive", "blocked"})
 
@@ -63,6 +64,39 @@ FAMILY_CONTRACTS: dict[str, dict[str, Any]] = {
         "requires": ["sensitive_value_present"],
         "refute_if": ["name_only_classification"],
     },
+    "device_service_exposure": {
+        "cwe": "CWE-284",
+        "requires": ["protocol_handshake", "policy_denied", "recent_observation"],
+        "refute_if": ["service_closed", "policy_allowed", "health_degraded"],
+    },
+    "device_tls": {
+        "cwe": "CWE-295",
+        "requires": ["strict_handshake_failed", "endpoint_identity_bound", "recent_observation"],
+        "refute_if": ["strict_handshake_succeeded"],
+    },
+    "device_auth_bypass": {
+        "cwe": "CWE-306",
+        "requires": ["protected_resource_established", "anonymous_semantic_equivalence", "negative_control"],
+        "refute_if": ["anonymous_access_denied", "generic_response_shell"],
+    },
+    "device_control_authorization": {
+        "cwe": "CWE-862",
+        "requires": [
+            "exact_bound_request", "before_state", "underprivileged_effect",
+            "after_state", "cleanup_or_safe_residue",
+        ],
+        "refute_if": ["underprivileged_control_rejected", "state_unchanged"],
+    },
+    "device_firmware_advisory": {
+        "cwe": "CWE-1104",
+        "requires": ["exact_product_identity", "version_in_affected_range", "advisory_snapshot_verified"],
+        "refute_if": ["version_outside_affected_range", "heuristic_product_match"],
+    },
+    "device_ssh_posture": {
+        "cwe": "CWE-327",
+        "requires": ["pinned_host_key", "negotiated_posture", "policy_violation"],
+        "refute_if": ["policy_requirements_satisfied", "host_key_changed"],
+    },
 }
 
 # Aliases -> canonical family.
@@ -79,6 +113,8 @@ FAMILY_ALIASES = {
     "business_logic": "workflow",
     "sensitive_data_exposure": "data_exposure",
     "information_disclosure": "data_exposure",
+    "service_exposure": "device_service_exposure",
+    "firmware_advisory": "device_firmware_advisory",
 }
 
 
@@ -187,6 +223,78 @@ def promotion_gate(result: dict[str, Any] | None) -> tuple[bool, str | None]:
         return False, "not_reexecuted_at_handoff"
     if not r.get("promotable"):
         return False, "not_promotable"
+    return True, None
+
+
+def build_proof_contract_result(
+    family: Any,
+    evidence: Any,
+    *,
+    contract_id: str,
+    contract_version: str,
+    verifier_build: str,
+    subject: Any = None,
+    observations: Any = None,
+    controls: Any = None,
+    proof_basis: str = "deterministic_replay",
+    traffic_receipt_id: str | None = None,
+    tool_receipt_ids: Any = None,
+    require_reexecution: bool = True,
+) -> dict[str, Any]:
+    """Wrap a family predicate in the versioned envelope accepted by promotion callers."""
+    predicate = evaluate_family_proof(
+        family, evidence, require_reexecution=require_reexecution,
+    )
+    return {
+        "schema_version": PROOF_CONTRACT_SCHEMA_VERSION,
+        "contract_id": str(contract_id or "")[:160],
+        "contract_version": str(contract_version or "")[:80],
+        "family_registry_version": FAMILY_PROOF_VERSION,
+        "family": predicate["family"],
+        "subject": subject if isinstance(subject, dict) else {},
+        "reexecution": {
+            "performed": bool(predicate.get("reexecuted_at_handoff")),
+            "verifier_build": str(verifier_build or "")[:200],
+        },
+        "controls": list(controls or [])[:100],
+        "observations": list(observations or [])[:200],
+        "predicate": {
+            "satisfied": predicate["verdict"] == "verified",
+            "reason": predicate["reason"],
+            "requirements": predicate["requirements"],
+            "met": predicate["met"],
+            "missing": predicate["missing"],
+            "refuted_by": predicate.get("refuted_by") or [],
+        },
+        "verdict": predicate["verdict"],
+        "proof_basis": str(proof_basis or "deterministic_replay")[:80],
+        "promotable": bool(predicate["promotable"]),
+        "traffic_receipt_id": traffic_receipt_id,
+        "tool_receipt_ids": [str(item) for item in list(tool_receipt_ids or [])[:100]],
+    }
+
+
+def proof_contract_promotion_gate(result: dict[str, Any] | None) -> tuple[bool, str | None]:
+    """Fail closed unless a complete server-executed v2 proof envelope is present."""
+    payload = result if isinstance(result, dict) else {}
+    if payload.get("schema_version") != PROOF_CONTRACT_SCHEMA_VERSION:
+        return False, "unsupported_proof_contract_schema"
+    if not str(payload.get("contract_id") or "").strip():
+        return False, "missing_contract_id"
+    if not str(payload.get("contract_version") or "").strip():
+        return False, "missing_contract_version"
+    reexecution = payload.get("reexecution") if isinstance(payload.get("reexecution"), dict) else {}
+    if reexecution.get("performed") is not True:
+        return False, "not_reexecuted_at_handoff"
+    if not str(reexecution.get("verifier_build") or "").strip():
+        return False, "missing_verifier_build"
+    predicate = payload.get("predicate") if isinstance(payload.get("predicate"), dict) else {}
+    if payload.get("verdict") != "verified" or predicate.get("satisfied") is not True:
+        return False, f"not_verified:{payload.get('verdict') or 'none'}"
+    if payload.get("promotable") is not True:
+        return False, "not_promotable"
+    if predicate.get("missing"):
+        return False, "missing_proof_requirements"
     return True, None
 
 

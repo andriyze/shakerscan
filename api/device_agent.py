@@ -23,6 +23,11 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - package import in host tests
     from api import agent_text_toolcalls
 
+try:
+    from scanner_tools.device_advisories import match_advisories
+except ModuleNotFoundError:  # pragma: no cover - package import in host tests
+    from scanner.scanner_tools.device_advisories import match_advisories
+
 
 CALLABLE_TOOL_NAMES = {
     "inspect_device",
@@ -38,6 +43,7 @@ CALLABLE_TOOL_NAMES = {
     "resolve_intel",
     "lookup_protocol_playbook",
     "verify_service_state",
+    "verify_candidate",
     "note",
 }
 MAX_TOOL_CALLS_PER_TURN = 6
@@ -115,6 +121,7 @@ TOOL_TIERS = {
     "note": 0,
     "queue_device_scan": 2,
     "verify_service_state": 2,
+    "verify_candidate": 2,
     "propose_ssh_shell": 3,
     "execute_confirmed_ssh_shell": 3,
 }
@@ -207,6 +214,8 @@ PORT_PLAYBOOKS = {
 
 
 def tool_fragility_cost(name: str, args: dict[str, Any]) -> int:
+    if name == "verify_candidate":
+        return 3
     if name == "verify_service_state":
         return 6 if str(args.get("transport") or "tcp") == "udp" else 3
     if name != "queue_device_scan":
@@ -273,27 +282,13 @@ def resolve_local_intel(*, cpe: str | None, product: str | None, version: str | 
     except (OSError, UnicodeError, ValueError) as exc:
         return {"status": "unavailable", "query": query, "candidates": [], "error": type(exc).__name__, "runtime_egress": False}
     records = raw if isinstance(raw, list) else raw.get("advisories", []) if isinstance(raw, dict) else []
-    candidates = []
-    for item in records[:100_000]:
-        if not isinstance(item, dict):
-            continue
-        item_cpe = str(item.get("cpe") or "")
-        item_product = str(item.get("product") or "").lower()
-        if query["cpe"] and item_cpe == query["cpe"]:
-            confidence = "high"
-        elif query["product"] and query["product"].lower() == item_product and (not query["version"] or query["version"] == str(item.get("version") or "")):
-            confidence = "medium"
-        else:
-            continue
-        candidates.append({
-            "advisory_id": str(item.get("advisory_id") or item.get("cve") or "")[:100],
-            "title": str(item.get("title") or "")[:500],
-            "severity": str(item.get("severity") or "unknown")[:30],
-            "reference": str(item.get("reference") or "")[:1000],
-            "confidence": confidence,
-        })
-        if len(candidates) >= 50:
-            break
+    candidates = match_advisories(
+        records,
+        cpe=query["cpe"],
+        product=query["product"],
+        version=query["version"],
+        limit=50,
+    )
     return {
         "status": "available",
         "query": query,
@@ -426,6 +421,19 @@ def tool_schemas() -> list[dict[str, Any]]:
             },
         },
         {
+            "name": "verify_candidate",
+            "description": "Queue the registered deterministic verifier for one candidate already bound to this device. The server resolves scope, operation, and proof controls; the planner cannot supply a locator, payload, credential, or safety profile.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "candidate_id": {"type": "string"},
+                    "reason": {"type": "string", "maxLength": 500},
+                },
+                "required": ["candidate_id", "reason"],
+                "additionalProperties": False,
+            },
+        },
+        {
             "name": "note",
             "description": "Record a bounded hypothesis, observation, or next step. Notes are not findings or proof.",
             "parameters": {
@@ -470,7 +478,7 @@ def render_contract() -> str:
         "```",
         "When done, reply with only:",
         "```json",
-        '{"done":true,"summary":"...","leads":[{"title":"...","rationale":"...","evidence_refs":["devref_1"]}],"next_actions":["..."]}',
+        '{"done":true,"summary":"...","leads":[{"title":"...","family":"service_exposure","severity":"medium","rationale":"...","locus":{"transport":"tcp","port":80},"evidence_refs":["devref_1"],"verifier_contract_id":"device.service_exposure"}],"next_actions":["..."]}',
         "```",
         "Do not call a lead verified. A lead without a valid evidence reference is discarded.",
     ])
@@ -496,6 +504,7 @@ def validate_tool_call(call: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         "resolve_intel": {"cpe", "product", "version"},
         "lookup_protocol_playbook": {"service_name", "port"},
         "verify_service_state": {"transport", "port", "expected_state", "reason"},
+        "verify_candidate": {"candidate_id", "reason"},
         "note": {"kind", "content"},
     }[name]
     if set(args) - allowed_fields:
@@ -601,6 +610,14 @@ def validate_tool_call(call: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         if not reason:
             raise ValueError("verify_service_state requires a reason")
         args = {"transport": transport, "port": port, "expected_state": expected_state, "reason": reason[:500]}
+    elif name == "verify_candidate":
+        candidate_id = str(args.get("candidate_id") or "").strip()
+        reason = str(args.get("reason") or "").strip()
+        if not re.fullmatch(r"[0-9a-fA-F-]{36}", candidate_id):
+            raise ValueError("verify_candidate candidate_id is invalid")
+        if not reason:
+            raise ValueError("verify_candidate requires a reason")
+        args = {"candidate_id": candidate_id.lower(), "reason": reason[:500]}
     elif name == "note":
         kind = str(args.get("kind") or "").lower()
         content = str(args.get("content") or "").strip()
@@ -639,8 +656,19 @@ def interpret_reply(reply: str) -> dict[str, Any]:
             continue
         leads.append({
             "title": str(raw.get("title") or "Device security lead")[:300],
+            "family": str(raw.get("family") or "unknown")[:80],
+            "severity": (
+                str(raw.get("severity") or "info").lower()
+                if str(raw.get("severity") or "info").lower() in {"critical", "high", "medium", "low", "info"}
+                else "info"
+            ),
             "rationale": str(raw.get("rationale") or "")[:2000],
+            "locus": raw.get("locus") if isinstance(raw.get("locus"), dict) else {},
             "evidence_refs": refs,
+            "verifier_contract_id": (
+                str(raw.get("verifier_contract_id"))[:160]
+                if raw.get("verifier_contract_id") else None
+            ),
         })
     return {
         "kind": "done",

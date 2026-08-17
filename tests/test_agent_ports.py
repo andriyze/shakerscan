@@ -6,6 +6,7 @@ Pure-stdlib modules, so this runs on the host with no scanner deps:
 and the honest context packer.
 """
 import os
+import json
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
@@ -372,11 +373,35 @@ def test_katana_argv_is_bounded_and_same_host():
     assert "-js-crawl" in argv                                   # JS endpoint extraction on
     assert argv[argv.index("-field-scope") + 1] == "fqdn"        # same host ONLY, never cross-origin
     assert argv[argv.index("-depth") + 1] == "2"                 # bounded depth
-    assert argv[argv.index("-crawl-duration") + 1] == "45s"      # hard wall cap
+    assert argv[argv.index("-crawl-duration") + 1] == "30s"      # hard wall cap
+    assert argv[argv.index("-rate-limit") + 1] == "5"
+    assert at.scanner_request_reservation("katana") == 150
     assert timeout > 0
     # no form-submission / cross-scope flags leaked in
     for unsafe in ("-form-extraction", "-automatic-form-fill", "-aff", "-display-out-scope", "-do"):
         assert unsafe not in argv
+
+
+def test_external_scanner_output_is_typed_and_query_values_are_redacted():
+    output = at.parse_scanner_output("nuclei", json.dumps({
+        "template-id": "cve-test",
+        "matched-at": "https://app.test/search?q=secret-value",
+        "matcher-name": "body",
+        "info": {"name": "Test match", "severity": "high"},
+    }))
+
+    assert output["parser_status"] == "parsed"
+    record = output["records"][0]
+    assert record["kind"] == "template_match"
+    assert record["proof_state"] == "candidate"
+    assert "secret-value" not in record["matched_at"]
+    assert "q=%3Credacted%3E" in record["matched_at"]
+
+
+def test_scanner_request_reservations_are_conservative_and_explicit():
+    assert at.scanner_request_reservation("httpx") == 4
+    assert at.scanner_request_reservation("nuclei") == 450
+    assert at.scanner_request_reservation("ffuf") == 220
 
 
 def test_ffuf_wordlist_tunable_is_injection_proof():

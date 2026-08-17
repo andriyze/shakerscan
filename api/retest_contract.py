@@ -2756,6 +2756,67 @@ async def run_schema_migrations(pool) -> None:
                 CREATE INDEX IF NOT EXISTS idx_device_agent_actions_device_day
                 ON device_agent_actions(device_target_id, created_at DESC)
             """)
+            # Hunt output is a non-authoritative candidate until a registered server-side
+            # verifier satisfies its proof contract. Web and device candidates share this
+            # lifecycle while retaining mutually exclusive target namespaces.
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS investigation_candidates (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    plane TEXT NOT NULL,
+                    target_id UUID REFERENCES targets(id) ON DELETE CASCADE,
+                    device_target_id UUID REFERENCES device_targets(id) ON DELETE CASCADE,
+                    research_episode_id UUID REFERENCES research_episodes(id) ON DELETE SET NULL,
+                    device_agent_run_id UUID REFERENCES device_agent_runs(id) ON DELETE SET NULL,
+                    family TEXT NOT NULL,
+                    canonical_locus JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    title TEXT NOT NULL,
+                    claim TEXT NOT NULL,
+                    claimed_severity TEXT NOT NULL DEFAULT 'info',
+                    evidence_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    verifier_contract_id TEXT,
+                    verification_context JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    source_kind TEXT NOT NULL DEFAULT 'hunt',
+                    fingerprint TEXT NOT NULL UNIQUE,
+                    status TEXT NOT NULL DEFAULT 'new',
+                    latest_verification_id UUID,
+                    created_by TEXT,
+                    first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT investigation_candidates_plane_check CHECK (plane IN ('web','device')),
+                    CONSTRAINT investigation_candidates_target_check CHECK (
+                        (plane='web' AND target_id IS NOT NULL AND device_target_id IS NULL) OR
+                        (plane='device' AND device_target_id IS NOT NULL AND target_id IS NULL)
+                    ),
+                    CONSTRAINT investigation_candidates_status_check CHECK (status IN (
+                        'new','verification_queued','verifying','verified','refuted',
+                        'inconclusive','blocked','expired'
+                    )),
+                    CONSTRAINT investigation_candidates_severity_check CHECK (
+                        claimed_severity IN ('critical','high','medium','low','info')
+                    )
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_investigation_candidates_web
+                ON investigation_candidates(target_id, status, last_seen_at DESC)
+                WHERE target_id IS NOT NULL
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_investigation_candidates_device
+                ON investigation_candidates(device_target_id, status, last_seen_at DESC)
+                WHERE device_target_id IS NOT NULL
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_investigation_candidates_run
+                ON investigation_candidates(device_agent_run_id, created_at)
+                WHERE device_agent_run_id IS NOT NULL
+            """)
+            await conn.execute("""
+                ALTER TABLE investigation_candidates
+                ADD COLUMN IF NOT EXISTS verification_context JSONB NOT NULL DEFAULT '{}'::jsonb
+            """)
             await conn.execute("""
                 UPDATE scans SET run_kind = 'web_dast'
                 WHERE run_kind IS NULL
@@ -2950,6 +3011,31 @@ async def run_schema_migrations(pool) -> None:
                 ADD COLUMN IF NOT EXISTS ai_plan JSONB,
                 ADD COLUMN IF NOT EXISTS ai_reasoning TEXT,
                 ADD COLUMN IF NOT EXISTS campaign_id UUID REFERENCES scan_campaigns(id) ON DELETE SET NULL
+            """)
+            await conn.execute("""
+                ALTER TABLE finding_verifications
+                ALTER COLUMN finding_id DROP NOT NULL,
+                ADD COLUMN IF NOT EXISTS candidate_id UUID REFERENCES investigation_candidates(id) ON DELETE CASCADE,
+                ADD COLUMN IF NOT EXISTS device_target_id UUID REFERENCES device_targets(id) ON DELETE SET NULL,
+                ADD COLUMN IF NOT EXISTS research_episode_id UUID REFERENCES research_episodes(id) ON DELETE SET NULL,
+                ADD COLUMN IF NOT EXISTS device_agent_run_id UUID REFERENCES device_agent_runs(id) ON DELETE SET NULL,
+                ADD COLUMN IF NOT EXISTS contract_id TEXT,
+                ADD COLUMN IF NOT EXISTS contract_version TEXT,
+                ADD COLUMN IF NOT EXISTS proof_basis TEXT,
+                ADD COLUMN IF NOT EXISTS traffic_receipt_id UUID
+            """)
+            await conn.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname='finding_verifications_subject_check'
+                    ) THEN
+                        ALTER TABLE finding_verifications
+                        ADD CONSTRAINT finding_verifications_subject_check
+                        CHECK (finding_id IS NOT NULL OR candidate_id IS NOT NULL) NOT VALID;
+                    END IF;
+                END $$
             """)
 
             # Backfill NULLs to defaults
@@ -3258,6 +3344,21 @@ async def run_schema_migrations(pool) -> None:
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_instances_finding ON evidence_instances(finding_id, created_at DESC) WHERE finding_id IS NOT NULL")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_instances_tool_receipt ON evidence_instances(tool_receipt_id) WHERE tool_receipt_id IS NOT NULL")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_instances_hash ON evidence_instances(hash)")
+            await conn.execute("""
+                ALTER TABLE evidence_instances
+                ADD COLUMN IF NOT EXISTS candidate_id UUID REFERENCES investigation_candidates(id) ON DELETE CASCADE,
+                ADD COLUMN IF NOT EXISTS device_target_id UUID REFERENCES device_targets(id) ON DELETE SET NULL,
+                ADD COLUMN IF NOT EXISTS research_episode_id UUID REFERENCES research_episodes(id) ON DELETE SET NULL,
+                ADD COLUMN IF NOT EXISTS device_agent_run_id UUID REFERENCES device_agent_runs(id) ON DELETE SET NULL,
+                ADD COLUMN IF NOT EXISTS contract_id TEXT,
+                ADD COLUMN IF NOT EXISTS contract_version TEXT,
+                ADD COLUMN IF NOT EXISTS proof_basis TEXT
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_evidence_instances_candidate
+                ON evidence_instances(candidate_id, created_at DESC)
+                WHERE candidate_id IS NOT NULL
+            """)
             # Wave 5: evidence-strength ladder column (claimed<signal<reproduced<cross_principal_verified).
             await conn.execute("ALTER TABLE evidence_instances ADD COLUMN IF NOT EXISTS evidence_strength TEXT")
             await conn.execute("ALTER TABLE evidence_instances DROP CONSTRAINT IF EXISTS evidence_instances_strength_check")

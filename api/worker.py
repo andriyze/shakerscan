@@ -54,6 +54,7 @@ from retest_contract import (
 )
 import parallel_scan
 import asm_inventory
+import family_proof
 from model_intake_admissions import persist_from_result as persist_model_intake_admission
 from job_queue import (
     DEFAULT_WORKER_TOOL_COMMANDS,
@@ -3908,7 +3909,7 @@ async def save_device_findings(
     saved = 0
     seen_posture_fingerprints: list[str] = []
     seen_web_fingerprints: list[str] = []
-    async with db_pool.acquire() as conn:
+    async with db_pool.acquire() as conn, conn.transaction():
         for finding in findings:
             fingerprint = str(finding.get("fingerprint") or generate_finding_fingerprint(finding))
             if str(finding.get("tool") or "") in {"device_policy", "device_ssh", "device_posture"}:
@@ -3956,6 +3957,67 @@ async def save_device_findings(
                     conn, scan_uuid, finding_id, finding, evidence_with_triage,
                     tool_override=finding.get("tool") or "device_posture",
                 )
+                candidate_id = str(
+                    (finding.get("evidence") or {}).get("candidate_id")
+                    if isinstance(finding.get("evidence"), dict) else ""
+                ).strip()
+                proof = finding.get("proof_contract_v2") if isinstance(finding.get("proof_contract_v2"), dict) else {}
+                if candidate_id and proof and str(finding.get("tool") or "") == "device_candidate_verifier":
+                    try:
+                        candidate_uuid = uuid.UUID(candidate_id)
+                    except ValueError:
+                        candidate_uuid = None
+                    if candidate_uuid:
+                        verification_id = await conn.fetchval(
+                            """INSERT INTO finding_verifications (
+                                   finding_id, candidate_id, scan_id, device_target_id,
+                                   requested_by, status, result_status, verdict, verdict_reason,
+                                   finding_type, target_url, original_url, proof, confidence,
+                                   verification_mode, contract_id, contract_version, proof_basis,
+                                   started_at, completed_at, updated_at
+                               ) VALUES (
+                                   $1,$2,$3,$4,'device_candidate_verifier','completed','success',
+                                   'verified','Server-owned proof contract satisfied',
+                                   'device_service_exposure',$5,$5,$6::jsonb,1.00,
+                                   'deterministic',$7,$8,$9,NOW(),NOW(),NOW()
+                               ) RETURNING id""",
+                            finding_id, candidate_uuid, scan_uuid, device_uuid,
+                            str(finding.get("url") or f"device://{device_target_id}"),
+                            json.dumps(proof), proof.get("contract_id"), proof.get("contract_version"),
+                            proof.get("proof_basis"),
+                        )
+                        proof_hash = hashlib.sha256(
+                            json.dumps(proof, sort_keys=True, separators=(",", ":")).encode()
+                        ).hexdigest()
+                        await conn.execute(
+                            """INSERT INTO evidence_instances (
+                                   finding_id, candidate_id, scan_id, device_target_id,
+                                   proof_observation, hash, proof_state, evidence_strength,
+                                   contract_id, contract_version, proof_basis, created_by
+                               ) VALUES (
+                                   $1,$2,$3,$4,$5::jsonb,$6,'verified','reproduced',$7,$8,$9,
+                                   'device_candidate_verifier'
+                               )""",
+                            finding_id, candidate_uuid, scan_uuid, device_uuid, json.dumps(proof),
+                            proof_hash, proof.get("contract_id"), proof.get("contract_version"),
+                            proof.get("proof_basis"),
+                        )
+                        await conn.execute(
+                            """UPDATE investigation_candidates
+                               SET status='verified', latest_verification_id=$2,
+                                   verification_context=verification_context ||
+                                       jsonb_build_object('finding_id',$3::text),
+                                   updated_at=NOW()
+                               WHERE id=$1 AND plane='device' AND device_target_id=$4""",
+                            candidate_uuid, verification_id, finding_id, device_uuid,
+                        )
+                        await conn.execute(
+                            """UPDATE findings
+                               SET last_verification_status='completed',
+                                   last_verification_verdict='verified', updated_at=NOW()
+                               WHERE id=$1""",
+                            finding_id,
+                        )
         if resolve_posture_missing:
             await conn.execute(
                 """
@@ -3981,6 +4043,133 @@ async def save_device_findings(
                 seen_web_fingerprints,
             )
     return saved
+
+
+async def prepare_device_candidate_probe_result(
+    *, result: dict[str, Any], options: dict[str, Any], device_target_id: str, target: str,
+) -> dict[str, Any] | None:
+    """Evaluate a device service candidate through a server-owned proof contract.
+
+    The candidate's title, severity, and rationale are not used as proof. A verified finding is
+    materialized only from the typed probe result plus the persisted device policy disposition.
+    """
+    candidate_id = str((options or {}).get("candidate_id") or "").strip()
+    if not candidate_id or str((options or {}).get("proof_contract_id") or "") != "device.service_exposure":
+        return None
+    try:
+        candidate_uuid = uuid.UUID(candidate_id)
+        device_uuid = uuid.UUID(device_target_id)
+    except ValueError:
+        return None
+    probe = result.get("device_probe") if isinstance(result.get("device_probe"), dict) else {}
+    observation = probe.get("observation") if isinstance(probe.get("observation"), dict) else {}
+    verification = probe.get("verification") if isinstance(probe.get("verification"), dict) else {}
+    safety = probe.get("safety") if isinstance(probe.get("safety"), dict) else {}
+    transport = str(probe.get("transport") or "").lower()
+    try:
+        port = int(probe.get("port") or 0)
+    except (TypeError, ValueError):
+        port = 0
+    async with db_pool.acquire() as conn:
+        candidate = await conn.fetchrow(
+            """SELECT id, canonical_locus, verifier_contract_id
+               FROM investigation_candidates
+               WHERE id=$1 AND plane='device' AND device_target_id=$2""",
+            candidate_uuid, device_uuid,
+        )
+        service = await conn.fetchrow(
+            """SELECT state, service_name, product, version, cpe,
+                      policy_disposition, policy_reason
+               FROM device_services
+               WHERE device_target_id=$1 AND transport=$2 AND port=$3""",
+            device_uuid, transport, port,
+        )
+    if not candidate or str(candidate["verifier_contract_id"] or "") != "device.service_exposure":
+        return None
+    locus = parse_json_field(candidate["canonical_locus"]) or {}
+    locus_matches = str(locus.get("transport") or "").lower() == transport and int(locus.get("port") or 0) == port
+    policy_disposition = str(service["policy_disposition"] or "") if service else ""
+    protocol_handshake = bool(
+        locus_matches
+        and observation.get("complete") is True
+        and str(observation.get("state") or "") == "open"
+        and str(verification.get("verdict") or "") == "satisfied"
+    )
+    evidence = {
+        "protocol_handshake": protocol_handshake,
+        "policy_denied": policy_disposition == "deny",
+        "recent_observation": bool(probe),
+        "service_closed": str(observation.get("state") or "") == "closed",
+        "policy_allowed": policy_disposition == "allow",
+        "health_degraded": bool(safety.get("halted")),
+        "reexecuted_at_handoff": bool(probe),
+    }
+    proof = family_proof.build_proof_contract_result(
+        "device_service_exposure",
+        evidence,
+        contract_id="device.service_exposure",
+        contract_version="1.0.0",
+        verifier_build=str(_worker_build_fingerprint() or "unknown"),
+        subject={
+            "device_target_id": device_target_id,
+            "transport": transport,
+            "port": port,
+        },
+        observations=[{
+            "state": observation.get("state"),
+            "complete": observation.get("complete"),
+            "service_name": service["service_name"] if service else None,
+            "policy_disposition": policy_disposition or None,
+        }],
+        controls=[{
+            "health_halted": bool(safety.get("halted")),
+            "locus_matches": locus_matches,
+        }],
+        proof_basis="protocol_handshake",
+    )
+    promotable, gate_reason = family_proof.proof_contract_promotion_gate(proof)
+    settlement = {
+        "candidate_id": candidate_id,
+        "status": "verified" if promotable else (
+            "refuted" if proof["verdict"] == "refuted" else "inconclusive"
+        ),
+        "proof": proof,
+        "gate_reason": gate_reason,
+    }
+    result["candidate_verification"] = settlement
+    if promotable:
+        title = "Policy-denied connected-device service is exposed"
+        finding = {
+            "type": "Device service policy violation",
+            "title": title,
+            "severity": "high",
+            "description": (
+                f"A deterministic {transport.upper()} probe confirmed port {port} open, and the "
+                "effective connected-device policy denies that service."
+            ),
+            "recommendation": "Disable the service or restrict it to the explicitly approved management segment.",
+            "url": f"{transport}://{target}:{port}",
+            "tool": "device_candidate_verifier",
+            "source": "device",
+            "cwe": "CWE-284",
+            "verified": True,
+            "proof_state": "verified",
+            "proof_contract_v2": proof,
+            "evidence": {
+                "candidate_id": candidate_id,
+                "transport": transport,
+                "port": port,
+                "observed_state": observation.get("state"),
+                "policy_disposition": policy_disposition,
+                "policy_reason": str(service["policy_reason"] or "")[:1000] if service else None,
+                "proof_contract_v2": proof,
+            },
+        }
+        finding["fingerprint"] = hashlib.sha256(
+            json.dumps([title, device_target_id, transport, port], separators=(",", ":")).encode()
+        ).hexdigest()
+        result.setdefault("findings", []).append(finding)
+    return settlement
 
 
 async def persist_device_inventory(scan_id: str, device_target_id: str, result: dict[str, Any]) -> None:
@@ -6379,6 +6568,64 @@ async def process_finding_retest_job(job_data: dict):
                 completed_at,
                 verification["finding_id"],
             )
+            # Link Deep Hunt's durable candidate to the existing deterministic retest record.
+            # The retest verdict, never the model claim, owns the candidate lifecycle.
+            candidate = await conn.fetchrow(
+                """SELECT id, verifier_contract_id
+                   FROM investigation_candidates
+                   WHERE plane='web'
+                     AND verification_context->>'finding_id'=$1::text
+                   ORDER BY last_seen_at DESC, id DESC LIMIT 1""",
+                verification["finding_id"],
+            )
+            if candidate:
+                final_candidate_verdict = str(result.get("verdict") or "").lower()
+                candidate_status = (
+                    "verified" if final_candidate_verdict == "exploited"
+                    else "refuted" if final_candidate_verdict in {"false_positive", "likely_fixed"}
+                    else "inconclusive"
+                )
+                proof_basis = str(
+                    (result.get("proof") or {}).get("evidence_type")
+                    if isinstance(result.get("proof"), dict) else ""
+                ) or str(result.get("verification_mode") or "deterministic_retest")
+                await conn.execute(
+                    """UPDATE finding_verifications
+                       SET candidate_id=$2, contract_id=COALESCE(contract_id,$3),
+                           contract_version=COALESCE(contract_version,'deterministic-retest/v1'),
+                           proof_basis=COALESCE(proof_basis,$4)
+                       WHERE id=$1""",
+                    verification["id"], candidate["id"], candidate["verifier_contract_id"], proof_basis,
+                )
+                proof_observation = _redact_finding_evidence(result.get("proof") or {})
+                proof_hash = hashlib.sha256(
+                    json.dumps(proof_observation, sort_keys=True, separators=(",", ":"), default=str).encode()
+                ).hexdigest()
+                await conn.execute(
+                    """INSERT INTO evidence_instances (
+                           finding_id, candidate_id, scan_id, target_id, proof_observation,
+                           hash, proof_state, evidence_strength, contract_id, contract_version,
+                           proof_basis, created_by
+                       ) VALUES (
+                           $1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,'deterministic-retest/v1',$10,
+                           'deep_hunt_candidate_retest'
+                       )""",
+                    verification["finding_id"], candidate["id"], verification["scan_id"],
+                    verification["target_id"], json.dumps(proof_observation), proof_hash,
+                    "verified" if candidate_status == "verified" else candidate_status,
+                    "reproduced" if candidate_status == "verified" else "signal",
+                    candidate["verifier_contract_id"], proof_basis,
+                )
+                await conn.execute(
+                    """UPDATE investigation_candidates
+                       SET status=$2, latest_verification_id=$3,
+                           verification_context=verification_context || jsonb_build_object(
+                               'verdict',$4::text,'verified_at',$5::text
+                           ), updated_at=NOW()
+                       WHERE id=$1""",
+                    candidate["id"], candidate_status, verification["id"],
+                    final_candidate_verdict or "inconclusive", completed_at.isoformat(),
+                )
             campaign_status = (
                 'completed'
                 if result.get("verdict") == "exploited" or result.get("status") == "completed"
@@ -8330,6 +8577,20 @@ async def process_scan_job(job_data: dict):
         result = _apply_runtime_scope_guard_to_result(result, options)
         if device_target_id and (options or {}).get("run_kind") == "device_posture":
             await _persist_device_credential_attempts(result, scan_id)
+        if device_target_id and (options or {}).get("run_kind") == "device_probe" and not result.get("error"):
+            try:
+                await prepare_device_candidate_probe_result(
+                    result=result,
+                    options=options,
+                    device_target_id=device_target_id,
+                    target=str(target or ""),
+                )
+            except Exception as candidate_error:
+                result["candidate_verification"] = {
+                    "candidate_id": str((options or {}).get("candidate_id") or "") or None,
+                    "status": "inconclusive",
+                    "error": f"candidate_verifier_fault:{type(candidate_error).__name__}",
+                }
 
         # Extract results (run_scan already strips NUL bytes from the whole result so
         # the scans.result write and findings rows can't crash on \x00; save_findings
@@ -8461,6 +8722,21 @@ async def process_scan_job(job_data: dict):
                         current_phase = 'failed'
                     WHERE id = $5
                 """, error_detail[:2000], json.dumps(failure_result), completed_at, duration, uuid.UUID(scan_id))
+                candidate_id = str((options or {}).get("candidate_id") or "")
+                if candidate_id:
+                    try:
+                        await conn.execute(
+                            """UPDATE investigation_candidates
+                               SET status='inconclusive',
+                                   verification_context=verification_context || jsonb_build_object(
+                                       'scan_id',$2::text,'error','probe_failed'
+                                   ),
+                                   updated_at=NOW()
+                               WHERE id=$1 AND status IN ('verification_queued','verifying')""",
+                            uuid.UUID(candidate_id), scan_id,
+                        )
+                    except (ValueError, asyncpg.PostgresError):
+                        pass
                 await asm_inventory.finish_campaign(conn, campaign_id, status='failed')
             else:
                 metadata = result.get("scan_metadata") if isinstance(result.get("scan_metadata"), dict) else {}
@@ -8491,6 +8767,32 @@ async def process_scan_job(job_data: dict):
                     WHERE id = $7
                 """, json.dumps(result), score, grade, len(findings),
                      completed_at, duration, uuid.UUID(scan_id))
+                candidate_settlement = result.get("candidate_verification") if isinstance(result.get("candidate_verification"), dict) else {}
+                candidate_id = str(candidate_settlement.get("candidate_id") or "")
+                if candidate_id:
+                    try:
+                        await conn.execute(
+                            """UPDATE investigation_candidates
+                               SET status=$2,
+                                   verification_context=verification_context || jsonb_build_object(
+                                       'scan_id',$3::text,
+                                       'proof',$4::jsonb,
+                                       'gate_reason',$5::text
+                                   ),
+                                   updated_at=NOW()
+                               WHERE id=$1 AND status IN ('verification_queued','verifying','inconclusive')""",
+                            uuid.UUID(candidate_id),
+                            (
+                                "verifying"
+                                if str(candidate_settlement.get("status") or "") == "verified"
+                                else str(candidate_settlement.get("status") or "inconclusive")
+                            ),
+                            scan_id,
+                            json.dumps(candidate_settlement.get("proof") or {}),
+                            candidate_settlement.get("gate_reason"),
+                        )
+                    except (ValueError, asyncpg.PostgresError):
+                        pass
                 if (options or {}).get("run_kind") in MODEL_INTAKE_RUN_KINDS:
                     try:
                         admission = await persist_model_intake_admission(
@@ -8543,7 +8845,7 @@ async def process_scan_job(job_data: dict):
                 saved_count = await save_ai_findings(scan_id, ai_target_id, findings)
             except Exception as e:
                 print(f"[{job_id[:8]}] save_ai_findings error: {e}", flush=True)
-        elif device_target_id and (options or {}).get("run_kind") == "device_posture":
+        elif device_target_id and (options or {}).get("run_kind") in {"device_posture", "device_probe"} and findings:
             try:
                 posture = result.get("device_posture") if isinstance(result.get("device_posture"), dict) else {}
                 completeness = posture.get("completeness") if isinstance(posture.get("completeness"), dict) else {}

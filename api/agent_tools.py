@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import re
+import urllib.parse
 from typing import Any, Optional
 
 # Methods the model may request. Reads are read-only; writes are credential/active-gated.
@@ -172,6 +173,7 @@ def _tmpl_nuclei(url: str, opts: dict[str, Any]) -> list[str]:
         severity = "high,critical"
     args = ["-target", url, "-severity", severity, "-silent", "-jsonl",
             "-timeout", "8", "-retries", "1", "-no-color", "-disable-update-check"]
+    args += ["-rate-limit", "5", "-bulk-size", "5", "-concurrency", "5"]
     tags = str(opts.get("tags") or "").strip().lower()
     if _TAGS_RE.match(tags):
         args += ["-tags", tags]
@@ -191,8 +193,8 @@ def _tmpl_katana(url: str, opts: dict[str, Any]) -> list[str]:
     # Same-origin crawl + JS endpoint extraction. Read-only (GET only; form auto-fill stays OFF),
     # bounded: depth 2, 45s wall cap, 50 req/s, field-scope fqdn (same HOST only — never crosses
     # origin), 8s per-request timeout, jsonl output. No tunables.
-    return ["-u", url, "-js-crawl", "-depth", "2", "-concurrency", "10",
-            "-rate-limit", "50", "-crawl-duration", "45s", "-field-scope", "fqdn",
+    return ["-u", url, "-js-crawl", "-depth", "2", "-concurrency", "5",
+            "-rate-limit", "5", "-crawl-duration", "30s", "-field-scope", "fqdn",
             "-timeout", "8", "-silent", "-jsonl"]
 
 
@@ -206,20 +208,24 @@ def _tmpl_ffuf(url: str, opts: dict[str, Any]) -> list[str]:
     base = url.split("?", 1)[0].rstrip("/")
     return ["-u", f"{base}/FUZZ", "-w", wordlist,
             "-mc", "200,204,301,302,307,401,403,405", "-ac",
-            "-t", "20", "-rate", "50", "-timeout", "8", "-maxtime", "60", "-s", "-json"]
+            "-t", "5", "-rate", "5", "-timeout", "8", "-maxtime", "60", "-s", "-json"]
 
 
 # {tool: {binary, target_param, risk, default_timeout_ms, build}}. httpx is the only passive
 # (read_only) scanner; nuclei/katana/ffuf are bounded ACTIVE discovery (deep_hunt-gated) — each
 # has a fixed argv (no arbitrary flags/paths) and a hard wall-clock cap so the sync loop stays safe.
 SCANNER_ARG_TEMPLATES: dict[str, dict[str, Any]] = {
-    "httpx": {"binary": "httpx", "risk": "read_only", "default_timeout_ms": 30_000, "build": _tmpl_httpx,
+    "httpx": {"binary": "httpx", "risk": "read_only", "default_timeout_ms": 30_000,
+              "max_wire_requests": 4, "build": _tmpl_httpx,
               "desc": "passive HTTP fingerprint (status, title, tech, server) of a target-host URL"},
-    "nuclei": {"binary": "nuclei", "risk": "active", "default_timeout_ms": 90_000, "build": _tmpl_nuclei,
+    "nuclei": {"binary": "nuclei", "risk": "active", "default_timeout_ms": 90_000,
+               "max_wire_requests": 450, "build": _tmpl_nuclei,
                "desc": "bounded Nuclei template scan (default high,critical) of a target-host URL; options {severity,tags}"},
-    "katana": {"binary": "katana", "risk": "active", "default_timeout_ms": 75_000, "build": _tmpl_katana,
+    "katana": {"binary": "katana", "risk": "active", "default_timeout_ms": 75_000,
+               "max_wire_requests": 150, "build": _tmpl_katana,
                "desc": "bounded target-host crawl + JS endpoint extraction (depth 2, 45s, same-host only)"},
-    "ffuf": {"binary": "ffuf", "risk": "active", "default_timeout_ms": 75_000, "build": _tmpl_ffuf,
+    "ffuf": {"binary": "ffuf", "risk": "active", "default_timeout_ms": 75_000,
+             "max_wire_requests": 220, "build": _tmpl_ffuf,
              "desc": "bounded content/dir discovery over a small bundled wordlist; options {wordlist: common|api|admin}"},
 }
 RUN_TOOL_NAMES: frozenset[str] = frozenset(SCANNER_ARG_TEMPLATES)
@@ -270,6 +276,105 @@ def build_scanner_argv(name: str, url: str, options: dict[str, Any]) -> tuple[st
     (passed separately to the subprocess); every flag is hardcoded in the template."""
     template = SCANNER_ARG_TEMPLATES[name]
     return template["binary"], template["build"](url, options or {}), int(template["default_timeout_ms"])
+
+
+def scanner_request_reservation(name: str, options: dict[str, Any] | None = None) -> int:
+    """Return the fail-closed wire-request reservation for one external scanner invocation."""
+    template = SCANNER_ARG_TEMPLATES.get(str(name or "").strip().lower())
+    if not template:
+        raise AgentToolError(f"unknown run_tool:{name}")
+    return max(1, int(template.get("max_wire_requests") or 1))
+
+
+def _public_observed_url(value: Any) -> str | None:
+    """Retain route and parameter names while removing query values from scanner output."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(text)
+    except ValueError:
+        return text.split("?", 1)[0][:1000]
+    if not parsed.scheme or not parsed.netloc:
+        return text.split("?", 1)[0][:1000]
+    query_names = [name for name, _ in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)]
+    safe_query = urllib.parse.urlencode([(name[:100], "<redacted>") for name in query_names[:50]])
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, safe_query, ""))[:2000]
+
+
+def parse_scanner_output(name: str, stdout: str) -> dict[str, Any]:
+    """Parse bounded scanner output into records safe for hunt reasoning.
+
+    Raw output remains receipt evidence; these records are observations, never finding proof.
+    """
+    scanner = str(name or "").strip().lower()
+    decoded: list[dict[str, Any]] = []
+    text = str(stdout or "")
+    try:
+        whole = json.loads(text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        whole = None
+    if isinstance(whole, dict) and isinstance(whole.get("results"), list):
+        decoded.extend(item for item in whole["results"] if isinstance(item, dict))
+    elif isinstance(whole, list):
+        decoded.extend(item for item in whole if isinstance(item, dict))
+    elif isinstance(whole, dict):
+        decoded.append(whole)
+    else:
+        for line in text.splitlines()[:500]:
+            try:
+                item = json.loads(line)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if isinstance(item, dict):
+                decoded.append(item)
+
+    records: list[dict[str, Any]] = []
+    for item in decoded[:200]:
+        if scanner == "nuclei":
+            info = item.get("info") if isinstance(item.get("info"), dict) else {}
+            records.append({
+                "kind": "template_match",
+                "template_id": str(item.get("template-id") or item.get("template_id") or "")[:200] or None,
+                "name": str(info.get("name") or item.get("name") or "")[:300] or None,
+                "severity": str(info.get("severity") or item.get("severity") or "").lower()[:20] or None,
+                "matched_at": _public_observed_url(item.get("matched-at") or item.get("matched_at") or item.get("url")),
+                "matcher_name": str(item.get("matcher-name") or item.get("matcher_name") or "")[:200] or None,
+                "proof_state": "candidate",
+            })
+        elif scanner == "katana":
+            request = item.get("request") if isinstance(item.get("request"), dict) else {}
+            records.append({
+                "kind": "discovered_route",
+                "url": _public_observed_url(item.get("url") or item.get("endpoint") or request.get("endpoint")),
+                "method": str(item.get("method") or request.get("method") or "GET").upper()[:16],
+                "source": _public_observed_url(item.get("source") or item.get("from")),
+            })
+        elif scanner == "ffuf":
+            records.append({
+                "kind": "content_discovery",
+                "url": _public_observed_url(item.get("url") or item.get("input", {}).get("FUZZ") if isinstance(item.get("input"), dict) else item.get("url")),
+                "status": item.get("status"),
+                "length": item.get("length"),
+                "redirect_location": _public_observed_url(item.get("redirectlocation") or item.get("redirect_location")),
+            })
+        elif scanner == "httpx":
+            technologies = item.get("tech") or item.get("technologies") or []
+            records.append({
+                "kind": "http_fingerprint",
+                "url": _public_observed_url(item.get("url") or item.get("input")),
+                "status": item.get("status_code") or item.get("status-code"),
+                "title": str(item.get("title") or "")[:300] or None,
+                "webserver": str(item.get("webserver") or item.get("web_server") or "")[:200] or None,
+                "technologies": [str(value)[:100] for value in list(technologies or [])[:50]],
+            })
+    records = [record for record in records if any(value not in (None, "", [], {}) for key, value in record.items() if key != "kind")]
+    return {
+        "parser": f"{scanner}-typed-v1",
+        "parser_status": "parsed" if records else ("partial" if decoded else "not_applicable"),
+        "records": records[:200],
+        "record_count": len(records),
+    }
 
 
 # --------------------------------------------------------------------------------------

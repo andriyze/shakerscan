@@ -11,6 +11,7 @@ from scanner_tools import common
 from scanner_tools.request_meter import (
     RequestBudgetExceeded,
     configure_request_meter,
+    get_request_meter,
     install_async_client_metering,
 )
 
@@ -61,6 +62,26 @@ def test_request_meter_ignores_other_hosts():
 
     assert meter.before_request(phase="provider", url="https://provider.test/v1") is False
     assert meter.snapshot()["attempted_requests"] == 0
+
+
+def test_request_meter_isolated_between_concurrent_scan_contexts():
+    async def scan(host):
+        meter = configure_request_meter(
+            limit=2, target_host=host, mode="enforce", planned=2, reserved=2,
+        )
+        await asyncio.sleep(0)
+        assert get_request_meter() is meter
+        meter.before_request(phase="probe", url=f"https://{host}/one")
+        return meter.snapshot()
+
+    async def run_scans():
+        return await asyncio.gather(scan("one.test"), scan("two.test"))
+
+    first, second = asyncio.run(run_scans())
+
+    assert first["target_host"] == "one.test"
+    assert second["target_host"] == "two.test"
+    assert first["attempted_requests"] == second["attempted_requests"] == 1
 
 
 def test_httpx_hook_enforces_target_budget():

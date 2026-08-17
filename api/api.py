@@ -385,6 +385,7 @@ import agent_text_toolcalls
 import agent_tools
 import device_agent
 import device_capabilities
+import investigation_candidates
 from job_queue import (
     DEFAULT_WORKER_TOOL_COMMANDS,
     QueueLease,
@@ -682,6 +683,19 @@ def row_to_dict(row) -> dict:
         elif isinstance(v, datetime):
             d[k] = v.isoformat()
     return d
+
+
+def _public_investigation_candidate(row: Any) -> dict[str, Any]:
+    payload = row_to_dict(row)
+    for key, default in (
+        ("canonical_locus", {}),
+        ("evidence_refs", []),
+        ("verification_context", {}),
+    ):
+        payload[key] = _decode_json_value(payload.get(key)) or default
+    payload["authoritative"] = False
+    payload["promotion_ready"] = payload.get("status") == "verified"
+    return payload
 
 
 def _int_or_none(value: Any) -> int | None:
@@ -4269,6 +4283,7 @@ class DeviceServiceVerifyRequest(BaseModel):
     confirm_authorized: bool = False
     confirm_lab_invasive: bool = False
     reason: str = Field(min_length=1, max_length=500)
+    candidate_id: Optional[str] = None
     approval_receipt_id: Optional[str] = None
 
 
@@ -19039,6 +19054,94 @@ async def deactivate_device_request_collection(device_id: str, collection_id: st
     return {"status": "deactivated", "collection": _public_device_request_collection(row)}
 
 
+@app.get("/investigation/candidates")
+async def list_investigation_candidates(
+    plane: str | None = Query(None),
+    target_id: str | None = Query(None),
+    device_target_id: str | None = Query(None),
+    status: str | None = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    """List non-authoritative hunt candidates and their verifier lifecycle."""
+    normalized_plane = str(plane or "").strip().lower() or None
+    normalized_status = str(status or "").strip().lower() or None
+    if normalized_plane not in (None, *sorted(investigation_candidates.PLANES)):
+        raise HTTPException(status_code=422, detail="plane must be web or device")
+    if normalized_status not in (None, *sorted(investigation_candidates.STATUSES)):
+        raise HTTPException(status_code=422, detail="unsupported candidate status")
+    if target_id and device_target_id:
+        raise HTTPException(status_code=422, detail="web and device candidate filters are mutually exclusive")
+    try:
+        target_uuid = uuid.UUID(target_id) if target_id else None
+        device_uuid = uuid.UUID(device_target_id) if device_target_id else None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="candidate target filter must be a UUID") from exc
+    if normalized_plane == "web" and device_uuid:
+        raise HTTPException(status_code=422, detail="web candidates cannot use device_target_id")
+    if normalized_plane == "device" and target_uuid:
+        raise HTTPException(status_code=422, detail="device candidates cannot use target_id")
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT *, COUNT(*) OVER() AS total_count
+               FROM investigation_candidates
+               WHERE ($1::text IS NULL OR plane=$1)
+                 AND ($2::uuid IS NULL OR target_id=$2)
+                 AND ($3::uuid IS NULL OR device_target_id=$3)
+                 AND ($4::text IS NULL OR status=$4)
+               ORDER BY last_seen_at DESC, id DESC
+               LIMIT $5 OFFSET $6""",
+            normalized_plane, target_uuid, device_uuid, normalized_status, limit, offset,
+        )
+    total = int(rows[0]["total_count"] or 0) if rows else 0
+    candidates = []
+    for row in rows:
+        payload = _public_investigation_candidate(row)
+        payload.pop("total_count", None)
+        candidates.append(payload)
+    return {"candidates": candidates, "total": total, "limit": limit, "offset": offset}
+
+
+@app.get("/investigation/candidates/{candidate_id}")
+async def get_investigation_candidate(candidate_id: str):
+    """Inspect one candidate with its deterministic verification and evidence records."""
+    candidate_uuid = _uuid_or_400(candidate_id, "candidate id")
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM investigation_candidates WHERE id=$1", candidate_uuid)
+        if not row:
+            raise HTTPException(status_code=404, detail="Investigation candidate not found")
+        verifications = await conn.fetch(
+            """SELECT id, finding_id, scan_id, status, result_status, verdict, verdict_reason,
+                      finding_type, confidence, verification_mode, contract_id, contract_version,
+                      proof_basis, proof, created_at, started_at, completed_at
+               FROM finding_verifications WHERE candidate_id=$1
+               ORDER BY created_at DESC LIMIT 100""",
+            candidate_uuid,
+        )
+        evidence = await conn.fetch(
+            """SELECT id, finding_id, scan_id, proof_state, evidence_strength, contract_id,
+                      contract_version, proof_basis, proof_observation, hash, created_at
+               FROM evidence_instances WHERE candidate_id=$1
+               ORDER BY created_at DESC LIMIT 100""",
+            candidate_uuid,
+        )
+    verification_payloads = []
+    for item in verifications:
+        payload = row_to_dict(item)
+        payload["proof"] = _decode_json_value(payload.get("proof")) or {}
+        verification_payloads.append(payload)
+    evidence_payloads = []
+    for item in evidence:
+        payload = row_to_dict(item)
+        payload["proof_observation"] = _decode_json_value(payload.get("proof_observation")) or {}
+        evidence_payloads.append(payload)
+    return {
+        "candidate": _public_investigation_candidate(row),
+        "verifications": verification_payloads,
+        "evidence": evidence_payloads,
+    }
+
+
 @app.get("/devices/{device_id}")
 async def get_device(
     device_id: str,
@@ -19259,6 +19362,7 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
     if "agent-confirmed-ssh-shell" in capability_ids and not approved_shell_plan:
         raise HTTPException(status_code=422, detail="AI SSH shell execution requires a separately user-confirmed shell plan")
     device_uuid = _device_uuid(device_id)
+    candidate_uuid = _device_uuid(request.candidate_id, "candidate") if request.candidate_id else None
     scan_id, job_id = str(uuid.uuid4()), str(uuid.uuid4())
     async with db_pool.acquire() as conn:
         device = await conn.fetchrow("SELECT * FROM device_targets WHERE id=$1", device_uuid)
@@ -19266,6 +19370,22 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
             raise HTTPException(status_code=404, detail="Connected device not found")
         if not device["is_active"]:
             raise HTTPException(status_code=409, detail="Connected device is inactive")
+        candidate = None
+        if candidate_uuid:
+            candidate = await conn.fetchrow(
+                """SELECT * FROM investigation_candidates
+                   WHERE id=$1 AND plane='device' AND device_target_id=$2
+                     AND status IN ('new','inconclusive','blocked')
+                   FOR UPDATE""",
+                candidate_uuid, device_uuid,
+            )
+            if not candidate:
+                raise HTTPException(status_code=404, detail="Verifiable device candidate not found for this device")
+            if str(candidate["verifier_contract_id"] or "") != "device.service_exposure":
+                raise HTTPException(status_code=422, detail="This candidate does not use the service-exposure verifier")
+            locus = _decode_json_value(candidate["canonical_locus"]) or {}
+            if str(locus.get("transport") or "").lower() != request.transport or int(locus.get("port") or 0) != request.port:
+                raise HTTPException(status_code=409, detail="Candidate locus does not match the fixed service verifier")
         credential_refs = await _validate_device_credential_refs(
             conn,
             device_uuid,
@@ -19433,6 +19553,8 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
             "device_shell_plan": approved_shell_plan if "agent-confirmed-ssh-shell" in capability_ids else None,
             "device_policy": {"id": str(policy["id"]), "name": policy["name"], "rules": policy_payload["rules"]},
             "approval_receipt_id": request.approval_receipt_id,
+            "candidate_id": str(candidate_uuid) if candidate_uuid else None,
+            "proof_contract_id": "device.service_exposure" if candidate_uuid else None,
             "resolved_budget": {
                 "scan_type": "device_posture",
                 "budget_profile": request.profile,
@@ -19457,6 +19579,18 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
             )
             if not inserted_scan:
                 raise HTTPException(status_code=409, detail="Device address changed during submission; review it and retry")
+            if candidate_uuid:
+                await conn.execute(
+                    """UPDATE investigation_candidates
+                       SET status='verification_queued',
+                           verification_context=jsonb_build_object(
+                               'scan_id',$2::text,'job_id',$3::text,
+                               'contract_id','device.service_exposure'
+                           ),
+                           updated_at=NOW()
+                       WHERE id=$1""",
+                    candidate_uuid, scan_id, job_id,
+                )
         except asyncpg.UniqueViolationError as exc:
             raise HTTPException(status_code=409, detail="A connected-device scan is already active for this device") from exc
     job_data = {
@@ -19587,6 +19721,16 @@ async def verify_device_service(device_id: str, request: DeviceServiceVerifyRequ
         enqueue_job(get_redis(), DEVICE_QUEUE_NAME, job_data)
     except Exception as exc:
         await _mark_scan_enqueue_failed(scan_id, f"connected-device probe enqueue failed: {exc}")
+        if candidate_uuid:
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    """UPDATE investigation_candidates
+                       SET status='inconclusive',
+                           verification_context=verification_context || jsonb_build_object('enqueue_error','queue_unavailable'),
+                           updated_at=NOW()
+                       WHERE id=$1 AND status='verification_queued'""",
+                    candidate_uuid,
+                )
         raise HTTPException(status_code=503, detail="Failed to queue connected-device service verification") from exc
     get_redis().hset(f"job:{job_id}", mapping={"status": "queued", "target": device["primary_locator"], "scan_id": scan_id})
     return {
@@ -20243,6 +20387,50 @@ async def _execute_device_agent_tool(
             "message": "Scan queued. Inspect it on a later turn; do not queue an equivalent scan while it is active.",
         }
 
+    if name == "verify_candidate":
+        if state.get("traffic_frozen"):
+            raise HTTPException(status_code=409, detail="Device traffic is frozen after a health circuit breaker")
+        if safety_profile == "observe_only":
+            raise HTTPException(status_code=409, detail="observe_only does not permit candidate verification traffic")
+        if int(state.get("scans_queued") or 0) >= device_agent.MAX_SCANS_PER_SESSION:
+            raise HTTPException(status_code=409, detail="Connected-device agent scan budget exhausted")
+        candidate_uuid = _device_uuid(args["candidate_id"], "candidate")
+        async with db_pool.acquire() as conn:
+            candidate = await conn.fetchrow(
+                """SELECT canonical_locus, verifier_contract_id
+                   FROM investigation_candidates
+                   WHERE id=$1 AND plane='device' AND device_target_id=$2
+                     AND status IN ('new','inconclusive','blocked')""",
+                candidate_uuid, device_target_id,
+            )
+        if not candidate:
+            raise HTTPException(status_code=404, detail="Verifiable device candidate not found")
+        if str(candidate["verifier_contract_id"] or "") != "device.service_exposure":
+            raise HTTPException(status_code=422, detail="No automatic verifier is registered for this candidate")
+        locus = _decode_json_value(candidate["canonical_locus"]) or {}
+        transport = str(locus.get("transport") or "").lower()
+        port = int(locus.get("port") or 0)
+        if transport not in {"tcp", "udp"} or not 1 <= port <= 65535:
+            raise HTTPException(status_code=422, detail="Candidate does not contain a valid fixed service locus")
+        queued = await verify_device_service(str(device_target_id), DeviceServiceVerifyRequest(
+            transport=transport,
+            port=port,
+            expected_state="open",
+            safety_profile=safety_profile,
+            confirm_authorized=True,
+            reason=args["reason"],
+            candidate_id=str(candidate_uuid),
+            approval_receipt_id=approval_receipt_id,
+        ))
+        state["scans_queued"] = int(state.get("scans_queued") or 0) + 1
+        return {
+            "ok": True,
+            "candidate_id": str(candidate_uuid),
+            "proof_contract_id": "device.service_exposure",
+            "queued": queued,
+            "message": "The server-resolved deterministic verifier was queued; the candidate remains non-authoritative until the proof contract passes.",
+        }
+
     if name == "verify_service_state":
         if state.get("traffic_frozen"):
             raise HTTPException(status_code=409, detail="Device traffic is frozen after a health circuit breaker")
@@ -20774,7 +20962,7 @@ async def submit_device_agent_reply(run_id: str, request: DeviceAgentReplyReques
                     cost = device_agent.tool_fragility_cost(name, args)
                     signature = json.dumps({"name": name, "arguments": args}, sort_keys=True, default=str)
                     queued_signatures = state.setdefault("queued_scan_signatures", [])
-                    if name in {"queue_device_scan", "verify_service_state"} and signature in queued_signatures:
+                    if name in {"queue_device_scan", "verify_service_state", "verify_candidate"} and signature in queued_signatures:
                         raise HTTPException(status_code=409, detail="Equivalent device traffic was already queued in this session")
                     session_used = int(state.get("fragility_used") or 0)
                     session_budget = int(state.get("fragility_budget") or device_agent.MAX_FRAGILITY_PER_SESSION)
@@ -20800,7 +20988,7 @@ async def submit_device_agent_reply(run_id: str, request: DeviceAgentReplyReques
                         )
                     finally:
                         _DEVICE_AGENT_PARENT_AUTHORITY.reset(authority_token)
-                    if name in {"queue_device_scan", "verify_service_state"}:
+                    if name in {"queue_device_scan", "verify_service_state", "verify_candidate"}:
                         queued_signatures.append(signature)
                         state["queued_scan_signatures"] = queued_signatures[-20:]
                     reference = output.get("evidence_ref") if isinstance(output, dict) else None
@@ -20851,21 +21039,48 @@ async def submit_device_agent_reply(run_id: str, request: DeviceAgentReplyReques
                 terminal_status = "failed"
                 stop_reason = "turn_limit_without_debrief"
         async with db_pool.acquire() as conn:
-            updated = await conn.fetchrow(
-                """UPDATE device_agent_runs
-                   SET status=$2, stop_reason=$3, state=$4, result=$5,
-                       planning_token=NULL, updated_at=NOW()
-                   WHERE id=$1 AND status='planning' AND planning_token=$6
-                   RETURNING *""",
-                run_uuid,
-                terminal_status,
-                stop_reason,
-                json.dumps(state, default=str),
-                json.dumps(final_result, default=str),
-                planning_token,
-            )
-            if not updated:
-                updated = await _device_agent_run_or_404(conn, run_id)
+            async with conn.transaction():
+                if terminal_status == "completed":
+                    persisted_leads: list[dict[str, Any]] = []
+                    for lead in final_result.get("leads") or []:
+                        candidate = investigation_candidates.normalize_candidate(
+                            plane="device",
+                            device_target_id=str(device_target_id),
+                            device_agent_run_id=str(run_uuid),
+                            family=lead.get("family") or "unknown",
+                            locus=lead.get("locus") or {},
+                            title=lead.get("title"),
+                            claim=lead.get("rationale"),
+                            severity=lead.get("severity") or "info",
+                            evidence_refs=lead.get("evidence_refs") or [],
+                            verifier_contract_id=lead.get("verifier_contract_id"),
+                            source_kind="device_hunt",
+                        )
+                        candidate_record = await investigation_candidates.upsert_candidate(
+                            conn, candidate, created_by=f"device_agent_session:{run_id}",
+                        )
+                        persisted_leads.append({
+                            **lead,
+                            "candidate_id": candidate_record["id"],
+                            "status": candidate_record["status"],
+                            "authoritative": False,
+                        })
+                    final_result["leads"] = persisted_leads
+                updated = await conn.fetchrow(
+                    """UPDATE device_agent_runs
+                       SET status=$2, stop_reason=$3, state=$4, result=$5,
+                           planning_token=NULL, updated_at=NOW()
+                       WHERE id=$1 AND status='planning' AND planning_token=$6
+                       RETURNING *""",
+                    run_uuid,
+                    terminal_status,
+                    stop_reason,
+                    json.dumps(state, default=str),
+                    json.dumps(final_result, default=str),
+                    planning_token,
+                )
+                if not updated:
+                    updated = await _device_agent_run_or_404(conn, run_id)
         return _device_agent_run_public(updated)
     except Exception:
         async with db_pool.acquire() as conn:
@@ -30395,6 +30610,7 @@ async def _agent_tool_run_tool(
     target is forced onto the selected target host; active scanners require the gated tier."""
     name, raw_target, options = agent_tools.coerce_run_tool(args)
     template = agent_tools.SCANNER_ARG_TEMPLATES[name]
+    wire_request_reservation = agent_tools.scanner_request_reservation(name, options)
     if template["risk"] != "read_only" and not allow_active:
         return {"ok": False, "needs_approval": True,
                 "error": f"run_tool '{name}' is active; it requires a gated episode with an approval receipt."}
@@ -30441,6 +30657,7 @@ async def _agent_tool_run_tool(
     finished_at = datetime.now(timezone.utc)
 
     lines = [ln for ln in stdout.splitlines() if ln.strip()][:200]
+    typed_output = agent_tools.parse_scanner_output(name, stdout)
     # The scanned URL can carry query values the model chose; keep only the path in the durable
     # receipt so a receipt never persists a query-string secret. (External-audit P2.)
     safe_url = url.split("?", 1)[0][:200]
@@ -30459,11 +30676,22 @@ async def _agent_tool_run_tool(
                     },
                     approval_receipt_id=approval_receipt_id,
                     status=status_label,
-                    parser_status="parsed" if lines else "not_applicable",
+                    parser_status=str(typed_output.get("parser_status") or "not_applicable"),
                     started_at=started_at.isoformat(),
                     finished_at=finished_at.isoformat(),
                     redaction_summary="Hardcoded-argv scanner; output bounded + redacted; receipt URL query-stripped.",
-                    metadata_json={"tool": name, "url_scanned": safe_url, "lines": len(lines), "error": error, "hypothesis_id": hypothesis_id},
+                    metadata_json={
+                        "tool": name,
+                        "url_scanned": safe_url,
+                        "lines": len(lines),
+                        "error": error,
+                        "hypothesis_id": hypothesis_id,
+                        "wire_request_accounting": "worst_case_reserved",
+                        "wire_requests_reserved": wire_request_reservation,
+                        "wire_requests_actual": None,
+                        "typed_parser": typed_output.get("parser"),
+                        "typed_record_count": typed_output.get("record_count"),
+                    },
                     created_by=created_by,
                 ))
                 receipt_id = (receipt_result.get("tool_receipt") or {}).get("id")
@@ -30473,8 +30701,20 @@ async def _agent_tool_run_tool(
     if error and not lines:
         return {"ok": False, "error": f"{name}:{error}", "receipt_id": receipt_id}
     safe_lines = [_redact_agent_text(ln)[:1200] for ln in lines[:60]]
-    return {"ok": True, "tool": name, "url": url, "line_count": len(lines),
-            "output_lines": safe_lines, "receipt_id": receipt_id, "provenance": "tool"}
+    return {
+        "ok": True,
+        "tool": name,
+        "url": url,
+        "line_count": len(lines),
+        "output_lines": safe_lines,
+        "receipt_id": receipt_id,
+        "provenance": "tool",
+        "wire_request_accounting": "worst_case_reserved",
+        "wire_requests_reserved": wire_request_reservation,
+        "wire_requests_actual": None,
+        "typed_observations": typed_output.get("records") or [],
+        "typed_parser_status": typed_output.get("parser_status"),
+    }
 
 
 def _agent_resolve_ref(value: Any, results: dict[str, Any]) -> dict[str, Any]:
@@ -30797,8 +31037,27 @@ async def _persist_agent_suspected_finding(
             evidence_json["param"] = finding_param
         if finding_payload:
             evidence_json["payload"] = finding_payload
+    candidate = investigation_candidates.normalize_candidate(
+        plane="web",
+        target_id=str(target_uuid),
+        family=family or retest_family or "unknown",
+        locus={
+            "method": method,
+            "route": url_path or concrete_url,
+            "parameter": finding_param,
+        },
+        title=title,
+        claim=finding.get("details") or title,
+        severity=severity,
+        evidence_refs=finding.get("evidence_refs") or [],
+        verifier_contract_id=(f"web.{retest_family}" if retest_family else None),
+        source_kind="deep_hunt",
+    )
+    candidate_record = await investigation_candidates.upsert_candidate(
+        conn, candidate, created_by="autonomous_agent",
+    )
     existing = await conn.fetchrow(
-        "SELECT id, status FROM findings WHERE fingerprint=$1 AND target_id=$2", fingerprint, target_uuid
+        "SELECT id, status, last_verification_verdict FROM findings WHERE fingerprint=$1 AND target_id=$2", fingerprint, target_uuid
     )
     if existing:
         # SUSPECTED rediscovery updates VISIBILITY ONLY — it must never reopen a human-triaged
@@ -30809,7 +31068,18 @@ async def _persist_agent_suspected_finding(
             "UPDATE findings SET last_seen_at=NOW(), updated_at=NOW() WHERE id=$1",
             existing["id"],
         )
-        return {"id": str(existing["id"]), "persisted": "existing", "net_new": net_new,
+        await conn.execute(
+            """UPDATE investigation_candidates
+               SET verification_context=verification_context || jsonb_build_object(
+                       'finding_id',$2::text
+                   ),
+                   status=CASE WHEN $3='exploited' THEN 'verified' ELSE status END,
+                   updated_at=NOW()
+               WHERE id=$1""",
+            uuid.UUID(candidate_record["id"]), existing["id"], existing["last_verification_verdict"],
+        )
+        return {"id": str(existing["id"]), "candidate_id": candidate_record["id"],
+                "persisted": "existing", "net_new": net_new,
                 "title": title, "url": url_path, "existing_status": existing["status"]}
     finding_id = await conn.fetchval(
         """INSERT INTO findings (target_id, fingerprint, title, description, severity, cvss_score,
@@ -30827,7 +31097,7 @@ async def _persist_agent_suspected_finding(
         # A concurrent hunt inserted the same operation after our SELECT. Treat it as an ordinary
         # rediscovery instead of swallowing UniqueViolation as a run-level persist failure.
         concurrent = await conn.fetchrow(
-            "SELECT id, status FROM findings WHERE fingerprint=$1 AND target_id=$2",
+            "SELECT id, status, last_verification_verdict FROM findings WHERE fingerprint=$1 AND target_id=$2",
             fingerprint,
             target_uuid,
         )
@@ -30837,15 +31107,35 @@ async def _persist_agent_suspected_finding(
             "UPDATE findings SET last_seen_at=NOW(), updated_at=NOW() WHERE id=$1",
             concurrent["id"],
         )
+        await conn.execute(
+            """UPDATE investigation_candidates
+               SET verification_context=verification_context || jsonb_build_object(
+                       'finding_id',$2::text
+                   ),
+                   status=CASE WHEN $3='exploited' THEN 'verified' ELSE status END,
+                   updated_at=NOW()
+               WHERE id=$1""",
+            uuid.UUID(candidate_record["id"]), concurrent["id"], concurrent["last_verification_verdict"],
+        )
         return {
             "id": str(concurrent["id"]),
+            "candidate_id": candidate_record["id"],
             "persisted": "existing",
             "net_new": net_new,
             "title": title,
             "url": url_path,
             "existing_status": concurrent["status"],
         }
-    return {"id": str(finding_id), "persisted": "created", "net_new": net_new, "title": title, "url": url_path}
+    await conn.execute(
+        """UPDATE investigation_candidates
+           SET verification_context=verification_context || jsonb_build_object(
+                   'finding_id',$2::text
+               ), updated_at=NOW()
+           WHERE id=$1""",
+        uuid.UUID(candidate_record["id"]), finding_id,
+    )
+    return {"id": str(finding_id), "candidate_id": candidate_record["id"],
+            "persisted": "created", "net_new": net_new, "title": title, "url": url_path}
 
 
 def _agent_new_state(objective: str, messages: list[dict[str, Any]], included: list[str]) -> dict[str, Any]:
@@ -31011,7 +31301,14 @@ async def _agent_apply_reply(
             state["events"].append({"iteration": iteration, "tool": name, "duplicate": True})
             continue
 
-        request_units = 1 if name in {"http_request", "run_tool"} else 0
+        request_units = 1 if name == "http_request" else 0
+        if name == "run_tool":
+            try:
+                scanner_name, _, scanner_options = agent_tools.coerce_run_tool(args)
+                request_units = agent_tools.scanner_request_reservation(scanner_name, scanner_options)
+            except (agent_tools.AgentToolError, KeyError, TypeError, ValueError):
+                # Unknown/unmetered external work must not receive a cheap one-request path.
+                request_units = max(1, int(state.get("request_budget_limit") or 1))
         active_units = 0
         if name == "http_request":
             try:
@@ -31562,6 +31859,8 @@ async def _agent_finalize_and_persist(
         "stop_reason": state["stop_reason"],
         "tool_calls_made": state["tool_calls_made"],
         "request_units_used": int(state.get("request_units_used") or 0),
+        "wire_requests_reserved": int(state.get("request_units_used") or 0),
+        "request_accounting": "actual_for_http_request_worst_case_reserved_for_external_scanners",
         "active_actions_used": int(state.get("active_actions_used") or 0),
         "model_tokens_used": int(state.get("model_tokens_used") or 0),
         "elapsed_seconds": int(state.get("elapsed_seconds") or 0),

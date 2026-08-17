@@ -55,6 +55,30 @@ def test_device_agent_reply_parser_requires_real_evidence_refs_for_leads():
     assert [lead["title"] for lead in done["result"]["leads"]] == ["Supported"]
 
 
+def test_device_agent_debrief_preserves_typed_candidate_fields():
+    reply = '''{
+      "done": true,
+      "summary": "done",
+      "leads": [{
+        "title": "Unexpected Telnet",
+        "family": "service_exposure",
+        "severity": "high",
+        "rationale": "Confirmed service conflicts with policy",
+        "locus": {"transport": "tcp", "port": 23},
+        "evidence_refs": ["devref_3"],
+        "verifier_contract_id": "device.service_exposure"
+      }]
+    }'''
+
+    result = device_agent.interpret_reply(reply)
+    lead = result["result"]["leads"][0]
+
+    assert lead["family"] == "service_exposure"
+    assert lead["severity"] == "high"
+    assert lead["locus"] == {"transport": "tcp", "port": 23}
+    assert lead["verifier_contract_id"] == "device.service_exposure"
+
+
 def test_device_agent_state_fixes_safety_and_budgets():
     state = device_agent.seed_state(objective="Review the TV", safety_profile="safe_remote", max_turns=8)
     assert state["safety_profile"] == "safe_remote"
@@ -74,6 +98,7 @@ def test_device_agent_depth_tools_are_read_only_and_scan_costs_are_profiled():
     assert device_agent.tool_fragility_cost("queue_device_scan", {"coverage_profile": "inventory", "capability_ids": ["ssh-authenticated-host-review"]}) == 11
     assert device_agent.tool_fragility_cost("verify_service_state", {"transport": "tcp"}) == 3
     assert device_agent.tool_fragility_cost("verify_service_state", {"transport": "udp"}) == 6
+    assert device_agent.tool_fragility_cost("verify_candidate", {}) == 3
     name, args = device_agent.validate_tool_call({"name": "diff_scans", "arguments": {}})
     assert name == "diff_scans" and args == {"scan_a": None, "scan_b": None}
     name, args = device_agent.validate_tool_call({"name": "verify_service_state", "arguments": {
@@ -100,6 +125,15 @@ def test_device_agent_depth_tools_are_read_only_and_scan_costs_are_profiled():
     with pytest.raises(ValueError, match="unsupported arguments"):
         device_agent.validate_tool_call({"name": "propose_ssh_shell", "arguments": {
             "port": 22, "commands": ["id"], "purpose": "x", "risk_summary": "x", "target": "other-host",
+        }})
+    candidate_id = "4ae842d5-7250-4b0f-9942-c4a204d7ca6d"
+    name, args = device_agent.validate_tool_call({"name": "verify_candidate", "arguments": {
+        "candidate_id": candidate_id, "reason": "confirm policy-conflicting exposure",
+    }})
+    assert name == "verify_candidate" and args["candidate_id"] == candidate_id
+    with pytest.raises(ValueError, match="unsupported arguments"):
+        device_agent.validate_tool_call({"name": "verify_candidate", "arguments": {
+            "candidate_id": candidate_id, "reason": "escape", "port": 23,
         }})
 
 

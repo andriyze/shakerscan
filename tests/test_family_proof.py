@@ -101,3 +101,48 @@ def test_caller_claim_preflight_can_neither_verify_nor_refute():
     asserted_refuted = fp.evaluate_claim_preflight("bola", {"cross_principal_denied": True})
     assert asserted_refuted["verdict"] == "inconclusive"
     assert asserted_refuted["promotable"] is False
+
+
+def test_v2_proof_envelope_requires_verifier_build_and_live_reexecution():
+    result = fp.build_proof_contract_result(
+        "device_service_exposure",
+        {
+            "protocol_handshake": True,
+            "policy_denied": True,
+            "recent_observation": True,
+            "reexecuted_at_handoff": True,
+        },
+        contract_id="device.service_exposure",
+        contract_version="1.0.0",
+        verifier_build="worker:abc123",
+        subject={"device_target_id": "d1", "transport": "tcp", "port": 23},
+        proof_basis="protocol_handshake",
+    )
+
+    assert result["schema_version"] == "proof-contract/v2"
+    assert result["verdict"] == "verified"
+    assert fp.proof_contract_promotion_gate(result) == (True, None)
+
+    missing_build = {**result, "reexecution": {"performed": True, "verifier_build": ""}}
+    assert fp.proof_contract_promotion_gate(missing_build) == (
+        False, "missing_verifier_build",
+    )
+
+
+def test_device_proof_contract_refuters_override_positive_predicates():
+    result = fp.build_proof_contract_result(
+        "device_auth_bypass",
+        {
+            "protected_resource_established": True,
+            "anonymous_semantic_equivalence": True,
+            "negative_control": True,
+            "anonymous_access_denied": True,
+            "reexecuted_at_handoff": True,
+        },
+        contract_id="device.auth_bypass",
+        contract_version="1.0.0",
+        verifier_build="worker:abc123",
+    )
+
+    assert result["verdict"] == "refuted"
+    assert fp.proof_contract_promotion_gate(result)[0] is False
