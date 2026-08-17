@@ -3,6 +3,7 @@ import json
 import urllib.parse
 
 from scanner.scanner_tools.proof_of_exploit import (
+    _evaluate_boolean_sqli_differential,
     _is_valid_sqli_extraction,
     _split_curl_response,
     prove_sqli_reflection_fp,
@@ -19,6 +20,65 @@ HONEY_POSTGRES_ERROR = """ERROR: syntax error at or near "' OR 1=1--"
   SQLSTATE: 42601
   PG_VERSION: PostgreSQL 14.7 on x86_64-pc-linux-gnu, compiled by gcc 11.3.0
   HINT: Check escaping of single quotes in the WHERE clause."""
+
+
+def _response(body, status=200):
+    return {"body": body, "status_code": status, "headers": {"content-type": "application/json"}}
+
+
+def test_boolean_sqli_requires_repeated_stable_semantic_differential():
+    baseline = json.dumps({"data": [{"id": 1, "name": "owned"}]})
+    true_body = json.dumps({"data": [
+        {"id": 1, "name": "owned"},
+        {"id": 2, "name": "other"},
+        {"id": 3, "name": "third"},
+    ]})
+    false_body = json.dumps({"data": []})
+
+    result = _evaluate_boolean_sqli_differential(
+        [_response(baseline), _response(baseline)],
+        [_response(true_body), _response(true_body)],
+        [_response(false_body), _response(false_body)],
+        true_payload="' OR '1'='1",
+        false_payload="' OR '1'='2",
+    )
+
+    assert result["proven"] is True
+    assert result["reason"] == "repeated_semantic_boolean_differential"
+
+
+def test_boolean_sqli_rejects_dynamic_baselines_and_length_only_changes():
+    dynamic = _evaluate_boolean_sqli_differential(
+        [_response(json.dumps({"data": [1], "nonce": "a"})), _response(json.dumps({"data": [2, 3]}))],
+        [_response(json.dumps({"data": [1, 2, 3]})), _response(json.dumps({"data": [1, 2, 3]}))],
+        [_response(json.dumps({"data": []})), _response(json.dumps({"data": []}))],
+        true_payload="TRUE",
+        false_payload="FALSE",
+    )
+    length_only = _evaluate_boolean_sqli_differential(
+        [_response("A" * 1000), _response("A" * 1000)],
+        [_response("C" * 1400), _response("C" * 1400)],
+        [_response("B" * 700), _response("B" * 700)],
+        true_payload="TRUE",
+        false_payload="FALSE",
+    )
+
+    assert dynamic["proven"] is False
+    assert dynamic["reason"] == "dynamic_response_not_stable"
+    assert length_only["proven"] is False
+    assert length_only["reason"] == "length_only_differential"
+
+
+def test_boolean_sqli_rejects_reflected_predicate_payload():
+    result = _evaluate_boolean_sqli_differential(
+        [_response("normal"), _response("normal")],
+        [_response("normal TRUE expanded"), _response("normal TRUE expanded")],
+        [_response("FALSE empty"), _response("FALSE empty")],
+        true_payload="TRUE",
+        false_payload="FALSE",
+    )
+
+    assert result == {"proven": False, "reason": "true_payload_reflected"}
 
 
 def test_curl_response_parser_uses_final_redirect_response_body():

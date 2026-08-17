@@ -250,24 +250,27 @@ def validate_xss(
             evidence_level="confirmed_exploit",
         )
 
-    # Trust dalfox findings - it does its own verification
-    # Dalfox only reports confirmed XSS, not potential
+    # Dalfox emits both verified and signal-only results. Trust only an explicit parser field;
+    # string containment is unsafe because values such as "not verified" also contain "verified".
     if tool == "dalfox":
         detail = evidence.get("detail", {})
-        # Dalfox "Verified" type is highest confidence
-        if detail.get("type") == "Verified" or "verified" in str(detail).lower():
+        explicitly_verified = (
+            str(detail.get("type") or "").strip().lower() == "verified"
+            or detail.get("verified") is True
+        )
+        if explicitly_verified:
             return ValidationResult(
                 verified=True,
                 confidence=0.95,
                 evidence=payload[:100] if payload else "dalfox verified",
                 reason="Dalfox confirmed verified XSS"
             )
-        # Even non-verified dalfox findings are reliable (it has built-in verification)
         return ValidationResult(
-            verified=True,
-            confidence=0.85,
+            verified=False,
+            confidence=0.65,
             evidence=payload[:100] if payload else "dalfox finding",
-            reason="Dalfox reported XSS (tool has built-in verification)"
+            reason="Dalfox reported an XSS candidate without explicit execution proof",
+            evidence_level="strong_indicator",
         )
 
     # DOM-based XSS is static analysis (source-to-sink) and may not have a payload
@@ -291,22 +294,9 @@ def validate_xss(
             reason="No payload to verify"
         )
 
-    # If no response to check, trust the tool but with reduced confidence
+    # Without a response or browser canary there is no execution proof. Parser labels and
+    # top-level booleans are candidate signals only; the browser-proof branch above is authoritative.
     if not response_body:
-        # Check if tool reported as verified
-        detail = evidence.get("detail", {})
-        if (
-            detail.get("type") == "Verified"
-            or "verified" in str(detail).lower()
-            or (finding.get("verified") is True and _finding_has_execution_proof(finding))
-        ):
-            return ValidationResult(
-                verified=True,
-                confidence=0.85,
-                evidence=payload[:100] if payload else "xss execution proof",
-                reason="Tool reported execution-verified XSS",
-                evidence_level="confirmed_exploit",
-            )
         # Has payload but no response/context proof. This is a lead, not verified XSS.
         return ValidationResult(
             verified=False,
@@ -715,14 +705,9 @@ def validate_exposed_file(
 
 # Patterns indicating successful SSRF (actual internal access)
 SSRF_CONFIRMED_PATTERNS = [
-    r'ami-[a-f0-9]+',  # AWS instance metadata
-    r'instance-id',
-    r'iam/security-credentials',
-    r'169\.254\.169\.254',
-    r'metadata\.google\.internal',
-    r'root:.*:0:0:',  # /etc/passwd content
-    r'localhost.*refused',  # Internal port scan indicator
-    r'\["127\.0\.0\.1"\]',  # Internal IP in response
+    r'"AccessKeyId"\s*:\s*"[A-Z0-9]{12,}".*"SecretAccessKey"\s*:',
+    r'\bi-[a-f0-9]{8,17}\b',  # Concrete AWS instance identifier.
+    r'root:[^\r\n:]*:0:0:',  # Concrete /etc/passwd row.
 ]
 
 # Patterns that suggest SSRF but need more verification
@@ -745,13 +730,16 @@ def validate_ssrf(
     evidence = finding.get("evidence", {})
 
     if not response_body:
-        # Check if evidence shows confirmed access
-        evidence_str = str(evidence).lower()
-        if any(pattern in evidence_str for pattern in ['metadata', '169.254', 'internal']):
+        poe = finding.get("poe_result") if isinstance(finding.get("poe_result"), dict) else {}
+        if (
+            poe.get("proven") is True
+            and str(poe.get("evidence_type") or "") in {"oob_callback", "internal_resource_accessed"}
+        ):
             return ValidationResult(
                 verified=True,
-                confidence=0.75,
-                reason="SSRF evidence suggests internal access"
+                confidence=max(0.9, float(poe.get("confidence") or 0.0)),
+                reason="SSRF verified by a deterministic callback or internal-resource proof",
+                evidence_level="confirmed_exploit",
             )
         return ValidationResult(
             verified=False,
@@ -773,10 +761,11 @@ def validate_ssrf(
     for pattern in SSRF_POSSIBLE_PATTERNS:
         if re.search(pattern, response_body, re.I):
             return ValidationResult(
-                verified=True,
-                confidence=0.65,
+                verified=False,
+                confidence=0.55,
                 evidence=f"Network behavior indicates SSRF: {pattern}",
-                reason="Possible SSRF - internal network interaction"
+                reason="Possible SSRF signal; deterministic callback or content proof required",
+                evidence_level="strong_indicator",
             )
 
     return ValidationResult(

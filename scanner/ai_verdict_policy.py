@@ -26,7 +26,7 @@ _DETERMINISTIC_PROOF_TYPES = {
     "sqli_data_extraction",
     "data_extraction",
     "oob_callback",
-    "differential_response",
+    "repeated_semantic_response_diff",
 }
 
 _BROWSER_EXECUTION_MARKERS = (
@@ -68,6 +68,24 @@ def _has_browser_execution_proof(finding: dict[str, Any], evidence: dict[str, An
     return any(marker in evidence_text for marker in _BROWSER_EXECUTION_MARKERS)
 
 
+def _has_verified_proof_contract_v2(finding: dict[str, Any]) -> bool:
+    proof = _as_dict(finding.get("proof_contract_v2"))
+    if not proof:
+        proof = _as_dict(_as_dict(finding.get("evidence")).get("proof_contract_v2"))
+    predicate = _as_dict(proof.get("predicate"))
+    reexecution = _as_dict(proof.get("reexecution"))
+    return bool(
+        proof.get("schema_version") == "proof-contract/v2"
+        and str(proof.get("contract_id") or "").strip()
+        and str(proof.get("contract_version") or "").strip()
+        and str(reexecution.get("verifier_build") or "").strip()
+        and reexecution.get("performed") is True
+        and predicate.get("verdict") == "verified"
+        and predicate.get("promotable") is True
+        and not list(predicate.get("missing") or [])
+    )
+
+
 def ai_confidence(finding: dict[str, Any]) -> float:
     """Return normalized AI confidence from a finding."""
     return _as_float(finding.get("ai_confidence"), 0.0)
@@ -96,6 +114,9 @@ def has_deterministic_exploit_proof(finding: dict[str, Any]) -> bool:
         or validation.get("poe_technique")
         or ""
     ).strip().lower()
+
+    if _has_verified_proof_contract_v2(finding):
+        return True
 
     explicit_truthy_keys = (
         (finding, "proof_of_exploitation"),

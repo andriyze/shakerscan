@@ -13,7 +13,7 @@ from grading import grade  # noqa: E402
 from reporting import _ai_rule_verdict, _generate_fallback_executive_summary  # noqa: E402
 from scanner_tools import active_checks  # noqa: E402
 from scanner_tools import nuclei as nuclei_module  # noqa: E402
-from scanner_tools.finding_validator import apply_validation_to_finding, validate_finding, validate_sqli, validate_xss  # noqa: E402
+from scanner_tools.finding_validator import apply_validation_to_finding, validate_finding, validate_sqli, validate_ssrf, validate_xss  # noqa: E402
 from scanner_tools.tls_scanner import build_crypto_inventory  # noqa: E402
 
 sys.path.pop(0)
@@ -539,7 +539,7 @@ def test_registry_contract_accepts_complete_sqli_runtime_proof():
         "severity": "critical",
         "cvss_score": 9.8,
         "confidence": 0.95,
-        "proof_type": "differential_response",
+        "proof_type": "repeated_semantic_response_diff",
         "evidence": {
             "url": "https://example.test/search",
             "method": "GET",
@@ -631,7 +631,7 @@ def test_precision_policy_accepts_graphql_verified_evidence_flag():
             "evidence": {
                 "issue": "introspection_enabled",
                 "verified": True,
-                "proof_type": "differential_response",
+                "proof_type": "data_extraction",
                 "evidence": [{"type": "introspection_enabled", "verified": True}],
             },
         }
@@ -859,6 +859,56 @@ def test_proven_browser_proof_is_trusted_as_verified_xss():
     validation = validate_xss(finding, response_body="<html>search results</html>")
     assert validation.verified is True
     assert getattr(validation, "downgrade_to", None) is None
+
+
+def test_nonverified_dalfox_result_remains_a_candidate():
+    finding = {
+        "tool": "dalfox",
+        "title": "Reflected XSS candidate",
+        "severity": "high",
+        "evidence": {
+            "payload": "<img src=x onerror=alert(1)>",
+            "detail": {"type": "Not Verified", "message": "reflection only"},
+        },
+    }
+
+    validation = validate_xss(finding, response_body=None)
+
+    assert validation.verified is False
+    assert validation.evidence_level == "strong_indicator"
+
+
+def test_dalfox_requires_explicit_verified_parser_field():
+    finding = {
+        "tool": "dalfox",
+        "title": "Reflected XSS",
+        "severity": "high",
+        "evidence": {
+            "payload": "<img src=x onerror=alert(1)>",
+            "detail": {"verified": True},
+        },
+    }
+
+    assert validate_xss(finding, response_body=None).verified is True
+
+
+def test_possible_ssrf_network_error_is_not_verified():
+    validation = validate_ssrf(
+        {"tool": "ssrf_probe", "evidence": {"target": "http://169.254.169.254/"}},
+        response_body="connect: connection refused",
+    )
+
+    assert validation.verified is False
+    assert validation.evidence_level == "strong_indicator"
+
+
+def test_ssrf_target_string_without_callback_or_content_is_not_verified():
+    validation = validate_ssrf({
+        "tool": "ssrf_probe",
+        "evidence": {"payload": "http://169.254.169.254/latest/meta-data/"},
+    })
+
+    assert validation.verified is False
 
 
 def test_sqli_error_indicator_is_strong_but_not_verified():
