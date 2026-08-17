@@ -1372,13 +1372,13 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Scanner wrapper commands | 28 | `scanner.sh` |
 | Make targets | 13 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
-| Runtime environment keys | 344 | Python sources + Compose manifests |
+| Runtime environment keys | 345 | Python sources + Compose manifests |
 | Scanner modules | 111 | `scanner/scanner_tools/` |
-| UI pages | 35 | `ui/src/app/` |
+| UI pages | 36 | `ui/src/app/` |
 | Skills | 8 | `skills/` |
 | Slash commands | 15 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
-| Durable tables | 78 | `db/init.sql` + migrations |
+| Durable tables | 79 | `db/init.sql` + migrations |
 
 ### Public REST Operations
 
@@ -2035,7 +2035,8 @@ Only key names and declaring sources are documented; secret values are never rea
 | Environment key | Referenced by |
 |---|---|
 | `ABUSEIPDB_API_KEY` | `scanner/scanner.py` |
-| `AGENT_TOOL_QUEUE_NAME` | `api/api.py`, `api/worker.py` |
+| `AGENT_TOOL_ONLY_WORKER` | `api/worker.py` |
+| `AGENT_TOOL_QUEUE_NAME` | `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `AI_API_KEY` | `api/ai_gate_scan.py`, `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner.py` |
 | `AI_CLASSIFY_CHAIN_BUDGET_SECONDS` | `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner_tools/ai_classifier.py` |
 | `AI_CLASSIFY_CIRCUIT_COOLDOWN_SECONDS` | `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner_tools/ai_classifier.py` |
@@ -2402,6 +2403,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `/exceptions` | `ui/src/app/exceptions/page.tsx` |
 | `/exposure` | `ui/src/app/exposure/page.tsx` |
 | `/findings/{id}` | `ui/src/app/findings/[id]/page.tsx` |
+| `/findings/candidates` | `ui/src/app/findings/candidates/page.tsx` |
 | `/findings` | `ui/src/app/findings/page.tsx` |
 | `/fleet` | `ui/src/app/fleet/page.tsx` |
 | `/interactive` | `ui/src/app/interactive/page.tsx` |
@@ -2503,6 +2505,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `findings` | `db/init.sql` |
 | `fleet_node_events` | `db/init.sql` |
 | `hypotheses` | `api/retest_contract.py` |
+| `investigation_candidate_observations` | `api/retest_contract.py` |
 | `investigation_candidates` | `api/retest_contract.py` |
 | `model_intake_admission_events` | `db/init.sql` |
 | `model_intake_admissions` | `db/init.sql` |
