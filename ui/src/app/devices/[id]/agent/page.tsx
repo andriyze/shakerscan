@@ -11,6 +11,7 @@ import {
   getDeviceCapabilities,
   getDeviceAgentSession,
   getDeviceCredentials,
+  getInvestigationCandidates,
   getDeviceRequestCollections,
   listDeviceAgentSessions,
   startDeviceAgentSession,
@@ -19,6 +20,7 @@ import {
   type DeviceAgentSession,
   type DeviceDetailResponse,
   type DeviceCapabilitiesResponse,
+  type InvestigationCandidate,
 } from '@/lib/api'
 import { Button, Card, ErrorState, Field, Input, PageHeader, Select, Skeleton, Textarea, useToast } from '@/components/ui'
 
@@ -34,6 +36,7 @@ export default function DeviceAgentPage() {
   const [credentials, setCredentials] = useState<DeviceCredentialProfile[]>([])
   const [requestCollections, setRequestCollections] = useState<DeviceRequestCollection[]>([])
   const [capabilityPack, setCapabilityPack] = useState<DeviceCapabilitiesResponse | null>(null)
+  const [candidates, setCandidates] = useState<InvestigationCandidate[]>([])
   const [runId, setRunId] = useState<string | null>(null)
   const [objective, setObjective] = useState(DEFAULT_OBJECTIVE)
   const [safetyProfile, setSafetyProfile] = useState<'observe_only' | 'safe_remote' | 'authenticated_active'>('safe_remote')
@@ -57,8 +60,8 @@ export default function DeviceAgentPage() {
 
   const loadDevice = useCallback(async () => {
     try {
-      const [device, credentialData, capabilities, collections] = await Promise.all([getDevice(deviceId), getDeviceCredentials(deviceId), getDeviceCapabilities(deviceId), getDeviceRequestCollections(deviceId)])
-      setData(device); setCredentials(credentialData.profiles || []); setCapabilityPack(capabilities); setRequestCollections(collections.collections || []); setError(null)
+      const [device, credentialData, capabilities, collections, candidateData] = await Promise.all([getDevice(deviceId), getDeviceCredentials(deviceId), getDeviceCapabilities(deviceId), getDeviceRequestCollections(deviceId), getInvestigationCandidates({ plane: 'device', device_target_id: deviceId, limit: 100 })])
+      setData(device); setCredentials(credentialData.profiles || []); setCapabilityPack(capabilities); setRequestCollections(collections.collections || []); setCandidates(candidateData.candidates || []); setError(null)
     }
     catch (err) { setError(err instanceof Error ? err.message : 'Could not load connected device') }
     finally { setLoading(false) }
@@ -94,7 +97,7 @@ export default function DeviceAgentPage() {
     let stopped = false
     const tick = () => {
       if (stopped) return
-      getDeviceAgentSession(runId).then((value) => {
+      Promise.all([getDeviceAgentSession(runId), getInvestigationCandidates({ plane: 'device', device_target_id: deviceId, limit: 100 })]).then(([value, candidateData]) => {
       if (stopped) return
       if (value.device_target_id !== deviceId) {
         stopped = true
@@ -106,6 +109,7 @@ export default function DeviceAgentPage() {
       }
       setError(null)
       setSession(value)
+      setCandidates(candidateData.candidates || [])
     }).catch((err) => {
       if (!stopped) setError(err instanceof Error ? err.message : 'Could not load Device Hunt')
       })
@@ -219,7 +223,9 @@ export default function DeviceAgentPage() {
           </div>)}</div>
         </Card>}
 
-        {session.result && <Card className="p-5"><h2 className="font-semibold text-white">Device Hunt result</h2><p className="mt-2 text-sm leading-6 text-gray-300">{session.result.summary || 'No summary supplied.'}</p>{(session.result.leads || []).length > 0 && <div className="mt-4 space-y-3">{session.result.leads?.map((lead) => <div key={`${lead.title}-${lead.evidence_refs.join('-')}`} className="rounded border border-amber-500/20 bg-amber-500/5 p-3"><p className="font-medium text-amber-100">{lead.title}</p><p className="mt-1 text-sm text-gray-400">{lead.rationale}</p><p className="mt-2 font-mono text-xs text-gray-500">{lead.evidence_refs.join(', ')}</p></div>)}</div>}</Card>}
+        {session.result && <Card className="p-5"><h2 className="font-semibold text-white">Device Hunt result</h2><p className="mt-2 text-sm leading-6 text-gray-300">{session.result.summary || 'No summary supplied.'}</p>{(session.result.leads || []).length > 0 && <div className="mt-4 space-y-3">{session.result.leads?.map((lead) => <div key={lead.candidate_id || `${lead.title}-${lead.evidence_refs.join('-')}`} className="rounded border border-amber-500/20 bg-amber-500/5 p-3"><div className="flex flex-wrap items-center justify-between gap-2"><p className="font-medium text-amber-100">{lead.title}</p><span className="rounded bg-amber-500/10 px-2 py-0.5 text-[10px] uppercase tracking-wide text-amber-300">{String(lead.status || 'new').replace(/_/g, ' ')}</span></div><p className="mt-1 text-sm text-gray-400">{lead.rationale}</p>{lead.family && <p className="mt-2 text-xs text-gray-500">{lead.family.replace(/_/g, ' ')} · {lead.verifier_contract_id || 'no registered verifier'}</p>}<p className="mt-2 font-mono text-xs text-gray-500">{lead.evidence_refs.join(', ')}</p></div>)}</div>}</Card>}
+
+        {candidates.length > 0 && <Card className="p-5"><div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="font-semibold text-white">Candidate verification</h2><p className="mt-1 text-sm text-gray-500">AI claims stay non-authoritative until a server-owned verifier satisfies its proof contract.</p></div><span className="rounded bg-gray-900 px-2 py-1 text-xs text-gray-400">{candidates.length} persisted</span></div><div className="mt-4 space-y-3">{candidates.map((candidate) => { const scanId = typeof candidate.verification_context.scan_id === 'string' ? candidate.verification_context.scan_id : ''; return <div key={candidate.id} className={`rounded border p-3 ${candidate.status === 'verified' ? 'border-emerald-500/25 bg-emerald-500/5' : candidate.status === 'refuted' ? 'border-gray-700 bg-gray-900/40' : 'border-amber-500/20 bg-amber-500/5'}`}><div className="flex flex-wrap items-center justify-between gap-2"><div><p className="text-sm font-medium text-gray-100">{candidate.title}</p><p className="mt-1 text-xs text-gray-500">{candidate.family.replace(/_/g, ' ')} · {candidate.verifier_contract_id || 'verifier unavailable'}</p></div><span className={`rounded px-2 py-1 text-xs ${candidate.status === 'verified' ? 'bg-emerald-500/15 text-emerald-300' : candidate.status === 'refuted' ? 'bg-gray-800 text-gray-300' : 'bg-amber-500/15 text-amber-300'}`}>{candidate.status.replace(/_/g, ' ')}</span></div><p className="mt-2 text-sm text-gray-400">{candidate.claim}</p><div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-gray-500"><span>Claimed {candidate.claimed_severity}</span><span>Authoritative: no</span>{scanId && <Link href={`/scans/${scanId}`} className="text-blue-400 hover:text-blue-300">Open verification scan</Link>}</div></div> })}</div></Card>}
 
         <Card className="p-5"><h2 className="font-semibold text-white">Recent activity</h2><div className="mt-3 space-y-3">{session.events.length ? session.events.slice(-8).reverse().map((event, index) => <pre key={index} className="overflow-x-auto whitespace-pre-wrap rounded bg-gray-950 p-3 text-xs text-gray-400">{JSON.stringify(event, null, 2)}</pre>) : <p className="text-sm text-gray-500">Waiting for the coding agent’s first planner turn.</p>}</div></Card>
       </div>}

@@ -299,7 +299,7 @@ and compatibility. It is not the Deep Hunt launcher.
 | Dashboard | Security posture, prioritized actions, recent activity, queue operations, worker freshness/scaling, and Gungnir |
 | Docs | In-app rendering of the installed README for setup, workflows, safety, and troubleshooting |
 | DAST Scans / New Scan | Submission, filters, cancellation, live logs, reports, proof, coverage, and PDF export |
-| Connected Devices / Device Hunt | Stable device identities with changeable IP/hostname history, TCP/UDP posture, service policies, credentialed SSH/web checks, encrypted Postman, HAR 1.2, OpenAPI 3.x, and Swagger 2.0 request imports with device-pinned API testing, live scan activity, typed one-port verification, and **Device Hunt** for bounded AI-directed investigation of one device |
+| Connected Devices / Device Hunt | Stable device identities with changeable IP/hostname history, TCP/UDP posture, service policies, contextual device-web header checks, CPE/version-aware offline advisory matching, credentialed SSH/web checks, encrypted Postman, HAR 1.2, OpenAPI 3.x, and Swagger 2.0 request imports with device-pinned API testing, live scan activity, typed one-port verification, and **Device Hunt** with durable non-authoritative candidates and server-owned proof promotion |
 | Targets / Exposure | Asset inventory, subdomains, exposure graph, and application graph |
 | Coverage (Continuous ASM) | Endpoint inventory, proof-family coverage, gaps, recommendations, and activity |
 | Findings / Exceptions Queue | Triage, notes, retests, replay, cleanup, accepted risk, and exception lifecycle |

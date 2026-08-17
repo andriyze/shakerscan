@@ -3903,6 +3903,12 @@ export interface AgentHuntResult {
   stop_reason: string
   tool_calls_made: number
   request_units_used: number
+  wire_requests_reserved?: number
+  wire_requests_actual?: number | null
+  wire_requests_actual_confirmed?: number
+  wire_requests_observed_minimum?: number
+  wire_request_unsettled_tools?: number
+  request_accounting?: 'exact' | 'mixed_conservative'
   active_actions_used: number
   model_tokens_used: number
   elapsed_seconds: number
@@ -5081,6 +5087,34 @@ export interface AIOpsRouteResponse {
 
 export type DeviceAgentStatus = 'awaiting_planner' | 'planning' | 'completed' | 'cancelled' | 'failed'
 
+export type InvestigationCandidateStatus =
+  | 'new' | 'verification_queued' | 'verifying' | 'verified' | 'refuted'
+  | 'inconclusive' | 'blocked' | 'expired'
+
+export interface InvestigationCandidate {
+  id: string
+  plane: 'web' | 'device'
+  target_id?: string | null
+  device_target_id?: string | null
+  research_episode_id?: string | null
+  device_agent_run_id?: string | null
+  family: string
+  canonical_locus: Record<string, string | number>
+  title: string
+  claim: string
+  claimed_severity: 'critical' | 'high' | 'medium' | 'low' | 'info'
+  evidence_refs: string[]
+  verifier_contract_id?: string | null
+  verification_context: Record<string, unknown>
+  status: InvestigationCandidateStatus
+  latest_verification_id?: string | null
+  authoritative: false
+  promotion_ready: boolean
+  last_seen_at: string
+  created_at: string
+  updated_at: string
+}
+
 export interface DeviceAgentShellPlan {
   schema_version: 'device-agent-ssh-shell-plan/v1'
   plan_id: string
@@ -5134,7 +5168,18 @@ export interface DeviceAgentSession {
   next_action: string
   result?: {
     summary?: string
-    leads?: Array<{ title: string; rationale: string; evidence_refs: string[]; status: 'hypothesis' }>
+    leads?: Array<{
+      title: string
+      rationale: string
+      evidence_refs: string[]
+      status: InvestigationCandidateStatus | 'hypothesis'
+      candidate_id?: string
+      family?: string
+      severity?: string
+      locus?: Record<string, string | number>
+      verifier_contract_id?: string
+      authoritative?: false
+    }>
     next_actions?: string[]
     authoritative_findings?: boolean
   } | null
@@ -5213,6 +5258,27 @@ export async function getDevices(params?: {
 export async function getDevice(deviceId: string): Promise<DeviceDetailResponse> {
   const res = await fetch(`${API_URL}/devices/${encodeURIComponent(deviceId)}`, { cache: 'no-store' })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch connected device'))
+  return res.json()
+}
+
+export async function getInvestigationCandidates(params: {
+  plane?: 'web' | 'device'
+  target_id?: string
+  device_target_id?: string
+  status?: InvestigationCandidateStatus
+  limit?: number
+  offset?: number
+} = {}): Promise<{ candidates: InvestigationCandidate[]; total: number; limit: number; offset: number }> {
+  const search = new URLSearchParams()
+  if (params.plane) search.set('plane', params.plane)
+  if (params.target_id) search.set('target_id', params.target_id)
+  if (params.device_target_id) search.set('device_target_id', params.device_target_id)
+  if (params.status) search.set('status', params.status)
+  if (params.limit) search.set('limit', String(params.limit))
+  if (params.offset) search.set('offset', String(params.offset))
+  const suffix = search.size ? `?${search.toString()}` : ''
+  const res = await fetch(`${API_URL}/investigation/candidates${suffix}`, { cache: 'no-store' })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load investigation candidates'))
   return res.json()
 }
 

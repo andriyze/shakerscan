@@ -81,7 +81,8 @@ def test_multi_node_doc_states_semaphore_failure_posture():
 def test_deep_hunt_design_authority_is_honest_about_driver_limits():
     text = _flat(DEEP_HUNT_DOC)
     assert "current implementation reference" in text
-    assert "not a wire-request count" in text
+    assert "reserves that scanner template's fail-closed maximum wire-request allowance" in text
+    assert "conservative accounting" in text
     assert "external coding agent's tokens" in text
     assert "between completed turns" in text
     assert "restart during an in-flight `planning` turn" in text
@@ -112,7 +113,7 @@ def test_functionality_reference_does_not_overclaim_keyless_token_bounding():
     # Model-token budgets bound the configured-provider loop only; a keyless session's token budget
     # sizes the seed context pack, because the server cannot meter an external coding agent.
     text = _flat(FUNCTIONALITY_DOC)
-    assert "request unit is one tool invocation, not one wire request" in text
+    assert "external scanners reserve their fail-closed maximum wire request allowance" in text
     assert "cannot meter an external coding agent's tokens" in text
     assert "turns, and tokens are bounded" not in text
 

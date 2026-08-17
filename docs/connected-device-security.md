@@ -300,10 +300,15 @@ propose remote-device SSH commands; confirmation is not a planner tool. Sessions
 36 tool actions, six calls per turn, and three queued scans. Concurrent agent sessions and concurrent
 device scans for the same device fail closed.
 
-Device Hunt cannot create authoritative findings. Scanner findings continue to come from
-deterministic device scans. A final AI debrief may retain evidence-backed hypotheses only when they
-cite real `devref_N` references created by device context, scan-result, or evidence-graph reads. Notes,
-queue acknowledgements, and model prose are not proof.
+Device Hunt cannot create authoritative findings. A final AI debrief may retain evidence-backed,
+typed candidates only when they cite real `devref_N` references created by device context,
+scan-result, or evidence-graph reads. Candidates have a durable lifecycle (`new`, queued/verifying,
+verified, refuted, inconclusive, blocked, or expired), a canonical device locus, and a registered
+verifier contract; notes, queue acknowledgements, and model prose are not proof. The
+`verify_candidate` tool resolves scope and probe inputs from the persisted candidate. The first
+promotion path covers policy-denied service exposure: only a fresh protocol-level open observation,
+the persisted deny disposition, a healthy safety receipt, and a satisfied server-owned Proof Contract
+v2 can atomically create the device finding, verification record, and typed evidence instance.
 
 ## Wireless and non-IP extensions
 
