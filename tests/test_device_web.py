@@ -147,3 +147,37 @@ def test_chunked_response_never_reads_a_device_controlled_huge_chunk():
     assert reader.requested == [device_web.MAX_RESPONSE_BYTES + 1]
     assert len(body) == device_web.MAX_RESPONSE_BYTES
     assert truncated is True
+
+
+def test_device_management_header_findings_are_contextual_and_deduplicable():
+    findings = device_web._security_header_findings(
+        origin="https://tv.example.lan:8443",
+        response_url="https://tv.example.lan:8443/admin",
+        status=200,
+        headers={
+            "content-type": "text/html; charset=utf-8",
+            "set-cookie": "session=secret; Path=/",
+        },
+        authenticated=True,
+    )
+    titles = {finding["title"] for finding in findings}
+
+    assert "Device HTTPS management interface does not declare HSTS" in titles
+    assert "Device management page has no Content Security Policy" in titles
+    assert "Device management page lacks framing protection" in titles
+    assert "Authenticated device response lacks private cache controls" in titles
+    assert "Device management cookie lacks protective attributes" in titles
+    assert all("secret" not in str(finding) for finding in findings)
+
+
+def test_hsts_is_not_recommended_for_literal_ip_device_origin():
+    findings = device_web._security_header_findings(
+        origin="https://192.0.2.10",
+        response_url="https://192.0.2.10/",
+        status=200,
+        headers={"content-type": "application/json"},
+        authenticated=False,
+    )
+
+    assert not any("HSTS" in finding["title"] for finding in findings)
+    assert not any("Content Security Policy" in finding["title"] for finding in findings)

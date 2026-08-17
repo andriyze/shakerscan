@@ -366,7 +366,7 @@ def _public_response_headers(headers: dict[str, str]) -> dict[str, str]:
         "server", "content-type", "content-length", "location", "allow",
         "access-control-allow-origin", "access-control-allow-credentials",
         "strict-transport-security", "x-content-type-options", "x-frame-options",
-        "content-security-policy",
+        "content-security-policy", "referrer-policy", "cache-control", "pragma",
     }
     result = {
         key: (public_request_url(value) if key.lower() == "location" else value[:1000])
@@ -375,6 +375,106 @@ def _public_response_headers(headers: dict[str, str]) -> dict[str, str]:
     if "set-cookie" in {key.lower() for key in headers}:
         result["set-cookie"] = "<redacted>"
     return result
+
+
+def _security_header_findings(
+    *, origin: str, response_url: str, status: int, headers: dict[str, str], authenticated: bool,
+) -> list[dict[str, Any]]:
+    """Build contextual embedded-management header findings from one concrete response."""
+    if not 200 <= int(status or 0) < 400:
+        return []
+    normalized = {str(key).lower(): str(value) for key, value in headers.items()}
+    content_type = normalized.get("content-type", "").lower()
+    html = "text/html" in content_type or "application/xhtml" in content_type
+    parsed = urllib.parse.urlsplit(origin)
+    findings: list[dict[str, Any]] = []
+
+    def add(title: str, severity: str, description: str, recommendation: str, missing: list[str]) -> None:
+        finding = {
+            "type": "Device management interface headers",
+            "title": title,
+            "severity": severity,
+            "description": description,
+            "recommendation": recommendation,
+            "url": public_request_url(response_url),
+            "tool": "device_web_headers",
+            "source": "device",
+            "evidence": {
+                "status": int(status),
+                "content_type": content_type[:200],
+                "missing_headers": missing,
+                "authenticated_request": bool(authenticated),
+            },
+        }
+        # One finding per origin/header control, rather than one duplicate per probed path.
+        finding["fingerprint"] = hashlib.sha256(
+            json.dumps([title, public_request_url(origin)], separators=(",", ":")).encode()
+        ).hexdigest()
+        findings.append(finding)
+
+    if parsed.scheme == "https" and parsed.hostname:
+        try:
+            ipaddress.ip_address(parsed.hostname)
+            hostname_based = False
+        except ValueError:
+            hostname_based = True
+        if hostname_based and not normalized.get("strict-transport-security"):
+            add(
+                "Device HTTPS management interface does not declare HSTS", "low",
+                "A hostname-based HTTPS management interface omitted Strict-Transport-Security.",
+                "After validating certificate deployment and HTTP redirect behavior, enable a bounded HSTS policy for the device hostname.",
+                ["strict-transport-security"],
+            )
+    if html:
+        csp = normalized.get("content-security-policy", "")
+        if not csp:
+            add(
+                "Device management page has no Content Security Policy", "low",
+                "The HTML management page did not declare a Content-Security-Policy header.",
+                "Deploy a restrictive policy based on script nonces or hashes and explicitly constrain object, frame, and connection sources.",
+                ["content-security-policy"],
+            )
+        if not normalized.get("x-frame-options") and "frame-ancestors" not in csp.lower():
+            add(
+                "Device management page lacks framing protection", "low",
+                "The HTML management page declared neither X-Frame-Options nor CSP frame-ancestors.",
+                "Set CSP frame-ancestors or X-Frame-Options to prevent unauthorized framing of management actions.",
+                ["x-frame-options", "content-security-policy: frame-ancestors"],
+            )
+        if normalized.get("x-content-type-options", "").lower() != "nosniff":
+            add(
+                "Device management page allows content-type sniffing", "info",
+                "The HTML management response did not declare X-Content-Type-Options: nosniff.",
+                "Return X-Content-Type-Options: nosniff on management and API responses.",
+                ["x-content-type-options: nosniff"],
+            )
+    if authenticated:
+        cache_control = normalized.get("cache-control", "").lower()
+        if "no-store" not in cache_control and "private" not in cache_control:
+            add(
+                "Authenticated device response lacks private cache controls", "medium",
+                "An authenticated management response did not prohibit shared or persistent caching.",
+                "Return Cache-Control: no-store for sensitive management responses, or at minimum a suitable private policy.",
+                ["cache-control: no-store|private"],
+            )
+    cookie = normalized.get("set-cookie", "")
+    if cookie:
+        missing_cookie = []
+        lower_cookie = cookie.lower()
+        if parsed.scheme == "https" and "secure" not in lower_cookie:
+            missing_cookie.append("Secure")
+        if "httponly" not in lower_cookie:
+            missing_cookie.append("HttpOnly")
+        if "samesite=" not in lower_cookie:
+            missing_cookie.append("SameSite")
+        if missing_cookie:
+            add(
+                "Device management cookie lacks protective attributes", "medium",
+                "A management response issued a cookie without all expected transport, script-access, and cross-site protections.",
+                "Mark session cookies Secure on HTTPS, HttpOnly, and with an appropriate SameSite policy.",
+                [f"set-cookie: {item}" for item in missing_cookie],
+            )
+    return findings
 
 
 def _request_finding(
@@ -718,6 +818,7 @@ async def run_pinned_device_web_scan(
                 request_headers["Cookie"] = cookie
 
     observations: list[dict[str, Any]] = []
+    header_findings: dict[str, dict[str, Any]] = {}
     redirect_chain: list[str] = []
     final_url = origin
     for path in (() if cancelled else PROFILE_PATHS.get(profile, PROFILE_PATHS["standard"])):
@@ -754,6 +855,14 @@ async def run_pinned_device_web_scan(
                 "truncated": response["truncated"],
                 "elapsed_ms": response["elapsed_ms"],
             })
+            for finding in _security_header_findings(
+                origin=origin,
+                response_url=response_url,
+                status=int(response["status"]),
+                headers=dict(response["headers"]),
+                authenticated=bool(request_headers),
+            ):
+                header_findings.setdefault(str(finding["fingerprint"]), finding)
             if tls_assessment is not None and isinstance(response.get("tls"), dict):
                 tls_assessment.update({
                     key: value for key, value in response["tls"].items()
@@ -813,7 +922,7 @@ async def run_pinned_device_web_scan(
             "status_code": status_code,
         },
         "result": {"score": None, "grade": None},
-        "findings": tls_findings + imported_findings,
+        "findings": tls_findings + list(header_findings.values()) + imported_findings,
         "device_web": {
             "schema_version": "device-web-pinned/v1",
             "origin": origin,
