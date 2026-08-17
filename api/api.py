@@ -31609,14 +31609,23 @@ async def _agent_apply_reply(
             state["events"].append({"iteration": iteration, "tool": name, "duplicate": True})
             continue
 
-        request_units = 1 if name == "http_request" else 0
+        # The episode request budget counts traffic-producing TOOL INVOCATIONS, not the
+        # scanner's internal wire traffic.  External scanners have their own fixed per-tool
+        # wire ceilings and are reported separately below.  Charging the conservative wire
+        # reservation here made Nuclei (450 max wire requests) impossible to invoke because a
+        # Deep Hunt session is capped at 400 request units.
+        request_units = agent_tools.request_budget_units(name)
+        wire_request_reservation = 1 if name == "http_request" else 0
         if name == "run_tool":
             try:
                 scanner_name, _, scanner_options = agent_tools.coerce_run_tool(args)
-                request_units = agent_tools.scanner_request_reservation(scanner_name, scanner_options)
+                wire_request_reservation = agent_tools.scanner_request_reservation(
+                    scanner_name, scanner_options
+                )
             except (agent_tools.AgentToolError, KeyError, TypeError, ValueError):
-                # Unknown/unmetered external work must not receive a cheap one-request path.
-                request_units = max(1, int(state.get("request_budget_limit") or 1))
+                # Unknown scanner work will fail validation before execution. Keep a bounded
+                # invocation charge, but reserve no fictitious wire traffic.
+                wire_request_reservation = 0
         active_units = 0
         if name == "http_request":
             try:
@@ -31647,7 +31656,9 @@ async def _agent_apply_reply(
 
         state["tool_calls_made"] += 1
         state["request_units_used"] += request_units
-        state["wire_requests_reserved"] = int(state.get("wire_requests_reserved") or 0) + request_units
+        state["wire_requests_reserved"] = (
+            int(state.get("wire_requests_reserved") or 0) + wire_request_reservation
+        )
         state["active_actions_used"] += active_units
         remaining_seconds = (
             None if deadline_monotonic is None
@@ -31716,9 +31727,6 @@ async def _agent_apply_reply(
             state["wire_requests_observed_minimum"] = int(
                 state.get("wire_requests_observed_minimum") or 0
             ) + actual
-            state["request_units_used"] = max(
-                0, int(state["request_units_used"]) - max(0, request_units - actual)
-            )
         elif name == "run_tool":
             accounting = str(result.get("wire_request_accounting") or "unavailable")
             observed = max(0, int(result.get("wire_requests_observed_minimum") or 0))
@@ -31726,13 +31734,13 @@ async def _agent_apply_reply(
                 state.get("wire_requests_observed_minimum") or 0
             ) + observed
             if accounting == "exact" and result.get("wire_requests_actual") is not None:
-                actual = max(0, min(request_units, int(result["wire_requests_actual"])))
+                actual = max(
+                    0,
+                    min(wire_request_reservation, int(result["wire_requests_actual"])),
+                )
                 state["wire_requests_actual_confirmed"] = int(
                     state.get("wire_requests_actual_confirmed") or 0
                 ) + actual
-                state["request_units_used"] = max(
-                    0, int(state["request_units_used"]) - max(0, request_units - actual)
-                )
             else:
                 state["wire_request_unsettled_tools"] = int(
                     state.get("wire_request_unsettled_tools") or 0
@@ -31761,7 +31769,7 @@ async def _agent_apply_reply(
             "tool": name,
             "ok": bool(result.get("ok")),
             "ref": result.get("ref"),
-            "wire_requests_reserved": request_units,
+            "wire_requests_reserved": wire_request_reservation,
             "wire_request_accounting": result.get("wire_request_accounting") if name == "run_tool" else "exact",
             "wire_requests_actual": (
                 result.get("wire_requests_actual") if name == "run_tool"

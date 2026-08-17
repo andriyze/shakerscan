@@ -406,6 +406,15 @@ def test_scanner_request_reservations_are_conservative_and_explicit():
     assert at.scanner_request_reservation("ffuf") == 220
 
 
+def test_episode_request_budget_counts_scanner_invocations_not_internal_wire_ceiling():
+    assert at.request_budget_units("http_request") == 1
+    assert at.request_budget_units("run_tool") == 1
+    assert at.request_budget_units("query_kb") == 0
+    assert at.request_budget_units("note") == 0
+    assert at.request_budget_units("diff") == 0
+    assert at.request_budget_units("nuclei") == 0
+
+
 def test_worker_scanner_target_revalidation_is_same_host_and_http_only():
     assert at.validate_scanner_execution_target(
         "https://Example.test", "http://example.test:8080/admin?q=1"

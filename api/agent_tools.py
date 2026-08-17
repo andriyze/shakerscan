@@ -286,6 +286,15 @@ def scanner_request_reservation(name: str, options: dict[str, Any] | None = None
     return max(1, int(template.get("max_wire_requests") or 1))
 
 
+def request_budget_units(tool_name: str) -> int:
+    """Return episode request units for one traffic-producing tool invocation.
+
+    A bounded external scanner consumes one episode request unit regardless of how many
+    requests it issues inside its fixed wire ceiling. Wire traffic is settled separately.
+    """
+    return 1 if str(tool_name or "").strip() in {"http_request", "run_tool"} else 0
+
+
 def validate_scanner_execution_target(registered_target: str, execution_target: str) -> str:
     """Revalidate the worker-side scanner destination against the durable web target.
 
