@@ -430,10 +430,23 @@ function SessionMonitor({
         <p className="mt-3 text-xs text-amber-300">Stopped: {session.stop_reason.replace(/_/g, ' ')}</p>
       ) : null}
       {session.result ? (
-        <div className="mt-3 grid grid-cols-3 gap-2 text-center">
-          <Outcome label="Suspected" value={session.result.net_new_count} />
-          <Outcome label="Verified" value={session.result.verified_count} tone="good" />
-          <Outcome label="HTTP evidence" value={session.result.http_evidence_count} />
+        <div className="mt-3 space-y-2">
+          <div className="grid grid-cols-3 gap-2 text-center">
+            <Outcome label="Suspected" value={session.result.net_new_count} />
+            <Outcome label="Verified" value={session.result.verified_count} tone="good" />
+            <Outcome label="HTTP evidence" value={session.result.http_evidence_count} />
+          </div>
+          <div className="grid grid-cols-3 gap-2 text-center">
+            <Outcome label="Wire reserved" value={session.result.wire_requests_reserved ?? session.result.request_units_used} />
+            <Outcome
+              label={session.result.wire_requests_actual == null ? 'Wire observed ≥' : 'Wire actual'}
+              value={session.result.wire_requests_actual ?? session.result.wire_requests_observed_minimum ?? 0}
+            />
+            <Outcome label="Unsettled tools" value={session.result.wire_request_unsettled_tools ?? 0} />
+          </div>
+          <p className="text-[10px] leading-4 text-gray-600">
+            Scanner calls reserve worst-case traffic before execution. Exact worker counters refund unused units; observed-only tools remain conservatively charged.
+          </p>
         </div>
       ) : null}
 
@@ -582,7 +595,7 @@ function TranscriptRow({ role, content }: { role: 'system' | 'user' | 'assistant
   )
 }
 
-function Outcome({ label, value, tone = 'default' }: { label: string; value: number; tone?: 'default' | 'good' }) {
+function Outcome({ label, value, tone = 'default' }: { label: string; value: number | string; tone?: 'default' | 'good' }) {
   return (
     <div className="rounded-lg border border-gray-800 bg-gray-950/40 p-2">
       <div className={`text-lg font-semibold tabular-nums ${tone === 'good' ? 'text-emerald-300' : 'text-white'}`}>{value}</div>

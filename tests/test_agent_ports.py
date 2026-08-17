@@ -9,6 +9,8 @@ import os
 import json
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 
 import agent_provenance as prov
@@ -402,6 +404,40 @@ def test_scanner_request_reservations_are_conservative_and_explicit():
     assert at.scanner_request_reservation("httpx") == 4
     assert at.scanner_request_reservation("nuclei") == 450
     assert at.scanner_request_reservation("ffuf") == 220
+
+
+def test_worker_scanner_target_revalidation_is_same_host_and_http_only():
+    assert at.validate_scanner_execution_target(
+        "https://Example.test", "http://example.test:8080/admin?q=1"
+    ) == "http://example.test:8080/admin?q=1"
+    with pytest.raises(at.AgentToolError, match="selected target host"):
+        at.validate_scanner_execution_target("https://example.test", "https://evil.test/")
+    with pytest.raises(at.AgentToolError, match=r"HTTP\(S\)"):
+        at.validate_scanner_execution_target("https://example.test", "file:///etc/passwd")
+    with pytest.raises(at.AgentToolError, match="user information"):
+        at.validate_scanner_execution_target("https://example.test", "https://user@example.test/")
+
+
+def test_scanner_request_settlement_distinguishes_exact_from_observed():
+    assert at.scanner_request_settlement(
+        "nuclei", json.dumps({"stats": {"total-requests": 17}})
+    ) == {
+        "mode": "exact", "actual": 17, "observed_minimum": 17,
+        "source": "scanner_counter",
+    }
+    httpx = at.scanner_request_settlement(
+        "httpx", json.dumps({"url": "https://example.test", "status_code": 200})
+    )
+    assert httpx["mode"] == "exact" and httpx["actual"] == 1
+    katana = at.scanner_request_settlement(
+        "katana", "\n".join([
+            json.dumps({"request": {"endpoint": "https://example.test/a"}}),
+            json.dumps({"request": {"endpoint": "https://example.test/b"}}),
+        ])
+    )
+    assert katana["mode"] == "observed_lower_bound"
+    assert katana["actual"] is None and katana["observed_minimum"] == 2
+    assert at.scanner_request_settlement("ffuf", "not-json")["mode"] == "unavailable"
 
 
 def test_ffuf_wordlist_tunable_is_injection_proof():

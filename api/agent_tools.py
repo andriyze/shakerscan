@@ -286,6 +286,108 @@ def scanner_request_reservation(name: str, options: dict[str, Any] | None = None
     return max(1, int(template.get("max_wire_requests") or 1))
 
 
+def validate_scanner_execution_target(registered_target: str, execution_target: str) -> str:
+    """Revalidate the worker-side scanner destination against the durable web target.
+
+    The control plane resolves an allowed origin before enqueueing, but queue contents are
+    untrusted at execution time.  Workers therefore independently require HTTP(S), a concrete
+    hostname, and the exact selected target host.  Ports and paths may differ because Deep Hunt
+    explicitly supports discovered origins on the same registered host.
+    """
+    try:
+        registered = urllib.parse.urlsplit(str(registered_target or "").strip())
+        execution = urllib.parse.urlsplit(str(execution_target or "").strip())
+        registered_host = (registered.hostname or "").lower().rstrip(".")
+        execution_host = (execution.hostname or "").lower().rstrip(".")
+        # Accessing port also rejects malformed authorities such as ``host:bad``.
+        _ = registered.port
+        _ = execution.port
+    except ValueError as exc:
+        raise AgentToolError("scanner execution target has an invalid authority") from exc
+    if registered.scheme.lower() not in {"http", "https"} or not registered_host:
+        raise AgentToolError("registered scanner target must be an absolute HTTP(S) URL")
+    if execution.scheme.lower() not in {"http", "https"} or not execution_host:
+        raise AgentToolError("scanner execution target must be an absolute HTTP(S) URL")
+    if execution.username or execution.password:
+        raise AgentToolError("scanner execution target must not contain user information")
+    if execution_host != registered_host:
+        raise AgentToolError("scanner execution target must use the selected target host")
+    return urllib.parse.urlunsplit(
+        (execution.scheme.lower(), execution.netloc, execution.path or "/", execution.query, "")
+    )
+
+
+_REQUEST_COUNTER_KEYS: frozenset[str] = frozenset({
+    "requests", "request_count", "requests_count", "requests_sent",
+    "total_requests", "total_requests_sent", "http_requests",
+})
+
+
+def _explicit_request_counters(value: Any) -> list[int]:
+    counters: list[int] = []
+    if isinstance(value, dict):
+        for raw_key, raw_value in value.items():
+            key = str(raw_key or "").strip().lower().replace("-", "_")
+            if key in _REQUEST_COUNTER_KEYS and isinstance(raw_value, (int, float)):
+                number = int(raw_value)
+                if number >= 0:
+                    counters.append(number)
+            elif isinstance(raw_value, (dict, list)):
+                counters.extend(_explicit_request_counters(raw_value))
+    elif isinstance(value, list):
+        for item in value:
+            counters.extend(_explicit_request_counters(item))
+    return counters
+
+
+def scanner_request_settlement(name: str, stdout: str) -> dict[str, Any]:
+    """Derive honest post-execution wire-request accounting from scanner output.
+
+    An explicit scanner counter is exact and may refund a conservative reservation.  A successful
+    ``httpx`` fingerprint is one request because redirects are not followed by its fixed template.
+    Other result records are only a lower bound: a crawler/template engine can issue many requests
+    that produce no record, so those observations must never be treated as exact or refunded.
+    """
+    scanner = str(name or "").strip().lower()
+    text = str(stdout or "")
+    decoded: list[Any] = []
+    try:
+        whole = json.loads(text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        whole = None
+    if whole is not None:
+        decoded.append(whole)
+    else:
+        for line in text.splitlines()[:1000]:
+            try:
+                decoded.append(json.loads(line))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+    counters = _explicit_request_counters(decoded)
+    if counters:
+        # Nested summaries sometimes repeat the same cumulative counter.  The maximum is the final
+        # cumulative total and is safer than summing duplicate snapshots.
+        actual = max(counters)
+        return {
+            "mode": "exact",
+            "actual": actual,
+            "observed_minimum": actual,
+            "source": "scanner_counter",
+        }
+    typed = parse_scanner_output(scanner, text)
+    observed = int(typed.get("record_count") or 0)
+    if scanner == "httpx" and observed > 0:
+        return {"mode": "exact", "actual": 1, "observed_minimum": 1, "source": "fixed_httpx_contract"}
+    if observed > 0:
+        return {
+            "mode": "observed_lower_bound",
+            "actual": None,
+            "observed_minimum": observed,
+            "source": "typed_result_records",
+        }
+    return {"mode": "unavailable", "actual": None, "observed_minimum": 0, "source": None}
+
+
 def _public_observed_url(value: Any) -> str | None:
     """Retain route and parameter names while removing query values from scanner output."""
     text = str(value or "").strip()

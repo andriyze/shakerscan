@@ -55,6 +55,7 @@ from retest_contract import (
 import parallel_scan
 import asm_inventory
 import family_proof
+import agent_tools
 from model_intake_admissions import persist_from_result as persist_model_intake_admission
 from job_queue import (
     DEFAULT_WORKER_TOOL_COMMANDS,
@@ -122,6 +123,7 @@ DEVICE_ONLY_WORKER = str(os.environ.get("DEVICE_ONLY_WORKER", "false")).strip().
 WORKER_BUILD_REGISTRY_KEY = "shakerscan:device_worker_build" if DEVICE_ONLY_WORKER else "shakerscan:worker_build"
 RETEST_QUEUE_NAME = os.environ.get("RETEST_QUEUE_NAME", "retest_jobs")
 BROKER_INGEST_QUEUE_NAME = os.environ.get("BROKER_INGEST_QUEUE_NAME", "broker_ingest_jobs")
+AGENT_TOOL_QUEUE_NAME = os.environ.get("AGENT_TOOL_QUEUE_NAME", "agent_tool_jobs")
 AI_GATE_RUN_KINDS = {"ai_api", "ai_rag", "ai_trace", "ai_mcp", "ai_widget"}
 MODEL_INTAKE_RUN_KINDS = {"model_intake"}
 ASM_RECON_RUN_KINDS = {"asm_recon"}
@@ -12209,6 +12211,128 @@ def _clear_fleet_busy_marker(marker: Path | None) -> None:
         print(f"[fleet] busy marker cleanup failed: {exc}", flush=True)
 
 
+_AGENT_TOOL_OUTPUT_BYTES = max(
+    4_096, min(200_000, int(os.environ.get("SHAKERSCAN_AGENT_TOOL_OUTPUT_BYTES", "80000")))
+)
+_AGENT_TOOL_RESULT_TTL_SECONDS = max(
+    60, min(86_400, int(os.environ.get("SHAKERSCAN_AGENT_TOOL_RESULT_TTL_SECONDS", "3600")))
+)
+
+
+async def process_agent_scanner_tool_job(job_data: dict[str, Any]) -> None:
+    """Execute one fixed-template Deep Hunt scanner outside the API process.
+
+    Queue payloads contain declarative tool/options/target data only.  This worker independently
+    validates scope and rebuilds argv from :mod:`agent_tools`; no binary, argv, shell text, or
+    credential supplied by the control plane is executable here.
+    """
+    job_id = str(job_data.get("job_id") or "").strip()
+    result_key = f"agent_tool_result:{job_id}"
+    cancel_key = f"agent_tool_cancel:{job_id}"
+    redis_client = get_redis()
+    started_at = utc_now_iso()
+    proc: asyncio.subprocess.Process | None = None
+    status = "failed"
+    error: str | None = None
+    stdout = ""
+    returncode: int | None = None
+    try:
+        if not job_id:
+            raise agent_tools.AgentToolError("scanner job requires an identity")
+        name, _ignored, options = agent_tools.coerce_run_tool({
+            "name": job_data.get("tool_name"),
+            "target": job_data.get("execution_target"),
+            "options": job_data.get("scanner_options"),
+        })
+        execution_target = agent_tools.validate_scanner_execution_target(
+            str(job_data.get("registered_target") or ""),
+            str(job_data.get("execution_target") or ""),
+        )
+        binary, argv, template_timeout_ms = agent_tools.build_scanner_argv(
+            name, execution_target, options
+        )
+        requested_timeout = int(job_data.get("timeout_ms") or template_timeout_ms)
+        timeout_ms = max(1_000, min(template_timeout_ms, requested_timeout))
+        proc = await asyncio.create_subprocess_exec(
+            binary,
+            *argv,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        communicate = asyncio.create_task(proc.communicate())
+        deadline = asyncio.get_running_loop().time() + timeout_ms / 1000.0
+        while not communicate.done():
+            if redis_client.exists(cancel_key):
+                status, error = "cancelled", "cancelled"
+                proc.kill()
+                break
+            if asyncio.get_running_loop().time() >= deadline:
+                status, error = "timeout", "timeout"
+                proc.kill()
+                break
+            await asyncio.sleep(0.25)
+        out, err = await communicate
+        returncode = proc.returncode
+        stdout = (out or b"")[:_AGENT_TOOL_OUTPUT_BYTES].decode("utf-8", "replace")
+        if status not in {"cancelled", "timeout"}:
+            if returncode not in (0, None) and not stdout.strip():
+                status = "failed"
+                error = redact_text((err or b"").decode("utf-8", "replace")[:300]) or f"exit_{returncode}"
+            else:
+                status = "success"
+    except FileNotFoundError:
+        error = "scanner_not_available"
+    except (agent_tools.AgentToolError, KeyError, TypeError, ValueError) as exc:
+        error = f"contract:{str(exc)[:240]}"
+    except asyncio.CancelledError:
+        if proc is not None and proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+        raise
+    except Exception as exc:  # noqa: BLE001 - publish a bounded operational result
+        error = f"worker_fault:{type(exc).__name__}"
+
+    typed_output = agent_tools.parse_scanner_output(str(job_data.get("tool_name") or ""), stdout)
+    settlement = agent_tools.scanner_request_settlement(
+        str(job_data.get("tool_name") or ""), stdout
+    )
+    if status in {"failed", "cancelled"} and not stdout.strip():
+        # No scanner output is not proof that DNS/TCP emitted no traffic, so only the known
+        # pre-spawn contract failures above can safely settle at zero.
+        if error == "scanner_not_available" or str(error or "").startswith("contract:"):
+            settlement = {"mode": "exact", "actual": 0, "observed_minimum": 0,
+                          "source": "not_executed"}
+    safe_lines = [
+        str(redact_text(line))[:1200]
+        for line in stdout.splitlines()
+        if line.strip()
+    ][:60]
+    result = {
+        "job_id": job_id,
+        "status": status,
+        "error": error,
+        "returncode": returncode,
+        "started_at": started_at,
+        "finished_at": utc_now_iso(),
+        "output_lines": safe_lines,
+        "line_count": min(200, sum(1 for line in stdout.splitlines() if line.strip())),
+        "typed_output": typed_output,
+        "settlement": settlement,
+    }
+    if job_id:
+        redis_client.set(
+            result_key,
+            json.dumps(result, default=str, separators=(",", ":")),
+            ex=_AGENT_TOOL_RESULT_TTL_SECONDS,
+        )
+        redis_client.hset(
+            f"job:{job_id}",
+            mapping={"status": status, "current_phase": "agent_tool_complete", "error": error or ""},
+        )
+        redis_client.expire(f"job:{job_id}", _AGENT_TOOL_RESULT_TTL_SECONDS)
+        redis_client.delete(cancel_key)
+
+
 async def process_job(job_data: dict):
     """Route job to appropriate handler."""
     if str(os.environ.get("SHAKERSCAN_NODE_ID") or "").strip():
@@ -12263,6 +12387,8 @@ async def process_job(job_data: dict):
 
     if job_type == 'discovery':
         await process_discovery_job(job_data)
+    elif job_type == 'agent_scanner_tool':
+        await process_agent_scanner_tool_job(job_data)
     elif job_type == 'finding_retest':
         await process_finding_retest_job(job_data)
     elif job_type == parallel_scan.PLAN_JOB_TYPE:
@@ -12448,7 +12574,7 @@ async def async_main():
     if DEVICE_ONLY_WORKER:
         base_queue_keys = [DEVICE_QUEUE_NAME]
     else:
-        base_queue_keys = [QUEUE_NAME, RETEST_QUEUE_NAME, BROKER_INGEST_QUEUE_NAME]
+        base_queue_keys = [QUEUE_NAME, RETEST_QUEUE_NAME, BROKER_INGEST_QUEUE_NAME, AGENT_TOOL_QUEUE_NAME]
         if device_queue_enabled:
             base_queue_keys.append(DEVICE_QUEUE_NAME)
     base_queue_keys = list(dict.fromkeys(base_queue_keys))

@@ -2519,6 +2519,110 @@ def test_run_scan_rejects_invalid_explicit_scan_type():
         raise AssertionError("invalid scan_type should be rejected before scanner subprocess starts")
 
 
+def test_agent_scanner_tool_job_rebuilds_argv_and_publishes_settlement(monkeypatch):
+    class _Redis:
+        def __init__(self):
+            self.values = {}
+            self.hashes = []
+
+        def exists(self, _key):
+            return False
+
+        def set(self, key, value, ex=None):
+            self.values[key] = value
+
+        def hset(self, key, mapping=None):
+            self.hashes.append((key, dict(mapping or {})))
+
+        def expire(self, _key, _ttl):
+            return True
+
+        def delete(self, key):
+            self.values.pop(key, None)
+
+    class _Process:
+        returncode = 0
+
+        async def communicate(self):
+            return json.dumps({
+                "url": "https://example.test/admin?token=secret",
+                "status_code": 200,
+            }).encode(), b""
+
+        def kill(self):
+            self.returncode = -9
+
+        async def wait(self):
+            return self.returncode
+
+    redis = _Redis()
+    captured = {}
+
+    async def _exec(*cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        return _Process()
+
+    monkeypatch.setattr(worker, "get_redis", lambda: redis)
+    monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", _exec)
+    asyncio.run(worker.process_agent_scanner_tool_job({
+        "job_id": "agent-job-1",
+        "type": "agent_scanner_tool",
+        "tool_name": "httpx",
+        "registered_target": "https://example.test",
+        "execution_target": "https://example.test/admin?token=secret",
+        "scanner_options": {},
+        "timeout_ms": 30_000,
+    }))
+
+    assert captured["cmd"][0] == "httpx"
+    assert "-json" in captured["cmd"] and "-silent" in captured["cmd"]
+    result = json.loads(redis.values["agent_tool_result:agent-job-1"])
+    assert result["status"] == "success"
+    assert result["settlement"]["mode"] == "exact"
+    assert result["settlement"]["actual"] == 1
+    assert "secret" not in json.dumps(result)
+
+
+def test_agent_scanner_tool_job_refuses_cross_host_without_spawning(monkeypatch):
+    class _Redis:
+        def __init__(self):
+            self.values = {}
+
+        def set(self, key, value, ex=None):
+            self.values[key] = value
+
+        def hset(self, *_args, **_kwargs):
+            return True
+
+        def expire(self, *_args):
+            return True
+
+        def delete(self, *_args):
+            return True
+
+    redis = _Redis()
+
+    async def _must_not_spawn(*_args, **_kwargs):
+        raise AssertionError("cross-host queue payload must fail before spawn")
+
+    monkeypatch.setattr(worker, "get_redis", lambda: redis)
+    monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", _must_not_spawn)
+    asyncio.run(worker.process_agent_scanner_tool_job({
+        "job_id": "agent-job-2",
+        "tool_name": "httpx",
+        "registered_target": "https://example.test",
+        "execution_target": "https://evil.test/",
+        "scanner_options": {},
+    }))
+
+    result = json.loads(redis.values["agent_tool_result:agent-job-2"])
+    assert result["status"] == "failed"
+    assert result["settlement"] == {
+        "mode": "exact", "actual": 0, "observed_minimum": 0, "source": "not_executed"
+    }
+
+
 def test_run_scan_maps_explicit_standard_to_standard_flag(monkeypatch):
     captured = {}
 

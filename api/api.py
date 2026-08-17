@@ -593,6 +593,7 @@ DEVICE_SCAN_MAX_DURATION_MINUTES = {
 }
 RETEST_QUEUE_NAME = os.environ.get("RETEST_QUEUE_NAME", "retest_jobs")
 BROKER_INGEST_QUEUE_NAME = os.environ.get("BROKER_INGEST_QUEUE_NAME", "broker_ingest_jobs")
+AGENT_TOOL_QUEUE_NAME = os.environ.get("AGENT_TOOL_QUEUE_NAME", "agent_tool_jobs")
 BROKER_LEASE_SECONDS = max(60, int(os.environ.get("SHAKERSCAN_BROKER_LEASE_SECONDS", "300")))
 BROKER_MAX_DELIVERY_ATTEMPTS = max(1, int(os.environ.get("SHAKERSCAN_QUEUE_MAX_DELIVERY_ATTEMPTS", "5")))
 BROKER_MAX_RESULT_BYTES = max(1_048_576, int(os.environ.get("SHAKERSCAN_BROKER_MAX_RESULT_BYTES", str(64 * 1024 * 1024))))
@@ -30595,6 +30596,67 @@ async def _agent_tool_note(target_uuid: uuid.UUID, note: dict[str, Any], *, crea
 _AGENT_RUN_TOOL_MAX_OUTPUT = 20000
 
 
+async def _enqueue_agent_scanner_tool(
+    *,
+    name: str,
+    execution_target: str,
+    registered_target: str,
+    options: dict[str, Any],
+    timeout_ms: int,
+) -> dict[str, Any]:
+    """Queue fixed-template scanner work and await its bounded worker result.
+
+    Cancellation publishes a short-lived kill marker that the worker polls while the child process
+    runs.  A worker also has its own hard timeout, so an API restart cannot orphan the scanner.
+    """
+    redis_client = get_redis()
+    job_id = str(uuid.uuid4())
+    result_key = f"agent_tool_result:{job_id}"
+    cancel_key = f"agent_tool_cancel:{job_id}"
+    payload = {
+        "job_id": job_id,
+        "type": "agent_scanner_tool",
+        "tool_name": name,
+        "execution_target": execution_target,
+        "registered_target": registered_target,
+        "scanner_options": options,
+        "timeout_ms": timeout_ms,
+        "submitted_at": utc_now_iso(),
+        "_base_queue_name": AGENT_TOOL_QUEUE_NAME,
+    }
+    redis_client.hset(
+        f"job:{job_id}",
+        mapping={"status": "queued", "current_phase": "agent_tool_queued", "tool": name},
+    )
+    redis_client.expire(f"job:{job_id}", max(3600, math.ceil(timeout_ms / 1000) + 300))
+    enqueue_job(redis_client, AGENT_TOOL_QUEUE_NAME, payload)
+    deadline = asyncio.get_running_loop().time() + timeout_ms / 1000.0 + 30.0
+    try:
+        while asyncio.get_running_loop().time() < deadline:
+            raw = redis_client.get(result_key)
+            if raw is not None:
+                redis_client.delete(result_key)
+                text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
+                parsed = json.loads(text)
+                if not isinstance(parsed, dict):
+                    raise RuntimeError("agent scanner worker returned a malformed result")
+                return parsed
+            await asyncio.sleep(0.2)
+    except asyncio.CancelledError:
+        redis_client.set(cancel_key, "1", ex=max(60, math.ceil(timeout_ms / 1000) + 30))
+        raise
+    redis_client.set(cancel_key, "1", ex=max(60, math.ceil(timeout_ms / 1000) + 30))
+    return {
+        "status": "timeout",
+        "error": "worker_result_timeout",
+        "output_lines": [],
+        "line_count": 0,
+        "typed_output": {"parser_status": "not_applicable", "records": [], "record_count": 0},
+        "settlement": {"mode": "unavailable", "actual": None, "observed_minimum": 0,
+                       "source": None},
+    }
+
+
 async def _agent_tool_run_tool(
     target_uuid: uuid.UUID,
     target_url: str,
@@ -30622,42 +30684,26 @@ async def _agent_tool_run_tool(
 
     binary, argv, timeout_ms = agent_tools.build_scanner_argv(name, url, options)
     started_at = datetime.now(timezone.utc)
-    status_label = "success"
-    error: Optional[str] = None
-    stdout = ""
-    proc: Optional[asyncio.subprocess.Process] = None
     try:
-        proc = await asyncio.create_subprocess_exec(
-            binary, *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        worker_result = await _enqueue_agent_scanner_tool(
+            name=name,
+            execution_target=url,
+            registered_target=target_url,
+            options=options,
+            timeout_ms=timeout_ms,
         )
-        try:
-            out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout_ms / 1000.0)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            status_label = "timeout"
-            error = "timeout"
-            out, err = b"", b""
-        stdout = (out or b"")[: _AGENT_RUN_TOOL_MAX_OUTPUT * 4].decode("utf-8", "replace")
-        # Do NOT let the killed process's -9 exit code overwrite a real timeout label. (Audit P2.)
-        if status_label != "timeout" and proc.returncode not in (0, None) and not stdout.strip():
-            status_label = "failed"
-            error = ((err or b"").decode("utf-8", "replace")[:300]) or f"exit_{proc.returncode}"
-    except FileNotFoundError:
-        # Scanner missing is an operational fact worth an audit receipt, not a silent early return.
-        status_label, error, stdout = "failed", "scanner_not_available", ""
-    except asyncio.CancelledError:
-        # A hunt wall-clock cancellation must not orphan an external scanner process.
-        if proc is not None and proc.returncode is None:
-            proc.kill()
-            await proc.wait()
-        raise
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": f"run_tool_fault:{type(exc).__name__}"}
     finished_at = datetime.now(timezone.utc)
 
-    lines = [ln for ln in stdout.splitlines() if ln.strip()][:200]
-    typed_output = agent_tools.parse_scanner_output(name, stdout)
+    status_label = str(worker_result.get("status") or "failed")
+    error = str(worker_result.get("error") or "").strip() or None
+    lines = [str(line) for line in list(worker_result.get("output_lines") or [])[:60]]
+    typed_output = worker_result.get("typed_output") if isinstance(worker_result.get("typed_output"), dict) else {}
+    settlement = worker_result.get("settlement") if isinstance(worker_result.get("settlement"), dict) else {}
+    settlement_mode = str(settlement.get("mode") or "unavailable")
+    wire_requests_actual = settlement.get("actual") if settlement_mode == "exact" else None
+    wire_requests_observed = max(0, int(settlement.get("observed_minimum") or 0))
     # The scanned URL can carry query values the model chose; keep only the path in the durable
     # receipt so a receipt never persists a query-string secret. (External-audit P2.)
     safe_url = url.split("?", 1)[0][:200]
@@ -30686,9 +30732,12 @@ async def _agent_tool_run_tool(
                         "lines": len(lines),
                         "error": error,
                         "hypothesis_id": hypothesis_id,
-                        "wire_request_accounting": "worst_case_reserved",
+                        "wire_request_accounting": settlement_mode,
                         "wire_requests_reserved": wire_request_reservation,
-                        "wire_requests_actual": None,
+                        "wire_requests_actual": wire_requests_actual,
+                        "wire_requests_observed_minimum": wire_requests_observed,
+                        "wire_request_counter_source": settlement.get("source"),
+                        "execution_plane": "worker_queue",
                         "typed_parser": typed_output.get("parser"),
                         "typed_record_count": typed_output.get("record_count"),
                     },
@@ -30699,19 +30748,31 @@ async def _agent_tool_run_tool(
         receipt_id = None
 
     if error and not lines:
-        return {"ok": False, "error": f"{name}:{error}", "receipt_id": receipt_id}
+        return {
+            "ok": False,
+            "error": f"{name}:{error}",
+            "receipt_id": receipt_id,
+            "wire_request_accounting": settlement_mode,
+            "wire_requests_reserved": wire_request_reservation,
+            "wire_requests_actual": wire_requests_actual,
+            "wire_requests_observed_minimum": wire_requests_observed,
+            "execution_plane": "worker_queue",
+        }
     safe_lines = [_redact_agent_text(ln)[:1200] for ln in lines[:60]]
     return {
         "ok": True,
         "tool": name,
         "url": url,
-        "line_count": len(lines),
+        "line_count": int(worker_result.get("line_count") or len(lines)),
         "output_lines": safe_lines,
         "receipt_id": receipt_id,
         "provenance": "tool",
-        "wire_request_accounting": "worst_case_reserved",
+        "wire_request_accounting": settlement_mode,
         "wire_requests_reserved": wire_request_reservation,
-        "wire_requests_actual": None,
+        "wire_requests_actual": wire_requests_actual,
+        "wire_requests_observed_minimum": wire_requests_observed,
+        "wire_request_counter_source": settlement.get("source"),
+        "execution_plane": "worker_queue",
         "typed_observations": typed_output.get("records") or [],
         "typed_parser_status": typed_output.get("parser_status"),
     }
@@ -31152,6 +31213,10 @@ def _agent_new_state(objective: str, messages: list[dict[str, Any]], included: l
         "empty_replies": 0,
         "tool_calls_made": 0,
         "request_units_used": 0,
+        "wire_requests_reserved": 0,
+        "wire_requests_actual_confirmed": 0,
+        "wire_requests_observed_minimum": 0,
+        "wire_request_unsettled_tools": 0,
         "active_actions_used": 0,
         "model_tokens_used": 0,
         "action_budget_limit": None,
@@ -31339,6 +31404,7 @@ async def _agent_apply_reply(
 
         state["tool_calls_made"] += 1
         state["request_units_used"] += request_units
+        state["wire_requests_reserved"] = int(state.get("wire_requests_reserved") or 0) + request_units
         state["active_actions_used"] += active_units
         remaining_seconds = (
             None if deadline_monotonic is None
@@ -31396,6 +31462,38 @@ async def _agent_apply_reply(
         except asyncio.TimeoutError:
             state["events"].append({"iteration": iteration, "budget_exhausted": "seconds"})
             return {"stop": True, "stop_reason": "budget_exhausted:seconds"}
+
+        if name == "http_request":
+            # A shaped request means the HTTP executor reached its single wire attempt; contract or
+            # approval failures occur before a request is shaped and safely settle at zero.
+            actual = 1 if isinstance(result.get("request"), dict) else 0
+            state["wire_requests_actual_confirmed"] = int(
+                state.get("wire_requests_actual_confirmed") or 0
+            ) + actual
+            state["wire_requests_observed_minimum"] = int(
+                state.get("wire_requests_observed_minimum") or 0
+            ) + actual
+            state["request_units_used"] = max(
+                0, int(state["request_units_used"]) - max(0, request_units - actual)
+            )
+        elif name == "run_tool":
+            accounting = str(result.get("wire_request_accounting") or "unavailable")
+            observed = max(0, int(result.get("wire_requests_observed_minimum") or 0))
+            state["wire_requests_observed_minimum"] = int(
+                state.get("wire_requests_observed_minimum") or 0
+            ) + observed
+            if accounting == "exact" and result.get("wire_requests_actual") is not None:
+                actual = max(0, min(request_units, int(result["wire_requests_actual"])))
+                state["wire_requests_actual_confirmed"] = int(
+                    state.get("wire_requests_actual_confirmed") or 0
+                ) + actual
+                state["request_units_used"] = max(
+                    0, int(state["request_units_used"]) - max(0, request_units - actual)
+                )
+            else:
+                state["wire_request_unsettled_tools"] = int(
+                    state.get("wire_request_unsettled_tools") or 0
+                ) + 1
         state["seen_calls"][signature] = agent_loop.format_tool_result(result, max_chars=160)
 
         if result.get("ok") and result.get("provenance") == "tool":
@@ -31415,7 +31513,19 @@ async def _agent_apply_reply(
             made_progress = True
 
         state["messages"].append({"role": "user", "content": f"[tool {name} -> {'ok' if result.get('ok') else 'error'}] " + agent_loop.format_tool_result(result)})
-        state["events"].append({"iteration": iteration, "tool": name, "ok": bool(result.get("ok")), "ref": result.get("ref")})
+        state["events"].append({
+            "iteration": iteration,
+            "tool": name,
+            "ok": bool(result.get("ok")),
+            "ref": result.get("ref"),
+            "wire_requests_reserved": request_units,
+            "wire_request_accounting": result.get("wire_request_accounting") if name == "run_tool" else "exact",
+            "wire_requests_actual": (
+                result.get("wire_requests_actual") if name == "run_tool"
+                else (1 if isinstance(result.get("request"), dict) else 0)
+            ),
+            "wire_requests_observed_minimum": result.get("wire_requests_observed_minimum") if name == "run_tool" else None,
+        })
 
     state["messages"] = _agent_trim_transcript(state["messages"])
     state["no_progress"] = 0 if made_progress else state["no_progress"] + 1
@@ -31469,6 +31579,10 @@ async def _agent_run_summary_receipt(
                         "objective": objective[:500],
                         "iterations": state["iterations"],
                         "tool_calls_made": state["tool_calls_made"],
+                        "wire_requests_reserved": int(state.get("wire_requests_reserved") or 0),
+                        "wire_requests_actual_confirmed": int(state.get("wire_requests_actual_confirmed") or 0),
+                        "wire_requests_observed_minimum": int(state.get("wire_requests_observed_minimum") or 0),
+                        "wire_request_unsettled_tools": int(state.get("wire_request_unsettled_tools") or 0),
                         "http_evidence": len(state["evidence_by_ref"]),
                         "stop_reason": state["stop_reason"],
                         "findings_suspected": sum(1 for g in gated_findings if g["tier"] == "suspected"),
@@ -31852,6 +31966,8 @@ async def _agent_finalize_and_persist(
         int(item.get("active_action_units_reserved") or 0) for item in auto_verified
     )
     auto_verify_seconds = sum(int(item.get("seconds_reserved") or 0) for item in auto_verified)
+    unsettled_tool_count = int(state.get("wire_request_unsettled_tools") or 0)
+    actual_confirmed = int(state.get("wire_requests_actual_confirmed") or 0)
     return {
         "target_id": str(target_uuid),
         "objective": objective,
@@ -31859,8 +31975,12 @@ async def _agent_finalize_and_persist(
         "stop_reason": state["stop_reason"],
         "tool_calls_made": state["tool_calls_made"],
         "request_units_used": int(state.get("request_units_used") or 0),
-        "wire_requests_reserved": int(state.get("request_units_used") or 0),
-        "request_accounting": "actual_for_http_request_worst_case_reserved_for_external_scanners",
+        "wire_requests_reserved": int(state.get("wire_requests_reserved") or 0),
+        "wire_requests_actual": None if unsettled_tool_count else actual_confirmed,
+        "wire_requests_actual_confirmed": actual_confirmed,
+        "wire_requests_observed_minimum": int(state.get("wire_requests_observed_minimum") or 0),
+        "wire_request_unsettled_tools": unsettled_tool_count,
+        "request_accounting": "exact" if not unsettled_tool_count else "mixed_conservative",
         "active_actions_used": int(state.get("active_actions_used") or 0),
         "model_tokens_used": int(state.get("model_tokens_used") or 0),
         "elapsed_seconds": int(state.get("elapsed_seconds") or 0),
