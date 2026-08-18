@@ -14,6 +14,8 @@ const uniformHealth = {
     fleet_uniform: true,
     scanner_version: 'abc1234',
   },
+  agent_tool_worker: { status: 'ready', worker_count: 1 },
+  device_worker: { enabled: false, status: 'disabled', worker_count: 0 },
 }
 
 test('matching component identities collapse to one version', () => {
@@ -86,4 +88,16 @@ test('worker reports without an expected denominator are visibly unverified', ()
   })
   assert.equal(identity.skew, true)
   assert.equal(formatBuildIdentity(identity), 'UI abc1234 · API abc1234 · Workers unverified (3 reported)')
+})
+
+test('specialized scanner workers participate in build mismatch reporting', () => {
+  const identity = deriveBuildIdentity('abc1234', {
+    ...uniformHealth,
+    agent_tool_worker: { status: 'not_ready', worker_count: 1 },
+  })
+  assert.equal(identity.skew, true)
+  assert.equal(
+    formatBuildIdentity(identity),
+    'UI abc1234 · API abc1234 · Workers mixed/stale (1 specialized)',
+  )
 })

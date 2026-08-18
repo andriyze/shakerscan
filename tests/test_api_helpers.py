@@ -743,6 +743,37 @@ def test_fleet_connection_bundle_prefers_bounded_file(tmp_path, monkeypatch):
     assert api_module._fleet_connection_bundle()["redis_url"] == "redis://10.77.0.1"
 
 
+def test_current_scanner_version_prefers_the_stamped_deployment_label(monkeypatch):
+    monkeypatch.setenv("SCANNER_VERSION", "abc1234-dirty")
+    monkeypatch.setenv("GIT_COMMIT", "abc1234-dirty")
+    monkeypatch.setattr(api_module, "_git_head_short", lambda *_args: "abc1234")
+    monkeypatch.setattr(api_module, "published_scanner_version", lambda fallback: fallback)
+
+    assert api_module.current_scanner_version() == "abc1234-dirty"
+
+
+def test_agent_tool_readiness_requires_current_build_and_complete_arsenal(monkeypatch):
+    now = datetime.now(timezone.utc).isoformat()
+
+    class _Redis:
+        def hgetall(self, key):
+            assert key == api_module.AGENT_TOOL_WORKER_BUILD_REGISTRY_KEY
+            return {b"agent": json.dumps({
+                "build_fingerprint": "expected",
+                "scanner_version": "build",
+                "reported_at": now,
+                "tools": sorted(api_module.agent_tools.RUN_TOOL_NAMES),
+            }).encode()}
+
+    monkeypatch.setattr(api_module, "get_redis", lambda: _Redis())
+    monkeypatch.setattr(api_module, "expected_build_fingerprint", lambda: "expected")
+    monkeypatch.setattr(api_module, "current_scanner_version", lambda: "build")
+
+    readiness = api_module._agent_tool_worker_readiness()
+    assert readiness["status"] == "ready"
+    assert readiness["capable_worker_count"] == 1
+
+
 def test_worker_build_current_is_fingerprint_authoritative_over_version_label():
     # The source fingerprint covers all detection/orchestration modules and is the
     # precise currency signal. The git version label is volatile (real commit, and

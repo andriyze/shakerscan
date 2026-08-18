@@ -609,6 +609,7 @@ RESULTS_DIR = Path(os.environ.get('RESULTS_DIR', '/results'))
 QUEUE_NAME = 'scan_jobs'
 DEVICE_QUEUE_NAME = os.environ.get("DEVICE_QUEUE_NAME", "device_scan_jobs")
 DEVICE_WORKER_BUILD_REGISTRY_KEY = "shakerscan:device_worker_build"
+AGENT_TOOL_WORKER_BUILD_REGISTRY_KEY = "shakerscan:agent_tool_worker_build"
 DEVICE_SCAN_MAX_DURATION_MINUTES = {
     "inventory": 120,
     "posture": 360,
@@ -10710,9 +10711,11 @@ def current_scanner_version() -> str:
     images retain the live-checkout commit fallback needed by bind-mounted source.
     """
     return published_scanner_version(
-        _git_head_short()
-        or os.environ.get("SCANNER_VERSION")
+        # scanner.sh stamps one deployment label across the images. Prefer it over the live
+        # workspace HEAD so a uniformly rebuilt dirty snapshot stays uniformly labelled.
+        os.environ.get("SCANNER_VERSION")
         or os.environ.get("GIT_COMMIT")
+        or _git_head_short()
         or "dev"
     )
 
@@ -11023,6 +11026,8 @@ async def health():
         "scanner_version": expected_version,
         "build_fingerprint": expected_fingerprint,
         "worker_build": worker_build,
+        "device_worker": _device_worker_readiness(),
+        "agent_tool_worker": _agent_tool_worker_readiness(),
         "fleet": fleet_feature_state(),
     }
 
@@ -18559,6 +18564,65 @@ def _device_worker_readiness() -> dict[str, Any]:
     }
 
 
+def _agent_tool_worker_readiness() -> dict[str, Any]:
+    """Return fresh, build-current isolated Deep Hunt scanner capacity."""
+    expected_fingerprint = expected_build_fingerprint()
+    expected_version = current_scanner_version()
+    now = datetime.now(timezone.utc)
+    required_tools = set(agent_tools.RUN_TOOL_NAMES)
+    reports: list[dict[str, Any]] = []
+    try:
+        raw_reports = get_redis().hgetall(AGENT_TOOL_WORKER_BUILD_REGISTRY_KEY) or {}
+    except Exception:
+        raw_reports = {}
+    for raw_host, raw_payload in raw_reports.items():
+        host = raw_host.decode("utf-8", "replace") if isinstance(raw_host, bytes) else str(raw_host)
+        payload = raw_payload.decode("utf-8", "replace") if isinstance(raw_payload, bytes) else raw_payload
+        try:
+            report = json.loads(payload) if isinstance(payload, str) else dict(payload)
+            reported_at = datetime.fromisoformat(str(report.get("reported_at") or "").replace("Z", "+00:00"))
+            if reported_at.tzinfo is None:
+                reported_at = reported_at.replace(tzinfo=timezone.utc)
+            age_seconds = (now - reported_at.astimezone(timezone.utc)).total_seconds()
+            if not (-_WORKER_BUILD_REPORT_CLOCK_SKEW_SECONDS <= age_seconds <= _WORKER_BUILD_REPORT_MAX_AGE_SECONDS):
+                continue
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        tools = sorted({str(item).strip().lower() for item in report.get("tools", []) if str(item).strip()})
+        build_current = worker_build_current(
+            reported_fingerprint=report.get("build_fingerprint"),
+            reported_version=report.get("scanner_version"),
+            expected_fingerprint=expected_fingerprint,
+            expected_version=expected_version,
+        )
+        reports.append({
+            "worker_id": host,
+            "build_current": build_current,
+            "tools": tools,
+            "reported_at": report.get("reported_at"),
+            "capable": build_current is True and required_tools.issubset(tools),
+        })
+    capable_count = sum(1 for report in reports if report["capable"])
+    if capable_count:
+        status, reason = "ready", None
+    elif reports and any(report["build_current"] is False for report in reports):
+        status, reason = "not_ready", "agent_tool_worker_build_stale"
+    elif reports:
+        status, reason = "not_ready", "agent_tool_worker_missing_tools_or_build_identity"
+    else:
+        status, reason = "not_ready", "no_fresh_agent_tool_worker"
+    return {
+        "status": status,
+        "reason": reason,
+        "queue_name": AGENT_TOOL_QUEUE_NAME,
+        "worker_count": len(reports),
+        "capable_worker_count": capable_count,
+        "required_tools": sorted(required_tools),
+        "workers": reports,
+        "expected_build_fingerprint": expected_fingerprint,
+    }
+
+
 @app.get("/devices/readiness")
 async def get_device_readiness():
     readiness = _device_worker_readiness()
@@ -18580,6 +18644,11 @@ async def get_device_readiness():
         "optional_sensor_capabilities": ["bluetooth", "ble", "passive_traffic"],
         "wireless_status": "planned_sensor_extension",
     }
+
+
+@app.get("/agent/tools/readiness")
+async def get_agent_tool_readiness():
+    return _agent_tool_worker_readiness()
 
 
 @app.get("/devices/{device_id}/capabilities")

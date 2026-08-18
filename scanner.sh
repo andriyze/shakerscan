@@ -1323,7 +1323,8 @@ get_build_version() {
     if git rev-parse --is-inside-work-tree > /dev/null 2>&1; then
         local commit
         commit=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-        if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
+        # Docker COPY and the source bind mounts include untracked runtime modules too.
+        if [ -n "$(git status --porcelain --untracked-files=normal 2>/dev/null)" ]; then
             commit="${commit}-dirty"
         fi
         echo "$commit"
@@ -1795,6 +1796,31 @@ verify_running_build_identity() {
     return 1
 }
 
+verify_specialized_worker_identity() {
+    local expect_agent="${1:-0}"
+    local expect_device="${2:-0}"
+    local health agent_status device_status elapsed=0
+    local timeout="${SHAKERSCAN_BUILD_IDENTITY_TIMEOUT:-90}"
+
+    [ "$expect_agent" -gt 0 ] || [ "$expect_device" -gt 0 ] || return 0
+    while [ "$elapsed" -lt "$timeout" ]; do
+        health="$(curl -fsS "$(api_probe_url)/health" 2>/dev/null || true)"
+        agent_status="$(printf '%s' "$health" | jq -r '.agent_tool_worker.status // empty' 2>/dev/null || true)"
+        device_status="$(printf '%s' "$health" | jq -r '.device_worker.status // empty' 2>/dev/null || true)"
+        if { [ "$expect_agent" -lt 1 ] || [ "$agent_status" = "ready" ]; } \
+            && { [ "$expect_device" -lt 1 ] || [ "$device_status" = "ready" ]; }; then
+            echo -e "${GREEN}Specialized worker identity verified${NC}"
+            return 0
+        fi
+        sleep 2
+        elapsed=$((elapsed + 2))
+    done
+    echo -e "${RED}Error: specialized worker build identity did not converge.${NC}" >&2
+    echo "  agent scanner: ${agent_status:-unavailable}" >&2
+    echo "  device worker: ${device_status:-not requested}" >&2
+    return 1
+}
+
 confirm_active_testing() {
     local scan_name="$1"
     local target="$2"
@@ -1940,6 +1966,9 @@ start_services() {
     wait_for_url "API" "$(api_probe_url)/health" 120
     wait_for_url "UI" "$(ui_probe_url)" 120
     verify_running_build_identity
+    verify_specialized_worker_identity \
+        "$(running_compose_service_count agent-tool-worker)" \
+        "$(running_device_worker_count)"
     if [ "$USE_PREBUILT" -eq 1 ]; then
         record_runtime_mode prebuilt
     fi
@@ -2703,6 +2732,18 @@ rebuild_images() {
         refresh_running_service_after_rebuild api "$existing_api"
         refresh_running_service_after_rebuild ui "$existing_ui"
         refresh_running_service_after_rebuild model-intake-signer "$existing_model_intake_signer"
+    fi
+
+    # A full rebuild is an atomic deployment operation when the main stack was already running.
+    # Do not report success while any primary execution component still serves the old image.
+    if [ -z "$SERVICES" ] \
+        && [ "${existing_api:-0}" -gt 0 ] \
+        && [ "${existing_ui:-0}" -gt 0 ] \
+        && [ "${existing_workers:-0}" -gt 0 ]; then
+        wait_for_url "API" "$(api_probe_url)/health" 120
+        wait_for_url "UI" "$(ui_probe_url)" 120
+        verify_running_build_identity
+        verify_specialized_worker_identity "$existing_agent_tool_worker" "$existing_device_workers"
     fi
 
     echo -e "${GREEN}Rebuild complete${NC}"

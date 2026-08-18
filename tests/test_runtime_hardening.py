@@ -570,6 +570,9 @@ api_base_url() { printf 'http://api'; }
 ui_base_url() { printf 'http://ui'; }
 wait_for_url() { :; }
 verify_running_build_identity() { :; }
+verify_specialized_worker_identity() { :; }
+running_compose_service_count() { printf '1\n'; }
+running_device_worker_count() { printf '0\n'; }
 start_services() {
 __START_SERVICES__
 }
@@ -991,6 +994,38 @@ def test_startup_fails_closed_on_mixed_release_images_and_ui_reports_baked_ident
     assert "readFileSync" in route
     assert "UI_BUILD_VERSION" in route
     assert "ui_version" in route
+
+
+def test_source_build_version_marks_untracked_runtime_files_dirty(tmp_path):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@shakerscan.local"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "ShakerScan Test"], cwd=tmp_path, check=True)
+    (tmp_path / "tracked.py").write_text("value = 1\n")
+    subprocess.run(["git", "add", "tracked.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "fixture"], cwd=tmp_path, check=True)
+
+    script = (ROOT / "scanner.sh").read_text()
+    body = script.split("get_build_version() {", 1)[1].split("\n}", 1)[0]
+    harness = "get_build_version() {" + body + "\n}\nget_build_version\n"
+    clean = subprocess.run(
+        ["bash", "-c", harness], cwd=tmp_path, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    assert clean and not clean.endswith("-dirty")
+
+    (tmp_path / "new_runtime_module.py").write_text("value = 2\n")
+    dirty = subprocess.run(
+        ["bash", "-c", harness], cwd=tmp_path, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    assert dirty == f"{clean}-dirty"
+
+
+def test_full_rebuild_verifies_the_recreated_running_stack_before_success():
+    script = (ROOT / "scanner.sh").read_text()
+    rebuild = script.split("rebuild_images() {", 1)[1].split("\n}\n\nrefresh_workers_after_rebuild", 1)[0]
+    assert rebuild.index("refresh_running_service_after_rebuild ui") < rebuild.index(
+        "verify_running_build_identity"
+    )
+    assert rebuild.index("verify_running_build_identity") < rebuild.index("Rebuild complete")
 
 
 def test_macos_build_network_can_follow_host_vpn_without_changing_runtime_networks():

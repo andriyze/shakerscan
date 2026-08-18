@@ -17,6 +17,8 @@ export type HealthBuildIdentity = {
     fleet_uniform?: boolean
     scanner_version?: string | null
   }
+  device_worker?: { enabled?: boolean; status?: string; worker_count?: number }
+  agent_tool_worker?: { status?: string; worker_count?: number }
 }
 
 export type BuildIdentity = {
@@ -51,13 +53,20 @@ export function deriveBuildIdentity(
 ): BuildIdentity {
   const apiVersion = typeof health?.scanner_version === 'string' ? health.scanner_version : undefined
   const workerBuild = health?.worker_build
-  const workerLabel = workerBuild?.available
+  const auxiliaryMismatchCount = (
+    (health?.agent_tool_worker?.status && health.agent_tool_worker.status !== 'ready' ? 1 : 0)
+    + (health?.device_worker?.enabled === true && health.device_worker.status !== 'ready' ? 1 : 0)
+  )
+  const normalWorkerLabel = workerBuild?.available
     ? workerBuild.fleet_uniform
       ? workerBuild.scanner_version || apiVersion
       : workerBuild.expected_count == null
         ? `unverified (${workerBuild.reported_count || 0} reported)`
         : `mixed/stale (${(workerBuild.stale_count || 0) + (workerBuild.pending_count || 0)})`
     : undefined
+  const workerLabel = auxiliaryMismatchCount > 0 && workerBuild?.fleet_uniform
+    ? `mixed/stale (${auxiliaryMismatchCount} specialized)`
+    : normalWorkerLabel
 
   // Raw docker compose intentionally bakes "dev" because Compose cannot discover Git. It is an
   // unknown UI label, not evidence of a stale image. scanner.sh and release installs bake a real
@@ -69,7 +78,9 @@ export function deriveBuildIdentity(
       && apiVersion
       && !buildVersionsMatch(bakedVersion, apiVersion),
   )
-  const workerSkew = Boolean(workerBuild?.available && !workerBuild.fleet_uniform)
+  const workerSkew = Boolean(
+    (workerBuild?.available && !workerBuild.fleet_uniform) || auxiliaryMismatchCount > 0,
+  )
   return {
     ui: displayedUiVersion,
     api: apiVersion,

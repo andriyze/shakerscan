@@ -2604,6 +2604,22 @@ def test_agent_scanner_tool_job_rebuilds_argv_and_publishes_settlement(monkeypat
     assert "secret" not in json.dumps(result)
 
 
+def test_agent_tool_worker_reports_the_complete_isolated_arsenal(monkeypatch):
+    monkeypatch.setattr(worker, "AGENT_TOOL_ONLY_WORKER", True)
+    monkeypatch.setattr(worker, "DEVICE_ONLY_WORKER", False)
+    monkeypatch.setattr(worker.shutil, "which", lambda command: f"/opt/tools/{command}")
+    monkeypatch.setattr(worker, "_worker_build_hostname", lambda: "agent-worker")
+    monkeypatch.setattr(worker, "_worker_build_fingerprint", lambda: "fingerprint")
+    monkeypatch.setattr(worker, "_published_scanner_version", lambda: "build")
+    monkeypatch.setattr(worker, "published_scanner_version", lambda value: value)
+
+    hostname, raw = worker._worker_build_report_payload()
+    report = json.loads(raw)
+    assert hostname == "agent-worker"
+    assert report["worker_kind"] == "agent_tool"
+    assert set(worker.agent_tools.RUN_TOOL_NAMES).issubset(report["tools"])
+
+
 def test_agent_scanner_tool_job_refuses_cross_host_without_spawning(monkeypatch):
     class _Redis:
         def __init__(self):

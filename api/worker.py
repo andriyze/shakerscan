@@ -13505,13 +13505,22 @@ def _worker_build_hostname() -> str:
 
 def _worker_build_report_payload() -> tuple[str, str]:
     hostname = _worker_build_hostname()
+    tool_commands = dict(DEFAULT_WORKER_TOOL_COMMANDS)
+    if AGENT_TOOL_ONLY_WORKER:
+        tool_commands.update({
+            name: str(spec.get("binary") or name)
+            for name, spec in agent_tools.SCANNER_ARG_TEMPLATES.items()
+        })
     payload = json.dumps({
         "build_fingerprint": _worker_build_fingerprint(),
         "scanner_version": published_scanner_version(_published_scanner_version()),
         "node_id": os.environ.get("SHAKERSCAN_NODE_ID") or os.environ.get("FLEET_NODE_ID") or None,
-        "worker_kind": "device" if DEVICE_ONLY_WORKER else "web_dast",
+        "worker_kind": (
+            "device" if DEVICE_ONLY_WORKER else "agent_tool" if AGENT_TOOL_ONLY_WORKER
+            else "web_dast"
+        ),
         "tools": sorted(
-            tool for tool, command in DEFAULT_WORKER_TOOL_COMMANDS.items() if shutil.which(command)
+            tool for tool, command in tool_commands.items() if shutil.which(command)
         ),
         "reported_at": utc_now_iso(),
     })
