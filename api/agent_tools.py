@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import ipaddress
+import os
 import re
 import urllib.parse
 from typing import Any, Optional
@@ -371,6 +372,26 @@ def build_scanner_argv(
         template["build"](execution_url, options or {}) + pin_args,
         int(template["default_timeout_ms"]),
     )
+
+
+def bind_scanner_runtime_paths(
+    name: str,
+    argv: list[str],
+    *,
+    scratch_dir: str | None,
+) -> list[str]:
+    """Bind worker-owned ephemeral paths after the fixed argv is constructed."""
+    bound = list(argv)
+    if name != "sqlmap":
+        return bound
+    if not scratch_dir or not os.path.isabs(scratch_dir):
+        raise AgentToolError("sqlmap requires an absolute worker-owned scratch directory")
+    try:
+        output_index = bound.index("--output-dir") + 1
+    except (ValueError, IndexError) as exc:
+        raise AgentToolError("sqlmap output directory contract is missing") from exc
+    bound[output_index] = scratch_dir
+    return bound
 
 
 def scanner_request_reservation(name: str, options: dict[str, Any] | None = None) -> int:

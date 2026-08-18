@@ -12937,6 +12937,7 @@ async def process_agent_scanner_tool_job(job_data: dict[str, Any]) -> None:
     error: str | None = None
     stdout = ""
     returncode: int | None = None
+    scratch_dir: str | None = None
     try:
         if not job_id:
             raise agent_tools.AgentToolError("scanner job requires an identity")
@@ -12954,6 +12955,11 @@ async def process_agent_scanner_tool_job(job_data: dict[str, Any]) -> None:
         )
         binary, argv, template_timeout_ms = agent_tools.build_scanner_argv(
             name, execution_target, options, pinned_address=pinned_address,
+        )
+        if name == "sqlmap":
+            scratch_dir = tempfile.mkdtemp(prefix=f"shakerscan-sqlmap-{job_id[:8]}-")
+        argv = agent_tools.bind_scanner_runtime_paths(
+            name, argv, scratch_dir=scratch_dir,
         )
         requested_timeout = int(job_data.get("timeout_ms") or template_timeout_ms)
         timeout_ms = max(1_000, min(template_timeout_ms, requested_timeout))
@@ -13012,9 +13018,14 @@ async def process_agent_scanner_tool_job(job_data: dict[str, Any]) -> None:
         if proc is not None and proc.returncode is None:
             _terminate_agent_tool_process_group(proc)
             await proc.wait()
+        if scratch_dir:
+            shutil.rmtree(scratch_dir, ignore_errors=True)
         raise
     except Exception as exc:  # noqa: BLE001 - publish a bounded operational result
         error = f"worker_fault:{type(exc).__name__}"
+
+    if scratch_dir:
+        shutil.rmtree(scratch_dir, ignore_errors=True)
 
     typed_output = agent_tools.parse_scanner_output(str(job_data.get("tool_name") or ""), stdout)
     settlement = agent_tools.scanner_request_settlement(

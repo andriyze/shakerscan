@@ -349,6 +349,18 @@ def test_run_tool_argv_templates_hardcode_flags():
     assert argv[argv.index("-tags") + 1] == "cve,exposure"
 
 
+def test_sqlmap_runtime_path_is_worker_bound_per_job():
+    _, argv, _ = at.build_scanner_argv("sqlmap", "http://t/item?id=1", {})
+    bound = at.bind_scanner_runtime_paths(
+        "sqlmap", argv, scratch_dir="/tmp/shakerscan-sqlmap-job-123",
+    )
+
+    assert bound[bound.index("--output-dir") + 1] == "/tmp/shakerscan-sqlmap-job-123"
+    assert argv[argv.index("--output-dir") + 1] == "/tmp/shakerscan-sqlmap"
+    with pytest.raises(at.AgentToolError):
+        at.bind_scanner_runtime_paths("sqlmap", argv, scratch_dir="relative")
+
+
 def test_run_tool_rejects_flag_injection():
     # a severity/tags value trying to inject flags is rejected -> safe defaults, no extra flags
     _, argv, _ = at.build_scanner_argv("nuclei", "http://t/x", {"severity": "-o /etc/passwd", "tags": "; rm -rf /"})
