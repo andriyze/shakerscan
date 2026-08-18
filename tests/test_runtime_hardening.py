@@ -472,6 +472,15 @@ def test_scanner_sh_local_build_marker_controls_default_runtime_mode():
     assert ignored.returncode == 0
 
 
+def test_source_reload_restarts_every_editable_execution_role():
+    script = (ROOT / "scanner.sh").read_text()
+    reload_body = script.split("reload_services() {", 1)[1].split("\n}", 1)[0]
+
+    assert "compose restart api worker" in reload_body
+    assert "compose --profile devices restart device-worker" in reload_body
+    assert "compose restart agent-tool-worker" in reload_body
+
+
 def test_runtime_mode_matrix_keeps_source_local_and_curl_prebuilt(tmp_path):
     script = (ROOT / "scanner.sh").read_text()
     source_tree_fn = script.split("has_local_source_tree() {", 1)[1].split("\n}", 1)[0]

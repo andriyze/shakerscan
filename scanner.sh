@@ -2028,6 +2028,13 @@ reload_services() {
         compose --profile devices restart device-worker || return 1
     fi
 
+    # Agent scanner workers mount the same editable API/scanner trees. Restart
+    # this isolated lane too, otherwise a reload can leave Deep Hunt executing
+    # old broker or accounting code while the API advertises the new contract.
+    if [ "$(running_compose_service_count agent-tool-worker)" -gt 0 ]; then
+        compose restart agent-tool-worker || return 1
+    fi
+
     # Verify host<->container parity for the single-file-mounted modules.
     local host_sha cont_sha drift=0 worker
     worker=$(running_scan_worker_containers | head -n1)
