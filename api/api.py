@@ -20296,29 +20296,36 @@ async def _verify_device_firmware_candidate(
             transport = str(locus.get("transport") or "").lower()
             port = int(locus.get("port") or 0)
             service = await conn.fetchrow(
-                """SELECT service_name, product, version, cpe, transport, port, state
+                """SELECT service_name, product, version, cpe, transport, port, state, metadata_json
                    FROM device_services
                    WHERE device_target_id=$1 AND transport=$2 AND port=$3""",
                 device_target_id, transport, port,
             )
             if not service or str(service["state"] or "") != "open":
                 raise HTTPException(status_code=409, detail="The candidate's exact service is no longer confirmed open")
+            service_identity = device_advisories.identity_evidence_tier({
+                **dict(service),
+                "metadata_json": _decode_json_value(service["metadata_json"]) or {},
+            })
             matches = device_advisories.match_advisories(
                 snapshot.get("advisories") or [],
                 cpe=str(service["cpe"] or "") or None,
                 product=str(service["product"] or service["service_name"] or "") or None,
                 version=str(service["version"] or "") or None,
+                identity_evidence_tier=service_identity["tier"],
                 limit=50,
             )
             advisory_id = str(locus.get("advisory_id") or "")
             match = next((item for item in matches if str(item.get("advisory_id") or "") == advisory_id), None)
             evidence = {
                 "exact_product_identity": bool(match and match.get("match_type") == "exact_cpe_version_range"),
+                "authoritative_product_identity": service_identity["authoritative"],
                 "version_in_affected_range": bool(match and match.get("version_evaluation") == "affected"),
                 "advisory_snapshot_verified": True,
                 "version_outside_affected_range": match is None,
                 "heuristic_product_match": bool(match and match.get("match_type") == "heuristic_product"),
-                "reexecuted_at_handoff": True,
+                # Re-reading a persisted service fingerprint is not a live device reproduction.
+                "reexecuted_at_handoff": False,
             }
             proof = family_proof.build_proof_contract_result(
                 "device_firmware_advisory",
@@ -20336,8 +20343,9 @@ async def _verify_device_firmware_candidate(
                 controls=[{
                     "snapshot_sha256": snapshot.get("snapshot_sha256"),
                     "runtime_egress": False,
+                    "identity_evidence_tier": service_identity["tier"],
                 }],
-                proof_basis="hash_pinned_offline_advisory_match",
+                proof_basis="stored_identity_plus_hash_pinned_offline_advisory",
             )
             promotable, gate_reason = family_proof.proof_contract_promotion_gate(proof)
             status = "verified" if promotable else "refuted" if proof.get("verdict") == "refuted" else "inconclusive"
@@ -20401,7 +20409,7 @@ async def _verify_device_firmware_candidate(
                        last_verification_verdict='verified', updated_at=NOW()
                    RETURNING id""",
                 device_target_id, fingerprint, title,
-                f"The exact observed CPE and version matched {advisory_id} in the hash-pinned offline advisory snapshot.",
+                f"The authoritatively observed software identity and version matched {advisory_id} in the hash-pinned offline advisory snapshot.",
                 severity, str((match or {}).get("reference") or f"device://{device_target_id}"),
                 json.dumps({
                     "candidate_id": str(candidate_id),

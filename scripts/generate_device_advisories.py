@@ -552,6 +552,8 @@ def self_check(output_path: str, digest: str) -> None:
                 query_cpe = ":".join(components)
             matches = device_advisories.match_advisories(
                 [record], cpe=query_cpe, product=None, version=version,
+                # The generator validates advisory semantics, not network identity provenance.
+                identity_evidence_tier="signed_firmware_manifest",
             )
             if matches and matches[0].get("promotable"):
                 promoted = True

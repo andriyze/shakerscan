@@ -89,7 +89,10 @@ FAMILY_CONTRACTS: dict[str, dict[str, Any]] = {
     },
     "device_firmware_advisory": {
         "cwe": "CWE-1104",
-        "requires": ["exact_product_identity", "version_in_affected_range", "advisory_snapshot_verified"],
+        "requires": [
+            "exact_product_identity", "authoritative_product_identity",
+            "version_in_affected_range", "advisory_snapshot_verified",
+        ],
         "refute_if": ["version_outside_affected_range", "heuristic_product_match"],
     },
     "device_ssh_posture": {

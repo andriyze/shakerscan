@@ -33,7 +33,7 @@ def _probe_versions(record):
     return candidates
 
 
-def test_cpe_version_range_match_is_promotable_advisory_evidence():
+def test_cpe_version_range_match_requires_authoritative_identity_to_promote():
     matches = device_advisories.match_advisories([
         {
             "cve": "CVE-2026-0001",
@@ -45,9 +45,22 @@ def test_cpe_version_range_match_is_promotable_advisory_evidence():
     ], cpe="cpe:2.3:o:acme:tv_firmware:2.3.1:*:*:*:*:*:*:*", product=None, version="2.3.1")
 
     assert len(matches) == 1
-    assert matches[0]["promotable"] is True
-    assert matches[0]["proof_basis"] == "advisory_matched"
+    assert matches[0]["advisory_match_complete"] is True
+    assert matches[0]["promotable"] is False
+    assert matches[0]["proof_basis"] == "advisory_matched_fingerprint_only"
     assert matches[0]["match_type"] == "exact_cpe_version_range"
+
+    authoritative = device_advisories.match_advisories([
+        {
+            "cve": "CVE-2026-0001",
+            "cpe": "cpe:2.3:o:acme:tv_firmware:*:*:*:*:*:*:*:*",
+            "version_start_including": "1.0.0",
+            "version_end_excluding": "2.4.0",
+        }
+    ], cpe="cpe:2.3:o:acme:tv_firmware:2.3.1:*:*:*:*:*:*:*", product=None,
+       version="2.3.1", identity_evidence_tier="authenticated_firmware_inventory")
+    assert authoritative[0]["promotable"] is True
+    assert authoritative[0]["authoritative_product_identity"] is True
 
 
 def test_out_of_range_or_heuristic_product_match_cannot_promote():
@@ -97,6 +110,7 @@ def test_escaped_cpe_components_match_but_identity_wildcards_do_not_promote():
         cpe=r"cpe:2.3:a:acme:smart\:tv:2.0:*:*:*:*:*:*:*",
         product=None,
         version="2.0",
+        identity_evidence_tier="signed_firmware_manifest",
     )
     assert matches[0]["promotable"] is True
 
@@ -117,7 +131,8 @@ def test_cpe_22_and_exact_version_from_advisory_cpe_are_supported():
     matches = device_advisories.match_advisories([{
         "cve": "CVE-2026-0006",
         "cpe": "cpe:/a:acme:smart%3Atv:2.0",
-    }], cpe="cpe:/a:acme:smart%3Atv:2.0", product=None, version=None)
+    }], cpe="cpe:/a:acme:smart%3Atv:2.0", product=None, version=None,
+       identity_evidence_tier="vendor_attested_inventory")
     assert matches[0]["promotable"] is True
     assert matches[0]["version_range"] == {"version": "2.0"}
 
@@ -188,11 +203,25 @@ def test_every_bundled_advisory_is_version_bounded_and_promotable():
                 components[5] = version
             matches = device_advisories.match_advisories(
                 [record], cpe=":".join(components), product=None, version=version,
+                identity_evidence_tier="authenticated_firmware_inventory",
             )
             if matches and matches[0]["promotable"]:
                 promoted = True
                 break
         assert promoted, f"{record.get('cve')} never promotes for an in-range version"
+
+
+def test_identity_evidence_tier_never_upgrades_unrecognized_or_banner_metadata():
+    assert device_advisories.identity_evidence_tier({
+        "cpe": "cpe:2.3:a:acme:tv:1.0:*:*:*:*:*:*:*",
+        "confidence": "confirmed",
+    }) == {"tier": "network_service_fingerprint", "authoritative": False}
+    assert device_advisories.identity_evidence_tier({
+        "metadata_json": {"identity_evidence_tier": "made_up_super_confident"},
+    })["authoritative"] is False
+    assert device_advisories.identity_evidence_tier({
+        "identity_evidence_tier": "authenticated_package_inventory",
+    }) == {"tier": "authenticated_package_inventory", "authoritative": True}
 
 
 def test_generator_verify_mode_accepts_the_bundled_snapshot():

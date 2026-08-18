@@ -176,7 +176,9 @@ def test_device_agent_uses_bundled_intel_when_env_is_unset(monkeypatch):
     assert result["status"] == "available"
     assert result["snapshot_sha256"] == device_agent.BUNDLED_SNAPSHOT_SHA256
     assert result["candidates"][0]["advisory_id"] == "CVE-2017-17562"
-    assert result["candidates"][0]["promotable"] is True
+    assert result["candidates"][0]["advisory_match_complete"] is True
+    assert result["candidates"][0]["promotable"] is False
+    assert result["candidates"][0]["identity_evidence_tier"] == "network_service_fingerprint"
 
 
 def test_protocol_playbook_never_infers_unknown_service_from_port_alone():

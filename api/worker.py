@@ -4508,6 +4508,7 @@ async def correlate_device_advisory_lifecycle(
             version = str(service.get("version") or "").strip()
             if not cpe and not product:
                 continue
+            identity_provenance = device_advisories.identity_evidence_tier(service)
             try:
                 evaluated_loci.add((
                     str(service.get("transport") or "tcp").lower(),
@@ -4518,6 +4519,7 @@ async def correlate_device_advisory_lifecycle(
             summary["services_evaluated"] += 1
             matches = device_advisories.match_advisories(
                 records, cpe=cpe or None, product=product or None, version=version or None,
+                identity_evidence_tier=identity_provenance["tier"],
                 limit=50,
             )
             for match in matches:
@@ -4550,6 +4552,8 @@ async def correlate_device_advisory_lifecycle(
                         "transport": service.get("transport"), "port": service.get("port"),
                         "service_name": service.get("service_name"), "product": product,
                         "version": version, "cpe": cpe,
+                        "identity_evidence_tier": identity_provenance["tier"],
+                        "authoritative_product_identity": identity_provenance["authoritative"],
                     },
                 }
                 candidate_record = await investigation_candidates.upsert_candidate(
@@ -4576,11 +4580,14 @@ async def correlate_device_advisory_lifecycle(
                     "device_firmware_advisory",
                     {
                         "exact_product_identity": bool(cpe and match.get("match_type") == "exact_cpe_version_range"),
+                        "authoritative_product_identity": identity_provenance["authoritative"],
                         "version_in_affected_range": match.get("version_evaluation") == "affected",
                         "advisory_snapshot_verified": True,
                         "version_outside_affected_range": False,
                         "heuristic_product_match": match.get("match_type") == "heuristic_product",
-                        "reexecuted_at_handoff": True,
+                        # The current scan is fresh, but only authoritative inventory can satisfy
+                        # the product-identity reproduction required for a verified advisory.
+                        "reexecuted_at_handoff": identity_provenance["authoritative"],
                     },
                     contract_id="device.firmware_advisory",
                     contract_version="1.0.0",
@@ -4597,8 +4604,9 @@ async def correlate_device_advisory_lifecycle(
                     controls=[{
                         "snapshot_sha256": snapshot.get("snapshot_sha256"),
                         "runtime_egress": False,
+                        "identity_evidence_tier": identity_provenance["tier"],
                     }],
-                    proof_basis="hash_pinned_offline_advisory_match",
+                    proof_basis="authoritative_inventory_plus_hash_pinned_offline_advisory",
                 )
                 promotable, _gate_reason = family_proof.proof_contract_promotion_gate(proof)
                 if not promotable:
@@ -4613,7 +4621,7 @@ async def correlate_device_advisory_lifecycle(
                     "title": title,
                     "severity": severity,
                     "description": (
-                        f"The exact observed CPE and version matched the affected range in the "
+                        f"The authoritatively observed software identity and version matched the affected range in the "
                         f"hash-pinned offline advisory snapshot for {advisory_id}."
                     ),
                     "recommendation": "Apply the vendor-fixed firmware or isolate the affected service until remediation.",

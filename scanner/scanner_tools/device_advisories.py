@@ -20,6 +20,38 @@ BUNDLED_SNAPSHOT_PATH = os.path.join(
 )
 BUNDLED_SNAPSHOT_SHA256 = "d8d614b63f39cce836938ecd3fe5e1e134efac21b7759a928eeeb7d1d7b18b13"
 
+# A network banner, Nmap guess, or unauthenticated protocol response can produce a
+# syntactically exact CPE without proving which firmware is installed. Only authenticated or
+# cryptographically attested inventory may turn an advisory match into a verified finding.
+AUTHORITATIVE_IDENTITY_EVIDENCE_TIERS = frozenset({
+    "authenticated_firmware_inventory",
+    "authenticated_package_inventory",
+    "signed_firmware_manifest",
+    "vendor_attested_inventory",
+})
+FINGERPRINT_IDENTITY_EVIDENCE_TIER = "network_service_fingerprint"
+
+
+def identity_evidence_tier(service: Any) -> dict[str, Any]:
+    """Classify identity provenance without upgrading fingerprints by inference."""
+    record = service if isinstance(service, dict) else {}
+    metadata = record.get("metadata_json")
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            metadata = {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    raw = record.get("identity_evidence_tier") or metadata.get("identity_evidence_tier")
+    tier = str(raw or FINGERPRINT_IDENTITY_EVIDENCE_TIER).strip().lower()
+    if tier not in AUTHORITATIVE_IDENTITY_EVIDENCE_TIERS:
+        tier = FINGERPRINT_IDENTITY_EVIDENCE_TIER
+    return {
+        "tier": tier,
+        "authoritative": tier in AUTHORITATIVE_IDENTITY_EVIDENCE_TIERS,
+    }
+
 
 def load_verified_snapshot(
     path: Any, expected_sha256: Any, *, max_bytes: int = MAX_SNAPSHOT_BYTES,
@@ -198,7 +230,7 @@ def _concrete_identity_matches(
 
 def match_advisories(
     records: Any, *, cpe: str | None, product: str | None, version: str | None,
-    limit: int = 50,
+    identity_evidence_tier: str | None = None, limit: int = 50,
 ) -> list[dict[str, Any]]:
     query_cpe = str(cpe or "").strip()
     query_identity = _cpe_identity(query_cpe)
@@ -246,6 +278,10 @@ def match_advisories(
         exact_and_bounded = (
             exact_identity and affected is True and bool(query_version) and has_version_constraint
         )
+        authoritative_identity = (
+            str(identity_evidence_tier or "").strip().lower()
+            in AUTHORITATIVE_IDENTITY_EVIDENCE_TIERS
+        )
         matches.append({
             "advisory_id": str(raw.get("advisory_id") or raw.get("cve") or "")[:100],
             "title": str(raw.get("title") or "")[:500],
@@ -256,8 +292,18 @@ def match_advisories(
             ),
             "version_evaluation": "affected" if affected is True else "unknown",
             "confidence": "high" if exact_and_bounded else ("medium" if exact_identity else "low"),
-            "proof_basis": "advisory_matched" if exact_and_bounded else "signal_only",
-            "promotable": exact_and_bounded,
+            "proof_basis": (
+                "authoritative_inventory_advisory_match"
+                if exact_and_bounded and authoritative_identity
+                else "advisory_matched_fingerprint_only" if exact_and_bounded
+                else "signal_only"
+            ),
+            "advisory_match_complete": exact_and_bounded,
+            "identity_evidence_tier": str(
+                identity_evidence_tier or FINGERPRINT_IDENTITY_EVIDENCE_TIER
+            ).strip().lower(),
+            "authoritative_product_identity": authoritative_identity,
+            "promotable": exact_and_bounded and authoritative_identity,
             "version_range": {
                     key: evaluation_record.get(key) for key in (
                     "version", "version_start_including", "version_start_excluding",

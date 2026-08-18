@@ -38,6 +38,15 @@ def test_missing_reexecution_is_supported_not_verified():
     assert fp.evaluate_family_proof("bola", ev)["verdict"] == "supported_unverified"
 
 
+def test_device_advisory_fingerprint_is_never_authoritative_identity():
+    evidence = _full("device_firmware_advisory")
+    evidence["authoritative_product_identity"] = False
+    result = fp.evaluate_family_proof("device_firmware_advisory", evidence)
+    assert result["verdict"] == "supported_unverified"
+    assert "authoritative_product_identity" in result["missing"]
+    assert result["promotable"] is False
+
+
 def test_refuting_predicate_forces_refuted():
     ev = {**_full("bola"), "cross_principal_denied": True}
     assert fp.evaluate_family_proof("bola", ev)["verdict"] == "refuted"
