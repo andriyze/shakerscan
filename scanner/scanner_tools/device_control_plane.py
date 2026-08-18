@@ -484,13 +484,16 @@ async def _rtsp_exchange(*, connect_address: str, port: int, requests: list[byte
             asyncio.open_connection(connect_address, int(port)), timeout=SOAP_TIMEOUT_SECONDS,
         )
         responses: list[bytes] = []
+        pending = b""
         for payload in requests:
             writer.write(payload)
             await asyncio.wait_for(writer.drain(), timeout=SOAP_TIMEOUT_SECONDS)
-            data = await asyncio.wait_for(
-                reader.read(MAX_RTSP_RESPONSE_BYTES + 1), timeout=SOAP_TIMEOUT_SECONDS,
-            )
-            responses.append(bytes(data)[:MAX_RTSP_RESPONSE_BYTES])
+            data, pending = await _read_rtsp_response(reader, pending)
+            expected_cseq = re.search(br"(?im)^CSeq:\s*(\d+)\s*$", payload)
+            actual_cseq = str(parse_rtsp_response(data).get("headers", {}).get("cseq") or "")
+            if expected_cseq and actual_cseq != expected_cseq.group(1).decode("ascii"):
+                raise ValueError("RTSP response CSeq did not match the request")
+            responses.append(data)
         return responses
     finally:
         if writer is not None:
@@ -499,6 +502,38 @@ async def _rtsp_exchange(*, connect_address: str, port: int, requests: list[byte
                 await writer.wait_closed()
             except Exception:
                 pass
+
+
+async def _read_rtsp_response(
+    reader: asyncio.StreamReader,
+    pending: bytes = b"",
+) -> tuple[bytes, bytes]:
+    """Read one framed RTSP response and retain bytes belonging to the next one."""
+    data = bytearray(pending)
+    header_end = -1
+    content_length = 0
+    total_length: int | None = None
+    while True:
+        if header_end < 0:
+            header_end = data.find(b"\r\n\r\n")
+            if header_end >= 0:
+                header_length = header_end + 4
+                match = re.search(br"(?im)^Content-Length:\s*(\d+)\s*$", bytes(data[:header_end]))
+                content_length = int(match.group(1)) if match else 0
+                total_length = header_length + content_length
+                if total_length > MAX_RTSP_RESPONSE_BYTES:
+                    raise ValueError("RTSP response exceeded the bounded size limit")
+        if total_length is not None and len(data) >= total_length:
+            return bytes(data[:total_length]), bytes(data[total_length:])
+        if len(data) >= MAX_RTSP_RESPONSE_BYTES:
+            raise ValueError("RTSP response headers were incomplete or oversized")
+        chunk = await asyncio.wait_for(
+            reader.read(min(4096, MAX_RTSP_RESPONSE_BYTES + 1 - len(data))),
+            timeout=SOAP_TIMEOUT_SECONDS,
+        )
+        if not chunk:
+            raise EOFError("RTSP response ended before the framed message was complete")
+        data.extend(chunk)
 
 
 def _base_observation(unit: dict[str, Any], platform: str, title: str) -> dict[str, Any]:

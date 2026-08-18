@@ -376,6 +376,60 @@ def test_rtsp_and_onvif_surface_flows_through_application_discovery(monkeypatch)
     assert result["summary"]["requests_executed"] == 2 + len(soap_calls)
 
 
+def test_rtsp_exchange_reads_fragmented_headers_and_sdp_body(monkeypatch):
+    class FragmentedReader:
+        def __init__(self, chunks):
+            self.chunks = list(chunks)
+
+        async def read(self, _size):
+            return self.chunks.pop(0) if self.chunks else b""
+
+    class Writer:
+        def __init__(self):
+            self.payloads = []
+
+        def write(self, payload):
+            self.payloads.append(payload)
+
+        async def drain(self):
+            return None
+
+        def close(self):
+            return None
+
+        async def wait_closed(self):
+            return None
+
+    sdp = b"v=0\r\ns=Lobby\r\nm=video 0 RTP/AVP 96\r\n"
+    chunks = [
+        b"RTSP/1.0 200 OK\r\nCS",
+        b"eq: 1\r\nPublic: OPTIONS, DESCRIBE\r\n\r\n",
+        b"RTSP/1.0 200 OK\r\nCSeq: 2\r\nContent-Length: ",
+        str(len(sdp)).encode("ascii") + b"\r\n\r\nv=0\r\n",
+        b"s=Lobby\r\nm=video 0 RTP/AVP 96\r\n",
+    ]
+    reader = FragmentedReader(chunks)
+    writer = Writer()
+
+    async def open_connection(*_args, **_kwargs):
+        return reader, writer
+
+    monkeypatch.setattr(device_control_plane.asyncio, "open_connection", open_connection)
+    responses = asyncio.run(device_control_plane._rtsp_exchange(
+        connect_address="192.0.2.10",
+        port=554,
+        requests=[
+            device_control_plane.build_rtsp_options_request(),
+            device_control_plane.build_rtsp_describe_request("camera.example.test", 554),
+        ],
+    ))
+
+    assert len(responses) == 2
+    parsed = device_control_plane.parse_rtsp_response(responses[1])
+    assert parsed["body"] == sdp
+    assert device_control_plane.classify_rtsp_describe(parsed)["outcome"] == "media_described"
+
+
 def test_observe_only_and_exhausted_budget_run_no_control_plane_probes(monkeypatch):
     async def fail_request(**_kwargs):
         raise AssertionError("no control-plane request may be sent")
