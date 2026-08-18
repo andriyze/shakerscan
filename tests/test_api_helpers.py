@@ -15984,6 +15984,106 @@ def test_mass_assignment_verification_requires_evidenced_post_method():
     assert (route, method, metadata) == ("/api/users", "POST", {"create_based": True})
 
 
+def test_device_control_verifier_restores_query_state_before_promotion(monkeypatch):
+    device_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    candidate_id = uuid.uuid4()
+    collection_id = uuid.uuid4()
+    payload = {"fixture": "owned-tv-control"}
+    raw_payload = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    digest = hashlib.sha256(raw_payload.encode()).hexdigest()
+    request = {
+        "id": "power-on", "method": "POST",
+        "url": "http://owned-tv.test:7345/api/power?state=on",
+        "headers": {}, "body": b"",
+    }
+
+    class _Transaction:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_args): return False
+
+    class _Conn:
+        def __init__(self):
+            self.fetchval_calls = 0
+            self.executed = []
+
+        async def fetch(self, _query, *_args):
+            return [{
+                "id": collection_id, "name": "TV controls",
+                "document_sha256": digest, "encrypted_payload": "encrypted",
+            }]
+
+        def transaction(self): return _Transaction()
+
+        async def fetchval(self, _query, *_args):
+            self.fetchval_calls += 1
+            return uuid.uuid4()
+
+        async def execute(self, query, *args):
+            self.executed.append((query, args))
+            return "OK"
+
+    class _Pool:
+        def __init__(self): self.conn = _Conn()
+        def acquire(self): return self
+        async def __aenter__(self): return self.conn
+        async def __aexit__(self, *_args): return False
+
+    async def _origins(_device_id):
+        return [{
+            "scheme": "http", "port": 7345, "hostname": "owned-tv.test",
+            "connect_address": "192.0.2.10", "origin": "http://owned-tv.test:7345",
+        }]
+
+    reads = iter([
+        {"status": 200, "body": b'{"power":"off","counter":1}'},
+        {"status": 200, "body": b'{"power":"on","counter":2}'},
+        {"status": 200, "body": b'{"power":"off","counter":3}'},
+    ])
+    control_paths = []
+
+    async def _read(**_kwargs): return next(reads)
+
+    async def _control(**kwargs):
+        control_paths.append(kwargs["path"])
+        return {"status": 200, "body": b'{"accepted":true}'}
+
+    pool = _Pool()
+    monkeypatch.setattr(api_module, "db_pool", pool)
+    monkeypatch.setattr(api_module, "decrypt_secret", lambda _value: raw_payload)
+    monkeypatch.setattr(api_module, "_resolve_imported_device_requests", lambda _payload: [request])
+    monkeypatch.setattr(api_module, "_device_confirmed_web_origins", _origins)
+    monkeypatch.setattr(api_module, "_device_request_pinned_http", _read)
+    monkeypatch.setattr(api_module, "_device_request_pinned_control_http", _control)
+    monkeypatch.setattr(api_module, "expected_build_fingerprint", lambda: "test-build")
+
+    state = api_module.device_agent.seed_state(
+        objective="verify owned TV power authorization",
+        safety_profile="authenticated_active", max_turns=4,
+    )
+    state.update({
+        "confirm_request_replay": True,
+        "allow_state_changing_requests": True,
+        "device_request_collections": [{
+            "collection_id": str(collection_id), "state_changing_request_count": 1,
+        }],
+    })
+    result = asyncio.run(api_module._verify_device_control_authorization_candidate(
+        run_id=run_id, device_target_id=device_id, candidate_id=candidate_id,
+        state=state,
+        locus={
+            "collection_id": str(collection_id), "request_id": "power-on",
+            "state_path": "/api/status", "state_json_pointer": "/power",
+            "cleanup_adapter": "restore_query_parameter", "mutation_field": "state",
+        },
+    ))
+
+    assert result["verified"] is True
+    assert result["cleanup_outcome"] == "cleanup_restored_exact_pre_state"
+    assert control_paths == ["/api/power?state=on", "/api/power?state=off"]
+    assert pool.conn.fetchval_calls == 2
+
+
 def test_probe_create_surface_cleans_trackable_artifact_with_same_cookie():
     import httpx
 

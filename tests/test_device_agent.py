@@ -290,6 +290,12 @@ def test_control_authorization_preconditions_list_exactly_what_is_missing():
     ready["allow_state_changing_requests"] = True
     exact_locus = {"collection_id": "c1", "request_id": "req1", "cleanup_request_id": "req2"}
     assert device_agent.control_authorization_precondition_gaps(ready, exact_locus) == []
+    derived_locus = {
+        "collection_id": "c1", "request_id": "req1",
+        "cleanup_adapter": "restore_query_parameter",
+        "mutation_field": "state", "state_json_pointer": "/power",
+    }
+    assert device_agent.control_authorization_precondition_gaps(ready, derived_locus) == []
     assert device_agent.control_authorization_precondition_gaps(
         ready, {"collection_id": "other", "request_id": "req1", "cleanup_request_id": "req2"}
     ) == [
@@ -332,6 +338,47 @@ def test_control_state_transition_requires_an_observable_effect_and_exact_restor
 
     restored = device_agent.control_state_transition(before, unchanged)
     assert restored["comparable"] is True and restored["changed"] is False
+
+    volatile_before = {"status": 200, "body": b'{"power":"off","counter":1}'}
+    volatile_after = {"status": 200, "body": b'{"power":"off","counter":2}'}
+    selected = device_agent.control_state_transition(
+        volatile_before, volatile_after, json_pointer="/power",
+    )
+    assert selected["comparable"] is True and selected["changed"] is False
+
+
+def test_control_cleanup_adapters_restore_only_one_bound_mutation_field():
+    query = device_agent.derive_control_cleanup_request({
+        "method": "POST", "url": "https://tv.test/api/power?state=on&source=app",
+        "headers": {}, "body": b"",
+    }, {
+        "cleanup_adapter": "restore_query_parameter", "mutation_field": "state",
+    }, "off")
+    assert query["url"] == "https://tv.test/api/power?state=off&source=app"
+
+    json_request = device_agent.derive_control_cleanup_request({
+        "method": "PUT", "url": "https://tv.test/api/power",
+        "headers": {"Content-Type": "application/json"},
+        "body": b'{"power":"on","source":"app"}',
+    }, {
+        "cleanup_adapter": "restore_json_field", "mutation_field": "power",
+    }, "off")
+    assert json.loads(json_request["body"]) == {"power": "off", "source": "app"}
+
+    form = device_agent.derive_control_cleanup_request({
+        "method": "POST", "url": "/api/power", "headers": {},
+        "body": b"enabled=true&source=app",
+    }, {
+        "cleanup_adapter": "restore_form_field", "mutation_field": "enabled",
+    }, False)
+    assert form["body"] == b"enabled=false&source=app"
+
+    with pytest.raises(ValueError, match="must_exist_once"):
+        device_agent.derive_control_cleanup_request({
+            "method": "POST", "url": "/api/power?state=on&state=off", "body": b"",
+        }, {
+            "cleanup_adapter": "restore_query_parameter", "mutation_field": "state",
+        }, "off")
 
     no_effect_proof = family_proof.evaluate_family_proof("device_control_authorization", {
         "exact_bound_request": True,

@@ -21150,50 +21150,24 @@ async def _verify_device_control_authorization_candidate(
             gaps=["state_observation_path_invalid"],
         )
     cleanup_request_id = str(locus.get("cleanup_request_id") or "")
-    reverse = next((
-        item for item in collection_requests
-        if str(item.get("id") or "") == cleanup_request_id
-    ), None)
-    strict_reverse = _device_paired_reverse_request(
-        [imported, reverse] if isinstance(reverse, dict) else [imported],
-        str(imported.get("id") or ""),
-    )
-    if not isinstance(reverse, dict) or strict_reverse is not reverse:
-        return await _device_control_authorization_blocked(
-            candidate_id=candidate_id, device_target_id=device_target_id, run_id=run_id,
-            gaps=["exact_strict_inverse_cleanup_request_not_bound"],
+    cleanup_adapter = str(
+        locus.get("cleanup_adapter") or "explicit_bound_request"
+    ).lower()
+    reverse: dict[str, Any] | None = None
+    if cleanup_adapter == "explicit_bound_request":
+        reverse = next((
+            item for item in collection_requests
+            if str(item.get("id") or "") == cleanup_request_id
+        ), None)
+        strict_reverse = _device_paired_reverse_request(
+            [imported, reverse] if isinstance(reverse, dict) else [imported],
+            str(imported.get("id") or ""),
         )
-    reverse_method = str(reverse.get("method") or "").upper()
-    reverse_url = str(reverse.get("url") or "")
-    reverse_parsed = urllib.parse.urlsplit(reverse_url)
-    if reverse_parsed.scheme or reverse_parsed.netloc:
-        try:
-            reverse_port = int(reverse_parsed.port or (443 if reverse_parsed.scheme == "https" else 80))
-        except ValueError:
-            reverse_port = 0
-        reverse_host = str(reverse_parsed.hostname or "").rstrip(".").lower()
-        if (
-            reverse_parsed.scheme.lower() != origin["scheme"]
-            or reverse_port != int(origin["port"])
-            or reverse_host not in {
-                str(origin["hostname"]).rstrip(".").lower(),
-                str(origin["connect_address"]).lower(),
-            }
-        ):
+        if not isinstance(reverse, dict) or strict_reverse is not reverse:
             return await _device_control_authorization_blocked(
                 candidate_id=candidate_id, device_target_id=device_target_id, run_id=run_id,
-                gaps=["cleanup_request_origin_mismatch"],
+                gaps=["exact_strict_inverse_cleanup_request_not_bound"],
             )
-        reverse_path = urllib.parse.urlunsplit(
-            ("", "", reverse_parsed.path or "/", reverse_parsed.query, "")
-        )
-    elif reverse_url.startswith("/"):
-        reverse_path = reverse_url
-    else:
-        return await _device_control_authorization_blocked(
-            candidate_id=candidate_id, device_target_id=device_target_id, run_id=run_id,
-            gaps=["cleanup_request_path_invalid"],
-        )
     headers = {
         str(key): str(value)
         for key, value in dict(imported.get("headers") or {}).items()
@@ -21202,20 +21176,75 @@ async def _verify_device_control_authorization_candidate(
     }
     body = imported.get("body") if isinstance(imported.get("body"), bytes) else b""
     replay_headers = _device_strip_credential_headers(headers)
-    reverse_headers = {
-        str(key): str(value)
-        for key, value in dict(reverse.get("headers") or {}).items()
-        if "\r" not in str(key) and "\n" not in str(key)
-        and "\r" not in str(value) and "\n" not in str(value)
-        and str(key).lower() not in {"host", "connection", "content-length", "transfer-encoding"}
-    }
-    reverse_body = reverse.get("body") if isinstance(reverse.get("body"), bytes) else b""
+    reverse_method = ""
+    reverse_path = ""
+    reverse_headers: dict[str, str] = {}
+    reverse_body = b""
     try:
         before = await _device_request_pinned_http(
             connect_address=origin["connect_address"], hostname=origin["hostname"],
             port=origin["port"], scheme=origin["scheme"], method="GET", path=observation_path,
             timeout=device_agent.DEVICE_HTTP_REQUEST_TIMEOUT_SECONDS,
         )
+        if cleanup_adapter != "explicit_bound_request":
+            original_state = device_agent.control_json_pointer_value(
+                before, locus.get("state_json_pointer"),
+            )
+            if not original_state.get("found"):
+                return await _device_control_authorization_blocked(
+                    candidate_id=candidate_id, device_target_id=device_target_id, run_id=run_id,
+                    gaps=[f"cleanup_state_unavailable:{original_state.get('reason') or 'unknown'}"],
+                )
+            try:
+                reverse = device_agent.derive_control_cleanup_request(
+                    imported, locus, original_state.get("value"),
+                )
+            except ValueError as exc:
+                return await _device_control_authorization_blocked(
+                    candidate_id=candidate_id, device_target_id=device_target_id, run_id=run_id,
+                    gaps=[str(exc)[:160]],
+                )
+        assert isinstance(reverse, dict)
+        reverse_method = str(reverse.get("method") or "").upper()
+        reverse_url = str(reverse.get("url") or "")
+        reverse_parsed = urllib.parse.urlsplit(reverse_url)
+        if reverse_parsed.scheme or reverse_parsed.netloc:
+            try:
+                reverse_port = int(reverse_parsed.port or (443 if reverse_parsed.scheme == "https" else 80))
+            except ValueError:
+                reverse_port = 0
+            reverse_host = str(reverse_parsed.hostname or "").rstrip(".").lower()
+            if (
+                reverse_parsed.scheme.lower() != origin["scheme"]
+                or reverse_port != int(origin["port"])
+                or reverse_host not in {
+                    str(origin["hostname"]).rstrip(".").lower(),
+                    str(origin["connect_address"]).lower(),
+                }
+            ):
+                return await _device_control_authorization_blocked(
+                    candidate_id=candidate_id, device_target_id=device_target_id, run_id=run_id,
+                    gaps=["cleanup_request_origin_mismatch"],
+                )
+            reverse_path = urllib.parse.urlunsplit(
+                ("", "", reverse_parsed.path or "/", reverse_parsed.query, "")
+            )
+        elif reverse_url.startswith("/"):
+            reverse_path = reverse_url
+        else:
+            return await _device_control_authorization_blocked(
+                candidate_id=candidate_id, device_target_id=device_target_id, run_id=run_id,
+                gaps=["cleanup_request_path_invalid"],
+            )
+        reverse_headers = {
+            str(key): str(value)
+            for key, value in dict(reverse.get("headers") or {}).items()
+            if "\r" not in str(key) and "\n" not in str(key)
+            and "\r" not in str(value) and "\n" not in str(value)
+            and str(key).lower() not in {"host", "connection", "content-length", "transfer-encoding"}
+        }
+        reverse_headers = _device_strip_credential_headers(reverse_headers)
+        reverse_body = reverse.get("body") if isinstance(reverse.get("body"), bytes) else b""
         replay = await _device_request_pinned_control_http(
             connect_address=origin["connect_address"], hostname=origin["hostname"],
             port=origin["port"], scheme=origin["scheme"], method=method, path=path,
@@ -21234,7 +21263,10 @@ async def _verify_device_control_authorization_candidate(
         ) from exc
     replay_status = int(replay.get("status") or 0)
     verdict = device_agent.control_replay_verdict(replay_status)
-    transition = device_agent.control_state_transition(before, after)
+    state_json_pointer = str(locus.get("state_json_pointer") or "") or None
+    transition = device_agent.control_state_transition(
+        before, after, json_pointer=state_json_pointer,
+    )
     underprivileged_effect = bool(
         verdict == "unauthenticated_control_accepted" and transition["changed"]
     )
@@ -21258,7 +21290,9 @@ async def _verify_device_control_authorization_candidate(
                     port=origin["port"], scheme=origin["scheme"], method="GET", path=observation_path,
                     timeout=device_agent.DEVICE_HTTP_REQUEST_TIMEOUT_SECONDS,
                 )
-                restoration = device_agent.control_state_transition(before, restored)
+                restoration = device_agent.control_state_transition(
+                    before, restored, json_pointer=state_json_pointer,
+                )
                 cleanup_outcome = (
                     "cleanup_restored_exact_pre_state"
                     if restoration["comparable"] and not restoration["changed"]
@@ -21297,6 +21331,8 @@ async def _verify_device_control_authorization_candidate(
             "method": method,
             "path": path,
             "state_path": observation_path,
+            "state_json_pointer": state_json_pointer,
+            "cleanup_adapter": cleanup_adapter,
         },
         observations=[{
             "before_status": int(before.get("status") or 0),
@@ -21310,17 +21346,23 @@ async def _verify_device_control_authorization_candidate(
             "cleanup_outcome": cleanup_outcome,
             "cleanup_status": cleanup_status,
             "cleanup_request_id": str(reverse.get("id") or ""),
+            "cleanup_adapter": cleanup_adapter,
             "cleanup_restoration": restoration,
         }],
         controls=[{
             "pinned_connect_address": origin["connect_address"],
             "redirects_followed": False,
             "credentials_stripped_for_replay": True,
+            "cleanup_credentials_stripped": True,
             "collection_document_sha256": next(
                 (str(row["document_sha256"]) for row in rows if str(row["id"]) == collection_id), ""
             ),
         }],
-        proof_basis="unauthenticated_observed_state_change_with_exact_restoration",
+        proof_basis=(
+            "unauthenticated_state_change_with_bound_inverse_restoration"
+            if cleanup_adapter == "explicit_bound_request"
+            else "unauthenticated_state_change_with_observed_value_restoration"
+        ),
     )
     promotable, gate_reason = family_proof.proof_contract_promotion_gate(proof)
     status = "verified" if promotable else "refuted" if proof.get("verdict") == "refuted" else "inconclusive"
@@ -21345,13 +21387,14 @@ async def _verify_device_control_authorization_candidate(
                            last_verification_verdict='verified', updated_at=NOW()
                        RETURNING id""",
                     device_target_id, fingerprint, title,
-                    "A credential-stripped, exactly bound control request caused an observable device state change without authentication. An exact same-origin inverse request then restored the pre-test state.",
+                    "A credential-stripped, exactly bound control request caused an observable device state change without authentication. A server-validated same-origin cleanup restored the exact observed pre-test state.",
                     f"{origin['origin']}{path.split('?', 1)[0]}",
                     json.dumps({
                         "candidate_id": str(candidate_id),
                         "collection_id": collection_id,
                         "request_id": str(imported.get("id") or ""),
                         "cleanup_request_id": str(reverse.get("id") or ""),
+                        "cleanup_adapter": cleanup_adapter,
                         "cleanup_outcome": cleanup_outcome,
                         "proof_contract_v2": proof,
                     }),
@@ -21407,7 +21450,7 @@ async def _verify_device_control_authorization_candidate(
             "cleanup_outcome": cleanup_outcome,
             "message": (
                 "The credential-stripped replay caused an observable state change and the "
-                f"exact inverse restored the pre-test state. Cleanup: {cleanup_outcome}."
+                f"validated cleanup restored the pre-test state. Cleanup: {cleanup_outcome}."
             ),
         }
     return {
