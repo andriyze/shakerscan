@@ -455,11 +455,11 @@ compose() {
 }
 
 compose_up() {
-    if [ "$USE_PREBUILT" -eq 1 ]; then
-        compose up --no-build "$@"
-    else
-        compose up "$@"
-    fi
+    # Both runtime modes resolve their application images before startup:
+    # release mode pulls the pinned set, while source mode builds the exact
+    # checkout through build_local_images. Never let `up` independently choose
+    # to pull or rebuild an application image.
+    compose up --no-build "$@"
 }
 
 pull_prebuilt_images() {
@@ -1304,6 +1304,16 @@ ensure_command_dependencies() {
             echo -e "${RED}Error: Docker Compose is not available${NC}"
             return 1
         fi
+
+        # The source Compose contract uses service-level pull_policy to ensure
+        # synthetic local application tags are never resolved from a registry.
+        # Legacy docker-compose v1 does not implement that contract. Curl
+        # installs use the release Compose file and retain the existing fallback.
+        if [ "$USE_PREBUILT" -ne 1 ] && ! has_docker_compose_v2; then
+            echo -e "${RED}Error: local source builds require Docker Compose v2.${NC}"
+            echo "Install the Docker Compose plugin, then rerun './scanner.sh start --local'."
+            return 1
+        fi
     fi
 
     return 0
@@ -1375,8 +1385,15 @@ set_build_env() {
     fi
 }
 
+has_local_source_tree() {
+    [ -f "$SCRIPT_DIR/docker-compose.yml" ] && \
+        [ -f "$SCRIPT_DIR/scanner/Dockerfile" ] && \
+        [ -f "$SCRIPT_DIR/ui/Dockerfile" ]
+}
+
 configure_runtime_mode() {
     local command="$1"
+    local persisted_mode=""
     local release_version
 
     release_version="$(get_release_version)"
@@ -1407,7 +1424,7 @@ configure_runtime_mode() {
     # The source Compose file consumes this exact image identity. Keeping the
     # build and sandbox retag on one explicit contract avoids guessing a tag
     # synthesized independently from the build configuration.
-    export SCANNER_LOCAL_WORKER_IMAGE="${SCANNER_LOCAL_WORKER_IMAGE:-${COMPOSE_PROJECT_NAME}-worker:latest}"
+    export SCANNER_LOCAL_WORKER_IMAGE="${SCANNER_LOCAL_WORKER_IMAGE:-${COMPOSE_PROJECT_NAME}-worker:local}"
     export SCANNER_RELEASE_VERSION="$release_version"
     if [ -z "${SCANNER_IMAGE_TAG:-}" ]; then
         if [ -n "$release_version" ] && [ "$release_version" != "dev" ]; then
@@ -1419,19 +1436,37 @@ configure_runtime_mode() {
         export SCANNER_IMAGE_TAG
     fi
 
+    if [ -f "$LOCAL_BUILD_MARKER" ]; then
+        persisted_mode="$(head -n 1 "$LOCAL_BUILD_MARKER" 2>/dev/null | tr -d '[:space:]')"
+    fi
+
+    if [ "$RUNTIME_MODE_EXPLICIT" -eq 0 ]; then
+        case "$persisted_mode" in
+            local)
+                # Never let stale runtime state turn a source-less curl install
+                # into a local build that it cannot perform.
+                if has_local_source_tree; then
+                    USE_PREBUILT=0
+                else
+                    USE_PREBUILT=1
+                fi
+                ;;
+            prebuilt) USE_PREBUILT=1 ;;
+            *)
+                # A full source tree defaults to local builds. Curl installs
+                # intentionally omit these files and therefore stay prebuilt.
+                if has_local_source_tree; then
+                    USE_PREBUILT=0
+                fi
+                ;;
+        esac
+    fi
+
     case "$command" in
         build|rebuild)
             USE_PREBUILT=0
             ;;
     esac
-
-    if [ "$RUNTIME_MODE_EXPLICIT" -eq 0 ] && [ -f "$LOCAL_BUILD_MARKER" ]; then
-        USE_PREBUILT=0
-    fi
-
-    if [ "$RUNTIME_MODE_EXPLICIT" -eq 1 ] && [ "$USE_PREBUILT" -eq 1 ]; then
-        rm -f "$LOCAL_BUILD_MARKER"
-    fi
 
     if [ "$USE_PREBUILT" -eq 1 ] && [ ! -f "$SCRIPT_DIR/$PREBUILT_COMPOSE_FILE" ]; then
         echo -e "${YELLOW}Prebuilt override file missing ($PREBUILT_COMPOSE_FILE). Falling back to local build mode.${NC}"
@@ -1439,6 +1474,23 @@ configure_runtime_mode() {
     fi
 
     update_compose_file_args
+}
+
+record_runtime_mode() {
+    local mode="$1"
+    local tmp="${LOCAL_BUILD_MARKER}.tmp.$$"
+
+    case "$mode" in
+        local|prebuilt) ;;
+        *)
+            echo -e "${RED}Error: invalid runtime mode '$mode'${NC}" >&2
+            return 1
+            ;;
+    esac
+
+    printf '%s\n' "$mode" > "$tmp"
+    chmod 600 "$tmp"
+    mv "$tmp" "$LOCAL_BUILD_MARKER"
 }
 
 total_memory_gb() {
@@ -1816,7 +1868,7 @@ print_help() {
     echo "  -f, --follow       Follow logs"
     echo "  -y, --yes          Auto-confirm dependency installation"
     echo "  --local            Force local Docker build instead of prebuilt images"
-    echo "  --prebuilt         Force prebuilt Docker Hub images (default for start/restart)"
+    echo "  --prebuilt         Force prebuilt Docker Hub images (default for curl installs)"
     echo "  --image-tag TAG    Override Docker image tag (default: latest)"
     echo "  --remote           Bind UI/API to this host's Tailscale IPv4 address"
     echo "  --confirm-active   Confirm authorization for full, aggressive, or smart scans"
@@ -1830,7 +1882,7 @@ print_help() {
     echo "  macOS; Linux with apt, dnf/yum, pacman, zypper, or apk"
     echo ""
     echo "Examples:"
-    echo "  ./scanner.sh start                    # Start with latest prebuilt images"
+    echo "  ./scanner.sh start                    # Source checkout: local build; curl install: prebuilt"
     echo "  ./scanner.sh start -y                 # Install prerequisites if missing, then start"
     echo "  ./scanner.sh start --remote           # VPS access over Tailscale"
     echo "  ./scanner.sh env                      # Show PATH and agent launch commands"
@@ -1879,12 +1931,18 @@ start_services() {
         pull_prebuilt_images
     else
         echo "Mode: local build"
+        echo -e "${GREEN}Building application images from this checkout...${NC}"
+        build_local_images
+        record_runtime_mode local
     fi
     compose_up -d --scale worker=$start_workers
     echo ""
     wait_for_url "API" "$(api_probe_url)/health" 120
     wait_for_url "UI" "$(ui_probe_url)" 120
     verify_running_build_identity
+    if [ "$USE_PREBUILT" -eq 1 ]; then
+        record_runtime_mode prebuilt
+    fi
     echo -e "${GREEN}Services started.${NC}"
     echo "  UI:  $(ui_base_url)"
     echo "  API: $(api_base_url)"
@@ -2521,7 +2579,7 @@ submit_scan() {
 build_local_scanner_family() {
     local no_cache="${1:-}"
     local worker_image_id
-    local worker_image="${SCANNER_LOCAL_WORKER_IMAGE:-shakerscan-worker:latest}"
+    local worker_image="${SCANNER_LOCAL_WORKER_IMAGE:-shakerscan-worker:local}"
     local sandbox_image="${MODEL_INTAKE_SANDBOX_IMAGE:-shakerscan-model-intake-sandbox:local}"
 
     # worker and model-intake-sandbox intentionally use the exact same image.
@@ -2541,13 +2599,19 @@ build_local_scanner_family() {
     compose build $no_cache api
 }
 
+build_local_images() {
+    local no_cache="${1:-}"
+
+    build_local_scanner_family "$no_cache"
+    compose build $no_cache ui model-intake-signer
+}
+
 build_images() {
     prepare_runtime_files
     set_build_env
     echo -e "${GREEN}Building Docker images...${NC}"
-    build_local_scanner_family
-    compose build ui model-intake-signer
-    printf "local\n" > "$LOCAL_BUILD_MARKER"
+    build_local_images
+    record_runtime_mode local
     echo -e "${GREEN}Build complete${NC}"
     echo -e "${BLUE}Local-build mode recorded. Use './scanner.sh start' or './scanner.sh restart' to run these local images.${NC}"
 }
@@ -2560,6 +2624,7 @@ rebuild_images() {
     local SERVICE_DESC="all services"
     local REFRESH_WORKERS=1
     local existing_workers
+    local existing_agent_tool_worker
     local existing_device_workers
     local existing_api
     local existing_ui
@@ -2606,6 +2671,7 @@ rebuild_images() {
     fi
 
     existing_workers="$(running_scan_worker_count)"
+    existing_agent_tool_worker="$(running_compose_service_count agent-tool-worker)"
     existing_device_workers="$(running_device_worker_count)"
     existing_api="$(running_compose_service_count api)"
     existing_ui="$(running_compose_service_count ui)"
@@ -2621,10 +2687,11 @@ rebuild_images() {
         compose build $NO_CACHE ui model-intake-signer
     fi
 
-    printf "local\n" > "$LOCAL_BUILD_MARKER"
+    record_runtime_mode local
 
     if [ "$REFRESH_WORKERS" -eq 1 ]; then
         refresh_workers_after_rebuild "$existing_workers" "$existing_model_intake_sandbox"
+        refresh_running_service_after_rebuild agent-tool-worker "$existing_agent_tool_worker"
         refresh_device_worker_after_rebuild "$existing_device_workers"
     fi
 
@@ -3024,12 +3091,24 @@ devices_cmd() {
             # release operators already have the selected prebuilt image.
             # `--no-build` also keeps enabling device capacity fast and avoids
             # consuming resources used by ordinary Web DAST workers.
+            if [ "$USE_PREBUILT" -ne 1 ] && \
+               ! docker image inspect "$SCANNER_LOCAL_WORKER_IMAGE" >/dev/null 2>&1; then
+                echo -e "${RED}Error: local worker image $SCANNER_LOCAL_WORKER_IMAGE is missing.${NC}" >&2
+                echo "Run './scanner.sh build' or './scanner.sh start --local' first." >&2
+                return 1
+            fi
             compose --profile devices up --no-build -d device-worker
             echo -e "${GREEN}Connected-device worker started${NC}"
             echo "Readiness: $(api_base_url)/devices/readiness"
             ;;
         restart)
             echo -e "${GREEN}Restarting isolated connected-device worker from the selected image...${NC}"
+            if [ "$USE_PREBUILT" -ne 1 ] && \
+               ! docker image inspect "$SCANNER_LOCAL_WORKER_IMAGE" >/dev/null 2>&1; then
+                echo -e "${RED}Error: local worker image $SCANNER_LOCAL_WORKER_IMAGE is missing.${NC}" >&2
+                echo "Run './scanner.sh build' or './scanner.sh start --local' first." >&2
+                return 1
+            fi
             compose --profile devices up --no-build -d --force-recreate device-worker
             echo -e "${GREEN}Connected-device worker restarted${NC}"
             echo "Readiness: $(api_base_url)/devices/readiness"

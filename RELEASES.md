@@ -16,7 +16,7 @@ generated launcher also pins `SCANNER_IMAGE_TAG` to the downloaded version by de
 
 | Version | Git Commit | Scanner/Worker Image | API Image | UI Image | Model Intake Signer Image |
 | --- | --- | --- | --- | --- | --- |
-| 0.8.18 | pending | `shakerscan/shakerscan-scanner:0.8.18` (pending) | `shakerscan/shakerscan-api:0.8.18` (pending) | `shakerscan/shakerscan-ui:0.8.18` (pending) | `shakerscan/shakerscan-model-intake-signer:0.8.18` (pending) |
+| 0.8.18 | `9f87f7dbf814fce37a5cda95ff7954e21aaa1dd2` | `shakerscan/shakerscan-scanner:0.8.18` (`sha256:1bfdd22e87bf90cead6a2c38cd98abd94c5a8eadeea9cee351ea9a484bd1d1fd`) | `shakerscan/shakerscan-api:0.8.18` (`sha256:9349c5c0b4dc59c4c43de0583770ed03a996df6601adf49b175d40747a7f4a0a`) | `shakerscan/shakerscan-ui:0.8.18` (`sha256:7811dd9ff647c546fe695cc139171694e90b2bc26a725ec6b0534fe94c8ce7bb`) | `shakerscan/shakerscan-model-intake-signer:0.8.18` (`sha256:5cdeb9d25bc0e8a423b0cf8eb2669fc5558e4e551605a987252b9cbf11d522ab`) |
 | 0.8.17 | `9a43ebc445264c3c6a36e14a7685299b6f4b9dab` | `shakerscan/shakerscan-scanner:0.8.17` (`sha256:31289d5b5d0b5c734d5da1d47e16f7df6d94b4218d9d7bcf7a285e8f9789cfa8`) | `shakerscan/shakerscan-api:0.8.17` (`sha256:b8a0ab7ff3a1369f9569fb434a220584d96f50de6ffa658e9922fd314a7d9aea`) | `shakerscan/shakerscan-ui:0.8.17` (`sha256:51081c10ded6c56db74142e2a3a727e68fea2a00ba6f1a130be8b4eb1c4e6e9b`) | `shakerscan/shakerscan-model-intake-signer:0.8.17` (`sha256:1ea012f6f7dacd150a6869ec94633eaf5e0ec1cef7c0babd1c9d444cff69f251`) |
 | 0.8.16 | `93f5bb2ad2b469bec979792a5f9213756427b1d3` | `shakerscan/shakerscan-scanner:0.8.16` (`sha256:8b902f9bbf29f0fd6c0740546db8c14754e048afefcd02c30ff1734f25f00790`) | `shakerscan/shakerscan-api:0.8.16` (`sha256:f781a67e570b51ceb7d7ec98b33d3a130f4ebf17bd7b489ba4c00044a8d5c8da`) | `shakerscan/shakerscan-ui:0.8.16` (`sha256:c77eadabac730085c451f9ac1a00327aff7bc5a63637882dfd270fa4548cd884`) | `shakerscan/shakerscan-model-intake-signer:0.8.16` (`sha256:651e843e75aa31c7a92c785e2aac22089ef42902d97fcdf0a6c3f0870b1d0771`) |
 | 0.8.15 | `c66b1119cef331175d236788ea59933ac23a0ec4` | `shakerscan/shakerscan-scanner:0.8.15` (`sha256:3344b8c5e3d509852cb4add283083507a89d04c6a42518d86a82d65d0020f54c`) | `shakerscan/shakerscan-api:0.8.15` (`sha256:afbdbe60eb08783861c16919cfcfbd440350ffb8e8ed13c6c9028951bc29a780`) | `shakerscan/shakerscan-ui:0.8.15` (`sha256:62f710774af949697c111ac67681f3099fe4de241c37a63b1a5b617647d4c627`) | `shakerscan/shakerscan-model-intake-signer:0.8.15` (`sha256:8b40783cf6fa88bb009f975404e1d211bd3b29cd32335876e4b44cf540dbb456`) |
@@ -51,7 +51,7 @@ tag alone does not prove which commit produced an image.
 
 ## Release Workflow
 
-Version 0.8.17 is the current stable release; 0.8.18 is the pending installer-hardening candidate. Version 0.8.9 was published but deliberately not
+Version 0.8.18 is the current stable installer-hardening release. Version 0.8.9 was published but deliberately not
 promoted after the installed-runtime audit found a remote-mode agent/MCP routing defect; 0.8.10 was
 cancelled before publication when the same audit found remaining hard-coded loopback guidance;
 0.8.11 was cancelled before publication when the final audit found a host-world-writable Model

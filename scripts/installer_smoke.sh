@@ -58,6 +58,14 @@ required_files=(
   runner/host/requirements.in
   runner/host/requirements.lock
   runner/host/system-requirements.ubuntu.txt
+  skills/device-hunt/SKILL.md
+  skills/device-hunt/agents/openai.yaml
+  skills/device-hunt/references/smart-tv-platforms.md
+  skills/device-hunt/references/smart-tv-protocol-application.md
+  skills/device-hunt/references/smart-tv-capabilities.md
+  skills/device-hunt/references/smart-tv-artifacts-sensors-lab.md
+  skills/device-triage/SKILL.md
+  skills/device-triage/agents/openai.yaml
 )
 
 for relative_path in "${required_files[@]}"; do

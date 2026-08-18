@@ -439,8 +439,12 @@ cd shakerscan
 ./scanner.sh start --local
 ```
 
-Local-build mode is remembered for later starts. Use `./scanner.sh start --prebuilt` to switch
-explicitly to the published images.
+A source checkout defaults to local-build mode; `--local` makes that choice explicit. ShakerScan's
+API, UI, worker, signer, and sandbox images are built from the current checkout before Compose starts
+them, and synthetic local image tags are never pulled from a registry. Docker Compose v2 is required
+for this source-build contract. Local-build mode is remembered for later starts. Use
+`./scanner.sh start --prebuilt` to switch explicitly to the published images. Curl installations do
+not contain Dockerfiles and continue to default to the versioned published images.
 
 The source build downloads version-pinned Go scanner modules. It retries transient module-proxy or
 DNS failures four times and preserves the Go module/build cache between attempts. A repeated error

@@ -64,7 +64,13 @@ def test_scanner_image_bakes_release_identity_for_broker_workers():
     assert dockerfile.index("ARG SCANNER_VERSION=dev") > dockerfile.index("COPY api/*.py /app/")
     assert dockerfile.index("ARG SCANNER_VERSION=dev") > dockerfile.index("RUN pip install")
     assert "release_identity.py --verify" in (ROOT / "scanner" / "entrypoint.sh").read_text()
-    assert compose.count("SCANNER_VERSION: ${SCANNER_VERSION:-dev}") >= 5
+    # Only services that actually own a scanner build carry build arguments.
+    # Agent, device, and sandbox consumers reuse the worker image so a clean
+    # source start cannot export the same multi-gigabyte image repeatedly.
+    for service in ("api", "fleet-edge", "worker", "gungnir-worker"):
+        assert "SCANNER_VERSION: ${SCANNER_VERSION:-dev}" in _service_block(compose, service)
+    for service in ("agent-tool-worker", "device-worker", "model-intake-sandbox"):
+        assert "SCANNER_VERSION: ${SCANNER_VERSION:-dev}" not in _service_block(compose, service)
     assert workflow.count("SCANNER_VERSION=${{ needs.meta.outputs.version }}") == 4
     assert "Verify baked scanner release identity" in workflow
     assert "SCANNER_SOURCE_REVISION=${{ needs.meta.outputs.candidate_sha }}" in workflow

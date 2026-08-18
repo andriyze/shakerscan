@@ -1,12 +1,22 @@
 import json
 import os
 import re
+import shlex
 from pathlib import Path
 import shutil
 import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _compose_service_block(compose: str, service: str) -> str:
+    match = re.search(
+        rf"(?ms)^  {re.escape(service)}:\n.*?(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+        compose,
+    )
+    assert match is not None, service
+    return match.group(0)
 
 
 def test_local_compose_mounts_live_source_as_directories():
@@ -368,7 +378,8 @@ def test_scanner_sh_records_local_build_mode_after_builds():
     script = (ROOT / "scanner.sh").read_text()
 
     assert "LOCAL_BUILD_MARKER" in script
-    assert 'printf "local\\n" > "$LOCAL_BUILD_MARKER"' in script
+    assert "record_runtime_mode local" in script
+    assert "record_runtime_mode prebuilt" in script
     assert "Local-build mode recorded" in script
     assert "restart --prebuilt" in script
 
@@ -383,15 +394,14 @@ def test_scanner_sh_builds_shared_worker_and_intake_sandbox_image_once():
     # build arguments. Exporting each Compose target separately duplicates a
     # multi-gigabyte image and can exhaust supported source-build hosts.
     assert "compose build $no_cache worker" in helper
-    assert 'worker_image="${SCANNER_LOCAL_WORKER_IMAGE:-shakerscan-worker:latest}"' in helper
+    assert 'worker_image="${SCANNER_LOCAL_WORKER_IMAGE:-shakerscan-worker:local}"' in helper
     assert "docker image inspect --format '{{.Id}}' \"$worker_image\"" in helper
     assert "compose images -q worker" not in helper
     assert 'docker image tag "$worker_image_id" "$sandbox_image"' in helper
     assert "compose build $no_cache api" in helper
     assert "compose build $no_cache model-intake-sandbox" not in helper
 
-    assert "build_local_scanner_family" in build_body
-    assert "compose build ui model-intake-signer" in build_body
+    assert "build_local_images" in build_body
     assert "compose build\n" not in build_body
     assert 'elif [ "$SERVICES" = "api worker" ]' in rebuild_body
     assert 'build_local_scanner_family "$NO_CACHE"' in rebuild_body
@@ -442,10 +452,190 @@ build_local_scanner_family
 
 def test_scanner_sh_local_build_marker_controls_default_runtime_mode():
     script = (ROOT / "scanner.sh").read_text()
+    gitignore = (ROOT / ".gitignore").read_text()
 
-    assert '[ "$RUNTIME_MODE_EXPLICIT" -eq 0 ] && [ -f "$LOCAL_BUILD_MARKER" ]' in script
-    assert 'USE_PREBUILT=0' in script
-    assert 'rm -f "$LOCAL_BUILD_MARKER"' in script
+    assert 'case "$persisted_mode"' in script
+    assert "local)" in script
+    assert "prebuilt) USE_PREBUILT=1" in script
+    assert "has_local_source_tree" in script
+    source_tree = script.split("has_local_source_tree() {", 1)[1].split("\n}", 1)[0]
+    assert '[ -f "$SCRIPT_DIR/docker-compose.yml" ]' in source_tree
+    assert '[ -f "$SCRIPT_DIR/scanner/Dockerfile" ]' in source_tree
+    assert '[ -f "$SCRIPT_DIR/ui/Dockerfile" ]' in source_tree
+    assert 'rm -f "$LOCAL_BUILD_MARKER"' not in script
+    assert ".shakerscan-local-build" in gitignore
+    assert not (ROOT / ".shakerscan-local-build").exists()
+
+
+def test_runtime_mode_matrix_keeps_source_local_and_curl_prebuilt(tmp_path):
+    script = (ROOT / "scanner.sh").read_text()
+    source_tree_fn = script.split("has_local_source_tree() {", 1)[1].split("\n}", 1)[0]
+    configure_fn = script.split("configure_runtime_mode() {", 1)[1].split("\n}", 1)[0]
+
+    def resolve(runtime: Path, *, marker: str = "", explicit_local: bool = False) -> str:
+        runtime.mkdir(parents=True, exist_ok=True)
+        if marker:
+            (runtime / ".shakerscan-local-build").write_text(marker + "\n")
+        harness = f"""
+set -eu
+SCRIPT_DIR={shlex.quote(str(runtime))}
+LOCAL_BUILD_MARKER="$SCRIPT_DIR/.shakerscan-local-build"
+PREBUILT_COMPOSE_FILE=docker-compose.release.yml
+DEFAULT_PREBUILT_IMAGE_TAG=latest
+IMAGE_TAG_OVERRIDE=''
+RUNTIME_MODE_EXPLICIT={1 if explicit_local else 0}
+USE_PREBUILT={0 if explicit_local else 1}
+is_truthy() {{ case "${{1:-}}" in 1|true|yes|on) return 0 ;; *) return 1 ;; esac; }}
+get_release_version() {{ printf '0.0.0\n'; }}
+update_compose_file_args() {{
+  if [ "$USE_PREBUILT" -eq 1 ]; then
+    COMPOSE_FILE_ARGS="docker-compose.release.yml"
+  else
+    COMPOSE_FILE_ARGS="docker-compose.yml"
+  fi
+}}
+has_local_source_tree() {{
+{source_tree_fn}
+}}
+configure_runtime_mode() {{
+{configure_fn}
+}}
+configure_runtime_mode start
+printf '%s|%s\n' "$USE_PREBUILT" "$COMPOSE_FILE_ARGS"
+"""
+        result = subprocess.run(
+            ["bash", "-c", harness],
+            cwd=ROOT,
+            env={"PATH": os.environ["PATH"]},
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        return result.stdout.strip().splitlines()[-1]
+
+    source = tmp_path / "source"
+    for relative in (
+        "docker-compose.yml",
+        "docker-compose.release.yml",
+        "scanner/Dockerfile",
+        "ui/Dockerfile",
+    ):
+        path = source / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+    curl_runtime = tmp_path / "curl"
+    curl_runtime.mkdir(parents=True, exist_ok=True)
+    (curl_runtime / "docker-compose.release.yml").touch()
+
+    assert resolve(source) == "0|docker-compose.yml"
+    assert resolve(source, marker="prebuilt") == "1|docker-compose.release.yml"
+    assert resolve(source, marker="prebuilt", explicit_local=True) == "0|docker-compose.yml"
+    assert resolve(curl_runtime) == "1|docker-compose.release.yml"
+    assert resolve(curl_runtime, marker="local") == "1|docker-compose.release.yml"
+
+
+def test_local_start_builds_explicitly_and_compose_up_never_builds_or_pulls_apps():
+    script = (ROOT / "scanner.sh").read_text()
+    compose_up = script.split("compose_up() {", 1)[1].split("\n}", 1)[0]
+    start_services = script.split("start_services() {", 1)[1].split("\n}", 1)[0]
+
+    harness_template = r'''
+set -eu
+RED=''
+GREEN=''
+BLUE=''
+NC=''
+WORKERS=1
+USE_PREBUILT=__MODE__
+API_IMAGE_REPO=release-api
+SCANNER_IMAGE_REPO=release-worker
+UI_IMAGE_REPO=release-ui
+SCANNER_IMAGE_TAG=release-tag
+prepare_runtime_files() { :; }
+persist_remote_access_env() { :; }
+resolve_start_workers() { printf '1\n'; }
+set_build_env() { :; }
+pull_prebuilt_images() { printf 'pull-prebuilt\n'; }
+build_local_images() { printf 'build-local\n'; }
+record_runtime_mode() { printf 'record:%s\n' "$1"; }
+compose() { printf 'compose:%s\n' "$*"; }
+compose_up() {
+__COMPOSE_UP__
+}
+api_probe_url() { printf 'http://api'; }
+ui_probe_url() { printf 'http://ui'; }
+api_base_url() { printf 'http://api'; }
+ui_base_url() { printf 'http://ui'; }
+wait_for_url() { :; }
+verify_running_build_identity() { :; }
+start_services() {
+__START_SERVICES__
+}
+start_services
+'''
+
+    outputs = {}
+    for mode in (0, 1):
+        harness = (
+            harness_template.replace("__MODE__", str(mode))
+            .replace("__COMPOSE_UP__", compose_up)
+            .replace("__START_SERVICES__", start_services)
+        )
+        result = subprocess.run(
+            ["bash", "-c", harness],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        outputs[mode] = result.stdout
+
+    assert outputs[0].count("build-local") == 1
+    assert "pull-prebuilt" not in outputs[0]
+    assert "record:local" in outputs[0]
+    assert "compose:up --no-build -d --scale worker=1" in outputs[0]
+
+    assert "build-local" not in outputs[1]
+    assert outputs[1].count("pull-prebuilt") == 1
+    assert "record:prebuilt" in outputs[1]
+    assert "compose:up --no-build -d --scale worker=1" in outputs[1]
+
+
+def test_source_compose_has_one_scanner_build_owner_and_never_pulls_local_tags():
+    compose = (ROOT / "docker-compose.yml").read_text()
+
+    worker = _compose_service_block(compose, "worker")
+    assert "dockerfile: scanner/Dockerfile" in worker
+    assert "pull_policy: never" in worker
+    assert "shakerscan-worker:local" in worker
+
+    for service in ("agent-tool-worker", "device-worker", "model-intake-sandbox"):
+        block = _compose_service_block(compose, service)
+        assert "pull_policy: never" in block
+        assert "\n    build:" not in block
+
+
+def test_ui_docker_context_excludes_host_build_artifacts():
+    compose = (ROOT / "docker-compose.yml").read_text()
+    ignored = (ROOT / "ui" / ".dockerignore").read_text().splitlines()
+
+    assert "context: ./ui" in _compose_service_block(compose, "ui")
+    for path in ("node_modules", ".next", ".env", ".env.*", "*.tsbuildinfo"):
+        assert path in ignored
+
+
+def test_curl_installer_remains_release_only_and_does_not_package_source_builds():
+    installer = (ROOT / "install" / "index.sh").read_text()
+
+    assert 'download "$REPO_RAW_BASE/docker-compose.release.yml"' in installer
+    assert 'download "$REPO_RAW_BASE/docker-compose.yml"' not in installer
+    assert 'download "$REPO_RAW_BASE/scanner/Dockerfile"' not in installer
+    assert 'download "$REPO_RAW_BASE/ui/Dockerfile"' not in installer
+    assert '"$BIN_DIR/shakerscan" start -y' in installer
 
 
 def test_scanner_sh_forwards_join_local_build_instead_of_consuming_it():
@@ -562,6 +752,8 @@ def test_scanner_sh_restart_and_rebuild_recreate_api_scaled_workers():
     assert "refresh_workers_after_rebuild" in script
     assert 'existing_workers="$(running_scan_worker_count)"' in script
     assert 'refresh_workers_after_rebuild "$existing_workers" "$existing_model_intake_sandbox"' in script
+    assert 'existing_agent_tool_worker="$(running_compose_service_count agent-tool-worker)"' in script
+    assert 'refresh_running_service_after_rebuild agent-tool-worker "$existing_agent_tool_worker"' in script
     assert 'existing_device_workers="$(running_device_worker_count)"' in script
     assert 'refresh_device_worker_after_rebuild "$existing_device_workers"' in script
     assert 'if [ "$(running_device_worker_count)" -gt 0 ]; then' in script
@@ -807,5 +999,8 @@ def test_macos_build_network_can_follow_host_vpn_without_changing_runtime_networ
 
     assert 'export SHAKERSCAN_BUILD_NETWORK="host"' in script
     assert 'export SHAKERSCAN_BUILD_NETWORK="default"' in script
-    assert compose.count("network: ${SHAKERSCAN_BUILD_NETWORK:-default}") >= 8
+    for service in ("api", "model-intake-signer", "fleet-edge", "worker", "gungnir-worker", "ui"):
+        assert "network: ${SHAKERSCAN_BUILD_NETWORK:-default}" in _compose_service_block(compose, service)
+    for service in ("agent-tool-worker", "device-worker", "model-intake-sandbox"):
+        assert "network: ${SHAKERSCAN_BUILD_NETWORK:-default}" not in _compose_service_block(compose, service)
     assert "network_mode: ${SHAKERSCAN_BUILD_NETWORK" not in compose
