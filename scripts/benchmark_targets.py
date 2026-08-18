@@ -159,7 +159,7 @@ def _post_retest_findings(scan_findings, live_findings):
 
 
 def _has_browser_proof(finding):
-    """Require an explicit successful browser proof, not a generic verified flag."""
+    """Require the same structured ShakerScan browser proof as report promotion."""
     evidence = finding.get("evidence")
     if isinstance(evidence, str):
         try:
@@ -169,7 +169,14 @@ def _has_browser_proof(finding):
     if not isinstance(evidence, dict):
         evidence = {}
     for proof in (finding.get("browser_proof"), evidence.get("browser_proof")):
-        if isinstance(proof, dict) and proof.get("proven") is True:
+        if not isinstance(proof, dict) or proof.get("proven") is not True:
+            continue
+        if (
+            proof.get("proof_producer") == "shakerscan"
+            and str(proof.get("evidence_type") or "").strip().lower()
+            in {"dom_execution", "browser_execution"}
+            and str(proof.get("technique") or "").strip().lower().startswith("headless_xss_")
+        ):
             return True
     return False
 

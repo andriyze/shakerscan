@@ -1263,7 +1263,13 @@ def test_scan_time_verification_fields_failed_browser_proof_is_not_proof():
 def test_scan_time_verification_fields_strong_proof_is_exploited():
     for finding in (
         {"poe": {"proven": True}},
-        {"browser_proof": {"proven": True, "confidence": 0.99}},
+        {"browser_proof": {
+            "proven": True,
+            "confidence": 0.99,
+            "proof_producer": "shakerscan",
+            "evidence_type": "dom_execution",
+            "technique": "headless_xss_dialog",
+        }},
         {"verification_verdict": "exploited"},
         {"result_status": "verified_vulnerable"},
     ):

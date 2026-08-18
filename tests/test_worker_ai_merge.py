@@ -117,7 +117,13 @@ def test_scan_time_verification_fields_rejects_failed_browser_proof():
 
 def test_scan_time_verification_fields_accepts_proven_browser_proof():
     status, verdict, confidence = _scan_time_verification_fields(
-        {"browser_proof": {"proven": True, "confidence": 0.99}}
+        {"browser_proof": {
+            "proven": True,
+            "confidence": 0.99,
+            "proof_producer": "shakerscan",
+            "evidence_type": "dom_execution",
+            "technique": "headless_xss_dialog",
+        }}
     )
 
     assert status == "still_vulnerable"

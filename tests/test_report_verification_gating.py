@@ -45,7 +45,13 @@ def test_finding_has_verification_evidence_rejects_failed_browser_proof():
 def test_finding_has_verification_evidence_accepts_proven_browser_proof():
     finding = {
         "title": "Confirmed XSS",
-        "browser_proof": {"proven": True, "confidence": 0.99},
+        "browser_proof": {
+            "proven": True,
+            "confidence": 0.99,
+            "proof_producer": "shakerscan",
+            "evidence_type": "dom_execution",
+            "technique": "headless_xss_dialog",
+        },
     }
 
     assert report_gating.finding_has_verification_evidence(finding) is True

@@ -77,7 +77,13 @@ def test_failed_browser_proof_is_not_verified():
 
 
 def test_proven_browser_proof_is_verified():
-    r = pf({"severity": "high", "browser_proof": {"proven": True, "confidence": 0.99}})
+    r = pf({"severity": "high", "browser_proof": {
+        "proven": True,
+        "confidence": 0.99,
+        "proof_producer": "shakerscan",
+        "evidence_type": "dom_execution",
+        "technique": "headless_xss_dialog",
+    }})
     assert r["is_verified"] is True
     assert r["proof_state"] == "verified"
 

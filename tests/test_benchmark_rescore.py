@@ -49,7 +49,12 @@ def test_inconclusive_retest_is_not_verified():
 
 
 def test_live_finding_preserves_browser_proof_evidence():
-    proof = {"proven": True, "technique": "headless_xss_dialog"}
+    proof = {
+        "proven": True,
+        "proof_producer": "shakerscan",
+        "evidence_type": "dom_execution",
+        "technique": "headless_xss_dialog",
+    }
     finding = b._norm_live_finding({
         "title": "Reflected XSS",
         "severity": "high",
@@ -60,7 +65,12 @@ def test_live_finding_preserves_browser_proof_evidence():
 
 
 def test_post_retest_merge_preserves_scan_time_browser_proof():
-    proof = {"proven": True, "technique": "headless_xss_dialog"}
+    proof = {
+        "proven": True,
+        "proof_producer": "shakerscan",
+        "evidence_type": "dom_execution",
+        "technique": "headless_xss_dialog",
+    }
     scan_finding = {
         "title": "DOM XSS in Hash Route",
         "tool": "hash_route_dom_xss",
@@ -129,10 +139,21 @@ def test_browser_gate_requires_explicit_successful_browser_proof():
     assert failed["pass"] is False
 
     proven = b.collect_scorecard({
-        "findings": [{**base, "browser_proof": {"proven": True}}],
+        "findings": [{**base, "browser_proof": {
+            "proven": True,
+            "proof_producer": "shakerscan",
+            "evidence_type": "dom_execution",
+            "technique": "headless_xss_dialog",
+        }}],
     }, fixture)
     passed = next(g for g in b.apply_gates(proven, fixture) if g["gate"] == "require_browser_proven_xss")
     assert passed["pass"] is True
+
+    unstructured = b.collect_scorecard({
+        "findings": [{**base, "browser_proof": {"proven": True}}],
+    }, fixture)
+    rejected = next(g for g in b.apply_gates(unstructured, fixture) if g["gate"] == "require_browser_proven_xss")
+    assert rejected["pass"] is False
 
 
 def test_fleet_gate_blocks_mixed_fleet(monkeypatch):
