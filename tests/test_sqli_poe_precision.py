@@ -201,6 +201,30 @@ def test_boolean_sqli_accepts_numeric_total_header_separation():
     assert result["metrics"]["numeric_separation_field"] == "@header.x-total-count"
 
 
+def test_boolean_sqli_rejects_numeric_difference_that_mutation_control_contradicts():
+    body = json.dumps({"ok": True})
+
+    def response(total):
+        return {
+            "body": body,
+            "status_code": 200,
+            "headers": {"content-type": "application/json", "X-Total-Count": str(total)},
+        }
+
+    result = _evaluate_boolean_sqli_differential(
+        [response(5), response(5)],
+        [response(10), response(10)],
+        [response(1), response(1)],
+        true_payload="TRUE",
+        false_payload="FALSE",
+        mutation_responses=[response(7), response(7)],
+    )
+
+    assert result["proven"] is False
+    assert result["metrics"]["numeric_separation_field"] is None
+    assert result["metrics"]["numeric_control_mismatch_path"] == "@header.x-total-count"
+
+
 def test_boolean_sqli_missing_numeric_field_in_one_repetition_does_not_crash():
     def page(total=None):
         value = {"items": [{"name": "stable"}]}
