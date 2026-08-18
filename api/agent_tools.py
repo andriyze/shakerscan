@@ -214,7 +214,7 @@ def _tmpl_dalfox(url: str, opts: dict[str, Any]) -> list[str]:
     else:
         severity_args = ["--only-poc", "v"]
     return (["url", url, "--format", "jsonl", "--silence", "--no-color",
-             "--timeout", "8", "--delay", "200", "--worker", "3",
+             "--timeout", "8", "--delay", "1000", "--worker", "3",
              "--skip-bav", "--skip-grepping", "--skip-headless",
              "--skip-mining-all"] + severity_args)
 
@@ -224,7 +224,7 @@ def _tmpl_sqlmap(url: str, opts: dict[str, Any]) -> list[str]:
     # (no time-based/stacked queries -> bounded wall time), level/risk 1, no crawl, output to a
     # scratch dir the worker owns; findings surface in stdout ("is vulnerable").
     return ["-u", url, "--batch", "--technique", "BE", "--level", "1", "--risk", "1",
-            "--threads", "3", "--timeout", "8", "--retries", "1", "--delay", "0.2",
+            "--threads", "2", "--timeout", "8", "--retries", "1", "--delay", "1",
             "--flush-session", "--output-dir", "/tmp/shakerscan-sqlmap",
             "--smart", "--disable-coloring", "--answers", "redirect=N",
             "--user-agent", "shakerscan-sqlmap/1.0"]
@@ -233,14 +233,14 @@ def _tmpl_sqlmap(url: str, opts: dict[str, Any]) -> list[str]:
 def _tmpl_ffuf(url: str, opts: dict[str, Any]) -> list[str]:
     # Bounded content/dir discovery. Read-only (GET). One tunable: wordlist in {common,api,admin}
     # -> a small BUNDLED list (unknown/invalid -> common; no arbitrary path). Auto-calibrated
-    # soft-404 filtering (-ac), 60s wall cap, 50 req/s. FUZZ appended to the same-origin base path.
+    # soft-404 filtering (-ac), 40s wall cap, 5 req/s. FUZZ appended to the same-origin base path.
     wordlist = _AGENT_FFUF_WORDLISTS.get(
         str(opts.get("wordlist") or "").strip().lower(), _AGENT_FFUF_WORDLISTS["common"]
     )
     base = url.split("?", 1)[0].rstrip("/")
     return ["-u", f"{base}/FUZZ", "-w", wordlist,
             "-mc", "200,204,301,302,307,401,403,405", "-ac",
-            "-t", "5", "-rate", "5", "-timeout", "8", "-maxtime", "60", "-s", "-json"]
+            "-t", "5", "-rate", "5", "-timeout", "8", "-maxtime", "40", "-s", "-json"]
 
 
 # {tool: {binary, target_param, risk, default_timeout_ms, build}}. httpx is the only passive
@@ -413,6 +413,33 @@ def scanner_request_reservation(name: str, options: dict[str, Any] | None = None
     if not template:
         raise AgentToolError(f"unknown run_tool:{name}")
     return max(1, int(template.get("max_wire_requests") or 1))
+
+
+def settle_scanner_wire_reservation(
+    *, charged_total: int, reservation: int, accounting: str,
+    actual: Any, budget_limit: int | None,
+) -> dict[str, Any]:
+    """Replace one reservation with an exact counter without hiding overruns."""
+    before = max(0, int(charged_total))
+    reserved = max(0, int(reservation))
+    exact: int | None = None
+    if str(accounting or "") == "exact" and actual is not None:
+        try:
+            exact = max(0, int(actual))
+        except (TypeError, ValueError):
+            exact = None
+    charged = reserved if exact is None else exact
+    total = max(0, before - reserved + charged)
+    limit = None if budget_limit is None else max(0, int(budget_limit))
+    return {
+        "charged": charged,
+        "charged_total": total,
+        "actual": exact,
+        "reservation_refund": max(0, reserved - charged),
+        "reservation_overrun": max(0, charged - reserved),
+        "budget_overrun": 0 if limit is None else max(0, total - limit),
+        "settled": exact is not None,
+    }
 
 
 def request_budget_units(tool_name: str) -> int:

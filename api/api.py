@@ -32596,13 +32596,25 @@ async def _agent_apply_reply(
                 state.get("wire_requests_observed_minimum") or 0
             ) + observed
             if accounting == "exact" and result.get("wire_requests_actual") is not None:
-                actual = max(
-                    0,
-                    min(wire_request_reservation, int(result["wire_requests_actual"])),
+                wire_settlement = agent_tools.settle_scanner_wire_reservation(
+                    charged_total=int(state.get("wire_requests_reserved") or 0),
+                    reservation=wire_request_reservation,
+                    accounting=accounting,
+                    actual=result.get("wire_requests_actual"),
+                    budget_limit=wire_request_limit,
                 )
+                actual = int(wire_settlement["actual"] or 0)
+                state["wire_requests_reserved"] = int(wire_settlement["charged_total"])
                 state["wire_requests_actual_confirmed"] = int(
                     state.get("wire_requests_actual_confirmed") or 0
                 ) + actual
+                if wire_settlement["reservation_overrun"]:
+                    state["events"].append({
+                        "iteration": iteration,
+                        "wire_request_reservation_overrun": wire_settlement["reservation_overrun"],
+                        "wire_request_budget_overrun": wire_settlement["budget_overrun"],
+                        "scanner": scanner_name,
+                    })
             else:
                 state["wire_request_unsettled_tools"] = int(
                     state.get("wire_request_unsettled_tools") or 0

@@ -424,6 +424,42 @@ def test_scanner_request_reservations_are_conservative_and_explicit():
     assert at.scanner_request_reservation("ffuf") == 220
 
 
+def test_exact_scanner_wire_settlement_refunds_and_never_clamps_overruns():
+    refund = at.settle_scanner_wire_reservation(
+        charged_total=450, reservation=450, accounting="exact", actual=17,
+        budget_limit=500,
+    )
+    assert refund["charged_total"] == 17
+    assert refund["reservation_refund"] == 433
+    assert refund["budget_overrun"] == 0
+
+    overrun = at.settle_scanner_wire_reservation(
+        charged_total=400, reservation=400, accounting="exact", actual=525,
+        budget_limit=500,
+    )
+    assert overrun["actual"] == 525
+    assert overrun["charged_total"] == 525
+    assert overrun["reservation_overrun"] == 125
+    assert overrun["budget_overrun"] == 25
+
+    unknown = at.settle_scanner_wire_reservation(
+        charged_total=220, reservation=220, accounting="unavailable", actual=None,
+        budget_limit=500,
+    )
+    assert unknown["charged_total"] == 220 and unknown["settled"] is False
+
+
+def test_scanner_rate_and_wall_bounds_fit_their_wire_reservations():
+    _, ffuf, _ = at.build_scanner_argv("ffuf", "http://t/", {})
+    assert int(ffuf[ffuf.index("-rate") + 1]) * int(ffuf[ffuf.index("-maxtime") + 1]) <= at.scanner_request_reservation("ffuf")
+    _, dalfox, dalfox_ms = at.build_scanner_argv("dalfox", "http://t/?q=x", {})
+    dalfox_ceiling = int(dalfox[dalfox.index("--worker") + 1]) * (dalfox_ms // int(dalfox[dalfox.index("--delay") + 1]))
+    assert dalfox_ceiling <= at.scanner_request_reservation("dalfox")
+    _, sqlmap, sqlmap_ms = at.build_scanner_argv("sqlmap", "http://t/?id=1", {})
+    sqlmap_ceiling = int(sqlmap[sqlmap.index("--threads") + 1]) * (sqlmap_ms // (1000 * int(sqlmap[sqlmap.index("--delay") + 1])))
+    assert sqlmap_ceiling <= at.scanner_request_reservation("sqlmap")
+
+
 def test_episode_request_budget_counts_scanner_invocations_not_internal_wire_ceiling():
     assert at.request_budget_units("http_request") == 1
     assert at.request_budget_units("run_tool") == 1
@@ -668,7 +704,7 @@ def test_attack_scanners_dalfox_sqlmap_present_and_bounded():
     assert b == "dalfox"
     assert argv[0] == "url" and argv[argv.index("url") + 1] == "http://t/search?q=1"
     assert "--skip-headless" in argv and "--skip-bav" in argv and "--skip-mining-all" in argv
-    assert argv[argv.index("--worker") + 1] == "3" and argv[argv.index("--delay") + 1] == "200"
+    assert argv[argv.index("--worker") + 1] == "3" and argv[argv.index("--delay") + 1] == "1000"
     assert argv[argv.index("--only-poc") + 1] == "v"  # default severity -> verified-only PoCs
     assert argv[argv.index("--format") + 1] == "jsonl"
 
@@ -678,6 +714,7 @@ def test_attack_scanners_dalfox_sqlmap_present_and_bounded():
     assert argv[argv.index("--batch") + 1] == "--technique"  # non-interactive
     assert argv[argv.index("--technique") + 1] == "BE"       # boolean+error only
     assert argv[argv.index("--level") + 1] == "1" and argv[argv.index("--risk") + 1] == "1"
+    assert argv[argv.index("--threads") + 1] == "2" and argv[argv.index("--delay") + 1] == "1"
     assert "--crawl" not in " ".join(argv) and "--os-shell" not in " ".join(argv)
 
 

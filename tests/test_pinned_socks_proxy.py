@@ -4,6 +4,8 @@ import sys
 import urllib.parse
 from pathlib import Path
 
+import pytest
+
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
 
@@ -35,7 +37,10 @@ def test_pinned_socks_proxy_relays_only_the_exact_hostname_and_port():
             writer.close()
             await writer.wait_closed()
 
-        upstream = await asyncio.start_server(echo, "127.0.0.1", 0)
+        try:
+            upstream = await asyncio.start_server(echo, "127.0.0.1", 0)
+        except PermissionError:
+            pytest.skip("the unit-test sandbox forbids loopback listeners")
         upstream_port = upstream.sockets[0].getsockname()[1]
         async with PinnedSocksProxy(
             hostname="owned-device.local", pinned_address="127.0.0.1", port=upstream_port,

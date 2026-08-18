@@ -2521,6 +2521,14 @@ def test_run_scan_rejects_invalid_explicit_scan_type():
 
 
 def test_agent_scanner_tool_job_rebuilds_argv_and_publishes_settlement(monkeypatch):
+    class _PinnedProxy:
+        proxy_url = "socks5://127.0.0.1:45678"
+
+        def __init__(self, **_kwargs): pass
+        async def start(self): return self
+        async def close(self): return None
+
+    monkeypatch.setattr(worker, "PinnedSocksProxy", _PinnedProxy)
     class _Redis:
         def __init__(self):
             self.values = {}
@@ -2586,9 +2594,10 @@ def test_agent_scanner_tool_job_rebuilds_argv_and_publishes_settlement(monkeypat
     assert captured["cmd"][0] == "httpx"
     assert "-json" in captured["cmd"] and "-silent" in captured["cmd"]
     assert captured["kwargs"]["start_new_session"] is True
-    assert "203.0.113.7" in " ".join(captured["cmd"])
-    assert "Host: example.test" in captured["cmd"]
+    assert "https://example.test/admin?token=secret" in captured["cmd"]
+    assert "socks5://127.0.0.1:45678" in captured["cmd"]
     result = json.loads(redis.values["agent_tool_result:agent-job-1"])
+    assert result["network_binding"] == "hostname_preserving_pinned_socks5"
     assert result["status"] == "success"
     assert result["settlement"]["mode"] == "exact"
     assert result["settlement"]["actual"] == 1
@@ -2635,6 +2644,14 @@ def test_agent_scanner_tool_job_refuses_cross_host_without_spawning(monkeypatch)
 
 
 def test_agent_scanner_tool_streams_and_fails_closed_at_output_limit(monkeypatch):
+    class _PinnedProxy:
+        proxy_url = "socks5://127.0.0.1:45678"
+
+        def __init__(self, **_kwargs): pass
+        async def start(self): return self
+        async def close(self): return None
+
+    monkeypatch.setattr(worker, "PinnedSocksProxy", _PinnedProxy)
     class _Redis:
         def __init__(self):
             self.values = {}
