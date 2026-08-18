@@ -791,14 +791,11 @@ def test_vendor_port_hints_require_exact_manufacturer_or_model_tokens():
     assert 8001 in device_posture.manufacturer_priority_ports("Samsung", "Tizen TV")
 
 
-def test_device_worker_identity_and_queue_are_isolated_from_web_dast():
+def test_device_worker_deployment_is_isolated_from_web_dast():
     root = Path(__file__).resolve().parents[1]
-    worker = (root / "api" / "worker.py").read_text(encoding="utf-8")
     compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
     launcher = (root / "scanner.sh").read_text(encoding="utf-8")
 
-    assert '"shakerscan:device_worker_build" if DEVICE_ONLY_WORKER else "shakerscan:worker_build"' in worker
-    assert "base_queue_keys = [DEVICE_QUEUE_NAME]" in worker
     assert "device-worker:" in compose
     assert 'profiles: ["devices"]' in compose
     assert "hostname: shakerscan-device-worker" in compose

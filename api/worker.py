@@ -58,7 +58,7 @@ import family_proof
 import agent_tools
 from pinned_socks_proxy import PinnedSocksProxy
 import investigation_candidates
-from worker_queue_policy import base_worker_queue_keys
+from worker_queue_policy import base_worker_queue_keys, worker_role
 from model_intake_admissions import persist_from_result as persist_model_intake_admission
 from job_queue import (
     DEFAULT_WORKER_TOOL_COMMANDS,
@@ -126,10 +126,9 @@ QUEUE_NAME = 'scan_jobs'
 DEVICE_QUEUE_NAME = os.environ.get("DEVICE_QUEUE_NAME", "device_scan_jobs")
 DEVICE_ONLY_WORKER = str(os.environ.get("DEVICE_ONLY_WORKER", "false")).strip().lower() in {"1", "true", "yes", "on"}
 AGENT_TOOL_ONLY_WORKER = str(os.environ.get("AGENT_TOOL_ONLY_WORKER", "false")).strip().lower() in {"1", "true", "yes", "on"}
-WORKER_BUILD_REGISTRY_KEY = (
-    "shakerscan:device_worker_build" if DEVICE_ONLY_WORKER
-    else "shakerscan:agent_tool_worker_build" if AGENT_TOOL_ONLY_WORKER
-    else "shakerscan:worker_build"
+WORKER_KIND, WORKER_BUILD_REGISTRY_KEY = worker_role(
+    device_only=DEVICE_ONLY_WORKER,
+    agent_tool_only=AGENT_TOOL_ONLY_WORKER,
 )
 RETEST_QUEUE_NAME = os.environ.get("RETEST_QUEUE_NAME", "retest_jobs")
 BROKER_INGEST_QUEUE_NAME = os.environ.get("BROKER_INGEST_QUEUE_NAME", "broker_ingest_jobs")
@@ -13515,10 +13514,7 @@ def _worker_build_report_payload() -> tuple[str, str]:
         "build_fingerprint": _worker_build_fingerprint(),
         "scanner_version": published_scanner_version(_published_scanner_version()),
         "node_id": os.environ.get("SHAKERSCAN_NODE_ID") or os.environ.get("FLEET_NODE_ID") or None,
-        "worker_kind": (
-            "device" if DEVICE_ONLY_WORKER else "agent_tool" if AGENT_TOOL_ONLY_WORKER
-            else "web_dast"
-        ),
+        "worker_kind": WORKER_KIND,
         "tools": sorted(
             tool for tool, command in tool_commands.items() if shutil.which(command)
         ),

@@ -6,7 +6,21 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 
-from worker_queue_policy import base_worker_queue_keys  # noqa: E402
+from worker_queue_policy import base_worker_queue_keys, worker_role  # noqa: E402
+
+
+def test_worker_roles_have_distinct_public_kinds_and_build_registries():
+    assert worker_role(device_only=False, agent_tool_only=False) == (
+        "web_dast", "shakerscan:worker_build",
+    )
+    assert worker_role(device_only=True, agent_tool_only=False) == (
+        "device", "shakerscan:device_worker_build",
+    )
+    assert worker_role(device_only=False, agent_tool_only=True) == (
+        "agent_tool", "shakerscan:agent_tool_worker_build",
+    )
+    with pytest.raises(ValueError, match="both device-only and agent-tool-only"):
+        worker_role(device_only=True, agent_tool_only=True)
 
 
 QUEUES = {
