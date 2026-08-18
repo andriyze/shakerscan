@@ -17,6 +17,7 @@ import agent_provenance as prov
 import agent_text_toolcalls as tc
 import agent_context_pack as cp
 import agent_tools as at
+import agent_budget
 import agent_loop as al
 
 
@@ -524,11 +525,11 @@ def test_all_scanners_preserve_hostname_through_the_pinned_socks_broker():
         )
 
 
-def test_deep_hunt_has_a_separately_enforced_wire_budget():
-    source = open(os.path.join(os.path.dirname(__file__), "..", "api", "api.py"), encoding="utf-8").read()
-    assert '"budget_exhausted": "wire_requests"' in source
-    assert "wire_request_budget_limit" in source
-    assert "wire_requests_reserved\") or 0) + wire_request_reservation" in source
+def test_short_deep_hunts_can_compose_recon_with_one_attack_scanner():
+    assert agent_budget.keyless_hunt_wire_budget(1) == 900
+    assert agent_budget.keyless_hunt_wire_budget(4) == 900
+    assert agent_budget.keyless_hunt_wire_budget(20) == 1800
+    assert agent_budget.keyless_hunt_wire_budget(40) == 3600
     with pytest.raises(at.AgentToolError, match="user information"):
         at.validate_scanner_execution_target("https://example.test", "https://user@example.test/")
 

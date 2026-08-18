@@ -225,6 +225,41 @@ if "fastapi" not in sys.modules:
 import api as api_module  # noqa: E402
 
 
+def test_deep_hunt_wire_budget_denial_is_a_tool_result_not_a_terminal_run(monkeypatch):
+    state = api_module._agent_new_state("budget test", [], [])
+    state["wire_request_budget_limit"] = 100
+    state["action_budget_limit"] = 12
+    state["request_budget_limit"] = 12
+    state["active_action_budget_limit"] = 4
+
+    async def should_not_execute(*_args, **_kwargs):
+        raise AssertionError("over-budget scanner reached the executor")
+
+    monkeypatch.setattr(api_module, "_execute_agent_tool", should_not_execute)
+    reply = json.dumps({"tool_calls": [{
+        "name": "run_tool",
+        "arguments": {"name": "nuclei", "target": "http://device.test/", "options": {}},
+    }]})
+    outcome = asyncio.run(api_module._agent_apply_reply(
+        state,
+        reply,
+        target_uuid=uuid.uuid4(),
+        target_url="http://device.test/",
+        created_by="test",
+        allow_write=False,
+        allow_active=True,
+        approval_receipt_id=None,
+        hypothesis_id=None,
+        iteration=0,
+        max_iterations=4,
+    ))
+
+    assert outcome["stop"] is False
+    assert state["tool_calls_made"] == 0
+    assert state["events"][-1]["reservation_rejected"] == 450
+    assert "wire_request_budget_insufficient" in state["messages"][-1]["content"]
+
+
 def test_model_intake_stage_manifest_is_bound_to_guest_build_inputs(tmp_path, monkeypatch):
     stage = tmp_path / "stage"
     stage.mkdir()

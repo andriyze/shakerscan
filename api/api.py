@@ -406,6 +406,7 @@ import agent_loop
 import agent_provenance
 import agent_text_toolcalls
 import agent_tools
+import agent_budget
 import device_agent
 import device_capabilities
 import investigation_candidates
@@ -32617,12 +32618,29 @@ async def _agent_apply_reply(
             and int(state.get("wire_requests_reserved") or 0) + wire_request_reservation
             > int(wire_request_limit)
         ):
+            remaining_wire_requests = max(
+                0,
+                int(wire_request_limit) - int(state.get("wire_requests_reserved") or 0),
+            )
             state["events"].append({
                 "iteration": iteration,
                 "budget_exhausted": "wire_requests",
                 "reservation_rejected": wire_request_reservation,
+                "remaining_wire_requests": remaining_wire_requests,
             })
-            return {"stop": True, "stop_reason": "budget_exhausted:wire_requests"}
+            denial = {
+                "ok": False,
+                "error": "wire_request_budget_insufficient",
+                "tool": name,
+                "required_reservation": wire_request_reservation,
+                "remaining": remaining_wire_requests,
+            }
+            state["messages"].append({
+                "role": "user",
+                "content": f"[tool {name} -> denied] " + json.dumps(denial, sort_keys=True),
+            })
+            state["seen_calls"][signature] = agent_loop.format_tool_result(denial, max_chars=160)
+            continue
         if active_limit is not None and int(state["active_actions_used"]) + active_units > int(active_limit):
             state["events"].append({"iteration": iteration, "budget_exhausted": "active_actions"})
             return {"stop": True, "stop_reason": "budget_exhausted:active_actions"}
@@ -33955,7 +33973,7 @@ async def start_agent_hunt_session(target_id: str, req: AgentHuntSessionStartReq
     # capability and its boundary.
     state["action_budget_limit"] = req.max_iterations * _AGENT_MAX_TOOLS_PER_TURN
     state["request_budget_limit"] = min(400, req.max_iterations * 12)
-    state["wire_request_budget_limit"] = min(3600, max(450, req.max_iterations * 90))
+    state["wire_request_budget_limit"] = agent_budget.keyless_hunt_wire_budget(req.max_iterations)
     state["active_action_budget_limit"] = min(24, req.max_iterations)
     capability_message = (
         "Deep Hunt authorization is active for this target. You may use bounded active run_tool "
@@ -34051,7 +34069,7 @@ async def submit_agent_hunt_reply(run_id: str, req: AgentHuntReplyRequest):
             )
             max_iterations = int(row["max_iterations"] or _AGENT_HUNT_DEFAULT_ITERATIONS)
             if state.get("wire_request_budget_limit") is None:
-                state["wire_request_budget_limit"] = min(3600, max(450, max_iterations * 90))
+                state["wire_request_budget_limit"] = agent_budget.keyless_hunt_wire_budget(max_iterations)
             allow_write = bool(row["allow_write"])
             allow_active = bool(row["allow_active"])
             # Revalidate Deep Hunt authority on every turn. An expired, revoked, wrong-target,
