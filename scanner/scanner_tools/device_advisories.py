@@ -18,7 +18,7 @@ BUNDLED_SNAPSHOT_PATH = os.path.join(
     "data",
     "device_advisories.json",
 )
-BUNDLED_SNAPSHOT_SHA256 = "3c9c66b400f2fe2d931066d9f92fd2cbb3de5030e50ec1570eef0fc018cdfb0a"
+BUNDLED_SNAPSHOT_SHA256 = "d8d614b63f39cce836938ecd3fe5e1e134efac21b7759a928eeeb7d1d7b18b13"
 
 
 def load_verified_snapshot(
@@ -84,7 +84,10 @@ def _version_parts(value: Any) -> tuple[tuple[int, Any], ...]:
     text = str(value or "").strip().lower()
     parts: list[tuple[int, Any]] = []
     for token in re.findall(r"\d+|[a-z]+", text):
-        parts.append((1, int(token)) if token.isdigit() else (0, token))
+        # Numeric segments sort before letter suffixes at the same position
+        # (1.0.1 < 1.0.1a < 1.0.1g), matching NVD's letter-suffix release
+        # families; zero-padding keeps 1.0 == 1.0.0.
+        parts.append((1, int(token)) if token.isdigit() else (2, token))
     return tuple(parts)
 
 

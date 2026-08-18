@@ -123,7 +123,8 @@ def test_public_response_headers_redact_redirect_secrets_and_auth_challenges():
 
     assert "secret-token" not in public["location"]
     assert "%3Credacted%3E" in public["location"]
-    assert "www-authenticate" not in public
+    # auth-challenge scheme stays visible for reasoning, secrets do not
+    assert public["www-authenticate"] == "<redacted>"
     assert public["set-cookie"] == "<redacted>"
 
 
@@ -247,3 +248,81 @@ def test_anonymous_denial_then_credentialed_access_proves_authentication(monkeyp
         finding["title"] == "Authenticated device response lacks private cache controls"
         for finding in result["findings"]
     )
+
+
+def test_classify_discovered_device_path_matches_management_tokens():
+    assert device_web.classify_discovered_device_path("/admin.html")
+    assert device_web.classify_discovered_device_path("/api/status")
+    assert device_web.classify_discovered_device_path("/setup.cgi")
+    assert not device_web.classify_discovered_device_path("/favicon.ico")
+    assert not device_web.classify_discovered_device_path("/assets/logo.png")
+    assert not device_web.classify_discovered_device_path("")
+
+
+def test_dir_discovery_findings_require_sensitive_200(monkeypatch):
+    findings = device_web._dir_discovery_findings(
+        origin="http://tv.example.test:8080",
+        discovery={"tool": device_web.DIR_DISCOVERY_TOOL, "wordlist": "/app/wordlists/common.txt",
+                   "discovered": [
+                       {"path": "/admin", "status": 200, "length": 512},
+                       {"path": "/admin", "status": 401, "length": 0},
+                       {"path": "/images", "status": 200, "length": 90},
+                   ]},
+    )
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["severity"] == "medium" and finding["cwe"] == "CWE-306"
+    assert finding["tool"] == device_web.DIR_DISCOVERY_TOOL
+    assert finding["evidence"]["path"] == "/admin"
+    assert finding["fingerprint"]
+
+
+def test_dir_discovery_is_thorough_and_cleartext_only(monkeypatch):
+    import asyncio as _asyncio
+
+    calls = {}
+
+    async def fake_dir_discovery(**kwargs):
+        calls["kwargs"] = kwargs
+        return {"tool": device_web.DIR_DISCOVERY_TOOL, "wordlist": "w",
+                "discovered": [{"path": "/admin", "status": 200, "length": 10}]}
+
+    async def public_response(**_kwargs):
+        return {
+            "status": 200,
+            "headers": {"content-type": "text/html"},
+            "body": b"<html></html>",
+            "truncated": False,
+            "elapsed_ms": 1,
+        }
+
+    monkeypatch.setattr(device_web, "run_device_dir_discovery", fake_dir_discovery)
+    monkeypatch.setattr(device_web, "_request", public_response)
+
+    async def fake_tls(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(device_web, "_assess_tls_trust", fake_tls)
+
+    async def run(profile, scheme):
+        port = 8080 if scheme == "http" else 8443
+        return await device_web.run_pinned_device_web_scan({
+            "origin": f"{scheme}://tv.example.test:{port}",
+            "connect_address": "192.0.2.10",
+            "port": port,
+            "host_header": f"tv.example.test:{port}",
+        }, profile=profile, credential=None, cancel_check=None)
+
+    # thorough + http -> discovery runs, finding + observation emitted
+    result = _asyncio.run(run("thorough", "http"))
+    assert calls["kwargs"]["hostname"] == "tv.example.test"
+    assert any(f["tool"] == device_web.DIR_DISCOVERY_TOOL for f in result["findings"])
+    assert result["device_web"]["dir_discovery"]["discovered"][0]["path"] == "/admin"
+    assert any(o.get("source") == device_web.DIR_DISCOVERY_TOOL for o in result["device_web"]["observations"])
+
+    # standard profile or https origin -> discovery never invoked
+    calls.clear()
+    _asyncio.run(run("standard", "http"))
+    assert calls == {}
+    _asyncio.run(run("thorough", "https"))
+    assert calls == {}

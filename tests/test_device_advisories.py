@@ -1,8 +1,35 @@
 import hashlib
 import json
 import os
+import subprocess
+import sys
 
 from scanner.scanner_tools import device_advisories
+
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+GENERATOR_PATH = os.path.join(REPO_ROOT, "scripts", "generate_device_advisories.py")
+
+BOUNDED_KEYS = (
+    "version", "version_start_including", "version_start_excluding",
+    "version_end_including", "version_end_excluding",
+)
+
+
+def _probe_versions(record):
+    """Candidate versions that should fall inside the advisory's affected range."""
+    if record.get("version"):
+        return [str(record["version"])]
+    candidates = []
+    start_including = record.get("version_start_including")
+    if start_including:
+        candidates.extend([str(start_including), f"{start_including}a"])
+    if record.get("version_start_excluding"):
+        candidates.append("9999")
+    if record.get("version_end_including") or record.get("version_end_excluding"):
+        candidates.append("0")
+    candidates.append("1.0")
+    return candidates
 
 
 def test_cpe_version_range_match_is_promotable_advisory_evidence():
@@ -137,3 +164,56 @@ def test_bundled_snapshot_hash_and_release_image_defaults_cannot_drift():
     dockerfile = open(dockerfile_path, encoding="utf-8").read()
     assert "ENV DEVICE_INTEL_DB_PATH=/app/data/device_advisories.json" in dockerfile
     assert f"ENV DEVICE_INTEL_DB_SHA256={actual}" in dockerfile
+
+
+def test_bundled_snapshot_loads_through_the_real_loader_with_a_real_dataset():
+    loaded = device_advisories.load_verified_snapshot(None, None)
+    assert loaded["status"] == "available"
+    assert loaded["record_count"] >= 15
+    products = {str(item.get("product") or "").lower() for item in loaded["advisories"]}
+    assert len(products) >= 8
+    assert all(str(item.get("cve") or "").startswith("CVE-") for item in loaded["advisories"])
+
+
+def test_every_bundled_advisory_is_version_bounded_and_promotable():
+    loaded = device_advisories.load_verified_snapshot(None, None)
+    assert loaded["status"] == "available"
+    for record in loaded["advisories"]:
+        assert any(record.get(key) not in (None, "", "*", "-") for key in BOUNDED_KEYS), record
+        promoted = False
+        for version in _probe_versions(record):
+            components = str(record.get("cpe") or "").split(":")
+            if len(components) >= 6:
+                components[5] = version
+            matches = device_advisories.match_advisories(
+                [record], cpe=":".join(components), product=None, version=version,
+            )
+            if matches and matches[0]["promotable"]:
+                promoted = True
+                break
+        assert promoted, f"{record.get('cve')} never promotes for an in-range version"
+
+
+def test_generator_verify_mode_accepts_the_bundled_snapshot():
+    result = subprocess.run(
+        [sys.executable, GENERATOR_PATH, "--verify", device_advisories.BUNDLED_SNAPSHOT_PATH],
+        capture_output=True, text=True, cwd=REPO_ROOT,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "self-check:" in result.stdout
+
+
+def test_generator_offline_mode_emits_a_loadable_curated_snapshot(tmp_path):
+    output = tmp_path / "device_advisories.json"
+    result = subprocess.run(
+        [sys.executable, GENERATOR_PATH, "--offline", "--output", str(output), "--self-check"],
+        capture_output=True, text=True, cwd=REPO_ROOT,
+    )
+    assert result.returncode == 0, result.stderr
+    snapshot = json.loads(output.read_text(encoding="utf-8"))
+    assert snapshot["schema_version"] == "shakerscan-device-advisories/v1"
+    assert len(snapshot["advisories"]) >= 5
+    digest = hashlib.sha256(output.read_bytes()).hexdigest()
+    loaded = device_advisories.load_verified_snapshot(str(output), digest)
+    assert loaded["status"] == "available"
+    assert loaded["record_count"] == len(snapshot["advisories"])

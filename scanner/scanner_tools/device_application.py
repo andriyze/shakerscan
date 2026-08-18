@@ -30,6 +30,11 @@ try:
 except ImportError:  # pragma: no cover - flat scanner runtime
     from device_web import request_pinned_device_http
 
+try:
+    from .device_control_plane import discover_control_plane_surface
+except ImportError:  # pragma: no cover - flat scanner runtime
+    from device_control_plane import discover_control_plane_surface
+
 
 CATALOG_PATH = Path(__file__).resolve().parent.parent / "data" / "device_api_catalog.json"
 PROFILE_RANK = {"inventory": 0, "posture": 1, "thorough": 2}
@@ -630,10 +635,40 @@ async def discover_device_application_surface(
                         "source": "device_api_catalog",
                     })
 
+    control_plane_findings: list[dict[str, Any]] = []
+    remaining_budget = budget - requests_executed
+    if remaining_budget > 0 and safety_profile != "observe_only":
+        try:
+            control_plane = await discover_control_plane_surface(
+                connect_address=connect_address,
+                origin_locator=origin_locator,
+                profile=profile,
+                open_ports=open_ports,
+                web_origins=web_origins,
+                descriptor_services=[
+                    {
+                        "origin": item.get("origin"),
+                        "port": item.get("port"),
+                        "scheme": str(item.get("transport") or "http"),
+                        "services": (item.get("descriptor") or {}).get("services") or [],
+                    }
+                    for item in (descriptor_enrichment or {}).get("observations") or []
+                    if isinstance(item.get("descriptor"), dict)
+                ],
+                remaining_budget=remaining_budget,
+            )
+        except Exception:  # pragma: no cover - defensive: never fail the stage
+            control_plane = {"observations": [], "findings": [], "skipped_probes": [], "summary": {"requests_executed": 0}}
+        observations.extend(control_plane.get("observations") or [])
+        skipped.extend(control_plane.get("skipped_probes") or [])
+        requests_executed += int((control_plane.get("summary") or {}).get("requests_executed") or 0)
+        control_plane_findings = [
+            dict(item) for item in control_plane.get("findings") or [] if isinstance(item, dict)
+        ]
     confirmed = sum(1 for item in observations if item.get("outcome") == "confirmed")
     auth_boundaries = sum(1 for item in observations if item.get("auth_required"))
     responded = sum(1 for item in observations if int(item.get("status") or 0) > 0)
-    findings = build_application_findings(observations)
+    findings = build_application_findings(observations) + control_plane_findings
     return {
         "schema_version": "device-application-surface/v1",
         "catalog_version": catalog.get("catalog_version"),

@@ -11,9 +11,12 @@ import asyncio
 import hashlib
 import ipaddress
 import json
+import re
 import ssl
+import tempfile
 import time
 import urllib.parse
+from pathlib import Path
 from typing import Any
 
 from .device_postman import (
@@ -29,11 +32,161 @@ MAX_RESPONSE_BYTES = 256 * 1024
 MAX_REDIRECTS = 5
 IMPORTED_REQUEST_LIMITS = {"quick": 50, "standard": 200, "deep": 500}
 IMPORTED_REQUEST_TIME_BUDGETS = {"quick": 60.0, "standard": 180.0, "deep": 480.0}
+CREDENTIAL_HEADER_NAMES = {
+    "authorization", "proxy-authorization", "cookie", "x-api-key", "api-key",
+    "x-auth-token", "x-session-token",
+}
+REVERSE_OPERATION_TOKEN_PAIRS = (
+    ("on", "off"), ("open", "close"), ("enable", "disable"), ("start", "stop"),
+    ("lock", "unlock"), ("mute", "unmute"), ("play", "pause"), ("up", "down"),
+    ("increase", "decrease"), ("activate", "deactivate"),
+)
+INVERSE_METHOD_PAIRS = ({"POST", "DELETE"}, {"PUT", "DELETE"})
 PROFILE_PATHS = {
     "quick": ("/",),
     "standard": ("/", "/.well-known/security.txt", "/robots.txt"),
     "deep": ("/", "/.well-known/security.txt", "/robots.txt", "/favicon.ico", "/description.xml", "/system.xml"),
 }
+
+# Bounded directory discovery (ffuf) on device web origins. Cleartext HTTP only: ffuf cannot
+# pin SNI separately from the URL host, and HTTPS origins must not be fuzzed against the
+# pre-resolved IP without the registered hostname's SNI identity.
+DIR_DISCOVERY_PROFILE = "thorough"
+DIR_DISCOVERY_WORDLIST = "/app/wordlists/common.txt"
+DIR_DISCOVERY_MAXTIME_SECONDS = 90
+DIR_DISCOVERY_RATE = 5
+DIR_DISCOVERY_MAX_PATHS = 40
+DIR_DISCOVERY_MATCH_CODES = "200,204,301,302,307,401,403,405"
+DIR_DISCOVERY_SENSITIVE_PATH_RE = None  # compiled lazily below
+_SENSITIVE_PATH_TOKENS = (
+    "admin", "config", "setup", "debug", "api", "login", "status", "info",
+    "control", "manage", "system", "diag", "firmware", "upgrade",
+)
+DIR_DISCOVERY_TOOL = "device_web_discovery"
+
+_DIR_SENSITIVE_RE = re.compile("|".join(_SENSITIVE_PATH_TOKENS), re.I)
+
+
+def classify_discovered_device_path(path: str) -> bool:
+    """A discovered path is sensitive-relevant when it carries a management/control token."""
+    return bool(_DIR_SENSITIVE_RE.search(str(path or "")))
+
+
+async def run_device_dir_discovery(
+    *,
+    connect_address: str,
+    hostname: str,
+    port: int,
+    cancel_check: Any = None,
+) -> dict[str, Any] | None:
+    """Bounded ffuf directory discovery against one pinned cleartext device origin.
+
+    The URL pins the pre-resolved device address; the registered hostname is preserved via
+    the Host header. Output is a bounded typed summary, never raw tool output.
+    """
+    display = f"[{connect_address}]" if ":" in connect_address else connect_address
+    url = f"http://{display}:{port}/FUZZ"
+    host_header = f"{hostname}:{port}"
+    out_path: str | None = None
+    try:
+        fd, out_path = tempfile.mkstemp(prefix="shakerscan-ffuf-", suffix=".json")
+        import os
+
+        os.close(fd)
+        argv = [
+            "ffuf", "-u", url, "-w", DIR_DISCOVERY_WORDLIST,
+            "-H", f"Host: {host_header}",
+            "-mc", DIR_DISCOVERY_MATCH_CODES, "-ac",
+            "-t", "3", "-rate", str(DIR_DISCOVERY_RATE), "-timeout", "5",
+            "-maxtime", str(DIR_DISCOVERY_MAXTIME_SECONDS),
+            "-of", "json", "-o", out_path, "-s",
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        deadline = asyncio.get_running_loop().time() + DIR_DISCOVERY_MAXTIME_SECONDS + 10
+        while proc.returncode is None:
+            if callable(cancel_check):
+                requested = cancel_check()
+                if hasattr(requested, "__await__"):
+                    requested = await requested
+                if requested:
+                    proc.kill()
+                    return None
+            if asyncio.get_running_loop().time() >= deadline:
+                proc.kill()
+                break
+            await asyncio.sleep(0.25)
+        try:
+            payload = json.loads(Path(out_path).read_text(errors="replace") or "{}")
+        except (OSError, ValueError):
+            return None
+        results = payload.get("results") if isinstance(payload, dict) else None
+        if not isinstance(results, list):
+            return None
+        discovered: list[dict[str, Any]] = []
+        for item in results[: DIR_DISCOVERY_MAX_PATHS]:
+            if not isinstance(item, dict):
+                continue
+            fuzz = str(item.get("input") or {}).get("FUZZ") if isinstance(item.get("input"), dict) else None
+            if fuzz is None:
+                fuzz = str(item.get("input") or "")
+            status = int(item.get("status") or 0)
+            length = int(item.get("length") or 0)
+            if not fuzz or not status:
+                continue
+            discovered.append({
+                "path": f"/{str(fuzz).strip('/')}",
+                "status": status,
+                "length": length,
+            })
+        return {"tool": DIR_DISCOVERY_TOOL, "wordlist": DIR_DISCOVERY_WORDLIST, "discovered": discovered}
+    except (OSError, ValueError):
+        return None
+    finally:
+        if out_path:
+            try:
+                import os
+
+                os.unlink(out_path)
+            except OSError:
+                pass
+
+
+def _dir_discovery_findings(
+    *, origin: str, discovery: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    if not discovery:
+        return findings
+    for item in discovery.get("discovered") or []:
+        path = str(item.get("path") or "")
+        status = int(item.get("status") or 0)
+        if status != 200 or not classify_discovered_device_path(path):
+            continue
+        finding = {
+            "type": "Unauthenticated device management page discovered",
+            "title": f"Unauthenticated device page {path} discovered via directory discovery",
+            "severity": "medium",
+            "description": (
+                f"Directory discovery found {path} returning HTTP 200 without credentials on the "
+                "device web origin. Management-relevant paths should require authentication."
+            ),
+            "recommendation": "Require authentication and least-privilege authorization on management pages.",
+            "url": public_request_url(origin),
+            "tool": DIR_DISCOVERY_TOOL,
+            "source": "device",
+            "cwe": "CWE-306",
+            "evidence": {"path": path, "status": status, "wordlist": discovery.get("wordlist")},
+        }
+        finding["fingerprint"] = hashlib.sha256(
+            json.dumps([finding["title"], public_request_url(origin)], separators=(",", ":")).encode()
+        ).hexdigest()
+        findings.append(finding)
+    return findings
 
 
 class _DeviceWebCancelled(Exception):
@@ -310,6 +463,96 @@ async def request_pinned_device_http(
     )
 
 
+async def request_pinned_device_control_http(
+    *,
+    connect_address: str,
+    hostname: str,
+    port: int,
+    scheme: str,
+    method: str,
+    path: str,
+    headers: dict[str, str] | None = None,
+    body: bytes = b"",
+    timeout: float = 8.0,
+) -> dict[str, Any]:
+    """Send one state-changing HTTP request to an already-pinned device destination.
+
+    Reserved for server-owned executors that selected an exact bound request from
+    a user-confirmed collection. The socket stays pinned to ``connect_address``
+    while ``hostname`` is used only for Host and TLS SNI.
+    """
+    normalized_scheme = str(scheme or "").strip().lower()
+    normalized_method = str(method or "").strip().upper()
+    if normalized_scheme not in {"http", "https"}:
+        raise ValueError("device adapter scheme must be http or https")
+    if normalized_method not in {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"}:
+        raise ValueError("device adapter method is not permitted")
+    if not isinstance(path, str) or not path.startswith("/") or "\r" in path or "\n" in path:
+        raise ValueError("device adapter path must be one relative HTTP path")
+    if not 1 <= int(port) <= 65535:
+        raise ValueError("device adapter port is invalid")
+    return await _request(
+        connect_address=str(connect_address),
+        hostname=str(hostname),
+        port=int(port),
+        scheme=normalized_scheme,
+        method=normalized_method,
+        path=path,
+        headers=dict(headers or {}),
+        body=bytes(body),
+        timeout=float(timeout),
+    )
+
+
+def _request_text(request: dict[str, Any]) -> str:
+    return " ".join(filter(None, [
+        str(request.get("name") or ""),
+        str(request.get("url") or ""),
+        str(request.get("path") or ""),
+    ])).lower()
+
+
+def paired_reverse_request(
+    requests: list[dict[str, Any]], request_id: str,
+) -> dict[str, Any] | None:
+    """Find one obvious paired reverse operation for a bound state-changing request."""
+    target = next((
+        item for item in requests
+        if isinstance(item, dict) and str(item.get("id") or "") == str(request_id)
+    ), None)
+    if not isinstance(target, dict):
+        return None
+    target_method = str(target.get("method") or "").upper()
+    if target_method not in STATE_CHANGING_METHODS:
+        return None
+    target_path = str(target.get("url") or "").split("?", 1)[0].lower()
+    target_text = _request_text(target)
+    for candidate in requests:
+        if not isinstance(candidate, dict) or candidate is target:
+            continue
+        if str(candidate.get("id") or "") == str(request_id):
+            continue
+        method = str(candidate.get("method") or "").upper()
+        if method not in STATE_CHANGING_METHODS:
+            continue
+        candidate_path = str(candidate.get("url") or "").split("?", 1)[0].lower()
+        if (
+            target_path
+            and candidate_path == target_path
+            and {method, target_method} in INVERSE_METHOD_PAIRS
+        ):
+            return candidate
+        candidate_text = _request_text(candidate)
+        for forward, reverse in REVERSE_OPERATION_TOKEN_PAIRS:
+            if (
+                forward in target_text and reverse in candidate_text
+            ) or (
+                reverse in target_text and forward in candidate_text
+            ):
+                return candidate
+    return None
+
+
 def _origin_request_path(url: str) -> str:
     parsed = urllib.parse.urlsplit(url)
     path = parsed.path or "/"
@@ -374,7 +617,21 @@ def _public_response_headers(headers: dict[str, str]) -> dict[str, str]:
     }
     if "set-cookie" in {key.lower() for key in headers}:
         result["set-cookie"] = "<redacted>"
+    if "www-authenticate" in {key.lower() for key in headers}:
+        result["www-authenticate"] = "<redacted>"
     return result
+
+
+def public_device_response_headers(headers: dict[str, str]) -> dict[str, str]:
+    return _public_response_headers(headers)
+
+
+def strip_credential_headers(headers: dict[str, str]) -> dict[str, str]:
+    return {
+        str(key): str(value)
+        for key, value in dict(headers or {}).items()
+        if str(key).lower() not in CREDENTIAL_HEADER_NAMES
+    }
 
 
 def _security_header_findings(
@@ -972,6 +1229,30 @@ async def run_pinned_device_web_scan(
         if cancelled:
             break
 
+    dir_discovery: dict[str, Any] | None = None
+    if not cancelled and profile == DIR_DISCOVERY_PROFILE and scheme == "http":
+        try:
+            dir_discovery = await run_device_dir_discovery(
+                connect_address=connect_address,
+                hostname=hostname,
+                port=port,
+                cancel_check=cancel_check,
+            )
+        except _DeviceWebCancelled:
+            cancelled = True
+        if dir_discovery:
+            for item in dir_discovery.get("discovered") or []:
+                observations.append({
+                    "url": urllib.parse.urlunsplit((scheme, parsed.netloc, item.get("path", ""), "", "")),
+                    "path": item.get("path", ""),
+                    "status": int(item.get("status") or 0),
+                    "headers": {},
+                    "body_bytes": int(item.get("length") or 0),
+                    "truncated": False,
+                    "elapsed_ms": None,
+                    "source": DIR_DISCOVERY_TOOL,
+                })
+
     root = next((item for item in observations if item.get("path") == "/"), observations[0] if observations else {})
     status_code = int(root.get("status") or 0)
     imported_result = None
@@ -1006,12 +1287,15 @@ async def run_pinned_device_web_scan(
             "status_code": status_code,
         },
         "result": {"score": None, "grade": None},
-        "findings": tls_findings + list(header_findings.values()) + imported_findings,
+        "findings": tls_findings + list(header_findings.values()) + _dir_discovery_findings(
+            origin=origin, discovery=dir_discovery,
+        ) + imported_findings,
         "device_web": {
             "schema_version": "device-web-pinned/v1",
             "origin": origin,
             "connect_address": connect_address,
             "profile": profile,
+            "dir_discovery": dir_discovery,
             "observations": observations,
             "credentials_attempted": credentials_attempted,
             "credentials_withheld": credentials_withheld,

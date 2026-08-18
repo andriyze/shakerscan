@@ -316,6 +316,49 @@ exists; Device Hunt never invents a safe mutation. Every posture scan re-correla
 advisory snapshot, and resolves an old advisory finding only when the same service locus was observed
 again and no longer matches. Silence is never treated as remediation.
 
+## Offline advisory snapshot
+
+Exact CPE/version promotion is backed by a compact, hash-pinned advisory snapshot rather than a
+live vulnerability feed, so device workers make no external calls and no unverified data can
+silently change matching behavior. The bundled snapshot lives at
+`scanner/data/device_advisories.json` under the `shakerscan-device-advisories/v1` schema. It is
+loaded only through the real loader (`scanner/scanner_tools/device_advisories.py`), which requires
+a regular file whose SHA-256 matches the pinned digest; a mismatched or missing file fails closed
+instead of degrading to unpinned data.
+
+Only advisories with explicit NVD version bounds (or an exact version) are included; unbounded
+wildcard configurations are signal-only and are never emitted into the snapshot, so any promotable
+match is provably version-bounded. The release image pins the bundled copy through
+`DEVICE_INTEL_DB_PATH` and `DEVICE_INTEL_DB_SHA256` in `scanner/Dockerfile`, and tests reject drift
+between the file, the loader constant, and the Dockerfile pin.
+
+An operator can substitute a newer or site-specific snapshot without rebuilding by pointing the
+same two environment variables at a regular file and its SHA-256; `DEVICE_INTEL_DB_SHA256` is
+mandatory, so an unpinned override is rejected. Values are resolved at read time with the
+environment taking precedence over the bundled fallback.
+
+The snapshot is refreshed at release time with `scripts/generate_device_advisories.py` (stdlib
+only, no API key; it honors the unauthenticated NVD rate limit). Typical refresh:
+
+```bash
+# Curated CVE selection against the live NVD API 2.0
+python3 scripts/generate_device_advisories.py \
+  --cve CVE-2017-17562 --cve CVE-2023-38545 ... \
+  --output scanner/data/device_advisories.json --self-check
+
+# Or product-wide queries for an embedded product
+python3 scripts/generate_device_advisories.py --vendor mosquitto --output /tmp/mosquitto.json
+```
+
+The generator prints the new SHA-256 plus the exact `DEVICE_INTEL_DB_PATH`/`DEVICE_INTEL_DB_SHA256`
+override lines. `--self-check` validates the written file through the real scanner loader and
+confirms every record is bounded and promotable; `--verify PATH` runs the same validation against
+an existing snapshot; `--offline` emits only the generator's built-in curated seed with no network
+access; and `--from-raw DIR` rebuilds deterministically from cached NVD API responses. After a
+refresh, copy the printed SHA-256 into both `BUNDLED_SNAPSHOT_SHA256` in
+`scanner/scanner_tools/device_advisories.py` and the `ENV DEVICE_INTEL_DB_SHA256` line in
+`scanner/Dockerfile`; the drift tests fail until both match.
+
 ## Wireless and non-IP extensions
 
 Bluetooth, BLE, Zigbee, Thread, and passive network telemetry require hardware or network placement
