@@ -14,8 +14,9 @@ Modes:
   * --verify PATH: validate an existing snapshot with the real scanner loader
     (hashes the file, no write, no network).
 
-Only configuration matches with explicit NVD version bounds (or an exact CPE
-version) are emitted; unbounded wildcard matches are signal-only and skipped.
+Only unconditional configuration matches explicitly marked vulnerable and carrying
+NVD version bounds (or an exact CPE version) are emitted; conditional, negated,
+non-vulnerable, and unbounded wildcard matches are skipped.
 Matches for products outside the embedded dictionary are skipped too, so a
 shared CVE (Heartbleed, etc.) does not drag in vendor appliance noise.
 
@@ -359,13 +360,36 @@ def severity_from_metrics(cve: dict) -> str:
     return "unknown"
 
 
+def _iter_unconditional_vulnerable_matches(node: Any):
+    """Yield only CPEs NVD marks vulnerable outside conditional/negated branches.
+
+    An AND node commonly combines a vulnerable product with ``vulnerable:false``
+    platform constraints.  The snapshot schema cannot represent that boolean
+    configuration safely, so the entire conditional branch is rejected rather
+    than flattening it into a false exact-product advisory.
+    """
+    if not isinstance(node, dict) or node.get("negate") is True:
+        return
+    if str(node.get("operator") or "OR").upper() == "AND":
+        return
+    for match in node.get("cpeMatch", []):
+        if not isinstance(match, dict) or match.get("vulnerable") is not True:
+            continue
+        criteria = str(match.get("criteria", "")).strip()
+        if criteria.startswith("cpe:2.3:"):
+            yield criteria, match
+    for child in node.get("nodes", []):
+        yield from _iter_unconditional_vulnerable_matches(child)
+
+
 def iter_cpe_matches(cve: dict):
     for configuration in cve.get("configurations", []):
+        if not isinstance(configuration, dict) or configuration.get("negate") is True:
+            continue
+        if str(configuration.get("operator") or "OR").upper() == "AND":
+            continue
         for node in configuration.get("nodes", []):
-            for match in node.get("cpeMatch", []):
-                criteria = str(match.get("criteria", "")).strip()
-                if criteria.startswith("cpe:2.3:"):
-                    yield criteria, match
+            yield from _iter_unconditional_vulnerable_matches(node)
 
 
 def advisory_from_match(cve: dict, criteria: str, match: dict) -> dict | None:

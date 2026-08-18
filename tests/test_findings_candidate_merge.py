@@ -206,12 +206,12 @@ def test_auto_verify_limit_is_raised_to_eight():
     assert api_module._AGENT_AUTO_VERIFY_LIMIT == 8
 
 
-def test_findings_endpoint_admits_candidates_only_on_the_deep_hunt_surface():
+def test_findings_endpoint_keeps_candidates_opt_in_and_only_on_the_deep_hunt_surface():
     source = (ROOT / "api" / "api.py").read_text()
     endpoint = source[source.index('@app.get("/findings")'):]
     endpoint = endpoint[:endpoint.index('def _public_evidence_object_row')]
 
-    assert "include_candidates: bool = True" in endpoint
+    assert "include_candidates: bool = False" in endpoint
     assert '"include_candidates"' in endpoint
     assert "source_type in (None, \"deep_hunt\")" in endpoint
     assert "status in (None, \"active\")" in endpoint
@@ -225,6 +225,11 @@ def test_findings_endpoint_admits_candidates_only_on_the_deep_hunt_surface():
     # Pagination stays coherent: separate totals plus an explicit included count.
     assert "'candidates_total': candidates_total" in endpoint
     assert "'included_candidates': included_candidates" in endpoint
+
+    client = (ROOT / "ui" / "src" / "lib" / "api.ts").read_text()
+    assert "params?.include_candidates === true" in client
+    findings_page = (ROOT / "ui" / "src" / "app" / "findings" / "page.tsx").read_text()
+    assert "if (finding.is_candidate) return '/findings/candidates'" in findings_page
 
 
 def test_dashboard_counts_open_candidates_with_a_single_bounded_query():

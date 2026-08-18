@@ -2357,7 +2357,7 @@ export interface Finding {
   retest_type?: string | null
   retest_modes?: string[]
   retest_unsupported_reason?: string
-  // Open Deep Hunt investigation candidates merged into GET /findings items
+  // Optional compatibility view when GET /findings explicitly opts into candidates.
   is_candidate?: boolean
   verification_status?: string
   trust_tier?: 'suspected' | string
@@ -5811,7 +5811,7 @@ export async function getFindings(params?: {
   if (params?.research_campaign_id) searchParams.set('research_campaign_id', params.research_campaign_id)
   if (params?.sort_by) searchParams.set('sort_by', params.sort_by)
   if (params?.sort_order) searchParams.set('sort_order', params.sort_order)
-  if (params?.include_candidates === false) searchParams.set('include_candidates', 'false')
+  if (params?.include_candidates === true) searchParams.set('include_candidates', 'true')
 
   const res = await fetch(`${API_URL}/findings?${searchParams}`)
   if (!res.ok) throw new Error('Failed to fetch findings')

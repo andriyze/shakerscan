@@ -1055,6 +1055,50 @@ def test_ssrf_directory_listing_requires_causal_metadata_payload():
     assert suspected.evidence_level == "strong_indicator"
 
 
+def test_ssrf_causality_accepts_local_file_private_network_and_encoded_metadata_targets():
+    passwd = "root:x:0:0:root:/root:/bin/bash\n"
+    assert validate_ssrf(
+        {"tool": "ssrf_probe", "evidence": {"payload": "file:///etc/passwd"}},
+        passwd,
+    ).verified is True
+    assert validate_ssrf(
+        {"tool": "ssrf_probe", "evidence": {"payload": "http://10.0.0.5/admin"}},
+        passwd,
+    ).verified is True
+
+    creds = (
+        '{"AccessKeyId":"AKIAIOSFODNN7EXAMPLE",'
+        '"SecretAccessKey":"wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"}'
+    )
+    encoded = "http%253A%252F%252F169.254.169.254%252Flatest%252Fmeta-data%252F"
+    assert validate_ssrf(
+        {"tool": "ssrf_probe", "evidence": {"payload": encoded}},
+        creds,
+    ).verified is True
+
+
+def test_cloud_metadata_signature_does_not_promote_for_an_unrelated_private_target():
+    creds = (
+        '{"AccessKeyId":"AKIAIOSFODNN7EXAMPLE",'
+        '"SecretAccessKey":"wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"}'
+    )
+    result = validate_ssrf(
+        {"tool": "ssrf_probe", "evidence": {"payload": "http://10.0.0.5/admin"}},
+        creds,
+    )
+    assert result.verified is False
+    assert result.evidence_level == "strong_indicator"
+
+    lookalike = validate_ssrf(
+        {
+            "tool": "ssrf_probe",
+            "evidence": {"payload": "https://metadata.google.internal.attacker.example/creds"},
+        },
+        creds,
+    )
+    assert lookalike.verified is False
+
+
 def test_sqli_error_indicator_is_strong_but_not_verified():
     finding = {
         "tool": "active_sqli",

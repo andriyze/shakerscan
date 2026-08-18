@@ -306,7 +306,8 @@ function FindingsContent() {
   const page = Math.min(rawPage, Math.max(1, totalPages))
 
   // Build detail URL with return params to preserve filter context
-  const buildDetailUrl = (findingId: string) => {
+  const buildDetailUrl = (finding: Finding) => {
+    if (finding.is_candidate) return '/findings/candidates'
     const params = new URLSearchParams()
     if (severityFilter) params.set('return_severity', severityFilter)
     if (statusFilter) params.set('return_status', statusFilter)
@@ -325,7 +326,7 @@ function FindingsContent() {
     if (sortOrder !== 'desc') params.set('return_sort_order', sortOrder)
     if (page > 1) params.set('return_page', String(page))
     const queryString = params.toString()
-    return queryString ? `/findings/${findingId}?${queryString}` : `/findings/${findingId}`
+    return queryString ? `/findings/${finding.id}?${queryString}` : `/findings/${finding.id}`
   }
 
   const PaginationControls = () => (
@@ -755,7 +756,7 @@ function FindingsContent() {
               return (
                 <Link
                   key={finding.id}
-                  href={buildDetailUrl(finding.id)}
+                  href={buildDetailUrl(finding)}
                   className="block p-4 hover:bg-gray-800/50 transition-colors"
                 >
                   <div className="flex items-start gap-3">

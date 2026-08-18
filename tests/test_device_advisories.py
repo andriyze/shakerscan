@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import runpy
 import subprocess
 import sys
 
@@ -217,3 +218,29 @@ def test_generator_offline_mode_emits_a_loadable_curated_snapshot(tmp_path):
     loaded = device_advisories.load_verified_snapshot(str(output), digest)
     assert loaded["status"] == "available"
     assert loaded["record_count"] == len(snapshot["advisories"])
+
+
+def test_generator_rejects_non_vulnerable_and_conditional_nvd_cpes():
+    generator = runpy.run_path(GENERATOR_PATH)
+    iter_matches = generator["iter_cpe_matches"]
+    vulnerable_match = {
+        "vulnerable": True,
+        "criteria": "cpe:2.3:a:acme:tv_admin:1.0:*:*:*:*:*:*:*",
+    }
+    context_match = {
+        "vulnerable": False,
+        "criteria": "cpe:2.3:o:acme:tv_os:1.0:*:*:*:*:*:*:*",
+    }
+
+    explicit_false = {"configurations": [{"nodes": [{"operator": "OR", "cpeMatch": [context_match]}]}]}
+    assert list(iter_matches(explicit_false)) == []
+
+    conditional = {
+        "configurations": [{
+            "nodes": [{"operator": "AND", "cpeMatch": [vulnerable_match, context_match]}]
+        }]
+    }
+    assert list(iter_matches(conditional)) == []
+
+    unconditional = {"configurations": [{"nodes": [{"operator": "OR", "cpeMatch": [vulnerable_match]}]}]}
+    assert list(iter_matches(unconditional)) == [(vulnerable_match["criteria"], vulnerable_match)]

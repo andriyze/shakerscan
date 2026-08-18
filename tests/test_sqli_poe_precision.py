@@ -201,6 +201,46 @@ def test_boolean_sqli_accepts_numeric_total_header_separation():
     assert result["metrics"]["numeric_separation_field"] == "@header.x-total-count"
 
 
+def test_boolean_sqli_missing_numeric_field_in_one_repetition_does_not_crash():
+    def page(total=None):
+        value = {"items": [{"name": "stable"}]}
+        if total is not None:
+            value["total"] = total
+        return json.dumps(value)
+
+    result = _evaluate_boolean_sqli_differential(
+        [_response(page(3)), _response(page())],
+        [_response(page(87)), _response(page(87))],
+        [_response(page(3)), _response(page(3))],
+        true_payload="TRUE",
+        false_payload="FALSE",
+        mutation_responses=[_response(page(3)), _response(page(3))],
+    )
+
+    assert isinstance(result, dict)
+    assert result.get("metrics", {}).get("numeric_separation_field") is None
+
+
+def test_boolean_sqli_stable_separating_field_survives_unrelated_volatile_counter():
+    padding = "stable-content-" * 80
+
+    def page(total, request_counter):
+        return json.dumps({"padding": padding, "total": total, "request_counter": request_counter})
+
+    result = _evaluate_boolean_sqli_differential(
+        [_response(page(3, 1)), _response(page(3, 2))],
+        [_response(page(87, 3)), _response(page(87, 4))],
+        [_response(page(3, 5)), _response(page(3, 6))],
+        true_payload="TRUE",
+        false_payload="FALSE",
+        mutation_responses=[_response(page(3, 7)), _response(page(3, 8))],
+    )
+
+    assert result["proven"] is True
+    assert result["metrics"]["numeric_separation_field"] == "total"
+    assert result["metrics"]["numeric_unstable_path"] == "request_counter"
+
+
 def test_boolean_sqli_rejects_volatile_total_between_baselines():
     items = [{"id": 1, "name": "alpha"}, {"id": 2, "name": "beta"}, {"id": 3, "name": "gamma"}]
 

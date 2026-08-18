@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.join(ROOT, "api"))
 sys.path.insert(0, os.path.join(ROOT, "scanner"))
 
 import device_agent  # noqa: E402
+import family_proof  # noqa: E402
 from scanner_tools.device_web import (  # noqa: E402
     paired_reverse_request,
     strip_credential_headers,
@@ -24,6 +25,9 @@ def test_device_agent_contract_has_only_bounded_device_tools():
     assert "separate user confirmation" in device_agent.render_contract().lower()
     assert "queue_device_scan" in device_agent.render_contract()
     assert "separately labeled inconclusive observations" in device_agent.render_contract()
+    assert "locus.state_path" in device_agent.render_contract()
+    assert "locus.cleanup_request_id" in device_agent.render_contract()
+    assert "HTTP success alone is never proof" in device_agent.render_contract()
     assert "devref_1" in device_agent.render_contract()
 
 
@@ -276,17 +280,23 @@ def test_control_authorization_preconditions_list_exactly_what_is_missing():
     assert "bound_request_replay_not_confirmed" in gaps
     assert "no_bound_confirmed_request_collection" in gaps
     assert "state_changing_replay_not_authorized" in gaps
+    assert "exact_collection_id_required" in gaps
+    assert "exact_request_id_required" in gaps
+    assert "exact_cleanup_request_id_required" in gaps
     ready = device_agent.seed_state(objective="tv", safety_profile="authenticated_active", max_turns=4)
     ready["device_request_collections"] = [{"collection_id": "c1", "state_changing_request_count": 2}]
     ready["confirm_request_replay"] = True
     ready["allow_state_changing_requests"] = True
-    assert device_agent.control_authorization_precondition_gaps(ready) == []
-    assert device_agent.control_authorization_precondition_gaps(ready, {"collection_id": "other"}) == [
+    exact_locus = {"collection_id": "c1", "request_id": "req1", "cleanup_request_id": "req2"}
+    assert device_agent.control_authorization_precondition_gaps(ready, exact_locus) == []
+    assert device_agent.control_authorization_precondition_gaps(
+        ready, {"collection_id": "other", "request_id": "req1", "cleanup_request_id": "req2"}
+    ) == [
         "no_bound_confirmed_request_collection"
     ]
     read_only_collection = dict(ready)
     read_only_collection["device_request_collections"] = [{"collection_id": "c1", "state_changing_request_count": 0}]
-    assert device_agent.control_authorization_precondition_gaps(read_only_collection) == [
+    assert device_agent.control_authorization_precondition_gaps(read_only_collection, exact_locus) == [
         "no_state_changing_request_in_bound_collection"
     ]
 
@@ -298,6 +308,41 @@ def test_control_replay_verdict_classifies_unauthenticated_control():
         assert device_agent.control_replay_verdict(accepted) == "unauthenticated_control_accepted"
     assert device_agent.control_replay_verdict(500) == "inconclusive"
     assert device_agent.control_replay_verdict(0) == "inconclusive"
+
+
+def test_control_state_transition_requires_an_observable_effect_and_exact_restoration():
+    before = {"status": 200, "body": b'{"power":"off"}'}
+    unchanged = {"status": 200, "body": b'{"power":"off"}'}
+    changed = {"status": 200, "body": b'{"power":"on"}'}
+
+    no_effect = device_agent.control_state_transition(before, unchanged)
+    assert no_effect["comparable"] is True
+    assert no_effect["changed"] is False
+
+    effect = device_agent.control_state_transition(before, changed)
+    assert effect["changed"] is True
+    assert effect["before"]["body_sha256"] != effect["after"]["body_sha256"]
+
+    truncated = device_agent.control_state_transition(
+        {**before, "truncated": True}, changed,
+    )
+    assert truncated["comparable"] is False
+    assert truncated["changed"] is False
+
+    restored = device_agent.control_state_transition(before, unchanged)
+    assert restored["comparable"] is True and restored["changed"] is False
+
+    no_effect_proof = family_proof.evaluate_family_proof("device_control_authorization", {
+        "exact_bound_request": True,
+        "before_state": True,
+        "underprivileged_effect": False,
+        "after_state": False,
+        "cleanup_or_safe_residue": False,
+        "state_unchanged": True,
+        "reexecuted_at_handoff": True,
+    })
+    assert no_effect_proof["verdict"] == "refuted"
+    assert no_effect_proof["promotable"] is False
 
 
 def test_device_web_credential_stripping_and_paired_reverse_request_helpers():
@@ -320,4 +365,15 @@ def test_device_web_credential_stripping_and_paired_reverse_request_helpers():
         {"id": "create", "method": "POST", "url": "https://tv.example.test/api/presets"},
         {"id": "remove", "method": "DELETE", "url": "https://tv.example.test/api/presets"},
     ]
-    assert paired_reverse_request(delete_pair, "create")["id"] == "remove"
+    assert paired_reverse_request(delete_pair, "create") is None
+    # Name substrings and cross-origin lookalikes are not exact cleanup bindings.
+    loose_name_pair = [
+        {"id": "start", "method": "POST", "name": "Start diagnostics", "url": "https://tv.example.test/api/run"},
+        {"id": "stop", "method": "POST", "name": "Stop diagnostics", "url": "https://tv.example.test/api/other"},
+    ]
+    assert paired_reverse_request(loose_name_pair, "start") is None
+    cross_origin = [
+        {"id": "on", "method": "POST", "url": "https://tv.example.test/api/power/on"},
+        {"id": "off", "method": "POST", "url": "https://other.example.test/api/power/off"},
+    ]
+    assert paired_reverse_request(cross_origin, "on") is None

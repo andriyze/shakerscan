@@ -41,7 +41,6 @@ REVERSE_OPERATION_TOKEN_PAIRS = (
     ("lock", "unlock"), ("mute", "unmute"), ("play", "pause"), ("up", "down"),
     ("increase", "decrease"), ("activate", "deactivate"),
 )
-INVERSE_METHOD_PAIRS = ({"POST", "DELETE"}, {"PUT", "DELETE"})
 PROFILE_PATHS = {
     "quick": ("/",),
     "standard": ("/", "/.well-known/security.txt", "/robots.txt"),
@@ -70,6 +69,41 @@ _DIR_SENSITIVE_RE = re.compile("|".join(_SENSITIVE_PATH_TOKENS), re.I)
 def classify_discovered_device_path(path: str) -> bool:
     """A discovered path is sensitive-relevant when it carries a management/control token."""
     return bool(_DIR_SENSITIVE_RE.search(str(path or "")))
+
+
+def _parse_dir_discovery_results(payload: Any) -> list[dict[str, Any]]:
+    """Return a bounded, typed view of ffuf JSON output.
+
+    ffuf represents substitution values as an ``input`` object.  Keep this parser
+    pure so ordinary tool output is covered without having to spawn a subprocess.
+    Malformed individual records are ignored rather than aborting the device scan.
+    """
+    results = payload.get("results") if isinstance(payload, dict) else None
+    if not isinstance(results, list):
+        return []
+    discovered: list[dict[str, Any]] = []
+    for item in results[:DIR_DISCOVERY_MAX_PATHS]:
+        if not isinstance(item, dict):
+            continue
+        input_values = item.get("input")
+        fuzz = (
+            str(input_values.get("FUZZ") or "")
+            if isinstance(input_values, dict)
+            else str(input_values or "")
+        )
+        try:
+            status = int(item.get("status") or 0)
+            length = int(item.get("length") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not fuzz or not status:
+            continue
+        discovered.append({
+            "path": f"/{fuzz.strip('/')}",
+            "status": status,
+            "length": max(0, length),
+        })
+    return discovered
 
 
 async def run_device_dir_discovery(
@@ -124,25 +158,7 @@ async def run_device_dir_discovery(
             payload = json.loads(Path(out_path).read_text(errors="replace") or "{}")
         except (OSError, ValueError):
             return None
-        results = payload.get("results") if isinstance(payload, dict) else None
-        if not isinstance(results, list):
-            return None
-        discovered: list[dict[str, Any]] = []
-        for item in results[: DIR_DISCOVERY_MAX_PATHS]:
-            if not isinstance(item, dict):
-                continue
-            fuzz = str(item.get("input") or {}).get("FUZZ") if isinstance(item.get("input"), dict) else None
-            if fuzz is None:
-                fuzz = str(item.get("input") or "")
-            status = int(item.get("status") or 0)
-            length = int(item.get("length") or 0)
-            if not fuzz or not status:
-                continue
-            discovered.append({
-                "path": f"/{str(fuzz).strip('/')}",
-                "status": status,
-                "length": length,
-            })
+        discovered = _parse_dir_discovery_results(payload)
         return {"tool": DIR_DISCOVERY_TOOL, "wordlist": DIR_DISCOVERY_WORDLIST, "discovered": discovered}
     except (OSError, ValueError):
         return None
@@ -168,19 +184,25 @@ def _dir_discovery_findings(
         if status != 200 or not classify_discovered_device_path(path):
             continue
         finding = {
-            "type": "Unauthenticated device management page discovered",
-            "title": f"Unauthenticated device page {path} discovered via directory discovery",
-            "severity": "medium",
+            "type": "Device management path discovered",
+            "title": f"Management-relevant device path {path} discovered",
+            "severity": "info",
             "description": (
-                f"Directory discovery found {path} returning HTTP 200 without credentials on the "
-                "device web origin. Management-relevant paths should require authentication."
+                f"Directory discovery found {path} returning HTTP 200 on the device web origin. "
+                "Path presence alone does not establish that protected management functionality "
+                "is available without authentication."
             ),
-            "recommendation": "Require authentication and least-privilege authorization on management pages.",
+            "recommendation": "Review the discovered route and verify authentication before treating it as a vulnerability.",
             "url": public_request_url(origin),
             "tool": DIR_DISCOVERY_TOOL,
             "source": "device",
-            "cwe": "CWE-306",
-            "evidence": {"path": path, "status": status, "wordlist": discovery.get("wordlist")},
+            "evidence": {
+                "path": path,
+                "status": status,
+                "wordlist": discovery.get("wordlist"),
+                "authentication_assessed": False,
+                "proof_state": "observation",
+            },
         }
         finding["fingerprint"] = hashlib.sha256(
             json.dumps([finding["title"], public_request_url(origin)], separators=(",", ":")).encode()
@@ -504,18 +526,47 @@ async def request_pinned_device_control_http(
     )
 
 
-def _request_text(request: dict[str, Any]) -> str:
-    return " ".join(filter(None, [
-        str(request.get("name") or ""),
-        str(request.get("url") or ""),
-        str(request.get("path") or ""),
-    ])).lower()
+def _normalized_request_location(url: str) -> tuple[tuple[str, str, int] | None, list[str], str]:
+    """Return (absolute origin, decoded path segments, query) for strict inverse pairing."""
+    try:
+        parsed = urllib.parse.urlsplit(str(url or "").strip())
+        origin = None
+        if parsed.scheme or parsed.netloc:
+            if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+                return None, [], ""
+            origin = (
+                parsed.scheme.lower(),
+                parsed.hostname.rstrip(".").lower(),
+                int(parsed.port or (443 if parsed.scheme.lower() == "https" else 80)),
+            )
+        segments = [urllib.parse.unquote(value).lower() for value in parsed.path.split("/") if value]
+        return origin, segments, parsed.query
+    except (TypeError, ValueError):
+        return None, [], ""
+
+
+def _paths_are_strict_token_inverses(
+    left: list[str], right: list[str],
+) -> bool:
+    if len(left) != len(right) or not left:
+        return False
+    differences = [(a, b) for a, b in zip(left, right) if a != b]
+    if len(differences) != 1:
+        return False
+    a, b = differences[0]
+    return any({a, b} == {forward, reverse} for forward, reverse in REVERSE_OPERATION_TOKEN_PAIRS)
 
 
 def paired_reverse_request(
     requests: list[dict[str, Any]], request_id: str,
 ) -> dict[str, Any] | None:
-    """Find one obvious paired reverse operation for a bound state-changing request."""
+    """Find one strict same-origin inverse for a bound state-changing request.
+
+    Names, arbitrary substrings, and inferred POST/DELETE semantics are
+    intentionally ignored. A pair must differ by exactly one whole path segment
+    from the allowlisted inverse-token pairs while preserving method, origin,
+    and query.
+    """
     target = next((
         item for item in requests
         if isinstance(item, dict) and str(item.get("id") or "") == str(request_id)
@@ -525,8 +576,10 @@ def paired_reverse_request(
     target_method = str(target.get("method") or "").upper()
     if target_method not in STATE_CHANGING_METHODS:
         return None
-    target_path = str(target.get("url") or "").split("?", 1)[0].lower()
-    target_text = _request_text(target)
+    target_url = str(target.get("url") or "")
+    target_origin, target_segments, target_query = _normalized_request_location(target_url)
+    if not target_segments:
+        return None
     for candidate in requests:
         if not isinstance(candidate, dict) or candidate is target:
             continue
@@ -535,21 +588,17 @@ def paired_reverse_request(
         method = str(candidate.get("method") or "").upper()
         if method not in STATE_CHANGING_METHODS:
             continue
-        candidate_path = str(candidate.get("url") or "").split("?", 1)[0].lower()
+        candidate_url = str(candidate.get("url") or "")
+        candidate_origin, candidate_segments, candidate_query = _normalized_request_location(candidate_url)
+        # Never infer cleanup across origins, nor between one relative and one absolute URL.
+        if candidate_origin != target_origin:
+            continue
         if (
-            target_path
-            and candidate_path == target_path
-            and {method, target_method} in INVERSE_METHOD_PAIRS
+            method == target_method
+            and candidate_query == target_query
+            and _paths_are_strict_token_inverses(target_segments, candidate_segments)
         ):
             return candidate
-        candidate_text = _request_text(candidate)
-        for forward, reverse in REVERSE_OPERATION_TOKEN_PAIRS:
-            if (
-                forward in target_text and reverse in candidate_text
-            ) or (
-                reverse in target_text and forward in candidate_text
-            ):
-                return candidate
     return None
 
 

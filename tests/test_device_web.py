@@ -271,10 +271,26 @@ def test_dir_discovery_findings_require_sensitive_200(monkeypatch):
     )
     assert len(findings) == 1
     finding = findings[0]
-    assert finding["severity"] == "medium" and finding["cwe"] == "CWE-306"
+    assert finding["severity"] == "info"
+    assert "cwe" not in finding
     assert finding["tool"] == device_web.DIR_DISCOVERY_TOOL
     assert finding["evidence"]["path"] == "/admin"
+    assert finding["evidence"]["authentication_assessed"] is False
     assert finding["fingerprint"]
+
+
+def test_dir_discovery_parser_accepts_normal_ffuf_input_objects_and_skips_bad_rows():
+    parsed = device_web._parse_dir_discovery_results({
+        "results": [
+            {"input": {"FUZZ": "admin"}, "status": 200, "length": 512},
+            {"input": {"FUZZ": "api/status"}, "status": "204", "length": "0"},
+            {"input": {"FUZZ": "broken"}, "status": "not-a-status", "length": 1},
+        ]
+    })
+    assert parsed == [
+        {"path": "/admin", "status": 200, "length": 512},
+        {"path": "/api/status", "status": 204, "length": 0},
+    ]
 
 
 def test_dir_discovery_is_thorough_and_cleartext_only(monkeypatch):

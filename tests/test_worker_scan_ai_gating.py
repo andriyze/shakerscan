@@ -3020,11 +3020,13 @@ def test_device_control_authorization_executor_replaces_the_hard_block():
     assert '"unauthenticated_control_accepted"' in verifier
     assert "_device_strip_credential_headers" in verifier
     assert "_device_request_pinned_control_http" in verifier
-    assert "cleanup_unavailable" in verifier
-    assert "cleanup_attempted_with_credentials" in verifier
-    assert "'CWE-306'" in verifier
+    assert "exact_strict_inverse_cleanup_request_not_bound" in verifier
+    assert "cleanup_restored_exact_pre_state" in verifier
+    assert "control_state_transition" in verifier
+    assert "'CWE-862'" in verifier
     assert "'high'" in verifier
     assert "before" in verifier and '"after_state"' in verifier
+    assert '"state_unchanged"' in verifier
     assert "credentials_stripped_for_replay" in verifier
 
 

@@ -7,8 +7,10 @@ are actually exploitable, reducing false positives and noise.
 Philosophy: "Find less, but only real vulnerabilities."
 """
 
+import ipaddress
 import logging
 import re
+import urllib.parse
 from dataclasses import dataclass
 from typing import Any
 
@@ -721,20 +723,28 @@ SSRF_POSSIBLE_PATTERNS = [
 # actually made must target a metadata/internal endpoint. Indicators must appear
 # in the tested payload/param/url, never merely in the response body (which may
 # just echo attacker-supplied or unrelated content).
-SSRF_CAUSAL_TARGET_RE = re.compile(
-    r"169\.254\.169\.254"
-    r"|169\.254\.170\.2"
-    r"|metadata\.google\.internal"
-    r"|100\.100\.100\.200"
-    r"|fd00:ec2::254"
-    r"|\blocalhost\b"
-    r"|127\.0\.0\.1",
+_SSRF_URL_HOST_RE = re.compile(
+    r"(?:https?|gopher|dict|ftp)://(?:[^/@\s]+@)?(\[[^\]]+\]|[^/:?#\s]+)",
+    re.I,
+)
+_SSRF_IPV4_RE = re.compile(r"(?<![0-9])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![0-9])")
+_SSRF_LOCAL_FILE_RE = re.compile(r"(?:file:(?:/{0,3})|(?:^|[?=&]))/?etc/passwd(?:\b|$)", re.I)
+_SSRF_METADATA_HOSTS = {
+    "metadata.google.internal",
+    "metadata.goog",
+    "169.254.169.254",
+    "169.254.170.2",
+    "100.100.100.200",
+    "fd00:ec2::254",
+}
+_SSRF_METADATA_NAME_RE = re.compile(
+    r"(?<![A-Za-z0-9.:-])(?:metadata\.google\.internal|metadata\.goog|fd00:ec2::254)(?![A-Za-z0-9.:-])",
     re.I,
 )
 
 
-def _ssrf_request_targets_internal_endpoint(finding: dict[str, Any]) -> bool:
-    """True when the tested request evidence itself names a metadata/internal target."""
+def _ssrf_request_target_kinds(finding: dict[str, Any]) -> set[str]:
+    """Classify causal targets found in request-side evidence, including encoded URLs."""
     candidate_strings: list[str] = []
     evidence = finding.get("evidence")
     if isinstance(evidence, dict):
@@ -748,7 +758,42 @@ def _ssrf_request_targets_internal_endpoint(finding: dict[str, Any]) -> bool:
         value = finding.get(key)
         if isinstance(value, str):
             candidate_strings.append(value)
-    return any(SSRF_CAUSAL_TARGET_RE.search(text) for text in candidate_strings)
+
+    kinds: set[str] = set()
+    for original in candidate_strings:
+        variants = [original]
+        for _ in range(2):
+            decoded = urllib.parse.unquote(variants[-1])
+            if decoded == variants[-1]:
+                break
+            variants.append(decoded)
+        for text in variants:
+            if _SSRF_LOCAL_FILE_RE.search(text):
+                kinds.add("local_file")
+            if _SSRF_METADATA_NAME_RE.search(text):
+                kinds.add("cloud_metadata")
+            hosts = [match.group(1).strip("[]") for match in _SSRF_URL_HOST_RE.finditer(text)]
+            hosts.extend(_SSRF_IPV4_RE.findall(text))
+            for host in hosts:
+                normalized = host.rstrip(".").lower()
+                if normalized in _SSRF_METADATA_HOSTS:
+                    kinds.add("cloud_metadata")
+                    continue
+                if normalized == "localhost" or normalized.endswith(".localhost"):
+                    kinds.add("internal_network")
+                    continue
+                try:
+                    address = ipaddress.ip_address(normalized)
+                except ValueError:
+                    continue
+                if not address.is_global:
+                    kinds.add("internal_network")
+    return kinds
+
+
+def _ssrf_request_targets_internal_endpoint(finding: dict[str, Any]) -> bool:
+    """True when the tested request evidence itself names a metadata/internal target."""
+    return bool(_ssrf_request_target_kinds(finding))
 
 
 def validate_ssrf(
@@ -783,12 +828,17 @@ def validate_ssrf(
             reason="Cannot verify SSRF without response"
         )
 
-    causal_target = _ssrf_request_targets_internal_endpoint(finding)
+    target_kinds = _ssrf_request_target_kinds(finding)
 
     # Check for confirmed SSRF patterns
     for signature, pattern in SSRF_CONFIRMED_PATTERNS:
         if re.search(pattern, response_body, re.I | re.S):
-            if not causal_target:
+            required_kinds = (
+                {"cloud_metadata"}
+                if signature != "passwd_root_record"
+                else {"cloud_metadata", "internal_network", "local_file"}
+            )
+            if not target_kinds.intersection(required_kinds):
                 return ValidationResult(
                     verified=False,
                     confidence=0.6,
@@ -817,7 +867,7 @@ def validate_ssrf(
     }
     gcp_index_markers = {"attributes", "instance", "project", "service-accounts", "zone"}
     if len(normalized_lines & aws_index_markers) >= 3 or len(normalized_lines & gcp_index_markers) >= 3:
-        if not causal_target:
+        if "cloud_metadata" not in target_kinds:
             return ValidationResult(
                 verified=False,
                 confidence=0.6,

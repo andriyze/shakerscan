@@ -21084,6 +21084,8 @@ async def _verify_device_control_authorization_candidate(
         except Exception:
             continue
         locus_request = str(locus.get("request_id") or "")
+        if not locus_request:
+            continue
         state_changing = [
             item for item in requests
             if isinstance(item, dict)
@@ -21092,9 +21094,7 @@ async def _verify_device_control_authorization_candidate(
         selected = next(
             (item for item in state_changing if str(item.get("id") or "") == locus_request),
             None,
-        ) if locus_request else None
-        if selected is None:
-            selected = state_changing[0] if state_changing else None
+        )
         if selected is not None:
             imported = selected
             collection_id = str(row["id"])
@@ -21103,7 +21103,7 @@ async def _verify_device_control_authorization_candidate(
     if imported is None:
         return await _device_control_authorization_blocked(
             candidate_id=candidate_id, device_target_id=device_target_id, run_id=run_id,
-            gaps=["no_state_changing_request_in_bound_collection"],
+            gaps=["exact_state_changing_request_not_bound"],
         )
     origins = await _device_confirmed_web_origins(device_target_id)
     request_url = str(imported.get("url") or "")
@@ -21111,19 +21111,84 @@ async def _verify_device_control_authorization_candidate(
     origin = None
     if parsed_request.scheme and parsed_request.hostname:
         request_port = int(parsed_request.port or (443 if parsed_request.scheme == "https" else 80))
+        request_host = str(parsed_request.hostname or "").rstrip(".").lower()
         origin = next((
             item for item in origins
-            if item["scheme"] == parsed_request.scheme.lower() and int(item["port"]) == request_port
+            if item["scheme"] == parsed_request.scheme.lower()
+            and int(item["port"]) == request_port
+            and request_host in {
+                str(item["hostname"]).rstrip(".").lower(),
+                str(item["connect_address"]).lower(),
+            }
         ), None)
-    elif origins:
-        origin = origins[0]
     if origin is None:
         return await _device_control_authorization_blocked(
             candidate_id=candidate_id, device_target_id=device_target_id, run_id=run_id,
-            gaps=["request_origin_not_confirmed_open"],
+            gaps=[
+                "state_changing_request_requires_absolute_confirmed_origin"
+                if not (parsed_request.scheme and parsed_request.hostname)
+                else "request_origin_not_confirmed_open"
+            ],
         )
     path = urllib.parse.urlunsplit(("", "", parsed_request.path or "/", parsed_request.query, ""))
     method = str(imported.get("method") or "").upper()
+    observation_path = str(locus.get("state_path") or path)
+    if (
+        not observation_path.startswith("/")
+        or observation_path.startswith("//")
+        or "://" in observation_path
+        or len(observation_path) > 2048
+        or any(ord(character) < 32 or ord(character) == 127 for character in observation_path)
+    ):
+        return await _device_control_authorization_blocked(
+            candidate_id=candidate_id, device_target_id=device_target_id, run_id=run_id,
+            gaps=["state_observation_path_invalid"],
+        )
+    cleanup_request_id = str(locus.get("cleanup_request_id") or "")
+    reverse = next((
+        item for item in collection_requests
+        if str(item.get("id") or "") == cleanup_request_id
+    ), None)
+    strict_reverse = _device_paired_reverse_request(
+        [imported, reverse] if isinstance(reverse, dict) else [imported],
+        str(imported.get("id") or ""),
+    )
+    if not isinstance(reverse, dict) or strict_reverse is not reverse:
+        return await _device_control_authorization_blocked(
+            candidate_id=candidate_id, device_target_id=device_target_id, run_id=run_id,
+            gaps=["exact_strict_inverse_cleanup_request_not_bound"],
+        )
+    reverse_method = str(reverse.get("method") or "").upper()
+    reverse_url = str(reverse.get("url") or "")
+    reverse_parsed = urllib.parse.urlsplit(reverse_url)
+    if reverse_parsed.scheme or reverse_parsed.netloc:
+        try:
+            reverse_port = int(reverse_parsed.port or (443 if reverse_parsed.scheme == "https" else 80))
+        except ValueError:
+            reverse_port = 0
+        reverse_host = str(reverse_parsed.hostname or "").rstrip(".").lower()
+        if (
+            reverse_parsed.scheme.lower() != origin["scheme"]
+            or reverse_port != int(origin["port"])
+            or reverse_host not in {
+                str(origin["hostname"]).rstrip(".").lower(),
+                str(origin["connect_address"]).lower(),
+            }
+        ):
+            return await _device_control_authorization_blocked(
+                candidate_id=candidate_id, device_target_id=device_target_id, run_id=run_id,
+                gaps=["cleanup_request_origin_mismatch"],
+            )
+        reverse_path = urllib.parse.urlunsplit(
+            ("", "", reverse_parsed.path or "/", reverse_parsed.query, "")
+        )
+    elif reverse_url.startswith("/"):
+        reverse_path = reverse_url
+    else:
+        return await _device_control_authorization_blocked(
+            candidate_id=candidate_id, device_target_id=device_target_id, run_id=run_id,
+            gaps=["cleanup_request_path_invalid"],
+        )
     headers = {
         str(key): str(value)
         for key, value in dict(imported.get("headers") or {}).items()
@@ -21132,10 +21197,18 @@ async def _verify_device_control_authorization_candidate(
     }
     body = imported.get("body") if isinstance(imported.get("body"), bytes) else b""
     replay_headers = _device_strip_credential_headers(headers)
+    reverse_headers = {
+        str(key): str(value)
+        for key, value in dict(reverse.get("headers") or {}).items()
+        if "\r" not in str(key) and "\n" not in str(key)
+        and "\r" not in str(value) and "\n" not in str(value)
+        and str(key).lower() not in {"host", "connection", "content-length", "transfer-encoding"}
+    }
+    reverse_body = reverse.get("body") if isinstance(reverse.get("body"), bytes) else b""
     try:
         before = await _device_request_pinned_http(
             connect_address=origin["connect_address"], hostname=origin["hostname"],
-            port=origin["port"], scheme=origin["scheme"], method="GET", path=path,
+            port=origin["port"], scheme=origin["scheme"], method="GET", path=observation_path,
             timeout=device_agent.DEVICE_HTTP_REQUEST_TIMEOUT_SECONDS,
         )
         replay = await _device_request_pinned_control_http(
@@ -21146,7 +21219,7 @@ async def _verify_device_control_authorization_candidate(
         )
         after = await _device_request_pinned_http(
             connect_address=origin["connect_address"], hostname=origin["hostname"],
-            port=origin["port"], scheme=origin["scheme"], method="GET", path=path,
+            port=origin["port"], scheme=origin["scheme"], method="GET", path=observation_path,
             timeout=device_agent.DEVICE_HTTP_REQUEST_TIMEOUT_SECONDS,
         )
     except Exception as exc:
@@ -21156,46 +21229,53 @@ async def _verify_device_control_authorization_candidate(
         ) from exc
     replay_status = int(replay.get("status") or 0)
     verdict = device_agent.control_replay_verdict(replay_status)
+    transition = device_agent.control_state_transition(before, after)
+    underprivileged_effect = bool(
+        verdict == "unauthenticated_control_accepted" and transition["changed"]
+    )
     cleanup_outcome = "not_attempted_verdict_not_verified"
     cleanup_status: int | None = None
-    if verdict == "unauthenticated_control_accepted":
-        reverse = _device_paired_reverse_request(collection_requests, str(imported.get("id") or ""))
-        if isinstance(reverse, dict):
-            reverse_method = str(reverse.get("method") or "").upper()
-            reverse_url = str(reverse.get("url") or "")
-            reverse_parsed = urllib.parse.urlsplit(reverse_url)
-            reverse_path = urllib.parse.urlunsplit(
-                ("", "", reverse_parsed.path or "/", reverse_parsed.query, "")
-            ) if (reverse_parsed.scheme and reverse_parsed.hostname) else reverse_url if reverse_url.startswith("/") else "/"
-            reverse_headers = {
-                str(key): str(value)
-                for key, value in dict(reverse.get("headers") or {}).items()
-                if "\r" not in str(key) and "\n" not in str(key) and "\r" not in str(value) and "\n" not in str(value)
-                and str(key).lower() not in {"host", "connection", "content-length", "transfer-encoding"}
-            }
-            reverse_body = reverse.get("body") if isinstance(reverse.get("body"), bytes) else b""
-            try:
-                cleanup = await _device_request_pinned_control_http(
+    restoration: dict[str, Any] = {"comparable": False, "changed": False}
+    if verdict == "unauthenticated_control_accepted" and not transition["changed"]:
+        cleanup_outcome = "not_required_no_observed_state_change"
+    elif underprivileged_effect:
+        try:
+            cleanup = await _device_request_pinned_control_http(
+                connect_address=origin["connect_address"], hostname=origin["hostname"],
+                port=origin["port"], scheme=origin["scheme"], method=reverse_method,
+                path=reverse_path, headers=reverse_headers, body=reverse_body,
+                timeout=device_agent.DEVICE_HTTP_REQUEST_TIMEOUT_SECONDS,
+            )
+            cleanup_status = int(cleanup.get("status") or 0)
+            if 200 <= cleanup_status < 300:
+                restored = await _device_request_pinned_http(
                     connect_address=origin["connect_address"], hostname=origin["hostname"],
-                    port=origin["port"], scheme=origin["scheme"], method=reverse_method,
-                    path=reverse_path, headers=reverse_headers, body=reverse_body,
+                    port=origin["port"], scheme=origin["scheme"], method="GET", path=observation_path,
                     timeout=device_agent.DEVICE_HTTP_REQUEST_TIMEOUT_SECONDS,
                 )
-                cleanup_status = int(cleanup.get("status") or 0)
-                cleanup_outcome = "cleanup_attempted_with_credentials" if 200 <= cleanup_status < 300 else "cleanup_attempt_rejected"
-            except Exception:
-                cleanup_outcome = "cleanup_attempt_failed"
-        else:
-            cleanup_outcome = "cleanup_unavailable"
+                restoration = device_agent.control_state_transition(before, restored)
+                cleanup_outcome = (
+                    "cleanup_restored_exact_pre_state"
+                    if restoration["comparable"] and not restoration["changed"]
+                    else "cleanup_did_not_restore_pre_state"
+                )
+            else:
+                cleanup_outcome = "cleanup_attempt_rejected"
+        except Exception:
+            cleanup_outcome = "cleanup_attempt_failed"
+    cleanup_restored = cleanup_outcome == "cleanup_restored_exact_pre_state"
     evidence = {
         "exact_bound_request": True,
-        "before_state": int(before.get("status") or 0) > 0,
-        "underprivileged_effect": verdict == "unauthenticated_control_accepted",
-        "after_state": int(after.get("status") or 0) > 0,
-        "cleanup_or_safe_residue": verdict != "unauthenticated_control_accepted" or cleanup_outcome != "not_attempted_verdict_not_verified",
-        "cleanup_unavailable": cleanup_outcome == "cleanup_unavailable",
+        "before_state": bool(transition["before"]["observable"]),
+        "underprivileged_effect": underprivileged_effect,
+        "after_state": bool(transition["after"]["observable"] and transition["changed"]),
+        "cleanup_or_safe_residue": cleanup_restored,
         "underprivileged_control_rejected": verdict == "unauthorized_rejected",
-        "state_unchanged": False,
+        "state_unchanged": bool(
+            verdict == "unauthenticated_control_accepted"
+            and transition["comparable"]
+            and not transition["changed"]
+        ),
         "reexecuted_at_handoff": True,
     }
     proof = family_proof.build_proof_contract_result(
@@ -21211,15 +21291,21 @@ async def _verify_device_control_authorization_candidate(
             "origin": origin["origin"],
             "method": method,
             "path": path,
+            "state_path": observation_path,
         },
         observations=[{
             "before_status": int(before.get("status") or 0),
             "replay_status": replay_status,
             "after_status": int(after.get("status") or 0),
+            "before_state": transition["before"],
+            "after_state": transition["after"],
+            "state_changed": transition["changed"],
             "replay_credentials": "stripped",
             "replay_sha256": hashlib.sha256(bytes(replay.get("body") or b"")).hexdigest(),
             "cleanup_outcome": cleanup_outcome,
             "cleanup_status": cleanup_status,
+            "cleanup_request_id": str(reverse.get("id") or ""),
+            "cleanup_restoration": restoration,
         }],
         controls=[{
             "pinned_connect_address": origin["connect_address"],
@@ -21229,7 +21315,7 @@ async def _verify_device_control_authorization_candidate(
                 (str(row["document_sha256"]) for row in rows if str(row["id"]) == collection_id), ""
             ),
         }],
-        proof_basis="unauthenticated_state_changing_replay_before_after",
+        proof_basis="unauthenticated_observed_state_change_with_exact_restoration",
     )
     promotable, gate_reason = family_proof.proof_contract_promotion_gate(proof)
     status = "verified" if promotable else "refuted" if proof.get("verdict") == "refuted" else "inconclusive"
@@ -21246,7 +21332,7 @@ async def _verify_device_control_authorization_candidate(
                     """INSERT INTO findings (
                            device_target_id, fingerprint, title, description, severity, tool, cwe,
                            url, evidence, source, last_verification_status, last_verification_verdict
-                       ) VALUES ($1,$2,$3,$4,'high','device_candidate_verifier','CWE-306',$5,$6::jsonb,
+                       ) VALUES ($1,$2,$3,$4,'high','device_candidate_verifier','CWE-862',$5,$6::jsonb,
                                  'device','completed','verified')
                        ON CONFLICT (device_target_id, fingerprint) WHERE device_target_id IS NOT NULL
                        DO UPDATE SET status='active', resolved_at=NULL, last_seen_at=NOW(),
@@ -21254,12 +21340,13 @@ async def _verify_device_control_authorization_candidate(
                            last_verification_verdict='verified', updated_at=NOW()
                        RETURNING id""",
                     device_target_id, fingerprint, title,
-                    "A state-changing control request from the bound collection succeeded after all credential headers were stripped, so the device performed a control action without authentication.",
+                    "A credential-stripped, exactly bound control request caused an observable device state change without authentication. An exact same-origin inverse request then restored the pre-test state.",
                     f"{origin['origin']}{path.split('?', 1)[0]}",
                     json.dumps({
                         "candidate_id": str(candidate_id),
                         "collection_id": collection_id,
                         "request_id": str(imported.get("id") or ""),
+                        "cleanup_request_id": str(reverse.get("id") or ""),
                         "cleanup_outcome": cleanup_outcome,
                         "proof_contract_v2": proof,
                     }),
@@ -21314,8 +21401,8 @@ async def _verify_device_control_authorization_candidate(
             "finding_id": str(finding_id),
             "cleanup_outcome": cleanup_outcome,
             "message": (
-                "The credential-stripped state-changing replay was accepted by the device. "
-                f"Cleanup: {cleanup_outcome}."
+                "The credential-stripped replay caused an observable state change and the "
+                f"exact inverse restored the pre-test state. Cleanup: {cleanup_outcome}."
             ),
         }
     return {
@@ -21328,6 +21415,8 @@ async def _verify_device_control_authorization_candidate(
         "cleanup_outcome": cleanup_outcome,
         "message": (
             "The device rejected the unauthenticated state-changing replay; the candidate is refuted."
+            if verdict == "unauthorized_rejected"
+            else "The replay returned success but caused no observable state change; the candidate is refuted."
             if status == "refuted"
             else "The control-authorization replay was inconclusive; no finding was promoted."
         ),
@@ -57539,7 +57628,7 @@ async def list_findings(
     resolved_within_days: Optional[int] = Query(None, ge=1),
     sort_by: Optional[str] = Query(None, pattern="^(severity|first_seen|last_seen|cvss)$"),
     sort_order: Optional[str] = Query("desc", pattern="^(asc|desc)$"),
-    include_candidates: bool = True,
+    include_candidates: bool = False,
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0)
 ):
@@ -57709,10 +57798,9 @@ async def list_findings(
                     ELSE 5
                 END""" + f" {severity_dir}, f.last_seen_at DESC NULLS LAST"
 
-        # Open web-plane hunt candidates ride along as SUSPECTED pseudo-findings unless a
-        # filter excludes them: another source_type, a non-active status, or a filter that
-        # only real findings can satisfy (scan/ai/device scope, verification state, research
-        # provenance, resolution recency).
+        # Open web-plane hunt candidates are an explicit compatibility opt-in. The default
+        # findings contract remains authoritative findings only; candidates have their own
+        # endpoint and UI. When requested, ordinary filters can still exclude them.
         candidates_included = (
             include_candidates
             and source_type in (None, "deep_hunt")
