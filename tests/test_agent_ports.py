@@ -340,6 +340,7 @@ def test_run_tool_argv_templates_hardcode_flags():
     assert b == "httpx" and "-json" in argv and "-silent" in argv and argv[argv.index("-u") + 1] == "http://t/x"
     b, argv, timeout = at.build_scanner_argv("nuclei", "http://t/x", {"severity": "high,critical", "tags": "cve,exposure"})
     assert b == "nuclei" and "-jsonl" in argv
+    assert "-no-interactsh" in argv
     assert argv[argv.index("-severity") + 1] == "high,critical"
     assert argv[argv.index("-tags") + 1] == "cve,exposure"
 

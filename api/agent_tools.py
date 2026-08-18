@@ -174,7 +174,8 @@ def _tmpl_nuclei(url: str, opts: dict[str, Any]) -> list[str]:
     if not _SEV_RE.match(severity):
         severity = "high,critical"
     args = ["-target", url, "-severity", severity, "-silent", "-jsonl",
-            "-timeout", "8", "-retries", "1", "-no-color", "-disable-update-check", "-disable-redirects"]
+            "-timeout", "8", "-retries", "1", "-no-color", "-disable-update-check",
+            "-disable-redirects", "-no-interactsh"]
     args += ["-rate-limit", "5", "-bulk-size", "5", "-concurrency", "5"]
     tags = str(opts.get("tags") or "").strip().lower()
     if _TAGS_RE.match(tags):
