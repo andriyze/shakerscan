@@ -122,6 +122,8 @@ async def run_device_dir_discovery(
     url = f"http://{display}:{port}/FUZZ"
     host_header = f"{hostname}:{port}"
     out_path: str | None = None
+    proc: asyncio.subprocess.Process | None = None
+    timed_out = False
     try:
         fd, out_path = tempfile.mkstemp(prefix="shakerscan-ffuf-", suffix=".json")
         import os
@@ -149,19 +151,56 @@ async def run_device_dir_discovery(
                     requested = await requested
                 if requested:
                     proc.kill()
-                    return None
+                    await proc.wait()
+                    raise _DeviceWebCancelled()
             if asyncio.get_running_loop().time() >= deadline:
                 proc.kill()
+                timed_out = True
                 break
             await asyncio.sleep(0.25)
+        await proc.wait()
+        if timed_out:
+            return {
+                "tool": DIR_DISCOVERY_TOOL,
+                "status": "timeout",
+                "wordlist": DIR_DISCOVERY_WORDLIST,
+                "discovered": [],
+                "error": "ffuf_time_budget_exhausted",
+            }
         try:
             payload = json.loads(Path(out_path).read_text(errors="replace") or "{}")
         except (OSError, ValueError):
-            return None
+            return {
+                "tool": DIR_DISCOVERY_TOOL,
+                "status": "failed",
+                "wordlist": DIR_DISCOVERY_WORDLIST,
+                "discovered": [],
+                "error": "ffuf_output_unavailable",
+            }
         discovered = _parse_dir_discovery_results(payload)
-        return {"tool": DIR_DISCOVERY_TOOL, "wordlist": DIR_DISCOVERY_WORDLIST, "discovered": discovered}
-    except (OSError, ValueError):
-        return None
+        return {
+            "tool": DIR_DISCOVERY_TOOL,
+            "status": "completed",
+            "wordlist": DIR_DISCOVERY_WORDLIST,
+            "discovered": discovered,
+            "error": None,
+        }
+    except FileNotFoundError:
+        return {
+            "tool": DIR_DISCOVERY_TOOL,
+            "status": "unavailable",
+            "wordlist": DIR_DISCOVERY_WORDLIST,
+            "discovered": [],
+            "error": "ffuf_not_installed",
+        }
+    except OSError as exc:
+        return {
+            "tool": DIR_DISCOVERY_TOOL,
+            "status": "failed",
+            "wordlist": DIR_DISCOVERY_WORDLIST,
+            "discovered": [],
+            "error": f"ffuf_execution_failed:{type(exc).__name__}",
+        }
     finally:
         if out_path:
             try:

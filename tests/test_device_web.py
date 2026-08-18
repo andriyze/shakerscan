@@ -293,6 +293,24 @@ def test_dir_discovery_parser_accepts_normal_ffuf_input_objects_and_skips_bad_ro
     ]
 
 
+def test_dir_discovery_reports_missing_ffuf_distinct_from_zero_results(monkeypatch):
+    import asyncio as _asyncio
+
+    async def missing_binary(*_args, **_kwargs):
+        raise FileNotFoundError("ffuf")
+
+    monkeypatch.setattr(device_web.asyncio, "create_subprocess_exec", missing_binary)
+    result = _asyncio.run(device_web.run_device_dir_discovery(
+        connect_address="192.0.2.10",
+        hostname="tv.example.test",
+        port=8080,
+    ))
+
+    assert result["status"] == "unavailable"
+    assert result["error"] == "ffuf_not_installed"
+    assert result["discovered"] == []
+
+
 def test_dir_discovery_is_thorough_and_cleartext_only(monkeypatch):
     import asyncio as _asyncio
 
