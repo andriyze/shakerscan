@@ -225,3 +225,18 @@ def test_privacy_sensitive_read_becomes_a_deterministic_finding(monkeypatch):
     assert finding["severity"] == "medium"
     assert finding["cwe"] == "CWE-306"
     assert "Private App" not in str(result)
+
+
+def test_generic_redirect_or_login_response_does_not_become_a_vulnerability():
+    observations = [{
+        "source": "device_api_catalog",
+        "outcome": "responded",
+        "origin": "http://tv.example.test:8080",
+        "path": "/query/apps",
+        "status": 302,
+        "action_class": "privacy_sensitive_read",
+        "data_class": "installed_applications",
+        "auth_required": False,
+    }]
+
+    assert device_application.build_application_findings(observations) == []

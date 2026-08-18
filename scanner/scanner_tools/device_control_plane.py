@@ -390,7 +390,7 @@ def _control_plane_finding(
     description: str,
     remediation: str,
     observation: dict[str, Any],
-    cwe: str,
+    cwe: str | None,
 ) -> dict[str, Any]:
     evidence = {
         key: observation.get(key)
@@ -401,19 +401,21 @@ def _control_plane_finding(
         [title, observation.get("platform"), observation.get("origin"), observation.get("port"), observation.get("path")],
         separators=(",", ":"),
     ).encode()).hexdigest()
-    return {
+    finding = {
         "fingerprint": fingerprint,
         "title": title,
         "description": description,
         "severity": severity,
         "tool": "device_control_plane_dast",
         "source": "device",
-        "cwe": cwe,
         "url": urllib.parse.urljoin(str(observation.get("origin") or ""), str(observation.get("path") or "/")),
         "evidence": evidence,
         "remediation": remediation,
         "verification": "deterministic_observation",
     }
+    if cwe:
+        finding["cwe"] = cwe
+    return finding
 
 
 def build_control_plane_findings(observations: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -423,28 +425,20 @@ def build_control_plane_findings(observations: list[dict[str, Any]]) -> list[dic
         if observation.get("source") != "device_control_plane":
             continue
         outcome = observation.get("outcome")
-        if outcome == "external_ip_returned":
-            findings.append(_control_plane_finding(
-                title="UPnP WAN address exposed without authentication",
-                severity="medium",
-                description="The UPnP IGD WAN control service answered an unauthenticated GetExternalIPAddress request with the device's current public IPv4 address.",
-                remediation="Disable WAN-side UPnP on the router, or restrict the IGD control service to authenticated management sessions.",
-                observation=observation,
-                cwe="CWE-306",
-            ))
-        elif outcome == "port_mapping_returned":
+        if outcome == "port_mapping_returned":
             mapping = observation.get("port_mapping") or {}
             wildcard = port_mapping_is_wildcard(mapping)
             findings.append(_control_plane_finding(
-                title="UPnP port mapping exposed",
-                severity="high" if wildcard else "medium",
+                title="UPnP port mapping visible on the local network",
+                severity="info",
                 description=(
-                    "The UPnP IGD control service disclosed an active port mapping to an unauthenticated peer."
-                    + (" The mapping accepts connections from any remote host." if wildcard else "")
+                    "The LAN-side UPnP IGD service returned an active port mapping. This is inventory "
+                    "evidence, not proof that UPnP is reachable from the WAN or that authentication is required."
+                    + (" The mapping does not restrict its remote-host field." if wildcard else "")
                 ),
-                remediation="Disable UPnP port mapping or require operator approval per mapping, and review disclosed entries against expected forwarding rules.",
+                remediation="Review the mapping against the device/network policy and disable UPnP if automatic mappings are not expected.",
                 observation=observation,
-                cwe="CWE-749",
+                cwe=None,
             ))
         elif outcome == "media_described":
             findings.append(_control_plane_finding(

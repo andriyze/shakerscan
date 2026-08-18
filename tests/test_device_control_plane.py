@@ -231,31 +231,34 @@ def test_plan_truncates_against_budget_and_thorough_tier():
 def test_finding_shape_matches_application_finding_contract():
     observations = [{
         "source": "device_control_plane", "platform": "upnp_igd",
-        "title": "UPnP IGD GetExternalIPAddress read-only control request",
+        "title": "UPnP IGD GetGenericPortMappingEntry read-only control request",
         "origin": "http://192.0.2.1:49152", "port": 49152, "method": "POST",
-        "path": "/ud", "status": 200, "outcome": "external_ip_returned",
+        "path": "/ud", "status": 200, "outcome": "port_mapping_returned",
         "auth_required": False, "action_class": "read_only_rpc",
         "data_class": "device_control_plane", "protocol": "upnp_soap",
         "service_type": "urn:schemas-upnp-org:service:WANIPConnection:1",
-        "soap_action": '"urn:schemas-upnp-org:service:WANIPConnection:1#GetExternalIPAddress"',
-        "external_ip": "203.0.113.7", "body_bytes": 300, "body_sha256": "0" * 64,
+        "soap_action": '"urn:schemas-upnp-org:service:WANIPConnection:1#GetGenericPortMappingEntry"',
+        "port_mapping": {"external_port": "8443", "internal_port": "443", "protocol": "TCP"},
+        "body_bytes": 300, "body_sha256": "0" * 64,
     }]
     findings = device_control_plane.build_control_plane_findings(observations)
     assert len(findings) == 1
     finding = findings[0]
-    for key in ("fingerprint", "title", "description", "severity", "tool", "source", "cwe", "url", "evidence", "remediation", "verification"):
+    for key in ("fingerprint", "title", "description", "severity", "tool", "source", "url", "evidence", "remediation", "verification"):
         assert key in finding
-    assert finding["title"] == "UPnP WAN address exposed without authentication"
-    assert finding["severity"] == "medium"
-    assert finding["cwe"] == "CWE-306"
+    assert finding["title"] == "UPnP port mapping visible on the local network"
+    assert finding["severity"] == "info"
+    assert "cwe" not in finding
     assert finding["tool"] == "device_control_plane_dast"
     assert finding["source"] == "device"
     assert finding["verification"] == "deterministic_observation"
-    assert finding["evidence"]["external_ip"] == "203.0.113.7"
+    assert finding["evidence"]["port_mapping"]["external_port"] == "8443"
     assert finding["url"].startswith("http://192.0.2.1:49152/")
 
-    # Auth boundaries, missing mappings, and unsupported control URLs stay observational.
+    # Ordinary WAN-address reads, auth boundaries, missing mappings, and unsupported
+    # control URLs stay observational.
     quiet = [
+        {"source": "device_control_plane", "outcome": "external_ip_returned", "platform": "upnp_igd"},
         {"source": "device_control_plane", "outcome": "authentication_required", "platform": "upnp_igd"},
         {"source": "device_control_plane", "outcome": "not_supported", "platform": "upnp_igd"},
         {"source": "device_control_plane", "outcome": "no_port_mapping", "platform": "upnp_igd"},
@@ -321,9 +324,8 @@ def test_upnp_wan_surface_flows_through_application_discovery(monkeypatch):
     assert len(soap_calls) == 6
     assert all(call["connect_address"] == "192.0.2.10" for call in soap_calls)
     titles = {finding["title"]: finding for finding in result["findings"]}
-    assert titles["UPnP WAN address exposed without authentication"]["severity"] == "medium"
-    assert titles["UPnP port mapping exposed"]["severity"] == "high"
-    assert titles["UPnP WAN address exposed without authentication"]["evidence"]["external_ip"] == "203.0.113.7"
+    assert "UPnP WAN address exposed without authentication" not in titles
+    assert titles["UPnP port mapping visible on the local network"]["severity"] == "info"
     assert result["summary"]["requests_executed"] == len(calls)
 
 

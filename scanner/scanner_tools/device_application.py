@@ -226,7 +226,9 @@ def build_application_findings(observations: list[dict[str, Any]]) -> list[dict[
     for observation in observations:
         if observation.get("source") != "device_api_catalog":
             continue
-        if observation.get("outcome") not in {"confirmed", "responded"}:
+        # A generic 2xx/3xx response can be a redirect, login shell, or unrelated
+        # application page. Only a catalog response signature is finding evidence.
+        if observation.get("outcome") != "confirmed":
             continue
         origin = str(observation.get("origin") or "")
         if origin.startswith("http://") and origin not in cleartext_origins:
