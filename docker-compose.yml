@@ -468,8 +468,8 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  # Dedicated low-latency lane for Deep Hunt scanner tools. Ordinary workers may also
-  # consume this queue, but this worker never leases a multi-minute DAST scan first.
+  # Dedicated and isolated lane for Deep Hunt scanner tools. Ordinary Web DAST
+  # workers never consume this queue.
   agent-tool-worker:
     init: true
     hostname: shakerscan-agent-tool-worker

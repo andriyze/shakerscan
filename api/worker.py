@@ -57,6 +57,7 @@ import asm_inventory
 import family_proof
 import agent_tools
 import investigation_candidates
+from worker_queue_policy import base_worker_queue_keys
 from model_intake_admissions import persist_from_result as persist_model_intake_admission
 from job_queue import (
     DEFAULT_WORKER_TOOL_COMMANDS,
@@ -13294,15 +13295,16 @@ async def async_main():
 
     r = get_redis()
     device_queue_enabled = str(os.environ.get("DEVICE_SCAN_WORKER_ENABLED", "false")).strip().lower() in {"1", "true", "yes", "on"}
-    if DEVICE_ONLY_WORKER:
-        base_queue_keys = [DEVICE_QUEUE_NAME]
-    elif AGENT_TOOL_ONLY_WORKER:
-        base_queue_keys = [AGENT_TOOL_QUEUE_NAME]
-    else:
-        base_queue_keys = [QUEUE_NAME, RETEST_QUEUE_NAME, BROKER_INGEST_QUEUE_NAME, AGENT_TOOL_QUEUE_NAME]
-        if device_queue_enabled:
-            base_queue_keys.append(DEVICE_QUEUE_NAME)
-    base_queue_keys = list(dict.fromkeys(base_queue_keys))
+    base_queue_keys = base_worker_queue_keys(
+        device_only=DEVICE_ONLY_WORKER,
+        agent_tool_only=AGENT_TOOL_ONLY_WORKER,
+        device_queue_enabled=device_queue_enabled,
+        scan_queue=QUEUE_NAME,
+        retest_queue=RETEST_QUEUE_NAME,
+        broker_queue=BROKER_INGEST_QUEUE_NAME,
+        device_queue=DEVICE_QUEUE_NAME,
+        agent_tool_queue=AGENT_TOOL_QUEUE_NAME,
+    )
     queue_keys = list(base_queue_keys)
     print(
         f"Worker started, listening on queues: {', '.join(queue_keys)} "
