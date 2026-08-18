@@ -126,10 +126,10 @@ QUEUE_NAME = 'scan_jobs'
 DEVICE_QUEUE_NAME = os.environ.get("DEVICE_QUEUE_NAME", "device_scan_jobs")
 DEVICE_ONLY_WORKER = str(os.environ.get("DEVICE_ONLY_WORKER", "false")).strip().lower() in {"1", "true", "yes", "on"}
 AGENT_TOOL_ONLY_WORKER = str(os.environ.get("AGENT_TOOL_ONLY_WORKER", "false")).strip().lower() in {"1", "true", "yes", "on"}
-WORKER_KIND, WORKER_BUILD_REGISTRY_KEY = worker_role(
+WORKER_BUILD_REGISTRY_KEY = worker_role(
     device_only=DEVICE_ONLY_WORKER,
     agent_tool_only=AGENT_TOOL_ONLY_WORKER,
-)
+)[1]
 RETEST_QUEUE_NAME = os.environ.get("RETEST_QUEUE_NAME", "retest_jobs")
 BROKER_INGEST_QUEUE_NAME = os.environ.get("BROKER_INGEST_QUEUE_NAME", "broker_ingest_jobs")
 AGENT_TOOL_QUEUE_NAME = os.environ.get("AGENT_TOOL_QUEUE_NAME", "agent_tool_jobs")
@@ -13514,7 +13514,10 @@ def _worker_build_report_payload() -> tuple[str, str]:
         "build_fingerprint": _worker_build_fingerprint(),
         "scanner_version": published_scanner_version(_published_scanner_version()),
         "node_id": os.environ.get("SHAKERSCAN_NODE_ID") or os.environ.get("FLEET_NODE_ID") or None,
-        "worker_kind": WORKER_KIND,
+        "worker_kind": worker_role(
+            device_only=DEVICE_ONLY_WORKER,
+            agent_tool_only=AGENT_TOOL_ONLY_WORKER,
+        )[0],
         "tools": sorted(
             tool for tool, command in tool_commands.items() if shutil.which(command)
         ),
