@@ -262,10 +262,9 @@ def test_device_http_request_path_and_method_validation_blocks_target_escape():
 
 def test_device_http_request_server_side_budgets_are_enforced_in_the_executor():
     api_source = open(os.path.join(ROOT, "api", "api.py"), encoding="utf-8").read()
-    assert "DEVICE_HTTP_REQUEST_SESSION_LIMIT" in api_source
     assert "device_http_requests_used" in api_source
     assert "observe_only cannot send device HTTP requests" in api_source
-    assert "DEVICE_HTTP_REQUEST_MIN_INTERVAL_SECONDS" in api_source
+    assert "reserve_device_http_attempt" in api_source
     assert "_device_request_pinned_http(" in api_source
     assert "_device_confirmed_web_origins" in api_source
     assert "origin_port does not match a confirmed-open web origin" in api_source
@@ -377,3 +376,19 @@ def test_device_web_credential_stripping_and_paired_reverse_request_helpers():
         {"id": "off", "method": "POST", "url": "https://other.example.test/api/power/off"},
     ]
     assert paired_reverse_request(cross_origin, "on") is None
+
+
+def test_device_http_attempts_are_charged_before_success_is_known():
+    state = {}
+
+    assert device_agent.reserve_device_http_attempt(state, now_monotonic=10.0) == 1
+    assert state["device_http_requests_used"] == 1
+    with pytest.raises(device_agent.DeviceHttpAttemptRejected) as spaced:
+        device_agent.reserve_device_http_attempt(state, now_monotonic=10.5)
+    assert spaced.value.status_code == 429
+    assert state["device_http_requests_used"] == 1
+
+    state["device_http_requests_used"] = device_agent.DEVICE_HTTP_REQUEST_SESSION_LIMIT
+    with pytest.raises(device_agent.DeviceHttpAttemptRejected) as exhausted:
+        device_agent.reserve_device_http_attempt(state, now_monotonic=12.0)
+    assert exhausted.value.status_code == 409

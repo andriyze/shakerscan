@@ -76,6 +76,29 @@ class _LocalIntelTooLarge(ValueError):
         self.size_bytes = size_bytes
 
 
+class DeviceHttpAttemptRejected(ValueError):
+    def __init__(self, message: str, *, status_code: int):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def reserve_device_http_attempt(state: dict[str, Any], *, now_monotonic: float) -> int:
+    """Charge one device HTTP attempt before its socket is opened."""
+    used = int(state.get("device_http_requests_used") or 0)
+    if used >= DEVICE_HTTP_REQUEST_SESSION_LIMIT:
+        raise DeviceHttpAttemptRejected(
+            "Session device HTTP request limit reached", status_code=409,
+        )
+    last_sent = float(state.get("last_device_http_request_monotonic") or 0.0)
+    if last_sent and now_monotonic - last_sent < DEVICE_HTTP_REQUEST_MIN_INTERVAL_SECONDS:
+        raise DeviceHttpAttemptRejected(
+            "Device HTTP requests must be spaced at least one second apart", status_code=429,
+        )
+    state["device_http_requests_used"] = used + 1
+    state["last_device_http_request_monotonic"] = now_monotonic
+    return used + 1
+
+
 def _read_local_intel_snapshot(path: str, expected_sha256: str) -> Any:
     flags = os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):

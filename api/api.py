@@ -20744,13 +20744,6 @@ async def _execute_device_agent_tool(
             raise HTTPException(status_code=409, detail="observe_only cannot send device HTTP requests")
         if state.get("traffic_frozen"):
             raise HTTPException(status_code=409, detail="Device traffic is frozen after a health circuit breaker")
-        used = int(state.get("device_http_requests_used") or 0)
-        if used >= device_agent.DEVICE_HTTP_REQUEST_SESSION_LIMIT:
-            raise HTTPException(status_code=409, detail="Session device HTTP request limit reached")
-        now_monotonic = time.monotonic()
-        last_sent = float(state.get("last_device_http_request_monotonic") or 0.0)
-        if last_sent and now_monotonic - last_sent < device_agent.DEVICE_HTTP_REQUEST_MIN_INTERVAL_SECONDS:
-            raise HTTPException(status_code=429, detail="Device HTTP requests must be spaced at least one second apart")
         origins = await _device_confirmed_web_origins(device_target_id)
         if not origins:
             raise HTTPException(status_code=409, detail="No confirmed-open web origin is available; run a device scan first")
@@ -20762,6 +20755,12 @@ async def _execute_device_agent_tool(
             raise HTTPException(status_code=409, detail="origin_port does not match a confirmed-open web origin on this device")
         if origin is None:
             origin = origins[0]
+        try:
+            device_agent.reserve_device_http_attempt(
+                state, now_monotonic=time.monotonic(),
+            )
+        except device_agent.DeviceHttpAttemptRejected as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
         try:
             response = await _device_request_pinned_http(
                 connect_address=origin["connect_address"],
@@ -20799,8 +20798,6 @@ async def _execute_device_agent_tool(
             "elapsed_ms": response.get("elapsed_ms"),
             "tls": response.get("tls"),
         }
-        state["device_http_requests_used"] = used + 1
-        state["last_device_http_request_monotonic"] = now_monotonic
         return {"ok": True, "evidence_ref": _device_agent_add_evidence(state, payload), "data": payload}
 
     if name == "verify_service_state":

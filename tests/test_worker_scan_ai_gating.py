@@ -3038,8 +3038,8 @@ def test_device_http_request_is_pinned_bounded_and_rate_limited():
     branch = branch[:branch.index('if name == "verify_service_state":')]
 
     assert "observe_only cannot send device HTTP requests" in branch
-    assert "DEVICE_HTTP_REQUEST_SESSION_LIMIT" in branch
-    assert "DEVICE_HTTP_REQUEST_MIN_INTERVAL_SECONDS" in branch
+    assert "reserve_device_http_attempt" in branch
+    assert branch.index("reserve_device_http_attempt") < branch.index("_device_request_pinned_http")
     assert "_device_confirmed_web_origins" in branch
     assert "_device_request_pinned_http" in branch
     assert '"redirects_followed": False' in branch
