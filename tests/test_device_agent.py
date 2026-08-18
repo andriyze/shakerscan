@@ -7,8 +7,13 @@ import pytest
 
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, os.path.join(ROOT, "api"))
+sys.path.insert(0, os.path.join(ROOT, "scanner"))
 
 import device_agent  # noqa: E402
+from scanner_tools.device_web import (  # noqa: E402
+    paired_reverse_request,
+    strip_credential_headers,
+)
 
 
 def test_device_agent_contract_has_only_bounded_device_tools():
@@ -195,3 +200,124 @@ def test_device_agent_api_and_schema_preserve_the_device_boundary():
     assert "_build_device_agent_context_pack" in api_source
     assert "_diff_device_scan_snapshots" in api_source
     assert "device_target_id UUID NOT NULL REFERENCES device_targets(id) ON DELETE CASCADE" in migration_source
+
+
+def test_device_http_request_tool_is_registered_readonly_and_session_capped():
+    tools = {tool["name"]: tool for tool in device_agent.tool_schemas()}
+    assert "device_http_request" in tools
+    assert "device_http_request" in device_agent.CALLABLE_TOOL_NAMES
+    assert device_agent.TOOL_TIERS["device_http_request"] == 0
+    assert device_agent.DEVICE_HTTP_REQUEST_SESSION_LIMIT == 40
+    assert device_agent.tool_fragility_cost("device_http_request", {}) == 1
+    assert "device_http_request" in device_agent.render_contract()
+    schema = tools["device_http_request"]["parameters"]
+    assert schema["required"] == ["path"]
+    assert schema["properties"]["method"]["enum"] == ["GET", "HEAD"]
+    assert set(schema["properties"]) == {"path", "method", "origin_port"}
+
+
+def test_device_http_request_path_and_method_validation_blocks_target_escape():
+    name, args = device_agent.validate_tool_call({
+        "name": "device_http_request",
+        "arguments": {"path": "/api/status?verbose=1"},
+    })
+    assert name == "device_http_request"
+    assert args == {"path": "/api/status?verbose=1", "method": "GET", "origin_port": None}
+    name, args = device_agent.validate_tool_call({
+        "name": "device_http_request",
+        "arguments": {"path": "/", "method": "HEAD", "origin_port": 3001},
+    })
+    assert args["method"] == "HEAD" and args["origin_port"] == 3001
+    for bad_path in [
+        "http://tv.example.test/api",
+        "https://evil.test",
+        "//skip-pinning",
+        "relative/path",
+        "/api/\r\nHost: other",
+        "/a\x00b",
+    ]:
+        with pytest.raises(ValueError):
+            device_agent.validate_tool_call({"name": "device_http_request", "arguments": {"path": bad_path}})
+    for bad_method in ["POST", "PUT", "DELETE", "post"]:
+        with pytest.raises(ValueError, match="GET or HEAD"):
+            device_agent.validate_tool_call({
+                "name": "device_http_request",
+                "arguments": {"path": "/", "method": bad_method},
+            })
+    with pytest.raises(ValueError, match="unsupported arguments"):
+        device_agent.validate_tool_call({
+            "name": "device_http_request",
+            "arguments": {"path": "/", "host": "other.test"},
+        })
+    with pytest.raises(ValueError, match="origin_port"):
+        device_agent.validate_tool_call({
+            "name": "device_http_request",
+            "arguments": {"path": "/", "origin_port": 70000},
+        })
+
+
+def test_device_http_request_server_side_budgets_are_enforced_in_the_executor():
+    api_source = open(os.path.join(ROOT, "api", "api.py"), encoding="utf-8").read()
+    assert "DEVICE_HTTP_REQUEST_SESSION_LIMIT" in api_source
+    assert "device_http_requests_used" in api_source
+    assert "observe_only cannot send device HTTP requests" in api_source
+    assert "DEVICE_HTTP_REQUEST_MIN_INTERVAL_SECONDS" in api_source
+    assert "_device_request_pinned_http(" in api_source
+    assert "_device_confirmed_web_origins" in api_source
+    assert "origin_port does not match a confirmed-open web origin" in api_source
+    state = device_agent.seed_state(objective="probe web", safety_profile="safe_remote", max_turns=4)
+    assert state["device_http_requests_used"] == 0
+
+
+def test_control_authorization_preconditions_list_exactly_what_is_missing():
+    state = device_agent.seed_state(objective="tv", safety_profile="safe_remote", max_turns=4)
+    gaps = device_agent.control_authorization_precondition_gaps(state)
+    assert "authenticated_active_safety_required" in gaps
+    assert "bound_request_replay_not_confirmed" in gaps
+    assert "no_bound_confirmed_request_collection" in gaps
+    assert "state_changing_replay_not_authorized" in gaps
+    ready = device_agent.seed_state(objective="tv", safety_profile="authenticated_active", max_turns=4)
+    ready["device_request_collections"] = [{"collection_id": "c1", "state_changing_request_count": 2}]
+    ready["confirm_request_replay"] = True
+    ready["allow_state_changing_requests"] = True
+    assert device_agent.control_authorization_precondition_gaps(ready) == []
+    assert device_agent.control_authorization_precondition_gaps(ready, {"collection_id": "other"}) == [
+        "no_bound_confirmed_request_collection"
+    ]
+    read_only_collection = dict(ready)
+    read_only_collection["device_request_collections"] = [{"collection_id": "c1", "state_changing_request_count": 0}]
+    assert device_agent.control_authorization_precondition_gaps(read_only_collection) == [
+        "no_state_changing_request_in_bound_collection"
+    ]
+
+
+def test_control_replay_verdict_classifies_unauthenticated_control():
+    for rejected in (401, 403, 404):
+        assert device_agent.control_replay_verdict(rejected) == "unauthorized_rejected"
+    for accepted in (200, 201, 204):
+        assert device_agent.control_replay_verdict(accepted) == "unauthenticated_control_accepted"
+    assert device_agent.control_replay_verdict(500) == "inconclusive"
+    assert device_agent.control_replay_verdict(0) == "inconclusive"
+
+
+def test_device_web_credential_stripping_and_paired_reverse_request_helpers():
+    stripped = strip_credential_headers({
+        "Authorization": "Bearer secret",
+        "Cookie": "session=secret",
+        "X-API-Key": "secret",
+        "Content-Type": "application/json",
+    })
+    assert stripped == {"Content-Type": "application/json"}
+    requests = [
+        {"id": "on", "method": "POST", "name": "Power On", "url": "https://tv.example.test/api/power/on"},
+        {"id": "read", "method": "GET", "name": "Status", "url": "https://tv.example.test/api/status"},
+        {"id": "off", "method": "POST", "name": "Power Off", "url": "https://tv.example.test/api/power/off"},
+    ]
+    assert paired_reverse_request(requests, "on")["id"] == "off"
+    assert paired_reverse_request(requests, "read") is None
+    assert paired_reverse_request(requests, "missing") is None
+    delete_pair = [
+        {"id": "create", "method": "POST", "url": "https://tv.example.test/api/presets"},
+        {"id": "remove", "method": "DELETE", "url": "https://tv.example.test/api/presets"},
+    ]
+    assert paired_reverse_request(delete_pair, "create")["id"] == "remove"

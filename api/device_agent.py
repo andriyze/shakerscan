@@ -52,6 +52,7 @@ CALLABLE_TOOL_NAMES = {
     "lookup_protocol_playbook",
     "verify_service_state",
     "verify_candidate",
+    "device_http_request",
     "note",
 }
 MAX_TOOL_CALLS_PER_TURN = 6
@@ -60,6 +61,10 @@ MAX_SCANS_PER_SESSION = 3
 MAX_FRAGILITY_PER_SESSION = 40
 MAX_FRAGILITY_PER_DEVICE_DAY = 80
 CONFIRMED_SHELL_FRAGILITY_COST = 12
+DEVICE_HTTP_REQUEST_SESSION_LIMIT = 40
+DEVICE_HTTP_REQUEST_MIN_INTERVAL_SECONDS = 1.0
+DEVICE_HTTP_REQUEST_TIMEOUT_SECONDS = 5.0
+DEVICE_HTTP_REQUEST_BODY_PREVIEW_BYTES = 512
 MAX_LOCAL_INTEL_BYTES = 32 * 1024 * 1024
 _LOCAL_INTEL_CACHE: dict[tuple[Any, ...], Any] = {}
 _LOCAL_INTEL_CACHE_LOCK = threading.Lock()
@@ -127,6 +132,7 @@ TOOL_TIERS = {
     "resolve_intel": 1,
     "lookup_protocol_playbook": 1,
     "note": 0,
+    "device_http_request": 0,
     "queue_device_scan": 2,
     "verify_service_state": 2,
     "verify_candidate": 2,
@@ -224,6 +230,8 @@ PORT_PLAYBOOKS = {
 def tool_fragility_cost(name: str, args: dict[str, Any]) -> int:
     if name == "verify_candidate":
         return 3
+    if name == "device_http_request":
+        return 1
     if name == "verify_service_state":
         return 6 if str(args.get("transport") or "tcp") == "udp" else 3
     if name != "queue_device_scan":
@@ -445,6 +453,20 @@ def tool_schemas() -> list[dict[str, Any]]:
             },
         },
         {
+            "name": "device_http_request",
+            "description": "Send one read-only HTTP request to a confirmed-open web origin on this device. The server pins the destination; you supply only a path and optional query.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "minLength": 1, "maxLength": 2048},
+                    "method": {"type": "string", "enum": ["GET", "HEAD"]},
+                    "origin_port": {"type": "integer", "minimum": 1, "maximum": 65535},
+                },
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+        },
+        {
             "name": "note",
             "description": "Record a bounded hypothesis, observation, or next step. Notes are not findings or proof.",
             "parameters": {
@@ -516,6 +538,7 @@ def validate_tool_call(call: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         "lookup_protocol_playbook": {"service_name", "port"},
         "verify_service_state": {"transport", "port", "expected_state", "reason"},
         "verify_candidate": {"candidate_id", "reason"},
+        "device_http_request": {"path", "method", "origin_port"},
         "note": {"kind", "content"},
     }[name]
     if set(args) - allowed_fields:
@@ -629,6 +652,21 @@ def validate_tool_call(call: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         if not reason:
             raise ValueError("verify_candidate requires a reason")
         args = {"candidate_id": candidate_id.lower(), "reason": reason[:500]}
+    elif name == "device_http_request":
+        path = str(args.get("path") or "")
+        if not path.startswith("/") or path.startswith("//"):
+            raise ValueError("device_http_request path must be one absolute path on the pinned device origin")
+        if "://" in path or any(ord(character) < 32 or ord(character) == 127 for character in path):
+            raise ValueError("device_http_request path must not contain a scheme, host, or control characters")
+        if len(path) > 2048:
+            raise ValueError("device_http_request path is too long")
+        method = str(args.get("method") or "GET").upper()
+        if method not in {"GET", "HEAD"}:
+            raise ValueError("device_http_request method must be GET or HEAD")
+        origin_port = int(args["origin_port"]) if args.get("origin_port") is not None else None
+        if origin_port is not None and not 1 <= origin_port <= 65535:
+            raise ValueError("device_http_request origin_port is invalid")
+        args = {"path": path, "method": method, "origin_port": origin_port}
     elif name == "note":
         kind = str(args.get("kind") or "").lower()
         content = str(args.get("content") or "").strip()
@@ -649,6 +687,38 @@ def _done_payload(reply: str) -> dict[str, Any] | None:
         if isinstance(parsed, dict) and parsed.get("done") is True:
             return parsed
     return None
+
+
+def control_authorization_precondition_gaps(
+    state: dict[str, Any], locus: dict[str, Any] | None = None,
+) -> list[str]:
+    """List exactly which server-side preconditions for a state-changing replay are missing."""
+    gaps: list[str] = []
+    if str(state.get("safety_profile") or "") != "authenticated_active":
+        gaps.append("authenticated_active_safety_required")
+    if not state.get("confirm_request_replay"):
+        gaps.append("bound_request_replay_not_confirmed")
+    refs = [ref for ref in state.get("device_request_collections") or [] if isinstance(ref, dict)]
+    collection_id = str((locus or {}).get("collection_id") or "")
+    if collection_id:
+        refs = [ref for ref in refs if str(ref.get("collection_id") or "") == collection_id]
+    if not refs:
+        gaps.append("no_bound_confirmed_request_collection")
+    elif not any(int(ref.get("state_changing_request_count") or 0) > 0 for ref in refs):
+        gaps.append("no_state_changing_request_in_bound_collection")
+    if not state.get("allow_state_changing_requests"):
+        gaps.append("state_changing_replay_not_authorized")
+    return gaps
+
+
+def control_replay_verdict(replay_status: int) -> str:
+    """Classify one credential-stripped state-changing replay against the device."""
+    status = int(replay_status or 0)
+    if status in {401, 403, 404}:
+        return "unauthorized_rejected"
+    if 200 <= status < 300:
+        return "unauthenticated_control_accepted"
+    return "inconclusive"
 
 
 def interpret_reply(reply: str) -> dict[str, Any]:
@@ -701,6 +771,7 @@ def seed_state(*, objective: str, safety_profile: str, max_turns: int) -> dict[s
         "turns": 0,
         "actions_used": 0,
         "scans_queued": 0,
+        "device_http_requests_used": 0,
         "fragility_budget": MAX_FRAGILITY_PER_SESSION,
         "fragility_used": 0,
         "traffic_frozen": False,

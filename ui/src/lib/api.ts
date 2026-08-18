@@ -2357,6 +2357,10 @@ export interface Finding {
   retest_type?: string | null
   retest_modes?: string[]
   retest_unsupported_reason?: string
+  // Open Deep Hunt investigation candidates merged into GET /findings items
+  is_candidate?: boolean
+  verification_status?: string
+  trust_tier?: 'suspected' | string
 }
 
 // Research provenance stamped on hunt-driven scanner findings (evidence.research):
@@ -5783,7 +5787,8 @@ export async function getFindings(params?: {
   research_campaign_id?: string
   sort_by?: 'severity' | 'first_seen' | 'last_seen' | 'cvss'
   sort_order?: 'asc' | 'desc'
-}): Promise<{ findings: Finding[]; total: number; limit: number; offset: number }> {
+  include_candidates?: boolean
+}): Promise<{ findings: Finding[]; total: number; limit: number; offset: number; candidates_total?: number; included_candidates?: number }> {
   const searchParams = new URLSearchParams()
   if (params?.severity) searchParams.set('severity', params.severity)
   if (params?.status) searchParams.set('status', params.status)
@@ -5806,6 +5811,7 @@ export async function getFindings(params?: {
   if (params?.research_campaign_id) searchParams.set('research_campaign_id', params.research_campaign_id)
   if (params?.sort_by) searchParams.set('sort_by', params.sort_by)
   if (params?.sort_order) searchParams.set('sort_order', params.sort_order)
+  if (params?.include_candidates === false) searchParams.set('include_candidates', 'false')
 
   const res = await fetch(`${API_URL}/findings?${searchParams}`)
   if (!res.ok) throw new Error('Failed to fetch findings')

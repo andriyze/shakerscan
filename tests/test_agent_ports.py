@@ -608,6 +608,61 @@ def test_bola_targets_bare_collection_route():
     assert t["collection"] == "/rest/basket"
 
 
+def test_attack_scanners_dalfox_sqlmap_present_and_bounded():
+    # dalfox + sqlmap join the fixed-argv arsenal: active (approval-gated), bounded reservations,
+    # GET-based XSS (no headless/blind/mining), boolean/error-only SQLi (no time-based, no crawl).
+    assert {"dalfox", "sqlmap"}.issubset(at.RUN_TOOL_NAMES)
+    for name in ("dalfox", "sqlmap"):
+        assert at.SCANNER_ARG_TEMPLATES[name]["risk"] == "active"
+        assert at.scanner_request_reservation(name) >= 200
+
+    b, argv, _ = at.build_scanner_argv("dalfox", "http://t/search?q=1", {"severity": "high"})
+    assert b == "dalfox"
+    assert argv[0] == "url" and argv[argv.index("url") + 1] == "http://t/search?q=1"
+    assert "--skip-headless" in argv and "--skip-bav" in argv and "--skip-mining-all" in argv
+    assert argv[argv.index("--worker") + 1] == "3" and argv[argv.index("--delay") + 1] == "200"
+    assert argv[argv.index("--only-poc") + 1] == "v"  # default severity -> verified-only PoCs
+    assert argv[argv.index("--format") + 1] == "jsonl"
+
+    b, argv, _ = at.build_scanner_argv("sqlmap", "http://t/item?id=1", {})
+    assert b == "sqlmap"
+    assert argv[argv.index("-u") + 1] == "http://t/item?id=1"
+    assert argv[argv.index("--batch") + 1] == "--technique"  # non-interactive
+    assert argv[argv.index("--technique") + 1] == "BE"       # boolean+error only
+    assert argv[argv.index("--level") + 1] == "1" and argv[argv.index("--risk") + 1] == "1"
+    assert "--crawl" not in " ".join(argv) and "--os-shell" not in " ".join(argv)
+
+
+def test_attack_scanner_pinning_preserves_host_and_sni():
+    _, argv, _ = at.build_scanner_argv("dalfox", "https://t.test:8443/x?a=1", {}, pinned_address="10.0.0.5")
+    assert argv[argv.index("url") + 1].startswith("https://10.0.0.5:8443/")
+    assert argv[argv.index("--header") + 1] == "Host: t.test:8443"
+
+    _, argv, _ = at.build_scanner_argv("sqlmap", "https://t.test:8443/x?a=1", {}, pinned_address="10.0.0.5")
+    assert argv[argv.index("-u") + 1].startswith("https://10.0.0.5:8443/")
+    assert argv[argv.index("--host") + 1] == "t.test:8443"
+
+
+def test_dalfox_sqlmap_output_is_typed_and_payloads_not_exposed():
+    out = at.parse_scanner_output("dalfox", json.dumps({
+        "type": "alert",
+        "data": {"type": "V", "address": "http://t/?q=abc", "param": "q",
+                 "payload": "<script>alert(1)</script>"},
+    }))
+    assert out["parser_status"] == "parsed"
+    record = out["records"][0]
+    assert record["kind"] == "xss_alert" and record["proof_state"] == "verified"
+    assert "alert(1)" not in json.dumps(record) and record["payload_sha256"]
+
+    out = at.parse_scanner_output("sqlmap", "Parameter 'q' is vulnerable. Do you want to keep testing? [Ny/N]\n[INFO] back-end DBMS: MySQL")
+    kinds = {r["kind"] for r in out["records"]}
+    assert kinds == {"sqli_finding", "sqli_dbms_fingerprint"}
+    assert not any("Do you want" in r["message"] for r in out["records"])
+    # no trailing id segment -> the route itself is the collection
+    t = at.derive_bola_verification_targets("/rest/basket", {"basket_id": "15"}, {"basket_id": "16"})
+    assert t["collection"] == "/rest/basket"
+
+
 # ------------------------------------------------------------------------ runner --------
 
 if __name__ == "__main__":

@@ -18154,20 +18154,25 @@ def test_auto_verify_classifies_findings_after_attempt_cap_and_without_approval(
             },
         }
 
-    # Three real attempts consume the traffic cap; the later taxonomy mismatch must still appear.
+    # Eight real attempts consume the traffic cap; the later taxonomy mismatch must still appear.
     gated = [
         _entry("data_exposure", 1),
         _entry("data_exposure", 2),
         _entry("data_exposure", 3),
-        _entry("totally_made_up", 4),
+        _entry("data_exposure", 4),
         _entry("data_exposure", 5),
+        _entry("data_exposure", 6),
+        _entry("data_exposure", 7),
+        _entry("data_exposure", 8),
+        _entry("totally_made_up", 9),
+        _entry("data_exposure", 10),
     ]
     capped = asyncio.run(api_module._agent_auto_verify(
         gated, approval_receipt_id="receipt", created_by="test"
     ))
     capped_by_id = {row.get("finding_id"): row for row in capped}
-    assert capped_by_id["00000000-0000-4000-8000-000000000004"]["skipped"] == "family_not_verifiable"
-    assert capped_by_id["00000000-0000-4000-8000-000000000005"]["skipped"] == "auto_verify_attempt_limit_reached"
+    assert capped_by_id["00000000-0000-4000-8000-000000000009"]["skipped"] == "family_not_verifiable"
+    assert capped_by_id["00000000-0000-4000-8000-000000000010"]["skipped"] == "auto_verify_attempt_limit_reached"
 
     # Read-only/no-approval runs do not execute traffic, but they still expose taxonomy truth.
     no_approval = asyncio.run(api_module._agent_auto_verify(

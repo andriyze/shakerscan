@@ -15,6 +15,7 @@ left to the model.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import ipaddress
 import re
@@ -199,6 +200,34 @@ def _tmpl_katana(url: str, opts: dict[str, Any]) -> list[str]:
             "-timeout", "8", "-disable-redirects", "-silent", "-jsonl"]
 
 
+def _tmpl_dalfox(url: str, opts: dict[str, Any]) -> list[str]:
+    # Bounded XSS scan of a single URL. GET-based: no data body, no blind callback, no headless,
+    # no WAF evasion, no parameter mining beyond the URL itself. json output for the typed parser.
+    severity = str(opts.get("severity") or "").strip().lower()
+    severity_args: list[str] = []
+    if severity == "low":
+        severity_args = ["--only-poc", "g,r,v"]
+    elif severity == "medium":
+        severity_args = ["--only-poc", "r,v"]
+    else:
+        severity_args = ["--only-poc", "v"]
+    return (["url", url, "--format", "jsonl", "--silence", "--no-color",
+             "--timeout", "8", "--delay", "200", "--worker", "3",
+             "--skip-bav", "--skip-grepping", "--skip-headless",
+             "--skip-mining-all"] + severity_args)
+
+
+def _tmpl_sqlmap(url: str, opts: dict[str, Any]) -> list[str]:
+    # Bounded single-URL SQLi test. Non-interactive (--batch), boolean+error techniques only
+    # (no time-based/stacked queries -> bounded wall time), level/risk 1, no crawl, output to a
+    # scratch dir the worker owns; findings surface in stdout ("is vulnerable").
+    return ["-u", url, "--batch", "--technique", "BE", "--level", "1", "--risk", "1",
+            "--threads", "3", "--timeout", "8", "--retries", "1", "--delay", "0.2",
+            "--flush-session", "--output-dir", "/tmp/shakerscan-sqlmap",
+            "--smart", "--disable-coloring", "--answers", "redirect=N",
+            "--user-agent", "shakerscan-sqlmap/1.0"]
+
+
 def _tmpl_ffuf(url: str, opts: dict[str, Any]) -> list[str]:
     # Bounded content/dir discovery. Read-only (GET). One tunable: wordlist in {common,api,admin}
     # -> a small BUNDLED list (unknown/invalid -> common; no arbitrary path). Auto-calibrated
@@ -228,6 +257,13 @@ SCANNER_ARG_TEMPLATES: dict[str, dict[str, Any]] = {
     "ffuf": {"binary": "ffuf", "risk": "active", "default_timeout_ms": 75_000,
              "max_wire_requests": 220, "build": _tmpl_ffuf,
              "desc": "bounded content/dir discovery over a small bundled wordlist; options {wordlist: common|api|admin}"},
+    "dalfox": {"binary": "dalfox", "risk": "active", "default_timeout_ms": 120_000,
+               "max_wire_requests": 400, "build": _tmpl_dalfox,
+               "desc": "bounded XSS scan of one URL (GET-based, no headless, no blind callback); "
+                       "options {severity: low|medium|high} — default 'high' reports verified-only PoCs"},
+    "sqlmap": {"binary": "sqlmap", "risk": "active", "default_timeout_ms": 180_000,
+               "max_wire_requests": 500, "build": _tmpl_sqlmap,
+               "desc": "bounded boolean/error SQLi test of one URL (level/risk 1, no time-based, no crawl)"},
 }
 RUN_TOOL_NAMES: frozenset[str] = frozenset(SCANNER_ARG_TEMPLATES)
 
@@ -240,8 +276,10 @@ RUN_TOOL_SCHEMA: dict[str, Any] = {
         "fingerprint; nuclei = bounded templates (options {severity,tags}); katana = crawl + "
         "JS endpoint extraction (finds linked/JS-referenced routes); ffuf = content/dir "
         "discovery over a bundled wordlist (options {wordlist: common|api|admin} — finds "
-        "UNLINKED paths). Use katana/ffuf to expand the surface, then probe hits with "
-        "http_request. Returns the scanner's JSON/JSONL output (bounded)."
+        "UNLINKED paths); dalfox = XSS scan of one URL (options {severity}); sqlmap = "
+        "boolean/error SQLi test of one URL. Use katana/ffuf to expand the surface, then "
+        "attack params with dalfox/sqlmap or probe hits with http_request. Returns the "
+        "scanner's output (bounded)."
     ),
     "parameters": {
         "type": "object",
@@ -312,6 +350,10 @@ def build_scanner_argv(
             pin_args = ["-H", f"Host: {host_header}"]
         elif name == "ffuf":
             pin_args = ["-H", f"Host: {host_header}", "-sni", hostname]
+        elif name == "dalfox":
+            pin_args = ["--header", f"Host: {host_header}"]
+        elif name == "sqlmap":
+            pin_args = ["--host", host_header]
     return (
         template["binary"],
         template["build"](execution_url, options or {}) + pin_args,
@@ -536,6 +578,35 @@ def parse_scanner_output(name: str, stdout: str) -> dict[str, Any]:
                 "webserver": str(item.get("webserver") or item.get("web_server") or "")[:200] or None,
                 "technologies": [str(value)[:100] for value in list(technologies or [])[:50]],
             })
+        elif scanner == "dalfox":
+            data = item.get("data") if isinstance(item.get("data"), dict) else item
+            message = str(data.get("message") or data.get("poc") or "")[:500] or None
+            record = {
+                "kind": "xss_alert",
+                "alert_type": str(data.get("type") or item.get("type") or "")[:40] or None,
+                "url": _public_observed_url(data.get("address") or data.get("url") or data.get("target")),
+                "param": str(data.get("param") or "")[:200] or None,
+                # Payload text is receipt-side only; hunt reasoning gets its shape, not the body.
+                "payload_sha256": hashlib.sha256(str(data.get("payload") or "").encode()).hexdigest() if data.get("payload") else None,
+                "message": message,
+                "proof_state": "verified" if str(data.get("type") or "").lower() == "v" else "candidate",
+            }
+            records.append(record)
+    if scanner == "sqlmap":
+        for line in text.splitlines()[:500]:
+            line = line.strip()
+            if "is vulnerable" in line:
+                records.append({
+                    "kind": "sqli_finding",
+                    "message": line.split("Do you want")[0].strip()[:500],
+                    "proof_state": "candidate",
+                })
+            elif line.startswith("[INFO] back-end DBMS:") or "back-end DBMS" in line:
+                records.append({
+                    "kind": "sqli_dbms_fingerprint",
+                    "message": line[:300],
+                    "proof_state": "candidate",
+                })
     records = [record for record in records if any(value not in (None, "", [], {}) for key, value in record.items() if key != "kind")]
     return {
         "parser": f"{scanner}-typed-v1",

@@ -10,6 +10,7 @@ import types
 import urllib.parse
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -2975,6 +2976,74 @@ def test_device_advisory_lifecycle_resolves_only_an_observed_stale_service(monke
 
     assert summary["resolved_stale_matches"] == 1
     assert any("status='refuted'" in query for query, _ in pool.conn.executed)
+
+
+def test_device_agent_auto_verify_is_bounded_and_logged_at_run_completion():
+    api = (Path(__file__).resolve().parents[1] / "api" / "api.py").read_text()
+    reply = api[api.index('@app.post("/device-agent/session/{run_id}/reply")'):]
+    reply = reply[:reply.index('@app.post("/device-agent/session/{run_id}/cancel")')]
+    helper = api[api.index("async def _device_agent_auto_verify"):]
+    helper = helper[:helper.index("async def _record_device_agent_action")]
+
+    assert "_device_agent_auto_verify(" in reply
+    assert '"auto_verified"' in reply
+    assert "_DEVICE_AGENT_AUTO_VERIFY_LIMIT = 6" in api
+    assert "_DEVICE_AGENT_AUTO_VERIFY_CONTRACTS" in api
+    for contract in ("device.service_exposure", "device.tls", "device.ssh_posture", "device.auth_bypass"):
+        assert contract in helper or contract in api[api.index("_DEVICE_AGENT_AUTO_VERIFY_CONTRACTS"):][:400]
+    assert "control_authorization_requires_session_bound_state_changing_request" in helper
+    assert "device_intel_" in helper
+    assert "fragility_budget_exhausted" in helper
+    assert "auto_verify_limit_reached" in helper
+    assert "resolve_local_intel" in helper
+    assert "_device_verify_candidate_tool(" in helper
+    assert "candidate_not_open_for_verification" in helper
+
+
+def test_device_control_authorization_executor_replaces_the_hard_block():
+    api = (Path(__file__).resolve().parents[1] / "api" / "api.py").read_text()
+    verifier = api[api.index("async def _device_control_authorization_blocked"):]
+    verifier = verifier[:verifier.index("_DEVICE_AGENT_AUTO_VERIFY_LIMIT")]
+    dispatch = api[api.index("async def _device_verify_candidate_tool"):]
+    dispatch = dispatch[:dispatch.index("async def _device_control_authorization_blocked")]
+
+    assert api.index("async def _verify_device_control_authorization_candidate") < api.index(
+        "async def _record_device_agent_action"
+    )
+    assert "_verify_device_control_authorization_candidate(" in dispatch
+    assert "exact_before_after_cleanup_contract_unavailable" not in api
+
+    assert "control_authorization_precondition_gaps" in verifier
+    assert "_device_control_authorization_blocked" in verifier
+    assert "missing_preconditions" in verifier
+    assert '"unauthorized_rejected"' in verifier
+    assert '"unauthenticated_control_accepted"' in verifier
+    assert "_device_strip_credential_headers" in verifier
+    assert "_device_request_pinned_control_http" in verifier
+    assert "cleanup_unavailable" in verifier
+    assert "cleanup_attempted_with_credentials" in verifier
+    assert "'CWE-306'" in verifier
+    assert "'high'" in verifier
+    assert "before" in verifier and '"after_state"' in verifier
+    assert "credentials_stripped_for_replay" in verifier
+
+
+def test_device_http_request_is_pinned_bounded_and_rate_limited():
+    api = (Path(__file__).resolve().parents[1] / "api" / "api.py").read_text()
+    executor = api[api.index("async def _execute_device_agent_tool"):]
+    executor = executor[:executor.index("async def _device_verify_candidate_tool")]
+    branch = executor[executor.index('if name == "device_http_request":'):]
+    branch = branch[:branch.index('if name == "verify_service_state":')]
+
+    assert "observe_only cannot send device HTTP requests" in branch
+    assert "DEVICE_HTTP_REQUEST_SESSION_LIMIT" in branch
+    assert "DEVICE_HTTP_REQUEST_MIN_INTERVAL_SECONDS" in branch
+    assert "_device_confirmed_web_origins" in branch
+    assert "_device_request_pinned_http" in branch
+    assert '"redirects_followed": False' in branch
+    assert "body_sha256" in branch and "body_preview" in branch
+    assert "_device_public_response_headers" in branch
+    assert "_device_agent_add_evidence" in branch
 
 
 def test_run_scan_maps_explicit_standard_to_standard_flag(monkeypatch):
