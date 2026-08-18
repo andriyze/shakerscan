@@ -345,6 +345,7 @@ def test_run_tool_argv_templates_hardcode_flags():
     b, argv, timeout = at.build_scanner_argv("nuclei", "http://t/x", {"severity": "high,critical", "tags": "cve,exposure"})
     assert b == "nuclei" and "-jsonl" in argv
     assert "-no-interactsh" in argv
+    assert argv[argv.index("-type") + 1] == "http"
     assert argv[argv.index("-severity") + 1] == "high,critical"
     assert argv[argv.index("-tags") + 1] == "cve,exposure"
 
@@ -455,6 +456,36 @@ def test_scanner_execution_is_address_pinned_with_original_host_and_sni():
     ) == "203.0.113.7"
     with pytest.raises(at.AgentToolError, match="outside the authorized"):
         at.validate_pinned_scanner_address("127.0.0.1", ["203.0.113.7"])
+
+
+def test_all_scanners_preserve_hostname_through_the_pinned_socks_broker():
+    proxy = "socks5://127.0.0.1:45678"
+    expected_flags = {
+        "httpx": "-http-proxy",
+        "nuclei": "-proxy",
+        "katana": "-proxy",
+        "ffuf": "-x",
+        "dalfox": "--proxy",
+    }
+    for name, flag in expected_flags.items():
+        _binary, argv, _timeout = at.build_scanner_argv(
+            name, "https://example.test:8443/admin", {},
+            pinned_address="203.0.113.7", pinned_proxy_url=proxy,
+        )
+        assert any(str(value).startswith("https://example.test:8443/admin") for value in argv)
+        assert argv[argv.index(flag) + 1] == proxy
+        assert "https://203.0.113.7:8443/admin" not in argv
+    _binary, sqlmap_argv, _timeout = at.build_scanner_argv(
+        "sqlmap", "https://example.test:8443/item?id=1", {},
+        pinned_address="203.0.113.7", pinned_proxy_url=proxy,
+    )
+    assert "https://example.test:8443/item?id=1" in sqlmap_argv
+    assert f"--proxy={proxy}" in sqlmap_argv
+    with pytest.raises(at.AgentToolError, match="loopback SOCKS5"):
+        at.build_scanner_argv(
+            "katana", "https://example.test/", {},
+            pinned_address="203.0.113.7", pinned_proxy_url="socks5://evil.test:1080",
+        )
 
 
 def test_deep_hunt_has_a_separately_enforced_wire_budget():

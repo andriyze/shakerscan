@@ -176,7 +176,7 @@ def _tmpl_nuclei(url: str, opts: dict[str, Any]) -> list[str]:
         severity = "high,critical"
     args = ["-target", url, "-severity", severity, "-silent", "-jsonl",
             "-timeout", "8", "-retries", "1", "-no-color", "-disable-update-check",
-            "-disable-redirects", "-no-interactsh"]
+            "-disable-redirects", "-no-interactsh", "-type", "http"]
     args += ["-rate-limit", "5", "-bulk-size", "5", "-concurrency", "5"]
     tags = str(opts.get("tags") or "").strip().lower()
     if _TAGS_RE.match(tags):
@@ -347,13 +347,26 @@ def build_scanner_argv(
     options: dict[str, Any],
     *,
     pinned_address: str | None = None,
+    pinned_proxy_url: str | None = None,
 ) -> tuple[str, list[str], int]:
     """Return (binary, argv, timeout_ms) for a scanner run. The binary name is NOT in argv
     (passed separately to the subprocess); every flag is hardcoded in the template."""
     template = SCANNER_ARG_TEMPLATES[name]
     execution_url = url
     pin_args: list[str] = []
-    if pinned_address:
+    if pinned_proxy_url:
+        if not re.fullmatch(r"socks5://127\.0\.0\.1:\d{1,5}", pinned_proxy_url):
+            raise AgentToolError("scanner pinned proxy must be a loopback SOCKS5 URL")
+        proxy_flags = {
+            "httpx": ["-http-proxy", pinned_proxy_url],
+            "nuclei": ["-proxy", pinned_proxy_url, "-proxy-internal"],
+            "katana": ["-proxy", pinned_proxy_url],
+            "ffuf": ["-x", pinned_proxy_url],
+            "dalfox": ["--proxy", pinned_proxy_url],
+            "sqlmap": [f"--proxy={pinned_proxy_url}"],
+        }
+        pin_args = proxy_flags[name]
+    elif pinned_address:
         execution_url, hostname, host_header = _pinned_scanner_url(url, pinned_address)
         if name == "httpx":
             pin_args = ["-H", f"Host: {host_header}", "-sni-name", hostname]

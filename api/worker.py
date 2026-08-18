@@ -56,6 +56,7 @@ import parallel_scan
 import asm_inventory
 import family_proof
 import agent_tools
+from pinned_socks_proxy import PinnedSocksProxy
 import investigation_candidates
 from worker_queue_policy import base_worker_queue_keys
 from model_intake_admissions import persist_from_result as persist_model_intake_admission
@@ -12947,6 +12948,7 @@ async def process_agent_scanner_tool_job(job_data: dict[str, Any]) -> None:
     stdout = ""
     returncode: int | None = None
     scratch_dir: str | None = None
+    pinned_proxy: PinnedSocksProxy | None = None
     try:
         if not job_id:
             raise agent_tools.AgentToolError("scanner job requires an identity")
@@ -12962,8 +12964,18 @@ async def process_agent_scanner_tool_job(job_data: dict[str, Any]) -> None:
         pinned_address = agent_tools.validate_pinned_scanner_address(
             job_data.get("pinned_address"), job_data.get("authorized_addresses"),
         )
+        parsed_execution = urllib.parse.urlsplit(execution_target)
+        target_port = parsed_execution.port or (
+            443 if parsed_execution.scheme.lower() == "https" else 80
+        )
+        pinned_proxy = await PinnedSocksProxy(
+            hostname=str(parsed_execution.hostname or ""),
+            pinned_address=pinned_address,
+            port=target_port,
+        ).start()
         binary, argv, template_timeout_ms = agent_tools.build_scanner_argv(
             name, execution_target, options, pinned_address=pinned_address,
+            pinned_proxy_url=pinned_proxy.proxy_url,
         )
         if name == "sqlmap":
             scratch_dir = tempfile.mkdtemp(prefix=f"shakerscan-sqlmap-{job_id[:8]}-")
@@ -13027,12 +13039,16 @@ async def process_agent_scanner_tool_job(job_data: dict[str, Any]) -> None:
         if proc is not None and proc.returncode is None:
             _terminate_agent_tool_process_group(proc)
             await proc.wait()
+        if pinned_proxy is not None:
+            await pinned_proxy.close()
         if scratch_dir:
             shutil.rmtree(scratch_dir, ignore_errors=True)
         raise
     except Exception as exc:  # noqa: BLE001 - publish a bounded operational result
         error = f"worker_fault:{type(exc).__name__}"
 
+    if pinned_proxy is not None:
+        await pinned_proxy.close()
     if scratch_dir:
         shutil.rmtree(scratch_dir, ignore_errors=True)
 
@@ -13062,6 +13078,7 @@ async def process_agent_scanner_tool_job(job_data: dict[str, Any]) -> None:
         "line_count": min(200, sum(1 for line in stdout.splitlines() if line.strip())),
         "typed_output": typed_output,
         "settlement": settlement,
+        "network_binding": "hostname_preserving_pinned_socks5",
     }
     if job_id:
         redis_client.set(

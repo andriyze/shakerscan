@@ -31859,6 +31859,7 @@ async def _agent_tool_run_tool(
                         "wire_request_counter_source": settlement.get("source"),
                         "execution_plane": "worker_queue",
                         "pinned_address": pinned_address,
+                        "network_binding": worker_result.get("network_binding"),
                         "typed_parser": typed_output.get("parser"),
                         "typed_record_count": typed_output.get("record_count"),
                     },
@@ -31878,6 +31879,7 @@ async def _agent_tool_run_tool(
             "wire_requests_actual": wire_requests_actual,
             "wire_requests_observed_minimum": wire_requests_observed,
             "execution_plane": "worker_queue",
+            "network_binding": worker_result.get("network_binding"),
         }
     safe_lines = [_redact_agent_text(ln)[:1200] for ln in lines[:60]]
     return {
@@ -31894,6 +31896,7 @@ async def _agent_tool_run_tool(
         "wire_requests_observed_minimum": wire_requests_observed,
         "wire_request_counter_source": settlement.get("source"),
         "execution_plane": "worker_queue",
+        "network_binding": worker_result.get("network_binding"),
         "typed_observations": typed_output.get("records") or [],
         "typed_parser_status": typed_output.get("parser_status"),
     }
