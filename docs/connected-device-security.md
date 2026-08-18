@@ -311,10 +311,18 @@ authenticated-versus-anonymous imported-request equivalence with a negative cont
 SSH policy violations, and exact CPE/version matches against a SHA-256-pinned offline advisory
 snapshot. Each promotion requires fresh or hash-pinned deterministic evidence satisfying Proof
 Contract v2 before it can create a device finding, verification record, and typed evidence instance.
-Control-authorization claims abstain and remain blocked unless an exact before/after/cleanup contract
-exists; Device Hunt never invents a safe mutation. Every posture scan re-correlates the pinned
+Control-authorization claims abstain unless an exact read/mutate/read/restore/read contract exists.
+The verifier supports only fixed server-validated restoration adapters bound to an imported request:
+an explicit inverse request, one query parameter, one JSON field, or one form field. The restoration
+value comes from the pre-test response at a declared JSON pointer, never from model text. Device Hunt
+cannot select arbitrary cleanup code or invent a mutation. Every posture scan re-correlates the pinned
 advisory snapshot, and resolves an old advisory finding only when the same service locus was observed
 again and no longer matches. Silence is never treated as remediation.
+
+Firmware and package advisories also preserve evidence tiers. Unauthenticated banners, Nmap product
+strings, SSDP metadata, and model names remain candidates; they cannot establish an exact vulnerable
+version. Promotion requires an authenticated host review, signed manifest, or another authoritative
+identity source tied to the exact observed service locus.
 
 ## Offline advisory snapshot
 

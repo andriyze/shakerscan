@@ -387,6 +387,7 @@ under `authenticated_active`; Device Hunt cannot grant the override itself.
 ```bash
 # Check dedicated worker/tool readiness
 curl http://localhost:8080/devices/readiness
+curl http://localhost:8080/agent/tools/readiness
 
 # Register one hostname or IP (URLs and network ranges are rejected)
 curl -X POST http://localhost:8080/devices \
