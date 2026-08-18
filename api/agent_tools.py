@@ -285,9 +285,20 @@ RUN_TOOL_SCHEMA: dict[str, Any] = {
     "parameters": {
         "type": "object",
         "properties": {
-            "name": {"type": "string", "description": "httpx | nuclei | katana | ffuf"},
+            "name": {
+                "type": "string",
+                "enum": sorted(RUN_TOOL_NAMES),
+                "description": "httpx | nuclei | katana | ffuf | dalfox | sqlmap",
+            },
             "target": {"type": "string", "description": "absolute path (/) on the chosen origin or an http(s) URL on the selected target host"},
-            "options": {"type": "object", "description": "nuclei: {severity:'high,critical', tags:'cve,exposure'}; ffuf: {wordlist:'common'|'api'|'admin'}"},
+            "options": {
+                "type": "object",
+                "description": (
+                    "nuclei: {severity:'high,critical', tags:'cve,exposure'}; "
+                    "ffuf: {wordlist:'common'|'api'|'admin'}; "
+                    "dalfox: {severity:'low'|'medium'|'high'}; other tools have no tunable options"
+                ),
+            },
         },
         "required": ["name", "target"],
     },

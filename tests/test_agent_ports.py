@@ -333,6 +333,10 @@ def test_run_tool_schema_and_names():
     assert any(s["name"] == "run_tool" for s in schemas)
     assert "run_tool" in at.CALLABLE_TOOL_NAMES
     assert at.tool_schemas(include_run_tool=False) == [s for s in schemas if s["name"] != "run_tool"]
+    run_tool = next(schema for schema in schemas if schema["name"] == "run_tool")
+    name_schema = run_tool["parameters"]["properties"]["name"]
+    assert set(name_schema["enum"]) == {"httpx", "nuclei", "katana", "ffuf", "dalfox", "sqlmap"}
+    assert "dalfox" in name_schema["description"] and "sqlmap" in name_schema["description"]
 
 
 def test_run_tool_argv_templates_hardcode_flags():
