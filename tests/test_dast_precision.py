@@ -959,19 +959,100 @@ def test_ssrf_target_string_without_callback_or_content_is_not_verified():
 
 
 def test_ssrf_verifies_structured_cloud_metadata_without_trusting_reflected_hosts():
-    bodies = [
-        '''{\n  "Code": "Success",\n  "AccessKeyId": "AKIAIOSFODNN7EXAMPLE",\n  "SecretAccessKey": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"\n}''',
-        '{"access_token":"ya29.a0AfH6SM-example-token","expires_in":3599,"token_type":"Bearer"}',
-        '{"access_token":"eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.example-token","expires_in":"3599"}',
-        'ami-id\nami-launch-index\ninstance-id\niam/\n',
+    # Each verified case pairs the internal-content response with a causal
+    # request whose payload actually targeted a metadata endpoint.
+    causal_cases = [
+        (
+            {"tool": "ssrf_probe", "evidence": {"payload": "http://169.254.169.254/latest/meta-data/iam/security-credentials/"}},
+            '''{\n  "Code": "Success",\n  "AccessKeyId": "AKIAIOSFODNN7EXAMPLE",\n  "SecretAccessKey": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"\n}''',
+        ),
+        (
+            {"tool": "ssrf_probe", "evidence": {"payload": "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"}},
+            '{"access_token":"ya29.a0AfH6SM-example-token","expires_in":3599,"token_type":"Bearer"}',
+        ),
+        (
+            {"tool": "ssrf_probe", "evidence": {"payload": "http://169.254.169.254/metadata/identity/oauth2/token"}},
+            '{"access_token":"eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.example-token","expires_in":"3599"}',
+        ),
+        (
+            {"tool": "ssrf_probe", "evidence": {"payload": "http://169.254.169.254/latest/meta-data/"}},
+            "ami-id\nami-launch-index\ninstance-id\niam/\n",
+        ),
     ]
-    for body in bodies:
-        assert validate_ssrf({"tool": "ssrf_probe", "evidence": {}}, body).verified is True
+    for finding, body in causal_cases:
+        assert validate_ssrf(finding, body).verified is True
 
+    # Reflected metadata hostname in the response (no metadata-targeting payload)
+    # stays unverified, and so does creds-shaped content without a causal link.
     assert validate_ssrf(
         {"tool": "ssrf_probe", "evidence": {}},
         "requested http://metadata.google.internal/computeMetadata/v1/",
     ).verified is False
+
+    non_causal = validate_ssrf(
+        {"tool": "ssrf_probe", "evidence": {"payload": "http://example.com/fetch"}},
+        '''{"AccessKeyId": "AKIAIOSFODNN7EXAMPLE", "SecretAccessKey": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"}''',
+    )
+    assert non_causal.verified is False
+    assert non_causal.evidence_level == "strong_indicator"
+
+
+def test_ssrf_content_match_requires_causal_metadata_payload():
+    creds_body = '''{
+  "Code": "Success",
+  "AccessKeyId": "AKIAIOSFODNN7EXAMPLE",
+  "SecretAccessKey": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+}'''
+
+    # (a) payload targets the AWS metadata endpoint + creds JSON -> verified
+    verified = validate_ssrf(
+        {
+            "tool": "ssrf_probe",
+            "evidence": {
+                "url": "https://app.example.test/proxy?url=http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+                "param": "url",
+                "payload": "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+            },
+        },
+        creds_body,
+    )
+    assert verified.verified is True
+    assert verified.evidence_level == "confirmed_exploit"
+
+    # (b) ordinary-URL payload + creds-shaped response -> suspected, not verified
+    suspected = validate_ssrf(
+        {
+            "tool": "ssrf_probe",
+            "evidence": {
+                "url": "https://app.example.test/proxy?url=http://example.com/feed",
+                "param": "url",
+                "payload": "http://example.com/feed",
+            },
+        },
+        creds_body,
+    )
+    assert suspected.verified is False
+    assert suspected.evidence_level == "strong_indicator"
+    assert 0.55 <= suspected.confidence <= 0.65
+
+
+def test_ssrf_directory_listing_requires_causal_metadata_payload():
+    listing_body = "ami-id\nami-launch-index\ninstance-id\niam/\n"
+
+    # (c) payload targets metadata + 3-marker directory listing -> verified
+    verified = validate_ssrf(
+        {"tool": "ssrf_probe", "evidence": {"payload": "http://169.254.169.254/latest/meta-data/"}},
+        listing_body,
+    )
+    assert verified.verified is True
+
+    # (d) same listing but the request targeted a normal URL -> suspected
+    suspected = validate_ssrf(
+        {"tool": "ssrf_probe", "evidence": {"payload": "http://example.com/feed"}},
+        listing_body,
+    )
+    assert suspected.verified is False
+    assert suspected.evidence_level == "strong_indicator"
 
 
 def test_sqli_error_indicator_is_strong_but_not_verified():

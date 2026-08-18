@@ -152,6 +152,97 @@ def test_boolean_sqli_normalizes_html_csrf_and_created_at_controls():
     assert stable["proven"] is True
 
 
+def test_boolean_sqli_accepts_json_total_numeric_field_separation():
+    items = [{"id": 1, "name": "alpha"}, {"id": 2, "name": "beta"}, {"id": 3, "name": "gamma"}]
+
+    def page(total):
+        return json.dumps({"items": items, "total": total})
+
+    baseline_body, true_body, false_body = page(3), page(87), page(3)
+
+    result = _evaluate_boolean_sqli_differential(
+        [_response(baseline_body), _response(baseline_body)],
+        [_response(true_body), _response(true_body)],
+        [_response(false_body), _response(false_body)],
+        true_payload="' OR '1'='1",
+        false_payload="' OR '1'='2",
+        mutation_responses=[_response(baseline_body), _response(baseline_body)],
+    )
+
+    assert result["proven"] is True
+    assert result["reason"] == "numeric_field_separation"
+    assert result["metrics"]["numeric_separation_field"] == "total"
+    assert result["metrics"]["technique"] == "numeric_field_separation"
+    assert "total" in result["technique"]
+
+
+def test_boolean_sqli_accepts_numeric_total_header_separation():
+    items = [{"id": 1, "name": "alpha"}, {"id": 2, "name": "beta"}, {"id": 3, "name": "gamma"}]
+    body = json.dumps({"items": items})
+
+    def response(total):
+        return {
+            "body": body,
+            "status_code": 200,
+            "headers": {"content-type": "application/json", "X-Total-Count": str(total)},
+        }
+
+    result = _evaluate_boolean_sqli_differential(
+        [response(3), response(3)],
+        [response(87), response(87)],
+        [response(3), response(3)],
+        true_payload="' OR '1'='1",
+        false_payload="' OR '1'='2",
+        mutation_responses=[response(3), response(3)],
+    )
+
+    assert result["proven"] is True
+    assert result["reason"] == "numeric_field_separation"
+    assert result["metrics"]["numeric_separation_field"] == "@header.x-total-count"
+
+
+def test_boolean_sqli_rejects_volatile_total_between_baselines():
+    items = [{"id": 1, "name": "alpha"}, {"id": 2, "name": "beta"}, {"id": 3, "name": "gamma"}]
+
+    def page(total):
+        return json.dumps({"items": items, "total": total})
+
+    result = _evaluate_boolean_sqli_differential(
+        [_response(page(3)), _response(page(9))],
+        [_response(page(87)), _response(page(87))],
+        [_response(page(3)), _response(page(3))],
+        true_payload="' OR '1'='1",
+        false_payload="' OR '1'='2",
+        mutation_responses=[_response(page(3)), _response(page(3))],
+    )
+
+    assert result["proven"] is False
+    assert result["reason"] == "dynamic_response_not_stable"
+    assert result["metrics"]["numeric_unstable_path"] == "total"
+
+
+def test_boolean_sqli_rejects_weak_numeric_separation_ratio():
+    items = [{"id": 1, "name": "alpha"}, {"id": 2, "name": "beta"}, {"id": 3, "name": "gamma"}]
+
+    def page(total):
+        return json.dumps({"items": items, "total": total})
+
+    baseline_body, true_body, false_body = page(30), page(45), page(30)
+
+    result = _evaluate_boolean_sqli_differential(
+        [_response(baseline_body), _response(baseline_body)],
+        [_response(true_body), _response(true_body)],
+        [_response(false_body), _response(false_body)],
+        true_payload="' OR '1'='1",
+        false_payload="' OR '1'='2",
+        mutation_responses=[_response(baseline_body), _response(baseline_body)],
+    )
+
+    assert result["proven"] is False
+    assert result["reason"] == "predicate_responses_semantically_equivalent"
+    assert result["metrics"]["numeric_separation_field"] is None
+
+
 def test_curl_response_parser_uses_final_redirect_response_body():
     stdout = (
         "HTTP/1.1 308 Permanent Redirect\r\n"

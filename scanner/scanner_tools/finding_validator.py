@@ -717,6 +717,39 @@ SSRF_POSSIBLE_PATTERNS = [
     r'internal\s+server\s+error',
 ]
 
+# A verified content match additionally requires CAUSALITY: the request we
+# actually made must target a metadata/internal endpoint. Indicators must appear
+# in the tested payload/param/url, never merely in the response body (which may
+# just echo attacker-supplied or unrelated content).
+SSRF_CAUSAL_TARGET_RE = re.compile(
+    r"169\.254\.169\.254"
+    r"|169\.254\.170\.2"
+    r"|metadata\.google\.internal"
+    r"|100\.100\.100\.200"
+    r"|fd00:ec2::254"
+    r"|\blocalhost\b"
+    r"|127\.0\.0\.1",
+    re.I,
+)
+
+
+def _ssrf_request_targets_internal_endpoint(finding: dict[str, Any]) -> bool:
+    """True when the tested request evidence itself names a metadata/internal target."""
+    candidate_strings: list[str] = []
+    evidence = finding.get("evidence")
+    if isinstance(evidence, dict):
+        for key in ("payload", "url", "param", "target", "request"):
+            value = evidence.get(key)
+            if isinstance(value, str):
+                candidate_strings.append(value)
+    elif isinstance(evidence, str):
+        candidate_strings.append(evidence)
+    for key in ("url", "payload"):
+        value = finding.get(key)
+        if isinstance(value, str):
+            candidate_strings.append(value)
+    return any(SSRF_CAUSAL_TARGET_RE.search(text) for text in candidate_strings)
+
 
 def validate_ssrf(
     finding: dict[str, Any],
@@ -724,6 +757,11 @@ def validate_ssrf(
 ) -> ValidationResult:
     """
     Validate SSRF finding by checking for internal data access.
+
+    Verified-tier content matches (cloud credentials, metadata directory listings)
+    additionally require a causal link: the tested payload/param/url must itself
+    target a metadata or internal endpoint. Content matches without that causal
+    link are downgraded to the suspected tier.
     """
     evidence = finding.get("evidence", {})
 
@@ -745,9 +783,19 @@ def validate_ssrf(
             reason="Cannot verify SSRF without response"
         )
 
+    causal_target = _ssrf_request_targets_internal_endpoint(finding)
+
     # Check for confirmed SSRF patterns
     for signature, pattern in SSRF_CONFIRMED_PATTERNS:
         if re.search(pattern, response_body, re.I | re.S):
+            if not causal_target:
+                return ValidationResult(
+                    verified=False,
+                    confidence=0.6,
+                    evidence=f"Internal-looking data in response ({signature}) but tested request did not target a metadata/internal endpoint",
+                    reason="Possible SSRF; content match lacks a causal metadata-targeting request",
+                    evidence_level="strong_indicator",
+                )
             return ValidationResult(
                 verified=True,
                 confidence=0.95,
@@ -769,6 +817,14 @@ def validate_ssrf(
     }
     gcp_index_markers = {"attributes", "instance", "project", "service-accounts", "zone"}
     if len(normalized_lines & aws_index_markers) >= 3 or len(normalized_lines & gcp_index_markers) >= 3:
+        if not causal_target:
+            return ValidationResult(
+                verified=False,
+                confidence=0.6,
+                evidence="Metadata-shaped directory listing in response but tested request did not target a metadata/internal endpoint",
+                reason="Possible SSRF; content match lacks a causal metadata-targeting request",
+                evidence_level="strong_indicator",
+            )
         return ValidationResult(
             verified=True,
             confidence=0.93,
