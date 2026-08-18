@@ -8834,6 +8834,7 @@ async def run_device_web_children(
                 allow_untrusted_tls_credentials=bool(parent_options.get("allow_untrusted_tls_credentials")),
                 default_origin=index == 1,
                 cancel_check=lambda: asyncio.to_thread(_scan_cancel_requested, parent_scan_id),
+                request_budget=int(child_options["custom_budget"]["request_max"]),
             )
             child_result = _apply_runtime_scope_guard_to_result(child_result, child_options)
             child_error = child_result.get("error") if isinstance(child_result, dict) else "invalid child result"

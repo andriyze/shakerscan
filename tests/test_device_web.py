@@ -347,8 +347,8 @@ def test_dir_discovery_is_thorough_and_cleartext_only(monkeypatch):
             "host_header": f"tv.example.test:{port}",
         }, profile=profile, credential=None, cancel_check=None)
 
-    # thorough + http -> discovery runs, finding + observation emitted
-    result = _asyncio.run(run("thorough", "http"))
+    # deep + http -> discovery runs in the production web profile.
+    result = _asyncio.run(run("deep", "http"))
     assert calls["kwargs"]["hostname"] == "tv.example.test"
     assert any(f["tool"] == device_web.DIR_DISCOVERY_TOOL for f in result["findings"])
     assert result["device_web"]["dir_discovery"]["discovered"][0]["path"] == "/admin"
@@ -360,3 +360,29 @@ def test_dir_discovery_is_thorough_and_cleartext_only(monkeypatch):
     assert calls == {}
     _asyncio.run(run("thorough", "https"))
     assert calls == {}
+
+
+def test_dir_discovery_reserves_shared_device_web_request_budget(monkeypatch):
+    import asyncio as _asyncio
+
+    calls = []
+
+    async def fake_dir_discovery(**kwargs):
+        calls.append(kwargs)
+        return {"tool": device_web.DIR_DISCOVERY_TOOL, "status": "completed", "discovered": []}
+
+    async def public_response(**_kwargs):
+        return {"status": 200, "headers": {}, "body": b"ok", "truncated": False, "elapsed_ms": 1}
+
+    monkeypatch.setattr(device_web, "run_device_dir_discovery", fake_dir_discovery)
+    monkeypatch.setattr(device_web, "_request", public_response)
+    result = _asyncio.run(device_web.run_pinned_device_web_scan({
+        "origin": "http://tv.example.test:8080",
+        "connect_address": "192.0.2.10",
+        "port": 8080,
+        "host_header": "tv.example.test:8080",
+    }, profile="deep", request_budget=10))
+
+    assert calls == []
+    assert result["device_web"]["dir_discovery"]["status"] == "budget_limited"
+    assert result["device_web"]["request_budget"]["limit"] == 10

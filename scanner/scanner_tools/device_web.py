@@ -32,6 +32,7 @@ MAX_RESPONSE_BYTES = 256 * 1024
 MAX_REDIRECTS = 5
 IMPORTED_REQUEST_LIMITS = {"quick": 50, "standard": 200, "deep": 500}
 IMPORTED_REQUEST_TIME_BUDGETS = {"quick": 60.0, "standard": 180.0, "deep": 480.0}
+DEVICE_WEB_REQUEST_LIMITS = {"quick": 100, "standard": 750, "deep": 1500, "thorough": 1500}
 CREDENTIAL_HEADER_NAMES = {
     "authorization", "proxy-authorization", "cookie", "x-api-key", "api-key",
     "x-auth-token", "x-session-token",
@@ -50,10 +51,11 @@ PROFILE_PATHS = {
 # Bounded directory discovery (ffuf) on device web origins. Cleartext HTTP only: ffuf cannot
 # pin SNI separately from the URL host, and HTTPS origins must not be fuzzed against the
 # pre-resolved IP without the registered hostname's SNI identity.
-DIR_DISCOVERY_PROFILE = "thorough"
+DIR_DISCOVERY_PROFILES = {"deep", "thorough"}
 DIR_DISCOVERY_WORDLIST = "/app/wordlists/common.txt"
 DIR_DISCOVERY_MAXTIME_SECONDS = 90
 DIR_DISCOVERY_RATE = 5
+DIR_DISCOVERY_REQUEST_RESERVATION = 128
 DIR_DISCOVERY_MAX_PATHS = 40
 DIR_DISCOVERY_MATCH_CODES = "200,204,301,302,307,401,403,405"
 DIR_DISCOVERY_SENSITIVE_PATH_RE = None  # compiled lazily below
@@ -896,6 +898,7 @@ async def _run_imported_requests(
     allow_untrusted_tls_credentials: bool,
     deadline: float,
     cancel_check: Any,
+    max_wire_attempts: int | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     origin = str(origin_info.get("origin") or "")
     parsed_origin = urllib.parse.urlsplit(origin)
@@ -903,11 +906,16 @@ async def _run_imported_requests(
     scheme = str(parsed_origin.scheme or "")
     port = int(parsed_origin.port or (443 if scheme == "https" else 80))
     connect_address = str(origin_info.get("connect_address") or "")
-    limit = IMPORTED_REQUEST_LIMITS.get(profile, IMPORTED_REQUEST_LIMITS["standard"])
+    profile_limit = IMPORTED_REQUEST_LIMITS.get(profile, IMPORTED_REQUEST_LIMITS["standard"])
+    limit = (
+        min(profile_limit, max(0, int(max_wire_attempts)))
+        if max_wire_attempts is not None else profile_limit
+    )
     observations: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     findings: list[dict[str, Any]] = []
     attempted = 0
+    wire_attempts = 0
     for collection in request_collections:
         collection_id = str(collection.get("collection_id") or "")
         collection_name = str(collection.get("name") or "Imported requests")
@@ -920,7 +928,7 @@ async def _run_imported_requests(
             if time.monotonic() >= deadline:
                 skipped.append({"collection_id": collection_id, "request_id": imported.get("id"), "reason": "profile_time_budget"})
                 continue
-            if attempted >= limit:
+            if wire_attempts >= limit:
                 skipped.append({"collection_id": collection_id, "request_id": imported.get("id"), "reason": "profile_request_limit"})
                 continue
             method = str(imported.get("method") or "GET").upper()
@@ -944,6 +952,7 @@ async def _run_imported_requests(
                     return {
                         "schema_version": "device-request-dast/v1", "origin": origin,
                         "executed": len(observations), "skipped": len(skipped), "cancelled": True,
+                        "wire_attempts": wire_attempts,
                         "observations": observations, "skipped_requests": skipped[:500],
                     }, findings
             headers = dict(base_headers or {})
@@ -966,6 +975,7 @@ async def _run_imported_requests(
                 })
                 continue
             attempted += 1
+            wire_attempts += 1
             body = imported.get("body") if isinstance(imported.get("body"), bytes) else b""
             path = _origin_request_path(str(imported.get("url") or ""))
             try:
@@ -980,6 +990,7 @@ async def _run_imported_requests(
                 return {
                     "schema_version": "device-request-dast/v1", "origin": origin,
                     "executed": len(observations), "skipped": len(skipped), "cancelled": True,
+                    "wire_attempts": wire_attempts,
                     "observations": observations, "skipped_requests": skipped[:500],
                 }, findings
             except Exception as exc:
@@ -1050,13 +1061,21 @@ async def _run_imported_requests(
                 ))
 
             # Standard/deep: compare safe authenticated requests without credentials.
-            if profile in {"standard", "deep"} and method in SAFE_METHODS and imported.get("has_sensitive_material") and 200 <= observation["status"] < 300:
+            if (
+                profile in {"standard", "deep"}
+                and method in SAFE_METHODS
+                and imported.get("has_sensitive_material")
+                and 200 <= observation["status"] < 300
+                and wire_attempts + 2 <= limit
+            ):
                 sensitive_names = {
                     "authorization", "cookie", "x-api-key", "api-key",
                     *[str(name).lower() for name in imported.get("sensitive_header_names") or []],
                 }
                 stripped_headers = {key: value for key, value in headers.items() if key.lower() not in sensitive_names}
                 try:
+                    # Reserve both the anonymous replay and its negative route control.
+                    wire_attempts += 2
                     anonymous = await _cancelable_request(
                         cancel_check,
                         connect_address=connect_address, hostname=hostname, port=port, scheme=scheme,
@@ -1112,6 +1131,7 @@ async def _run_imported_requests(
         "origin": origin,
         "profile": profile,
         "request_limit": limit,
+        "wire_attempts": wire_attempts,
         "time_budget_seconds": IMPORTED_REQUEST_TIME_BUDGETS.get(profile, IMPORTED_REQUEST_TIME_BUDGETS["standard"]),
         "executed": len(observations),
         "skipped": len(skipped),
@@ -1136,6 +1156,7 @@ async def run_pinned_device_web_scan(
     allow_untrusted_tls_credentials: bool = False,
     default_origin: bool = False,
     cancel_check: Any = None,
+    request_budget: int | None = None,
 ) -> dict[str, Any]:
     origin = str(origin_info.get("origin") or "").strip()
     parsed = urllib.parse.urlsplit(origin)
@@ -1155,6 +1176,20 @@ async def run_pinned_device_web_scan(
     expected_host = str(urllib.parse.urlsplit(f"//{raw_host_header}").hostname or "").lower()
     if expected_host and expected_host != hostname:
         raise ValueError("device web origin hostname does not match pinned discovery evidence")
+
+    request_limit = max(
+        1,
+        min(10_000, int(request_budget or DEVICE_WEB_REQUEST_LIMITS.get(profile, 750))),
+    )
+    request_attempts = 0
+
+    def reserve_requests(count: int = 1) -> bool:
+        nonlocal request_attempts
+        count = max(0, int(count))
+        if request_attempts + count > request_limit:
+            return False
+        request_attempts += count
+        return True
 
     request_headers: dict[str, str] = {}
     tls_assessment = await _assess_tls_trust(
@@ -1186,6 +1221,7 @@ async def run_pinned_device_web_scan(
     protected_access: dict[str, Any] = {"verified": False, "reason": "credentials_not_attempted"}
     anonymous_root: dict[str, Any] | None = None
     cancelled = False
+    budget_exhausted = False
     if (
         credential and scheme == "https" and tls_assessment is not None
         and not tls_assessment.get("trusted") and not allow_untrusted_tls_credentials
@@ -1208,29 +1244,33 @@ async def run_pinned_device_web_scan(
                 "username": str(credential.get("username") or ""),
                 "password": secret,
             }).encode()
-            try:
-                login = await _cancelable_request(
-                    cancel_check,
-                    connect_address=connect_address,
-                    hostname=hostname,
-                    port=port,
-                    scheme=scheme,
-                    method="POST",
-                    path=login_path,
-                    headers={},
-                    body=form_body,
-                )
-            except _DeviceWebCancelled:
-                login = {"status": 0, "headers": {}}
-                cancelled = True
-            credentials_attempted = True
+            login = {"status": 0, "headers": {}}
+            if reserve_requests():
+                try:
+                    login = await _cancelable_request(
+                        cancel_check,
+                        connect_address=connect_address,
+                        hostname=hostname,
+                        port=port,
+                        scheme=scheme,
+                        method="POST",
+                        path=login_path,
+                        headers={},
+                        body=form_body,
+                    )
+                    credentials_attempted = True
+                except _DeviceWebCancelled:
+                    cancelled = True
+            else:
+                budget_exhausted = True
+                credentials_withheld = True
             cookie = str((login.get("headers") or {}).get("set-cookie") or "").split(";", 1)[0]
             if cookie:
                 request_headers["Cookie"] = cookie
 
     # A credential-attempted response needs a same-resource anonymous control before it can be
     # called authenticated. This safe GET is deliberately content-free in the returned evidence.
-    if credentials_attempted and not cancelled:
+    if credentials_attempted and not cancelled and reserve_requests():
         try:
             anonymous_root = await _cancelable_request(
                 cancel_check,
@@ -1259,6 +1299,9 @@ async def run_pinned_device_web_scan(
                 break
         current_path = path
         for _redirect in range(MAX_REDIRECTS + 1):
+            if not reserve_requests():
+                budget_exhausted = True
+                break
             try:
                 response = await _cancelable_request(
                     cancel_check,
@@ -1314,20 +1357,32 @@ async def run_pinned_device_web_scan(
                 final_url = next_url
                 break
             current_path = urllib.parse.urlunsplit(("", "", next_parsed.path or "/", next_parsed.query, ""))
-        if cancelled:
+        if cancelled or budget_exhausted:
             break
 
     dir_discovery: dict[str, Any] | None = None
-    if not cancelled and profile == DIR_DISCOVERY_PROFILE and scheme == "http":
-        try:
-            dir_discovery = await run_device_dir_discovery(
-                connect_address=connect_address,
-                hostname=hostname,
-                port=port,
-                cancel_check=cancel_check,
-            )
-        except _DeviceWebCancelled:
-            cancelled = True
+    if not cancelled and not budget_exhausted and profile in DIR_DISCOVERY_PROFILES and scheme == "http":
+        if not reserve_requests(DIR_DISCOVERY_REQUEST_RESERVATION):
+            dir_discovery = {
+                "tool": DIR_DISCOVERY_TOOL,
+                "status": "budget_limited",
+                "wordlist": DIR_DISCOVERY_WORDLIST,
+                "request_reservation": DIR_DISCOVERY_REQUEST_RESERVATION,
+                "discovered": [],
+                "error": "device_web_request_budget_exhausted",
+            }
+        else:
+            try:
+                dir_discovery = await run_device_dir_discovery(
+                    connect_address=connect_address,
+                    hostname=hostname,
+                    port=port,
+                    cancel_check=cancel_check,
+                )
+                if dir_discovery is not None:
+                    dir_discovery["request_reservation"] = DIR_DISCOVERY_REQUEST_RESERVATION
+            except _DeviceWebCancelled:
+                cancelled = True
         if dir_discovery:
             for item in dir_discovery.get("discovered") or []:
                 observations.append({
@@ -1345,7 +1400,7 @@ async def run_pinned_device_web_scan(
     status_code = int(root.get("status") or 0)
     imported_result = None
     imported_findings: list[dict[str, Any]] = []
-    if request_collections and not cancelled:
+    if request_collections and not cancelled and not budget_exhausted:
         request_deadline = time.monotonic() + IMPORTED_REQUEST_TIME_BUDGETS.get(
             profile, IMPORTED_REQUEST_TIME_BUDGETS["standard"],
         )
@@ -1360,7 +1415,9 @@ async def run_pinned_device_web_scan(
             allow_untrusted_tls_credentials=allow_untrusted_tls_credentials,
             deadline=request_deadline,
             cancel_check=cancel_check,
+            max_wire_attempts=max(0, request_limit - request_attempts),
         )
+        request_attempts += int(imported_result.get("wire_attempts") or 0)
         cancelled = cancelled or bool(imported_result.get("cancelled"))
     error = "Cancelled by user" if cancelled else None
     return {
@@ -1384,6 +1441,12 @@ async def run_pinned_device_web_scan(
             "connect_address": connect_address,
             "profile": profile,
             "dir_discovery": dir_discovery,
+            "request_budget": {
+                "limit": request_limit,
+                "reserved_or_attempted": request_attempts,
+                "remaining": max(0, request_limit - request_attempts),
+                "exhausted": bool(budget_exhausted or request_attempts >= request_limit),
+            },
             "observations": observations,
             "credentials_attempted": credentials_attempted,
             "credentials_withheld": credentials_withheld,
