@@ -86,7 +86,20 @@ def test_runner_job_id_cannot_escape_job_root(tmp_path, monkeypatch):
 def test_runner_queue_adds_mandatory_bounded_smoke_inputs(tmp_path, monkeypatch):
     monkeypatch.setenv("MODEL_INTAKE_RUNNER_JOB_ROOT", str(tmp_path))
     monkeypatch.setattr(DurableRunnerQueue, "_loop", lambda self: None)
+    monkeypatch.setattr(
+        runner_service,
+        "firecracker_readiness",
+        lambda: {"resources": {
+            "host_memory_total_bytes": 16_384 * 1024 * 1024,
+            "host_memory_available_bytes": 12_288 * 1024 * 1024,
+        }},
+    )
     queue = DurableRunnerQueue()
+    monkeypatch.setattr(
+        queue.runner,
+        "plan_storage",
+        lambda _request: {"sufficient": True, "reason": None},
+    )
     request = RunnerJobRequest.model_validate({**_request(), "known_answer_inputs": ["operator case"]})
 
     submitted = queue.submit(request)

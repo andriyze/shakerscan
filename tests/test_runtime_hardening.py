@@ -464,7 +464,12 @@ def test_scanner_sh_local_build_marker_controls_default_runtime_mode():
     assert '[ -f "$SCRIPT_DIR/ui/Dockerfile" ]' in source_tree
     assert 'rm -f "$LOCAL_BUILD_MARKER"' not in script
     assert ".shakerscan-local-build" in gitignore
-    assert not (ROOT / ".shakerscan-local-build").exists()
+    ignored = subprocess.run(
+        ["git", "check-ignore", "--quiet", "--no-index", ".shakerscan-local-build"],
+        cwd=ROOT,
+        check=False,
+    )
+    assert ignored.returncode == 0
 
 
 def test_runtime_mode_matrix_keeps_source_local_and_curl_prebuilt(tmp_path):
