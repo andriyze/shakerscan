@@ -1,0 +1,28 @@
+# The API control plane is the scanner runtime plus one narrowly scoped
+# capability: a checksum-pinned Docker client used to stage Model Intake guest
+# images through the host socket. Keep this as a thin derivative image so a
+# clean source build never recompiles the scanner/toolchain twice.
+ARG SCANNER_RUNTIME_IMAGE=shakerscan-worker:local
+FROM ${SCANNER_RUNTIME_IMAGE}
+
+ARG DOCKER_CLI_VERSION=27.5.1
+ARG DOCKER_CLI_SHA256_X86_64=4f798b3ee1e0140eab5bf30b0edc4e84f4cdb53255a429dc3bbae9524845d640
+ARG DOCKER_CLI_SHA256_AARCH64=e6b53725a73763ab3f988c73f8772eaed429754c1a579db5ff11f21990fd1817
+
+RUN set -eux; \
+    case "$(dpkg --print-architecture)" in \
+        amd64) docker_arch=x86_64; expected="$DOCKER_CLI_SHA256_X86_64" ;; \
+        arm64) docker_arch=aarch64; expected="$DOCKER_CLI_SHA256_AARCH64" ;; \
+        *) echo "unsupported architecture for the Docker CLI" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSLo /tmp/docker.tgz \
+        "https://download.docker.com/linux/static/stable/${docker_arch}/docker-${DOCKER_CLI_VERSION}.tgz"; \
+    echo "${expected}  /tmp/docker.tgz" | sha256sum -c -; \
+    tar -xzf /tmp/docker.tgz -C /tmp docker/docker; \
+    install -m 0755 /tmp/docker/docker /usr/local/bin/docker; \
+    rm -rf /tmp/docker.tgz /tmp/docker; \
+    docker --version; \
+    if docker buildx version >/dev/null 2>&1; then \
+        echo "runtime API must not carry Buildx" >&2; \
+        exit 1; \
+    fi

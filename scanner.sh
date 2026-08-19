@@ -1389,6 +1389,7 @@ set_build_env() {
 has_local_source_tree() {
     [ -f "$SCRIPT_DIR/docker-compose.yml" ] && \
         [ -f "$SCRIPT_DIR/scanner/Dockerfile" ] && \
+        [ -f "$SCRIPT_DIR/scanner/Dockerfile.api" ] && \
         [ -f "$SCRIPT_DIR/ui/Dockerfile" ]
 }
 
@@ -1699,7 +1700,9 @@ prepare_runtime_files() {
             echo "Re-run the installer or clone the repository again."
             return 1
         fi
-    elif [ ! -f "$SCRIPT_DIR/scanner/Dockerfile" ] || [ ! -f "$SCRIPT_DIR/ui/Dockerfile" ]; then
+    elif [ ! -f "$SCRIPT_DIR/scanner/Dockerfile" ] || \
+         [ ! -f "$SCRIPT_DIR/scanner/Dockerfile.api" ] || \
+         [ ! -f "$SCRIPT_DIR/ui/Dockerfile" ]; then
         echo -e "${RED}Error: local build mode requires a full source checkout.${NC}"
         echo "Run from a clone of https://github.com/andriyze/shakerscan.git or omit --local to use Docker Hub images."
         return 1
@@ -2618,11 +2621,10 @@ build_local_scanner_family() {
     local worker_image="${SCANNER_LOCAL_WORKER_IMAGE:-shakerscan-worker:local}"
     local sandbox_image="${MODEL_INTAKE_SANDBOX_IMAGE:-shakerscan-model-intake-sandbox:local}"
 
-    # worker and model-intake-sandbox intentionally use the exact same image.
-    # Building them as separate Compose targets duplicates a multi-gigabyte
-    # export and can fill otherwise-supported source-build hosts. Build the
-    # scanner runtime once, bind the sandbox tag to that exact image, then
-    # build the API variant (the only variant that adds the Docker CLI).
+    # The worker, Model Intake sandbox, and API share one scanner runtime.
+    # Build it once, bind the sandbox tag to that exact image, then build the
+    # API's thin Docker-client overlay. Even --no-cache must never compile the
+    # scanner/toolchain a second time.
     compose build $no_cache worker
     # The source Compose service builds and tags this exact explicit image.
     # Querying a running worker here can return the retired pre-build ID.

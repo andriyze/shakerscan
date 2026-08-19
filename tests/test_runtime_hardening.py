@@ -390,15 +390,15 @@ def test_scanner_sh_builds_shared_worker_and_intake_sandbox_image_once():
     build_body = script.split("build_images() {", 1)[1].split("\n}", 1)[0]
     rebuild_body = script.split("rebuild_images() {", 1)[1].split("\n}", 1)[0]
 
-    # Both services intentionally use the same scanner/Dockerfile without
-    # build arguments. Exporting each Compose target separately duplicates a
-    # multi-gigabyte image and can exhaust supported source-build hosts.
+    # The common runtime is exported exactly once. The sandbox reuses that
+    # image byte-for-byte and the API is a thin derivative image.
     assert "compose build $no_cache worker" in helper
     assert 'worker_image="${SCANNER_LOCAL_WORKER_IMAGE:-shakerscan-worker:local}"' in helper
     assert "docker image inspect --format '{{.Id}}' \"$worker_image\"" in helper
     assert "compose images -q worker" not in helper
     assert 'docker image tag "$worker_image_id" "$sandbox_image"' in helper
     assert "compose build $no_cache api" in helper
+    assert "scanner/toolchain a second time" in helper
     assert "compose build $no_cache model-intake-sandbox" not in helper
 
     assert "build_local_images" in build_body
@@ -534,6 +534,7 @@ printf '%s|%s\n' "$USE_PREBUILT" "$COMPOSE_FILE_ARGS"
         "docker-compose.yml",
         "docker-compose.release.yml",
         "scanner/Dockerfile",
+        "scanner/Dockerfile.api",
         "ui/Dockerfile",
     ):
         path = source / relative
@@ -626,9 +627,12 @@ def test_source_compose_has_one_scanner_build_owner_and_never_pulls_local_tags()
     compose = (ROOT / "docker-compose.yml").read_text()
 
     worker = _compose_service_block(compose, "worker")
+    api = _compose_service_block(compose, "api")
     assert "dockerfile: scanner/Dockerfile" in worker
     assert "pull_policy: never" in worker
     assert "shakerscan-worker:local" in worker
+    assert "dockerfile: scanner/Dockerfile.api" in api
+    assert "SCANNER_RUNTIME_IMAGE: ${SCANNER_LOCAL_WORKER_IMAGE:-shakerscan-worker:local}" in api
 
     for service in ("agent-tool-worker", "device-worker", "model-intake-sandbox"):
         block = _compose_service_block(compose, service)

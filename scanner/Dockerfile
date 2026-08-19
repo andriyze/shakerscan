@@ -365,34 +365,6 @@ RUN mkdir -p /tmp/.config/subfinder && \
 
 ENV HOME=/tmp
 
-# The API stages the Model Intake guest image through the Docker socket it
-# already mounts for worker scaling, which needs a client. This is opt-in per
-# service on purpose: scan workers and the no-egress Model Intake sandbox handle
-# hostile artifacts and must not carry a Docker client, whether or not a socket
-# happens to be present.
-ARG INSTALL_DOCKER_CLI=0
-ARG DOCKER_CLI_VERSION=27.5.1
-# Digests observed from download.docker.com for this exact version. A pinned
-# version over HTTPS is not enough on its own: without a digest the client that
-# builds the measured guest image would itself be unverified.
-ARG DOCKER_CLI_SHA256_X86_64=4f798b3ee1e0140eab5bf30b0edc4e84f4cdb53255a429dc3bbae9524845d640
-ARG DOCKER_CLI_SHA256_AARCH64=e6b53725a73763ab3f988c73f8772eaed429754c1a579db5ff11f21990fd1817
-RUN if [ "$INSTALL_DOCKER_CLI" = "1" ]; then \
-        set -eux; \
-        case "$(dpkg --print-architecture)" in \
-            amd64) docker_arch=x86_64; expected="$DOCKER_CLI_SHA256_X86_64" ;; \
-            arm64) docker_arch=aarch64; expected="$DOCKER_CLI_SHA256_AARCH64" ;; \
-            *) echo "unsupported architecture for the Docker CLI" >&2; exit 1 ;; \
-        esac; \
-        curl -fsSLo /tmp/docker.tgz \
-            "https://download.docker.com/linux/static/stable/${docker_arch}/docker-${DOCKER_CLI_VERSION}.tgz"; \
-        echo "${expected}  /tmp/docker.tgz" | sha256sum -c -; \
-        tar -xzf /tmp/docker.tgz -C /tmp docker/docker; \
-        install -m 0755 /tmp/docker/docker /usr/local/bin/docker; \
-        rm -rf /tmp/docker.tgz /tmp/docker; \
-        docker --version; \
-    fi
-
 # Bake the human release/build identity into the image itself. Keep this late
 # in the Dockerfile: a new source revision must not invalidate OS packages,
 # Python dependencies, scanner tools, and vulnerability databases. Standalone

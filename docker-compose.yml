@@ -106,15 +106,12 @@ services:
   api:
     build:
       context: .
-      dockerfile: scanner/Dockerfile
+      dockerfile: scanner/Dockerfile.api
       network: ${SHAKERSCAN_BUILD_NETWORK:-default}
       args:
-        SCANNER_VERSION: ${SCANNER_VERSION:-dev}
-        SCANNER_SOURCE_REVISION: ${GIT_COMMIT:-unknown}
-        # Only the API stages the Model Intake guest image, and only the API
-        # mounts the Docker socket. Scan workers and the no-egress sandbox
-        # handle hostile artifacts and deliberately get no Docker client.
-        INSTALL_DOCKER_CLI: "1"
+        # build_local_scanner_family builds this exact runtime first. The API
+        # adds only the checksum-pinned Docker client used for guest staging.
+        SCANNER_RUNTIME_IMAGE: ${SCANNER_LOCAL_WORKER_IMAGE:-shakerscan-worker:local}
     # Resolve host-published services (e2e fixtures / honey targets) from inside the
     # container on Linux CI too. No-op on Docker Desktop, where it already resolves.
     extra_hosts:

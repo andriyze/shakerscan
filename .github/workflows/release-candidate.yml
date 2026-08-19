@@ -164,10 +164,8 @@ jobs:
       - name: Build and verify locked API control-plane image
         run: |
           docker build \
-            --build-arg SCANNER_VERSION=${{ needs.meta.outputs.version }} \
-            --build-arg SCANNER_SOURCE_REVISION=${{ needs.meta.outputs.candidate_sha }} \
-            --build-arg INSTALL_DOCKER_CLI=1 \
-            -f scanner/Dockerfile -t shakerscan-api:release-candidate .
+            --build-arg SCANNER_RUNTIME_IMAGE=shakerscan-scanner:release-candidate \
+            -f scanner/Dockerfile.api -t shakerscan-api:release-candidate .
           docker run --rm --entrypoint sh shakerscan-scanner:release-candidate -ceu \
             'if command -v docker >/dev/null 2>&1; then echo "worker image must not contain Docker" >&2; exit 1; fi'
           docker run --rm --entrypoint docker shakerscan-api:release-candidate --version
@@ -300,12 +298,10 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: scanner/Dockerfile
+          file: scanner/Dockerfile.api
           platforms: ${{ matrix.platform }}
           build-args: |
-            SCANNER_VERSION=${{ needs.meta.outputs.version }}
-            SCANNER_SOURCE_REVISION=${{ needs.meta.outputs.candidate_sha }}
-            INSTALL_DOCKER_CLI=1
+            SCANNER_RUNTIME_IMAGE=${{ env.SCANNER_IMAGE }}@${{ steps.scanner.outputs.digest }}
           labels: |
             org.opencontainers.image.title=ShakerScan API Control Plane
             org.opencontainers.image.description=ShakerScan API with checksum-pinned Docker client for Model Intake guest staging
