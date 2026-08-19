@@ -32,6 +32,7 @@ try:
         resolve_active_enrichment_limits,
         resolve_bola_deadline_seconds,
         resolve_phase4_max_seconds,
+        resolve_smart_bola_lane_cap,
         resolve_scan_budget,
     )
 except ImportError:
@@ -39,6 +40,7 @@ except ImportError:
         resolve_active_enrichment_limits,
         resolve_bola_deadline_seconds,
         resolve_phase4_max_seconds,
+        resolve_smart_bola_lane_cap,
         resolve_scan_budget,
     )
 from scanner_tools.active_enrichment_policy import (
@@ -4279,6 +4281,25 @@ async def build_report(target: str,
         start_scan_session(scan_session_id)
     except ImportError:
         # PoE module not available - continue without session management
+        pass
+
+    # Proof-of-exploit aggression rides the operator-confirmed exploit level.
+    # An aggressive scan (already gated behind explicit active-testing confirmation)
+    # unlocks time-based blind SQLi, command-injection, and data-modification proofs;
+    # every other scan keeps the safe proof profile. Per-target proof budgets are
+    # clamped to the resolved scan budget so PoE never outspends the scan itself.
+    # This runs on every scan, so a safe scan following an aggressive one on the same
+    # long-lived worker is always reset to the safe proof profile.
+    try:
+        from scanner_tools.proof_of_exploit import configure_poe, resolve_scan_poe_config
+        _poe_request_ceiling = None
+        if isinstance(scan_budget, dict):
+            try:
+                _poe_request_ceiling = int(scan_budget.get("api_probe_limit") or 0) or None
+            except (TypeError, ValueError):
+                _poe_request_ceiling = None
+        configure_poe(resolve_scan_poe_config(exploit_level, request_ceiling=_poe_request_ceiling))
+    except ImportError:
         pass
 
     # Create authenticated session if credentials provided
@@ -12045,7 +12066,8 @@ async def build_report(target: str,
                         # *on top of* SQLi/XSS and blocked the scan from completing.
                         # Cap the non-focused lane hard; focused BOLA keeps its budget.
                         if not bola_focused:
-                            bola_overall_deadline = min(bola_overall_deadline, SMART_BOLA_LANE_MAX_SECONDS)
+                            bola_lane_cap = resolve_smart_bola_lane_cap(scan_budget, SMART_BOLA_LANE_MAX_SECONDS)
+                            bola_overall_deadline = min(bola_overall_deadline, bola_lane_cap)
                         if bola_focused:
                             try:
                                 from scanner_tools.proof_of_exploit import PoEConfig, configure_poe

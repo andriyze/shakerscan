@@ -4471,6 +4471,36 @@ async def persist_device_candidate_settlement(
     return verification_id
 
 
+def _authenticated_device_package_identities(posture: dict[str, Any]) -> list[dict[str, Any]]:
+    """Build authoritative identity records from any credentialed SSH package inventory.
+
+    These are synthetic, service-shaped identities the advisory correlator can iterate
+    alongside network-fingerprinted services. They are never persisted into the device
+    service inventory; they exist only to make an advisory match from authenticated
+    package evidence reachable (the authoritative tier that promotion requires).
+    """
+    identities: list[dict[str, Any]] = []
+    for service in posture.get("services") or []:
+        if not isinstance(service, dict):
+            continue
+        ssh = service.get("ssh") if isinstance(service.get("ssh"), dict) else {}
+        host_review = ssh.get("host_review") if isinstance(ssh.get("host_review"), dict) else {}
+        if not host_review:
+            continue
+        for record in device_advisories.parse_authenticated_package_inventory(host_review):
+            identities.append({
+                "transport": "authenticated_package",
+                "port": 0,
+                "service_name": record["package"],
+                "product": record["product"],
+                "version": record["version"],
+                "cpe": record["cpe"],
+                "identity_evidence_tier": record["identity_evidence_tier"],
+                "_advisory_identity_source": "authenticated_package",
+            })
+    return identities
+
+
 async def correlate_device_advisory_lifecycle(
     *, result: dict[str, Any], device_target_id: str,
 ) -> dict[str, Any]:
@@ -4499,8 +4529,10 @@ async def correlate_device_advisory_lifecycle(
     findings = result.setdefault("findings", [])
     evaluated_loci: set[tuple[str, int]] = set()
     current_candidate_ids: set[uuid.UUID] = set()
+    summary["authenticated_packages_evaluated"] = 0
+    identity_sources = list(posture.get("services") or []) + _authenticated_device_package_identities(posture)
     async with db_pool.acquire() as conn:
-        for service in posture.get("services") or []:
+        for service in identity_sources:
             if not isinstance(service, dict):
                 continue
             cpe = str(service.get("cpe") or "").strip()
@@ -4517,6 +4549,8 @@ async def correlate_device_advisory_lifecycle(
             except (TypeError, ValueError):
                 continue
             summary["services_evaluated"] += 1
+            if service.get("_advisory_identity_source") == "authenticated_package":
+                summary["authenticated_packages_evaluated"] += 1
             matches = device_advisories.match_advisories(
                 records, cpe=cpe or None, product=product or None, version=version or None,
                 identity_evidence_tier=identity_provenance["tier"],
@@ -12972,9 +13006,14 @@ async def process_agent_scanner_tool_job(job_data: dict[str, Any]) -> None:
             pinned_address=pinned_address,
             port=target_port,
         ).start()
+        # OOB (interactsh) config is server-trusted: it comes only from the control-plane
+        # job_data (set solely for a gated hunt against an operator-configured private server),
+        # never from the model-supplied scanner options.
         binary, argv, template_timeout_ms = agent_tools.build_scanner_argv(
             name, execution_target, options, pinned_address=pinned_address,
             pinned_proxy_url=pinned_proxy.proxy_url,
+            oob_interactsh_server=job_data.get("oob_interactsh_server"),
+            oob_interactsh_token=job_data.get("oob_interactsh_token"),
         )
         if name == "sqlmap":
             scratch_dir = tempfile.mkdtemp(prefix=f"shakerscan-sqlmap-{job_id[:8]}-")

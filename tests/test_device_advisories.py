@@ -273,3 +273,61 @@ def test_generator_rejects_non_vulnerable_and_conditional_nvd_cpes():
 
     unconditional = {"configurations": [{"nodes": [{"operator": "OR", "cpeMatch": [vulnerable_match]}]}]}
     assert list(iter_matches(unconditional)) == [(vulnerable_match["criteria"], vulnerable_match)]
+
+
+def test_upstream_package_version_strips_epoch_and_revision():
+    assert device_advisories.upstream_package_version("1:8.9p1-3ubuntu0.4") == "8.9p1"
+    assert device_advisories.upstream_package_version("3.0.11-r0") == "3.0.11"
+    assert device_advisories.upstream_package_version("2020.81-1") == "2020.81"
+    assert device_advisories.upstream_package_version("") == ""
+
+
+def test_parse_authenticated_package_inventory_tiers_curated_vs_unmapped():
+    host_review = {"status": "ok", "bundles": [{
+        "bundle": "software_packages",
+        "stdout": (
+            "openssl 1.0.1f\n"        # curated -> cpe
+            "dropbear - 2016.74\n"    # opkg format, curated -> cpe
+            "systemd 252-1\n"         # unmapped -> product only
+            "openssl 1.0.1f\n"        # duplicate -> deduped
+            "\n"
+            "garbage-line-without-version\n"
+        ),
+    }]}
+    records = device_advisories.parse_authenticated_package_inventory(host_review)
+    by_pkg = {r["package"]: r for r in records}
+    assert set(by_pkg) == {"openssl", "dropbear", "systemd"}
+    assert all(r["identity_evidence_tier"] == "authenticated_package_inventory" for r in records)
+    assert by_pkg["openssl"]["cpe"].startswith("cpe:2.3:a:openssl:openssl:1.0.1f")
+    assert by_pkg["openssl"]["curated_identity"] is True
+    assert by_pkg["dropbear"]["version"] == "2016.74" and by_pkg["dropbear"]["cpe"]
+    assert by_pkg["systemd"]["cpe"] == "" and by_pkg["systemd"]["curated_identity"] is False
+
+
+def test_parse_authenticated_package_inventory_ignores_rejected_or_missing_bundle():
+    assert device_advisories.parse_authenticated_package_inventory(
+        {"status": "rejected", "bundles": []}
+    ) == []
+    assert device_advisories.parse_authenticated_package_inventory({"bundles": []}) == []
+    assert device_advisories.parse_authenticated_package_inventory(None) == []
+
+
+def test_authenticated_tier_promotes_only_with_curated_cpe():
+    records = [{
+        "cve": "CVE-2014-0160", "product": "openssl",
+        "cpe": "cpe:2.3:a:openssl:openssl:*:*:*:*:*:*:*:*",
+        "version_end_excluding": "1.0.1g",
+    }]
+    # Curated CPE + authenticated tier -> promotable.
+    curated = device_advisories.match_advisories(
+        records, cpe="cpe:2.3:a:openssl:openssl:1.0.1f:*:*:*:*:*:*:*",
+        product="openssl", version="1.0.1f",
+        identity_evidence_tier="authenticated_package_inventory",
+    )
+    assert curated and curated[0]["promotable"] is True
+    # Same authenticated tier but product-name only (no cpe) -> never promotable.
+    heuristic = device_advisories.match_advisories(
+        records, cpe=None, product="openssl", version="1.0.1f",
+        identity_evidence_tier="authenticated_package_inventory",
+    )
+    assert all(m["promotable"] is False for m in heuristic)

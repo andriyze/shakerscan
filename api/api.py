@@ -31820,6 +31820,8 @@ async def _enqueue_agent_scanner_tool(
     timeout_ms: int,
     pinned_address: str,
     authorized_addresses: list[str],
+    oob_interactsh_server: str | None = None,
+    oob_interactsh_token: str | None = None,
 ) -> dict[str, Any]:
     """Queue fixed-template scanner work and await its bounded worker result.
 
@@ -31840,6 +31842,8 @@ async def _enqueue_agent_scanner_tool(
         "timeout_ms": timeout_ms,
         "pinned_address": pinned_address,
         "authorized_addresses": authorized_addresses[:16],
+        "oob_interactsh_server": oob_interactsh_server,
+        "oob_interactsh_token": oob_interactsh_token,
         "submitted_at": utc_now_iso(),
         "_base_queue_name": AGENT_TOOL_QUEUE_NAME,
     }
@@ -31911,8 +31915,15 @@ async def _agent_tool_run_tool(
         )
     except agent_tools.AgentToolError as exc:
         return {"ok": False, "error": f"scope: {exc}"}
+    # Blind OOB (interactsh) is off unless a gated hunt AND an operator-configured PRIVATE
+    # server are both present; the public ProjectDiscovery servers are never used.
+    oob_interactsh_server, oob_interactsh_token = agent_tools.resolve_hunt_interactsh_config(
+        allow_active=allow_active,
+    )
     binary, argv, timeout_ms = agent_tools.build_scanner_argv(
         name, url, options, pinned_address=pinned_address,
+        oob_interactsh_server=oob_interactsh_server,
+        oob_interactsh_token=oob_interactsh_token,
     )
     started_at = datetime.now(timezone.utc)
     try:
@@ -31924,6 +31935,8 @@ async def _agent_tool_run_tool(
             timeout_ms=timeout_ms,
             pinned_address=pinned_address,
             authorized_addresses=frozen_addresses,
+            oob_interactsh_server=oob_interactsh_server,
+            oob_interactsh_token=oob_interactsh_token,
         )
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": f"run_tool_fault:{type(exc).__name__}"}

@@ -341,6 +341,76 @@ def _pinned_scanner_url(url: str, pinned_address: str) -> tuple[str, str, str]:
     return urllib.parse.urlunsplit((parsed.scheme, pinned_netloc, parsed.path or "/", parsed.query, "")), hostname, host_header
 
 
+# ProjectDiscovery's PUBLIC interactsh servers. A hunt runs against a customer target, so an
+# OOB callback URL reveals target-identifying data to whoever operates the callback server.
+# We therefore NEVER enable the public default; blind OOB detection is available only when an
+# operator explicitly points ShakerScan at their OWN private interactsh server.
+_PUBLIC_INTERACTSH_HOSTS = frozenset({
+    "oast.fun", "oast.online", "oast.pro", "oast.live", "oast.site", "oast.me", "interact.sh",
+})
+
+
+def validate_private_interactsh_server(url: Any) -> str | None:
+    """Return a normalized scheme://host[:port] only for a valid, non-public OOB server.
+
+    Fail-closed: empty, malformed, non-http(s), or any ProjectDiscovery public server returns
+    ``None`` (the caller then keeps ``-no-interactsh``). The path/query/fragment are dropped.
+    """
+    text = str(url or "").strip()
+    if not text or any(ch in text for ch in " \t\r\n"):
+        return None
+    parsed = urllib.parse.urlsplit(text if "://" in text else "https://" + text)
+    scheme = (parsed.scheme or "https").lower()
+    if scheme not in {"http", "https"}:
+        return None
+    host = (parsed.hostname or "").strip().lower().rstrip(".")
+    if not host:
+        return None
+    if any(host == pub or host.endswith("." + pub) for pub in _PUBLIC_INTERACTSH_HOSTS):
+        return None
+    authority = host
+    if parsed.port:
+        if not 1 <= int(parsed.port) <= 65535:
+            return None
+        authority = f"{host}:{int(parsed.port)}"
+    return f"{scheme}://{authority}"
+
+
+def resolve_hunt_interactsh_config(*, allow_active: bool) -> tuple[str | None, str | None]:
+    """Resolve the operator-configured private OOB server for a gated hunt, or (None, None).
+
+    Only a gated-execution (credential-tier approved) hunt may use OOB, and only when the
+    operator has set ``SHAKERSCAN_HUNT_INTERACTSH_SERVER`` to their own private server. This is
+    off by default, so no hunt gains external OOB egress without an explicit operator opt-in.
+    """
+    if not allow_active:
+        return None, None
+    server = validate_private_interactsh_server(os.environ.get("SHAKERSCAN_HUNT_INTERACTSH_SERVER"))
+    if not server:
+        return None, None
+    token = str(os.environ.get("SHAKERSCAN_HUNT_INTERACTSH_TOKEN") or "").strip() or None
+    if token and (any(ch in token for ch in "\r\n") or len(token) > 512):
+        token = None
+    return server, token
+
+
+def _apply_nuclei_interactsh(argv: list[str], server: str | None, token: str | None) -> list[str]:
+    """Enable nuclei OOB against a validated private server; otherwise leave argv unchanged.
+
+    When enabled we also drop ``-proxy-internal`` so nuclei's interactsh client can reach the
+    operator's private OOB server directly. Target scan traffic still rides ``-proxy`` (the pinned
+    loopback SOCKS broker), so egress pinning of the actual scan is preserved.
+    """
+    validated = validate_private_interactsh_server(server)
+    if not validated:
+        return argv
+    result = [flag for flag in argv if flag not in {"-no-interactsh", "-proxy-internal"}]
+    result += ["-interactsh-server", validated]
+    if token:
+        result += ["-interactsh-token", token]
+    return result
+
+
 def build_scanner_argv(
     name: str,
     url: str,
@@ -348,6 +418,8 @@ def build_scanner_argv(
     *,
     pinned_address: str | None = None,
     pinned_proxy_url: str | None = None,
+    oob_interactsh_server: str | None = None,
+    oob_interactsh_token: str | None = None,
 ) -> tuple[str, list[str], int]:
     """Return (binary, argv, timeout_ms) for a scanner run. The binary name is NOT in argv
     (passed separately to the subprocess); every flag is hardcoded in the template."""
@@ -380,9 +452,12 @@ def build_scanner_argv(
             pin_args = ["--header", f"Host: {host_header}"]
         elif name == "sqlmap":
             pin_args = ["--host", host_header]
+    argv = template["build"](execution_url, options or {}) + pin_args
+    if name == "nuclei":
+        argv = _apply_nuclei_interactsh(argv, oob_interactsh_server, oob_interactsh_token)
     return (
         template["binary"],
-        template["build"](execution_url, options or {}) + pin_args,
+        argv,
         int(template["default_timeout_ms"]),
     )
 

@@ -216,6 +216,25 @@ def resolve_bola_deadline_seconds(scan_budget: dict[str, Any] | None, custom_bud
     return max(300, min(900, active_budget))
 
 
+def resolve_smart_bola_lane_cap(scan_budget: dict[str, Any] | None, default_cap: int) -> int:
+    """Cap the non-focused smart-scan BOLA lane, scaled by the resolved budget profile.
+
+    The default cap keeps a rich app's BOLA pass from dwarfing SQLi/XSS in the
+    normal broad active mix. Deeper budget profiles the operator explicitly chose
+    (Thorough, Exhaustive) earn a proportionally larger lane so BOLA coverage is
+    not silently starved on a scan that asked for more depth. The cap never drops
+    below the configured default.
+    """
+    try:
+        base = int(default_cap)
+    except (TypeError, ValueError):
+        base = 150
+    budget = scan_budget if isinstance(scan_budget, dict) else {}
+    profile = normalize_budget_profile(budget.get("budget_profile"))
+    profile_caps = {"thorough": 300, "exhaustive": 600}
+    return max(base, profile_caps.get(profile, base))
+
+
 ACTIVE_ENRICHMENT_LIMITS_BY_PROFILE: dict[str, dict[str, int]] = {
     "fast": {
         "auxiliary_get_endpoints": 4,

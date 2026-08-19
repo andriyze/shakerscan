@@ -34,3 +34,26 @@ def test_poe_limit_warning_emitted_once_per_scan_domain_budget(caplog):
         poe.end_scan_session("scan-test-1")
         poe.reset_request_counts()
         poe.configure_poe(original_config)
+
+
+def test_resolve_scan_poe_config_only_aggressive_unlocks_and_clamps():
+    safe = poe.resolve_scan_poe_config("safe")
+    assert safe.safe_mode is True and safe.skip_time_based is True and safe.skip_rce is True
+
+    for level in ("", "moderate", None, "SAFE"):
+        assert poe.resolve_scan_poe_config(level).safe_mode is True
+
+    agg = poe.resolve_scan_poe_config("aggressive")
+    assert agg.safe_mode is False and agg.skip_time_based is False
+    assert agg.skip_rce is False and agg.skip_data_modification is False
+    assert agg.max_requests_per_target == 400 and agg.bola_max_requests_per_target == 800
+
+    # Clamp to the resolved scan budget (api_probe_limit), never below the safe floor.
+    clamped = poe.resolve_scan_poe_config("aggressive", request_ceiling=400)
+    assert clamped.max_requests_per_target == 400 and clamped.bola_max_requests_per_target == 400
+    low = poe.resolve_scan_poe_config("aggressive", request_ceiling=150)
+    assert low.max_requests_per_target == 200 and low.bola_max_requests_per_target == 400
+    high = poe.resolve_scan_poe_config("aggressive", request_ceiling=1500)
+    assert high.max_requests_per_target == 400 and high.bola_max_requests_per_target == 800
+    # Case-insensitive.
+    assert poe.resolve_scan_poe_config("AGGRESSIVE").safe_mode is False

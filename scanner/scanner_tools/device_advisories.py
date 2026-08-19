@@ -31,6 +31,123 @@ AUTHORITATIVE_IDENTITY_EVIDENCE_TIERS = frozenset({
 })
 FINGERPRINT_IDENTITY_EVIDENCE_TIER = "network_service_fingerprint"
 
+# Conservative, curated package-name -> (cpe_vendor, cpe_product) map. Only packages whose
+# upstream identity is unambiguous appear here: a mapped package earns an authoritative CPE and
+# can therefore promote an advisory match, while every unmapped package stays product-name-only
+# (a non-promotable candidate at most). The map is intentionally small and exact so an
+# authenticated inventory can never manufacture a false verified advisory from a guessed identity.
+PACKAGE_CPE_IDENTITY: dict[str, tuple[str, str]] = {
+    "openssl": ("openssl", "openssl"),
+    "libssl3": ("openssl", "openssl"),
+    "libssl1.1": ("openssl", "openssl"),
+    "libssl1.0.0": ("openssl", "openssl"),
+    "dropbear": ("dropbear_ssh_project", "dropbear_ssh"),
+    "dropbearmulti": ("dropbear_ssh_project", "dropbear_ssh"),
+    "dnsmasq": ("thekelleys", "dnsmasq"),
+    "dnsmasq-full": ("thekelleys", "dnsmasq"),
+    "dnsmasq-base": ("thekelleys", "dnsmasq"),
+    "busybox": ("busybox", "busybox"),
+    "lighttpd": ("lighttpd", "lighttpd"),
+    "mosquitto": ("eclipse", "mosquitto"),
+    "libmosquitto1": ("eclipse", "mosquitto"),
+    "zlib1g": ("zlib", "zlib"),
+    "libz1": ("zlib", "zlib"),
+    "libcurl3": ("haxx", "libcurl"),
+    "libcurl4": ("haxx", "libcurl"),
+    "libcurl3-gnutls": ("haxx", "libcurl"),
+    "libcurl3-openssl": ("haxx", "libcurl"),
+    "libupnp": ("libupnp_project", "libupnp"),
+    "libupnp13": ("libupnp_project", "libupnp"),
+    "miniupnpd": ("miniupnp_project", "miniupnpd"),
+    "goahead": ("embedthis", "goahead"),
+    "thttpd": ("acme", "thttpd"),
+    "libgnutls30": ("gnu", "gnutls"),
+    "gnutls-bin": ("gnu", "gnutls"),
+    "ffmpeg": ("ffmpeg", "ffmpeg"),
+    "live555": ("live555", "live555"),
+}
+AUTHENTICATED_PACKAGE_INVENTORY_TIER = "authenticated_package_inventory"
+_MAX_PARSED_PACKAGES = 800
+
+
+def upstream_package_version(value: Any) -> str:
+    """Reduce a distro package version to its upstream component for CPE comparison.
+
+    Strips a Debian/dpkg epoch (``1:8.9p1``) and the distro revision suffix
+    (``-3ubuntu0.4`` / ``-r0``) so ``version_in_range`` compares upstream releases.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if ":" in text:
+        text = text.split(":", 1)[1]
+    text = text.split("-", 1)[0]
+    return text.strip()
+
+
+def _package_inventory_text(host_review: Any) -> str:
+    """Extract the software_packages bundle stdout from an SSH host-review result."""
+    review = host_review if isinstance(host_review, dict) else {}
+    if str(review.get("status") or "") == "rejected":
+        return ""
+    for bundle in review.get("bundles") or []:
+        if isinstance(bundle, dict) and str(bundle.get("bundle") or "") == "software_packages":
+            return str(bundle.get("stdout") or "")
+    return ""
+
+
+def parse_authenticated_package_inventory(host_review: Any) -> list[dict[str, Any]]:
+    """Parse a credentialed SSH package inventory into authoritative identity records.
+
+    Only produced from an authenticated host review (dpkg/opkg/apk/rpm output), so every
+    record is tagged ``authenticated_package_inventory``. Mapped packages carry a curated
+    CPE (advisory-promotion eligible); unmapped packages carry only a product name.
+    """
+    text = _package_inventory_text(host_review)
+    records: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for raw_line in text.splitlines():
+        if len(records) >= _MAX_PARSED_PACKAGES:
+            break
+        line = raw_line.strip()
+        if not line:
+            continue
+        name = ""
+        raw_version = ""
+        if " - " in line:  # opkg list-installed: "dropbear - 2020.81-1"
+            head, _, tail = line.partition(" - ")
+            name = head.strip()
+            raw_version = tail.strip().split()[0] if tail.strip() else ""
+        else:
+            tokens = line.split()
+            if len(tokens) >= 2:  # dpkg-query "${Package} ${Version}"
+                name, raw_version = tokens[0].strip(), tokens[1].strip()
+        name = name.lower()
+        if not name or not raw_version or any(ch in name for ch in " \t/"):
+            continue
+        version = upstream_package_version(raw_version)
+        if not version:
+            continue
+        key = (name, version)
+        if key in seen:
+            continue
+        seen.add(key)
+        identity = PACKAGE_CPE_IDENTITY.get(name)
+        cpe = ""
+        if identity:
+            vendor, product = identity
+            cpe = f"cpe:2.3:a:{vendor}:{product}:{version}:*:*:*:*:*:*:*"
+        records.append({
+            "package": name,
+            "product": (identity[1] if identity else name),
+            "version": version,
+            "raw_version": raw_version[:120],
+            "cpe": cpe,
+            "identity_evidence_tier": AUTHENTICATED_PACKAGE_INVENTORY_TIER,
+            "curated_identity": bool(identity),
+        })
+    return records
+
 
 def identity_evidence_tier(service: Any) -> dict[str, Any]:
     """Classify identity provenance without upgrading fingerprints by inference."""

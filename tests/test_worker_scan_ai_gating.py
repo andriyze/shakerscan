@@ -3011,6 +3011,117 @@ def test_device_advisory_lifecycle_resolves_only_an_observed_stale_service(monke
     assert any("status='refuted'" in query for query, _ in pool.conn.executed)
 
 
+def _advisory_conn_recording():
+    class _Conn:
+        def __init__(self):
+            self.executed = []
+            self.candidate_seq = 0
+
+        async def fetch(self, query, *_args):
+            return []
+
+        async def fetchrow(self, query, *args):
+            self.candidate_seq += 1
+            return {"id": uuid.uuid4(), "status": "new",
+                    "fingerprint": f"fp{self.candidate_seq}", "inserted": True}
+
+        async def execute(self, query, *args):
+            self.executed.append((query, args))
+            return "OK"
+
+        async def fetchval(self, query, *_args):
+            return 0
+
+    class _Pool:
+        def __init__(self):
+            self.conn = _Conn()
+
+        def acquire(self):
+            return self
+
+        async def __aenter__(self):
+            return self.conn
+
+        async def __aexit__(self, *_args):
+            return False
+
+    return _Pool()
+
+
+_HEARTBLEED_SNAPSHOT = {
+    "status": "available", "snapshot_sha256": "b" * 64,
+    "generated_at": "2026-08-16T00:00:00Z",
+    "advisories": [{
+        "cve": "CVE-2014-0160", "product": "openssl",
+        "cpe": "cpe:2.3:a:openssl:openssl:*:*:*:*:*:*:*:*",
+        "version_end_excluding": "1.0.1g", "severity": "high",
+        "title": "OpenSSL Heartbleed", "reference": "https://nvd.nist.gov/vuln/detail/CVE-2014-0160",
+    }],
+}
+
+
+def _openssl_ssh_service(version_line):
+    return {
+        "transport": "tcp", "port": 22, "state": "open", "service_name": "ssh",
+        "product": "openssh", "version": "8.9", "cpe": "",
+        "ssh": {"authentication_succeeded": True, "host_review": {
+            "status": "ok",
+            "bundles": [{"bundle": "software_packages", "stdout": version_line}],
+        }},
+    }
+
+
+def test_authenticated_package_inventory_promotes_advisory(monkeypatch):
+    monkeypatch.setattr(worker, "db_pool", _advisory_conn_recording())
+    monkeypatch.setattr(worker, "_worker_build_fingerprint", lambda: "fingerprint")
+    monkeypatch.setattr(worker.device_advisories, "load_verified_snapshot",
+                        lambda *_a: dict(_HEARTBLEED_SNAPSHOT))
+    result = {"device_posture": {"services": [_openssl_ssh_service("openssl 1.0.1f\n")]}, "findings": []}
+    summary = asyncio.run(worker.correlate_device_advisory_lifecycle(
+        result=result, device_target_id="33333333-3333-4333-8333-333333333333",
+    ))
+    assert summary["authenticated_packages_evaluated"] >= 1
+    assert summary["exact_matches"] == 1
+    findings = result["findings"]
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["verified"] is True and finding["proof_state"] == "verified"
+    assert finding["proof_contract_v2"]["reexecution"]["performed"] is True
+    assert "CVE-2014-0160" in finding["title"]
+
+
+def test_authenticated_package_fixed_version_does_not_promote(monkeypatch):
+    monkeypatch.setattr(worker, "db_pool", _advisory_conn_recording())
+    monkeypatch.setattr(worker, "_worker_build_fingerprint", lambda: "fingerprint")
+    monkeypatch.setattr(worker.device_advisories, "load_verified_snapshot",
+                        lambda *_a: dict(_HEARTBLEED_SNAPSHOT))
+    # 1.0.1g is the fixed version (end_excluding), so it is NOT affected -> no finding.
+    result = {"device_posture": {"services": [_openssl_ssh_service("openssl 1.0.1g\n")]}, "findings": []}
+    summary = asyncio.run(worker.correlate_device_advisory_lifecycle(
+        result=result, device_target_id="44444444-4444-4444-8444-444444444444",
+    ))
+    assert summary["exact_matches"] == 0
+    assert result["findings"] == []
+
+
+def test_fingerprint_only_openssl_does_not_promote(monkeypatch):
+    monkeypatch.setattr(worker, "db_pool", _advisory_conn_recording())
+    monkeypatch.setattr(worker, "_worker_build_fingerprint", lambda: "fingerprint")
+    monkeypatch.setattr(worker.device_advisories, "load_verified_snapshot",
+                        lambda *_a: dict(_HEARTBLEED_SNAPSHOT))
+    # Same vulnerable version but only a network fingerprint (no authenticated inventory).
+    result = {"device_posture": {"services": [{
+        "transport": "tcp", "port": 443, "state": "open", "service_name": "https",
+        "product": "openssl", "version": "1.0.1f",
+        "cpe": "cpe:2.3:a:openssl:openssl:1.0.1f:*:*:*:*:*:*:*",
+    }]}, "findings": []}
+    summary = asyncio.run(worker.correlate_device_advisory_lifecycle(
+        result=result, device_target_id="55555555-5555-4555-8555-555555555555",
+    ))
+    assert summary["exact_matches"] == 0
+    assert result["findings"] == []
+
+
 def test_device_agent_auto_verify_is_bounded_and_logged_at_run_completion():
     api = (Path(__file__).resolve().parents[1] / "api" / "api.py").read_text()
     reply = api[api.index('@app.post("/device-agent/session/{run_id}/reply")'):]

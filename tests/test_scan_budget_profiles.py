@@ -156,3 +156,16 @@ def test_large_custom_active_budget_promotes_enrichment_depth():
 
     assert limits["profile"] == "exhaustive"
     assert limits["nosql_json_endpoints"] >= 100
+
+
+def test_resolve_smart_bola_lane_cap_scales_with_profile():
+    from constants import resolve_smart_bola_lane_cap
+    assert resolve_smart_bola_lane_cap({"budget_profile": "fast"}, 150) == 150
+    assert resolve_smart_bola_lane_cap({"budget_profile": "balanced"}, 150) == 150
+    assert resolve_smart_bola_lane_cap({"budget_profile": "thorough"}, 150) == 300
+    assert resolve_smart_bola_lane_cap({"budget_profile": "exhaustive"}, 150) == 600
+    # Never drops below the configured default cap.
+    assert resolve_smart_bola_lane_cap({"budget_profile": "exhaustive"}, 700) == 700
+    assert resolve_smart_bola_lane_cap({"budget_profile": "thorough"}, 500) == 500
+    assert resolve_smart_bola_lane_cap(None, 150) == 150
+    assert resolve_smart_bola_lane_cap({}, 150) == 150

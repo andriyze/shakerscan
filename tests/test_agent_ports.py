@@ -751,6 +751,43 @@ def test_dalfox_sqlmap_output_is_typed_and_payloads_not_exposed():
 
 # ------------------------------------------------------------------------ runner --------
 
+def test_interactsh_validator_rejects_public_and_malformed_servers():
+    for bad in (None, "", "oast.fun", "https://oast.fun", "https://x.interact.sh",
+                "ftp://oob.example", "oob example", "http://:80"):
+        assert at.validate_private_interactsh_server(bad) is None
+    assert at.validate_private_interactsh_server("oob.corp.example") == "https://oob.corp.example"
+    assert at.validate_private_interactsh_server("http://oob.corp:8443/p?q") == "http://oob.corp:8443"
+
+
+def test_nuclei_interactsh_disabled_by_default_and_off_without_gate(monkeypatch):
+    monkeypatch.delenv("SHAKERSCAN_HUNT_INTERACTSH_SERVER", raising=False)
+    _, argv, _ = at.build_scanner_argv("nuclei", "https://t/", {}, pinned_address="10.0.0.1")
+    assert "-no-interactsh" in argv and "-interactsh-server" not in argv
+    assert at.resolve_hunt_interactsh_config(allow_active=True) == (None, None)
+    assert at.resolve_hunt_interactsh_config(allow_active=False) == (None, None)
+
+
+def test_nuclei_interactsh_requires_gate_and_private_server(monkeypatch):
+    monkeypatch.setenv("SHAKERSCAN_HUNT_INTERACTSH_SERVER", "https://oast.fun")
+    assert at.resolve_hunt_interactsh_config(allow_active=True) == (None, None)  # public rejected
+    monkeypatch.setenv("SHAKERSCAN_HUNT_INTERACTSH_SERVER", "oob.corp.example")
+    assert at.resolve_hunt_interactsh_config(allow_active=False) == (None, None)  # not gated
+    assert at.resolve_hunt_interactsh_config(allow_active=True) == ("https://oob.corp.example", None)
+
+
+def test_nuclei_interactsh_enable_drops_proxy_internal_keeps_scan_pin():
+    base = at.SCANNER_ARG_TEMPLATES["nuclei"]["build"]("https://t/", {})
+    argv = base + ["-proxy", "socks5://127.0.0.1:9", "-proxy-internal"]
+    out = at._apply_nuclei_interactsh(list(argv), "oob.corp.example", "tok")
+    assert "-no-interactsh" not in out and "-proxy-internal" not in out
+    assert "-proxy" in out  # scan traffic stays pinned via the SOCKS broker
+    assert out[out.index("-interactsh-server") + 1] == "https://oob.corp.example"
+    assert out[out.index("-interactsh-token") + 1] == "tok"
+    # Disabled / public -> argv is unchanged.
+    assert at._apply_nuclei_interactsh(list(argv), None, None) == argv
+    assert at._apply_nuclei_interactsh(list(argv), "https://oast.fun", None) == argv
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0
