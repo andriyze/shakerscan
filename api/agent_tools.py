@@ -161,6 +161,7 @@ AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
 
 _SEV_RE = re.compile(r"^(critical|high|medium|low|info)(,(critical|high|medium|low|info))*$")
 _TAGS_RE = re.compile(r"^[a-z0-9][a-z0-9,\-]{0,80}$")
+_NUCLEI_FOCUSED_TAGS = "exposure,misconfig,auth-bypass,default-login"
 
 
 def _tmpl_httpx(url: str, opts: dict[str, Any]) -> list[str]:
@@ -175,12 +176,19 @@ def _tmpl_nuclei(url: str, opts: dict[str, Any]) -> list[str]:
     if not _SEV_RE.match(severity):
         severity = "high,critical"
     args = ["-target", url, "-severity", severity, "-silent", "-jsonl",
-            "-timeout", "8", "-retries", "1", "-no-color", "-disable-update-check",
+            "-stats", "-stats-json", "-stats-interval", "5",
+            "-timeout", "5", "-retries", "0", "-no-color", "-disable-update-check",
             "-disable-redirects", "-no-interactsh", "-type", "http"]
-    args += ["-rate-limit", "5", "-bulk-size", "5", "-concurrency", "5"]
+    args += ["-rate-limit", "10", "-bulk-size", "10", "-concurrency", "10"]
     tags = str(opts.get("tags") or "").strip().lower()
     if _TAGS_RE.match(tags):
         args += ["-tags", tags]
+    else:
+        # All High/Critical HTTP templates exceed the bounded agent turn on the
+        # pinned bundle. The default remains useful but finite; callers may ask
+        # for broader explicit tags and receive honestly labeled partial output
+        # if the same hard wall is reached.
+        args += ["-tags", _NUCLEI_FOCUSED_TAGS]
     return args
 
 
@@ -250,9 +258,9 @@ SCANNER_ARG_TEMPLATES: dict[str, dict[str, Any]] = {
     "httpx": {"binary": "httpx", "risk": "read_only", "default_timeout_ms": 30_000,
               "max_wire_requests": 4, "build": _tmpl_httpx,
               "desc": "passive HTTP fingerprint (status, title, tech, server) of a target-host URL"},
-    "nuclei": {"binary": "nuclei", "risk": "active", "default_timeout_ms": 90_000,
-               "max_wire_requests": 450, "build": _tmpl_nuclei,
-               "desc": "bounded Nuclei template scan (default high,critical) of a target-host URL; options {severity,tags}"},
+    "nuclei": {"binary": "nuclei", "risk": "active", "default_timeout_ms": 300_000,
+               "max_wire_requests": 4_000, "build": _tmpl_nuclei,
+               "desc": "bounded Nuclei template scan (default focused high,critical exposure/misconfiguration/auth pack) of a target-host URL; options {severity,tags}"},
     "katana": {"binary": "katana", "risk": "active", "default_timeout_ms": 75_000,
                "max_wire_requests": 150, "build": _tmpl_katana,
                "desc": "bounded target-host crawl + JS endpoint extraction (depth 2, 45s, same-host only)"},
@@ -275,7 +283,7 @@ RUN_TOOL_SCHEMA: dict[str, Any] = {
     "description": (
         "Run a bounded external scanner against a URL on the SELECTED TARGET HOST. You pick tool + target "
         f"only; all flags are fixed. Tools: {sorted(RUN_TOOL_NAMES)} — httpx = passive "
-        "fingerprint; nuclei = bounded templates (options {severity,tags}); katana = crawl + "
+        "fingerprint; nuclei = bounded focused templates by default (options {severity,tags}; explicit broad tags may return partial evidence at the hard wall); katana = crawl + "
         "JS endpoint extraction (finds linked/JS-referenced routes); ffuf = content/dir "
         "discovery over a bundled wordlist (options {wordlist: common|api|admin} — finds "
         "UNLINKED paths); dalfox = XSS scan of one URL (options {severity}); sqlmap = "
@@ -295,7 +303,7 @@ RUN_TOOL_SCHEMA: dict[str, Any] = {
             "options": {
                 "type": "object",
                 "description": (
-                    "nuclei: {severity:'high,critical', tags:'cve,exposure'}; "
+                    "nuclei: {severity:'high,critical', tags:'cve,exposure'} (omit tags for the focused pack); "
                     "ffuf: {wordlist:'common'|'api'|'admin'}; "
                     "dalfox: {severity:'low'|'medium'|'high'}; other tools have no tunable options"
                 ),

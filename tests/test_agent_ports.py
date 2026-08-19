@@ -345,7 +345,11 @@ def test_run_tool_argv_templates_hardcode_flags():
     assert b == "httpx" and "-json" in argv and "-silent" in argv and argv[argv.index("-u") + 1] == "http://t/x"
     b, argv, timeout = at.build_scanner_argv("nuclei", "http://t/x", {"severity": "high,critical", "tags": "cve,exposure"})
     assert b == "nuclei" and "-jsonl" in argv
+    assert timeout == 300_000
     assert "-no-interactsh" in argv
+    assert "-stats-json" in argv and argv[argv.index("-stats-interval") + 1] == "5"
+    assert argv[argv.index("-rate-limit") + 1] == "10"
+    assert argv[argv.index("-retries") + 1] == "0"
     assert argv[argv.index("-type") + 1] == "http"
     assert argv[argv.index("-severity") + 1] == "high,critical"
     assert argv[argv.index("-tags") + 1] == "cve,exposure"
@@ -367,7 +371,7 @@ def test_run_tool_rejects_flag_injection():
     # a severity/tags value trying to inject flags is rejected -> safe defaults, no extra flags
     _, argv, _ = at.build_scanner_argv("nuclei", "http://t/x", {"severity": "-o /etc/passwd", "tags": "; rm -rf /"})
     assert argv[argv.index("-severity") + 1] == "high,critical"  # bad severity -> default
-    assert "-tags" not in argv  # bad tags dropped
+    assert argv[argv.index("-tags") + 1] == "exposure,misconfig,auth-bypass,default-login"
     assert "-o" not in argv and "/etc/passwd" not in argv
 
 
@@ -421,7 +425,7 @@ def test_external_scanner_output_is_typed_and_query_values_are_redacted():
 
 def test_scanner_request_reservations_are_conservative_and_explicit():
     assert at.scanner_request_reservation("httpx") == 4
-    assert at.scanner_request_reservation("nuclei") == 450
+    assert at.scanner_request_reservation("nuclei") == 4000
     assert at.scanner_request_reservation("ffuf") == 220
 
 
@@ -451,6 +455,8 @@ def test_exact_scanner_wire_settlement_refunds_and_never_clamps_overruns():
 
 
 def test_scanner_rate_and_wall_bounds_fit_their_wire_reservations():
+    _, nuclei, nuclei_ms = at.build_scanner_argv("nuclei", "http://t/", {})
+    assert int(nuclei[nuclei.index("-rate-limit") + 1]) * (nuclei_ms // 1000) <= at.scanner_request_reservation("nuclei")
     _, ffuf, _ = at.build_scanner_argv("ffuf", "http://t/", {})
     assert int(ffuf[ffuf.index("-rate") + 1]) * int(ffuf[ffuf.index("-maxtime") + 1]) <= at.scanner_request_reservation("ffuf")
     _, dalfox, dalfox_ms = at.build_scanner_argv("dalfox", "http://t/?q=x", {})
@@ -526,10 +532,15 @@ def test_all_scanners_preserve_hostname_through_the_pinned_socks_broker():
 
 
 def test_short_deep_hunts_can_compose_recon_with_one_attack_scanner():
-    assert agent_budget.keyless_hunt_wire_budget(1) == 900
-    assert agent_budget.keyless_hunt_wire_budget(4) == 900
-    assert agent_budget.keyless_hunt_wire_budget(20) == 1800
-    assert agent_budget.keyless_hunt_wire_budget(40) == 3600
+    assert agent_budget.keyless_hunt_wire_budget(1) == 4200
+    assert agent_budget.keyless_hunt_wire_budget(4) == 4200
+    assert agent_budget.keyless_hunt_wire_budget(20) == 4200
+    assert agent_budget.keyless_hunt_wire_budget(40) == 8400
+    assert (
+        at.scanner_request_reservation("httpx")
+        + at.scanner_request_reservation("katana")
+        + at.scanner_request_reservation("nuclei")
+    ) <= agent_budget.keyless_hunt_wire_budget(20)
     with pytest.raises(at.AgentToolError, match="user information"):
         at.validate_scanner_execution_target("https://example.test", "https://user@example.test/")
 
@@ -568,6 +579,32 @@ def test_scanner_request_settlement_distinguishes_exact_from_observed():
     )
     assert katana["mode"] == "observed_lower_bound"
     assert katana["actual"] is None and katana["observed_minimum"] == 2
+
+
+def test_nuclei_focused_default_and_progress_counter_contract():
+    _, argv, timeout_ms = at.build_scanner_argv("nuclei", "https://example.test/", {})
+    assert argv[argv.index("-tags") + 1] == "exposure,misconfig,auth-bypass,default-login"
+    assert timeout_ms == 300_000
+    assert at.scanner_request_reservation("nuclei") == 4_000
+    settlement = at.scanner_request_settlement(
+        "nuclei",
+        "\n".join([
+            json.dumps({"duration": "0:00:05", "requests": 73}),
+            json.dumps({"duration": "0:00:10", "requests": 149}),
+        ]),
+    )
+    assert settlement == {
+        "mode": "exact", "actual": 149, "observed_minimum": 149,
+        "source": "scanner_counter",
+    }
+
+
+def test_partial_scanner_results_are_labeled_in_agent_surface():
+    source = open(os.path.join(os.path.dirname(__file__), "..", "api", "api.py"), encoding="utf-8").read()
+    run_tool = source[source.index("async def _agent_tool_run_tool("):source.index("def _agent_resolve_ref(")]
+    assert '"execution_status": status_label' in run_tool
+    assert '"complete": status_label == "success"' in run_tool
+    assert '"partial_reason": error if status_label != "success" else None' in run_tool
     assert at.scanner_request_settlement("ffuf", "not-json")["mode"] == "unavailable"
 
 

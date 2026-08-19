@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 
-MIN_USEFUL_WIRE_REQUEST_BUDGET = 900
-MAX_WIRE_REQUEST_BUDGET = 3600
-WIRE_REQUESTS_PER_TURN = 90
+MIN_USEFUL_WIRE_REQUEST_BUDGET = 4200
+MAX_WIRE_REQUEST_BUDGET = 8400
+WIRE_REQUESTS_PER_TURN = 210
 
 
 def keyless_hunt_wire_budget(max_iterations: int) -> int:

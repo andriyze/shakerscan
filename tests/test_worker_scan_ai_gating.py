@@ -2604,6 +2604,18 @@ def test_agent_scanner_tool_job_rebuilds_argv_and_publishes_settlement(monkeypat
     assert "secret" not in json.dumps(result)
 
 
+def test_nuclei_request_accounting_uses_stderr_stats_without_exposing_them():
+    stats = b'noise\n{"duration":"0:01:35","requests":1369,"templates":1183}\n'
+    settlement = worker._agent_scanner_request_settlement("nuclei", "", stats)
+    assert settlement == {
+        "mode": "exact",
+        "actual": 1369,
+        "observed_minimum": 1369,
+        "source": "scanner_counter",
+    }
+    assert worker._agent_scanner_request_settlement("katana", "", stats)["mode"] == "unavailable"
+
+
 def test_agent_tool_worker_reports_the_complete_isolated_arsenal(monkeypatch):
     monkeypatch.setattr(worker, "AGENT_TOOL_ONLY_WORKER", True)
     monkeypatch.setattr(worker, "DEVICE_ONLY_WORKER", False)

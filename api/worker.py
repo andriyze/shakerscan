@@ -12963,6 +12963,22 @@ async def _read_agent_tool_streams(
     return tuple(await asyncio.gather(stdout_task, stderr_task))  # type: ignore[return-value]
 
 
+def _agent_scanner_request_settlement(
+    scanner_name: str, stdout: str, stderr: bytes | str | None,
+) -> dict[str, Any]:
+    """Settle scanner traffic without exposing diagnostic stderr to the planner."""
+    normalized = str(scanner_name or "").strip().lower()
+    settlement_input = str(stdout or "")
+    if normalized == "nuclei" and stderr:
+        diagnostics = (
+            stderr.decode("utf-8", "replace")
+            if isinstance(stderr, bytes)
+            else str(stderr)
+        )
+        settlement_input = f"{settlement_input}\n{diagnostics}"
+    return agent_tools.scanner_request_settlement(normalized, settlement_input)
+
+
 async def process_agent_scanner_tool_job(job_data: dict[str, Any]) -> None:
     """Execute one fixed-template Deep Hunt scanner outside the API process.
 
@@ -12979,6 +12995,7 @@ async def process_agent_scanner_tool_job(job_data: dict[str, Any]) -> None:
     status = "failed"
     error: str | None = None
     stdout = ""
+    err: bytes = b""
     returncode: int | None = None
     scratch_dir: str | None = None
     pinned_proxy: PinnedSocksProxy | None = None
@@ -13091,8 +13108,11 @@ async def process_agent_scanner_tool_job(job_data: dict[str, Any]) -> None:
         shutil.rmtree(scratch_dir, ignore_errors=True)
 
     typed_output = agent_tools.parse_scanner_output(str(job_data.get("tool_name") or ""), stdout)
-    settlement = agent_tools.scanner_request_settlement(
-        str(job_data.get("tool_name") or ""), stdout
+    # Nuclei emits cumulative JSON counters on stderr while reserving stdout
+    # for matches. Feed those counters only into accounting; planner-visible
+    # evidence remains the typed/redacted stdout match stream.
+    settlement = _agent_scanner_request_settlement(
+        str(job_data.get("tool_name") or ""), stdout, err,
     )
     if status in {"failed", "cancelled"} and not stdout.strip():
         # No scanner output is not proof that DNS/TCP emitted no traffic, so only the known
