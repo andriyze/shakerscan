@@ -216,6 +216,7 @@ def test_device_hunt_history_is_durable_linkable_and_visible_from_the_device():
     assert "Device Hunt history" in hunt_ui
     assert "Action and scan ledger" in hunt_ui
     assert "Open scan" in hunt_ui
+    assert "result.error || result.ok === false ? 'failed'" in hunt_ui
     assert "Recent Device Hunt investigations" in detail_ui
     assert "listDeviceAgentSessions({ device_target_id: deviceId, limit: 5 })" in detail_ui
 

@@ -38,7 +38,10 @@ function activityLabel(event: Record<string, unknown>) {
   if (event.kind === 'ssh_shell_plan_confirmed') return `Confirmed SSH plan queued scan ${String(event.scan_id || '')}`
   if (Array.isArray(event.tool_results)) {
     const results = event.tool_results as Array<Record<string, unknown>>
-    return `Planner turn ${String(event.turn || '')}: ${results.map((result) => `${String(result.name || result.tool_name || 'tool')} ${String(result.outcome || (result.blocked ? 'blocked' : 'completed'))}`).join(', ')}`
+    return `Planner turn ${String(event.turn || '')}: ${results.map((result) => {
+      const outcome = result.outcome || (result.blocked ? 'blocked' : result.error || result.ok === false ? 'failed' : 'completed')
+      return `${String(result.name || result.tool_name || 'tool')} ${String(outcome)}`
+    }).join(', ')}`
   }
   return Object.entries(event).map(([key, value]) => `${key.replace(/_/g, ' ')}: ${typeof value === 'object' ? JSON.stringify(value) : String(value)}`).join(' · ')
 }
