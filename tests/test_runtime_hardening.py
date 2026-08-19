@@ -507,6 +507,22 @@ exit 0
     assert "22 GiB required" in payload["detail"]
 
 
+def test_api_overlay_smoke_proves_shared_layers_identity_and_role_isolation():
+    smoke = (ROOT / "scripts" / "docker_api_overlay_smoke.sh").read_text()
+    makefile = (ROOT / "Makefile").read_text()
+
+    assert 'SCANNER_RUNTIME_IMAGE=$WORKER_IMAGE' in smoke
+    assert '($api | length) == (($worker | length) + 1)' in smoke
+    assert '$api[0:($worker | length)] == $worker' in smoke
+    assert 'worker image must not contain Docker' in smoke
+    assert 'Docker version 27.5.1, build 9f9e405' in smoke
+    assert 'runtime API must not carry Buildx' in smoke
+    assert 'release-manifest.json' in smoke
+    assert '64 * 1024 * 1024' in smoke
+    assert "e2e-api-overlay:" in makefile
+    assert "scripts/docker_api_overlay_smoke.sh" in makefile
+
+
 def test_scanner_sh_local_build_marker_controls_default_runtime_mode():
     script = (ROOT / "scanner.sh").read_text()
     gitignore = (ROOT / ".gitignore").read_text()

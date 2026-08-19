@@ -3,7 +3,7 @@ PY ?= python3
 UV ?= uv
 UVX ?= uvx
 
-.PHONY: e2e e2e-model-intake e2e-model-intake-fixture e2e-ai-gate e2e-dast test \
+.PHONY: e2e e2e-model-intake e2e-model-intake-fixture e2e-ai-gate e2e-dast e2e-api-overlay test \
 	release-gates dependency-lock dependency-audit installer-smoke installed-stack-smoke upgrade-smoke fleet-acceptance
 
 ## Regenerate the cross-platform Python 3.12 runtime lock consumed by scanner/Dockerfile.
@@ -46,6 +46,10 @@ e2e-ai-gate:
 
 e2e-dast:
 	$(PY) tests/e2e/run_e2e.py --area dast
+
+## Prove the API is a thin derivative of the exact scanner runtime image.
+e2e-api-overlay:
+	bash scripts/docker_api_overlay_smoke.sh
 
 ## Physical fleet gate. Example:
 ## make fleet-acceptance FLEET_ACCEPT_ARGS='--api-url https://scanner.example --public-host scanner.example --target https://lab.example --authorized'
