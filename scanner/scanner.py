@@ -12070,12 +12070,15 @@ async def build_report(target: str,
                             bola_overall_deadline = min(bola_overall_deadline, bola_lane_cap)
                         if bola_focused:
                             try:
-                                from scanner_tools.proof_of_exploit import PoEConfig, configure_poe
+                                from scanner_tools.proof_of_exploit import configure_poe, focused_bola_poe_config
 
                                 focused_bola_poe_settings = resolve_focused_bola_poe_settings(smart_bola_max_endpoints)
-                                focused_poe = PoEConfig.safe()
-                                focused_poe.bola_max_requests_per_target = focused_bola_poe_settings["bola_max_requests_per_target"]
-                                focused_poe.rate_limit_ms = focused_bola_poe_settings["rate_limit_ms"]
+                                # Derive from the scan-session profile: an aggressive scan keeps
+                                # its unlocked proof tier here instead of being reset to safe.
+                                focused_poe = focused_bola_poe_config(
+                                    bola_max_requests_per_target=focused_bola_poe_settings["bola_max_requests_per_target"],
+                                    rate_limit_ms=focused_bola_poe_settings["rate_limit_ms"],
+                                )
                                 configure_poe(focused_poe)
                                 active_block["focused_bola_request_budget"] = focused_poe.bola_max_requests_per_target
                                 active_block["focused_bola_rate_limit_ms"] = focused_poe.rate_limit_ms
