@@ -204,10 +204,12 @@ _AGENT_FFUF_WORDLISTS: dict[str, str] = {
 def _tmpl_katana(url: str, opts: dict[str, Any]) -> list[str]:
     # Same-origin crawl + JS endpoint extraction. Read-only (GET only; form auto-fill stays OFF),
     # bounded: depth 2, 45s wall cap, 50 req/s, field-scope fqdn (same HOST only — never crosses
-    # origin), 8s per-request timeout, jsonl output. No tunables.
+    # origin), 8s per-request timeout, URL-only output. Katana's JSONL records embed raw
+    # request/response bodies and can exhaust the worker output cap after only a few pages.
+    # The compact stream is sufficient for route discovery and keeps planner evidence bounded.
     return ["-u", url, "-js-crawl", "-depth", "2", "-concurrency", "5",
             "-rate-limit", "5", "-crawl-duration", "30s", "-field-scope", "fqdn",
-            "-timeout", "8", "-disable-redirects", "-silent", "-jsonl"]
+            "-timeout", "8", "-disable-redirects", "-silent"]
 
 
 def _tmpl_dalfox(url: str, opts: dict[str, Any]) -> list[str]:
@@ -592,9 +594,14 @@ def _explicit_request_counters(value: Any) -> list[int]:
     if isinstance(value, dict):
         for raw_key, raw_value in value.items():
             key = str(raw_key or "").strip().lower().replace("-", "_")
-            if key in _REQUEST_COUNTER_KEYS and isinstance(raw_value, (int, float)):
-                number = int(raw_value)
-                if number >= 0:
+            if key in _REQUEST_COUNTER_KEYS:
+                number: int | None = None
+                if isinstance(raw_value, (int, float)):
+                    number = int(raw_value)
+                elif isinstance(raw_value, str) and re.fullmatch(r"\d{1,18}", raw_value.strip()):
+                    # Nuclei v3.11 serializes stats counters as JSON strings.
+                    number = int(raw_value.strip())
+                if number is not None and number >= 0:
                     counters.append(number)
             elif isinstance(raw_value, (dict, list)):
                 counters.extend(_explicit_request_counters(raw_value))
@@ -668,7 +675,9 @@ def _public_observed_url(value: Any) -> str | None:
     return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, safe_query, ""))[:2000]
 
 
-def parse_scanner_output(name: str, stdout: str) -> dict[str, Any]:
+def parse_scanner_output(
+    name: str, stdout: str, *, allowed_host: str | None = None,
+) -> dict[str, Any]:
     """Parse bounded scanner output into records safe for hunt reasoning.
 
     Raw output remains receipt evidence; these records are observations, never finding proof.
@@ -694,25 +703,59 @@ def parse_scanner_output(name: str, stdout: str) -> dict[str, Any]:
                 continue
             if isinstance(item, dict):
                 decoded.append(item)
+        if scanner == "katana" and not decoded:
+            # Compact Katana mode emits one absolute URL per line. Preserve only URL-shaped
+            # records; banners and diagnostics are not route observations.
+            for line in text.splitlines()[:500]:
+                candidate = line.strip()
+                try:
+                    parsed_candidate = urllib.parse.urlsplit(candidate)
+                except ValueError:
+                    continue
+                if parsed_candidate.scheme in {"http", "https"} and parsed_candidate.hostname:
+                    decoded.append({"url": candidate, "method": "GET"})
 
     records: list[dict[str, Any]] = []
+    seen_katana_urls: set[str] = set()
     for item in decoded[:200]:
         if scanner == "nuclei":
             info = item.get("info") if isinstance(item.get("info"), dict) else {}
+            template_id = str(item.get("template-id") or item.get("template_id") or "")[:200] or None
+            matched_at = _public_observed_url(
+                item.get("matched-at") or item.get("matched_at") or item.get("url")
+            )
+            # Stats/progress JSON is accounting evidence, not a template match.
+            if not template_id and not matched_at:
+                continue
             records.append({
                 "kind": "template_match",
-                "template_id": str(item.get("template-id") or item.get("template_id") or "")[:200] or None,
+                "template_id": template_id,
                 "name": str(info.get("name") or item.get("name") or "")[:300] or None,
                 "severity": str(info.get("severity") or item.get("severity") or "").lower()[:20] or None,
-                "matched_at": _public_observed_url(item.get("matched-at") or item.get("matched_at") or item.get("url")),
+                "matched_at": matched_at,
                 "matcher_name": str(item.get("matcher-name") or item.get("matcher_name") or "")[:200] or None,
                 "proof_state": "candidate",
             })
         elif scanner == "katana":
             request = item.get("request") if isinstance(item.get("request"), dict) else {}
+            observed_url = _public_observed_url(
+                item.get("url") or item.get("endpoint") or request.get("endpoint")
+            )
+            if not observed_url:
+                continue
+            if allowed_host:
+                try:
+                    observed_host = (urllib.parse.urlsplit(observed_url).hostname or "").lower().rstrip(".")
+                except ValueError:
+                    continue
+                if observed_host != str(allowed_host).lower().rstrip("."):
+                    continue
+            if observed_url in seen_katana_urls:
+                continue
+            seen_katana_urls.add(observed_url)
             records.append({
                 "kind": "discovered_route",
-                "url": _public_observed_url(item.get("url") or item.get("endpoint") or request.get("endpoint")),
+                "url": observed_url,
                 "method": str(item.get("method") or request.get("method") or "GET").upper()[:16],
                 "source": _public_observed_url(item.get("source") or item.get("from")),
             })

@@ -400,6 +400,7 @@ def test_katana_argv_is_bounded_and_same_host():
     assert argv[argv.index("-depth") + 1] == "2"                 # bounded depth
     assert argv[argv.index("-crawl-duration") + 1] == "30s"      # hard wall cap
     assert argv[argv.index("-rate-limit") + 1] == "5"
+    assert "-jsonl" not in argv                                # URL-only; no raw bodies
     assert at.scanner_request_reservation("katana") == 150
     assert timeout > 0
     # no form-submission / cross-scope flags leaked in
@@ -581,6 +582,27 @@ def test_scanner_request_settlement_distinguishes_exact_from_observed():
     assert katana["actual"] is None and katana["observed_minimum"] == 2
 
 
+def test_katana_compact_output_is_typed_deduplicated_and_host_scoped():
+    output = at.parse_scanner_output(
+        "katana",
+        "\n".join([
+            "http://juice-shop:3000/rest/products?token=secret",
+            "http://juice-shop:3000/rest/products?token=secret",
+            "https://external.example/reference",
+            "not a URL",
+        ]),
+        allowed_host="juice-shop",
+    )
+    assert output["parser_status"] == "parsed"
+    assert output["record_count"] == 1
+    assert output["records"] == [{
+        "kind": "discovered_route",
+        "url": "http://juice-shop:3000/rest/products?token=%3Credacted%3E",
+        "method": "GET",
+        "source": None,
+    }]
+
+
 def test_nuclei_focused_default_and_progress_counter_contract():
     _, argv, timeout_ms = at.build_scanner_argv("nuclei", "https://example.test/", {})
     assert argv[argv.index("-tags") + 1] == "exposure,misconfig,auth-bypass,default-login"
@@ -597,6 +619,14 @@ def test_nuclei_focused_default_and_progress_counter_contract():
         "mode": "exact", "actual": 149, "observed_minimum": 149,
         "source": "scanner_counter",
     }
+    string_counter = at.scanner_request_settlement(
+        "nuclei",
+        json.dumps({"duration": "0:00:10", "requests": "149", "templates": "1183"}),
+    )
+    assert string_counter == settlement
+    assert at.parse_scanner_output(
+        "nuclei", json.dumps({"duration": "0:00:10", "requests": "149"})
+    )["record_count"] == 0
 
 
 def test_partial_scanner_results_are_labeled_in_agent_surface():

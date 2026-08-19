@@ -13107,7 +13107,13 @@ async def process_agent_scanner_tool_job(job_data: dict[str, Any]) -> None:
     if scratch_dir:
         shutil.rmtree(scratch_dir, ignore_errors=True)
 
-    typed_output = agent_tools.parse_scanner_output(str(job_data.get("tool_name") or ""), stdout)
+    scanner_name = str(job_data.get("tool_name") or "").strip().lower()
+    registered_host = urllib.parse.urlsplit(str(job_data.get("registered_target") or "")).hostname
+    typed_output = agent_tools.parse_scanner_output(
+        scanner_name,
+        stdout,
+        allowed_host=registered_host if scanner_name == "katana" else None,
+    )
     # Nuclei emits cumulative JSON counters on stderr while reserving stdout
     # for matches. Feed those counters only into accounting; planner-visible
     # evidence remains the typed/redacted stdout match stream.
@@ -13120,11 +13126,13 @@ async def process_agent_scanner_tool_job(job_data: dict[str, Any]) -> None:
         if error == "scanner_not_available" or str(error or "").startswith("contract:"):
             settlement = {"mode": "exact", "actual": 0, "observed_minimum": 0,
                           "source": "not_executed"}
+    # Planner-visible scanner output is always the compact typed projection. This prevents
+    # raw crawler bodies, Nuclei progress records, and query values from entering the hunt.
     safe_lines = [
-        str(redact_text(line))[:1200]
-        for line in stdout.splitlines()
-        if line.strip()
-    ][:60]
+        json.dumps(record, sort_keys=True, separators=(",", ":"))[:1200]
+        for record in list(typed_output.get("records") or [])[:60]
+        if isinstance(record, dict)
+    ]
     result = {
         "job_id": job_id,
         "status": status,
@@ -13133,7 +13141,7 @@ async def process_agent_scanner_tool_job(job_data: dict[str, Any]) -> None:
         "started_at": started_at,
         "finished_at": utc_now_iso(),
         "output_lines": safe_lines,
-        "line_count": min(200, sum(1 for line in stdout.splitlines() if line.strip())),
+        "line_count": int(typed_output.get("record_count") or 0),
         "typed_output": typed_output,
         "settlement": settlement,
         "network_binding": "hostname_preserving_pinned_socks5",
