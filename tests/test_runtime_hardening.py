@@ -417,6 +417,7 @@ set -eu
 RED=''
 NC=''
 compose() {{ printf 'compose:%s\\n' "$*"; }}
+run_build_step() {{ shift; "$@"; }}
 docker() {{
   if [ "$1 $2" = 'image inspect' ]; then
     [ "${{@: -1}}" = 'release-candidate-worker:latest' ] || return 91
@@ -448,6 +449,62 @@ build_local_scanner_family
     assert "compose:build worker" in result.stdout
     assert f"tag:{image_id}:release-sandbox:test" in result.stdout
     assert "compose:build api" in result.stdout
+
+
+def test_clean_build_storage_admission_fails_early_with_durable_receipt(tmp_path):
+    script = (ROOT / "scanner.sh").read_text()
+    start = script.index("docker_storage_free_kb() {")
+    end = script.index("\nbuild_local_scanner_family() {", start)
+    helpers = script[start:end]
+    receipt = tmp_path / "build-receipt.json"
+    docker_root = tmp_path / "docker-root"
+    docker_root.mkdir()
+    harness = f"""
+set +e
+RED=''
+BLUE=''
+YELLOW=''
+NC=''
+GIT_COMMIT=test-revision
+BUILD_RECEIPT_FILE={shlex.quote(str(receipt))}
+BUILD_RECEIPT_ACTIVE=0
+BUILD_RECEIPT_OPERATION=''
+BUILD_RECEIPT_PHASE=not_started
+BUILD_RECEIPT_STARTED_AT=''
+docker() {{
+  if [ "$1" = info ]; then printf '%s\\n' {shlex.quote(str(docker_root))}; return 0; fi
+  printf 'unexpected docker mutation: %s\\n' "$*" >&2
+  return 90
+}}
+df() {{ printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\nmock 40000000 30000000 10485760 75%% %s\\n' {shlex.quote(str(docker_root))}; }}
+{helpers}
+begin_build_receipt rebuild
+check_build_storage --no-cache all
+exit_code=$?
+printf 'exit=%s\\n' "$exit_code"
+exit 0
+"""
+    result = subprocess.run(
+        ["bash", "-c", harness],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "exit=1" in result.stdout
+    assert "Build failed during phase: preflight" in result.stderr
+    assert "docker builder prune -af" in result.stderr
+    assert "docker system prune -af --volumes" in result.stderr
+    payload = json.loads(receipt.read_text())
+    assert payload["schema_version"] == "shakerscan-build-receipt/v1"
+    assert payload["status"] == "failed"
+    assert payload["phase"] == "preflight"
+    assert payload["source_revision"] == "test-revision"
+    assert payload["free_kb"] == 10485760
+    assert "22 GiB required" in payload["detail"]
 
 
 def test_scanner_sh_local_build_marker_controls_default_runtime_mode():

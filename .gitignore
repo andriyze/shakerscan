@@ -18,6 +18,8 @@ backups/
 .shakerscan-model-intake-runner-stage/
 .shakerscan-local-build
 .shakerscan-local-build.tmp.*
+.shakerscan-build-receipt.json
+.shakerscan-build-receipt.json.tmp.*
 
 # Claude Code local settings
 .claude/settings.local.json

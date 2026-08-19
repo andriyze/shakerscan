@@ -37,6 +37,11 @@ USE_PREBUILT=1
 PREBUILT_COMPOSE_FILE="docker-compose.release.yml"
 IMAGE_TAG_OVERRIDE=""
 LOCAL_BUILD_MARKER="$SCRIPT_DIR/.shakerscan-local-build"
+BUILD_RECEIPT_FILE="$SCRIPT_DIR/.shakerscan-build-receipt.json"
+BUILD_RECEIPT_ACTIVE=0
+BUILD_RECEIPT_OPERATION=""
+BUILD_RECEIPT_PHASE="not_started"
+BUILD_RECEIPT_STARTED_AT=""
 RUNTIME_MODE_EXPLICIT=0
 
 command_exists() {
@@ -2615,6 +2620,137 @@ submit_scan() {
     echo "View progress at: $(ui_base_url)/scans/$scan_id"
 }
 
+docker_storage_free_kb() {
+    local docker_root
+    docker_root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
+    # Docker Desktop keeps this path inside its VM, so the host cannot measure
+    # it reliably. The admission gate is authoritative only when the daemon's
+    # storage root is visible on this host (normal Linux/VPS installs).
+    if [ -z "$docker_root" ] || [ ! -d "$docker_root" ]; then
+        return 1
+    fi
+    df -Pk "$docker_root" 2>/dev/null | awk 'END {print $4}'
+}
+
+write_build_receipt() {
+    local status="$1"
+    local exit_code="${2:-0}"
+    local detail="${3:-}"
+    local free_kb=""
+    local finished_at=""
+    local tmp
+
+    [ "$BUILD_RECEIPT_ACTIVE" -eq 1 ] || return 0
+    free_kb="$(docker_storage_free_kb 2>/dev/null || true)"
+    if [ "$status" != "running" ]; then
+        finished_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    fi
+    tmp="${BUILD_RECEIPT_FILE}.tmp.$$"
+    if jq -n \
+        --arg operation "$BUILD_RECEIPT_OPERATION" \
+        --arg status "$status" \
+        --arg phase "$BUILD_RECEIPT_PHASE" \
+        --arg started_at "$BUILD_RECEIPT_STARTED_AT" \
+        --arg finished_at "$finished_at" \
+        --arg source_revision "${GIT_COMMIT:-unknown}" \
+        --arg detail "$detail" \
+        --argjson exit_code "$exit_code" \
+        --argjson free_kb "${free_kb:-null}" \
+        '{schema_version:"shakerscan-build-receipt/v1",operation:$operation,status:$status,phase:$phase,started_at:$started_at,finished_at:(if $finished_at == "" then null else $finished_at end),source_revision:$source_revision,exit_code:$exit_code,free_kb:$free_kb,detail:(if $detail == "" then null else $detail end)}' \
+        > "$tmp" 2>/dev/null; then
+        mv "$tmp" "$BUILD_RECEIPT_FILE"
+    else
+        rm -f "$tmp"
+    fi
+}
+
+begin_build_receipt() {
+    BUILD_RECEIPT_ACTIVE=1
+    BUILD_RECEIPT_OPERATION="$1"
+    BUILD_RECEIPT_PHASE="preflight"
+    BUILD_RECEIPT_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    write_build_receipt running 0
+}
+
+build_failure_guidance() {
+    echo -e "${RED}Build failed during phase: ${BUILD_RECEIPT_PHASE}${NC}" >&2
+    echo "Receipt: $BUILD_RECEIPT_FILE" >&2
+    echo "Safe cleanup (does not remove containers or volumes): docker builder prune -af" >&2
+    echo "Also remove unused images: docker image prune -af" >&2
+    echo "Disposable host only, after stopping services: docker system prune -af --volumes" >&2
+}
+
+fail_build() {
+    local exit_code="${1:-1}"
+    local detail="${2:-build command failed}"
+    write_build_receipt failed "$exit_code" "$detail"
+    build_failure_guidance
+    return "$exit_code"
+}
+
+finish_build_receipt() {
+    BUILD_RECEIPT_PHASE="complete"
+    write_build_receipt completed 0
+    echo -e "${BLUE}Build receipt: ${BUILD_RECEIPT_FILE}${NC}"
+}
+
+check_build_storage() {
+    local no_cache="$1"
+    local scope="$2"
+    local free_kb
+    local minimum_gb
+    local minimum_kb
+
+    if ! free_kb="$(docker_storage_free_kb)"; then
+        echo -e "${YELLOW}Docker storage is managed outside the host filesystem; skipping the Linux disk admission check.${NC}"
+        return 0
+    fi
+    if ! [[ "$free_kb" =~ ^[0-9]+$ ]]; then
+        BUILD_RECEIPT_PHASE="preflight"
+        fail_build 1 "could not measure Docker storage"
+        return 1
+    fi
+
+    if [ -n "${SHAKERSCAN_BUILD_MIN_FREE_GB:-}" ]; then
+        minimum_gb="$SHAKERSCAN_BUILD_MIN_FREE_GB"
+    elif [ -z "$no_cache" ]; then
+        minimum_gb=4
+    elif [ "$scope" = "ui" ]; then
+        minimum_gb=4
+    elif [ "$scope" = "scanner" ]; then
+        minimum_gb=20
+    else
+        minimum_gb=22
+    fi
+    if ! [[ "$minimum_gb" =~ ^[0-9]+$ ]] || [ "$minimum_gb" -lt 1 ]; then
+        fail_build 2 "SHAKERSCAN_BUILD_MIN_FREE_GB must be a positive integer"
+        return 1
+    fi
+    minimum_kb=$((minimum_gb * 1024 * 1024))
+    if [ "$free_kb" -lt "$minimum_kb" ]; then
+        fail_build 1 "insufficient Docker storage: $((free_kb / 1024 / 1024)) GiB free; ${minimum_gb} GiB required for ${scope}"
+        return 1
+    fi
+    echo -e "${BLUE}Docker storage preflight: $((free_kb / 1024 / 1024)) GiB free; ${minimum_gb} GiB required.${NC}"
+}
+
+run_build_step() {
+    local phase="$1"
+    shift
+    local exit_code
+
+    BUILD_RECEIPT_PHASE="$phase"
+    write_build_receipt running 0
+    if "$@"; then
+        write_build_receipt running 0
+        return 0
+    else
+        exit_code=$?
+        fail_build "$exit_code" "command failed in ${phase}"
+        return "$exit_code"
+    fi
+}
+
 build_local_scanner_family() {
     local no_cache="${1:-}"
     local worker_image_id
@@ -2625,31 +2761,34 @@ build_local_scanner_family() {
     # Build it once, bind the sandbox tag to that exact image, then build the
     # API's thin Docker-client overlay. Even --no-cache must never compile the
     # scanner/toolchain a second time.
-    compose build $no_cache worker
+    run_build_step scanner_runtime compose build $no_cache worker
     # The source Compose service builds and tags this exact explicit image.
     # Querying a running worker here can return the retired pre-build ID.
     worker_image_id="$(docker image inspect --format '{{.Id}}' "$worker_image" 2>/dev/null || true)"
     if ! [[ "$worker_image_id" =~ ^(sha256:)?[0-9a-f]{64}$ ]]; then
-        echo -e "${RED}Error: could not resolve the newly built worker image.${NC}"
+        fail_build 1 "could not resolve the newly built worker image"
         return 1
     fi
-    docker image tag "$worker_image_id" "$sandbox_image"
-    compose build $no_cache api
+    run_build_step sandbox_alias docker image tag "$worker_image_id" "$sandbox_image"
+    run_build_step api_overlay compose build $no_cache api
 }
 
 build_local_images() {
     local no_cache="${1:-}"
 
     build_local_scanner_family "$no_cache"
-    compose build $no_cache ui model-intake-signer
+    run_build_step ui_and_signer compose build $no_cache ui model-intake-signer
 }
 
 build_images() {
     prepare_runtime_files
     set_build_env
+    begin_build_receipt build
+    check_build_storage "" all
     echo -e "${GREEN}Building Docker images...${NC}"
     build_local_images
     record_runtime_mode local
+    finish_build_receipt
     echo -e "${GREEN}Build complete${NC}"
     echo -e "${BLUE}Local-build mode recorded. Use './scanner.sh start' or './scanner.sh restart' to run these local images.${NC}"
 }
@@ -2708,6 +2847,15 @@ rebuild_images() {
         echo -e "${GREEN}Rebuilding $SERVICE_DESC (using cache)...${NC}"
     fi
 
+    begin_build_receipt rebuild
+    if [ "$SERVICES" = "ui" ]; then
+        check_build_storage "$NO_CACHE" ui
+    elif [ "$SERVICES" = "api worker" ]; then
+        check_build_storage "$NO_CACHE" scanner
+    else
+        check_build_storage "$NO_CACHE" all
+    fi
+
     existing_workers="$(running_scan_worker_count)"
     existing_agent_tool_worker="$(running_compose_service_count agent-tool-worker)"
     existing_device_workers="$(running_device_worker_count)"
@@ -2717,12 +2865,12 @@ rebuild_images() {
     existing_model_intake_sandbox="$(running_compose_service_count model-intake-sandbox)"
 
     if [ "$SERVICES" = "ui" ]; then
-        compose build $NO_CACHE ui
+        run_build_step ui compose build $NO_CACHE ui
     elif [ "$SERVICES" = "api worker" ]; then
         build_local_scanner_family "$NO_CACHE"
     else
         build_local_scanner_family "$NO_CACHE"
-        compose build $NO_CACHE ui model-intake-signer
+        run_build_step ui_and_signer compose build $NO_CACHE ui model-intake-signer
     fi
 
     record_runtime_mode local
@@ -2755,6 +2903,7 @@ rebuild_images() {
         verify_specialized_worker_identity "$existing_agent_tool_worker" "$existing_device_workers"
     fi
 
+    finish_build_receipt
     echo -e "${GREEN}Rebuild complete${NC}"
     echo ""
     if [ "$REFRESH_WORKERS" -eq 1 ] && [ "${existing_workers:-0}" -gt 0 ]; then
