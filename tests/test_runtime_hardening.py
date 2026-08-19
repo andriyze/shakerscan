@@ -624,7 +624,7 @@ printf '%s|%s\n' "$USE_PREBUILT" "$COMPOSE_FILE_ARGS"
     assert resolve(curl_runtime, marker="local") == "1|docker-compose.release.yml"
 
 
-def test_local_start_builds_explicitly_and_compose_up_never_builds_or_pulls_apps():
+def test_local_start_reuses_a_current_full_build_and_rebuilds_an_unproven_set():
     script = (ROOT / "scanner.sh").read_text()
     compose_up = script.split("compose_up() {", 1)[1].split("\n}", 1)[0]
     start_services = script.split("start_services() {", 1)[1].split("\n}", 1)[0]
@@ -647,6 +647,7 @@ resolve_start_workers() { printf '1\n'; }
 set_build_env() { :; }
 pull_prebuilt_images() { printf 'pull-prebuilt\n'; }
 build_local_images() { printf 'build-local\n'; }
+local_application_images_ready() { return __READY_RC__; }
 record_runtime_mode() { printf 'record:%s\n' "$1"; }
 compose() { printf 'compose:%s\n' "$*"; }
 compose_up() {
@@ -668,9 +669,10 @@ start_services
 '''
 
     outputs = {}
-    for mode in (0, 1):
+    for mode, ready_rc in ((0, 0), (0, 1), (1, 1)):
         harness = (
             harness_template.replace("__MODE__", str(mode))
+            .replace("__READY_RC__", str(ready_rc))
             .replace("__COMPOSE_UP__", compose_up)
             .replace("__START_SERVICES__", start_services)
         )
@@ -683,17 +685,89 @@ start_services
             check=False,
         )
         assert result.returncode == 0, result.stdout + result.stderr
-        outputs[mode] = result.stdout
+        outputs[(mode, ready_rc)] = result.stdout
 
-    assert outputs[0].count("build-local") == 1
-    assert "pull-prebuilt" not in outputs[0]
-    assert "record:local" in outputs[0]
-    assert "compose:up --no-build -d --scale worker=1" in outputs[0]
+    assert "build-local" not in outputs[(0, 0)]
+    assert "complete application image set" in outputs[(0, 0)]
+    assert "compose:up --no-build -d --scale worker=1" in outputs[(0, 0)]
 
-    assert "build-local" not in outputs[1]
-    assert outputs[1].count("pull-prebuilt") == 1
-    assert "record:prebuilt" in outputs[1]
-    assert "compose:up --no-build -d --scale worker=1" in outputs[1]
+    assert outputs[(0, 1)].count("build-local") == 1
+    assert "pull-prebuilt" not in outputs[(0, 1)]
+    assert "record:local" in outputs[(0, 1)]
+    assert "compose:up --no-build -d --scale worker=1" in outputs[(0, 1)]
+
+    assert "build-local" not in outputs[(1, 1)]
+    assert outputs[(1, 1)].count("pull-prebuilt") == 1
+    assert "record:prebuilt" in outputs[(1, 1)]
+    assert "compose:up --no-build -d --scale worker=1" in outputs[(1, 1)]
+
+
+def test_build_receipt_scopes_prevent_partial_rebuilds_from_authorizing_startup():
+    script = (ROOT / "scanner.sh").read_text()
+    writer = script.split("write_build_receipt() {", 1)[1].split("\n}", 1)[0]
+    readiness = script.split("local_application_images_ready() {", 1)[1].split("\n}", 1)[0]
+    rebuild = script.split("rebuild_images() {", 1)[1].split("\n}", 1)[0]
+
+    assert '--arg scope "$BUILD_RECEIPT_SCOPE"' in writer
+    assert 'operation:$operation,scope:$scope' in writer
+    assert '.scope == "all"' in readiness
+    assert '.source_revision == $revision' in readiness
+    assert 'BUILD_SCOPE="ui"' in rebuild
+    assert 'BUILD_SCOPE="scanner"' in rebuild
+    assert 'begin_build_receipt rebuild "$BUILD_SCOPE"' in rebuild
+
+
+def test_local_image_receipt_acceptance_is_behavioral_and_fail_closed(tmp_path):
+    script = (ROOT / "scanner.sh").read_text()
+    readiness = script.split("local_application_images_ready() {", 1)[1].split("\n}", 1)[0]
+    receipt = tmp_path / "receipt.json"
+
+    def probe(*, scope: str = "all", revision: str = "current", missing: str = "") -> str:
+        receipt.write_text(
+            json.dumps(
+                {
+                    "schema_version": "shakerscan-build-receipt/v1",
+                    "operation": "rebuild",
+                    "scope": scope,
+                    "status": "completed",
+                    "phase": "complete",
+                    "source_revision": revision,
+                }
+            )
+        )
+        harness = f"""
+set -eu
+BUILD_RECEIPT_FILE={shlex.quote(str(receipt))}
+GIT_COMMIT=current
+SCANNER_LOCAL_WORKER_IMAGE=worker:local
+MODEL_INTAKE_SANDBOX_IMAGE=sandbox:local
+COMPOSE_PROJECT_NAME=acceptance
+MISSING_IMAGE={shlex.quote(missing)}
+docker() {{
+  [ "$1 $2" = "image inspect" ] || return 90
+  [ "$3" != "$MISSING_IMAGE" ]
+}}
+local_application_images_ready() {{
+{readiness}
+}}
+if local_application_images_ready; then printf 'ready\n'; else printf 'rebuild\n'; fi
+"""
+        result = subprocess.run(
+            ["bash", "-c", harness],
+            cwd=ROOT,
+            env={"PATH": os.environ["PATH"]},
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        return result.stdout.strip()
+
+    assert probe() == "ready"
+    assert probe(scope="ui") == "rebuild"
+    assert probe(revision="old") == "rebuild"
+    assert probe(missing="acceptance-model-intake-signer:latest") == "rebuild"
 
 
 def test_source_compose_has_one_scanner_build_owner_and_never_pulls_local_tags():

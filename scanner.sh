@@ -42,6 +42,7 @@ BUILD_RECEIPT_ACTIVE=0
 BUILD_RECEIPT_OPERATION=""
 BUILD_RECEIPT_PHASE="not_started"
 BUILD_RECEIPT_STARTED_AT=""
+BUILD_RECEIPT_SCOPE="all"
 RUNTIME_MODE_EXPLICIT=0
 
 command_exists() {
@@ -1965,9 +1966,13 @@ start_services() {
         pull_prebuilt_images
     else
         echo "Mode: local build"
-        echo -e "${GREEN}Building application images from this checkout...${NC}"
-        build_local_images
-        record_runtime_mode local
+        if local_application_images_ready; then
+            echo -e "${GREEN}Using the complete application image set from the successful full build receipt.${NC}"
+        else
+            echo -e "${GREEN}Building application images from this checkout...${NC}"
+            build_local_images
+            record_runtime_mode local
+        fi
     fi
     compose_up -d --scale worker=$start_workers
     echo ""
@@ -2648,6 +2653,7 @@ write_build_receipt() {
     tmp="${BUILD_RECEIPT_FILE}.tmp.$$"
     if jq -n \
         --arg operation "$BUILD_RECEIPT_OPERATION" \
+        --arg scope "$BUILD_RECEIPT_SCOPE" \
         --arg status "$status" \
         --arg phase "$BUILD_RECEIPT_PHASE" \
         --arg started_at "$BUILD_RECEIPT_STARTED_AT" \
@@ -2656,7 +2662,7 @@ write_build_receipt() {
         --arg detail "$detail" \
         --argjson exit_code "$exit_code" \
         --argjson free_kb "${free_kb:-null}" \
-        '{schema_version:"shakerscan-build-receipt/v1",operation:$operation,status:$status,phase:$phase,started_at:$started_at,finished_at:(if $finished_at == "" then null else $finished_at end),source_revision:$source_revision,exit_code:$exit_code,free_kb:$free_kb,detail:(if $detail == "" then null else $detail end)}' \
+        '{schema_version:"shakerscan-build-receipt/v1",operation:$operation,scope:$scope,status:$status,phase:$phase,started_at:$started_at,finished_at:(if $finished_at == "" then null else $finished_at end),source_revision:$source_revision,exit_code:$exit_code,free_kb:$free_kb,detail:(if $detail == "" then null else $detail end)}' \
         > "$tmp" 2>/dev/null; then
         mv "$tmp" "$BUILD_RECEIPT_FILE"
     else
@@ -2667,9 +2673,36 @@ write_build_receipt() {
 begin_build_receipt() {
     BUILD_RECEIPT_ACTIVE=1
     BUILD_RECEIPT_OPERATION="$1"
+    BUILD_RECEIPT_SCOPE="${2:-all}"
     BUILD_RECEIPT_PHASE="preflight"
     BUILD_RECEIPT_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     write_build_receipt running 0
+}
+
+local_application_images_ready() {
+    local worker_image="${SCANNER_LOCAL_WORKER_IMAGE:-shakerscan-worker:local}"
+    local sandbox_image="${MODEL_INTAKE_SANDBOX_IMAGE:-shakerscan-model-intake-sandbox:local}"
+    local api_image="${COMPOSE_PROJECT_NAME:-shakerscan}-api:latest"
+    local ui_image="${COMPOSE_PROJECT_NAME:-shakerscan}-ui:latest"
+    local signer_image="${COMPOSE_PROJECT_NAME:-shakerscan}-model-intake-signer:latest"
+    local image
+
+    # Only a successful full build is an atomic application image set. A
+    # scanner-only or UI-only rebuild deliberately cannot authorize startup of
+    # the untouched roles at a new source revision.
+    if ! jq -e --arg revision "${GIT_COMMIT:-unknown}" '
+        .schema_version == "shakerscan-build-receipt/v1" and
+        .status == "completed" and
+        .phase == "complete" and
+        .scope == "all" and
+        .source_revision == $revision
+    ' "$BUILD_RECEIPT_FILE" >/dev/null 2>&1; then
+        return 1
+    fi
+
+    for image in "$worker_image" "$sandbox_image" "$api_image" "$ui_image" "$signer_image"; do
+        docker image inspect "$image" >/dev/null 2>&1 || return 1
+    done
 }
 
 build_failure_guidance() {
@@ -2783,7 +2816,7 @@ build_local_images() {
 build_images() {
     prepare_runtime_files
     set_build_env
-    begin_build_receipt build
+    begin_build_receipt build all
     check_build_storage "" all
     echo -e "${GREEN}Building Docker images...${NC}"
     build_local_images
@@ -2799,6 +2832,7 @@ rebuild_images() {
     local NO_CACHE=""
     local SERVICES=""
     local SERVICE_DESC="all services"
+    local BUILD_SCOPE="all"
     local REFRESH_WORKERS=1
     local existing_workers
     local existing_agent_tool_worker
@@ -2818,12 +2852,14 @@ rebuild_images() {
             scanner)
                 SERVICES="api worker"
                 SERVICE_DESC="scanner services (api, worker)"
+                BUILD_SCOPE="scanner"
                 REFRESH_WORKERS=1
                 shift
                 ;;
             ui)
                 SERVICES="ui"
                 SERVICE_DESC="UI"
+                BUILD_SCOPE="ui"
                 REFRESH_WORKERS=0
                 shift
                 ;;
@@ -2847,7 +2883,7 @@ rebuild_images() {
         echo -e "${GREEN}Rebuilding $SERVICE_DESC (using cache)...${NC}"
     fi
 
-    begin_build_receipt rebuild
+    begin_build_receipt rebuild "$BUILD_SCOPE"
     if [ "$SERVICES" = "ui" ]; then
         check_build_storage "$NO_CACHE" ui
     elif [ "$SERVICES" = "api worker" ]; then
