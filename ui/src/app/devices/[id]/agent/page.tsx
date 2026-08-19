@@ -2,7 +2,7 @@
 
 import Link from 'next/link'
 import { useParams } from 'next/navigation'
-import { Bot, CircleStop, ShieldAlert, Terminal } from 'lucide-react'
+import { Bot, CircleStop, History, Plus, ShieldAlert, Terminal } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   cancelDeviceAgentSession,
@@ -18,6 +18,7 @@ import {
   type DeviceCredentialProfile,
   type DeviceRequestCollection,
   type DeviceAgentSession,
+  type DeviceAgentRunSummary,
   type DeviceDetailResponse,
   type DeviceCapabilitiesResponse,
   type InvestigationCandidate,
@@ -27,12 +28,28 @@ import { Button, Card, ErrorState, Field, Input, PageHeader, Select, Skeleton, T
 const DEFAULT_OBJECTIVE = 'Investigate this device autonomously, choose the smallest useful scans, correlate service and web evidence, and identify the highest-value next actions.'
 const TERMINAL = new Set(['completed', 'cancelled', 'failed'])
 
+function formatTimestamp(value?: string) {
+  if (!value) return 'Unknown time'
+  const parsed = new Date(value)
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString()
+}
+
+function activityLabel(event: Record<string, unknown>) {
+  if (event.kind === 'ssh_shell_plan_confirmed') return `Confirmed SSH plan queued scan ${String(event.scan_id || '')}`
+  if (Array.isArray(event.tool_results)) {
+    const results = event.tool_results as Array<Record<string, unknown>>
+    return `Planner turn ${String(event.turn || '')}: ${results.map((result) => `${String(result.name || result.tool_name || 'tool')} ${String(result.outcome || (result.blocked ? 'blocked' : 'completed'))}`).join(', ')}`
+  }
+  return Object.entries(event).map(([key, value]) => `${key.replace(/_/g, ' ')}: ${typeof value === 'object' ? JSON.stringify(value) : String(value)}`).join(' · ')
+}
+
 export default function DeviceAgentPage() {
   const params = useParams()
   const deviceId = params.id as string
   const toast = useToast()
   const [data, setData] = useState<DeviceDetailResponse | null>(null)
   const [session, setSession] = useState<DeviceAgentSession | null>(null)
+  const [history, setHistory] = useState<DeviceAgentRunSummary[]>([])
   const [credentials, setCredentials] = useState<DeviceCredentialProfile[]>([])
   const [requestCollections, setRequestCollections] = useState<DeviceRequestCollection[]>([])
   const [capabilityPack, setCapabilityPack] = useState<DeviceCapabilitiesResponse | null>(null)
@@ -78,6 +95,7 @@ export default function DeviceAgentPage() {
       }
       try {
         const recent = await listDeviceAgentSessions({ device_target_id: deviceId, limit: 20 })
+        if (!stopped) setHistory(recent.runs)
         const active = recent.runs.find((run) => !TERMINAL.has(run.status))
         if (!stopped && active) {
           setRunId(active.id)
@@ -97,7 +115,7 @@ export default function DeviceAgentPage() {
     let stopped = false
     const tick = () => {
       if (stopped) return
-      Promise.all([getDeviceAgentSession(runId), getInvestigationCandidates({ plane: 'device', device_target_id: deviceId, limit: 100 })]).then(([value, candidateData]) => {
+      Promise.all([getDeviceAgentSession(runId), getInvestigationCandidates({ plane: 'device', device_target_id: deviceId, limit: 100 }), listDeviceAgentSessions({ device_target_id: deviceId, limit: 20 })]).then(([value, candidateData, recent]) => {
       if (stopped) return
       if (value.device_target_id !== deviceId) {
         stopped = true
@@ -110,6 +128,7 @@ export default function DeviceAgentPage() {
       setError(null)
       setSession(value)
       setCandidates(candidateData.candidates || [])
+      setHistory(recent.runs)
     }).catch((err) => {
       if (!stopped) setError(err instanceof Error ? err.message : 'Could not load Device Hunt')
       })
@@ -141,6 +160,7 @@ export default function DeviceAgentPage() {
       })
       setSession(value)
       setRunId(value.id)
+      setHistory((current) => [value, ...current.filter((run) => run.id !== value.id)])
       window.history.replaceState(null, '', `${window.location.pathname}?run=${encodeURIComponent(value.id)}`)
       toast.success('Device Hunt started — continue it from your coding agent')
     } catch (err) {
@@ -152,7 +172,12 @@ export default function DeviceAgentPage() {
   const cancel = async () => {
     if (!runId || cancelling) return
     setCancelling(true)
-    try { setSession(await cancelDeviceAgentSession(runId)); toast.success('Device Hunt cancelled') }
+    try {
+      const value = await cancelDeviceAgentSession(runId)
+      setSession(value)
+      setHistory((current) => current.map((run) => run.id === value.id ? value : run))
+      toast.success('Device Hunt cancelled')
+    }
     catch (err) { toast.error(err instanceof Error ? err.message : 'Could not cancel Device Hunt') }
     finally { setCancelling(false) }
   }
@@ -187,6 +212,14 @@ export default function DeviceAgentPage() {
         <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">{capabilityPack.items.filter((item) => item.state !== 'not_applicable').map((item) => <div key={item.id} className="rounded border border-gray-800 bg-gray-950/60 p-3"><div className="flex items-start justify-between gap-2"><p className="text-sm font-medium text-gray-200">{item.title}</p><span className={`rounded px-1.5 py-0.5 text-[10px] ${item.state === 'completed' ? 'bg-blue-500/15 text-blue-300' : item.state === 'ready' ? 'bg-emerald-500/15 text-emerald-300' : item.state === 'blocked' ? 'bg-amber-500/15 text-amber-300' : 'bg-gray-800 text-gray-400'}`}>{item.state.replace(/_/g, ' ')}</span></div><p className="mt-1 text-xs text-gray-600">{item.implementation.replace(/_/g, ' ')} · {item.minimum_profile.replace(/_/g, ' ')}</p>{item.blockers.length > 0 && <p className="mt-1 text-xs text-amber-400/70">{item.blockers.join(', ').replace(/_/g, ' ')}</p>}</div>)}</div>
       </Card>}
 
+      <Card className="mb-6 p-5">
+        <div className="flex flex-wrap items-start justify-between gap-3"><div className="flex items-start gap-3"><History className="mt-0.5 h-5 w-5 text-violet-300" /><div><h2 className="font-semibold text-white">Device Hunt history</h2><p className="mt-1 text-sm text-gray-500">Durable investigations remain available after they finish or the service restarts.</p></div></div>{session && <Button variant="secondary" onClick={() => { setSession(null); setRunId(null); window.history.replaceState(null, '', window.location.pathname) }}><Plus className="h-4 w-4" /> New hunt</Button>}</div>
+        {history.length > 0 ? <div className="mt-4 space-y-2">{history.map((run) => <Link key={run.id} href={`/devices/${deviceId}/agent?run=${encodeURIComponent(run.id)}`} className={`block rounded-lg border p-3 transition-colors ${run.id === runId ? 'border-violet-500/40 bg-violet-500/10' : 'border-gray-800 bg-gray-950/50 hover:border-gray-700'}`}>
+          <div className="flex flex-wrap items-start justify-between gap-2"><div className="min-w-0"><p className="truncate text-sm font-medium text-gray-100">{run.objective}</p><p className="mt-1 text-xs text-gray-500">{formatTimestamp(run.created_at)} · {run.safety_profile.replace(/_/g, ' ')} · {run.turns} turns</p></div><span className={`rounded px-2 py-1 text-xs ${run.status === 'completed' ? 'bg-emerald-500/15 text-emerald-300' : TERMINAL.has(run.status) ? 'bg-gray-800 text-gray-300' : 'bg-blue-500/15 text-blue-300'}`}>{run.status.replace(/_/g, ' ')}</span></div>
+          <div className="mt-2 flex flex-wrap gap-3 text-xs text-gray-500"><span>{run.actions_used} actions</span><span>{run.scans_queued} scans</span><span>{run.candidate_summary?.verified || 0} verified</span><span>{run.candidate_summary?.open || 0} open candidates</span><span>Updated {formatTimestamp(run.updated_at)}</span></div>
+        </Link>)}</div> : <p className="mt-4 text-sm text-gray-500">No Device Hunt investigations have been started for this device.</p>}
+      </Card>
+
       {!session && <Card className="p-5">
         <div className="grid gap-4 lg:grid-cols-2">
           <Field label="Objective"><Textarea rows={5} value={objective} onChange={(event) => setObjective(event.target.value)} /></Field>
@@ -210,6 +243,10 @@ export default function DeviceAgentPage() {
           <p className="mt-4 text-xs text-gray-500">Target fixed · safety profile <span className="text-gray-300">{session.safety_profile.replace(/_/g, ' ')}</span> · imported collections <span className="text-gray-300">{session.capabilities.request_collections_bound || 0}</span>{session.capabilities.state_changing_requests_authorized ? ' · state-changing replay explicitly authorized' : ''} · AI leads are hypotheses; deterministic device scans remain authoritative.</p>
         </Card>
 
+        <Card className="p-5"><div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="font-semibold text-white">Action and scan ledger</h2><p className="mt-1 text-sm text-gray-500">Persisted tool outcomes and every scan launched by this investigation.</p></div><div className="flex gap-2 text-xs"><span className="rounded bg-gray-900 px-2 py-1 text-gray-300">{session.actions.length} recorded</span><span className="rounded bg-emerald-500/10 px-2 py-1 text-emerald-300">{session.candidate_summary.verified} verified</span></div></div>
+          {session.actions.length > 0 ? <div className="mt-4 space-y-3">{session.actions.map((action) => <div key={action.id} className="rounded border border-gray-800 bg-gray-950/60 p-3"><div className="flex flex-wrap items-center justify-between gap-2"><p className="text-sm font-medium text-gray-100">{action.tool_name.replace(/_/g, ' ')}</p><span className={`rounded px-2 py-0.5 text-xs ${action.outcome === 'completed' ? 'bg-emerald-500/15 text-emerald-300' : action.outcome === 'blocked' ? 'bg-amber-500/15 text-amber-300' : 'bg-red-500/15 text-red-300'}`}>{action.outcome}</span></div>{action.rationale && <p className="mt-1 text-sm text-gray-400">{action.rationale}</p>}<div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-gray-500"><span>{formatTimestamp(action.created_at)}</span><span>{action.evidence_count} evidence refs</span><span>fragility {action.fragility_cost}</span>{action.scan_ids.map((scanId) => <Link key={scanId} href={`/devices/${deviceId}?scan=${scanId}`} className="text-blue-400 hover:text-blue-300">Open scan {scanId.slice(0, 8)}</Link>)}</div></div>)}</div> : <p className="mt-4 text-sm text-gray-500">No bounded tools have run yet.</p>}
+        </Card>
+
         {(session.shell_plans || []).length > 0 && <Card className="border-amber-500/25 p-5">
           <div className="flex items-start gap-3"><ShieldAlert className="mt-0.5 h-5 w-5 text-amber-300" /><div><h2 className="font-semibold text-white">Remote-device SSH shell plans</h2><p className="mt-1 text-sm text-gray-500">These commands target the registered device only. A proposal does nothing until you review and confirm that exact digest.</p></div></div>
           <div className="mt-4 space-y-4">{session.shell_plans.slice().reverse().map((plan) => <div key={plan.plan_id} className="rounded-lg border border-gray-800 bg-gray-950/60 p-4">
@@ -227,7 +264,7 @@ export default function DeviceAgentPage() {
 
         {candidates.length > 0 && <Card className="p-5"><div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="font-semibold text-white">Candidate verification</h2><p className="mt-1 text-sm text-gray-500">AI claims stay non-authoritative until a server-owned verifier satisfies its proof contract.</p></div><span className="rounded bg-gray-900 px-2 py-1 text-xs text-gray-400">{candidates.length} persisted</span></div><div className="mt-4 space-y-3">{candidates.map((candidate) => { const scanId = typeof candidate.verification_context.scan_id === 'string' ? candidate.verification_context.scan_id : ''; return <div key={candidate.id} className={`rounded border p-3 ${candidate.status === 'verified' ? 'border-emerald-500/25 bg-emerald-500/5' : candidate.status === 'refuted' ? 'border-gray-700 bg-gray-900/40' : 'border-amber-500/20 bg-amber-500/5'}`}><div className="flex flex-wrap items-center justify-between gap-2"><div><p className="text-sm font-medium text-gray-100">{candidate.title}</p><p className="mt-1 text-xs text-gray-500">{candidate.family.replace(/_/g, ' ')} · {candidate.verifier_contract_id || 'verifier unavailable'}</p></div><span className={`rounded px-2 py-1 text-xs ${candidate.status === 'verified' ? 'bg-emerald-500/15 text-emerald-300' : candidate.status === 'refuted' ? 'bg-gray-800 text-gray-300' : 'bg-amber-500/15 text-amber-300'}`}>{candidate.status.replace(/_/g, ' ')}</span></div><p className="mt-2 text-sm text-gray-400">{candidate.claim}</p><div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-gray-500"><span>Claimed {candidate.claimed_severity}</span><span>Authoritative: no</span>{scanId && <Link href={`/scans/${scanId}`} className="text-blue-400 hover:text-blue-300">Open verification scan</Link>}</div></div> })}</div></Card>}
 
-        <Card className="p-5"><h2 className="font-semibold text-white">Recent activity</h2><div className="mt-3 space-y-3">{session.events.length ? session.events.slice(-8).reverse().map((event, index) => <pre key={index} className="overflow-x-auto whitespace-pre-wrap rounded bg-gray-950 p-3 text-xs text-gray-400">{JSON.stringify(event, null, 2)}</pre>) : <p className="text-sm text-gray-500">Waiting for the coding agent’s first planner turn.</p>}</div></Card>
+        <Card className="p-5"><h2 className="font-semibold text-white">Recent activity</h2><div className="mt-3 space-y-2">{session.events.length ? session.events.slice(-12).reverse().map((event, index) => <div key={index} className="rounded border border-gray-800 bg-gray-950/60 px-3 py-2 text-sm text-gray-300">{activityLabel(event)}</div>) : <p className="text-sm text-gray-500">Waiting for the coding agent’s first planner turn.</p>}</div></Card>
       </div>}
 
       {error && <p className="mt-4 text-sm text-red-300">{error}</p>}

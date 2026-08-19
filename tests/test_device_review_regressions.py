@@ -199,6 +199,27 @@ def test_device_hunt_ui_restores_active_runs_and_persists_new_run_urls():
     assert "?run=${encodeURIComponent(value.id)}" in hunt_ui
 
 
+def test_device_hunt_history_is_durable_linkable_and_visible_from_the_device():
+    api = (ROOT / "api" / "api.py").read_text()
+    api_client = (ROOT / "ui" / "src" / "lib" / "api.ts").read_text()
+    hunt_ui = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "agent" / "page.tsx").read_text()
+    detail_ui = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "page.tsx").read_text()
+    listing = api[api.index('@app.get("/device-agent/runs")'):]
+    listing = listing[:listing.index("# AI GATE TARGETS")]
+
+    assert "SELECT COUNT(*) FROM device_agent_runs" in listing
+    assert "device_agent_actions" in listing
+    assert "investigation_candidates" in listing
+    assert '"actions": [_device_agent_action_public' in api
+    assert '"candidate_summary"' in api
+    assert "actions: Array<{" in api_client
+    assert "Device Hunt history" in hunt_ui
+    assert "Action and scan ledger" in hunt_ui
+    assert "Open scan" in hunt_ui
+    assert "Recent Device Hunt investigations" in detail_ui
+    assert "listDeviceAgentSessions({ device_target_id: deviceId, limit: 5 })" in detail_ui
+
+
 def test_device_findings_use_atomic_conflict_upsert():
     source = (ROOT / "api" / "worker.py").read_text()
     function = source[source.index("async def save_device_findings"):]

@@ -20107,12 +20107,54 @@ async def _build_device_agent_context_pack(
     }
 
 
-def _device_agent_run_public(row: Any) -> dict[str, Any]:
+def _device_agent_scan_ids(value: Any, *, depth: int = 0) -> list[str]:
+    """Return only scan identifiers from a sanitized action summary."""
+    if depth > 5:
+        return []
+    if isinstance(value, dict):
+        found: list[str] = []
+        for key, item in value.items():
+            if str(key) in {"scan_id", "queued_scan_id"} and item:
+                try:
+                    found.append(str(uuid.UUID(str(item))))
+                except (TypeError, ValueError):
+                    pass
+            else:
+                found.extend(_device_agent_scan_ids(item, depth=depth + 1))
+        return found
+    if isinstance(value, list):
+        found = []
+        for item in value[:100]:
+            found.extend(_device_agent_scan_ids(item, depth=depth + 1))
+        return found
+    return []
+
+
+def _device_agent_action_public(row: Any) -> dict[str, Any]:
+    item = row_to_dict(row) if row is not None and not isinstance(row, dict) else dict(row or {})
+    result_summary = _decode_json_value(item.get("result_summary")) or {}
+    evidence_refs = _decode_json_value(item.get("evidence_refs")) or []
+    return {
+        "id": str(item.get("id") or ""),
+        "tool_name": str(item.get("tool_name") or "unknown"),
+        "tool_tier": int(item.get("tool_tier") or 0),
+        "fragility_cost": int(item.get("fragility_cost") or 0),
+        "outcome": str(item.get("outcome") or "failed"),
+        "rationale": str(item.get("rationale") or "")[:1000] or None,
+        "evidence_count": len(evidence_refs) if isinstance(evidence_refs, list) else 0,
+        "scan_ids": sorted(set(_device_agent_scan_ids(result_summary))),
+        "created_at": item.get("created_at"),
+    }
+
+
+def _device_agent_run_public(row: Any, *, summary: bool = False) -> dict[str, Any]:
     item = row_to_dict(row) if row is not None and not isinstance(row, dict) else dict(row or {})
     state = _decode_json_value(item.get("state")) or {}
     result = _decode_json_value(item.get("result")) or {}
     status = str(item.get("status") or "")
-    return {
+    action_history = item.pop("_action_history", [])
+    candidate_counts = item.pop("_candidate_counts", {})
+    response = {
         "id": str(item.get("id") or ""),
         "device_target_id": str(item.get("device_target_id") or ""),
         "objective": item.get("objective") or "",
@@ -20150,6 +20192,16 @@ def _device_agent_run_public(row: Any) -> dict[str, Any]:
         },
         "transcript": state.get("messages") or [],
         "events": state.get("events") or [],
+        "actions": [_device_agent_action_public(action) for action in action_history],
+        "candidate_summary": {
+            "total": sum(int(count or 0) for count in candidate_counts.values()),
+            "verified": int(candidate_counts.get("verified") or 0),
+            "open": sum(
+                int(candidate_counts.get(candidate_status) or 0)
+                for candidate_status in ("new", "verification_queued", "verifying", "inconclusive", "blocked")
+            ),
+            "refuted": int(candidate_counts.get("refuted") or 0),
+        },
         "notes": state.get("notes") or [],
         "shell_plans": [
             _sanitize_device_agent_value(plan)
@@ -20164,6 +20216,35 @@ def _device_agent_run_public(row: Any) -> dict[str, Any]:
         "created_at": item.get("created_at"),
         "updated_at": item.get("updated_at"),
     }
+    if summary:
+        summary_keys = {
+            "id", "device_target_id", "objective", "status", "stop_reason", "planner_mode",
+            "safety_profile", "max_turns", "turns", "actions_used", "scans_queued", "actions",
+            "candidate_summary", "created_at", "updated_at",
+        }
+        return {key: response[key] for key in summary_keys}
+    return response
+
+
+async def _device_agent_run_with_history(conn: Any, row: Any) -> dict[str, Any]:
+    item = row_to_dict(row)
+    run_uuid = item["id"]
+    item["_action_history"] = [
+        row_to_dict(action)
+        for action in await conn.fetch(
+            "SELECT * FROM device_agent_actions WHERE run_id=$1 ORDER BY created_at DESC LIMIT 100",
+            run_uuid,
+        )
+    ]
+    item["_candidate_counts"] = {
+        str(candidate["status"]): int(candidate["count"])
+        for candidate in await conn.fetch(
+            """SELECT status, COUNT(*) AS count FROM investigation_candidates
+               WHERE device_agent_run_id=$1 GROUP BY status""",
+            run_uuid,
+        )
+    }
+    return _device_agent_run_public(item)
 
 
 async def _device_agent_run_or_404(conn: Any, run_id: str, *, for_update: bool = False) -> Any:
@@ -21780,7 +21861,7 @@ async def start_device_agent_session(device_id: str, request: DeviceAgentSession
 async def get_device_agent_session(run_id: str):
     async with db_pool.acquire() as conn:
         row = await _device_agent_run_or_404(conn, run_id)
-    return _device_agent_run_public(row)
+        return await _device_agent_run_with_history(conn, row)
 
 
 @app.post("/device-agent/session/{run_id}/shell-plans/{plan_id}/confirm")
@@ -22284,13 +22365,38 @@ async def list_device_agent_runs(
         params.append(normalized)
         clauses.append(f"status=${len(params)}")
     where = " WHERE " + " AND ".join(clauses) if clauses else ""
-    params.append(limit)
     async with db_pool.acquire() as conn:
+        total = int(await conn.fetchval("SELECT COUNT(*) FROM device_agent_runs" + where, *params) or 0)
+        query_params = [*params, limit]
         rows = await conn.fetch(
-            "SELECT * FROM device_agent_runs" + where + f" ORDER BY created_at DESC LIMIT ${len(params)}",
-            *params,
+            "SELECT * FROM device_agent_runs" + where + f" ORDER BY created_at DESC LIMIT ${len(query_params)}",
+            *query_params,
         )
-    return {"runs": [_device_agent_run_public(row) for row in rows], "count": len(rows)}
+        run_ids = [row["id"] for row in rows]
+        actions = await conn.fetch(
+            "SELECT * FROM device_agent_actions WHERE run_id = ANY($1::uuid[]) ORDER BY created_at DESC",
+            run_ids,
+        ) if run_ids else []
+        candidates = await conn.fetch(
+            """SELECT device_agent_run_id, status, COUNT(*) AS count
+               FROM investigation_candidates
+               WHERE device_agent_run_id = ANY($1::uuid[])
+               GROUP BY device_agent_run_id, status""",
+            run_ids,
+        ) if run_ids else []
+    actions_by_run: dict[str, list[dict[str, Any]]] = {}
+    for action in actions:
+        actions_by_run.setdefault(str(action["run_id"]), []).append(row_to_dict(action))
+    candidates_by_run: dict[str, dict[str, int]] = {}
+    for candidate in candidates:
+        candidates_by_run.setdefault(str(candidate["device_agent_run_id"]), {})[str(candidate["status"])] = int(candidate["count"])
+    public_runs = []
+    for row in rows:
+        item = row_to_dict(row)
+        item["_action_history"] = actions_by_run.get(str(row["id"]), [])[:100]
+        item["_candidate_counts"] = candidates_by_run.get(str(row["id"]), {})
+        public_runs.append(_device_agent_run_public(item, summary=True))
+    return {"runs": public_runs, "count": total}
 
 
 # ============================================================

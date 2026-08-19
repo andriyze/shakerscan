@@ -225,6 +225,48 @@ if "fastapi" not in sys.modules:
 import api as api_module  # noqa: E402
 
 
+def test_device_hunt_public_history_exposes_only_bounded_action_metadata():
+    scan_id = str(uuid.uuid4())
+    row = {
+        "id": uuid.uuid4(),
+        "device_target_id": uuid.uuid4(),
+        "objective": "Review TV",
+        "status": "completed",
+        "max_turns": 4,
+        "state": {"turns": 2, "actions_used": 1, "scans_queued": 1},
+        "result": {"summary": "Done"},
+        "_candidate_counts": {"verified": 1, "new": 2, "refuted": 1},
+        "_action_history": [{
+            "id": uuid.uuid4(),
+            "tool_name": "queue_device_scan",
+            "tool_tier": 1,
+            "fragility_cost": 5,
+            "outcome": "completed",
+            "rationale": "Confirm the service inventory",
+            "evidence_refs": ["devref_1"],
+            "result_summary": {"queued": {"scan_id": scan_id}, "authorization": "must-not-be-returned"},
+        }],
+    }
+    public = api_module._device_agent_run_public(row)
+    summary = api_module._device_agent_run_public(row, summary=True)
+
+    assert public["candidate_summary"] == {"total": 4, "verified": 1, "open": 2, "refuted": 1}
+    assert public["actions"] == [{
+        "id": public["actions"][0]["id"],
+        "tool_name": "queue_device_scan",
+        "tool_tier": 1,
+        "fragility_cost": 5,
+        "outcome": "completed",
+        "rationale": "Confirm the service inventory",
+        "evidence_count": 1,
+        "scan_ids": [scan_id],
+        "created_at": None,
+    }]
+    assert "authorization" not in json.dumps(public["actions"])
+    assert summary["actions"] == public["actions"]
+    assert "transcript" not in summary and "events" not in summary and "capabilities" not in summary
+
+
 def test_deep_hunt_wire_budget_denial_is_a_tool_result_not_a_terminal_run(monkeypatch):
     state = api_module._agent_new_state("budget test", [], [])
     state["wire_request_budget_limit"] = 100
@@ -256,7 +298,7 @@ def test_deep_hunt_wire_budget_denial_is_a_tool_result_not_a_terminal_run(monkey
 
     assert outcome["stop"] is False
     assert state["tool_calls_made"] == 0
-    assert state["events"][-1]["reservation_rejected"] == 450
+    assert state["events"][-1]["reservation_rejected"] == api_module.agent_tools.scanner_request_reservation("nuclei")
     assert "wire_request_budget_insufficient" in state["messages"][-1]["content"]
 
 

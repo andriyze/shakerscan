@@ -5172,6 +5172,18 @@ export interface DeviceAgentSession {
   }
   transcript: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>
   events: Array<Record<string, unknown>>
+  actions: Array<{
+    id: string
+    tool_name: string
+    tool_tier: number
+    fragility_cost: number
+    outcome: 'completed' | 'blocked' | 'failed'
+    rationale?: string | null
+    evidence_count: number
+    scan_ids: string[]
+    created_at?: string
+  }>
+  candidate_summary: { total: number; verified: number; open: number; refuted: number }
   notes: Array<{ kind: string; content: string; turn: number }>
   shell_plans: DeviceAgentShellPlan[]
   next_action: string
@@ -5195,6 +5207,12 @@ export interface DeviceAgentSession {
   created_at?: string
   updated_at?: string
 }
+
+export type DeviceAgentRunSummary = Pick<DeviceAgentSession,
+  'id' | 'device_target_id' | 'objective' | 'status' | 'stop_reason' | 'planner_mode' |
+  'safety_profile' | 'max_turns' | 'turns' | 'actions_used' | 'scans_queued' | 'actions' |
+  'candidate_summary' | 'created_at' | 'updated_at'
+>
 
 export async function routeAiOps(payload: {
   prompt?: string
@@ -5430,7 +5448,7 @@ export async function listDeviceAgentSessions(params: {
   device_target_id?: string
   status?: DeviceAgentStatus
   limit?: number
-} = {}): Promise<{ runs: DeviceAgentSession[]; count: number }> {
+} = {}): Promise<{ runs: DeviceAgentRunSummary[]; count: number }> {
   const search = new URLSearchParams()
   if (params.device_target_id) search.set('device_target_id', params.device_target_id)
   if (params.status) search.set('status', params.status)
