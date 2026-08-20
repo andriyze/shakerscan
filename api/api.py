@@ -423,9 +423,9 @@ import agent_text_toolcalls
 import agent_tools
 import agent_budget
 try:
-    from scan.contracts import resolve_scan_contract
+    from scan.contracts import normalize_scan_authentication, resolve_scan_contract
 except ModuleNotFoundError:
-    from api.scan.contracts import resolve_scan_contract
+    from api.scan.contracts import normalize_scan_authentication, resolve_scan_contract
 try:
     from hunt.contracts import capability_manifest, resolve_hunt_policy
 except ModuleNotFoundError:
@@ -4203,7 +4203,7 @@ class ScanOptions(BaseModel):
 class ScanRequest(BaseModel):
     target: str
     name: Optional[str] = None
-    budget_profile: Optional[Literal["fast", "balanced", "thorough"]] = None
+    budget_profile: Optional[Literal["fast", "balanced", "thorough", "exhaustive"]] = None
     policy: Optional[dict[str, Any]] = None
     authentication: Optional[dict[str, Any]] = None
     request_collections: list[dict[str, Any]] = Field(default_factory=list, max_length=16)
@@ -4421,7 +4421,7 @@ class DeviceAgentShellConfirmRequest(BaseModel):
 
 class BatchRequest(BaseModel):
     targets: list[str] = Field(min_length=1, max_length=50)
-    budget_profile: Optional[Literal["fast", "balanced", "thorough"]] = None
+    budget_profile: Optional[Literal["fast", "balanced", "thorough", "exhaustive"]] = None
     policy: Optional[dict[str, Any]] = None
     authentication: Optional[dict[str, Any]] = None
     request_collections: list[dict[str, Any]] = Field(default_factory=list, max_length=16)
@@ -26318,7 +26318,15 @@ async def submit_scan(request: ScanRequest):
         defer_family_preconditions=True,
     )
     options_payload.update(scan_contract.option_metadata())
-    options_payload["authentication"] = dict(request.authentication or {})
+    try:
+        authentication = normalize_scan_authentication(request.authentication)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    options_payload["authentication"] = authentication
+    for key, value in authentication.items():
+        if value not in (None, "", [], {}):
+            options_payload[key] = value
+    options_payload["network_discovery"] = bool(scan_contract.policy.network_discovery)
     options_payload["request_collections"] = [dict(item) for item in request.request_collections]
     options_payload["scan_policy"]["approval_receipt_id"] = approval_receipt_id
 

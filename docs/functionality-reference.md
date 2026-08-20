@@ -1368,7 +1368,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
 | Local-agent adapters | 4 | `api/command_arsenal.py` |
-| Scanner CLI flags | 159 | `scanner/scanner.py` |
+| Scanner CLI flags | 160 | `scanner/scanner.py` |
 | Scanner wrapper commands | 28 | `scanner.sh` |
 | Make targets | 14 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
@@ -1958,6 +1958,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `--max-ports` | - | Max ports to scan in complete mode (default 1000) |
 | `--max-typo-checks` | - | Maximum typosquatting permutations to check (default: 100) |
 | `--model` | - | AI model identifier (provider specific) |
+| `--network-discovery` | - | Permit bounded target-host port and network-service discovery |
 | `--network-services` | - | Enable network services detection (VPN, RDP, VNC, IoT, Industrial, databases) |
 | `--no-browser` | - | Disable browser-based scanning, use curl only (faster but less data) |
 | `--no-early-stop` | - | Disable early stopping in smart scan (continue even after finding many vulns) |

@@ -4390,7 +4390,7 @@ export async function submitScan(target: string, options: Record<string, unknown
 export interface ScanV2Request {
   target: string
   name?: string
-  budget_profile?: 'fast' | 'balanced' | 'thorough'
+  budget_profile?: 'fast' | 'balanced' | 'thorough' | 'exhaustive'
   policy?: {
     active_testing?: boolean
     active_testing_authorized?: boolean

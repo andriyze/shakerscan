@@ -2468,6 +2468,8 @@ async def run_scan(
         cmd.append('--enhanced-dns')
     if options.get('subfinder'):
         cmd.append('--subfinder')
+    if options.get('network_discovery'):
+        cmd.append('--network-discovery')
 
     # Client-Side Security
     if options.get('js_dependency_scanning'):

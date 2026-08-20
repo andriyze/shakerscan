@@ -40,6 +40,8 @@ export default function NewScanPage() {
   const [approvalReceipt, setApprovalReceipt] = useState('')
   const [authHeader, setAuthHeader] = useState('')
   const [authCookies, setAuthCookies] = useState('')
+  const [user2Header, setUser2Header] = useState('')
+  const [user2Cookies, setUser2Cookies] = useState('')
   const [customEndpoints, setCustomEndpoints] = useState('')
   const [limits, setLimits] = useState<Record<string, string>>({})
   const [workerStats, setWorkerStats] = useState<Awaited<ReturnType<typeof getWorkers>> | null>(null)
@@ -91,6 +93,10 @@ export default function NewScanPage() {
       setError('Confirm that you own or are authorized to actively test every target.')
       return
     }
+    if (networkDiscovery && (!activeTesting || !approvalReceipt.trim())) {
+      setError('Network discovery requires active testing, authorization confirmation, and a target-bound approval receipt ID.')
+      return
+    }
 
     const advanced = Object.fromEntries(
       Object.entries(limits)
@@ -102,6 +108,8 @@ export default function NewScanPage() {
     const authentication = {
       ...(authHeader.trim() ? { auth_header: authHeader.trim() } : {}),
       ...(authCookies.trim() ? { auth_cookies: authCookies.trim() } : {}),
+      ...(user2Header.trim() ? { user2_header: user2Header.trim() } : {}),
+      ...(user2Cookies.trim() ? { user2_cookies: user2Cookies.trim() } : {}),
     }
     const common = {
       budget_profile: budgetProfile,
@@ -116,6 +124,8 @@ export default function NewScanPage() {
       options: {
         ...(authHeader.trim() ? { auth_header: authHeader.trim() } : {}),
         ...(authCookies.trim() ? { auth_cookies: authCookies.trim() } : {}),
+        ...(user2Header.trim() ? { user2_header: user2Header.trim() } : {}),
+        ...(user2Cookies.trim() ? { user2_cookies: user2Cookies.trim() } : {}),
         ...(endpointList.length ? { custom_endpoints: endpointList } : {}),
         require_current_workers: activeTesting,
       },
@@ -196,7 +206,7 @@ export default function NewScanPage() {
             <p className="mt-1 text-xs text-gray-500">Passive checks are always included. Opt in to broader discovery or active proof.</p>
           </div>
           <label className="flex items-start gap-3 rounded-lg border border-gray-700 bg-gray-950 p-4">
-            <input className="mt-1" type="checkbox" checked={activeTesting} onChange={(event) => { setActiveTesting(event.target.checked); if (!event.target.checked) setAuthorized(false) }} />
+            <input className="mt-1" type="checkbox" checked={activeTesting} onChange={(event) => { setActiveTesting(event.target.checked); if (!event.target.checked) { setAuthorized(false); setNetworkDiscovery(false) } }} />
             <span>
               <span className="block text-sm font-medium text-white">Allow active testing</span>
               <span className="block text-xs text-gray-500">Permit bounded XSS, SQL injection, authorization, and other proof-oriented probes.</span>
@@ -210,7 +220,7 @@ export default function NewScanPage() {
           )}
           <div className="grid gap-3 md:grid-cols-2">
             <label className="flex items-center gap-3 text-sm text-gray-300"><input type="checkbox" checked={subdomainDiscovery} onChange={(event) => setSubdomainDiscovery(event.target.checked)} />Discover subdomains</label>
-            <label className="flex items-center gap-3 text-sm text-gray-300"><input type="checkbox" checked={networkDiscovery} onChange={(event) => setNetworkDiscovery(event.target.checked)} />Discover network services</label>
+            <label className={`flex items-center gap-3 text-sm ${activeTesting ? 'text-gray-300' : 'text-gray-600'}`}><input type="checkbox" disabled={!activeTesting} checked={networkDiscovery} onChange={(event) => setNetworkDiscovery(event.target.checked)} />Discover network services (approval receipt required)</label>
           </div>
           {activeTesting && staleWorkers > 0 && (
             <p className="rounded-lg border border-amber-800/70 bg-amber-950/20 p-3 text-sm text-amber-200">{staleWorkers} worker{staleWorkers === 1 ? '' : 's'} are not on the current build. Active submission will fail closed until they are current.</p>
@@ -224,9 +234,15 @@ export default function NewScanPage() {
           </button>
           {showAdvanced && (
             <div className="space-y-5 border-t border-gray-800 p-5">
+              <div>
+                <h3 className="text-sm font-medium text-gray-300">Authenticated principals</h3>
+                <p className="mt-1 text-xs text-gray-500">Add a distinct second user to enable cross-user BOLA/IDOR comparisons.</p>
+              </div>
               <div className="grid gap-4 md:grid-cols-2">
-                <label className="text-sm text-gray-300">Authorization header<input value={authHeader} onChange={(event) => setAuthHeader(event.target.value)} placeholder="Bearer …" className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white" /></label>
-                <label className="text-sm text-gray-300">Cookies<input value={authCookies} onChange={(event) => setAuthCookies(event.target.value)} placeholder="session=…" className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white" /></label>
+                <label className="text-sm text-gray-300">User 1 authorization header<input value={authHeader} onChange={(event) => setAuthHeader(event.target.value)} placeholder="Bearer …" className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white" /></label>
+                <label className="text-sm text-gray-300">User 1 cookies<input value={authCookies} onChange={(event) => setAuthCookies(event.target.value)} placeholder="session=…" className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white" /></label>
+                <label className="text-sm text-gray-300">User 2 authorization header<input value={user2Header} onChange={(event) => setUser2Header(event.target.value)} placeholder="Bearer …" className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white" /></label>
+                <label className="text-sm text-gray-300">User 2 cookies<input value={user2Cookies} onChange={(event) => setUser2Cookies(event.target.value)} placeholder="session=…" className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white" /></label>
               </div>
               <label className="block text-sm text-gray-300">Known endpoints (one per line)<textarea value={customEndpoints} onChange={(event) => setCustomEndpoints(event.target.value)} rows={4} placeholder={'GET /api/users\nPOST /api/login username,password'} className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white" /></label>
               <label className="block text-sm text-gray-300">Approval receipt ID<input value={approvalReceipt} onChange={(event) => setApprovalReceipt(event.target.value)} className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white" /></label>

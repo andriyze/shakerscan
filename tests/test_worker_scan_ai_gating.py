@@ -3224,6 +3224,25 @@ def test_run_scan_maps_explicit_standard_to_standard_flag(monkeypatch):
         assert captured["kwargs"]["start_new_session"] is True
 
 
+def test_run_scan_only_passes_network_discovery_when_policy_enabled(monkeypatch):
+    commands = []
+
+    async def _fake_create_subprocess_exec(*cmd, **kwargs):
+        commands.append(list(cmd))
+        return _FakeProcess(b'{"ok": true, "findings": []}')
+
+    monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(worker, "_load_runtime_ai_settings", lambda: {})
+
+    asyncio.run(worker.run_scan("https://example.com", {"scan_type": "deep"}))
+    asyncio.run(worker.run_scan(
+        "https://example.com", {"scan_type": "full", "network_discovery": True},
+    ))
+
+    assert "--network-discovery" not in commands[0]
+    assert "--network-discovery" in commands[1]
+
+
 def test_run_scan_passes_auth_config_file_without_raw_auth_secrets(monkeypatch):
     captured = {}
 

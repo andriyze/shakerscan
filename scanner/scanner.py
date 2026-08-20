@@ -3717,6 +3717,26 @@ def focused_mode_keeps_phase4_bola(focused_family: str | None, bola_testing: boo
     return bool(bola_testing)
 
 
+def resolve_network_discovery_plan(
+    *, permitted: bool, quick_mode: bool, smart_mode: bool, complete_mode: bool,
+    grpc_discovery: bool, focused_manual_active_scope: bool, exploit_level: str,
+) -> tuple[dict[str, Any] | None, bool]:
+    """Resolve port work solely from explicit network-discovery authority."""
+    if not permitted:
+        return None, False
+    if quick_mode:
+        nmap_kwargs: dict[str, Any] | None = {"quick_mode": True}
+    elif smart_mode:
+        nmap_kwargs = None if focused_manual_active_scope else {"top_ports": 33, "scripts": False}
+    elif complete_mode:
+        nmap_kwargs = {"top_ports": 1000, "scripts": exploit_level == "aggressive"}
+    elif grpc_discovery:
+        nmap_kwargs = {"top_ports": 200, "scripts": False}
+    else:
+        nmap_kwargs = None
+    return nmap_kwargs, bool(complete_mode and not smart_mode)
+
+
 def _append_endpoint_attempt_telemetry(active_block: dict[str, Any], attempts: Any) -> None:
     if not isinstance(attempts, list):
         return
@@ -3794,6 +3814,7 @@ async def build_report(target: str,
                        max_typo_checks: int=100,
                        # New: Enhanced DNS Security
                        enhanced_dns: bool=False,
+                       network_discovery: bool=False,
                        dkim_enumeration: bool=False,
                        zone_transfer_test: bool=False,
                        # New: Domain Intelligence
@@ -5145,16 +5166,12 @@ async def build_report(target: str,
         # - smart: light (top 33)
         # - complete (deep/full/aggressive): top 1000 + scripts only if exploit_level aggressive
         # - standard: no nmap unless grpc_discovery is requested
-        nmap_kwargs: dict[str, Any] | None = None
-        if quick_mode:
-            nmap_kwargs = {"quick_mode": True}
-        elif smart_mode:
-            if not focused_manual_active_scope:
-                nmap_kwargs = {"top_ports": 33, "scripts": False}
-        elif complete_mode:
-            nmap_kwargs = {"top_ports": 1000, "scripts": exploit_level == "aggressive"}
-        elif grpc_discovery:
-            nmap_kwargs = {"top_ports": 200, "scripts": False}
+        nmap_kwargs, comprehensive_network_discovery = resolve_network_discovery_plan(
+            permitted=network_discovery, quick_mode=quick_mode, smart_mode=smart_mode,
+            complete_mode=complete_mode, grpc_discovery=grpc_discovery,
+            focused_manual_active_scope=focused_manual_active_scope,
+            exploit_level=exploit_level,
+        )
 
         if nmap_kwargs:
             nmap_full_task = asyncio.create_task(nmap_full_scan(host, **nmap_kwargs))
@@ -5173,7 +5190,7 @@ async def build_report(target: str,
         nmap_full_task = asyncio.create_task(dummy_nmap_full())
 
     # Complete mode specific tasks
-    if complete_mode and not public_only and not smart_mode:
+    if not public_only and comprehensive_network_discovery:
         comprehensive_port_task = asyncio.create_task(comprehensive_port_scan(host, max_ports))
         deep_discovery_task = asyncio.create_task(deep_discovery_scan(base_url) if deep_discovery else asyncio.sleep(0))
     else:
@@ -13942,6 +13959,8 @@ async def cli_main():
 
     # New: Network Services
     ap.add_argument("--network-services", action="store_true", help="Enable network services detection (VPN, RDP, VNC, IoT, Industrial, databases)")
+    ap.add_argument("--network-discovery", action="store_true",
+                    help="Permit bounded target-host port and network-service discovery")
 
     # New: Authenticated Scanning
     ap.add_argument("--auth-cookies", type=str, help="Session cookies for authenticated scanning (e.g., 'session=abc; token=xyz')")
@@ -14904,6 +14923,10 @@ async def cli_main():
     else:
         args.active_enforced = False
 
+    if args.network_discovery and not args.active:
+        print("Error: --network-discovery requires --active (or an active scan preset).", file=sys.stderr)
+        sys.exit(2)
+
     # Active check filters
     try:
         active_xss, active_sqli, resolved_check_family = resolve_active_check_flags(
@@ -14955,9 +14978,9 @@ async def cli_main():
     package_exposure = exposure_infra or args.package_exposure
     cloud_bucket_testing = exposure_infra or args.cloud_bucket_testing
     backup_file_testing = exposure_infra or args.backup_file_testing
-    ssh_testing = exposure_infra or args.ssh_testing
-    smtp_security = exposure_infra or args.smtp_security
-    network_services = exposure_infra or args.network_services
+    ssh_testing = bool(args.network_discovery and (exposure_infra or args.ssh_testing))
+    smtp_security = bool(args.network_discovery and (exposure_infra or args.smtp_security))
+    network_services = bool(args.network_discovery and (exposure_infra or args.network_services))
     kubernetes_exposure = exposure_infra or args.kubernetes_exposure
     terraform_exposure = exposure_infra or args.terraform_exposure
     registry_exposure = exposure_infra or args.registry_exposure
@@ -15068,6 +15091,7 @@ async def cli_main():
         typosquatting=typosquatting,
         max_typo_checks=args.max_typo_checks,
         enhanced_dns=enhanced_dns,
+        network_discovery=args.network_discovery,
         dkim_enumeration=dkim_enumeration,
         zone_transfer_test=zone_transfer_test,
         domain_intelligence=domain_intelligence,

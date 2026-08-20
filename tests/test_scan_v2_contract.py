@@ -6,7 +6,10 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 
-from scan.contracts import BUDGET_PROFILES, LEGACY_SCAN_MAPPING, resolve_scan_contract
+from scan.contracts import (
+    BUDGET_PROFILES, LEGACY_SCAN_MAPPING, normalize_scan_authentication,
+    resolve_scan_contract,
+)
 
 
 def test_canonical_scan_defaults_to_balanced_passive_v2():
@@ -78,6 +81,31 @@ def test_active_state_change_and_family_policy_fail_closed():
         resolve_scan_contract(
             policy={"include_families": ["xss"], "exclude_families": ["xss"]}
         )
+    with pytest.raises(ValueError, match="network_discovery requires active_testing"):
+        resolve_scan_contract(policy={"network_discovery": True})
+    with pytest.raises(ValueError, match="target-bound approval receipt"):
+        resolve_scan_contract(policy={"active_testing": True, "network_discovery": True})
+
+
+def test_network_discovery_is_explicitly_authorized_and_exhaustive_is_a_compat_alias():
+    network = resolve_scan_contract(
+        policy={"active_testing": True, "network_discovery": True},
+        approval_receipt_id="approval-1",
+    )
+    assert network.policy.network_discovery is True
+    exhaustive = resolve_scan_contract(budget_profile="exhaustive")
+    assert exhaustive.budget_profile == "thorough"
+    assert exhaustive.deprecations == ({
+        "field": "budget_profile", "value": "exhaustive", "replacement": "thorough",
+    },)
+
+
+def test_v2_authentication_keeps_both_bola_principals_and_rejects_unknown_fields():
+    assert normalize_scan_authentication({
+        "auth_header": "Bearer user-one", "user2_header": "Bearer user-two",
+    }) == {"auth_header": "Bearer user-one", "user2_header": "Bearer user-two"}
+    with pytest.raises(ValueError, match="unsupported authentication fields"):
+        normalize_scan_authentication({"raw_command": "curl attacker"})
 
 
 def test_resolved_metadata_is_reproducible_snapshot():

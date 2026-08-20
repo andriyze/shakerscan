@@ -24,6 +24,20 @@ if _added_scanner_dir:
     sys.path.remove(_SCANNER_DIR)
 
 
+def test_network_discovery_plan_is_permission_gated_even_for_deep_complete_mode():
+    disabled = scanner_mod.resolve_network_discovery_plan(
+        permitted=False, quick_mode=False, smart_mode=False, complete_mode=True,
+        grpc_discovery=True, focused_manual_active_scope=False, exploit_level="aggressive",
+    )
+    assert disabled == (None, False)
+
+    enabled = scanner_mod.resolve_network_discovery_plan(
+        permitted=True, quick_mode=False, smart_mode=False, complete_mode=True,
+        grpc_discovery=False, focused_manual_active_scope=False, exploit_level="safe",
+    )
+    assert enabled == ({"top_ports": 1000, "scripts": False}, True)
+
+
 def test_check_family_scope_marks_focused_sqli():
     scope = scanner_mod.build_check_family_scope(
         True,

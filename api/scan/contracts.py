@@ -37,6 +37,34 @@ LEGACY_SCAN_MAPPING: Mapping[str, Mapping[str, Any]] = {
     "smart": {"budget_profile": "thorough", "active_testing": True},
 }
 
+SCAN_AUTHENTICATION_KEYS = frozenset({
+    "auth_cookies", "auth_header", "auth_headers_json", "auth_scenario_json",
+    "login_url", "login_username", "login_password", "login_extra_fields", "auto_auth",
+    "oauth_client_id", "oauth_client_secret", "oauth_token_url", "oauth_scope",
+    "oauth_username", "oauth_password", "user2_cookies", "user2_header",
+    "user2_login_username", "user2_login_password",
+})
+
+
+def normalize_scan_authentication(value: Mapping[str, Any] | None) -> dict[str, Any]:
+    authentication = dict(value or {})
+    unknown = set(authentication) - set(SCAN_AUTHENTICATION_KEYS)
+    if unknown:
+        raise ValueError(f"unsupported authentication fields: {', '.join(sorted(unknown))}")
+    normalized: dict[str, Any] = {}
+    for key, item in authentication.items():
+        if item in (None, "", [], {}):
+            continue
+        if key == "auto_auth":
+            if not isinstance(item, bool):
+                raise ValueError("auto_auth must be a boolean")
+            normalized[key] = item
+            continue
+        if not isinstance(item, str) or len(item) > 131_072:
+            raise ValueError(f"{key} must be a string of at most 131072 characters")
+        normalized[key] = item
+    return normalized
+
 
 @dataclass(frozen=True)
 class ResolvedScanContract:
@@ -103,7 +131,7 @@ def resolve_scan_contract(
     """
     legacy = str(legacy_scan_type or "").strip().lower() or None
     compatibility_advanced: dict[str, Any] = {}
-    deprecations: tuple[Mapping[str, Any], ...] = ()
+    deprecation_items: list[Mapping[str, Any]] = []
     if legacy:
         try:
             mapping = LEGACY_SCAN_MAPPING[legacy]
@@ -112,17 +140,25 @@ def resolve_scan_contract(
         profile = str(mapping["budget_profile"])
         active_testing = bool(mapping["active_testing"])
         compatibility_advanced.update(mapping.get("advanced") or {})
-        deprecations = ({
+        deprecation_items.append({
             "field": "scan_type",
             "value": legacy,
             "replacement": {
                 "active_testing": active_testing,
                 "budget_profile": profile,
             },
-        },)
+        })
         execution_scan_type = legacy
     else:
-        profile = str(budget_profile or "balanced").strip().lower()
+        requested_profile = str(budget_profile or "balanced").strip().lower()
+        if requested_profile == "exhaustive":
+            profile = "thorough"
+            deprecation_items.append({
+                "field": "budget_profile", "value": "exhaustive",
+                "replacement": "thorough",
+            })
+        else:
+            profile = requested_profile
         active_testing = bool((policy or {}).get("active_testing", False))
         # Temporary compatibility adapter into the existing deterministic phase implementations.
         # V2 policy remains authoritative and is persisted independently from this internal alias.
@@ -160,8 +196,13 @@ def resolve_scan_contract(
     )
     if resolved_policy.allow_state_changing_http and not resolved_policy.active_testing:
         raise ValueError("state-changing HTTP requires active_testing")
+    if resolved_policy.network_discovery and not resolved_policy.active_testing:
+        raise ValueError("network_discovery requires active_testing")
+    if resolved_policy.network_discovery and not resolved_policy.approval_receipt_id:
+        raise ValueError("network_discovery requires a target-bound approval receipt")
     merged_advanced = {**compatibility_advanced, **dict(advanced or {})}
     budget = _resolve_budget(profile, merged_advanced)
     return ResolvedScanContract(
-        "v2", resolved_policy, profile, budget, execution_scan_type, legacy, deprecations
+        "v2", resolved_policy, profile, budget, execution_scan_type, legacy,
+        tuple(deprecation_items),
     )
