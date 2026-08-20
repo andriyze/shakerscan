@@ -10,7 +10,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 
 import agent_tools
 import command_arsenal
-from runtime.budgets import BudgetError, BudgetExceeded, BudgetLedger, reserve_budget_snapshot
+from runtime.budgets import (
+    BudgetError, BudgetExceeded, BudgetLedger, reconcile_budget_snapshot,
+    reserve_budget_snapshot,
+)
 from runtime.capability_registry import CAPABILITY_REGISTRY, LEGACY_TOOL_TO_CAPABILITY
 from runtime.receipts import CapabilityReceipt
 
@@ -124,6 +127,23 @@ def test_persistent_budget_snapshot_uses_the_shared_dimensions():
     assert used == {"agent_actions": 2, "http_requests": 4, "tcp_ports_attempted": 0}
     with pytest.raises(BudgetExceeded):
         reserve_budget_snapshot(limits, used, {"agent_actions": 1})
+
+
+def test_persistent_budget_reconciliation_preserves_later_reservations():
+    # Current usage includes this call's hold (5) and another call's later hold (3).
+    assert reconcile_budget_snapshot(
+        {"http_requests": 8, "agent_actions": 2},
+        {"http_requests": 5, "agent_actions": 1},
+        {"http_requests": 2, "agent_actions": 1},
+    ) == {"http_requests": 5, "agent_actions": 2}
+
+
+def test_persistent_budget_reconciliation_retains_unknown_and_releases_proven_zero():
+    assert reconcile_budget_snapshot(
+        {"tcp_ports_attempted": 100, "tool_wall_seconds": 30},
+        {"tcp_ports_attempted": 100, "tool_wall_seconds": 30},
+        {"tcp_ports_attempted": 0},
+    ) == {"tcp_ports_attempted": 0, "tool_wall_seconds": 30}
 
 
 def test_typed_receipt_requires_scan_or_hunt_and_honest_timeout_state():

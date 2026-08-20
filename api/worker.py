@@ -56,6 +56,8 @@ import parallel_scan
 import asm_inventory
 import family_proof
 import agent_tools
+from capabilities.network import CapabilityInputError, network_capability_adapter
+from runtime.models import ScanPolicy, TargetBinding
 from pinned_socks_proxy import PinnedSocksProxy
 import investigation_candidates
 from worker_queue_policy import base_worker_queue_keys, worker_role
@@ -79,6 +81,7 @@ try:
     from scanner_tools.build_fingerprint import hash_source_files, runtime_file_map
     from scanner_tools.device_web import run_pinned_device_web_scan
     from scanner_tools import device_advisories
+    from scanner_tools.common import run_streaming
 except ModuleNotFoundError:
     from scanner.scanner_tools.attempt_telemetry import (
         endpoint_attempt_schema_from_report,
@@ -87,6 +90,7 @@ except ModuleNotFoundError:
     from scanner.scanner_tools.build_fingerprint import hash_source_files, runtime_file_map
     from scanner.scanner_tools.device_web import run_pinned_device_web_scan
     from scanner.scanner_tools import device_advisories
+    from scanner.scanner_tools.common import run_streaming
 from evidence_storage import serialize_evidence_content, store_evidence_content
 from artifact_storage import (
     ArtifactStorageError,
@@ -13226,6 +13230,139 @@ async def process_agent_scanner_tool_job(job_data: dict[str, Any]) -> None:
         redis_client.delete(cancel_key)
 
 
+async def process_canonical_network_capability_job(job_data: dict[str, Any]) -> None:
+    """Execute a canonical network adapter from declarative, independently verified input."""
+    job_id = str(job_data.get("job_id") or "").strip()
+    result_key = f"agent_tool_result:{job_id}"
+    cancel_key = f"agent_tool_cancel:{job_id}"
+    redis_client = get_redis()
+    started_at = utc_now_iso()
+    status, error = "failed", None
+    observations: list[dict[str, Any]] = []
+    parser_errors: list[str] = []
+    partial = False
+    timed_out = False
+    attempted_commands = 0
+    elapsed_seconds = 0
+    actual: dict[str, int] = {}
+    prepared = None
+    try:
+        if not job_id:
+            raise CapabilityInputError("capability job requires an identity")
+        raw_target = dict(job_data.get("target_binding") or {})
+        raw_policy = dict(job_data.get("scan_policy") or {})
+        target = TargetBinding(
+            target_id=str(raw_target.get("target_id") or ""),
+            target_kind=str(raw_target.get("target_kind") or ""),
+            canonical_host=raw_target.get("canonical_host"),
+            allowed_origins=tuple(raw_target.get("allowed_origins") or ()),
+            allowed_addresses=tuple(raw_target.get("allowed_addresses") or ()),
+            allowed_root_domains=tuple(raw_target.get("allowed_root_domains") or ()),
+            environment=str(raw_target.get("environment") or "unknown"),
+            scope_receipt_id=raw_target.get("scope_receipt_id"),
+        )
+        policy = ScanPolicy(
+            active_testing=bool(raw_policy.get("active_testing")),
+            allow_state_changing_http=bool(raw_policy.get("allow_state_changing_http")),
+            network_discovery=bool(raw_policy.get("network_discovery")),
+            subdomain_discovery=bool(raw_policy.get("subdomain_discovery")),
+            scope_receipt_id=raw_policy.get("scope_receipt_id"),
+            approval_receipt_id=raw_policy.get("approval_receipt_id"),
+        )
+        adapter = network_capability_adapter(str(job_data.get("capability_name") or ""))
+        args = dict(job_data.get("capability_input") or {})
+        prepared = adapter.prepare(target=target, args=args, policy=policy)
+        if prepared.input_digest != str(job_data.get("expected_input_digest") or ""):
+            raise CapabilityInputError("control-plane and worker capability input digests differ")
+        expected_budget = {str(k): int(v) for k, v in dict(job_data.get("expected_budget") or {}).items()}
+        if dict(prepared.estimated_budget) != expected_budget:
+            raise CapabilityInputError("control-plane and worker budget estimates differ")
+
+        per_command_wall = max(
+            1, int(prepared.estimated_budget.get("tool_wall_seconds") or 1) // max(1, len(prepared.commands))
+        )
+        parsed_results = []
+        for command in prepared.commands:
+            if redis_client.exists(cancel_key):
+                status, error = "cancelled", "cancelled"
+                break
+            command_started = time.monotonic()
+            try:
+                attempted_commands += 1
+                streamed = await run_streaming(
+                    [command.binary, *command.argv], soft_timeout=float(per_command_wall),
+                    flush_grace=0.0, hard_timeout=float(per_command_wall),
+                    cancel_check=lambda: bool(redis_client.exists(cancel_key)),
+                    max_stdout_bytes=_AGENT_TOOL_OUTPUT_BYTES,
+                    max_stderr_bytes=min(_AGENT_TOOL_OUTPUT_BYTES, 20_000),
+                )
+            except FileNotFoundError:
+                attempted_commands -= 1
+                raise
+            finally:
+                elapsed_seconds += max(0, int(time.monotonic() - command_started + 0.999))
+            parse_kwargs = {"timed_out": streamed.timed_out}
+            if prepared.capability_name == "subdomains.discover":
+                parse_kwargs["root_domain"] = str(prepared.redacted_execution["root_domain"])
+            parsed = adapter.parse(streamed.stdout, **parse_kwargs)
+            parsed_results.append(parsed)
+            observations.extend(dict(row) for row in parsed.observations)
+            parser_errors.extend(str(item) for item in parsed.errors)
+            partial = partial or parsed.partial or streamed.partial or streamed.stdout_truncated
+            timed_out = timed_out or parsed.timed_out or streamed.timed_out
+            if streamed.cancelled:
+                status, error = "cancelled", "cancelled"
+                break
+            if streamed.returncode != 0 and not streamed.stdout.strip():
+                status, error = "failed", f"{prepared.adapter_name}_exit_{streamed.returncode}"
+                break
+        else:
+            status = "partial" if partial else "success"
+
+        command_count = max(1, len(prepared.commands))
+        for dimension, reserved in prepared.estimated_budget.items():
+            reserved = int(reserved)
+            if dimension == "tool_wall_seconds":
+                actual[dimension] = min(reserved, elapsed_seconds)
+            elif dimension in {"hosts_attempted", "tcp_ports_attempted"}:
+                actual[dimension] = min(
+                    reserved, (reserved * attempted_commands + command_count - 1) // command_count
+                )
+    except FileNotFoundError:
+        error = "scanner_not_available"
+        actual = {key: 0 for key in dict(prepared.estimated_budget) if prepared is not None}
+    except (CapabilityInputError, KeyError, TypeError, ValueError) as exc:
+        error = f"contract:{str(exc)[:240]}"
+        actual = {key: 0 for key in dict(prepared.estimated_budget) if prepared is not None}
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        error = f"worker_fault:{type(exc).__name__}"
+
+    result = {
+        "job_id": job_id, "status": status, "error": error,
+        "started_at": started_at, "finished_at": utc_now_iso(),
+        "partial": partial, "timed_out": timed_out,
+        "typed_output": {
+            "parser": prepared.parser_version if prepared is not None else None,
+            "parser_status": "partial" if partial else "parsed" if status == "success" else "failed",
+            "records": observations[:5000], "record_count": len(observations),
+            "errors": parser_errors[:20],
+        },
+        "budget_consumed": actual,
+        "execution": dict(prepared.redacted_execution) if prepared is not None else {},
+        "input_digest": prepared.input_digest if prepared is not None else None,
+        "network_binding": "runtime_target_binding",
+    }
+    if job_id:
+        redis_client.set(result_key, json.dumps(result, default=str, separators=(",", ":")), ex=_AGENT_TOOL_RESULT_TTL_SECONDS)
+        redis_client.hset(f"job:{job_id}", mapping={
+            "status": status, "current_phase": "canonical_capability_complete", "error": error or "",
+        })
+        redis_client.expire(f"job:{job_id}", _AGENT_TOOL_RESULT_TTL_SECONDS)
+        redis_client.delete(cancel_key)
+
+
 async def process_job(job_data: dict):
     """Route job to appropriate handler."""
     if str(os.environ.get("SHAKERSCAN_NODE_ID") or "").strip():
@@ -13282,6 +13419,8 @@ async def process_job(job_data: dict):
         await process_discovery_job(job_data)
     elif job_type == 'agent_scanner_tool':
         await process_agent_scanner_tool_job(job_data)
+    elif job_type == 'canonical_network_capability':
+        await process_canonical_network_capability_job(job_data)
     elif job_type == 'finding_retest':
         await process_finding_retest_job(job_data)
     elif job_type == parallel_scan.PLAN_JOB_TYPE:

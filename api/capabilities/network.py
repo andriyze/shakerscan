@@ -21,6 +21,22 @@ class CapabilityInputError(ValueError):
     pass
 
 
+NETWORK_CAPABILITY_ADAPTERS = {
+    "ports.discover": lambda: PortsDiscoverAdapter(),
+    "service.fingerprint": lambda: ServiceFingerprintAdapter(),
+    "subdomains.discover": lambda: SubdomainsDiscoverAdapter(),
+}
+
+
+def network_capability_adapter(name: str) -> Any:
+    """Return a fresh canonical adapter for a registry capability name."""
+    try:
+        factory = NETWORK_CAPABILITY_ADAPTERS[str(name or "").strip().lower()]
+    except KeyError as exc:
+        raise CapabilityInputError("unknown canonical network capability") from exc
+    return factory()
+
+
 PORT_PROFILES: Mapping[str, tuple[int, ...] | str] = {
     "known_services": (21, 22, 25, 53, 80, 110, 143, 443, 445, 587, 993, 995,
                        1433, 1521, 1883, 3000, 3306, 5432, 6379, 8080, 8443, 8883, 9200),
@@ -188,12 +204,20 @@ class ServiceFingerprintAdapter:
                 for port_node in host.findall("./ports/port"):
                     state_node = port_node.find("state")
                     service_node = port_node.find("service")
+                    state = (state_node.attrib if state_node is not None else {}).get("state")
+                    port = int(port_node.attrib["portid"])
+                    transport = port_node.attrib.get("protocol", "tcp")
+                    if state == "open":
+                        observations.append({
+                            "kind": "open_port", "address": address, "port": port,
+                            "transport": transport,
+                        })
                     observations.append({
                         "kind": "service",
                         "address": address,
-                        "port": int(port_node.attrib["portid"]),
-                        "transport": port_node.attrib.get("protocol", "tcp"),
-                        "state": (state_node.attrib if state_node is not None else {}).get("state"),
+                        "port": port,
+                        "transport": transport,
+                        "state": state,
                         "reason": (state_node.attrib if state_node is not None else {}).get("reason"),
                         "service": (service_node.attrib if service_node is not None else {}).get("name"),
                         "product": (service_node.attrib if service_node is not None else {}).get("product"),

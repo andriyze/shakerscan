@@ -431,9 +431,13 @@ try:
 except ModuleNotFoundError:
     from api.hunt.contracts import capability_manifest, resolve_hunt_policy
 try:
-    from runtime.budgets import BudgetExceeded, reserve_budget_snapshot
+    from runtime.budgets import BudgetExceeded, reconcile_budget_snapshot, reserve_budget_snapshot
+    from runtime.models import ScanPolicy, TargetBinding
+    from capabilities.network import CapabilityInputError, network_capability_adapter
 except ModuleNotFoundError:
-    from api.runtime.budgets import BudgetExceeded, reserve_budget_snapshot
+    from api.runtime.budgets import BudgetExceeded, reconcile_budget_snapshot, reserve_budget_snapshot
+    from api.runtime.models import ScanPolicy, TargetBinding
+    from api.capabilities.network import CapabilityInputError, network_capability_adapter
 import device_agent
 import device_capabilities
 import investigation_candidates
@@ -32462,6 +32466,68 @@ async def _enqueue_agent_scanner_tool(
     }
 
 
+async def _enqueue_canonical_network_capability(
+    *, capability_name: str, capability_input: Mapping[str, Any], target: TargetBinding,
+    policy: ScanPolicy, expected_input_digest: str, expected_budget: Mapping[str, int],
+    timeout_ms: int,
+) -> dict[str, Any]:
+    """Queue declarative canonical work; the worker independently reconstructs its argv."""
+    redis_client = get_redis()
+    job_id = str(uuid.uuid4())
+    result_key = f"agent_tool_result:{job_id}"
+    cancel_key = f"agent_tool_cancel:{job_id}"
+    payload = {
+        "job_id": job_id, "type": "canonical_network_capability",
+        "capability_name": capability_name, "capability_input": dict(capability_input),
+        "target_binding": {
+            "target_id": target.target_id, "target_kind": target.target_kind,
+            "canonical_host": target.canonical_host,
+            "allowed_origins": list(target.allowed_origins),
+            "allowed_addresses": list(target.allowed_addresses),
+            "allowed_root_domains": list(target.allowed_root_domains),
+            "environment": target.environment, "scope_receipt_id": target.scope_receipt_id,
+        },
+        "scan_policy": {
+            "active_testing": policy.active_testing,
+            "allow_state_changing_http": policy.allow_state_changing_http,
+            "network_discovery": policy.network_discovery,
+            "subdomain_discovery": policy.subdomain_discovery,
+            "scope_receipt_id": policy.scope_receipt_id,
+            "approval_receipt_id": policy.approval_receipt_id,
+        },
+        "expected_input_digest": expected_input_digest,
+        "expected_budget": {str(k): int(v) for k, v in expected_budget.items()},
+        "submitted_at": utc_now_iso(), "_base_queue_name": AGENT_TOOL_QUEUE_NAME,
+    }
+    redis_client.hset(f"job:{job_id}", mapping={
+        "status": "queued", "current_phase": "canonical_capability_queued",
+        "tool": capability_name,
+    })
+    redis_client.expire(f"job:{job_id}", max(3600, math.ceil(timeout_ms / 1000) + 300))
+    enqueue_job(redis_client, AGENT_TOOL_QUEUE_NAME, payload)
+    deadline = asyncio.get_running_loop().time() + timeout_ms / 1000.0 + 30.0
+    try:
+        while asyncio.get_running_loop().time() < deadline:
+            raw = redis_client.get(result_key)
+            if raw is not None:
+                redis_client.delete(result_key)
+                value = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
+                parsed = json.loads(value)
+                if not isinstance(parsed, dict):
+                    raise RuntimeError("canonical capability worker returned a malformed result")
+                return parsed
+            await asyncio.sleep(0.2)
+    except asyncio.CancelledError:
+        redis_client.set(cancel_key, "1", ex=max(60, math.ceil(timeout_ms / 1000) + 30))
+        raise
+    redis_client.set(cancel_key, "1", ex=max(60, math.ceil(timeout_ms / 1000) + 30))
+    return {
+        "status": "timeout", "error": "worker_result_timeout", "partial": False,
+        "typed_output": {"parser_status": "failed", "records": [], "record_count": 0},
+        "budget_consumed": {},
+    }
+
+
 async def _agent_tool_run_tool(
     target_uuid: uuid.UUID,
     target_url: str,
@@ -34656,7 +34722,7 @@ async def start_hunt(request: HuntStartRequest):
     approval_validated = False
     async with db_pool.acquire() as conn:
         web = await conn.fetchrow(
-            "SELECT id, url, name, is_active FROM targets WHERE id=$1", target_uuid,
+            "SELECT id, url, name, root_domain, metadata_json, is_active FROM targets WHERE id=$1", target_uuid,
         )
         device = None if web else await conn.fetchrow(
             "SELECT id, name, primary_locator, device_class, is_active FROM device_targets WHERE id=$1",
@@ -34677,7 +34743,11 @@ async def start_hunt(request: HuntStartRequest):
             )
             context_pack = {
                 "schema_version": "hunt-context/v2",
-                "target": {"id": str(target_uuid), "kind": target_kind, "url": target_url, "origins": origins},
+                "target": {
+                    "id": str(target_uuid), "kind": target_kind, "url": target_url,
+                    "origins": origins, "root_domain": web["root_domain"],
+                    "environment": str(_hunt_json(web["metadata_json"], {}).get("environment") or "unknown"),
+                },
                 "principal_refs_available": credentials_available,
                 "secret_values_visible_to_planner": False,
                 "request_collections": collection_refs,
@@ -34852,6 +34922,10 @@ async def execute_hunt_capability(
     hunt_id: str, capability_name: str, request: HuntCapabilityRequest,
 ):
     name = str(capability_name or "").strip().lower()
+    network_capability_names = {"ports.discover", "service.fingerprint", "subdomains.discover"}
+    prepared_network = None
+    network_target = None
+    network_policy = None
     try:
         spec = agent_tools.CAPABILITY_REGISTRY.require(name)
     except KeyError as exc:
@@ -34885,9 +34959,40 @@ async def execute_hunt_capability(
             used = _hunt_json(run["budget_used_json"], {})
             budget = _hunt_json(run["budget_json"], {})
             limits = _hunt_ledger_limits(budget)
-            charges = {
-                key: int(value) for key, value in spec.budget_cost.items() if key in limits
-            }
+            if name in network_capability_names:
+                authority_context = _hunt_json(run["context_pack"], {})
+                target_context = authority_context.get("target") if isinstance(authority_context.get("target"), Mapping) else {}
+                target_url = str(target_context.get("url") or "")
+                parsed_target = urllib.parse.urlsplit(target_url)
+                root_domain = str(target_context.get("root_domain") or parsed_target.hostname or "").lower().rstrip(".")
+                try:
+                    network_target = TargetBinding(
+                        target_id=str(run["target_id"]), target_kind=str(run["target_kind"]),
+                        canonical_host=parsed_target.hostname,
+                        allowed_origins=tuple(target_context.get("origins") or ()),
+                        allowed_addresses=tuple(authority_context.get("authorized_target_addresses") or ()),
+                        allowed_root_domains=(root_domain,) if root_domain else (),
+                        environment=str(target_context.get("environment") or "unknown"),
+                    )
+                    network_policy = ScanPolicy(
+                        active_testing=bool(policy.get("active_testing")),
+                        network_discovery=bool(policy.get("active_testing")),
+                        subdomain_discovery=True,
+                        approval_receipt_id=policy.get("approval_receipt_id"),
+                    )
+                    prepared_network = network_capability_adapter(name).prepare(
+                        target=network_target, args=request.input, policy=network_policy,
+                    )
+                except (CapabilityInputError, ValueError) as exc:
+                    raise HTTPException(status_code=422, detail=str(exc)) from exc
+                charges = {
+                    key: int(value) for key, value in prepared_network.estimated_budget.items()
+                    if key in limits
+                }
+            else:
+                charges = {
+                    key: int(value) for key, value in spec.budget_cost.items() if key in limits
+                }
             charges["agent_actions"] = 1
             if requires_call_approval:
                 charges["active_actions"] = 1
@@ -34911,6 +35016,7 @@ async def execute_hunt_capability(
             )
 
     context = _hunt_json(run["context_pack"], {})
+    execution_started = time.perf_counter()
     try:
         if name == "collections.inspect":
             refs = [item for item in context.get("request_collections") or [] if isinstance(item, dict)]
@@ -34938,6 +35044,15 @@ async def execute_hunt_capability(
                 created_by=f"hunt_v2:{hunt_id}", allow_write=False,
                 approval_receipt_id=policy.get("approval_receipt_id"),
                 authorized_addresses=context.get("authorized_target_addresses") or [],
+            )
+        elif name in network_capability_names:
+            assert prepared_network is not None and network_target is not None and network_policy is not None
+            result = await _enqueue_canonical_network_capability(
+                capability_name=name, capability_input=request.input,
+                target=network_target, policy=network_policy,
+                expected_input_digest=prepared_network.input_digest,
+                expected_budget=prepared_network.estimated_budget,
+                timeout_ms=max(1_000, int(prepared_network.estimated_budget.get("tool_wall_seconds") or 1) * 1_000),
             )
         elif spec.legacy_tool_name:
             path = str(request.input.get("path") or "").strip()
@@ -34972,6 +35087,53 @@ async def execute_hunt_capability(
         async with db_pool.acquire() as conn:
             receipt_id = None
             receipt_payload = locals().get("result", {})
+            actual_charges: dict[str, int] = {"agent_actions": 1}
+            if requires_call_approval:
+                actual_charges["active_actions"] = 1
+            measured = (
+                receipt_payload.get("budget_consumed")
+                if isinstance(receipt_payload, dict) and isinstance(receipt_payload.get("budget_consumed"), Mapping)
+                else {}
+            )
+            for dimension, amount in measured.items():
+                if dimension in charges:
+                    actual_charges[dimension] = min(int(charges[dimension]), max(0, int(amount)))
+            elapsed_wall = max(0, math.ceil(time.perf_counter() - execution_started))
+            if status == "blocked":
+                for dimension in charges:
+                    if dimension not in {"agent_actions", "active_actions"}:
+                        actual_charges[dimension] = 0
+            elif name == "http.request":
+                actual_charges["http_requests"] = min(int(charges.get("http_requests") or 0), 1)
+                actual_charges["tool_wall_seconds"] = min(int(charges.get("tool_wall_seconds") or 0), elapsed_wall)
+            elif name == "collections.replay_safe" and isinstance(receipt_payload, dict):
+                actual_charges["http_requests"] = min(
+                    int(charges.get("http_requests") or 0), max(0, int(receipt_payload.get("replayed") or 0)),
+                )
+                actual_charges["tool_wall_seconds"] = min(int(charges.get("tool_wall_seconds") or 0), elapsed_wall)
+            elif spec.legacy_tool_name and isinstance(receipt_payload, dict):
+                if receipt_payload.get("wire_request_accounting") == "exact":
+                    actual_charges["http_requests"] = min(
+                        int(charges.get("http_requests") or 0), max(0, int(receipt_payload.get("wire_requests_actual") or 0)),
+                    )
+                actual_charges["tool_wall_seconds"] = min(int(charges.get("tool_wall_seconds") or 0), elapsed_wall)
+            reconciled_used = dict(used)
+            try:
+                async with conn.transaction():
+                    locked = await _hunt_run_or_404(conn, hunt_id, for_update=True)
+                    current_used = _hunt_json(locked["budget_used_json"], {})
+                    current_ledger = {key: int(current_used.get(key) or 0) for key in limits}
+                    reconciled_ledger = reconcile_budget_snapshot(
+                        current_ledger, charges, actual_charges,
+                    )
+                    current_used.update(reconciled_ledger)
+                    await conn.execute(
+                        "UPDATE hunt_runs SET budget_used_json=$2, updated_at=NOW() WHERE id=$1",
+                        locked["id"], json.dumps(current_used),
+                    )
+                    reconciled_used = current_used
+            except Exception:
+                logger.exception("Failed to reconcile Hunt capability budget", extra={"hunt_id": hunt_id, "action_id": str(action_id)})
             is_partial = bool(
                 isinstance(receipt_payload, dict)
                 and (receipt_payload.get("partial") or receipt_payload.get("status") == "partial")
@@ -34990,7 +35152,10 @@ async def execute_hunt_capability(
                     approval_receipt_id=policy.get("approval_receipt_id"),
                     status="success" if status in {"completed", "partial"} else "failed",
                     parser_status="partial" if is_partial else "parsed" if status == "completed" else "failed",
-                    budget_json={"reserved": charges, "used_after_reservation": used},
+                    budget_json={
+                        "reserved": charges, "actual": actual_charges,
+                        "used_after_reconciliation": reconciled_used,
+                    },
                     partial=is_partial,
                     hunt_id=str(run["id"]),
                     metadata_json={"hunt_action_id": str(action_id), "result_status": status},

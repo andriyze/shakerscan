@@ -140,11 +140,14 @@ def test_nmap_xml_parser_normalizes_service_observations_and_partial_timeout():
 
     assert parsed.status == "succeeded"
     assert parsed.observations == ({
+        "kind": "open_port", "address": "192.0.2.10", "port": 8443,
+        "transport": "tcp",
+    }, {
         "kind": "service", "address": "192.0.2.10", "port": 8443,
         "transport": "tcp", "state": "open", "reason": "syn-ack",
         "service": "https", "product": "nginx", "version": "1.25",
         "cpe": ["cpe:/a:nginx:nginx:1.25"],
-    },)
+    })
 
     partial = ServiceFingerprintAdapter().parse(xml[:-10], timed_out=True)
     assert partial.partial is True and partial.timed_out is True

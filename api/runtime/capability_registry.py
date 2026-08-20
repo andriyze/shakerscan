@@ -137,8 +137,15 @@ _HTTP_TARGETS = frozenset({"web", "api"})
 _NETWORK_TARGETS = frozenset({"web", "api", "network"})
 
 
-def _schema(properties: Mapping[str, Any] | None = None) -> Mapping[str, Any]:
-    return {"type": "object", "properties": dict(properties or {}), "additionalProperties": False}
+def _schema(
+    properties: Mapping[str, Any] | None = None, *, required: tuple[str, ...] = (),
+) -> Mapping[str, Any]:
+    schema: dict[str, Any] = {
+        "type": "object", "properties": dict(properties or {}), "additionalProperties": False,
+    }
+    if required:
+        schema["required"] = list(required)
+    return schema
 
 
 CAPABILITY_REGISTRY = CapabilityRegistry(
@@ -200,8 +207,11 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "service.fingerprint", "Bounded connection-based service/version fingerprint.",
             "network_tcp", "active", _NETWORK_TARGETS, "nmap", "1",
             "network_discovery", {"tcp_ports_attempted": 60, "tool_wall_seconds": 90},
-            {"network_reachability": True, "binary": "nmap"}, _schema(),
-            "nmap-output/v1", ("open_port_observation", "service_observation"),
+            {"network_reachability": True, "binary": "nmap"}, _schema({
+                "ports": {"type": "array", "items": {"type": "integer", "minimum": 1, "maximum": 65535}, "minItems": 1, "maxItems": 256},
+                "profile": {"type": "string", "enum": ["version_light", "version_default"]},
+            }, required=("ports",)),
+            "nmap-xml/v1", ("open_port_observation", "service_observation"),
             "nmap", "nmap", 90_000, ("--version",), ("/opt/tools/nmap",),
             arsenal_status="gated",
         ),
@@ -209,7 +219,10 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "ports.discover", "Bounded connection-based TCP port discovery.",
             "network_tcp", "active", _NETWORK_TARGETS, "naabu", "1",
             "network_discovery", {"tcp_ports_attempted": 1_200, "tool_wall_seconds": 120},
-            {"network_reachability": True, "binary": "naabu"}, _schema(),
+            {"network_reachability": True, "binary": "naabu"}, _schema({
+                "profile": {"type": "string", "enum": ["known_services", "top_100", "top_1000"]},
+                "ports": {"type": "array", "items": {"type": "integer", "minimum": 1, "maximum": 65535}, "minItems": 1, "maxItems": 1000},
+            }),
             "naabu-jsonl/v1", ("open_port_observation",),
             "naabu", "naabu", 120_000, ("-version",), ("/opt/tools/naabu",),
             arsenal_status="gated",

@@ -87,6 +87,44 @@ def reserve_budget_snapshot(
     return result
 
 
+def reconcile_budget_snapshot(
+    consumed_after_reservation: Mapping[str, int],
+    reservation: Mapping[str, int],
+    actual: Mapping[str, int],
+    *, dimensions: frozenset[str] = BUDGET_DIMENSIONS,
+) -> dict[str, int]:
+    """Replace one durable reservation with measured usage.
+
+    ``consumed_after_reservation`` may include reservations made by concurrent calls after this
+    one. Only this call's held amounts are removed, which makes the transition safe to apply while
+    holding the datastore row lock. Omitted actual dimensions conservatively retain their held
+    amount; explicitly supplied zeroes release capacity for work proven not to have executed.
+    """
+    current = _normalize_amounts(consumed_after_reservation, dimensions=dimensions)
+    held = _normalize_amounts(reservation, dimensions=dimensions)
+    measured = _normalize_amounts(actual, dimensions=dimensions)
+    measured_dimensions = {str(kind or "").strip() for kind in actual}
+    invalid_measured = measured_dimensions - set(dimensions)
+    if invalid_measured:
+        raise BudgetError(f"unknown budget dimensions: {sorted(invalid_measured)}")
+    unknown = (set(held) | set(measured)) - set(current)
+    if unknown:
+        raise BudgetError(f"reconciliation dimensions are not present in ledger: {sorted(unknown)}")
+    outside = set(measured) - set(held)
+    if outside:
+        raise BudgetError(f"actual usage contains unreserved dimensions: {sorted(outside)}")
+    for kind, amount in measured.items():
+        if amount > held.get(kind, 0):
+            raise BudgetError(f"actual usage exceeds reservation for {kind}")
+    result = dict(current)
+    for kind, amount in held.items():
+        if current.get(kind, 0) < amount:
+            raise BudgetError(f"reservation is not present in consumed ledger for {kind}")
+        replacement = measured.get(kind, 0) if kind in measured_dimensions else amount
+        result[kind] = current[kind] - amount + replacement
+    return result
+
+
 class BudgetLedger:
     """Atomically reserves capacity before execution and reconciles actual use afterward."""
 

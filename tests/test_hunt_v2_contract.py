@@ -58,7 +58,9 @@ def test_hunt_actions_emit_capability_receipts_and_never_accept_raw_argv():
     assert 'app.post("/hunts/{hunt_id}/capabilities/{capability_name:path}")' in api
     assert "capability_name=name" in api
     assert "adapter_name=str(spec.adapter)" in api
-    assert "budget_json={\"reserved\": charges" in api
+    assert '"used_after_reconciliation": reconciled_used' in api
+    assert "reconcile_budget_snapshot" in api
+    assert "_enqueue_canonical_network_capability" in api
     assert "hunt_id=str(run[\"id\"])" in api
     assert "reserve_budget_snapshot" in api
     assert "trusted_collection_headers" in api
