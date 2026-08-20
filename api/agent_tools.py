@@ -23,6 +23,8 @@ import re
 import urllib.parse
 from typing import Any, Optional
 
+from runtime.capability_registry import CAPABILITY_REGISTRY
+
 # Methods the model may request. Reads are read-only; writes are credential/active-gated.
 READ_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "OPTIONS"})
 WRITE_METHODS: frozenset[str] = frozenset({"POST", "PUT", "PATCH", "DELETE"})
@@ -285,37 +287,22 @@ def _tmpl_naabu(url: str, opts: dict[str, Any]) -> list[str]:
             "-stats", "-stats-interval", "10"]
 
 
-# {tool: {binary, target_param, risk, default_timeout_ms, build}}. httpx is the only passive
-# (read_only) scanner; nuclei/katana/ffuf are bounded ACTIVE discovery (deep_hunt-gated) — each
-# has a fixed argv (no arbitrary flags/paths) and a hard wall-clock cap so the sync loop stays safe.
+# Adapter builders remain implementation details here while the canonical registry owns names,
+# risk, budgets, placement, schemas, evidence contracts, binaries, and timeouts.
+_SCANNER_BUILDERS = {
+    "httpx": _tmpl_httpx,
+    "nuclei": _tmpl_nuclei,
+    "katana": _tmpl_katana,
+    "ffuf": _tmpl_ffuf,
+    "dalfox": _tmpl_dalfox,
+    "sqlmap": _tmpl_sqlmap,
+    "nmap": _tmpl_nmap,
+    "naabu": _tmpl_naabu,
+}
 SCANNER_ARG_TEMPLATES: dict[str, dict[str, Any]] = {
-    "httpx": {"binary": "httpx", "risk": "read_only", "default_timeout_ms": 30_000,
-              "max_wire_requests": 4, "build": _tmpl_httpx,
-              "desc": "passive HTTP fingerprint (status, title, tech, server) of a target-host URL"},
-    "nuclei": {"binary": "nuclei", "risk": "active", "default_timeout_ms": 300_000,
-               "max_wire_requests": 4_000, "build": _tmpl_nuclei,
-               "desc": "bounded Nuclei template scan (default focused high,critical exposure/misconfiguration/auth pack) of a target-host URL; options {severity,tags}"},
-    "katana": {"binary": "katana", "risk": "active", "default_timeout_ms": 75_000,
-               "max_wire_requests": 150, "build": _tmpl_katana,
-               "desc": "bounded target-host crawl + JS endpoint extraction (depth 2, 45s, same-host only)"},
-    "ffuf": {"binary": "ffuf", "risk": "active", "default_timeout_ms": 75_000,
-             "max_wire_requests": 220, "build": _tmpl_ffuf,
-             "desc": "bounded content/dir discovery over a small bundled wordlist; options {wordlist: common|api|admin}"},
-    "dalfox": {"binary": "dalfox", "risk": "active", "default_timeout_ms": 120_000,
-               "max_wire_requests": 400, "build": _tmpl_dalfox,
-               "desc": "bounded XSS scan of one URL (GET-based, no headless, no blind callback); "
-                       "options {severity: low|medium|high} — default 'high' reports verified-only PoCs"},
-    "sqlmap": {"binary": "sqlmap", "risk": "active", "default_timeout_ms": 300_000,
-               "max_wire_requests": 900, "build": _tmpl_sqlmap,
-               "desc": "bounded SQLi test of one URL (techniques BEUT incl. time-based within the "
-                       "300s wall, level/risk 2, no crawl)"},
-    "nmap": {"binary": "nmap", "risk": "active", "default_timeout_ms": 90_000,
-             "max_wire_requests": 60, "build": _tmpl_nmap,
-             "desc": "read-only connect() service/version probe of the single port behind a "
-                     "target-host URL (no scripts, no raw-scan flags)"},
-    "naabu": {"binary": "naabu", "risk": "active", "default_timeout_ms": 120_000,
-              "max_wire_requests": 1200, "build": _tmpl_naabu,
-              "desc": "bounded top-100 TCP port sweep of the target host (connect scan, rate 10)"},
+    spec.legacy_tool_name: spec.legacy_template(_SCANNER_BUILDERS[spec.legacy_tool_name])
+    for spec in CAPABILITY_REGISTRY.legacy_tools()
+    if spec.legacy_tool_name in _SCANNER_BUILDERS
 }
 RUN_TOOL_NAMES: frozenset[str] = frozenset(SCANNER_ARG_TEMPLATES)
 

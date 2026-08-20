@@ -14,6 +14,18 @@ import subprocess
 from typing import Any
 import uuid
 
+try:
+    from runtime.capability_registry import CAPABILITY_REGISTRY, CapabilitySpec
+except ModuleNotFoundError:  # minimal compatibility bundle used by the local planner adapter
+    CapabilitySpec = Any  # type: ignore[misc,assignment]
+
+    class _EmptyCapabilityRegistry:
+        @staticmethod
+        def external_tools() -> tuple[Any, ...]:
+            return ()
+
+    CAPABILITY_REGISTRY = _EmptyCapabilityRegistry()
+
 
 ARSENAL_SCHEMA_VERSION = "2026-07-12.v3"
 
@@ -80,6 +92,7 @@ class ToolAdapterSpec:
     retest_contract: str | None = None
     redaction_rules: tuple[str, ...] = ("authorization headers", "cookies", "tokens", "private keys")
     timeout_seconds: int = 5
+    capability_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -2017,16 +2030,29 @@ COMMANDS: tuple[ArsenalCommand, ...] = (
 )
 
 
-TOOL_ADAPTERS: tuple[ToolAdapterSpec, ...] = (
-    ToolAdapterSpec("httpx", "http_probe", "ProjectDiscovery httpx HTTP probing.", "passive", "wired", ("httpx",), ("-version",), ("/opt/tools/httpx",), "httpx-json-v1", "http-observation"),
-    ToolAdapterSpec("katana", "crawl", "ProjectDiscovery katana crawler.", "passive", "wired", ("katana",), ("-version",), ("/opt/tools/katana",), "katana-jsonl-v1", "crawl-observation"),
-    ToolAdapterSpec("nuclei", "template_vuln_scan", "Nuclei template scanner.", "active", "wired", ("nuclei",), ("-version",), ("/opt/tools/nuclei",), "nuclei-jsonl-v1", "template-match-with-request-response", "rerun-template-or-family-on-same-surface", timeout_seconds=10),
-    ToolAdapterSpec("subfinder", "subdomain_discovery", "ProjectDiscovery subfinder passive subdomain discovery.", "passive", "wired", ("subfinder",), ("-version",), ("/opt/tools/subfinder",), "subfinder-lines-v1", "passive-discovery"),
-    ToolAdapterSpec("ffuf", "content_discovery", "ffuf content discovery.", "active", "wired", ("ffuf",), ("-V",), ("/opt/tools/ffuf",), "ffuf-json-v1", "content-discovery-observation"),
-    ToolAdapterSpec("dalfox", "xss", "Dalfox XSS scanner.", "active", "wired", ("dalfox",), ("version",), ("/opt/tools/dalfox",), "dalfox-json-v1", "xss-reflection-or-browser-proof"),
-    ToolAdapterSpec("sqlmap", "sqli", "sqlmap SQL injection verifier.", "active", "gated", ("sqlmap", "sqlmap.py"), ("--version",), ("/opt/tools/sqlmap",), "sqlmap-output-v1", "sqli-dbms-or-error-proof", "rerun-request-with-sqli-proof", timeout_seconds=10),
-    ToolAdapterSpec("nmap", "port_scan", "nmap network service discovery.", "active", "gated", ("nmap",), ("--version",), ("/opt/tools/nmap",), "nmap-xml-v1", "open-port-observation"),
-    ToolAdapterSpec("naabu", "port_discovery", "Naabu fast TCP port discovery.", "active", "gated", ("naabu",), ("-version",), ("/opt/tools/naabu",), "naabu-jsonl-v1", "open-port-observation"),
+def _registered_tool(spec: CapabilitySpec) -> ToolAdapterSpec:
+    """Render Arsenal's compatibility record from canonical capability metadata."""
+    return ToolAdapterSpec(
+        tool_name=str(spec.legacy_tool_name or spec.adapter),
+        family=spec.name,
+        description=spec.description,
+        risk_tier=spec.risk_tier,
+        status=spec.arsenal_status,
+        binaries=(spec.binary,) if spec.binary else (),
+        version_args=spec.version_args,
+        common_paths=spec.common_paths,
+        evidence_parser=spec.output_schema,
+        proof_contract=spec.evidence_contract[0] if spec.evidence_contract else None,
+        retest_contract=spec.retest_contract,
+        redaction_rules=spec.redaction_contract,
+        timeout_seconds=max(1, spec.default_timeout_ms // 1000),
+        capability_name=spec.name,
+    )
+
+
+TOOL_ADAPTERS: tuple[ToolAdapterSpec, ...] = tuple(
+    _registered_tool(spec) for spec in CAPABILITY_REGISTRY.external_tools()
+) + (
     ToolAdapterSpec("sslyze", "tls", "SSLyze TLS scanner (disabled until upstream supports the audited cryptography runtime).", "passive", "disabled", ("sslyze",), ("--version",), ("/opt/tools/sslyze",), "sslyze-json-v1", "tls-protocol-observation"),
     ToolAdapterSpec("testssl.sh", "tls", "testssl.sh TLS scanner.", "passive", "wired", ("testssl.sh",), ("--version",), ("/opt/testssl.sh/testssl.sh",), "testssl-json-v1", "tls-protocol-observation", None, timeout_seconds=10),
     ToolAdapterSpec("playwright", "browser_proof", "Playwright browser proof execution.", "active", "wired", ("playwright",), ("--version",), (), "playwright-proof-v1", "browser-observation"),
@@ -2864,6 +2890,7 @@ def _tool_to_dict(spec: ToolAdapterSpec, *, probe_versions: bool) -> dict[str, A
 
     return {
         "tool_name": spec.tool_name,
+        "capability_name": spec.capability_name,
         "family": spec.family,
         "description": spec.description,
         "risk_tier": spec.risk_tier,
