@@ -1,6 +1,6 @@
 ---
 name: shakerscan
-description: Operate ShakerScan. Route scan requests to Web DAST, web-agent investigations to Deep Hunt, connected-device agent investigations to Device Hunt, and manual browser work to Interactive Testing; also manage targets, Continuous ASM, findings, AI Gate, Model Intake, evidence, schedules, local workers, and opt-in Linux fleets.
+description: Operate ShakerScan. Route deterministic assessment to one budgeted Scan, adaptive investigation of web or device targets to Hunt, and manual browser work to Interactive Testing; also manage targets, Continuous ASM, findings, AI Gate, Model Intake, evidence, schedules, workers, and fleets.
 ---
 
 # ShakerScan
@@ -30,10 +30,9 @@ target binding, approvals, budgets, evidence, and finding proof.
 
 | User intent | ShakerScan surface |
 |---|---|
-| “Scan this target” with no type | Quick Web DAST (`POST /scans`, `scan_type=quick`) |
-| Quick, standard, deep, full, aggressive, or smart DAST | `POST /scans` |
-| Deep Hunt, autonomous hunt, or investigate autonomously | Use the `research-agent` skill and `/agent/hunt/*` |
-| Device Hunt, or investigate/hunt one connected device | Use the `device-hunt` skill; start at `/devices/{id}/agent/session`, then use `/device-agent/session/{run_id}/*` |
+| “Scan this target” | `POST /scans` with budget and policy; no scan type |
+| Legacy quick/standard/deep/full/aggressive/smart request | Map to Scan V2 and surface the deprecation warning |
+| Hunt, autonomous investigation, web or device security hunt | Use the `hunt` skill and `/hunts/*` |
 | Explain, compare, or triage a connected device without traffic | Use the `device-triage` skill |
 | Multiple targets | `POST /scans/batch` |
 | Authenticated or two-user testing | `POST /scans` with auth options |
@@ -51,27 +50,22 @@ target binding, approvals, budgets, evidence, and finding proof.
 | Interactive browser or BOLA/IDOR workflow | Use the `ai-security-session` skill (Interactive Testing) |
 | JS or frontend attack-surface analysis | Use the `js-analyze` skill |
 | Content-discovery seeds | Use the `content-discovery` skill |
-| Deep Hunt | Use the `research-agent` skill |
 | Health, queue, and workers | `/health`, `/queue/stats`, `/workers` |
 | Multi-node fleet setup or operations | Check `/workers.fleet`, then use `shakerscan fleet *`, `shakerscan join`, and `/fleet/*` only when supported/enabled |
 | Exhaustive operation or schema lookup | Read `AGENTS.md` and the live `/openapi.json` |
 
-Web DAST and Deep Hunt use one durable target per host. Different HTTP(S) schemes and ports share
+Web Scan and Hunt use one durable target per host. Different HTTP(S) schemes and ports share
 findings, inventory, credentials, and history, while each scan or hunt keeps its exact concrete
 origin. Model Intake artifacts remain exact-subject targets.
 
 ## Apply Safety Gates
 
 - Never scan a target without ownership or explicit authorization.
-- Ask for explicit confirmation before `full`, `aggressive`, or `smart`; these modes send active
-  probes.
-- Deep Hunt performs AI-driven exploration and bounded active exploitation. Confirm target
-  authorization, create a target-bound credential-tier approval, and let ShakerScan enforce the
-  request/action ceilings. The phrase “Deep Hunt” requests the workflow but is not itself a claim
-  that the user owns the target.
-- Device Hunt is the separate agentic connected-device workflow. Confirm authorization for the
-  exact registered device; keep its immutable scope, safety profile, worker-only credentials,
-  health circuit breaker, and user-confirmed SSH shell boundary intact.
+- Active Scan policy and active Hunt capabilities require explicit target authorization. A larger
+  budget changes ceilings only; it does not grant active permission.
+- Hunt is one target-kind-aware workflow. Confirm authorization for the exact web or device target;
+  keep immutable scope, worker-only credentials, device fragility/circuit-breaker controls, and
+  separately confirmed SSH plans intact.
 - Treat credentials, auth headers, cookies, API keys, and approval receipts as secrets. Do not echo
   them in reports.
 - Production AI Gate scans require their production confirmation.
@@ -98,7 +92,7 @@ For a normal scan:
 ```bash
 curl -X POST "$API_BASE/scans" \
   -H "Content-Type: application/json" \
-  -d '{"target":"https://app.example.test","options":{"scan_type":"quick"}}'
+  -d '{"target":"https://app.example.test","budget_profile":"balanced","policy":{"active_testing":false}}'
 ```
 
 After any action queues a scan, ASM job, AI Gate run, Model Intake run, or finding retest:
@@ -209,20 +203,20 @@ actions when they affect the user's decision.
 
 Keep these intents distinct:
 
-- `scan`, `quick scan` → Quick DAST by default.
-- `standard scan`, `deep scan`, `full scan`, `aggressive scan`, `smart scan` → that exact DAST type.
-- `deep hunt`, `autonomous hunt`, `investigate autonomously` → Deep Hunt, never DAST and never the
-  legacy `/research/campaigns/launch` path.
+- `scan` → Scan V2. Choose a resource budget and explicit active-testing permission.
+- legacy scan-type wording → the equivalent V2 budget/policy with a deprecation warning; never Hunt.
+- `hunt`, `deep hunt`, `device hunt`, `autonomous hunt`, `investigate autonomously` → Hunt V2,
+  never Scan and never the legacy `/research/campaigns/launch` path.
 - `verify this finding` → the bounded deterministic finding verification/retest path.
 - `test manually`, `interactive testing`, `browser session` → Interactive Testing.
-- `device hunt`, `investigate/hunt this TV, camera, printer, router, or device` → Device Hunt through
-  the `device-hunt` skill, never Deep Hunt or ordinary Web DAST.
+- `investigate/hunt this TV, camera, printer, router, or device` → Hunt with the registered device
+  target; target-kind policy preserves device-specific safety.
 - `explain/triage/compare this device` → `device-triage` unless the user explicitly authorizes new traffic.
 
-For Deep Hunt, use the current coding-agent session as the planner. Start
-`POST /agent/hunt/{target_id}/session` with `mode:"deep_hunt"` and the approved receipt, then drive
-one reply at a time only while the run is `awaiting_planner`. ShakerScan executes every tool and
-remains authoritative for scope, credentials, active-tool access, evidence, and proof.
+For Hunt, use the current coding-agent session as planner and the `hunt` skill. Start `POST /hunts`,
+then query context, call only returned capabilities, record evidence-backed candidates, and request
+deterministic verification through the same API. ShakerScan remains authoritative for scope,
+credentials, active authority, budgets, evidence, and proof.
 
 ## Read Detailed References
 

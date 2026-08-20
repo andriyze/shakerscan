@@ -54,7 +54,8 @@ def test_mcp_exposes_only_fixed_read_only_arsenal_commands():
     client = FakeClient()
     descriptors = client.list_tools()
 
-    assert {item["name"] for item in descriptors} == {
+    names = {item["name"] for item in descriptors}
+    assert names >= {
         "shakerscan_targets",
         "shakerscan_asm_gaps",
         "shakerscan_findings",
@@ -63,8 +64,9 @@ def test_mcp_exposes_only_fixed_read_only_arsenal_commands():
         "shakerscan_plans",
         "shakerscan_tool_status",
     }
-    assert all(item["annotations"]["readOnlyHint"] is True for item in descriptors)
+    assert {tool.name for tool in mcp.HUNT_TOOLS} <= names
     assert all(item["annotations"]["destructiveHint"] is False for item in descriptors)
+    assert all(item["annotations"]["readOnlyHint"] is True for item in descriptors if item["name"] not in {tool.name for tool in mcp.HUNT_TOOLS})
     assert all(tool.command not in {"scan.submit", "asm.improve", "finding.retest"} for tool in mcp.TOOLS)
 
 
@@ -145,7 +147,28 @@ def test_mcp_server_protocol_and_notifications():
     assert initialized["result"]["protocolVersion"] == "2024-11-05"
     assert initialized["result"]["capabilities"] == {"tools": {"listChanged": False}}
     assert notification is None
-    assert len(tools["result"]["tools"]) == 7
+    assert len(tools["result"]["tools"]) == 7 + len(mcp.HUNT_TOOLS)
+
+
+def test_mcp_hunt_tools_wrap_canonical_api_and_validate_ids():
+    class HuntClient(FakeClient):
+        def request_json(self, method, path, payload=None):
+            if path.startswith("/hunts/"):
+                self.calls.append((method, path, payload))
+                return {"hunt_id": path.split("/")[2], "status": "active"}
+            return super().request_json(method, path, payload)
+
+    client = HuntClient()
+    hunt_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    result = client.call_tool("shakerscan_hunt_query", {
+        "hunt_id": hunt_id, "kind": "endpoints", "limit": 25,
+    })
+
+    assert result["structuredContent"]["hunt_id"] == hunt_id
+    assert client.calls[-1] == ("POST", f"/hunts/{hunt_id}/query", {"kind": "endpoints", "limit": 25})
+
+    with pytest.raises(mcp.MCPError):
+        client.call_tool("shakerscan_hunt_get", {"hunt_id": "not-a-uuid"})
 
 
 def test_mcp_stdio_emits_only_json_rpc_on_stdout():

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Read-only MCP stdio adapter over ShakerScan Command Arsenal.
+"""MCP stdio adapter over ShakerScan Command Arsenal and canonical Hunt V2.
 
 The adapter has no scanner or database imports. It discovers the live REST
 catalog, exposes a fixed subset of read-only commands, and dispatches each call
-through POST /arsenal/execute. State-changing Arsenal commands are intentionally
-not representable in this transport.
+through POST /arsenal/execute. State-changing Arsenal commands are not representable. Hunt calls
+use the target-bound API, which revalidates approvals, scope, capabilities, and budgets.
 """
 
 from __future__ import annotations
@@ -20,8 +20,8 @@ from dataclasses import dataclass
 from typing import Any, BinaryIO
 
 
-SERVER_NAME = "shakerscan-read-only"
-SERVER_VERSION = "2026-07-09.v1"
+SERVER_NAME = "shakerscan"
+SERVER_VERSION = "2026-08-19.v2"
 SUPPORTED_PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
 DEFAULT_API_URL = "http://127.0.0.1:8080"
 DEFAULT_TIMEOUT_SECONDS = 20.0
@@ -59,6 +59,36 @@ class MCPTool:
                 "shakerscan/command": self.command,
                 "shakerscan/maturity": "read_only",
             },
+        }
+
+
+@dataclass(frozen=True)
+class HuntMCPTool:
+    name: str
+    method: str
+    path_template: str
+    description: str
+    properties: dict[str, dict[str, Any]]
+    required: tuple[str, ...] = ()
+    read_only: bool = False
+
+    def descriptor(self) -> dict[str, Any]:
+        schema: dict[str, Any] = {
+            "type": "object", "properties": self.properties, "additionalProperties": False,
+        }
+        if self.required:
+            schema["required"] = list(self.required)
+        return {
+            "name": self.name,
+            "description": self.description,
+            "inputSchema": schema,
+            "annotations": {
+                "readOnlyHint": self.read_only,
+                "destructiveHint": False,
+                "idempotentHint": self.read_only,
+                "openWorldHint": False,
+            },
+            "_meta": {"shakerscan/api": self.path_template, "shakerscan/maturity": "hunt_v2"},
         }
 
 
@@ -123,6 +153,68 @@ TOOLS: tuple[MCPTool, ...] = (
 )
 
 TOOL_BY_NAME = {tool.name: tool for tool in TOOLS}
+
+HUNT_TOOLS: tuple[HuntMCPTool, ...] = (
+    HuntMCPTool(
+        "shakerscan_hunt_start", "POST", "/hunts", "Start one target-bound Hunt.",
+        {
+            "target_id": {"type": "string", "format": "uuid"},
+            "objective": {"type": "string"},
+            "budget_profile": {"type": "string", "enum": ["fast", "balanced", "thorough"]},
+            "approval_receipt_id": {"type": "string", "format": "uuid"},
+            "request_collection_ids": {"type": "array", "items": {"type": "string", "format": "uuid"}, "maxItems": 16},
+        },
+        ("target_id", "objective", "budget_profile"),
+    ),
+    HuntMCPTool(
+        "shakerscan_hunt_get", "GET", "/hunts/{hunt_id}", "Read a Hunt and its capability manifest.",
+        {"hunt_id": {"type": "string", "format": "uuid"}}, ("hunt_id",), True,
+    ),
+    HuntMCPTool(
+        "shakerscan_hunt_query", "POST", "/hunts/{hunt_id}/query", "Query bounded Hunt context.",
+        {
+            "hunt_id": {"type": "string", "format": "uuid"},
+            "kind": {"type": "string", "enum": ["summary", "endpoints", "findings", "principals", "services", "scans", "collections", "candidates", "notes", "receipts"]},
+            "filter": {"type": "object"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 500},
+        },
+        ("hunt_id", "kind"), True,
+    ),
+    HuntMCPTool(
+        "shakerscan_hunt_capability", "POST", "/hunts/{hunt_id}/capabilities/{capability_name}",
+        "Execute one capability from the Hunt's server-returned manifest.",
+        {"hunt_id": {"type": "string", "format": "uuid"}, "capability_name": {"type": "string"}, "input": {"type": "object"}},
+        ("hunt_id", "capability_name"),
+    ),
+    HuntMCPTool(
+        "shakerscan_hunt_candidate", "POST", "/hunts/{hunt_id}/candidates",
+        "Record a non-authoritative, evidence-backed Hunt candidate.",
+        {
+            "hunt_id": {"type": "string", "format": "uuid"}, "family": {"type": "string"},
+            "locus": {"type": "object"}, "title": {"type": "string"}, "claim": {"type": "string"},
+            "severity": {"type": "string", "enum": ["critical", "high", "medium", "low", "info"]},
+            "evidence_refs": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 100},
+            "verifier_contract_id": {"type": "string"},
+        },
+        ("hunt_id", "family", "locus", "title", "claim", "evidence_refs"),
+    ),
+    HuntMCPTool(
+        "shakerscan_hunt_verify", "POST", "/hunts/{hunt_id}/candidates/{candidate_id}/verify",
+        "Request registered deterministic verification for one candidate.",
+        {"hunt_id": {"type": "string", "format": "uuid"}, "candidate_id": {"type": "string", "format": "uuid"}},
+        ("hunt_id", "candidate_id"),
+    ),
+    HuntMCPTool(
+        "shakerscan_hunt_finish", "POST", "/hunts/{hunt_id}/finish", "Finish a Hunt with a debrief.",
+        {"hunt_id": {"type": "string", "format": "uuid"}, "summary": {"type": "string"}, "next_actions": {"type": "array", "items": {"type": "string"}, "maxItems": 100}},
+        ("hunt_id", "summary"),
+    ),
+    HuntMCPTool(
+        "shakerscan_hunt_cancel", "POST", "/hunts/{hunt_id}/cancel", "Cancel a Hunt.",
+        {"hunt_id": {"type": "string", "format": "uuid"}}, ("hunt_id",),
+    ),
+)
+HUNT_TOOL_BY_NAME = {tool.name: tool for tool in HUNT_TOOLS}
 
 
 class MCPError(Exception):
@@ -232,6 +324,10 @@ class ArsenalClient:
             raise MCPError(-32602, f"Tool argument {name} must be a string")
         if expected == "boolean" and not isinstance(value, bool):
             raise MCPError(-32602, f"Tool argument {name} must be a boolean")
+        if expected == "object" and not isinstance(value, dict):
+            raise MCPError(-32602, f"Tool argument {name} must be an object")
+        if expected == "array" and not isinstance(value, list):
+            raise MCPError(-32602, f"Tool argument {name} must be an array")
 
         allowed = schema.get("enum")
         if isinstance(allowed, list) and value not in allowed:
@@ -250,6 +346,16 @@ class ArsenalClient:
                 raise MCPError(-32602, f"Tool argument {name} must be a UUID") from None
             if str(parsed) != value.lower():
                 raise MCPError(-32602, f"Tool argument {name} must use canonical UUID form")
+        if expected == "array":
+            minimum = schema.get("minItems")
+            maximum = schema.get("maxItems")
+            if minimum is not None and len(value) < minimum:
+                raise MCPError(-32602, f"Tool argument {name} needs at least {minimum} item(s)")
+            if maximum is not None and len(value) > maximum:
+                raise MCPError(-32602, f"Tool argument {name} allows at most {maximum} item(s)")
+            item_schema = schema.get("items") if isinstance(schema.get("items"), dict) else {}
+            for item in value:
+                ArsenalClient._validate_argument(name, item, item_schema)
 
     def list_tools(self) -> list[dict[str, Any]]:
         catalog = self.catalog()
@@ -261,9 +367,33 @@ class ArsenalClient:
             if command.get("status") != "read_only" or command.get("risk_tier") != "read_only" or command.get("method") != "GET":
                 raise MCPError(-32006, f"Arsenal command {tool.command} is no longer read-only")
             descriptors.append(tool.descriptor())
-        return descriptors
+        return descriptors + [tool.descriptor() for tool in HUNT_TOOLS]
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        hunt_tool = HUNT_TOOL_BY_NAME.get(name)
+        if hunt_tool:
+            unknown = sorted(set(arguments) - set(hunt_tool.properties))
+            missing = sorted(set(hunt_tool.required) - set(arguments))
+            if unknown:
+                raise MCPError(-32602, f"Unknown tool arguments: {', '.join(unknown)}")
+            if missing:
+                raise MCPError(-32602, f"Missing required tool arguments: {', '.join(missing)}")
+            for key, value in arguments.items():
+                self._validate_argument(key, value, hunt_tool.properties[key])
+            payload = dict(arguments)
+            path = hunt_tool.path_template
+            for key in ("hunt_id", "capability_name", "candidate_id"):
+                marker = "{" + key + "}"
+                if marker in path:
+                    path = path.replace(marker, urllib.parse.quote(str(payload.pop(key)), safe=""))
+            if name == "shakerscan_hunt_capability":
+                payload = {"input": payload.get("input") or {}}
+            result = self.request_json(hunt_tool.method, path, payload or None)
+            return {
+                "content": [{"type": "text", "text": json.dumps(result, sort_keys=True, default=str)}],
+                "structuredContent": result,
+                "isError": False,
+            }
         tool = TOOL_BY_NAME.get(name)
         if not tool:
             raise MCPError(-32602, f"Unknown read-only ShakerScan tool: {name}")
@@ -306,7 +436,7 @@ class MCPServer:
                 "protocolVersion": protocol,
                 "capabilities": {"tools": {"listChanged": False}},
                 "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
-                "instructions": "Read-only ShakerScan inspection. No scan, retest, replay, policy-write, or other state-changing command is exposed.",
+                "instructions": "Read-only inspection plus target-bound Hunt V2. Hunt calls remain subject to server scope, approval, capability, budget, evidence, and proof enforcement.",
             }
         elif method == "ping":
             result = {}

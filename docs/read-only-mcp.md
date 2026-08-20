@@ -1,10 +1,10 @@
-# Read-only MCP
+# ShakerScan MCP
 
 **Status:** shipped and contract-tested as of 2026-07-11.
 
-ShakerScan includes a fail-closed MCP stdio adapter over the REST Command Arsenal.
-It exposes stored product state only and does not expose scan submission, ASM
-mutation, retests, replay, policy writes, shell, or arbitrary code execution.
+ShakerScan includes a fail-closed MCP stdio adapter over the REST Command Arsenal and canonical
+Hunt V2. Arsenal tools remain read-only. Hunt tools wrap `/hunts` directly and inherit its exact
+target binding, approval, budget, evidence, and proof enforcement; arbitrary shell is never exposed.
 
 Start it from the source/runtime directory:
 
@@ -38,12 +38,15 @@ The adapter exposes:
 - `shakerscan_timeline`
 - `shakerscan_plans`
 - `shakerscan_tool_status`
+- `shakerscan_hunt_start`, `shakerscan_hunt_get`, and `shakerscan_hunt_query`
+- `shakerscan_hunt_capability` for capabilities returned by that Hunt's manifest
+- `shakerscan_hunt_candidate`, `shakerscan_hunt_verify`, `shakerscan_hunt_finish`, and `shakerscan_hunt_cancel`
 
-For every tool listing and call, the adapter reads `GET /arsenal/commands` and
-requires the mapped command to remain `read_only`, `read_only` risk, and `GET`.
-Calls then go through `POST /arsenal/execute`, preserving normal command-result
-auditing. Catalog drift, redirects, oversized responses, unavailable APIs, and
-unexpected dispatch results fail closed.
+Arsenal tools read `GET /arsenal/commands`, require the mapped command to remain `read_only` risk,
+and dispatch through the audited Arsenal endpoint. Hunt tools call the canonical `/hunts` API; the
+runtime revalidates target binding, the run's capability manifest, approval, budgets, evidence, and
+proof contracts. Catalog drift, redirects, oversized responses, unavailable APIs, and unexpected
+dispatch results fail closed.
 
 Input schemas enforce UUIDs, enums, required fields, and per-tool numeric bounds before dispatch;
 the REST Arsenal validates the command contract again. The transport also caps request and response
