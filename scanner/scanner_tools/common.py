@@ -10,6 +10,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import UTC, datetime
+from dataclasses import dataclass
 from typing import Any
 
 try:
@@ -188,7 +189,7 @@ def _record_subprocess_receipt(
     redacted = _redacted_argv(cmd or [])
     tool_name = redacted[0] if redacted else "subprocess"
     status = "timeout" if timed_out else "success" if exit_code == 0 else "failed"
-    parser_status = "not_applicable" if timed_out else "not_run"
+    parser_status = "partial_available" if timed_out and stdout else "not_applicable" if timed_out else "not_run"
     now = time.monotonic()
     stdout_text = str(stdout or "")
     stderr_text = str(stderr or error or "")
@@ -476,6 +477,176 @@ async def run(
                 if metered_request:
                     meter.record_completion(phase="curl", url=request_url)
         return "", "Max retries exceeded", 1
+
+
+@dataclass(frozen=True)
+class StreamingRunResult:
+    stdout: str
+    stderr: str
+    returncode: int
+    status: str
+    partial: bool = False
+    timed_out: bool = False
+    soft_deadline_reached: bool = False
+    cancelled: bool = False
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False
+
+
+async def run_streaming(
+    cmd: list[str],
+    *,
+    soft_timeout: float,
+    flush_grace: float = 30.0,
+    hard_timeout: float | None = None,
+    input_text: str | None = None,
+    cancel_check: Any = None,
+    on_stdout_line: Any = None,
+    max_stdout_bytes: int = 8 * 1024 * 1024,
+    max_stderr_bytes: int = 2 * 1024 * 1024,
+) -> StreamingRunResult:
+    """Run a process without discarding valid output when a deadline is reached.
+
+    At the soft deadline the process group receives SIGINT and may flush for ``flush_grace``.
+    A still-running group then receives SIGTERM and may run until ``hard_timeout`` before SIGKILL.
+    User cancellation always kills immediately and is returned distinctly from timeout.
+    """
+    if not cmd:
+        raise ValueError("cmd must not be empty")
+    soft_timeout = float(soft_timeout)
+    flush_grace = float(flush_grace)
+    hard_timeout = float(hard_timeout if hard_timeout is not None else soft_timeout + flush_grace)
+    if soft_timeout <= 0 or flush_grace < 0 or hard_timeout < soft_timeout + flush_grace:
+        raise ValueError("deadlines must satisfy 0 < soft <= soft+flush <= hard")
+    if max_stdout_bytes < 0 or max_stderr_bytes < 0:
+        raise ValueError("output limits must be non-negative")
+
+    async with _get_semaphore():
+        started = time.monotonic()
+        use_process_group = os.name == "posix"
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.PIPE if input_text is not None else None,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=use_process_group,
+        )
+        if input_text is not None and proc.stdin is not None:
+            proc.stdin.write(input_text.encode())
+            await proc.stdin.drain()
+            proc.stdin.close()
+
+        stdout = bytearray()
+        stderr = bytearray()
+        stdout_truncated = False
+        stderr_truncated = False
+
+        async def _read(stream: Any, sink: bytearray, limit: int, *, callback: Any = None) -> bool:
+            truncated = False
+            while True:
+                line = await stream.readline()
+                if not line:
+                    return truncated
+                room = max(0, limit - len(sink))
+                if room:
+                    sink.extend(line[:room])
+                if len(line) > room:
+                    truncated = True
+                if callback is not None:
+                    text = line.decode(errors="replace").rstrip("\r\n")
+                    result = callback(text)
+                    if hasattr(result, "__await__"):
+                        await result
+
+        stdout_task = asyncio.create_task(_read(
+            proc.stdout, stdout, max_stdout_bytes, callback=on_stdout_line
+        ))
+        stderr_task = asyncio.create_task(_read(proc.stderr, stderr, max_stderr_bytes))
+
+        async def _signal(sig: int) -> None:
+            if proc.returncode is not None:
+                return
+            try:
+                if use_process_group:
+                    os.killpg(proc.pid, sig)
+                else:
+                    proc.send_signal(sig)
+            except ProcessLookupError:
+                pass
+
+        cancelled = False
+        soft_reached = False
+        timed_out = False
+
+        async def _cancel_watch() -> None:
+            nonlocal cancelled
+            if not callable(cancel_check):
+                return
+            while proc.returncode is None:
+                requested = cancel_check()
+                if hasattr(requested, "__await__"):
+                    requested = await requested
+                if requested:
+                    cancelled = True
+                    await _signal(signal.SIGKILL)
+                    return
+                await asyncio.sleep(0.1)
+
+        cancel_task = asyncio.create_task(_cancel_watch())
+        try:
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=soft_timeout)
+            except TimeoutError:
+                soft_reached = True
+                await _signal(signal.SIGINT)
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=flush_grace)
+                except TimeoutError:
+                    await _signal(signal.SIGTERM)
+                    remaining = max(0.0, hard_timeout - soft_timeout - flush_grace)
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=remaining)
+                    except TimeoutError:
+                        timed_out = True
+                        await _signal(signal.SIGKILL)
+                        await proc.wait()
+                if not cancelled:
+                    timed_out = True
+        except asyncio.CancelledError:
+            await _signal(signal.SIGKILL)
+            await proc.wait()
+            raise
+        finally:
+            cancel_task.cancel()
+            try:
+                await cancel_task
+            except BaseException:
+                pass
+            stdout_truncated, stderr_truncated = await asyncio.gather(stdout_task, stderr_task)
+
+        stdout_text = stdout.decode(errors="replace")
+        stderr_text = stderr.decode(errors="replace")
+        if cancelled:
+            status, returncode = "cancelled", 130
+        elif timed_out:
+            status, returncode = "partial" if stdout_text else "timed_out", 124
+        else:
+            returncode = int(proc.returncode or 0)
+            status = "succeeded" if returncode == 0 else "failed"
+        partial = bool(timed_out and stdout_text)
+        _record_subprocess_receipt(
+            cmd,
+            timeout_seconds=max(1, int(hard_timeout)),
+            exit_code=returncode,
+            timed_out=timed_out,
+            started_at=started,
+            stdout=stdout_text,
+            stderr=stderr_text,
+        )
+        return StreamingRunResult(
+            stdout_text, stderr_text, returncode, status, partial, timed_out, soft_reached,
+            cancelled, stdout_truncated, stderr_truncated,
+        )
 
 
 def now_utc_iso() -> str:

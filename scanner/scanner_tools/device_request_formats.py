@@ -20,6 +20,8 @@ from .device_postman import (
     MAX_COLLECTION_BYTES,
     MAX_HEADERS,
     MAX_REQUESTS,
+    HARD_MAX_COLLECTION_BYTES,
+    HARD_MAX_REQUESTS,
     SAFE_METHODS,
     STATE_CHANGING_METHODS,
     SUPPORTED_METHODS,
@@ -110,14 +112,27 @@ def validate_request_document(
     requested_name: str | None = None,
     import_format: str = "auto",
     base_url: str | None = None,
+    max_requests: int = MAX_REQUESTS,
+    max_document_bytes: int = MAX_COLLECTION_BYTES,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    max_requests = int(max_requests)
+    max_document_bytes = int(max_document_bytes)
+    if not 1 <= max_requests <= HARD_MAX_REQUESTS:
+        raise RequestImportError(f"request limit must be between 1 and {HARD_MAX_REQUESTS}")
+    if not 1 <= max_document_bytes <= HARD_MAX_COLLECTION_BYTES:
+        raise RequestImportError(
+            f"document limit must be between 1 and {HARD_MAX_COLLECTION_BYTES} bytes"
+        )
     requested_format = str(import_format or "auto").strip().lower()
     if requested_format not in IMPORT_FORMATS:
         raise RequestImportError("format must be auto, postman_collection, har, or openapi")
     actual = detect_format(document) if requested_format == "auto" else requested_format
     if actual == "postman_collection":
         try:
-            return validate_postman(document, environment, requested_name=requested_name)
+            return validate_postman(
+                document, environment, requested_name=requested_name,
+                max_requests=max_requests, max_collection_bytes=max_document_bytes,
+            )
         except PostmanCollectionError as exc:
             raise RequestImportError(str(exc)) from exc
     if environment is not None:
@@ -125,32 +140,48 @@ def validate_request_document(
     if actual == "har":
         if base_url:
             raise RequestImportError("base_url is supported only for OpenAPI and Swagger imports")
-        return _validate_har(document, requested_name=requested_name)
-    return _validate_openapi(document, requested_name=requested_name, base_url=base_url)
+        return _validate_har(
+            document, requested_name=requested_name, max_requests=max_requests,
+            max_document_bytes=max_document_bytes,
+        )
+    return _validate_openapi(
+        document, requested_name=requested_name, base_url=base_url,
+        max_requests=max_requests, max_document_bytes=max_document_bytes,
+    )
 
 
-def resolve_imported_requests(payload: dict[str, Any]) -> list[dict[str, Any]]:
+def resolve_imported_requests(
+    payload: dict[str, Any], *, max_requests: int = MAX_REQUESTS
+) -> list[dict[str, Any]]:
     """Resolve a worker-only encrypted payload into the shared replay contract."""
     if not isinstance(payload, dict):
         raise RequestImportError("Encrypted request payload is invalid")
     format_name = str(payload.get("format") or "")
     if not format_name and isinstance(payload.get("collection"), dict):
-        return resolve_postman_requests(payload)  # legacy payloads
+        return resolve_postman_requests(payload, max_requests=max_requests)  # legacy payloads
     if format_name == "postman_collection":
-        return resolve_postman_requests({"collection": payload.get("document"), "environment": payload.get("environment")})
+        return resolve_postman_requests(
+            {"collection": payload.get("document"), "environment": payload.get("environment")},
+            max_requests=max_requests,
+        )
     if format_name == "har":
-        return _resolve_har(payload.get("document"))
+        return _resolve_har(payload.get("document"), max_requests=max_requests)
     if format_name == "openapi":
-        requests, _metadata = _openapi_requests(payload.get("document"), base_url=payload.get("base_url"))
+        requests, _metadata = _openapi_requests(
+            payload.get("document"), base_url=payload.get("base_url"), max_requests=max_requests
+        )
         return requests
     raise RequestImportError("Encrypted request payload has an unsupported format")
 
 
-def _validate_har(document: Any, *, requested_name: str | None) -> tuple[dict[str, Any], dict[str, Any]]:
+def _validate_har(
+    document: Any, *, requested_name: str | None, max_requests: int = MAX_REQUESTS,
+    max_document_bytes: int = MAX_COLLECTION_BYTES,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     if not isinstance(document, dict) or not isinstance(document.get("log"), dict):
         raise RequestImportError("HAR import must contain one log object")
-    if _json_size(document) > MAX_COLLECTION_BYTES:
-        raise RequestImportError("HAR import exceeds the 5 MiB limit")
+    if _json_size(document) > max_document_bytes:
+        raise RequestImportError(f"HAR import exceeds the {max_document_bytes}-byte limit")
     log = document["log"]
     version = str(log.get("version") or "")
     if version and version != "1.2":
@@ -158,9 +189,9 @@ def _validate_har(document: Any, *, requested_name: str | None) -> tuple[dict[st
     entries = log.get("entries")
     if not isinstance(entries, list) or not entries:
         raise RequestImportError("HAR import contains no request entries")
-    if len(entries) > MAX_REQUESTS:
-        raise RequestImportError(f"HAR import exceeds the {MAX_REQUESTS}-request limit")
-    resolved = _resolve_har(document)
+    if len(entries) > max_requests:
+        raise RequestImportError(f"HAR import exceeds the {max_requests}-request limit")
+    resolved = _resolve_har(document, max_requests=max_requests)
     if not resolved:
         raise RequestImportError("HAR import contains no valid requests")
     creator = log.get("creator") if isinstance(log.get("creator"), dict) else {}
@@ -182,14 +213,14 @@ def _validate_har(document: Any, *, requested_name: str | None) -> tuple[dict[st
     return payload, summary
 
 
-def _resolve_har(document: Any) -> list[dict[str, Any]]:
+def _resolve_har(document: Any, *, max_requests: int = MAX_REQUESTS) -> list[dict[str, Any]]:
     if not isinstance(document, dict) or not isinstance(document.get("log"), dict):
         raise RequestImportError("Encrypted HAR payload is invalid")
     entries = document["log"].get("entries")
     if not isinstance(entries, list):
         raise RequestImportError("Encrypted HAR entries are invalid")
     result: list[dict[str, Any]] = []
-    for index, entry in enumerate(entries[:MAX_REQUESTS]):
+    for index, entry in enumerate(entries[:max_requests]):
         request = entry.get("request") if isinstance(entry, dict) else None
         if not isinstance(request, dict):
             continue
@@ -391,7 +422,9 @@ def _openapi_body(
     return b"", "", None
 
 
-def _openapi_requests(document: Any, *, base_url: Any = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def _openapi_requests(
+    document: Any, *, base_url: Any = None, max_requests: int = MAX_REQUESTS
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if not isinstance(document, dict):
         raise RequestImportError("Encrypted OpenAPI payload is invalid")
     is_swagger = str(document.get("swagger") or "").startswith("2.")
@@ -424,8 +457,8 @@ def _openapi_requests(document: Any, *, base_url: Any = None) -> tuple[list[dict
             operation = resolver.resolve(raw_operation)
             if not isinstance(operation, dict):
                 continue
-            if len(requests) >= MAX_REQUESTS:
-                raise RequestImportError(f"OpenAPI import exceeds the {MAX_REQUESTS}-operation limit")
+            if len(requests) >= max_requests:
+                raise RequestImportError(f"OpenAPI import exceeds the {max_requests}-operation limit")
             server, unresolved = root_server, list(root_unresolved)
             if is_openapi and isinstance(path_item.get("servers"), list) and path_item["servers"]:
                 server, unresolved = _server_url(path_item["servers"][0])
@@ -488,12 +521,17 @@ def _openapi_requests(document: Any, *, base_url: Any = None) -> tuple[list[dict
     }
 
 
-def _validate_openapi(document: Any, *, requested_name: str | None, base_url: str | None) -> tuple[dict[str, Any], dict[str, Any]]:
+def _validate_openapi(
+    document: Any, *, requested_name: str | None, base_url: str | None,
+    max_requests: int = MAX_REQUESTS, max_document_bytes: int = MAX_COLLECTION_BYTES,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     if not isinstance(document, dict):
         raise RequestImportError("OpenAPI import must be one JSON object")
-    if _json_size(document) > MAX_COLLECTION_BYTES:
-        raise RequestImportError("OpenAPI import exceeds the 5 MiB limit")
-    requests, metadata = _openapi_requests(document, base_url=base_url)
+    if _json_size(document) > max_document_bytes:
+        raise RequestImportError(f"OpenAPI import exceeds the {max_document_bytes}-byte limit")
+    requests, metadata = _openapi_requests(
+        document, base_url=base_url, max_requests=max_requests
+    )
     if not requests:
         raise RequestImportError("OpenAPI import contains no supported operations")
     info = document.get("info") if isinstance(document.get("info"), dict) else {}

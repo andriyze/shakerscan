@@ -21,6 +21,8 @@ from typing import Any, Iterator
 MAX_COLLECTION_BYTES = 5 * 1024 * 1024
 MAX_ENVIRONMENT_BYTES = 2 * 1024 * 1024
 MAX_REQUESTS = 2000
+HARD_MAX_COLLECTION_BYTES = 50 * 1024 * 1024
+HARD_MAX_REQUESTS = 20_000
 MAX_HEADERS = 100
 MAX_BODY_BYTES = 512 * 1024
 MAX_EXPANDED_VALUE_CHARS = MAX_BODY_BYTES
@@ -258,15 +260,27 @@ def validate_and_summarize(
     environment: Any = None,
     *,
     requested_name: str | None = None,
+    max_requests: int = MAX_REQUESTS,
+    max_collection_bytes: int = MAX_COLLECTION_BYTES,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    max_requests = int(max_requests)
+    max_collection_bytes = int(max_collection_bytes)
+    if not 1 <= max_requests <= HARD_MAX_REQUESTS:
+        raise PostmanCollectionError(f"Postman request limit must be between 1 and {HARD_MAX_REQUESTS}")
+    if not 1 <= max_collection_bytes <= HARD_MAX_COLLECTION_BYTES:
+        raise PostmanCollectionError(
+            f"Postman document limit must be between 1 and {HARD_MAX_COLLECTION_BYTES} bytes"
+        )
     if not isinstance(collection, dict):
         raise PostmanCollectionError("Postman collection must be one JSON object")
     if environment is not None and not isinstance(environment, dict):
         raise PostmanCollectionError("Postman environment must be one JSON object")
     collection_size = _json_size(collection)
     environment_size = _json_size(environment) if environment is not None else 0
-    if collection_size > MAX_COLLECTION_BYTES:
-        raise PostmanCollectionError("Postman collection exceeds the 5 MiB limit")
+    if collection_size > max_collection_bytes:
+        raise PostmanCollectionError(
+            f"Postman collection exceeds the {max_collection_bytes}-byte limit"
+        )
     if environment_size > MAX_ENVIRONMENT_BYTES:
         raise PostmanCollectionError("Postman environment exceeds the 2 MiB limit")
     info = collection.get("info") if isinstance(collection.get("info"), dict) else {}
@@ -276,8 +290,8 @@ def validate_and_summarize(
     rows = list(_walk_items(collection.get("item"), inherited_auth=collection.get("auth")))
     if not rows:
         raise PostmanCollectionError("Postman collection contains no requests")
-    if len(rows) > MAX_REQUESTS:
-        raise PostmanCollectionError(f"Postman collection exceeds the {MAX_REQUESTS}-request limit")
+    if len(rows) > max_requests:
+        raise PostmanCollectionError(f"Postman collection exceeds the {max_requests}-request limit")
     requests: list[dict[str, Any]] = []
     methods: Counter[str] = Counter()
     port_hints: set[int] = set()
@@ -455,7 +469,9 @@ def _request_body(request: dict[str, Any], variables: dict[str, str]) -> tuple[b
     return rendered, content_type, sorted(unresolved), error
 
 
-def resolve_requests(payload: dict[str, Any]) -> list[dict[str, Any]]:
+def resolve_requests(
+    payload: dict[str, Any], *, max_requests: int = MAX_REQUESTS
+) -> list[dict[str, Any]]:
     collection = payload.get("collection") if isinstance(payload, dict) else None
     environment = payload.get("environment") if isinstance(payload, dict) else None
     if not isinstance(collection, dict):
@@ -494,7 +510,10 @@ def resolve_requests(payload: dict[str, Any]) -> list[dict[str, Any]]:
             "unresolved_variables": sorted(set(unresolved_url + unresolved_path + unresolved_headers + unresolved_body)),
             "error": body_error,
         })
-    return resolved[:MAX_REQUESTS]
+    limit = int(max_requests)
+    if not 1 <= limit <= HARD_MAX_REQUESTS:
+        raise PostmanCollectionError(f"Postman request limit must be between 1 and {HARD_MAX_REQUESTS}")
+    return resolved[:limit]
 
 
 def public_request_url(url: str) -> str:
