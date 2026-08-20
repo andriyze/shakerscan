@@ -2,6 +2,29 @@
 
 This is an open-source Dynamic Application Security Testing (DAST) scanner. Users interact with it via AI coding agents to scan websites for vulnerabilities.
 
+## AI-Native Architecture Rules
+
+ShakerScan has two core application-security workflows: one deterministic **Scan** and one
+AI-driven **Hunt**. New work must preserve the following boundaries:
+
+1. Do not add a new DAST scan type. Resource presets define ceilings; active testing is an
+   explicit permission, not a scan identity.
+2. Do not add target-specific Hunt engines. Target kind filters the capabilities and safety
+   policy of the shared Hunt runtime.
+3. Do not expose arbitrary shell commands or planner-supplied argv as trusted capabilities.
+4. Every network action must use runtime target binding and scope/destination validation.
+5. Every executable capability must have one canonical registry entry declaring risk, budgets,
+   placement, parser/output schema, and evidence contract.
+6. Reserve multi-dimensional budget before execution and reconcile it afterward.
+7. AI output may create notes, observations, and evidence-backed candidates; it cannot mark a
+   finding verified. Only deterministic proof contracts may promote findings.
+8. Adaptive pentesting strategy belongs in Hunt skills or the external planner, not in scanner
+   branching. Deterministic safety, protocol, evidence, and correctness rules remain server-side.
+9. Preserve trustworthy partial output on timeout where safe. Cancellation remains distinct and
+   must not continue the scan.
+10. Prefer reducing or reusing core concepts over introducing parallel registries, ledgers,
+    scope paths, candidate models, proof paths, or orchestration engines.
+
 ## Quick Setup
 
 If the scanner isn't running, start it:
@@ -57,10 +80,10 @@ flags, skills, agents, adapters, modules, and durable tables) plus architecture/
 
 - **Dashboard (`/`)**: security-posture summary, prioritized action center, recent meaningful activity, and a compact operations bar for live queue state, emergency clear, worker count/scaling/stale-build warning, and Gungnir CT status/toggle. Auto-refreshes every 10-30s.
 - **Docs (`/docs`)**: safely renders the installed `README.md` in the web UI. Relative README links open the matching public GitHub document; raw HTML is not rendered.
-- **Scans (`/scans`)**: filter by status/domain/search, pagination (50/page), cancel running/pending scans, re-scan dropdown (all 6 scan types), auto-refresh every 5s. Shows target, type, status, score/grade, findings count, duration, date.
+- **Scans (`/scans`)**: filter by status/domain/search, pagination (50/page), cancel running/pending scans, and re-run the deterministic Scan. Historical type labels remain readable. Auto-refreshes every 5s.
 - **Scan Detail (`/scans/{id}`)**: live logs with auto-scroll while running (5s refresh), progress bar + current phase, partial-results view for failed scans (warning banner), refreshed deployment decision, full report with PDF export, compliance section, resolved coverage budget, AI Gate evidence, and Model Intake artifact checks when complete. Preserves list filter context on back navigation.
-- **Exposure (`/exposure`)**: graph linking domains, targets, APIs, auth roles, third-party JS/vendors, cloud hints, AI targets, MCP tools, model artifacts, scans, and findings. Registered web assets can be opened directly in **Deep Hunt**.
-- **Continuous ASM (`/asm`)**: target coverage, family proof rollups, scheduler decisions, endpoint inventory, gaps, recommendations, and target campaign timeline. **Open Deep Hunt** carries the target and a coverage-gap objective into the canonical AI investigation flow; ordinary improve/test actions remain available separately.
+- **Exposure (`/exposure`)**: graph linking domains, targets, APIs, auth roles, third-party JS/vendors, cloud hints, AI targets, MCP tools, model artifacts, scans, and findings. Registered web assets can be opened directly in **Hunt**.
+- **Continuous ASM (`/asm`)**: target coverage, family proof rollups, scheduler decisions, endpoint inventory, gaps, recommendations, and target campaign timeline. **Open Hunt** carries the target and a coverage-gap objective into the canonical AI investigation flow.
 - **Timeline (`/timeline`)**: cross-product mission feed for scans, schedules, command results, evidence bindings, refuters, and exports.
 - **Campaigns (`/campaigns`, `/campaigns/{id}`)**: inspect the read-only mission ledger, lifecycle state, finding impact, and action history. It is not a Deep Hunt launcher.
 - **Evidence (`/evidence`)**: browse evidence instances, inspect objects, export content-free manifests/bundles, and run immutable-preview, approval-gated retention cleanup.
@@ -80,7 +103,7 @@ flags, skills, agents, adapters, modules, and durable tables) plus architecture/
 - **Exceptions (`/exceptions`)**: exception queue, owner/approver/control repair, expiry visibility, and lifecycle sweep.
 - **Command Arsenal (`/settings/arsenal`)**: command contracts, plans, scope/approval receipts, action ledger, hypotheses, refuters, tools, local agents, context packs, and decision traces.
 - **AI Operations Router (`/settings/ai-ops-router`)**: preview natural-language operations as bounded API plans with safety, missing-input, blast-radius, and confirmation details before optional execution.
-- **Deep Hunt (`/deep-hunt`)**: launch a keyless, AI-driven investigation through `/agent/hunt/*`. The current Codex/Claude/OpenCode session composes its own requests and tools; ShakerScan enforces target scope, expiring approval, bounded tool/action units, per-tool traffic limits, evidence provenance, and deterministic proof promotion. The request-unit counter counts tool invocations, not every wire request issued by a bounded scanner. Deep Hunt performs bounded active testing but blocks arbitrary state-changing HTTP in the free-form loop.
+- **Hunt (`/hunt`)**: launch one target-kind-aware investigation through `/hunts`. The current Codex/Claude/OpenCode session owns planning; ShakerScan enforces target scope, approval, multidimensional budgets, capability execution, evidence provenance, and deterministic proof promotion. `/deep-hunt` and device-agent pages redirect for compatibility.
 - **Leads and Test Builder (`/deep-hunt/leads`, `/deep-hunt/experiment`)**: inspect the hypothesis backlog or hand-craft an advanced bounded experiment. They support Deep Hunt; they are not separate engines.
 - **Bounded experiments (`/deep-hunt/runs/{id}`)**: inspect durable runs from the compatibility `/research/*` controller, retained for specialized guided verification. Do not route a user's "Deep Hunt" request there; `/deep-hunt/operator` and `/deep-hunt/explorer` are legacy URLs that redirect to `/deep-hunt`.
 - **Settings (`/settings`)**: AI providers, scan execution policy, automation defaults, and approval-receipt enforcement.
@@ -127,38 +150,20 @@ Base URL: `http://localhost:8080`
 ### Submit a Scan
 
 ```bash
-# Quick scan (1-2 min) - DNS, TLS, headers
+# Passive Scan with balanced resource ceilings
 curl -X POST http://localhost:8080/scans \
   -H "Content-Type: application/json" \
-  -d '{"target": "https://example.com", "options": {"scan_type": "quick"}}'
+  -d '{"target":"https://example.com","budget_profile":"balanced","policy":{"active_testing":false}}'
 
-# Standard scan (5-10 min) - + Nuclei, JS deps
+# The same deterministic Scan with thorough ceilings and authorized active testing
 curl -X POST http://localhost:8080/scans \
   -H "Content-Type: application/json" \
-  -d '{"target": "https://example.com", "options": {"scan_type": "standard"}}'
-
-# Deep scan (30-60 min) - + full Nuclei, top-ports scan (1000)
-curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{"target": "https://example.com", "options": {"scan_type": "deep"}}'
-
-# Full assessment (1-2 hrs) - + active XSS/SQLi - REQUIRES PERMISSION
-curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{"target": "https://example.com", "options": {"scan_type": "full"}}'
-
-# Aggressive (2+ hrs) - maximum coverage - REQUIRES PERMISSION
-curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{"target": "https://example.com", "options": {"scan_type": "aggressive"}}'
-
-# Smart (variable) - adaptive intelligent scanning - REQUIRES PERMISSION
-curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{"target": "https://example.com", "options": {"scan_type": "smart"}}'
+  -d '{"target":"https://example.com","budget_profile":"thorough","policy":{"active_testing":true},"approval_receipt_id":"TARGET_BOUND_APPROVAL_UUID"}'
 ```
 
-**Important**: Never run `full`, `aggressive`, or `smart` scans without asking user permission first. These scan types include active XSS/SQLi probes.
+`fast`, `balanced`, and `thorough` are ceilings, not scan identities. Never enable
+`policy.active_testing` without confirming that the user owns or is explicitly authorized to test
+the target. Old `scan_type` values are accepted only as deprecated compatibility mappings.
 
 ### Check Scan Status
 
@@ -498,7 +503,18 @@ curl -X POST http://localhost:8080/ai/ops/route \
 
 Active or budget-increasing intents return `dry_run: true` unless `execute`, `confirm_execution`, and `confirm_authorized` are true. Standard installs set `AI_OPS_ROUTER_EXECUTE_ENABLED=true`; an administrator can set it to `false` as a global execution kill switch. High-risk BOLA also requires `confirm_high_risk` plus auth context hints.
 
-### Deep Hunt
+### Hunt
+
+The canonical workflow is `POST /hunts` with a registered web or device `target_id`, an objective,
+`fast|balanced|thorough` budget profile, optional bound request-collection IDs, and an optional
+target-bound approval receipt. The response is a filtered capability manifest. The external coding
+agent queries context with `POST /hunts/{id}/query`, invokes only returned capabilities through
+`POST /hunts/{id}/capabilities/{name}`, creates evidence-backed candidates, hands candidates to the
+deterministic verifier, and finishes or cancels the run. It never sees secrets or supplies raw argv.
+
+The older Deep Hunt material below documents compatibility routes only; do not use it for new runs.
+
+#### Legacy Deep Hunt compatibility
 
 Natural-language routing is strict:
 
