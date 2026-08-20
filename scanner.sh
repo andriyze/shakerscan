@@ -1869,7 +1869,7 @@ print_help() {
     echo "  scale <N>          Scale to N workers (1-20)"
     echo "  logs [service]     View logs (api, worker, ui, postgres, redis)"
     echo "                       worker aggregates all shakerscan-worker* containers"
-    echo "  scan <target>      Submit any DAST scan type (quick by default)"
+    echo "  scan <target>      Submit the deterministic DAST Scan"
     echo "  scan-full <target> Compatibility alias for 'scan --type full'"
     echo "  scan-smart <target> Compatibility alias for 'scan --type smart'"
     echo "  install-deps       Install missing prerequisites"
@@ -1906,7 +1906,7 @@ print_help() {
     echo "  --prebuilt         Force prebuilt Docker Hub images (default for curl installs)"
     echo "  --image-tag TAG    Override Docker image tag (default: latest)"
     echo "  --remote           Bind UI/API to this host's Tailscale IPv4 address"
-    echo "  --confirm-active   Confirm authorization for full, aggressive, or smart scans"
+    echo "  --confirm-active   Confirm authorization when --active-testing is enabled"
     echo "  Scan-specific options are listed by './scanner.sh scan --help'"
     echo "  SHAKERSCAN_BIND_HOST=IP overrides the Docker bind address"
     echo "  SHAKERSCAN_DATA_BIND_HOST=IP separately binds local Redis/Postgres (default: 127.0.0.1)"
@@ -1931,9 +1931,8 @@ print_help() {
     echo "  ./scanner.sh start -w 10              # Start with 10 workers"
     echo "  ./scanner.sh start --image-tag $(get_release_version)  # Use this release's published tag"
     echo "  ./scanner.sh scale 10                 # Scale to 10 workers"
-    echo "  ./scanner.sh scan https://example.com # Quick scan"
-    echo "  ./scanner.sh scan https://example.com --type standard --budget-profile thorough"
-    echo "  ./scanner.sh scan https://example.com --type smart --execution coverage --confirm-active"
+    echo "  ./scanner.sh scan https://example.com --budget-profile balanced"
+    echo "  ./scanner.sh scan https://example.com --budget-profile thorough --active-testing --confirm-active"
     echo "  ./scanner.sh install-deps             # Install dependencies"
     echo "  ./scanner.sh logs worker -f           # Follow worker logs"
     echo ""
@@ -2268,9 +2267,10 @@ print_scan_help() {
     echo ""
     echo "Scan options:"
     if [ "$command_name" = "scan" ]; then
-        echo "  --type TYPE              quick, standard, deep, full, aggressive, or smart"
+        echo "  --type TYPE              Deprecated compatibility alias"
     fi
-    echo "  --budget-profile P       fast, balanced, thorough, or exhaustive"
+    echo "  --budget-profile P       fast, balanced, or thorough"
+    echo "  --active-testing         Enable authorized active checks"
     echo "  --execution MODE         auto, normal, parallel, or coverage"
     echo "  --shards N|auto          Parallel shard count (2-20)"
     echo "  --shard-strategy S       auto, scope, family, coverage, or coverage_family"
@@ -2279,7 +2279,7 @@ print_scan_help() {
     echo "  --auth-state-shards      Expand parallel work across configured auth states"
     echo "  --approval-receipt ID    Stamp a target-bound approval receipt on submission"
     echo "  --require-current-workers Reject active work on stale/unconfirmed workers"
-    echo "  --confirm-active         Confirm authorization for full, aggressive, or smart"
+    echo "  --confirm-active         Confirm authorization for active testing"
 }
 
 scan_error_detail() {
@@ -2315,6 +2315,8 @@ submit_scan() {
     local endpoint_count=0
     local endpoints='[]'
     local coverage_mode=0
+    local active_testing=0
+    local legacy_type=0
     local scan_label=""
     local value
 
@@ -2327,6 +2329,7 @@ submit_scan() {
                 fi
                 [ -n "${2:-}" ] || { echo -e "${RED}Error: $1 requires a value${NC}"; return 1; }
                 scan_type="$2"
+                legacy_type=1
                 shift 2
                 ;;
             --type=*|--scan-type=*)
@@ -2335,6 +2338,11 @@ submit_scan() {
                     return 1
                 fi
                 scan_type="${1#*=}"
+                legacy_type=1
+                shift
+                ;;
+            --active-testing)
+                active_testing=1
                 shift
                 ;;
             --budget-profile)
@@ -2434,12 +2442,15 @@ submit_scan() {
         esac
     done
 
-    case "$scan_type" in
-        quick|standard|deep|full|aggressive|smart) ;;
-        *) echo -e "${RED}Error: invalid scan type '$scan_type'${NC}"; return 1 ;;
-    esac
+    if [ "$legacy_type" -eq 1 ] || [ "$allow_type_override" -eq 0 ]; then
+        case "$scan_type" in
+            quick|standard|deep|full|aggressive|smart) ;;
+            *) echo -e "${RED}Error: invalid legacy scan type '$scan_type'${NC}"; return 1 ;;
+        esac
+        case "$scan_type" in full|aggressive|smart) active_testing=1 ;; esac
+    fi
     case "$budget_profile" in
-        ""|fast|balanced|thorough|exhaustive) ;;
+        ""|fast|balanced|thorough) ;;
         *) echo -e "${RED}Error: invalid budget profile '$budget_profile'${NC}"; return 1 ;;
     esac
     case "$execution" in
@@ -2513,24 +2524,18 @@ submit_scan() {
         esac
     fi
 
-    case "$scan_type" in
-        full|aggressive|smart)
-            case "$scan_type" in
-                full) scan_label="Full" ;;
-                aggressive) scan_label="Aggressive" ;;
-                smart) scan_label="Smart" ;;
-            esac
-            if ! confirm_active_testing "$scan_label scan" "$target"; then
-                echo "Cancelled"
-                return 1
-            fi
-            ;;
-    esac
+    if [ "$active_testing" -eq 1 ]; then
+        scan_label="Active"
+        if ! confirm_active_testing "$scan_label scan" "$target"; then
+            echo "Cancelled"
+            return 1
+        fi
+    fi
 
     local options
-    options="$(jq -cn --arg scan_type "$scan_type" '{scan_type: $scan_type}')"
-    if [ -n "$budget_profile" ]; then
-        options="$(jq -c --arg budget_profile "$budget_profile" '. + {budget_profile: $budget_profile}' <<<"$options")"
+    options='{}'
+    if [ "$legacy_type" -eq 1 ] || [ "$allow_type_override" -eq 0 ]; then
+        options="$(jq -cn --arg scan_type "$scan_type" '{scan_type: $scan_type}')"
     fi
     if [ "$require_current_workers" -eq 1 ]; then
         options="$(jq -c '. + {require_current_workers: true}' <<<"$options")"
@@ -2595,9 +2600,10 @@ submit_scan() {
     fi
 
     local payload response http_code body scan_id status
-    payload="$(jq -cn --arg target "$target" --argjson options "$options" '{target: $target, options: $options}')"
+    local resolved_budget="${budget_profile:-balanced}"
+    payload="$(jq -cn --arg target "$target" --arg budget "$resolved_budget" --argjson active "$active_testing" --argjson options "$options" --arg approval "$approval_receipt" '{target: $target, budget_profile: $budget, policy: {active_testing: ($active == 1)}, options: $options} + (if $approval == "" then {} else {approval_receipt_id: $approval} end)')"
 
-    echo -e "${GREEN}Submitting $scan_type scan: $target${NC}"
+    echo -e "${GREEN}Submitting Scan ($resolved_budget budget, active testing: $([ "$active_testing" -eq 1 ] && echo on || echo off)): $target${NC}"
     if ! response="$(curl -sS -w $'\n%{http_code}' -X POST "$(api_base_url)/scans" \
         -H "Content-Type: application/json" \
         --data-binary "$payload")"; then
