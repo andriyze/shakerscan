@@ -23,8 +23,14 @@ try:
 except ImportError:
     HAS_YAML = False
 
-from .common import get_auth_curl_args, run, normalize_hash_route_url, detect_spa_catch_all
+from .common import (
+    detect_spa_catch_all, get_auth_curl_args, normalize_hash_route_url, run, run_streaming,
+)
 from .http_scanner import HAS_PLAYWRIGHT, _pw
+try:
+    from ..manifests import DiscoveryDeadlines, EndpointManifest, normalize_endpoint
+except ImportError:  # top-level scanner_tools execution inside the scanner image
+    from manifests import DiscoveryDeadlines, EndpointManifest, normalize_endpoint
 
 
 # =============================================================================
@@ -1376,6 +1382,25 @@ async def discover_endpoint_parameters(
     return accepted_params
 
 
+async def run_katana_stream(
+    katana_binary: str, url: str, depth: int, on_stdout_line: Any,
+) -> Any:
+    """Run the canonical crawler with partial-output and cancellation semantics."""
+    deadlines = DiscoveryDeadlines()
+    return await run_streaming([
+        katana_binary, "-u", url, "-jsonl", "-silent",
+        "-depth", str(depth), "-aff", "-fx", "-kf",
+        "-ef", "jpg,png,svg,gif,ico,css,woff,woff2,ttf,eot",
+        "-H", "User-Agent: Mozilla/5.0 (compatible; SecurityScanner/1.0)",
+        "-timeout", "30", "-concurrency", "10", "-delay", "200", "-form-extraction",
+    ], soft_timeout=deadlines.soft_seconds, flush_grace=deadlines.flush_grace_seconds,
+       hard_timeout=deadlines.hard_seconds, on_stdout_line=on_stdout_line,
+       cancel_check=lambda: bool(
+           os.environ.get("SHAKERSCAN_CANCEL_FILE")
+           and os.path.exists(str(os.environ["SHAKERSCAN_CANCEL_FILE"]))
+       ))
+
+
 async def enhanced_url_discovery(
     url: str,
     scan_type: str = "standard",
@@ -1430,33 +1455,66 @@ async def enhanced_url_discovery(
     discovered_params: dict[str, list[str]] = {}  # URL -> list of discovered params
     js_bundle_analysis: dict[str, Any] | None = None
 
+    endpoint_manifest = EndpointManifest()
+    endpoint_manifest.start_producer("seed")
+    try:
+        endpoint_manifest.add("seed", normalize_endpoint(method="GET", url=url, source="seed"))
+    except ValueError:
+        pass
+    endpoint_manifest.finish_producer("seed")
+    endpoint_manifest.start_producer("katana")
+    target_host = (urllib.parse.urlsplit(url).hostname or "").lower().rstrip(".")
+
+    def _accept_manifest_endpoint(method: Any, candidate: Any, source: str) -> None:
+        candidate_url = str(candidate or "").strip()
+        parsed_candidate = urllib.parse.urlsplit(candidate_url)
+        if not candidate_url or (parsed_candidate.hostname or "").lower().rstrip(".") != target_host:
+            return
+        try:
+            endpoint_manifest.add(
+                source,
+                normalize_endpoint(method=str(method or "GET"), url=candidate_url, source=source),
+            )
+        except ValueError:
+            return
+
+    def _consume_katana_line(line: str) -> None:
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            return
+        request = row.get("request") if isinstance(row.get("request"), dict) else {}
+        candidate = request.get("endpoint") or request.get("url") or row.get("url")
+        if candidate:
+            discovered_urls.append(str(candidate))
+            _accept_manifest_endpoint(request.get("method") or row.get("method") or "GET", candidate, "katana")
+            if any(pattern in str(candidate) for pattern in ["/api/", "/v1/", "/v2/", "/graphql", "/rest/"]):
+                api_endpoints.append(str(candidate))
+        if "form" in row:
+            forms.append(row["form"])
+
     katana_cmd = "/opt/tools/katana" if os.path.exists("/opt/tools/katana") else "katana"
-    out, err, rc = await run([
-        katana_cmd, "-u", url, "-jsonl", "-silent",
-        "-depth", str(depth),  # Use configured depth
-        "-aff", "-fx", "-kf",
-        "-ef", "jpg,png,svg,gif,ico,css,woff,woff2,ttf,eot",
-        "-H", "User-Agent: Mozilla/5.0 (compatible; SecurityScanner/1.0)",
-        "-timeout", "30",
-        "-concurrency", "10",  # Increased concurrency for deeper crawls
-        "-delay", "200",  # Reduced delay for faster crawling
-        "-form-extraction"
-    ], timeout=300)  # Longer timeout for deeper crawls
-    if rc == 0 and out:
-        for l in out.splitlines():
-            try:
-                j = json.loads(l)
-                # Katana JSONL format: {"request": {"endpoint": "url"}} or {"url": "url"}
-                req = j.get("request", {})
-                u = req.get("endpoint") or req.get("url") if isinstance(req, dict) else j.get("url")
-                if u:
-                    discovered_urls.append(u)
-                    if any(api_pattern in u for api_pattern in ["/api/", "/v1/", "/v2/", "/graphql", "/rest/"]):
-                        api_endpoints.append(u)
-                if "form" in j:
-                    forms.append(j["form"])
-            except Exception:
-                pass
+    try:
+        streamed = await run_katana_stream(katana_cmd, url, depth, _consume_katana_line)
+    except (FileNotFoundError, OSError) as exc:
+        streamed = None
+        endpoint_manifest.finish_producer(
+            "katana", status="failed", reason=f"spawn_{type(exc).__name__}",
+        )
+    if streamed is not None and streamed.cancelled:
+        endpoint_manifest.finish_producer("katana", status="cancelled", reason="user_cancelled")
+        endpoint_manifest.finalize(cancelled=True)
+        raise asyncio.CancelledError
+    if streamed is None:
+        pass
+    elif streamed.timed_out:
+        endpoint_manifest.finish_producer("katana", status="timed_out", reason="soft_deadline")
+    elif streamed.returncode != 0:
+        endpoint_manifest.finish_producer(
+            "katana", status="failed", reason=f"exit_{streamed.returncode}",
+        )
+    else:
+        endpoint_manifest.finish_producer("katana")
     # Extract JS/CSS from HTML directly (for SPAs that katana misses)
     try:
         async with httpx.AsyncClient(timeout=10.0, follow_redirects=True, verify=False) as client:
@@ -1736,6 +1794,12 @@ async def enhanced_url_discovery(
         form_urls = [u for u in form_urls if u in url_set]
         api_endpoints = [u for u in api_endpoints if u in url_set]
 
+    endpoint_manifest.start_producer("aggregate")
+    for discovered_url in unique_urls:
+        _accept_manifest_endpoint("GET", discovered_url, "aggregate")
+    endpoint_manifest.finish_producer("aggregate")
+    endpoint_manifest.finalize()
+
     print(f"[discovery] Discovery complete: {len(unique_urls)} URLs, {len(parameterized_urls)} with params, {len(api_endpoints)} API endpoints", file=sys.stderr)
 
     return {
@@ -1749,6 +1813,7 @@ async def enhanced_url_discovery(
         "scan_type": scan_type,
         "config": config,
         "spa_catch_all": spa_catch_all,
+        "endpoint_manifest": endpoint_manifest.to_dict(),
     }
 
 
@@ -4203,4 +4268,5 @@ async def smart_discovery(
         "signals_used": signals,
         "tech_stack_guess": [],  # Populated by browser/httpx in main scanner
         "spa_catch_all": spa_catch_all,
+        "endpoint_manifest": initial_discovery.get("endpoint_manifest"),
     }

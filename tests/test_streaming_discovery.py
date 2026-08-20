@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,6 +14,7 @@ from scanner.manifests import (
     normalize_endpoint,
 )
 from scanner.scanner_tools.common import run_streaming
+from scanner.scanner_tools import discovery
 
 
 def test_endpoint_manifest_preserves_method_and_schema_identity_and_normalizes_examples(tmp_path):
@@ -143,3 +145,25 @@ def test_streaming_user_cancellation_does_not_report_timeout():
     assert result.status == "cancelled"
     assert result.returncode == 130
     assert result.stdout.strip() == "seed"
+
+
+def test_live_katana_adapter_uses_streaming_deadlines_and_line_callback(monkeypatch):
+    captured = {}
+
+    async def fake_stream(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        kwargs["on_stdout_line"]('{"request":{"method":"POST","endpoint":"https://example.test/api/items"}}')
+        return SimpleNamespace(timed_out=True, partial=True, cancelled=False, returncode=124)
+
+    monkeypatch.setattr(discovery, "run_streaming", fake_stream)
+    lines = []
+    result = asyncio.run(discovery.run_katana_stream(
+        "katana", "https://example.test", 4, lines.append,
+    ))
+
+    assert captured["cmd"][:5] == ["katana", "-u", "https://example.test", "-jsonl", "-silent"]
+    assert captured["kwargs"]["soft_timeout"] == 180.0
+    assert captured["kwargs"]["hard_timeout"] == 240.0
+    assert lines == ['{"request":{"method":"POST","endpoint":"https://example.test/api/items"}}']
+    assert result.timed_out is True and result.partial is True

@@ -5064,7 +5064,7 @@ async def build_report(target: str,
             )
         else:
             katana_task = asyncio.create_task(
-                katana_crawl(
+                enhanced_url_discovery(
                     base_url,
                     scan_type=discovery_scan_type,
                     budget=discovery_budget,
@@ -7005,6 +7005,8 @@ async def build_report(target: str,
         "websocket_security": ws_results,
         "virtual_hosts": vhost_results,
     }
+    if isinstance(katana_result, dict) and isinstance(katana_result.get("endpoint_manifest"), dict):
+        discovery["endpoint_manifest"] = katana_result["endpoint_manifest"]
     browser_crawl_stats = browser_res.get("crawl_stats") if browser_res else None
     if browser_crawl_stats:
         discovery["browser_crawl"] = {
