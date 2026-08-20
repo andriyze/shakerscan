@@ -3888,7 +3888,56 @@ export async function getResearchReadiness(): Promise<ResearchReadiness> {
 }
 
 // ---------------------------------------------------------------------------
-// Deep Hunt — keyless, free-form AI investigation (/agent/hunt/*).
+// Hunt V2 — target-kind-aware runtime driven by the external coding agent.
+export interface HuntV2 {
+  hunt_id: string
+  target_kind: 'web' | 'api' | 'device' | 'network'
+  target_id: string
+  objective: string
+  status: 'created' | 'active' | 'awaiting_planner' | 'completed' | 'cancelled' | 'failed' | 'budget_exhausted'
+  budget_profile: 'fast' | 'balanced' | 'thorough'
+  policy: Record<string, unknown>
+  budget: Record<string, number>
+  budget_used: Record<string, number>
+  context_pack?: Record<string, unknown>
+  capabilities: Array<{
+    name: string
+    description: string
+    risk_tier: string
+    input_schema: Record<string, unknown>
+    budget_cost: Record<string, number>
+  }>
+  final_debrief?: { summary?: string; next_actions?: string[] }
+  stop_reason?: string | null
+}
+
+export async function startHuntV2(request: {
+  target_id: string
+  objective: string
+  budget_profile: 'fast' | 'balanced' | 'thorough'
+  approval_receipt_id?: string
+  request_collection_ids?: string[]
+}): Promise<HuntV2> {
+  const res = await fetch(`${API_URL}/hunts`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to start Hunt'))
+  return res.json()
+}
+
+export async function getHuntV2(huntId: string): Promise<HuntV2> {
+  const res = await fetch(`${API_URL}/hunts/${huntId}`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load Hunt'))
+  return res.json()
+}
+
+export async function cancelHuntV2(huntId: string): Promise<HuntV2> {
+  const res = await fetch(`${API_URL}/hunts/${huntId}/cancel`, { method: 'POST' })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to cancel Hunt'))
+  return res.json()
+}
+
+// Legacy Deep Hunt compatibility API (/agent/hunt/*).
 // The current coding-agent session plans each turn; ShakerScan owns scope,
 // active-tool authorization, budgets, evidence, and deterministic promotion.
 // ---------------------------------------------------------------------------
@@ -4335,6 +4384,34 @@ export async function submitScan(target: string, options: Record<string, unknown
     body: JSON.stringify({ target, options })
   })
   if (!res.ok) throw new Error('Failed to submit scan')
+  return res.json()
+}
+
+export interface ScanV2Request {
+  target: string
+  name?: string
+  budget_profile?: 'fast' | 'balanced' | 'thorough'
+  policy?: {
+    active_testing?: boolean
+    active_testing_authorized?: boolean
+    subdomain_discovery?: boolean
+    network_discovery?: boolean
+    approval_receipt_id?: string
+  }
+  authentication?: Record<string, unknown>
+  request_collections?: Array<Record<string, unknown>>
+  advanced?: Record<string, unknown>
+  approval_receipt_id?: string
+  options?: Record<string, unknown>
+}
+
+export async function submitScanV2(request: ScanV2Request) {
+  const res = await fetch(`${API_URL}/scans`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to submit scan'))
   return res.json()
 }
 
@@ -5020,6 +5097,26 @@ export async function submitBatch(
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ targets, options }),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to submit batch scan'))
+  return res.json()
+}
+
+export async function submitBatchV2(
+  request: Omit<ScanV2Request, 'target' | 'name'> & { targets: string[] }
+): Promise<{
+  jobs: Array<{ scan_id: string; status: string }>
+  errors: Array<{ target: string; status_code: number; error: unknown }>
+  count: number
+  queued_count: number
+  failed_count: number
+  requested_count: number
+  status: 'queued' | 'partial' | 'failed'
+}> {
+  const res = await fetch(`${API_URL}/scans/batch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
   })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to submit batch scan'))
   return res.json()

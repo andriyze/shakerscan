@@ -2,9 +2,9 @@
 
 import { useEffect, useState, useCallback, useMemo, useRef, Suspense } from 'react'
 import Link from 'next/link'
-import { getScans, cancelScan, getCampaigns, getDomains, getGradeColor, formatDate, formatDuration, submitScan, type Campaign, type Scan } from '@/lib/api'
+import { getScans, cancelScan, getCampaigns, getDomains, getGradeColor, formatDate, formatDuration, submitScanV2, type Campaign, type Scan } from '@/lib/api'
 import { useUrlFilters } from '@/lib/useUrlFilters'
-import { SCAN_STATUSES, SCAN_TYPES, type ScanType } from '@/lib/constants'
+import { SCAN_STATUSES } from '@/lib/constants'
 import { Plus, Search } from 'lucide-react'
 import { buttonClasses, Card, ConfirmDialog, ErrorState, Input, LastUpdated, PageHeader, ScanStatusBadge, Select, TableSkeleton, useToast } from '@/components/ui'
 import { episodesStarted, findingCount, RunStatusBadge, runState } from '@/components/hunt'
@@ -43,6 +43,11 @@ function isAuthenticatedScan(scan: Scan): boolean {
 function formatScanTypeLabel(scan: Scan): string {
   if (scan.scan_type === 'ai_gate' || scan.run_kind?.startsWith('ai_')) {
     return 'AI Gate'
+  }
+  const options = scan.options && typeof scan.options === 'object' ? scan.options : {}
+  if (options.scan_generation === 'v2' && !options.legacy_scan_type) {
+    const budget = typeof options.budget_profile === 'string' ? options.budget_profile : 'balanced'
+    return `Scan · ${budget.charAt(0).toUpperCase()}${budget.slice(1)}`
   }
   return scan.scan_type
     .split('_')
@@ -108,10 +113,8 @@ function ScansContent() {
   const [cancelling, setCancelling] = useState<Set<string>>(new Set())
   const [confirmCancelId, setConfirmCancelId] = useState<string | null>(null)
   const [total, setTotal] = useState(0)
-  const [openScanMenu, setOpenScanMenu] = useState<string | null>(null)
   const [durationTickMs, setDurationTickMs] = useState<number>(Date.now())
   const searchTimeout = useRef<NodeJS.Timeout | null>(null)
-  const scanMenuRef = useRef<HTMLDivElement>(null)
 
   const statusFilter = filters.status || ''
   const domainFilter = filters.domain || ''
@@ -129,29 +132,6 @@ function ScansContent() {
   useEffect(() => {
     getDomains().then(data => setDomains(data.domains || [])).catch(() => {})
   }, [])
-
-  // Close scan menu when clicking outside
-  useEffect(() => {
-    function handleClickOutside(event: MouseEvent) {
-      if (scanMenuRef.current && !scanMenuRef.current.contains(event.target as Node)) {
-        setOpenScanMenu(null)
-      }
-    }
-    document.addEventListener('mousedown', handleClickOutside)
-    return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [])
-
-  // Close scan menu on Escape
-  useEffect(() => {
-    if (!openScanMenu) return
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === 'Escape') {
-        setOpenScanMenu(null)
-      }
-    }
-    document.addEventListener('keydown', handleKeyDown)
-    return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [openScanMenu])
 
   // Sync searchInput with URL when filters change externally (e.g., browser back)
   useEffect(() => {
@@ -285,15 +265,9 @@ function ScansContent() {
     }
   }
 
-  async function handleScan(targetUrl: string, scanType: ScanType) {
-    const type = SCAN_TYPES.find(t => t.value === scanType)
-    if (!type) return
+  async function handleScan(targetUrl: string) {
     try {
-      const result = await submitScan(targetUrl, {
-        ...type.options,
-        scan_type: scanType
-      })
-      setOpenScanMenu(null)
+      const result = await submitScanV2({ target: targetUrl, budget_profile: 'balanced' })
       toast.success(
         result?.auto_sharded ? 'Auto-sharded scan started' : result?.parallel ? 'Parallel scan started' : 'Scan started',
         result?.scan_id
@@ -344,7 +318,7 @@ function ScansContent() {
     <div className="space-y-6">
       <PageHeader
         title="Scans"
-        description="Scans and active autonomous testing in one place"
+        description="Deterministic DAST runs and their coverage"
         actions={
           <>
             <LastUpdated updatedAt={lastUpdated} onRefresh={handleManualRefresh} refreshing={refreshing} />
@@ -775,40 +749,13 @@ function ScansContent() {
                         AI Gate
                       </Link>
                     ) : (
-                      <div className={`relative ${openScanMenu === scan.id ? 'z-[100]' : ''}`} ref={openScanMenu === scan.id ? scanMenuRef : null}>
+                      <div>
                         <button
-                          onClick={() => setOpenScanMenu(openScanMenu === scan.id ? null : scan.id)}
-                          aria-haspopup="menu"
-                          aria-expanded={openScanMenu === scan.id}
+                          onClick={() => handleScan(scan.target_url)}
                           className="flex items-center gap-1 px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
                         >
-                          Scan
-                          <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                          </svg>
+                          Scan again
                         </button>
-                        {openScanMenu === scan.id && (
-                          <div role="menu" className="absolute right-0 mt-1 w-56 bg-gray-800 border border-gray-700 rounded-lg shadow-xl py-1">
-                            {SCAN_TYPES.map((type) => (
-                              <button
-                                key={type.value}
-                                role="menuitem"
-                                onClick={() => handleScan(scan.target_url, type.value)}
-                                className="w-full px-3 py-2 text-left hover:bg-gray-700 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500"
-                              >
-                                <div className="flex items-center justify-between">
-                                  <span className="text-sm text-white font-medium">{type.label}</span>
-                                  {type.requiresPermission && (
-                                    <span className="text-xs text-yellow-500">Active</span>
-                                  )}
-                                </div>
-                                <p className="text-xs text-gray-400 mt-0.5">
-                                  {type.duration ? `${type.duration} - ` : ''}{type.description}
-                                </p>
-                              </button>
-                            ))}
-                          </div>
-                        )}
                       </div>
                     )}
                   </td>

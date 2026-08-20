@@ -1362,23 +1362,23 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 340 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 285 | `api/api.py` |
+| Public REST operations | 354 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 297 | `api/api.py` |
 | Check families | 14 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
-| Tool adapters | 14 | `api/command_arsenal.py` |
+| Tool adapters | 0 | `api/command_arsenal.py` |
 | Local-agent adapters | 4 | `api/command_arsenal.py` |
 | Scanner CLI flags | 159 | `scanner/scanner.py` |
 | Scanner wrapper commands | 28 | `scanner.sh` |
 | Make targets | 14 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
 | Runtime environment keys | 347 | Python sources + Compose manifests |
-| Scanner modules | 112 | `scanner/scanner_tools/` |
-| UI pages | 36 | `ui/src/app/` |
-| Skills | 8 | `skills/` |
+| Scanner modules | 113 | `scanner/scanner_tools/` |
+| UI pages | 37 | `ui/src/app/` |
+| Skills | 9 | `skills/` |
 | Slash commands | 15 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
-| Durable tables | 79 | `db/init.sql` + migrations |
+| Durable tables | 83 | `db/init.sql` + migrations |
 
 ### Public REST Operations
 
@@ -1561,6 +1561,16 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `GET` | `/gungnir/status` | `gungnir_status` |
 | `POST` | `/gungnir/stop` | `gungnir_stop` |
 | `GET` | `/health` | `health` |
+| `GET` | `/hunts` | `list_hunts` |
+| `POST` | `/hunts` | `start_hunt` |
+| `GET` | `/hunts/{hunt_id}` | `get_hunt` |
+| `POST` | `/hunts/{hunt_id}/cancel` | `cancel_hunt` |
+| `POST` | `/hunts/{hunt_id}/candidates` | `create_hunt_candidate` |
+| `POST` | `/hunts/{hunt_id}/candidates/{candidate_id}/verify` | `verify_hunt_candidate` |
+| `POST` | `/hunts/{hunt_id}/capabilities/{capability_name:path}` | `execute_hunt_capability` |
+| `POST` | `/hunts/{hunt_id}/finish` | `finish_hunt` |
+| `POST` | `/hunts/{hunt_id}/query` | `query_hunt` |
+| `POST` | `/hunts/{hunt_id}/resume` | `resume_hunt` |
 | `GET` | `/investigation/candidates` | `list_investigation_candidates` |
 | `GET` | `/investigation/candidates/{candidate_id}` | `get_investigation_candidate` |
 | `POST` | `/model-intake/admission/verify` | `verify_model_intake_admission` |
@@ -1626,6 +1636,10 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `PATCH` | `/policy-profiles/{profile_id}` | `update_policy_profile` |
 | `DELETE` | `/queue/clear` | `clear_queue` |
 | `GET` | `/queue/stats` | `queue_stats` |
+| `GET` | `/request-collections` | `list_request_collections` |
+| `POST` | `/request-collections` | `create_request_collection` |
+| `GET` | `/request-collections/{collection_id}/requests` | `list_request_collection_requests` |
+| `POST` | `/request-collections/{collection_id}/select` | `select_request_collection_index` |
 | `POST` | `/research/campaigns/launch` | `launch_research_campaign` |
 | `POST` | `/research/campaigns/{campaign_id}/control` | `control_research_campaign` |
 | `GET` | `/research/episodes` | `list_research_episodes` |
@@ -1835,20 +1849,6 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Tool | Family | Status | Risk | Parser | Proof contract | Description |
 |---|---|---|---|---|---|---|
-| `ai_gate_probe_executor` | ai_red_team | runnable | active | `ai-gate-transcript-v1` | `deterministic-or-judge-evidence` | Internal AI Gate probe runner. |
-| `dalfox` | xss | wired | active | `dalfox-json-v1` | `xss-reflection-or-browser-proof` | Dalfox XSS scanner. |
-| `ffuf` | content_discovery | wired | active | `ffuf-json-v1` | `content-discovery-observation` | ffuf content discovery. |
-| `httpx` | http_probe | wired | passive | `httpx-json-v1` | `http-observation` | ProjectDiscovery httpx HTTP probing. |
-| `katana` | crawl | wired | passive | `katana-jsonl-v1` | `crawl-observation` | ProjectDiscovery katana crawler. |
-| `model_intake_signature_verifier` | model_trust | runnable | passive | `model-intake-summary-v1` | `cryptographic-signature-verification` | Internal cryptographic signature verifier. |
-| `naabu` | port_discovery | gated | active | `naabu-jsonl-v1` | `open-port-observation` | Naabu fast TCP port discovery. |
-| `nmap` | port_scan | gated | active | `nmap-xml-v1` | `open-port-observation` | nmap network service discovery. |
-| `nuclei` | template_vuln_scan | wired | active | `nuclei-jsonl-v1` | `template-match-with-request-response` | Nuclei template scanner. |
-| `playwright` | browser_proof | wired | active | `playwright-proof-v1` | `browser-observation` | Playwright browser proof execution. |
-| `sqlmap` | sqli | gated | active | `sqlmap-output-v1` | `sqli-dbms-or-error-proof` | sqlmap SQL injection verifier. |
-| `sslyze` | tls | disabled | passive | `sslyze-json-v1` | `tls-protocol-observation` | SSLyze TLS scanner (disabled until upstream supports the audited cryptography runtime). |
-| `subfinder` | subdomain_discovery | wired | passive | `subfinder-lines-v1` | `passive-discovery` | ProjectDiscovery subfinder passive subdomain discovery. |
-| `testssl.sh` | tls | wired | passive | `testssl-json-v1` | `tls-protocol-observation` | testssl.sh TLS scanner. |
 
 | Agent | Display | Headless prompt | Timeout | Workdir isolation | Max prompt bytes | Max output bytes |
 |---|---|---|---|---|---|---|
@@ -2409,6 +2409,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `/findings/candidates` | `ui/src/app/findings/candidates/page.tsx` |
 | `/findings` | `ui/src/app/findings/page.tsx` |
 | `/fleet` | `ui/src/app/fleet/page.tsx` |
+| `/hunt` | `ui/src/app/hunt/page.tsx` |
 | `/interactive` | `ui/src/app/interactive/page.tsx` |
 | `/model-intake` | `ui/src/app/model-intake/page.tsx` |
 | `/` | `ui/src/app/page.tsx` |
@@ -2430,12 +2431,13 @@ Only key names and declaring sources are documented; secret values are never rea
 |---|---|---|
 | `ai-security-session` | Interactive Testing through ShakerScan's `/session` API. Use when asked to test manually, open an interactive browser session, exercise authentication workflows, or perform BOLA/IDOR endpoint replay. | `skills/ai-security-session/SKILL.md` |
 | `content-discovery` | Build target-specific content discovery seeds, path lists, and ShakerScan scan inputs from scan results, JS analysis, framework clues, and exposed docs. Use when asked for content discovery, wordlist generation, ffuf seeds, admin path discovery, hidden file discovery, route discovery, or custom endpoint seeding. | `skills/content-discovery/SKILL.md` |
-| `device-hunt` | Run ShakerScan Device Hunt, a bounded AI investigation of one registered connected device through the device-agent API. Use for “Device Hunt” or requests to investigate, hunt, or autonomously assess a TV, camera, printer, router, NAS, appliance, or other connected device. Do not use for ordinary Web DAST, read-only explanation without new traffic, or fleet-wide campaigns. | `skills/device-hunt/SKILL.md` |
+| `device-hunt` | Compatibility entry point for the unified ShakerScan Hunt workflow. Use only when an older prompt says Device Hunt; follow the canonical hunt skill and /hunts API with a device target. | `skills/device-hunt/SKILL.md` |
 | `device-triage` | Explain or triage one registered connected device using existing ShakerScan evidence only. Use for requests such as explain this device, compare its scans, assess whether a device finding is credible, review policy decisions, or summarize device drift when the user has not authorized new device traffic. Do not queue scans or probes. | `skills/device-triage/SKILL.md` |
+| `hunt` | Drive ShakerScan Hunt for an authorized web, API, network, or connected-device target through the target-bound /hunts API. Use for autonomous investigation, security hunting, or evidence-driven exploration; use Scan for deterministic baseline assessment. | `skills/hunt/SKILL.md` |
 | `js-analyze` | Analyze JavaScript bundles, frontend routes, browser-captured APIs, libraries, and secrets for a ShakerScan target or completed scan. Use when asked for JS analysis, route analysis, frontend endpoint discovery, library review, source-map hints, or to build `custom_endpoints` for a ShakerScan scan. | `skills/js-analyze/SKILL.md` |
-| `research-agent` | Run ShakerScan Deep Hunt—the current coding agent performs free-form, AI-driven exploration and bounded active exploitation through /agent/hunt/* while ShakerScan enforces target scope, approvals, budgets, evidence provenance, and deterministic finding verification. Use for “deep hunt”, “autonomous hunt”, or “investigate autonomously”; do not use for ordinary DAST scans. | `skills/research-agent/SKILL.md` |
+| `research-agent` | Compatibility entry point for the unified ShakerScan Hunt workflow. Use only when an older prompt says Deep Hunt or autonomous research; follow the canonical hunt skill and /hunts API. | `skills/research-agent/SKILL.md` |
 | `review-skills` | Review ShakerScan skills, commands, and subagents for broken references, invalid Claude Code configuration, prompt anti-patterns, missing hard gates, missing outputs, and weak operational guidance. Use when asked to audit, review, or quality-check the skill system itself. | `skills/review-skills/SKILL.md` |
-| `shakerscan` | Operate ShakerScan. Route scan requests to Web DAST, web-agent investigations to Deep Hunt, connected-device agent investigations to Device Hunt, and manual browser work to Interactive Testing; also manage targets, Continuous ASM, findings, AI Gate, Model Intake, evidence, schedules, local workers, and opt-in Linux fleets. | `skills/shakerscan/SKILL.md` |
+| `shakerscan` | Operate ShakerScan. Route deterministic assessment to one budgeted Scan, adaptive investigation of web or device targets to Hunt, and manual browser work to Interactive Testing; also manage targets, Continuous ASM, findings, AI Gate, Model Intake, evidence, schedules, workers, and fleets. | `skills/shakerscan/SKILL.md` |
 
 | Slash command | Title | Purpose | Source |
 |---|---|---|---|
@@ -2463,7 +2465,7 @@ Only key names and declaring sources are documented; secret values are never rea
 
 ### Scanner Module Inventory
 
-`access_control_checks.py`, `active_checks.py`, `active_enrichment_policy.py`, `active_prioritization.py`, `adaptive_throttle.py`, `ai_classifier.py`, `api_auth.py`, `api_security.py`, `approval_checks.py`, `asn_discovery.py`, `attack_chains.py`, `attempt_telemetry.py`, `auth_session.py`, `benchmark_summary.py`, `bola_comparison.py`, `bounded_exec.py`, `brand_protection.py`, `breach_check.py`, `build_fingerprint.py`, `cancellation.py`, `client_side.py`, `common.py`, `completion_status.py`, `compliance_mapper.py`, `coverage_tracker.py`, `credential_check.py`, `critical_checks.py`, `ct_monitor.py`, `data_exposure.py`, `deduplication_engine.py`, `deserialization_tests.py`, `device_advisories.py`, `device_application.py`, `device_control_plane.py`, `device_evidence.py`, `device_postman.py`, `device_posture.py`, `device_probe.py`, `device_protocols.py`, `device_reachability.py`, `device_request_formats.py`, `device_safety.py`, `device_shell.py`, `device_web.py`, `discovery.py`, `dns_enhanced.py`, `dom_xss_analyzer.py`, `domain_intel.py`, `exposure_markers.py`, `file_upload_tests.py`, `finding_correlator.py`, `finding_validator.py`, `focused_scope.py`, `form_login.py`, `github_recon.py`, `google_dorking.py`, `gopher_payloads.py`, `graphql_schema_recovery.py`, `grpc_discovery.py`, `gungnir.py`, `har_discovery.py`, `hash_routes.py`, `health_check.py`, `http_scanner.py`, `hunter_summary.py`, `infrastructure_checks.py`, `injection_extra_checks.py`, `ip_reputation.py`, `logging_checks.py`, `model_intake.py`, `model_intake_acquisition.py`, `model_intake_adapter_self_test.py`, `model_intake_admission.py`, `model_intake_archives.py`, `model_intake_attestation.py`, `model_intake_evaluation.py`, `model_intake_licenses.py`, `model_intake_providers.py`, `model_intake_registry.py`, `model_intake_retention.py`, `model_intake_runtime.py`, `model_intake_safetensors_runtime.py`, `model_intake_safetensors_selftest.py`, `model_intake_sandbox.py`, `model_intake_scanners.py`, `network_services.py`, `nmap.py`, `nuclei.py`, `oauth_auth.py`, `oauth_tests.py`, `phase4_checks.py`, `proof_of_exploit.py`, `race_condition_tests.py`, `remediation_kb.py`, `report_gating.py`, `request_meter.py`, `resource_propagation.py`, `sarif_output.py`, `scan_delta.py`, `signal_types.py`, `smtp_scanner.py`, `ssh_scanner.py`, `subdomain_discovery.py`, `subfinder.py`, `tech_discovery.py`, `tls_scanner.py`, `vendor_risk.py`, `verification_engine.py`, `verification_phase.py`, `wayback_discovery.py`, `webhook_checks.py`, `websocket_security.py`
+`access_control_checks.py`, `active_checks.py`, `active_enrichment_policy.py`, `active_prioritization.py`, `adaptive_throttle.py`, `ai_classifier.py`, `api_auth.py`, `api_security.py`, `approval_checks.py`, `asn_discovery.py`, `attack_chains.py`, `attempt_telemetry.py`, `auth_session.py`, `benchmark_summary.py`, `bola_comparison.py`, `bounded_exec.py`, `brand_protection.py`, `breach_check.py`, `build_fingerprint.py`, `cancellation.py`, `client_side.py`, `common.py`, `completion_status.py`, `compliance_mapper.py`, `coverage_tracker.py`, `credential_check.py`, `critical_checks.py`, `ct_monitor.py`, `data_exposure.py`, `deduplication_engine.py`, `deserialization_tests.py`, `device_advisories.py`, `device_application.py`, `device_control_plane.py`, `device_evidence.py`, `device_postman.py`, `device_posture.py`, `device_probe.py`, `device_protocols.py`, `device_reachability.py`, `device_request_formats.py`, `device_safety.py`, `device_shell.py`, `device_web.py`, `discovery.py`, `dns_enhanced.py`, `dom_xss_analyzer.py`, `domain_intel.py`, `exposure_markers.py`, `file_upload_tests.py`, `finding_correlator.py`, `finding_validator.py`, `focused_scope.py`, `form_login.py`, `github_recon.py`, `google_dorking.py`, `gopher_payloads.py`, `graphql_schema_recovery.py`, `grpc_discovery.py`, `gungnir.py`, `har_discovery.py`, `hash_routes.py`, `health_check.py`, `http_scanner.py`, `hunter_summary.py`, `infrastructure_checks.py`, `injection_extra_checks.py`, `ip_reputation.py`, `logging_checks.py`, `model_intake.py`, `model_intake_acquisition.py`, `model_intake_adapter_self_test.py`, `model_intake_admission.py`, `model_intake_archives.py`, `model_intake_attestation.py`, `model_intake_evaluation.py`, `model_intake_licenses.py`, `model_intake_providers.py`, `model_intake_registry.py`, `model_intake_retention.py`, `model_intake_runtime.py`, `model_intake_safetensors_runtime.py`, `model_intake_safetensors_selftest.py`, `model_intake_sandbox.py`, `model_intake_scanners.py`, `network_services.py`, `nmap.py`, `nuclei.py`, `oauth_auth.py`, `oauth_tests.py`, `phase4_checks.py`, `proof_of_exploit.py`, `race_condition_tests.py`, `remediation_kb.py`, `report_gating.py`, `request_collections.py`, `request_meter.py`, `resource_propagation.py`, `sarif_output.py`, `scan_delta.py`, `signal_types.py`, `smtp_scanner.py`, `ssh_scanner.py`, `subdomain_discovery.py`, `subfinder.py`, `tech_discovery.py`, `tls_scanner.py`, `vendor_risk.py`, `verification_engine.py`, `verification_phase.py`, `wayback_discovery.py`, `webhook_checks.py`, `websocket_security.py`
 
 ### Durable Storage Inventory
 
@@ -2507,6 +2509,8 @@ Only key names and declaring sources are documented; secret values are never rea
 | `finding_verifications` | `db/init.sql` |
 | `findings` | `db/init.sql` |
 | `fleet_node_events` | `db/init.sql` |
+| `hunt_actions` | `db/init.sql` |
+| `hunt_runs` | `db/init.sql` |
 | `hypotheses` | `api/retest_contract.py` |
 | `investigation_candidate_observations` | `api/retest_contract.py` |
 | `investigation_candidates` | `api/retest_contract.py` |
@@ -2531,6 +2535,8 @@ Only key names and declaring sources are documented; secret values are never rea
 | `operation_plans` | `api/retest_contract.py` |
 | `policy_profiles` | `db/init.sql` |
 | `refuter_reviews` | `api/retest_contract.py` |
+| `request_collection_requests` | `db/init.sql` |
+| `request_collections` | `db/init.sql` |
 | `research_decisions` | `api/retest_contract.py` |
 | `research_episodes` | `api/retest_contract.py` |
 | `research_events` | `api/retest_contract.py` |

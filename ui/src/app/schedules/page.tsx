@@ -7,7 +7,6 @@ import {
   getTargets,
   type Schedule, type Target
 } from '@/lib/api'
-import { SCAN_TYPES, type ScanType } from '@/lib/constants'
 import { Plus } from 'lucide-react'
 import { Button, Card, CardSkeleton, ConfirmDialog, EmptyState, ErrorState, Modal, PageHeader, Select, useToast } from '@/components/ui'
 import { isWebTarget } from '@/lib/targets'
@@ -123,7 +122,7 @@ function SchedulesContent() {
   const [formFrequency, setFormFrequency] = useState<'daily' | 'weekly'>('daily')
   const [formDayOfWeek, setFormDayOfWeek] = useState(0)
   const [formTime, setFormTime] = useState('02:00')
-  const [formScanType, setFormScanType] = useState<ScanType>('standard')
+  const [formBudgetProfile, setFormBudgetProfile] = useState<'fast' | 'balanced' | 'thorough'>('balanced')
   const [formKind, setFormKind] = useState<ScheduleKind>('normal_scan')
   const [formAsmBatchSize, setFormAsmBatchSize] = useState(100)
   const [formAsmStaleDays, setFormAsmStaleDays] = useState(30)
@@ -203,7 +202,7 @@ function SchedulesContent() {
         dayOfWeek: formDayOfWeek,
         timeOfDay: formTime,
         kind: formKind,
-        scanType: formScanType,
+        scanType: 'scan',
         scanOptions: scan_options,
       })
       if (editingSchedule) {
@@ -227,7 +226,7 @@ function SchedulesContent() {
   }
 
   function buildScheduleOptions(): Record<string, unknown> | undefined {
-    if (formKind !== 'asm_improve') return {}
+    if (formKind === 'normal_scan') return { budget_profile: formBudgetProfile, scan_generation: 'v2' }
     return buildAsmScheduleOptions({
       batchSize: formAsmBatchSize,
       staleDays: formAsmStaleDays,
@@ -246,7 +245,8 @@ function SchedulesContent() {
     setFormFrequency(schedule.frequency)
     setFormDayOfWeek(schedule.day_of_week ?? 0)
     setFormTime((schedule.time_of_day || '02:00').slice(0, 5))
-    setFormScanType((schedule.scan_type || 'standard') as ScanType)
+    const legacyProfile = schedule.scan_type === 'quick' ? 'fast' : ['deep', 'full', 'smart', 'aggressive'].includes(schedule.scan_type) ? 'thorough' : 'balanced'
+    setFormBudgetProfile((options.budget_profile as 'fast' | 'balanced' | 'thorough') || legacyProfile)
     setFormKind(getScheduleKind(schedule))
     setFormAsmBatchSize(asmOptions.batchSize)
     setFormAsmStaleDays(asmOptions.staleDays)
@@ -293,7 +293,7 @@ function SchedulesContent() {
     setFormFrequency('daily')
     setFormDayOfWeek(0)
     setFormTime('02:00')
-    setFormScanType('standard')
+    setFormBudgetProfile('balanced')
     setFormKind('normal_scan')
     setFormAsmBatchSize(100)
     setFormAsmStaleDays(30)
@@ -305,8 +305,7 @@ function SchedulesContent() {
   }
 
   function getScanTypeLabel(type: string): string {
-    const found = SCAN_TYPES.find(t => t.value === type)
-    return found?.label || type
+    return type === 'scan' ? 'Scan' : `Legacy ${type}`
   }
 
   const formLocalTime = utcTimeToLocalLabel(formTime)
@@ -656,7 +655,7 @@ function SchedulesContent() {
                   onChange={(e) => setFormKind(e.target.value as ScheduleKind)}
                   className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500"
                 >
-                  <option value="normal_scan">Full scan each run</option>
+                  <option value="normal_scan">Scan each run</option>
                   <option value="asm_improve">Keep this target covered (ASM coverage wave)</option>
                   {formKind === 'evidence_retention_sweep' && (
                     <option value="evidence_retention_sweep" disabled>Legacy evidence retention (select a replacement)</option>
@@ -744,21 +743,19 @@ function SchedulesContent() {
                 </div>
               )}
 
-              {/* Scan Type */}
+              {/* Scan budget */}
               {formKind === 'normal_scan' && (
               <div>
-                <label htmlFor="schedule-scan-type" className="block text-sm font-medium text-gray-400 mb-1">Scan Type</label>
+                <label htmlFor="schedule-budget-profile" className="block text-sm font-medium text-gray-400 mb-1">Budget</label>
                 <select
-                  id="schedule-scan-type"
-                  value={formScanType}
-                  onChange={(e) => setFormScanType(e.target.value as ScanType)}
+                  id="schedule-budget-profile"
+                  value={formBudgetProfile}
+                  onChange={(e) => setFormBudgetProfile(e.target.value as 'fast' | 'balanced' | 'thorough')}
                   className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500"
                 >
-                  {SCAN_TYPES.map((type) => (
-                    <option key={type.value} value={type.value}>
-                      {type.label} - {type.description} {type.duration ? `(${type.duration})` : ''}
-                    </option>
-                  ))}
+                  <option value="fast">Fast — 5 minutes / 1,000 requests</option>
+                  <option value="balanced">Balanced — 20 minutes / 5,000 requests</option>
+                  <option value="thorough">Thorough — 60 minutes / 20,000 requests</option>
                 </select>
                 </div>
               )}

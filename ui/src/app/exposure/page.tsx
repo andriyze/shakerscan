@@ -387,10 +387,10 @@ function AgentFindingsSection({ targetId }: { targetId: string }) {
       <div className="mb-2 flex items-center gap-2 text-xs uppercase tracking-wide text-gray-500">
         <span>Deep Hunt findings</span>
         <Link
-          href={`/deep-hunt?target=${encodeURIComponent(targetId)}`}
+          href={`/hunt?target=${encodeURIComponent(targetId)}`}
           className="ml-auto rounded text-[11px] normal-case text-blue-400 hover:text-blue-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
         >
-          Open Deep Hunt →
+          Open Hunt →
         </Link>
       </div>
       {verified.length > 0 && (
@@ -809,7 +809,7 @@ function ExposureView() {
   }
 
   const SCAN_QUEUED_LABEL: Record<ExposureAssetKind, string> = {
-    web: 'Quick scan started',
+    web: 'Scan started',
     ai: 'AI Gate smoke scan queued',
     model: 'Model intake re-check queued',
   }
@@ -844,7 +844,7 @@ function ExposureView() {
 
   async function handleAutonomousInvestigation(asset: ExposureAsset): Promise<void> {
     if (asset.kind !== 'web') throw new Error('Deep Hunt is only available for registered web targets.')
-    router.push(`/deep-hunt?target=${encodeURIComponent(asset.id)}`)
+    router.push(`/hunt?target=${encodeURIComponent(asset.id)}`)
   }
 
   // Bulk variant of handleScan: fire kind-appropriate scans concurrently and

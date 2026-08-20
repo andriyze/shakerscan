@@ -172,53 +172,41 @@ def test_device_views_expose_last_scan_reachability_without_assuming_online():
     assert "Reachability: not checked" in list_ui
 
 
-def test_device_hunt_is_the_consistent_user_facing_agent_name():
+def test_device_hunt_compatibility_routes_to_unified_hunt():
     detail_ui = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "page.tsx").read_text()
     hunt_ui = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "agent" / "page.tsx").read_text()
     skill = (ROOT / "skills" / "device-hunt" / "SKILL.md").read_text()
     skill_index = (ROOT / "skills" / "README.md").read_text()
-    product_model = (ROOT / "docs" / "product-model.md").read_text()
-
-    assert "> Device Hunt</Link>" in detail_ui
-    assert 'title="Device Hunt"' in hunt_ui
-    assert "Start Device Hunt" in hunt_ui
-    assert "name: device-hunt" in skill and "ShakerScan Device Hunt" in skill
+    assert "href={`/devices/${device.id}/agent`}" in detail_ui
+    assert "redirect(`/hunt?target=${encodeURIComponent(id)}`)" in hunt_ui
+    assert "name: device-hunt" in skill and "compatibility" in skill.lower()
     assert "[`device-hunt`](device-hunt/SKILL.md)" in skill_index
-    assert "## Device Hunt" in product_model
+    assert "../hunt/SKILL.md" in skill
 
 
-def test_device_hunt_ui_restores_active_runs_and_persists_new_run_urls():
+def test_unified_hunt_client_and_device_redirect_are_wired():
     api_client = (ROOT / "ui" / "src" / "lib" / "api.ts").read_text()
     hunt_ui = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "agent" / "page.tsx").read_text()
 
-    assert "export async function listDeviceAgentSessions" in api_client
-    assert "device_target_id" in api_client
-    assert "listDeviceAgentSessions({ device_target_id: deviceId" in hunt_ui
-    assert "recent.runs.find((run) => !TERMINAL.has(run.status))" in hunt_ui
-    assert "window.history.replaceState" in hunt_ui
-    assert "?run=${encodeURIComponent(value.id)}" in hunt_ui
+    generic_hunt = (ROOT / "ui" / "src" / "app" / "hunt" / "page.tsx").read_text()
+    assert "export async function startHunt" in api_client
+    assert "export async function getHunt" in api_client
+    assert "redirect(`/hunt?target=${encodeURIComponent(id)}`)" in hunt_ui
+    assert "startHunt" in generic_hunt
+    assert "target_id" in generic_hunt
 
 
-def test_device_hunt_history_is_durable_linkable_and_visible_from_the_device():
+def test_unified_hunt_history_is_durable_and_target_bound():
     api = (ROOT / "api" / "api.py").read_text()
     api_client = (ROOT / "ui" / "src" / "lib" / "api.ts").read_text()
     hunt_ui = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "agent" / "page.tsx").read_text()
     detail_ui = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "page.tsx").read_text()
-    listing = api[api.index('@app.get("/device-agent/runs")'):]
-    listing = listing[:listing.index("# AI GATE TARGETS")]
-
-    assert "SELECT COUNT(*) FROM device_agent_runs" in listing
-    assert "device_agent_actions" in listing
-    assert "investigation_candidates" in listing
-    assert '"actions": [_device_agent_action_public' in api
-    assert '"candidate_summary"' in api
-    assert "actions: Array<{" in api_client
-    assert "Device Hunt history" in hunt_ui
-    assert "Action and scan ledger" in hunt_ui
-    assert "Open scan" in hunt_ui
-    assert "result.error || result.ok === false ? 'failed'" in hunt_ui
-    assert "Recent Device Hunt investigations" in detail_ui
-    assert "listDeviceAgentSessions({ device_target_id: deviceId, limit: 5 })" in detail_ui
+    assert "CREATE TABLE IF NOT EXISTS hunt_runs" in (ROOT / "api" / "retest_contract.py").read_text()
+    assert '@app.get("/hunts")' in api
+    assert '@app.get("/hunts/{hunt_id}")' in api
+    assert "target_id" in api_client
+    assert "redirect(`/hunt?target=${encodeURIComponent(id)}`)" in hunt_ui
+    assert "href={`/devices/${device.id}/agent`}" in detail_ui
 
 
 def test_device_findings_use_atomic_conflict_upsert():
@@ -328,7 +316,9 @@ def test_device_request_collections_are_encrypted_pinned_and_agent_bounded():
     assert '"request_collection_secrets_visible_to_planner": False' in api
     assert "Import API requests" in ui
     assert "Use real imported API requests" in ui
-    assert "Bind imported API requests" in hunt
+    assert "redirect(`/hunt?target=${encodeURIComponent(id)}`)" in hunt
+    assert "CREATE TABLE request_collections" in schema
+    assert '@app.post("/request-collections")' in api
     assert "libpcap0.8" in (ROOT / "scanner" / "Dockerfile").read_text()
     assert "allow_untrusted_tls_credentials" in api
     assert "untrusted_tls_credentials_not_confirmed" in web

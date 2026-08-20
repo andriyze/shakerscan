@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { usePathname } from 'next/navigation'
 import Link from 'next/link'
-import { Activity, BookOpen, Bot, Boxes, Compass, Crosshair, FileArchive, Lightbulb, Menu, Network, PackageCheck, Radar, Router, ServerCog, ShieldAlert, ShieldCheck, TriangleAlert, Wand2, X } from 'lucide-react'
+import { Activity, BookOpen, Bot, Boxes, Compass, Crosshair, FileArchive, Menu, Network, PackageCheck, Radar, Router, ServerCog, ShieldAlert, ShieldCheck, TriangleAlert, Wand2, X } from 'lucide-react'
 import { buttonClasses, Toggle } from '@/components/ui'
 import { API_URL } from '@/lib/api'
 import {
@@ -94,8 +94,7 @@ const navGroups: {
     heading: 'AI Investigator',
     badge: 'Agentic',
     items: [
-      { href: '/deep-hunt', label: 'Deep Hunt', icon: <Compass className="w-5 h-5" /> },
-      { href: '/deep-hunt/leads', label: 'Leads', icon: <Lightbulb className="w-5 h-5" />, advanced: true },
+      { href: '/hunt', label: 'Hunt', icon: <Compass className="w-5 h-5" /> },
     ],
   },
   {
@@ -202,15 +201,8 @@ function NavContent({
     if (href === '/') {
       return pathname === '/'
     }
-    if (href === '/deep-hunt') {
-      // Deep Hunt is the canonical investigator launcher; keep it lit across its
-      // cluster pages that have no sidebar entry of their own (run detail and
-      // Test Builder). Leads highlights its own item.
-      return (
-        pathname === href ||
-        pathname.startsWith('/deep-hunt/runs') ||
-        pathname.startsWith('/deep-hunt/experiment')
-      )
+    if (href === '/hunt') {
+      return pathname === href || pathname.startsWith('/hunt/')
     }
     return pathname.startsWith(href)
   }

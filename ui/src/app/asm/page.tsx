@@ -1456,7 +1456,7 @@ function TargetView({ targetId }: { targetId: string }) {
       return
     }
     const objective = 'Explore this target autonomously and close the highest-value unexplained coverage gaps with evidence.'
-    router.push(`/deep-hunt?target=${encodeURIComponent(target.id)}&objective=${encodeURIComponent(objective)}`)
+    router.push(`/hunt?target=${encodeURIComponent(target.id)}&objective=${encodeURIComponent(objective)}`)
   }
 
   const coverageDenominator = asmCoverageDenominator(coverage)
@@ -1485,10 +1485,10 @@ function TargetView({ targetId }: { targetId: string }) {
             type="button"
             onClick={openDeepHuntForGaps}
             disabled={!target}
-            title="Open Deep Hunt with this target and a coverage-gap objective."
+            title="Open Hunt with this target and a coverage-gap objective."
             className="inline-flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-45"
           >
-            <BrainCircuit className="h-4 w-4" /> Open Deep Hunt
+            <BrainCircuit className="h-4 w-4" /> Open Hunt
           </button>
         </div>
       </div>

@@ -9,10 +9,10 @@ Use it directly or ask Codex, Claude Code, or OpenCode in plain English:
 
 ```text
 Start ShakerScan.
-Run a quick scan on https://app.example.test.
+Run a balanced passive Scan on https://app.example.test.
 Show active critical and high findings.
 Keep this authorized target covered over time.
-Run a Deep Hunt on this registered staging target.
+Run a Hunt on this registered staging target.
 Red-team my chatbot API.
 Check this model artifact before deployment.
 ```
@@ -25,9 +25,9 @@ ShakerScan covers:
 - Continuous attack-surface management (ASM), subdomain discovery, and certificate-transparency monitoring
 - AI Gate tests for chat, RAG, agent, and MCP endpoints *(preview)*
 - Model Intake reviews for provenance, dependencies, licenses, unsafe serialization, isolated runtime behavior, and deployment readiness
-- Interactive Testing, finding retests, evidence, exceptions, the mission ledger, and Deep Hunt
+- Interactive Testing, finding retests, evidence, exceptions, the mission ledger, and Hunt
 
-> Only scan systems you own or are explicitly authorized to test. Active scan modes can change
+> Only scan systems you own or are explicitly authorized to test. Active testing can change
 > application state, trigger alerts, and create significant traffic.
 
 ## Install and start
@@ -65,7 +65,7 @@ If the new command is not available in the current shell yet:
 ```
 
 Codex, Claude Code, or OpenCode must already be installed and signed in. The current agent session is
-the planner for Deep Hunt, so no separate LLM API key needs to be stored in ShakerScan. Gated
+the planner for Hunt, so no separate LLM API key needs to be stored in ShakerScan. Gated
 execution is enabled in standard installs; ShakerScan still requires target authorization and an
 expiring target-bound approval, and remains responsible for budgets, execution, and proof.
 
@@ -73,93 +73,67 @@ expiring target-bound approval, and remains responsible for budgets, execution, 
 
 ```bash
 shakerscan scan https://app.example.test
-shakerscan scan https://app.example.test --type standard --budget-profile thorough
+shakerscan scan https://app.example.test --budget-profile thorough
+shakerscan scan https://app.example.test --budget-profile thorough --active-testing --confirm-active
 shakerscan status
 ```
 
-`scan` submits a quick scan by default. Use `--type` for `standard`, `deep`, `full`, `aggressive`, or
-`smart`; coverage budgets and normal/parallel/Full Coverage execution are also available as CLI
-options. Use the web UI or REST API for authentication values so secrets do not enter shell history.
+`scan` submits the one deterministic DAST pipeline. `fast`, `balanced`, and `thorough` are resource
+ceilings, while `--active-testing` is an explicit permission. Parallel placement and sharding are
+internal decisions. Old `--type` values remain deprecated compatibility aliases. Use the web UI or
+REST API for authentication values so secrets do not enter shell history.
 
 ### Use the web UI
 
 Open [http://localhost:3000](http://localhost:3000), select **New Scan**, enter an authorized target,
-choose a scan type and coverage budget, and submit. The scan detail page shows live progress, logs,
+choose a coverage budget and whether active testing is authorized, and submit. The scan detail page shows live progress, logs,
 findings, proof state, coverage, and the final report.
 
 ## Pick the right workflow
 
 | Goal | Start here |
 |---|---|
-| Check DNS, TLS, and security headers | Quick scan |
-| Add safe templates, CORS, cookies, and JS dependency checks | Standard scan |
-| Add deeper discovery, ports, templates, and JS secret checks | Deep scan |
-| Run authorized active XSS/SQLi and broader application checks | Full, Aggressive, or Smart scan |
+| Run reproducible web/API security testing | **Scan** |
+| Trade time and traffic for breadth | **Scan → Fast, Balanced, or Thorough budget** |
+| Run authorized active XSS/SQLi and broader application checks | **Scan → Active testing** |
 | Test an authenticated application or API | New Scan → Authentication, or `POST /scans` |
 | Keep an endpoint inventory fresh and close coverage gaps | **Continuous ASM** |
 | Discover subdomains continuously | **Targets** or Gungnir CT monitoring |
 | Inventory and assess a TV, camera, printer, or appliance | **Connected Devices** |
-| Let the current AI agent investigate one connected device | **Connected Devices → Device Hunt** |
+| Let the current AI agent investigate a web, API, network, or device target | **Hunt** |
 | Test a chatbot, RAG pipeline, agent, or MCP server | **AI Gate** |
 | Vet a model artifact before deployment | **Model Intake** |
 | Reproduce a workflow or test two user roles manually | **Interactive Testing** |
 | Review, retest, suppress, or triage issues | **Findings** and **Exceptions** |
 | Inspect retained proof or export evidence | **Evidence** |
-| Let the current AI agent explore and exploit autonomously | **Deep Hunt** |
+| Let the current AI agent explore and exploit autonomously | **Hunt** |
 | Preview a natural-language operation safely | **AI Operations Router** |
 
 Connected-device scan capacity is opt-in to preserve existing DAST resources. Run
 `./scanner.sh devices start` before the first device scan and `./scanner.sh devices status` to check
 its dedicated worker/tool readiness.
 
-### Scan types and coverage budgets
+### Scan policy and coverage budgets
 
-Scan type controls what is tested. The coverage budget controls how much time and depth it receives.
-
-| Scan type | Typical use | Active testing |
-|---|---|---|
-| `quick` | DNS, TLS, headers, and basic technology detection | No |
-| `standard` | Safe web posture, Nuclei, cookies, CORS, and JS dependencies | No |
-| `deep` | Broader discovery, full templates, ports, and JS secrets | No active XSS/SQLi |
-| `full` | Comprehensive application assessment | Yes |
-| `aggressive` | Maximum authorized depth and extended network coverage | Yes |
-| `smart` | Adaptive discovery, XSS/SQLi, verification, and attack-chain analysis | Yes |
-
-Coverage budgets are `fast`, `balanced`, `thorough`, and `exhaustive`. Prefer a deeper budget when
-you want more coverage from the same scan type.
-
-The Advanced section also offers `Auto`, `Normal`, `Parallel`, and `Full Coverage` execution. Auto is
-the recommended default and can shard eligible active scans across current workers. Full Coverage is
-the heaviest breadth-first path: it discovers once, partitions the endpoint worklist, and presents
-the merged result as one logical scan.
-
-`full`, `aggressive`, and `smart` require explicit authorization. Smart scan policy and tuning are
-documented in the [Smart Scan Policy](https://github.com/andriyze/shakerscan/blob/main/docs/SMART_SCAN_POLICY.md).
+Every submission runs the same deterministic pipeline. `fast`, `balanced`, and `thorough` set
+duration, HTTP-request, endpoint, network, tool-time, and concurrency ceilings; they do not change
+finding semantics. Active testing is off by default and requires explicit authorization. The runtime
+selects compatible workers and shards internally, preserves partial discovery output at deadlines,
+and reports incomplete coverage separately from failure.
 
 ## Common workflows
 
 ### Submit scans
 
 ```bash
-# Quick scan
-shakerscan scan https://app.example.test
-
-# Standard scan with a larger coverage budget
+# Passive deterministic Scan
 shakerscan scan https://app.example.test \
-  --type standard \
-  --budget-profile thorough
+  --budget-profile balanced
 
-# Full, Aggressive, and Smart scans require an explicit authorization confirmation
+# The same pipeline with broader ceilings and authorized active capabilities
 shakerscan scan https://app.example.test \
-  --type smart \
   --budget-profile thorough \
-  --confirm-active
-
-# Full Coverage discovers once and distributes the endpoint worklist
-shakerscan scan https://app.example.test \
-  --type smart \
-  --execution coverage \
-  --shards auto \
+  --active-testing \
   --confirm-active
 ```
 
@@ -177,16 +151,18 @@ curl -X POST http://localhost:8080/scans \
   -H "Content-Type: application/json" \
   -d '{
     "target": "https://api.example.test",
-    "options": {
-      "scan_type": "smart",
+    "budget_profile": "thorough",
+    "policy": {"active_testing": true},
+    "authentication": {
       "auth_header": "Bearer REDACTED",
       "user2_header": "Bearer REDACTED"
-    }
+    },
+    "approval_receipt_id": "TARGET_BOUND_APPROVAL_UUID"
   }'
 ```
 
 Treat authentication values as secrets. API responses redact stored credentials; ShakerScan can
-also use managed credential profiles for Interactive Testing and Deep Hunt.
+also use managed credential profiles for Interactive Testing and Hunt.
 
 ### Review and retest findings
 
@@ -256,14 +232,14 @@ curl -X POST http://localhost:8080/targets/{target_id}/asm/improve \
 Auth checks require a primary auth context. BOLA testing also requires a distinct second user and
 explicit deep intent (`exploit_depth`).
 
-### Run Deep Hunt
+### Run Hunt
 
-Deep Hunt uses the current Codex, Claude, or OpenCode session as an autonomous security
+Hunt uses the current Codex, Claude, or OpenCode session as an autonomous security
 investigator. The AI composes its own same-origin probes, uses bounded active scanner tools, can
 compare anonymous and authenticated behavior when managed principals are configured, and records
 only claims backed by real tool output.
 
-Deep Hunt works after a standard first-time install: gated execution is on by default and the current
+Hunt works after a standard first-time install: gated execution is on by default and the current
 coding-agent session supplies the planner. It still requires explicit target authorization and an
 expiring target-bound approval. ShakerScan keeps credentials server-side, enforces turn/request/action
 ceilings, blocks arbitrary write methods in the free-form loop, and promotes a Suspected finding to
@@ -273,19 +249,18 @@ To start:
 
 1. Add the authorized target under **Targets**.
 2. Run `shakerscan agent codex` (or `claude` / `opencode`).
-3. Ask: `Run a Deep Hunt on this authorized target.`
+3. Ask: `Run a Hunt on this authorized target.`
 
 An administrator can disable every gated AI Operations execution path by setting
 `AI_OPS_ROUTER_EXECUTE_ENABLED=false` in `.env` and restarting ShakerScan.
 
-The UI launcher is **AI Investigator → Deep Hunt**. Through an agent, the routing is:
+The UI launcher is **AI Investigator → Hunt**. Through an agent, the routing is:
 
 | Request | Workflow |
 |---|---|
-| “Scan example.com” | Quick DAST |
-| “Run a deep scan” | Deep DAST |
-| “Run a smart scan” | Smart DAST, after active-testing confirmation |
-| “Run a Deep Hunt” | Keyless AI-driven `/agent/hunt/*` investigation |
+| “Scan example.com” | Deterministic Scan with a balanced passive policy |
+| “Run a thorough active Scan” | The same Scan with larger ceilings and explicit authorization |
+| “Run a Hunt” | External-agent-driven `/hunts` investigation |
 | “Verify this finding” | Bounded deterministic verifier |
 | “Test this manually” | Interactive Testing |
 
@@ -299,12 +274,12 @@ and compatibility. It is not the Deep Hunt launcher.
 | Dashboard | Security posture, prioritized actions, recent activity, queue operations, worker freshness/scaling, and Gungnir |
 | Docs | In-app rendering of the installed README for setup, workflows, safety, and troubleshooting |
 | DAST Scans / New Scan | Submission, filters, cancellation, live logs, reports, proof, coverage, and PDF export |
-| Connected Devices / Device Hunt | Stable device identities with changeable IP/hostname history, TCP/UDP posture, service policies, contextual device-web and API checks, evidence-tiered offline advisory matching, credentialed SSH/web checks, encrypted Postman, HAR 1.2, OpenAPI 3.x, and Swagger 2.0 request imports with device-pinned testing, live scan activity, typed one-port verification, reversible control-auth proof adapters, and **Device Hunt** with durable non-authoritative candidates and server-owned proof promotion |
+| Connected Devices | Stable device identities, posture scans, service policy, credentials, generic request collections, and device-target Hunt capabilities |
 | Targets / Exposure | Asset inventory, subdomains, exposure graph, and application graph |
 | Coverage (Continuous ASM) | Endpoint inventory, proof-family coverage, gaps, recommendations, and activity |
 | Findings / Exceptions Queue | Triage, notes, retests, replay, cleanup, accepted risk, and exception lifecycle |
 | AI Gate / Model Intake | AI endpoint red teaming and pre-deployment model checks |
-| Deep Hunt / Leads | AI-driven exploration, bounded exploitation, proof promotion, and the hypothesis backlog |
+| Hunt / Leads | AI-driven exploration through target-aware capabilities, bounded exploitation, proof promotion, and the hypothesis backlog |
 | Interactive Testing | Browser sessions, credentials, principals, auth expectations, replay, and explicit findings |
 | Evidence / Timeline / Campaigns | Proof inventory, exports, retention, mission history, and the read-only mission ledger |
 | Settings | AI providers, scan policy, automation, deployment policies, Arsenal, and Router |
@@ -489,13 +464,13 @@ status                        Show services, queue state, workers, and access UR
 scale <N>                     Scale to 1-20 workers
 logs [service] [-f]           Read API, worker, UI, PostgreSQL, or Redis logs
 backup [directory]            Back up PostgreSQL, results, configuration, and release metadata
-scan <target> [options]       Submit any DAST scan type (quick by default)
+scan <target> [options]       Submit the deterministic DAST Scan
 scan-full <target>            Compatibility alias for `scan --type full`
 scan-smart <target>           Compatibility alias for `scan --type smart`
 doctor | install-deps         Diagnose or install local prerequisites
 env                           Show runtime, PATH, and agent-launch guidance
 agent [codex|claude|opencode] Launch an agent in the runtime
-mcp                           Start the read-only Command Arsenal MCP adapter
+mcp                           Start the ShakerScan MCP adapter (Hunt plus read-only Arsenal)
 research <episode-id> [N]     Drive bounded local Codex decisions
 fleet init|join-token|revoke-join-token|accept  Provision a fleet or run physical acceptance
 gungnir <command>             Manage certificate-transparency monitoring
@@ -505,9 +480,9 @@ shell                         Open a shell in the scanner container
 ```
 
 Run `shakerscan` or `./scanner.sh` without arguments for current options and examples. `reset` is
-destructive. Run `shakerscan scan --help` for scan flags, including `--type`, `--budget-profile`,
-`--execution`, `--shards`, `--shard-strategy`, `--endpoint`, `--approval-receipt`, and
-`--require-current-workers`.
+destructive. Run `shakerscan scan --help` for the canonical `--budget-profile` and
+`--active-testing` controls. `--type` and explicit execution/sharding flags remain compatibility and
+advanced-debug inputs during migration.
 
 ## REST API
 
@@ -520,10 +495,10 @@ the ShakerScan host.
 curl http://localhost:8080/health
 curl http://localhost:8080/queue/stats
 
-# Submit a quick scan
+# Submit the deterministic Scan
 curl -X POST http://localhost:8080/scans \
   -H "Content-Type: application/json" \
-  -d '{"target":"https://app.example.test","options":{"scan_type":"quick"}}'
+  -d '{"target":"https://app.example.test","budget_profile":"balanced","policy":{"active_testing":false}}'
 
 # Read one scan
 curl http://localhost:8080/scans/{scan_id}
@@ -554,7 +529,7 @@ AI_VERIFY_URL=https://api.openai.com/v1/chat/completions
 AI_VERIFY_API_KEY=...
 AI_VERIFY_MODEL=...
 
-# Enabled by default so Deep Hunt works after first install. Set false to disable
+# Enabled by default so confirmation-gated Hunt execution works after first install. Set false to disable
 # every confirmation-gated AI Operations execution path globally.
 AI_OPS_ROUTER_EXECUTE_ENABLED=true
 ```
@@ -577,12 +552,12 @@ established open-source security projects. We are grateful to their maintainers 
 | Discovery and HTTP probing | [httpx](https://github.com/projectdiscovery/httpx), [Katana](https://github.com/projectdiscovery/katana), [Subfinder](https://github.com/projectdiscovery/subfinder), and [Gungnir](https://github.com/g0ldencybersec/gungnir) |
 | Template-based checks | [Nuclei](https://github.com/projectdiscovery/nuclei) and the [Nuclei templates](https://github.com/projectdiscovery/nuclei-templates) |
 | Active web validation | [Dalfox](https://github.com/hahwul/dalfox), [sqlmap](https://github.com/sqlmapproject/sqlmap), and [ffuf](https://github.com/ffuf/ffuf) |
-| TLS and network inspection | [TLSX](https://github.com/projectdiscovery/tlsx), [testssl.sh](https://github.com/testssl/testssl.sh), and [Nmap](https://nmap.org/) |
+| TLS and network inspection | [TLSX](https://github.com/projectdiscovery/tlsx), [testssl.sh](https://github.com/testssl/testssl.sh), [Naabu](https://github.com/projectdiscovery/naabu), and [Nmap](https://nmap.org/) |
 | Browser and client-side analysis | [Playwright](https://github.com/microsoft/playwright) and the [Retire.js](https://github.com/RetireJS/retire.js) vulnerability database |
 | Security testing wordlists | [SecLists](https://github.com/danielmiessler/SecLists) |
 | Design inspiration (not bundled) | ShakerScan adapted selected autonomous-research ideas from [T3MP3ST](https://github.com/elder-plinius/T3MP3ST) |
 
-Tool availability and execution policy vary by scan type and release. The generated
+Tool availability and execution policy vary by target kind, authorization, and release. The generated
 [Functionality Reference](https://github.com/andriyze/shakerscan/blob/main/docs/functionality-reference.md#tool-and-local-agent-adapters)
 records which adapters are wired, gated, or disabled; an installed binary is not automatically an
 exposed ShakerScan action.

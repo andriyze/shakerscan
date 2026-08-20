@@ -100,7 +100,7 @@ export default function InvestigationCandidatesPage() {
           {candidates.map(candidate => {
             const sourceHref = candidate.plane === 'device'
               ? `/devices/${candidate.device_target_id}/agent`
-              : `/deep-hunt?target_id=${encodeURIComponent(candidate.target_id || '')}`
+              : `/hunt?target_id=${encodeURIComponent(candidate.target_id || '')}`
             return (
               <Card key={candidate.id} className="p-4">
                 <div className="flex flex-wrap items-start justify-between gap-3">

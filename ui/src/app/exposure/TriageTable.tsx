@@ -665,7 +665,7 @@ function AssetDetailDrawer({
             className="inline-flex items-center gap-1 rounded border border-teal-400/30 bg-teal-400/10 px-3 py-1.5 text-xs text-teal-200 hover:bg-teal-400/20 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
           >
             {scanning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ScanLine className="h-3.5 w-3.5" />}
-            {asset.kind === 'web' ? 'Quick scan' : asset.kind === 'ai' ? 'Run smoke test' : 'Re-check model'}
+            {asset.kind === 'web' ? 'Run Scan' : asset.kind === 'ai' ? 'Run smoke test' : 'Re-check model'}
           </button>
           {asset.kind === 'web' && (
             <button
@@ -675,7 +675,7 @@ function AssetDetailDrawer({
               className="inline-flex items-center gap-1 rounded border border-violet-400/40 bg-violet-500/15 px-3 py-1.5 text-xs font-medium text-violet-100 hover:bg-violet-500/25 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"
             >
               {autonomousLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <BrainCircuit className="h-3.5 w-3.5" />}
-              Open Deep Hunt
+              Open Hunt
             </button>
           )}
           <button

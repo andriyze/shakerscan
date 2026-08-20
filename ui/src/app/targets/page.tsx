@@ -4,7 +4,7 @@ import { useEffect, useState, useRef, useCallback, Suspense } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { getTargetsGrouped, createTarget, scanTarget, discoverSubdomains, dedupeTargets, getGradeColor, type Target, type GroupedDomain } from '@/lib/api'
-import { SCAN_TYPES, getScanOptions, DISCOVERY_SOURCES, GRADES, TARGET_SORT_OPTIONS, type ScanType, type SortOrder } from '@/lib/constants'
+import { DISCOVERY_SOURCES, GRADES, TARGET_SORT_OPTIONS, type SortOrder } from '@/lib/constants'
 import { useUrlFilters } from '@/lib/useUrlFilters'
 import { ArrowDown, ArrowUp, Plus, Search } from 'lucide-react'
 import { Button, Card, CardSkeleton, ConfirmDialog, EmptyState, ErrorState, Field, Input, Modal, PageHeader, Select, useToast } from '@/components/ui'
@@ -65,7 +65,7 @@ function TargetsContent() {
   const [dedupePreview, setDedupePreview] = useState<{ groups_found: number; targets_merged: number } | null>(null)
   const [dedupeLoading, setDedupeLoading] = useState(false)
   const [dedupeExecuting, setDedupeExecuting] = useState(false)
-  const [scanAllPending, setScanAllPending] = useState<{ domain: GroupedDomain; scanType: ScanType } | null>(null)
+  const [scanAllPending, setScanAllPending] = useState<{ domain: GroupedDomain } | null>(null)
   const scanMenuRef = useRef<HTMLDivElement>(null)
   const scanAllMenuRef = useRef<HTMLDivElement>(null)
   const searchTimeout = useRef<NodeJS.Timeout | null>(null)
@@ -191,11 +191,10 @@ function TargetsContent() {
     }
   }
 
-  async function handleScan(targetId: string, scanType: ScanType) {
+  async function handleScan(targetId: string) {
     setOpenScanMenu(null)
     try {
-      const options = getScanOptions(scanType)
-      const res = await scanTarget(targetId, options)
+      const res = await scanTarget(targetId, { budget_profile: 'balanced' })
       const scanId = res?.scan_id
       toast.success(
         'Scan started',
@@ -210,12 +209,12 @@ function TargetsContent() {
 
   function confirmScanAll() {
     if (!scanAllPending) return
-    const { domain, scanType } = scanAllPending
+    const { domain } = scanAllPending
     setScanAllPending(null)
-    handleScanDomainSet(domain, scanType)
+    handleScanDomainSet(domain)
   }
 
-  async function handleScanDomainSet(domain: GroupedDomain, scanType: ScanType) {
+  async function handleScanDomainSet(domain: GroupedDomain) {
     const allTargets: Target[] = []
     if (domain.root_target) {
       allTargets.push(domain.root_target)
@@ -231,9 +230,8 @@ function TargetsContent() {
     setOpenScanAllMenu(null)
 
     try {
-      const options = getScanOptions(scanType)
       // Submit scans for all targets, tolerating per-target failures.
-      const results = await Promise.allSettled(allTargets.map(target => scanTarget(target.id, options)))
+      const results = await Promise.allSettled(allTargets.map(target => scanTarget(target.id, { budget_profile: 'balanced' })))
       const succeeded = results.filter((r): r is PromiseFulfilledResult<{ scan_id?: string }> => r.status === 'fulfilled')
       const failedCount = results.length - succeeded.length
 
@@ -415,15 +413,12 @@ function TargetsContent() {
           scanAllPending
             ? (() => {
                 const count = (scanAllPending.domain.root_target ? 1 : 0) + scanAllPending.domain.subdomain_count
-                const active = SCAN_TYPES.find((t) => t.value === scanAllPending.scanType)?.requiresPermission
-                return `This queues a ${scanAllPending.scanType} scan for ${count} target${count !== 1 ? 's' : ''} (root + subdomains) in this domain set.${
-                  active ? ' This scan type runs active exploitation checks — only start it on targets you are authorized to test.' : ''
-                }`
+                return `This queues the balanced Scan policy for ${count} target${count !== 1 ? 's' : ''} (root + subdomains) in this domain set.`
               })()
             : ''
         }
         confirmLabel="Start scans"
-        danger={Boolean(scanAllPending && SCAN_TYPES.find((t) => t.value === scanAllPending.scanType)?.requiresPermission)}
+        danger={false}
         onConfirm={confirmScanAll}
         onCancel={() => setScanAllPending(null)}
       />
@@ -614,7 +609,7 @@ function TargetsContent() {
                       )}
                       {(domain.root_target.investigator_verified_count || 0) > 0 && (
                         <Link
-                          href={`/deep-hunt?target=${domain.root_target.id}`}
+                          href={`/hunt?target=${domain.root_target.id}`}
                           onClick={(e) => e.stopPropagation()}
                           className="text-emerald-400 transition-colors hover:text-emerald-300"
                           title="Deterministically verified investigator findings"
@@ -624,7 +619,7 @@ function TargetsContent() {
                       )}
                       {(domain.root_target.investigator_suspected_count || 0) > 0 && (
                         <Link
-                          href={`/deep-hunt?target=${domain.root_target.id}`}
+                          href={`/hunt?target=${domain.root_target.id}`}
                           onClick={(e) => e.stopPropagation()}
                           className="text-amber-400 transition-colors hover:text-amber-300"
                           title="Evidence-backed investigator leads awaiting deterministic proof"
@@ -684,26 +679,10 @@ function TargetsContent() {
                       </button>
                       {openScanMenu === domain.root_target!.id && (
                         <div className="absolute right-0 mt-1 w-56 bg-gray-800 border border-gray-700 rounded-lg shadow-xl py-1">
-                          {SCAN_TYPES.map((type) => (
-                            <button
-                              key={type.value}
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                handleScan(domain.root_target!.id, type.value)
-                              }}
-                              className="w-full px-3 py-2 text-left hover:bg-gray-700 transition-colors"
-                            >
-                              <div className="flex items-center justify-between">
-                                <span className="text-sm text-white font-medium">{type.label}</span>
-                                {type.requiresPermission && (
-                                  <span className="text-xs text-yellow-500">Active</span>
-                                )}
-                              </div>
-                              <p className="text-xs text-gray-400 mt-0.5">
-                                {type.duration ? `${type.duration} - ` : ''}{type.description}
-                              </p>
-                            </button>
-                          ))}
+                          <button onClick={(e) => { e.stopPropagation(); handleScan(domain.root_target!.id) }} className="w-full px-3 py-2 text-left hover:bg-gray-700 transition-colors">
+                            <span className="text-sm text-white font-medium">Run Scan</span>
+                            <p className="text-xs text-gray-400 mt-0.5">Balanced budget · passive policy</p>
+                          </button>
                         </div>
                       )}
                     </div>
@@ -745,27 +724,10 @@ function TargetsContent() {
                             Scan {domain.root_target ? '1 root + ' : ''}{domain.subdomain_count} subdomain{domain.subdomain_count !== 1 ? 's' : ''}
                           </p>
                         </div>
-                        {SCAN_TYPES.map((type) => (
-                          <button
-                            key={type.value}
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              setOpenScanAllMenu(null)
-                              setScanAllPending({ domain, scanType: type.value })
-                            }}
-                            className="w-full px-3 py-2 text-left hover:bg-gray-700 transition-colors"
-                          >
-                            <div className="flex items-center justify-between">
-                              <span className="text-sm text-white font-medium">{type.label}</span>
-                              {type.requiresPermission && (
-                                <span className="text-xs text-yellow-500">Active</span>
-                              )}
-                            </div>
-                            <p className="text-xs text-gray-400 mt-0.5">
-                              {type.duration ? `${type.duration} - ` : ''}{type.description}
-                            </p>
-                          </button>
-                        ))}
+                        <button onClick={(e) => { e.stopPropagation(); setOpenScanAllMenu(null); setScanAllPending({ domain }) }} className="w-full px-3 py-2 text-left hover:bg-gray-700 transition-colors">
+                          <span className="text-sm text-white font-medium">Run Scan</span>
+                          <p className="text-xs text-gray-400 mt-0.5">Balanced budget · passive policy</p>
+                        </button>
                       </div>
                     )}
                   </div>
@@ -840,7 +802,7 @@ function TargetsContent() {
                         )}
                         {(subdomain.investigator_verified_count || 0) > 0 && (
                           <Link
-                            href={`/deep-hunt?target=${subdomain.id}`}
+                            href={`/hunt?target=${subdomain.id}`}
                             className="text-emerald-400 transition-colors hover:text-emerald-300"
                             title="Deterministically verified investigator findings"
                           >
@@ -849,7 +811,7 @@ function TargetsContent() {
                         )}
                         {(subdomain.investigator_suspected_count || 0) > 0 && (
                           <Link
-                            href={`/deep-hunt?target=${subdomain.id}`}
+                            href={`/hunt?target=${subdomain.id}`}
                             className="text-amber-400 transition-colors hover:text-amber-300"
                             title="Evidence-backed investigator leads awaiting deterministic proof"
                           >
@@ -907,26 +869,10 @@ function TargetsContent() {
                         </button>
                         {openScanMenu === subdomain.id && (
                           <div className="absolute right-0 mt-1 w-56 bg-gray-800 border border-gray-700 rounded-lg shadow-xl py-1">
-                            {SCAN_TYPES.map((type) => (
-                              <button
-                                key={type.value}
-                                onClick={(e) => {
-                                  e.stopPropagation()
-                                  handleScan(subdomain.id, type.value)
-                                }}
-                                className="w-full px-3 py-2 text-left hover:bg-gray-700 transition-colors"
-                              >
-                                <div className="flex items-center justify-between">
-                                  <span className="text-sm text-white font-medium">{type.label}</span>
-                                  {type.requiresPermission && (
-                                    <span className="text-xs text-yellow-500">Active</span>
-                                  )}
-                                </div>
-                                <p className="text-xs text-gray-400 mt-0.5">
-                                  {type.duration ? `${type.duration} - ` : ''}{type.description}
-                                </p>
-                              </button>
-                            ))}
+                            <button onClick={(e) => { e.stopPropagation(); handleScan(subdomain.id) }} className="w-full px-3 py-2 text-left hover:bg-gray-700 transition-colors">
+                              <span className="text-sm text-white font-medium">Run Scan</span>
+                              <p className="text-xs text-gray-400 mt-0.5">Balanced budget · passive policy</p>
+                            </button>
                           </div>
                         )}
                       </div>
