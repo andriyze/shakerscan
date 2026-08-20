@@ -305,7 +305,14 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "device.scan", "Queue one bounded device posture scan through the canonical scanner pipeline.",
             "internal", "active", frozenset({"device"}), "device.queue_device_scan", "1",
             "active_testing", {"active_actions": 1, "tool_wall_seconds": 30}, {"device_worker": True},
-            _schema({"coverage_profile": {"type": "string", "enum": ["top100", "posture"]}, "include_web_dast": {"type": "boolean"}, "reason": {"type": "string"}}),
+            _schema({
+                "coverage_profile": {"type": "string", "enum": ["inventory", "posture", "thorough"]},
+                "include_web_dast": {"type": "boolean"},
+                "web_scan_type": {"type": "string", "enum": ["quick", "standard", "deep"]},
+                "include_imported_requests": {"type": "boolean"},
+                "reason": {"type": "string", "maxLength": 500},
+                "capability_ids": {"type": "array", "items": {"type": "string", "enum": ["ssh-authenticated-host-review"]}, "maxItems": 1},
+            }, required=("coverage_profile", "reason")),
             "device-scan-queue/v1", ("scan_receipt",),
         ),
         CapabilitySpec(
@@ -314,6 +321,19 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "active_testing", {"active_actions": 1, "tcp_ports_attempted": 1, "tool_wall_seconds": 30}, {"device_worker": True},
             _schema({"transport": {"type": "string", "enum": ["tcp", "udp"]}, "port": {"type": "integer"}, "expected_state": {"type": "string"}, "reason": {"type": "string"}}),
             "device-service-verification/v1", ("service_state_observation",),
+        ),
+        CapabilitySpec(
+            "device.ssh.propose", "Propose an immutable command plan for a bound, host-key-pinned SSH service; this does not execute it.",
+            "internal", "credential", frozenset({"device"}), "device.propose_ssh_shell", "1",
+            "active_testing", {"tool_wall_seconds": 5}, {"control_plane": True, "credential_binding": "ssh"},
+            _schema({
+                "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+                "commands": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 4096}, "minItems": 1, "maxItems": 8},
+                "timeout_seconds": {"type": "integer", "minimum": 5, "maximum": 60},
+                "purpose": {"type": "string", "minLength": 1, "maxLength": 1000},
+                "risk_summary": {"type": "string", "minLength": 1, "maxLength": 1000},
+            }, required=("port", "commands", "purpose", "risk_summary")),
+            "device-ssh-plan/v1", ("immutable_shell_plan", "user_confirmation_required"),
         ),
     )
 )

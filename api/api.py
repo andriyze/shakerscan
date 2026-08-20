@@ -34449,6 +34449,7 @@ class HuntStartRequest(BaseModel):
     budget_profile: Literal["fast", "balanced", "thorough"] = "balanced"
     approval_receipt_id: Optional[str] = None
     request_collection_ids: list[str] = Field(default_factory=list, max_length=16)
+    ssh_credential_profile_id: Optional[str] = None
 
 
 class HuntQueryRequest(BaseModel):
@@ -34765,10 +34766,11 @@ async def start_hunt(request: HuntStartRequest):
             target_kind = "device"
             target_url = str(device["primary_locator"])
             db_target_id, device_target_id = None, target_uuid
-            credentials_available = bool(await conn.fetchval(
-                "SELECT EXISTS(SELECT 1 FROM device_credential_profiles WHERE device_target_id=$1 AND is_active=true)",
-                target_uuid,
-            ))
+            credential_refs = await _validate_device_credential_refs(
+                conn, target_uuid, ssh_profile_id=request.ssh_credential_profile_id,
+                web_profile_id=None,
+            )
+            credentials_available = bool(credential_refs)
             collection_refs, _collection_endpoints = await _generic_collection_refs(
                 conn, device_target_id=target_uuid,
                 bindings=[{"id": value} for value in request.request_collection_ids],
@@ -34779,7 +34781,7 @@ async def start_hunt(request: HuntStartRequest):
                 max_turns=30,
             )
             device_state["device_request_collections"] = collection_refs
-            device_state["device_credential_profiles"] = []
+            device_state["device_credential_profiles"] = credential_refs
             context_pack = {
                 "schema_version": "hunt-context/v2",
                 "target": {
@@ -34934,6 +34936,8 @@ async def execute_hunt_capability(
     prepared_network = None
     network_target = None
     network_policy = None
+    device_adapter_name = None
+    validated_device_input = None
     try:
         spec = agent_tools.CAPABILITY_REGISTRY.require(name)
     except KeyError as exc:
@@ -34952,6 +34956,15 @@ async def execute_hunt_capability(
                 agent_tools.normalize_principal_slot(request.input.get("as_principal"))
                 if name == "http.request" else "anonymous"
             )
+            if str(run["target_kind"]) == "device" and not name.startswith("collections."):
+                device_adapter_name = str(spec.adapter).split(".")[-1]
+                try:
+                    device_adapter_name, validated_device_input = device_agent.validate_tool_call({
+                        "name": device_adapter_name,
+                        "arguments": request.input,
+                    })
+                except (TypeError, ValueError) as exc:
+                    raise HTTPException(status_code=422, detail=str(exc)) from exc
             requires_call_approval = spec.requires_active_approval or principal_slot != "anonymous"
             if requires_call_approval:
                 authority_context = _hunt_json(run["context_pack"], {})
@@ -35001,6 +35014,26 @@ async def execute_hunt_capability(
                 charges = {
                     key: int(value) for key, value in spec.budget_cost.items() if key in limits
                 }
+                if validated_device_input is not None and device_adapter_name is not None:
+                    fragility_cost = device_agent.tool_fragility_cost(
+                        device_adapter_name, validated_device_input,
+                    )
+                    if fragility_cost:
+                        charges["device_fragility_points"] = fragility_cost
+                        legacy_daily = int(await conn.fetchval(
+                            """SELECT COALESCE(SUM(fragility_cost),0) FROM device_agent_actions
+                               WHERE device_target_id=$1 AND outcome <> 'blocked'
+                                 AND created_at >= date_trunc('day', NOW())""",
+                            run["device_target_id"],
+                        ) or 0)
+                        hunt_daily = int(await conn.fetchval(
+                            """SELECT COALESCE(SUM(COALESCE((budget_used_json->>'device_fragility_points')::int,0)),0)
+                               FROM hunt_runs WHERE device_target_id=$1
+                                 AND created_at >= date_trunc('day', NOW())""",
+                            run["device_target_id"],
+                        ) or 0)
+                        if legacy_daily + hunt_daily + fragility_cost > device_agent.MAX_FRAGILITY_PER_DEVICE_DAY:
+                            raise HTTPException(status_code=409, detail="Daily fragility budget for this device is exhausted")
             charges["agent_actions"] = 1
             if requires_call_approval:
                 charges["active_actions"] = 1
@@ -35034,13 +35067,13 @@ async def execute_hunt_capability(
         elif name == "collections.replay_safe":
             result = await _hunt_replay_safe_collection(run, context, request.input)
         elif str(run["target_kind"]) == "device":
-            adapter_name = str(spec.adapter).split(".")[-1]
+            assert device_adapter_name is not None and validated_device_input is not None
             device_state = context.get("device_state") if isinstance(context.get("device_state"), dict) else device_agent.seed_state(objective=str(run["objective"]), safety_profile=str(policy.get("device_fragility_profile") or "safe_remote"), max_turns=30)
             result = await _execute_device_agent_tool(
                 run_id=run["id"], device_target_id=run["device_target_id"],
                 safety_profile=str(policy.get("device_fragility_profile") or "safe_remote"),
                 approval_receipt_id=policy.get("approval_receipt_id"), state=device_state,
-                name=adapter_name, args=request.input,
+                name=device_adapter_name, args=validated_device_input,
             )
             context["device_state"] = device_state
         elif name == "http.request":
@@ -35180,6 +35213,201 @@ async def execute_hunt_capability(
             if str(run["target_kind"]) == "device":
                 await conn.execute("UPDATE hunt_runs SET context_pack=$2, updated_at=NOW() WHERE id=$1", run["id"], json.dumps(context, default=str))
     return {"hunt_id": hunt_id, "capability": name, "action_id": str(action_id), "result": result}
+
+
+@app.post("/hunts/{hunt_id}/shell-plans/{plan_id}/confirm")
+async def confirm_hunt_shell_plan(
+    hunt_id: str, plan_id: str, request: DeviceAgentShellConfirmRequest,
+):
+    """Confirm one immutable device SSH plan owned by the unified Hunt runtime."""
+    if not request.confirm_exact_commands or not request.confirm_remote_device_effects:
+        raise HTTPException(
+            status_code=409,
+            detail="Confirm both the exact commands and their possible effects on the remote device",
+        )
+    plan_uuid = _device_uuid(plan_id, "SSH shell plan")
+    queue_token = str(uuid.uuid4())
+    action_id = uuid.uuid4()
+    charges = {
+        "active_actions": 1,
+        "device_fragility_points": device_agent.CONFIRMED_SHELL_FRAGILITY_COST,
+    }
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            run = await _hunt_run_or_404(conn, hunt_id, for_update=True)
+            if str(run["target_kind"]) != "device" or not run["device_target_id"]:
+                raise HTTPException(status_code=409, detail="SSH shell plans require a device Hunt")
+            if str(run["status"]) not in {"active", "awaiting_planner"}:
+                raise HTTPException(status_code=409, detail=f"Hunt is {run['status']}")
+            policy = _hunt_json(run["policy_json"], {})
+            if not policy.get("active_testing") or not policy.get("credential_access"):
+                raise HTTPException(status_code=409, detail="SSH shell confirmation requires active credential authority")
+            context = _hunt_json(run["context_pack"], {})
+            state = context.get("device_state") if isinstance(context.get("device_state"), dict) else {}
+            if state.get("traffic_frozen"):
+                raise HTTPException(status_code=409, detail="Device traffic is frozen after a health circuit breaker")
+            plans = [item for item in state.get("shell_plans", []) if isinstance(item, dict)]
+            index = next((i for i, item in enumerate(plans) if str(item.get("plan_id")) == str(plan_uuid)), None)
+            if index is None:
+                raise HTTPException(status_code=404, detail="SSH shell plan not found in this Hunt")
+            try:
+                plan = device_shell.validate_shell_plan(plans[index])
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            if str(plan.get("run_id")) != str(run["id"]) or str(plan.get("device_target_id")) != str(run["device_target_id"]):
+                raise HTTPException(status_code=409, detail="SSH shell plan scope does not match this Hunt")
+            if plan.get("status") != "proposed":
+                raise HTTPException(status_code=409, detail=f"SSH shell plan is already {plan.get('status') or 'unavailable'}")
+            if request.plan_digest != str(plan["plan_digest"]):
+                raise HTTPException(status_code=409, detail="SSH shell plan digest changed; review the exact commands again")
+            if request.confirmation_phrase != str(plan["confirmation_phrase"]):
+                raise HTTPException(status_code=409, detail="SSH shell confirmation phrase does not match the immutable plan")
+            try:
+                expires_at = datetime.fromisoformat(str(plan["expires_at"]).replace("Z", "+00:00"))
+                if expires_at.tzinfo is None:
+                    expires_at = expires_at.replace(tzinfo=timezone.utc)
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=409, detail="SSH shell plan has an invalid expiry") from exc
+            if expires_at <= datetime.now(timezone.utc):
+                plans[index] = {**plan, "status": "expired"}
+                state["shell_plans"], context["device_state"] = plans, state
+                await conn.execute(
+                    "UPDATE hunt_runs SET context_pack=$2, updated_at=NOW() WHERE id=$1",
+                    run["id"], json.dumps(context, default=str),
+                )
+                raise HTTPException(status_code=409, detail="SSH shell plan expired; ask the agent to propose it again")
+            bound_ssh_profiles = {
+                str(ref.get("profile_id")) for ref in state.get("device_credential_profiles", [])
+                if isinstance(ref, dict) and ref.get("role") == "ssh"
+            }
+            if str(plan.get("credential_profile_id")) not in bound_ssh_profiles:
+                raise HTTPException(status_code=409, detail="SSH shell plan credential is no longer bound to this Hunt")
+            device = await conn.fetchrow(
+                "SELECT id, primary_locator, locator_generation, is_active FROM device_targets WHERE id=$1",
+                run["device_target_id"],
+            )
+            if (
+                not device or not device["is_active"]
+                or str(device["primary_locator"]) != str(plan["target_locator"])
+                or int(device["locator_generation"]) != int(plan["locator_generation"])
+            ):
+                raise HTTPException(status_code=409, detail="Device address or identity changed; request a new shell plan")
+            legacy_daily = int(await conn.fetchval(
+                """SELECT COALESCE(SUM(fragility_cost),0) FROM device_agent_actions
+                   WHERE device_target_id=$1 AND outcome <> 'blocked'
+                     AND created_at >= date_trunc('day', NOW())""",
+                run["device_target_id"],
+            ) or 0)
+            hunt_daily = int(await conn.fetchval(
+                """SELECT COALESCE(SUM(COALESCE((budget_used_json->>'device_fragility_points')::int,0)),0)
+                   FROM hunt_runs WHERE device_target_id=$1
+                     AND created_at >= date_trunc('day', NOW())""",
+                run["device_target_id"],
+            ) or 0)
+            if legacy_daily + hunt_daily + charges["device_fragility_points"] > device_agent.MAX_FRAGILITY_PER_DEVICE_DAY:
+                raise HTTPException(status_code=409, detail="Daily fragility budget for this device is exhausted")
+            await _validate_approval_receipt_for_action(
+                conn, policy.get("approval_receipt_id"), target_url=str(device["primary_locator"]),
+                target_id=run["device_target_id"], action_name="hunt.device.ssh.confirm",
+                command="device.ssh.execute_confirmed", risk_tier="credential",
+                always_require_receipt=True, require_target_binding=True, require_expiry=True,
+                created_by=f"hunt_v2_shell:{hunt_id}",
+            )
+            budget = _hunt_json(run["budget_json"], {})
+            limits = _hunt_ledger_limits(budget)
+            used = _hunt_json(run["budget_used_json"], {})
+            try:
+                reserved_used = reserve_budget_snapshot(
+                    limits, {key: int(used.get(key) or 0) for key in limits}, charges,
+                )
+            except BudgetExceeded as exc:
+                dimension = next(iter(exc.shortages), "unknown")
+                raise HTTPException(status_code=409, detail=f"Hunt budget exhausted: {dimension}") from exc
+            used.update(reserved_used)
+            plan = {
+                **plan, "status": "queueing", "queue_token": queue_token,
+                "confirmed_at": datetime.now(timezone.utc).isoformat(),
+                "confirmed_plan_digest": request.plan_digest,
+                "confirmation_basis": "explicit_user_exact_command_confirmation",
+            }
+            plans[index] = plan
+            state["shell_plans"], context["device_state"] = plans, state
+            await conn.execute(
+                "UPDATE hunt_runs SET context_pack=$2,budget_used_json=$3,updated_at=NOW() WHERE id=$1",
+                run["id"], json.dumps(context, default=str), json.dumps(used),
+            )
+            await conn.execute(
+                """INSERT INTO hunt_actions (id,hunt_run_id,capability_name,status,input_summary)
+                   VALUES ($1,$2,'device.ssh.execute_confirmed','running',$3)""",
+                action_id, run["id"], json.dumps({"plan_id": str(plan_uuid), "plan_digest": request.plan_digest}),
+            )
+            device_target_id = run["device_target_id"]
+            approval_receipt_id = policy.get("approval_receipt_id")
+
+    parent_token = _DEVICE_AGENT_PARENT_AUTHORITY.set(True)
+    shell_token = _DEVICE_AGENT_APPROVED_SHELL_PLAN.set(plan)
+    try:
+        queued = await scan_device(str(device_target_id), DeviceScanRequest(
+            profile="inventory", safety_profile="authenticated_active", confirm_authorized=True,
+            include_web_dast=False, max_web_origins=0,
+            ssh_credential_profile_id=str(plan["credential_profile_id"]),
+            capability_ids=["agent-confirmed-ssh-shell"],
+            approval_receipt_id=approval_receipt_id,
+        ))
+    except Exception as exc:
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                failed = await _hunt_run_or_404(conn, hunt_id, for_update=True)
+                failed_context = _hunt_json(failed["context_pack"], {})
+                failed_state = failed_context.get("device_state") if isinstance(failed_context.get("device_state"), dict) else {}
+                failed_state["shell_plans"] = [
+                    {**item, "status": "proposed", "last_queue_error": type(exc).__name__}
+                    if str(item.get("plan_id")) == str(plan_uuid) and item.get("queue_token") == queue_token else item
+                    for item in failed_state.get("shell_plans", []) if isinstance(item, dict)
+                ]
+                failed_context["device_state"] = failed_state
+                current_used = _hunt_json(failed["budget_used_json"], {})
+                reconciled = reconcile_budget_snapshot(
+                    {key: int(current_used.get(key) or 0) for key in limits}, charges,
+                    {key: 0 for key in charges},
+                )
+                current_used.update(reconciled)
+                await conn.execute(
+                    "UPDATE hunt_runs SET context_pack=$2,budget_used_json=$3,updated_at=NOW() WHERE id=$1",
+                    failed["id"], json.dumps(failed_context, default=str), json.dumps(current_used),
+                )
+                await conn.execute(
+                    "UPDATE hunt_actions SET status='failed',result_summary=$2,completed_at=NOW() WHERE id=$1",
+                    action_id, json.dumps({"error": f"queue_fault:{type(exc).__name__}"}),
+                )
+        raise
+    finally:
+        _DEVICE_AGENT_APPROVED_SHELL_PLAN.reset(shell_token)
+        _DEVICE_AGENT_PARENT_AUTHORITY.reset(parent_token)
+
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            updated = await _hunt_run_or_404(conn, hunt_id, for_update=True)
+            updated_context = _hunt_json(updated["context_pack"], {})
+            updated_state = updated_context.get("device_state") if isinstance(updated_context.get("device_state"), dict) else {}
+            updated_state["shell_plans"] = [
+                {**item, "status": "queued", "scan_id": queued["scan_id"],
+                 "queued_at": datetime.now(timezone.utc).isoformat()}
+                if str(item.get("plan_id")) == str(plan_uuid) and item.get("queue_token") == queue_token else item
+                for item in updated_state.get("shell_plans", []) if isinstance(item, dict)
+            ]
+            updated_context["device_state"] = updated_state
+            updated = await conn.fetchrow(
+                "UPDATE hunt_runs SET context_pack=$2,updated_at=NOW() WHERE id=$1 RETURNING *",
+                updated["id"], json.dumps(updated_context, default=str),
+            )
+            await conn.execute(
+                "UPDATE hunt_actions SET status='completed',result_summary=$2,completed_at=NOW() WHERE id=$1",
+                action_id, json.dumps({"scan_id": queued["scan_id"], "plan_id": str(plan_uuid)}),
+            )
+    response = _hunt_public(updated)
+    response["queued_scan"] = queued
+    return response
 
 
 @app.post("/hunts/{hunt_id}/candidates")

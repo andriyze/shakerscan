@@ -56,6 +56,7 @@ def test_registry_filters_target_kind_and_active_permission():
     assert all_device == {
         "device.inspect", "device.capabilities.inspect", "device.http.probe",
         "device.scan", "device.service.verify", "collections.inspect", "collections.select",
+        "device.ssh.propose",
     }
     assert not CAPABILITY_REGISTRY.require("web.probe").requires_active_approval
     assert CAPABILITY_REGISTRY.require("ports.discover").requires_active_approval

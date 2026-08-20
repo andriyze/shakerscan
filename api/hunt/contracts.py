@@ -123,4 +123,5 @@ def capability_manifest(policy: HuntPolicy) -> list[dict[str, Any]]:
             target_kind=policy.target_kind,
             include_active=policy.active_testing,
         )
+        if spec.risk_tier != "credential" or policy.credential_access
     ]

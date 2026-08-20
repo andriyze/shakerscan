@@ -5,9 +5,14 @@ import { useSearchParams } from 'next/navigation'
 import { Compass, ShieldCheck } from 'lucide-react'
 import {
   cancelHuntV2,
+  confirmHuntShellPlan,
+  getDeviceCredentials,
   getDevices,
+  getHuntV2,
   getTargets,
   startHuntV2,
+  type DeviceAgentShellPlan,
+  type DeviceCredentialProfile,
   type DeviceTarget,
   type HuntV2,
   type Target,
@@ -26,9 +31,12 @@ function HuntContent() {
   const [budget, setBudget] = useState<'fast' | 'balanced' | 'thorough'>('balanced')
   const [approvalReceipt, setApprovalReceipt] = useState('')
   const [requestCollectionIds, setRequestCollectionIds] = useState('')
+  const [deviceCredentials, setDeviceCredentials] = useState<DeviceCredentialProfile[]>([])
+  const [sshCredentialId, setSshCredentialId] = useState('')
   const [hunt, setHunt] = useState<HuntV2 | null>(null)
   const [loading, setLoading] = useState(true)
   const [starting, setStarting] = useState(false)
+  const [confirmingPlanId, setConfirmingPlanId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
@@ -53,6 +61,37 @@ function HuntContent() {
     ...webTargets.map((target) => ({ id: target.id, kind: 'web' as const, label: target.name || target.url, detail: target.url })),
     ...devices.filter((device) => device.is_active).map((device) => ({ id: device.id, kind: 'device' as const, label: device.name, detail: device.primary_locator })),
   ], [webTargets, devices])
+  const selectedChoice = choices.find((choice) => choice.id === targetId)
+
+  useEffect(() => {
+    let cancelled = false
+    setSshCredentialId('')
+    setDeviceCredentials([])
+    if (selectedChoice?.kind !== 'device') return () => { cancelled = true }
+    getDeviceCredentials(selectedChoice.id)
+      .then(({ profiles }) => {
+        if (!cancelled) setDeviceCredentials(profiles.filter((profile) => profile.auth_kind.startsWith('ssh_') && profile.execution_compatible))
+      })
+      .catch(() => { if (!cancelled) setDeviceCredentials([]) })
+    return () => { cancelled = true }
+  }, [selectedChoice?.id, selectedChoice?.kind])
+
+  useEffect(() => {
+    if (!hunt || !['active', 'awaiting_planner'].includes(hunt.status)) return
+    let cancelled = false
+    const refresh = () => getHuntV2(hunt.hunt_id)
+      .then((current) => { if (!cancelled) setHunt(current) })
+      .catch(() => undefined)
+    const timer = window.setInterval(refresh, 5000)
+    return () => { cancelled = true; window.clearInterval(timer) }
+  }, [hunt?.hunt_id, hunt?.status])
+
+  const shellPlans = useMemo<DeviceAgentShellPlan[]>(() => {
+    const deviceState = hunt?.context_pack?.device_state
+    if (!deviceState || typeof deviceState !== 'object' || Array.isArray(deviceState)) return []
+    const plans = (deviceState as { shell_plans?: unknown }).shell_plans
+    return Array.isArray(plans) ? plans.filter((plan): plan is DeviceAgentShellPlan => Boolean(plan && typeof plan === 'object' && 'plan_id' in plan)) : []
+  }, [hunt?.context_pack])
 
   async function start() {
     if (!targetId) return
@@ -65,6 +104,7 @@ function HuntContent() {
         budget_profile: budget,
         approval_receipt_id: approvalReceipt.trim() || undefined,
         request_collection_ids: requestCollectionIds.split(/[\s,]+/).map((value) => value.trim()).filter(Boolean),
+        ssh_credential_profile_id: selectedChoice?.kind === 'device' ? sshCredentialId || undefined : undefined,
       })
       setHunt(created)
       toast.success('Hunt started')
@@ -74,6 +114,19 @@ function HuntContent() {
       toast.error(message)
     } finally {
       setStarting(false)
+    }
+  }
+
+  async function confirmShellPlan(plan: DeviceAgentShellPlan) {
+    if (!hunt) return
+    setConfirmingPlanId(plan.plan_id)
+    try {
+      setHunt(await confirmHuntShellPlan(hunt.hunt_id, plan))
+      toast.success('Exact SSH command plan queued')
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : 'Failed to confirm SSH command plan')
+    } finally {
+      setConfirmingPlanId(null)
     }
   }
 
@@ -125,6 +178,17 @@ function HuntContent() {
                   <p className="mt-1 text-xs text-gray-500">Without a valid target-bound receipt, Hunt exposes passive capabilities only.</p>
                 </div>
               </Field>
+              {selectedChoice?.kind === 'device' && (
+                <Field label="Bound SSH credential (optional)">
+                  <div>
+                    <Select value={sshCredentialId} onChange={(event) => setSshCredentialId(event.target.value)}>
+                      <option value="">No SSH command proposals</option>
+                      {deviceCredentials.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}{profile.port ? ` · port ${profile.port}` : ''}</option>)}
+                    </Select>
+                    <p className="mt-1 text-xs text-gray-500">A credential and target-bound approval receipt expose proposal only. No SSH command runs until you separately confirm its exact immutable plan here.</p>
+                  </div>
+                </Field>
+              )}
               <Field label="Bound request collection IDs (optional)">
                 <div>
                   <input value={requestCollectionIds} onChange={(event) => setRequestCollectionIds(event.target.value)} placeholder="UUIDs separated by commas" className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white" />
@@ -138,6 +202,7 @@ function HuntContent() {
         </Card>
       ) : (
         <div className="grid gap-5 lg:grid-cols-[1fr_1.4fr]">
+          <div className="space-y-5">
           <Card className="p-5 space-y-4">
             <div className="flex items-center justify-between gap-3">
               <div><p className="text-xs uppercase tracking-wide text-gray-500">{hunt.target_kind} Hunt</p><h2 className="mt-1 font-medium text-white">{hunt.objective}</h2></div>
@@ -150,6 +215,22 @@ function HuntContent() {
             <div className="flex items-start gap-2 rounded-lg border border-gray-800 bg-gray-950 p-3 text-xs text-gray-400"><ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />The runtime binds every capability to this target. Candidates require evidence and cannot become verified findings directly.</div>
             {['active', 'awaiting_planner'].includes(hunt.status) && <Button variant="danger" onClick={cancel}>Cancel Hunt</Button>}
           </Card>
+          {hunt.target_kind === 'device' && shellPlans.length > 0 && (
+            <Card className="p-5 space-y-4">
+              <div><h2 className="font-medium text-white">SSH command plans</h2><p className="mt-1 text-xs text-gray-500">Review every command. Plans are immutable, host-key pinned, and expire after 30 minutes.</p></div>
+              {shellPlans.map((plan) => (
+                <div key={plan.plan_id} className="space-y-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-4">
+                  <div className="flex items-center justify-between gap-3"><span className="text-sm font-medium text-amber-100">Port {plan.ssh_port} · {plan.status}</span><span className="text-xs text-gray-500">Expires {new Date(plan.expires_at).toLocaleString()}</span></div>
+                  <p className="text-xs text-gray-300">{plan.purpose}</p>
+                  <pre className="overflow-x-auto whitespace-pre-wrap rounded bg-gray-950 p-3 text-xs text-blue-200">{plan.commands.join('\n')}</pre>
+                  <div className="space-y-1 text-xs text-gray-400"><p><span className="text-gray-500">Risk:</span> {plan.risk_summary}</p><p className="break-all"><span className="text-gray-500">Pinned host key:</span> {plan.expected_host_key_fingerprint}</p><p className="break-all"><span className="text-gray-500">Plan digest:</span> {plan.plan_digest}</p></div>
+                  {plan.status === 'proposed' && <Button onClick={() => confirmShellPlan(plan)} loading={confirmingPlanId === plan.plan_id}>Confirm and queue these exact remote commands</Button>}
+                  {plan.scan_id && <p className="text-xs text-emerald-300">Queued scan: {plan.scan_id}</p>}
+                </div>
+              ))}
+            </Card>
+          )}
+          </div>
           <Card className="p-5">
             <h2 className="font-medium text-white">Available capabilities</h2>
             <p className="mt-1 text-xs text-gray-500">Your coding agent can query context and call these through the Hunt API.</p>

@@ -1362,8 +1362,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 354 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 297 | `api/api.py` |
+| Public REST operations | 355 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 298 | `api/api.py` |
 | Check families | 14 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -1571,6 +1571,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `POST` | `/hunts/{hunt_id}/finish` | `finish_hunt` |
 | `POST` | `/hunts/{hunt_id}/query` | `query_hunt` |
 | `POST` | `/hunts/{hunt_id}/resume` | `resume_hunt` |
+| `POST` | `/hunts/{hunt_id}/shell-plans/{plan_id}/confirm` | `confirm_hunt_shell_plan` |
 | `GET` | `/investigation/candidates` | `list_investigation_candidates` |
 | `GET` | `/investigation/candidates/{candidate_id}` | `get_investigation_candidate` |
 | `POST` | `/model-intake/admission/verify` | `verify_model_intake_admission` |
@@ -2319,7 +2320,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_BROKER_MAX_RESULT_BYTES` | `api/api.py` |
 | `SHAKERSCAN_BUILD_NETWORK` | `docker-compose.yml` |
 | `SHAKERSCAN_CALIBRATION_IMPORT_ROOT` | `scripts/device_posture_calibration.py` |
-| `SHAKERSCAN_CANCEL_FILE` | `scanner/scanner_tools/cancellation.py`, `scanner/scanner_tools/common.py` |
+| `SHAKERSCAN_CANCEL_FILE` | `scanner/scanner_tools/cancellation.py`, `scanner/scanner_tools/common.py`, `scanner/scanner_tools/discovery.py` |
 | `SHAKERSCAN_COMPOSE_PROJECT` | `api/api.py` |
 | `SHAKERSCAN_CORS_ALLOW_ORIGINS` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_CORS_ALLOW_ORIGIN_REGEX` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |

@@ -34,11 +34,20 @@ def test_hunt_with_valid_receipt_gets_active_capabilities_but_never_mutation():
     assert policy.credential_access is True
     assert policy.mutation_allowed is False
     names = {item["name"] for item in capabilities}
-    assert names >= {"device.inspect", "device.http.probe", "device.scan"}
+    assert names >= {"device.inspect", "device.http.probe", "device.scan", "device.ssh.propose"}
     assert not names & {
         "web.probe", "templates.scan", "web.crawl", "web.content_discover",
         "xss.verify", "sqli.verify", "service.fingerprint", "ports.discover", "tls.inspect",
     }
+
+
+def test_device_ssh_proposal_requires_bound_credentials():
+    policy = resolve_hunt_policy(
+        target_kind="device", budget_profile="thorough", approval_receipt_id="receipt",
+        approval_validated=True, credentials_available=False,
+        device_fragility_profile="authenticated_active",
+    )
+    assert "device.ssh.propose" not in {item["name"] for item in capability_manifest(policy)}
 
 
 def test_hunt_budget_profile_is_bounded():
@@ -56,6 +65,7 @@ def test_hunt_actions_emit_capability_receipts_and_never_accept_raw_argv():
     migration = (root / "api" / "retest_contract.py").read_text()
 
     assert 'app.post("/hunts/{hunt_id}/capabilities/{capability_name:path}")' in api
+    assert 'app.post("/hunts/{hunt_id}/shell-plans/{plan_id}/confirm")' in api
     assert "capability_name=name" in api
     assert "adapter_name=str(spec.adapter)" in api
     assert '"used_after_reconciliation": reconciled_used' in api
@@ -69,6 +79,7 @@ def test_hunt_actions_emit_capability_receipts_and_never_accept_raw_argv():
     assert "require_target_binding=True" in api
     assert 'elif name == "http.request"' in api
     assert "_hunt_tls_inspect" in api
+    assert "device_agent.validate_tool_call" in api
     assert "ADD COLUMN IF NOT EXISTS capability_name" in migration
     assert "ADD COLUMN IF NOT EXISTS hunt_id" in migration
     assert "argv" not in capability_manifest(resolve_hunt_policy(

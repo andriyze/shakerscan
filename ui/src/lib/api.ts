@@ -3909,6 +3909,7 @@ export interface HuntV2 {
   }>
   final_debrief?: { summary?: string; next_actions?: string[] }
   stop_reason?: string | null
+  queued_scan?: { scan_id: string; job_id?: string; status: string; ui_url?: string }
 }
 
 export async function startHuntV2(request: {
@@ -3917,6 +3918,7 @@ export async function startHuntV2(request: {
   budget_profile: 'fast' | 'balanced' | 'thorough'
   approval_receipt_id?: string
   request_collection_ids?: string[]
+  ssh_credential_profile_id?: string
 }): Promise<HuntV2> {
   const res = await fetch(`${API_URL}/hunts`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request),
@@ -3934,6 +3936,21 @@ export async function getHuntV2(huntId: string): Promise<HuntV2> {
 export async function cancelHuntV2(huntId: string): Promise<HuntV2> {
   const res = await fetch(`${API_URL}/hunts/${huntId}/cancel`, { method: 'POST' })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to cancel Hunt'))
+  return res.json()
+}
+
+export async function confirmHuntShellPlan(huntId: string, plan: DeviceAgentShellPlan): Promise<HuntV2> {
+  const res = await fetch(`${API_URL}/hunts/${encodeURIComponent(huntId)}/shell-plans/${encodeURIComponent(plan.plan_id)}/confirm`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      plan_digest: plan.plan_digest,
+      confirmation_phrase: plan.confirmation_phrase,
+      confirm_exact_commands: true,
+      confirm_remote_device_effects: true,
+    }),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to confirm Hunt SSH shell plan'))
   return res.json()
 }
 
