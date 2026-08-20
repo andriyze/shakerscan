@@ -96,6 +96,7 @@ def normalize_candidate(
     research_episode_id: str | None = None,
     agent_hunt_run_id: str | None = None,
     device_agent_run_id: str | None = None,
+    hunt_run_id: str | None = None,
     family: Any,
     locus: Any,
     title: Any,
@@ -139,6 +140,7 @@ def normalize_candidate(
         "research_episode_id": str(research_episode_id) if research_episode_id else None,
         "agent_hunt_run_id": str(agent_hunt_run_id) if agent_hunt_run_id else None,
         "device_agent_run_id": str(device_agent_run_id) if device_agent_run_id else None,
+        "hunt_run_id": str(hunt_run_id) if hunt_run_id else None,
         "family": normalized_family,
         "canonical_locus": normalized_locus,
         "title": str(title or "Investigation candidate").strip()[:300],
@@ -172,12 +174,12 @@ async def upsert_candidate(
     row = await conn.fetchrow(
         """INSERT INTO investigation_candidates (
                plane, target_id, device_target_id, research_episode_id, agent_hunt_run_id,
-               device_agent_run_id,
+               device_agent_run_id, hunt_run_id,
                family, canonical_locus, title, claim, claimed_severity, evidence_refs,
                verifier_contract_id, source_kind, fingerprint, status, created_by
            ) VALUES (
-               $1,$2::uuid,$3::uuid,$4::uuid,$5::uuid,$6::uuid,$7,$8::jsonb,$9,$10,$11,$12::jsonb,
-               $13,$14,$15,'new',$16
+               $1,$2::uuid,$3::uuid,$4::uuid,$5::uuid,$6::uuid,$7::uuid,$8,$9::jsonb,$10,$11,$12,$13::jsonb,
+               $14,$15,$16,'new',$17
            )
            ON CONFLICT (fingerprint) DO UPDATE SET
                title=CASE WHEN investigation_candidates.status IN ('verified','refuted','expired')
@@ -196,7 +198,7 @@ async def upsert_candidate(
            RETURNING id, status, fingerprint, created_at, updated_at, (xmax = 0) AS inserted""",
         candidate["plane"], candidate.get("target_id"), candidate.get("device_target_id"),
         candidate.get("research_episode_id"), candidate.get("agent_hunt_run_id"),
-        candidate.get("device_agent_run_id"), candidate["family"],
+        candidate.get("device_agent_run_id"), candidate.get("hunt_run_id"), candidate["family"],
         json.dumps(candidate["canonical_locus"]), candidate["title"], candidate["claim"],
         candidate["claimed_severity"], json.dumps(candidate["evidence_refs"]),
         candidate.get("verifier_contract_id"), candidate.get("source_kind"), candidate["fingerprint"],
@@ -204,14 +206,14 @@ async def upsert_candidate(
     )
     await conn.execute(
         """INSERT INTO investigation_candidate_observations (
-               candidate_id, research_episode_id, agent_hunt_run_id, device_agent_run_id,
+               candidate_id, research_episode_id, agent_hunt_run_id, device_agent_run_id, hunt_run_id,
                source_kind, title, claim, claimed_severity, evidence_refs,
                verifier_contract_id, observation_context, created_by
            ) VALUES (
-               $1,$2::uuid,$3::uuid,$4::uuid,$5,$6,$7,$8,$9::jsonb,$10,$11::jsonb,$12
+               $1,$2::uuid,$3::uuid,$4::uuid,$5::uuid,$6,$7,$8,$9,$10::jsonb,$11,$12::jsonb,$13
            )""",
         row["id"], candidate.get("research_episode_id"), candidate.get("agent_hunt_run_id"),
-        candidate.get("device_agent_run_id"), candidate.get("source_kind"), candidate["title"],
+        candidate.get("device_agent_run_id"), candidate.get("hunt_run_id"), candidate.get("source_kind"), candidate["title"],
         candidate["claim"], candidate["claimed_severity"], json.dumps(candidate["evidence_refs"]),
         candidate.get("verifier_contract_id"), json.dumps(observation_context or {}),
         str(created_by or "hunt")[:120],

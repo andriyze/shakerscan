@@ -76,9 +76,23 @@ except ModuleNotFoundError:
     from scanner.scanner_tools import device_advisories
 
 try:
-    from scanner_tools.device_request_formats import RequestImportError, validate_request_document as validate_device_request_collection
+    from scanner_tools.request_collections import (
+        RequestImportError,
+        RequestSelector,
+        page_index as page_request_collection_index,
+        select_requests as select_request_collection_requests,
+        validate_and_index as validate_and_index_request_collection,
+        validate_request_collection as validate_device_request_collection,
+    )
 except ModuleNotFoundError:
-    from scanner.scanner_tools.device_request_formats import RequestImportError, validate_request_document as validate_device_request_collection
+    from scanner.scanner_tools.request_collections import (
+        RequestImportError,
+        RequestSelector,
+        page_index as page_request_collection_index,
+        select_requests as select_request_collection_requests,
+        validate_and_index as validate_and_index_request_collection,
+        validate_request_collection as validate_device_request_collection,
+    )
 
 try:
     from scanner_tools.device_request_formats import resolve_imported_requests as _resolve_imported_device_requests
@@ -407,6 +421,18 @@ import agent_provenance
 import agent_text_toolcalls
 import agent_tools
 import agent_budget
+try:
+    from scan.contracts import resolve_scan_contract
+except ModuleNotFoundError:
+    from api.scan.contracts import resolve_scan_contract
+try:
+    from hunt.contracts import capability_manifest, resolve_hunt_policy
+except ModuleNotFoundError:
+    from api.hunt.contracts import capability_manifest, resolve_hunt_policy
+try:
+    from runtime.budgets import BudgetExceeded, reserve_budget_snapshot
+except ModuleNotFoundError:
+    from api.runtime.budgets import BudgetExceeded, reserve_budget_snapshot
 import device_agent
 import device_capabilities
 import investigation_candidates
@@ -3320,7 +3346,33 @@ async def run_due_schedules(pool: asyncpg.Pool):
                         retry_at, schedule_id)
                 continue
 
-            scan_options['scan_type'] = scan_type
+            canonical_schedule = scan_type == "scan"
+            if canonical_schedule:
+                try:
+                    scan_contract = resolve_scan_contract(
+                        budget_profile=scan_options.get("budget_profile"),
+                        policy=scan_options.pop("policy", None),
+                        advanced=scan_options.pop("advanced", None),
+                        approval_receipt_id=scan_options.get("approval_receipt_id"),
+                    )
+                except ValueError as exc:
+                    print(f"[scheduler] Skipping schedule {str(schedule_id)[:8]}: {exc}", flush=True)
+                    continue
+                scan_type = scan_contract.execution_scan_type
+                scan_options["scan_type"] = scan_type
+                scan_options["budget_profile"] = scan_contract.budget_profile
+                scan_options["active"] = scan_contract.policy.active_testing
+                scan_options["subfinder"] = scan_contract.policy.subdomain_discovery
+                scan_options["custom_budget"] = {
+                    "max_duration_minutes": max(1, scan_contract.budget.max_duration_seconds // 60),
+                    "request_max": scan_contract.budget.max_http_requests,
+                    "max_urls": scan_contract.budget.max_endpoints,
+                    "browser_max_pages": scan_contract.budget.max_browser_actions,
+                    "active_worklist_max": scan_contract.budget.max_endpoints,
+                    **dict(scan_options.get("custom_budget") or {}),
+                }
+            else:
+                scan_options['scan_type'] = scan_type
             scan_options_model = ScanOptions(**scan_options)
             scan_type = normalize_dast_scan_options(scan_options_model)
             if scan_type in ACTIVE_ENFORCED_SCAN_TYPES and scan_options_model.public:
@@ -3348,6 +3400,8 @@ async def run_due_schedules(pool: asyncpg.Pool):
                 scan_type,
                 defer_family_preconditions=True,
             )
+            if canonical_schedule:
+                scan_options.update(scan_contract.option_metadata())
             scan_options = await _resolve_target_credential_profiles(conn, target_id, scan_options)
             scan_options, _family = _apply_scan_check_family_policy(scan_options)
             parallel_enabled, parallel_worker_count = _apply_auto_sharding_policy(
@@ -3358,10 +3412,17 @@ async def run_due_schedules(pool: asyncpg.Pool):
             scan_role = 'parent' if parallel_enabled else 'standalone'
 
             await conn.execute("""
-                INSERT INTO scans (id, target_id, target_url, job_id, status, options, scan_type, scan_role)
-                VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7)
+                INSERT INTO scans (
+                    id, target_id, target_url, job_id, status, options, scan_type, scan_role,
+                    scan_generation, policy_json, budget_json, coverage_status, coverage_json
+                ) VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, $8, $9, $10, $11, $12)
             """, uuid.UUID(scan_id), target_id, target_url, job_id,
-                 json.dumps(scan_options), scan_type, scan_role)
+                 json.dumps(scan_options), "scan" if canonical_schedule else scan_type, scan_role,
+                 "v2" if canonical_schedule else "legacy",
+                 json.dumps(scan_options.get("scan_policy") or {}),
+                 json.dumps(scan_options.get("resolved_scan_budget") or {}),
+                 "pending" if canonical_schedule else None,
+                 json.dumps({"status": "pending", "reasons": []}) if canonical_schedule else json.dumps({}))
 
         job_data = {
             'job_id': job_id,
@@ -3416,7 +3477,7 @@ async def run_due_schedules(pool: asyncpg.Pool):
                 WHERE id = $3
             """, now, next_run, schedule_id)
 
-        print(f"[scheduler] Triggered scan {scan_id[:8]} for schedule {str(schedule_id)[:8]} ({target_url}, {scan_type})", flush=True)
+        print(f"[scheduler] Triggered {'Scan' if canonical_schedule else scan_type} {scan_id[:8]} for schedule {str(schedule_id)[:8]} ({target_url})", flush=True)
 
 
 async def schedule_runner(pool: asyncpg.Pool):
@@ -4137,6 +4198,12 @@ class ScanOptions(BaseModel):
 class ScanRequest(BaseModel):
     target: str
     name: Optional[str] = None
+    budget_profile: Optional[Literal["fast", "balanced", "thorough"]] = None
+    policy: Optional[dict[str, Any]] = None
+    authentication: Optional[dict[str, Any]] = None
+    request_collections: list[dict[str, Any]] = Field(default_factory=list, max_length=16)
+    advanced: Optional[dict[str, Any]] = None
+    approval_receipt_id: Optional[str] = None
     options: ScanOptions = Field(default_factory=ScanOptions)
 
 
@@ -4349,7 +4416,35 @@ class DeviceAgentShellConfirmRequest(BaseModel):
 
 class BatchRequest(BaseModel):
     targets: list[str] = Field(min_length=1, max_length=50)
+    budget_profile: Optional[Literal["fast", "balanced", "thorough"]] = None
+    policy: Optional[dict[str, Any]] = None
+    authentication: Optional[dict[str, Any]] = None
+    request_collections: list[dict[str, Any]] = Field(default_factory=list, max_length=16)
+    advanced: Optional[dict[str, Any]] = None
+    approval_receipt_id: Optional[str] = None
     options: ScanOptions = Field(default_factory=ScanOptions)
+
+
+class RequestCollectionCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    target_id: str
+    name: Optional[str] = Field(default=None, max_length=300)
+    format: str = Field(default="auto", max_length=40)
+    document: Any
+    environment: Any = None
+    base_url: Optional[str] = Field(default=None, max_length=2048)
+    import_limit: int = Field(default=5000, ge=1, le=20000)
+    max_document_bytes: int = Field(default=25 * 1024 * 1024, ge=1, le=50 * 1024 * 1024)
+
+
+class RequestCollectionSelect(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    request_ids: list[str] = Field(default_factory=list, max_length=2000)
+    folders: list[str] = Field(default_factory=list, max_length=200)
+    methods: list[str] = Field(default_factory=list, max_length=20)
+    path_regex: Optional[str] = Field(default=None, max_length=500)
+    safe_methods_only: bool = True
+    limit: int = Field(default=500, ge=1, le=2000)
 
 
 class ModelIntakeScanRequest(BaseModel):
@@ -5319,6 +5414,8 @@ class RefuterReviewDeriveVerdictRequest(BaseModel):
 
 class ToolReceiptRequest(BaseModel):
     tool_name: str = Field(min_length=1, max_length=120)
+    capability_name: Optional[str] = Field(default=None, max_length=160)
+    adapter_name: Optional[str] = Field(default=None, max_length=160)
     tool_version: Optional[str] = None
     adapter_version: str = "2026-07-05.v1"
     command_hash: Optional[str] = None
@@ -5338,6 +5435,10 @@ class ToolReceiptRequest(BaseModel):
     stdout_evidence_object_id: Optional[str] = None
     stderr_evidence_object_id: Optional[str] = None
     parsed_evidence_instance_ids: list[str] = Field(default_factory=list)
+    budget_json: dict[str, Any] = Field(default_factory=dict)
+    partial: bool = False
+    output_artifact_id: Optional[str] = None
+    hunt_id: Optional[str] = None
     redaction_summary: Optional[str] = None
     metadata_json: dict[str, Any] = Field(default_factory=dict)
     created_by: Optional[str] = None
@@ -18574,7 +18675,12 @@ def _agent_tool_worker_readiness() -> dict[str, Any]:
     expected_fingerprint = expected_build_fingerprint()
     expected_version = current_scanner_version()
     now = datetime.now(timezone.utc)
-    required_tools = set(agent_tools.RUN_TOOL_NAMES)
+    # The compatibility worker is required to serve every legacy-callable adapter. V2-only
+    # capabilities expose their own placement/readiness instead of making the old all-or-nothing
+    # run_tool worker fail closed before those routes are switched over.
+    required_tools = {
+        str(spec.binary) for spec in agent_tools.CAPABILITY_REGISTRY.legacy_tools() if spec.binary
+    }
     reports: list[dict[str, Any]] = []
     try:
         raw_reports = get_redis().hgetall(AGENT_TOOL_WORKER_BUILD_REGISTRY_KEY) or {}
@@ -25873,6 +25979,207 @@ def _route_capacity_http_exception(exc: RouteCapacityExceeded) -> HTTPException:
         headers={"Retry-After": "30"},
     )
 
+def _public_request_collection(row: Any) -> dict[str, Any]:
+    item = row_to_dict(row) if row is not None and not isinstance(row, dict) else dict(row or {})
+    item.pop("encrypted_payload", None)
+    item["id"] = str(item.get("id")) if item.get("id") else None
+    item["target_id"] = str(item.get("target_id")) if item.get("target_id") else None
+    item["device_target_id"] = str(item.get("device_target_id")) if item.get("device_target_id") else None
+    item["storage_encrypted"] = True
+    item["secret_values_visible"] = False
+    return _json_safe_row(item)
+
+
+async def _generic_collection_refs(
+    conn: Any, *, target_id: Any = None, device_target_id: Any = None,
+    bindings: Sequence[Mapping[str, Any]] = (),
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Validate collection IDs against one target and derive bounded safe endpoint seeds."""
+    ids: list[uuid.UUID] = []
+    selectors: dict[str, Mapping[str, Any]] = {}
+    for raw in list(bindings)[:16]:
+        value = raw.get("id") or raw.get("collection_id")
+        if not value:
+            raise HTTPException(status_code=422, detail="request collection binding requires id")
+        collection_id = _uuid_or_400(str(value), "request collection id")
+        ids.append(collection_id)
+        selectors[str(collection_id)] = raw.get("selector") if isinstance(raw.get("selector"), Mapping) else {}
+    if not ids:
+        return [], []
+    rows = await conn.fetch(
+        """SELECT id, target_id, device_target_id, name, format, request_count,
+                  safe_request_count, potentially_mutating_request_count, payload_sha256
+           FROM request_collections
+           WHERE id=ANY($1::uuid[]) AND is_active=true
+             AND (($2::uuid IS NOT NULL AND target_id=$2) OR
+                  ($3::uuid IS NOT NULL AND device_target_id=$3))""",
+        ids, target_id, device_target_id,
+    )
+    if len(rows) != len(set(ids)):
+        raise HTTPException(status_code=422, detail="request collection is missing or bound to another target")
+    endpoints: list[str] = []
+    refs: list[dict[str, Any]] = []
+    for row in rows:
+        selector = dict(selectors.get(str(row["id"])) or {})
+        limit = max(1, min(int(selector.get("limit") or 500), 2000))
+        methods = [str(item).upper() for item in selector.get("methods") or []]
+        request_ids = [str(item) for item in selector.get("request_ids") or []]
+        index_rows = await conn.fetch(
+            """SELECT request_id, method, normalized_path FROM request_collection_requests
+               WHERE collection_id=$1 AND safe_method=true AND supported=true
+                 AND ($2::text[]='{}'::text[] OR method=ANY($2::text[]))
+                 AND ($3::text[]='{}'::text[] OR request_id=ANY($3::text[]))
+               ORDER BY ordinal LIMIT $4""",
+            row["id"], methods, request_ids, limit,
+        )
+        for item in index_rows:
+            path = str(item["normalized_path"] or "").strip()
+            if path:
+                endpoints.append(f"{str(item['method']).upper()} {path}")
+        refs.append({
+            "collection_id": str(row["id"]), "name": row["name"], "format": row["format"],
+            "request_count": int(row["request_count"] or 0),
+            "selected_safe_requests": len(index_rows), "payload_sha256": row["payload_sha256"],
+            "secret_values_visible": False,
+        })
+    return refs, list(dict.fromkeys(endpoints))[:2000]
+
+
+@app.post("/request-collections")
+async def create_request_collection(request: RequestCollectionCreate):
+    target_uuid = _uuid_or_400(request.target_id, "target id")
+    try:
+        payload, summary, index = validate_and_index_request_collection(
+            request.document, request.environment, requested_name=request.name,
+            import_format=request.format, base_url=request.base_url,
+            import_limit=request.import_limit, max_document_bytes=request.max_document_bytes,
+        )
+    except RequestImportError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    encrypted_payload = encrypt_secret(json.dumps(payload, separators=(",", ":"), ensure_ascii=False))
+    if not str(encrypted_payload or "").startswith("enc:fernet:"):
+        raise HTTPException(status_code=503, detail="Encrypted request-collection storage is unavailable")
+    async with db_pool.acquire() as conn:
+        web = await conn.fetchval("SELECT EXISTS(SELECT 1 FROM targets WHERE id=$1 AND is_active=true)", target_uuid)
+        device = False if web else await conn.fetchval("SELECT EXISTS(SELECT 1 FROM device_targets WHERE id=$1 AND is_active=true)", target_uuid)
+        if not web and not device:
+            raise HTTPException(status_code=404, detail="Active web or device target not found")
+        async with conn.transaction():
+            collection_name = summary.get("name") or request.name or "Request collection"
+            collection_id = await conn.fetchval(
+                """SELECT id FROM request_collections
+                   WHERE name=$1 AND (($2::uuid IS NOT NULL AND target_id=$2) OR
+                                      ($3::uuid IS NOT NULL AND device_target_id=$3))
+                   FOR UPDATE""",
+                collection_name, target_uuid if web else None, target_uuid if device else None,
+            ) or uuid.uuid4()
+            row = await conn.fetchrow(
+                """INSERT INTO request_collections (
+                       id, target_id, device_target_id, name, format, encrypted_payload,
+                       payload_sha256, request_count, safe_request_count,
+                       potentially_mutating_request_count, metadata_json
+                   ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+                   ON CONFLICT (id)
+                   DO UPDATE SET format=EXCLUDED.format, encrypted_payload=EXCLUDED.encrypted_payload,
+                       payload_sha256=EXCLUDED.payload_sha256, request_count=EXCLUDED.request_count,
+                       safe_request_count=EXCLUDED.safe_request_count,
+                       potentially_mutating_request_count=EXCLUDED.potentially_mutating_request_count,
+                       metadata_json=EXCLUDED.metadata_json, updated_at=NOW(), is_active=true
+                   RETURNING *""",
+                collection_id, target_uuid if web else None, target_uuid if device else None,
+                collection_name, summary.get("format") or request.format,
+                encrypted_payload, summary.get("document_sha256") or summary.get("payload_sha256"),
+                int(summary.get("request_count") or len(index)),
+                sum(1 for item in index if item.get("safe_method")),
+                sum(1 for item in index if not item.get("safe_method")),
+                json.dumps({key: value for key, value in summary.items() if key != "requests"}, default=str),
+            )
+            await conn.execute("DELETE FROM request_collection_requests WHERE collection_id=$1", row["id"])
+            if index:
+                await conn.executemany(
+                    """INSERT INTO request_collection_requests (
+                           collection_id, request_id, ordinal, folder, name, method, redacted_url,
+                           normalized_path, body_mode, auth_type, safe_method, supported
+                       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)""",
+                    [(row["id"], item["request_id"], item["ordinal"], item.get("folder"), item.get("name"),
+                      item["method"], item.get("redacted_url"), item.get("normalized_path"),
+                      item.get("body_mode"), item.get("auth_type"), item.get("safe_method", False),
+                      item.get("supported", True)) for item in index],
+                )
+    return _public_request_collection(row)
+
+
+@app.get("/request-collections")
+async def list_request_collections(target_id: str, limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0)):
+    target_uuid = _uuid_or_400(target_id, "target id")
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT * FROM request_collections
+               WHERE is_active=true AND (target_id=$1 OR device_target_id=$1)
+               ORDER BY updated_at DESC LIMIT $2 OFFSET $3""", target_uuid, limit, offset,
+        )
+    return {"collections": [_public_request_collection(row) for row in rows], "count": len(rows), "limit": limit, "offset": offset}
+
+
+@app.get("/request-collections/{collection_id}/requests")
+async def list_request_collection_requests(collection_id: str, limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0)):
+    collection_uuid = _uuid_or_400(collection_id, "request collection id")
+    async with db_pool.acquire() as conn:
+        exists = await conn.fetchval("SELECT EXISTS(SELECT 1 FROM request_collections WHERE id=$1 AND is_active=true)", collection_uuid)
+        if not exists:
+            raise HTTPException(status_code=404, detail="Request collection not found")
+        rows = await conn.fetch(
+            """SELECT request_id, ordinal, folder, name, method, redacted_url, normalized_path,
+                      body_mode, auth_type, safe_method, supported
+               FROM request_collection_requests WHERE collection_id=$1
+               ORDER BY ordinal LIMIT $2 OFFSET $3""", collection_uuid, limit, offset,
+        )
+        total = int(await conn.fetchval("SELECT COUNT(*) FROM request_collection_requests WHERE collection_id=$1", collection_uuid) or 0)
+    return {"requests": [_json_safe_row(row) for row in rows], "count": len(rows), "total": total, "offset": offset, "limit": limit, "next_offset": offset + len(rows) if offset + len(rows) < total else None, "secret_values_visible": False}
+
+
+@app.post("/request-collections/{collection_id}/select")
+async def select_request_collection_index(collection_id: str, request: RequestCollectionSelect):
+    collection_uuid = _uuid_or_400(collection_id, "request collection id")
+    try:
+        selector = RequestSelector(
+            request_ids=tuple(request.request_ids), folders=tuple(request.folders),
+            methods=tuple(request.methods), path_regex=request.path_regex,
+            safe_methods_only=request.safe_methods_only, limit=request.limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    async with db_pool.acquire() as conn:
+        exists = await conn.fetchval("SELECT EXISTS(SELECT 1 FROM request_collections WHERE id=$1 AND is_active=true)", collection_uuid)
+        if not exists:
+            raise HTTPException(status_code=404, detail="Request collection not found")
+        rows = await conn.fetch(
+            """SELECT request_id, ordinal, folder, name, method, redacted_url, normalized_path,
+                      body_mode, auth_type, safe_method, supported
+               FROM request_collection_requests WHERE collection_id=$1 ORDER BY ordinal LIMIT 20000""",
+            collection_uuid,
+        )
+    ids, folders, methods = set(selector.request_ids), set(selector.folders), set(selector.methods)
+    pattern = re.compile(selector.path_regex) if selector.path_regex else None
+    selected: list[dict[str, Any]] = []
+    for raw in rows:
+        item = _json_safe_row(raw)
+        if selector.safe_methods_only and not item.get("safe_method"):
+            continue
+        if ids and item.get("request_id") not in ids:
+            continue
+        if folders and item.get("folder") not in folders:
+            continue
+        if methods and item.get("method") not in methods:
+            continue
+        if pattern and not pattern.search(str(item.get("normalized_path") or "")):
+            continue
+        selected.append(item)
+        if len(selected) >= selector.limit:
+            break
+    return {"collection_id": collection_id, "requests": selected, "count": len(selected), "limit": selector.limit, "secret_values_visible": False}
+
+
 def normalize_dast_scan_options(options: ScanOptions) -> str:
     """Resolve scan_type from explicit or legacy options and mutate options consistently.
 
@@ -25937,12 +26244,56 @@ async def submit_scan(request: ScanRequest):
     job_id = str(uuid.uuid4())
     scan_id = str(uuid.uuid4())
 
-    # Determine scan type.
-    # Priority: explicit scan_type > legacy boolean flags > default quick.
-    scan_type = normalize_dast_scan_options(request.options)
+    # Every new web DAST submission resolves to the V2 policy/budget contract. Explicit old
+    # scan-type/boolean inputs remain compatibility aliases and retain their execution adapter
+    # during the migration, but are persisted with deprecation metadata.
+    legacy_requested = bool(
+        str(request.options.scan_type or "").strip()
+        or request.options.quick or request.options.thorough or request.options.active
+        or request.options.xss or request.options.sqli
+    )
+    legacy_scan_type = normalize_dast_scan_options(request.options) if legacy_requested else None
+    approval_receipt_id = request.approval_receipt_id or request.options.approval_receipt_id
+    try:
+        scan_contract = resolve_scan_contract(
+            budget_profile=request.budget_profile or request.options.budget_profile,
+            policy=request.policy,
+            advanced=request.advanced,
+            approval_receipt_id=approval_receipt_id,
+            legacy_scan_type=legacy_scan_type,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    scan_type = scan_contract.execution_scan_type
+    public_scan_type = legacy_scan_type or "scan"
+    request.options.scan_type = scan_type
+    request.options.active = scan_contract.policy.active_testing
+    request.options.quick = scan_type == "quick"
+    request.options.thorough = scan_type in {"deep", "full", "aggressive", "smart"}
+    request.options.approval_receipt_id = approval_receipt_id
+    request.options.budget_profile = scan_contract.budget_profile
+    request.options.subfinder = bool(scan_contract.policy.subdomain_discovery)
+    if not legacy_scan_type:
+        canonical_budget = scan_contract.budget
+        translated_budget = {
+            "max_duration_minutes": max(1, canonical_budget.max_duration_seconds // 60),
+            "request_max": canonical_budget.max_http_requests,
+            "max_urls": canonical_budget.max_endpoints,
+            "active_worklist_max": canonical_budget.max_endpoints,
+            "browser_max_pages": min(2_000, canonical_budget.max_browser_actions),
+            "active_max_seconds": min(
+                canonical_budget.max_duration_seconds, canonical_budget.max_tool_wall_seconds
+            ),
+            "active_max_endpoints": min(10_000, canonical_budget.max_endpoints),
+        }
+        request.options.custom_budget = {
+            **translated_budget,
+            **dict(request.options.custom_budget or {}),
+        }
+        request.options.shard_concurrency = min(20, canonical_budget.max_workers)
 
     # Validate: public option is incompatible with active-enforced scan types
-    if scan_type in ACTIVE_ENFORCED_SCAN_TYPES and request.options.public:
+    if scan_contract.policy.active_testing and request.options.public:
         raise HTTPException(
             status_code=400,
             detail={
@@ -25962,6 +26313,10 @@ async def submit_scan(request: ScanRequest):
         scan_type,
         defer_family_preconditions=True,
     )
+    options_payload.update(scan_contract.option_metadata())
+    options_payload["authentication"] = dict(request.authentication or {})
+    options_payload["request_collections"] = [dict(item) for item in request.request_collections]
+    options_payload["scan_policy"]["approval_receipt_id"] = approval_receipt_id
 
     # §2 Operational freshness: record which build the fleet was on at submit, and
     # optionally refuse active scans unless the local fleet is positively
@@ -25969,7 +26324,7 @@ async def submit_scan(request: ScanRequest):
     _freshness = _worker_freshness_snapshot()
     require_current_workers = bool(
         getattr(request.options, "require_current_workers", False)
-        and scan_type in ACTIVE_ENFORCED_SCAN_TYPES
+        and scan_contract.policy.active_testing
     )
     if require_current_workers and (
         not _freshness.get("available") or int(_freshness.get("fleet_size") or 0) < 1
@@ -26017,8 +26372,8 @@ async def submit_scan(request: ScanRequest):
         # Early missing-receipt guard before target-row creation.
         await _require_approval_receipt_if_policy_enabled(
             conn,
-            request.options.approval_receipt_id,
-            action_name=f"scan.submit:{scan_type}",
+            approval_receipt_id,
+            action_name=(f"scan.submit:{legacy_scan_type}" if legacy_scan_type else "scan.submit"),
         )
         await _require_reachable_fleet_placement(conn, options_payload.get("placement") or {})
         # Check if target exists
@@ -26038,12 +26393,21 @@ async def submit_scan(request: ScanRequest):
                  _default_asm_enabled_for_new_web_target("manual"),
                  json.dumps(_default_asm_config_for_new_web_target("manual")))
 
+        collection_refs, collection_endpoints = await _generic_collection_refs(
+            conn, target_id=target_id, bindings=request.request_collections,
+        )
+        if collection_refs:
+            options_payload["request_collections"] = collection_refs
+            options_payload["custom_endpoints"] = list(dict.fromkeys([
+                *list(options_payload.get("custom_endpoints") or []), *collection_endpoints,
+            ]))[:2000]
+
         approval_context = await _validate_approval_receipt_for_action(
             conn,
-            request.options.approval_receipt_id,
+            approval_receipt_id,
             target_url=normalized_target,
             target_id=target_id,
-            action_name=f"scan.submit:{scan_type}",
+            action_name=(f"scan.submit:{legacy_scan_type}" if legacy_scan_type else "scan.submit"),
         )
         if approval_context:
             options_payload.update(approval_context)
@@ -26061,11 +26425,15 @@ async def submit_scan(request: ScanRequest):
 
         # Create scan record
         await conn.execute("""
-            INSERT INTO scans (id, target_id, target_url, job_id, status, options, scan_type, scan_role)
-            VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7)
+            INSERT INTO scans (
+                id, target_id, target_url, job_id, status, options, scan_type, scan_role,
+                scan_generation, policy_json, budget_json, coverage_status, coverage_json
+            ) VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, 'v2', $8, $9, 'pending', $10)
         """, uuid.UUID(scan_id), target_id, normalized_target, job_id,
              json.dumps(_attach_target_note(options_payload, request.target, target_note, scheme_inferred)),
-             scan_type, scan_role)
+             public_scan_type, scan_role, json.dumps(options_payload.get("scan_policy") or {}),
+             json.dumps(options_payload.get("resolved_scan_budget") or {}),
+             json.dumps({"status": "pending", "reasons": []}))
         command_result = await _record_command_result(
             conn,
             command="scan.submit",
@@ -26074,10 +26442,13 @@ async def submit_scan(request: ScanRequest):
             scan_id=scan_id,
             scope_receipt_id=options_payload.get("scope_receipt_id"),
             approval_receipt_id=options_payload.get("approval_receipt_id"),
-            operator_message=f"Queued {scan_type} scan for {normalized_target}",
+            operator_message=f"Queued {'legacy ' + legacy_scan_type if legacy_scan_type else 'Scan'} for {normalized_target}",
             result_json={
                 "target": normalized_target,
-                "scan_type": scan_type,
+                "scan_type": public_scan_type,
+                "scan_generation": "v2",
+                "policy": options_payload.get("scan_policy"),
+                "budget": options_payload.get("resolved_scan_budget"),
                 "job_id": job_id,
                 "scan_role": scan_role,
             },
@@ -26126,8 +26497,14 @@ async def submit_scan(request: ScanRequest):
         'job_id': job_id,
         'status': 'queued',
         'target': normalized_target,
-        'scan_type': scan_type
+        'scan_type': public_scan_type,
+        'scan_generation': 'v2',
+        'policy': options_payload.get('scan_policy'),
+        'budget': options_payload.get('resolved_scan_budget'),
+        'budget_profile': scan_contract.budget_profile,
     }
+    if scan_contract.deprecations:
+        response['deprecations'] = [dict(item) for item in scan_contract.deprecations]
     if parallel_enabled:
         response['parallel'] = True
         if options_payload.get("auto_sharded"):
@@ -26152,7 +26529,16 @@ async def submit_batch(request: BatchRequest):
     errors: list[dict[str, Any]] = []
     targets = list(dict.fromkeys(str(target).strip() for target in request.targets if str(target).strip()))
     for target in targets:
-        req = ScanRequest(target=target, options=request.options.model_copy(deep=True))
+        req = ScanRequest(
+            target=target,
+            budget_profile=request.budget_profile,
+            policy=dict(request.policy or {}),
+            authentication=dict(request.authentication or {}),
+            request_collections=[dict(item) for item in request.request_collections],
+            advanced=dict(request.advanced or {}),
+            approval_receipt_id=request.approval_receipt_id,
+            options=request.options.model_copy(deep=True),
+        )
         try:
             jobs.append(await submit_scan(req))
         except HTTPException as exc:
@@ -31706,6 +32092,7 @@ async def _agent_tool_http_request(
     approval_receipt_id: Optional[str] = None,
     hypothesis_id: Optional[str] = None,
     authorized_addresses: Optional[list[str]] = None,
+    trusted_collection_headers: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
     import httpx  # container-local; api.py has no top-level httpx dependency
 
@@ -31727,6 +32114,19 @@ async def _agent_tool_http_request(
             "a redirect chain must not replay a state-changing request.",
         }
     headers = agent_tools.filter_request_headers(args.get("headers"))
+    # Imported collection values are decrypted server-side and never pass through planner text.
+    # Permit their auth/cookie headers while retaining hop-by-hop, host, size, and control guards.
+    for raw_name, raw_value in dict(trusted_collection_headers or {}).items():
+        name, value = str(raw_name).strip(), str(raw_value)
+        lower = name.lower()
+        if (
+            not name or lower in {"host", "content-length", "connection", "transfer-encoding"}
+            or not name.isascii() or not value.isascii()
+            or len(name) > 120 or len(value.encode("utf-8")) > 8_192
+            or any(ord(character) < 32 or ord(character) == 127 for character in name + value)
+        ):
+            continue
+        headers[name] = value
     slot = agent_tools.normalize_principal_slot(args.get("as_principal"))
     query = args.get("query") if isinstance(args.get("query"), dict) else None
     json_body = args.get("json_body") if isinstance(args.get("json_body"), dict) else None
@@ -33966,6 +34366,667 @@ async def _run_agent_hunt_for_episode(episode_id: str) -> dict[str, Any]:
                 )
     return {"accepted": True, "agent_loop": True, "episode_id": episode_id, "status": final_status,
             "suspected": suspected, "net_new": net_new, "verified": verified, "stop_reason": stop_reason}
+
+
+class HuntStartRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    target_id: str
+    objective: str = Field(default="Find exploitable vulnerabilities", max_length=2000)
+    budget_profile: Literal["fast", "balanced", "thorough"] = "balanced"
+    approval_receipt_id: Optional[str] = None
+    request_collection_ids: list[str] = Field(default_factory=list, max_length=16)
+
+
+class HuntQueryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal[
+        "summary", "endpoints", "findings", "principals", "services", "scans",
+        "collections", "candidates", "notes", "receipts"
+    ] = "summary"
+    filter: dict[str, Any] = Field(default_factory=dict)
+    limit: int = Field(default=100, ge=1, le=500)
+
+
+class HuntCapabilityRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    input: dict[str, Any] = Field(default_factory=dict)
+
+
+class HuntCandidateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    family: str = Field(min_length=1, max_length=80)
+    locus: dict[str, Any] = Field(default_factory=dict)
+    title: str = Field(min_length=1, max_length=300)
+    claim: str = Field(min_length=1, max_length=8000)
+    severity: Literal["critical", "high", "medium", "low", "info"] = "info"
+    evidence_refs: list[str] = Field(min_length=1, max_length=100)
+    verifier_contract_id: Optional[str] = Field(default=None, max_length=160)
+
+
+class HuntFinishRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    summary: str = Field(min_length=1, max_length=20_000)
+    next_actions: list[str] = Field(default_factory=list, max_length=100)
+
+
+def _hunt_json(value: Any, default: Any) -> Any:
+    decoded = _decode_json_value(value)
+    return decoded if isinstance(decoded, type(default)) else default
+
+
+def _hunt_ledger_limits(budget: Mapping[str, Any]) -> dict[str, int]:
+    return {
+        "agent_actions": int(budget.get("max_capability_calls") or 0),
+        "active_actions": int(budget.get("max_active_actions") or 0),
+        "http_requests": int(budget.get("max_http_requests") or 0),
+        "tcp_ports_attempted": int(budget.get("max_tcp_ports") or 0),
+        "browser_actions": int(budget.get("max_browser_actions") or 0),
+        "state_changing_requests": int(budget.get("max_state_changing_requests") or 0),
+        "tool_wall_seconds": int(budget.get("max_duration_seconds") or 0),
+        "device_fragility_points": int(budget.get("max_device_fragility_points") or 0),
+        "hosts_attempted": int(budget.get("max_hosts") or 0),
+        "udp_ports_attempted": int(budget.get("max_udp_ports") or 0),
+        "oob_interactions": int(budget.get("max_oob_interactions") or 0),
+    }
+
+
+def _hunt_public(row: Any, *, include_context: bool = True) -> dict[str, Any]:
+    item = row_to_dict(row) if row is not None and not isinstance(row, dict) else dict(row or {})
+    policy = _hunt_json(item.get("policy_json"), {})
+    result = {
+        "hunt_id": str(item.get("id")) if item.get("id") else None,
+        "target_kind": item.get("target_kind"),
+        "target_id": str(item.get("target_id") or item.get("device_target_id") or "") or None,
+        "objective": item.get("objective"),
+        "status": item.get("status"),
+        "budget_profile": item.get("budget_profile"),
+        "policy": policy,
+        "budget": _hunt_json(item.get("budget_json"), {}),
+        "budget_used": _hunt_json(item.get("budget_used_json"), {}),
+        "capabilities": capability_manifest(resolve_hunt_policy(
+            target_kind=str(item.get("target_kind") or "web"),
+            budget_profile=str(item.get("budget_profile") or "balanced"),
+            approval_receipt_id=policy.get("approval_receipt_id"),
+            approval_validated=bool(policy.get("active_testing")),
+            credentials_available=bool(policy.get("credential_access")),
+            device_fragility_profile=policy.get("device_fragility_profile"),
+        )),
+        "stop_reason": item.get("stop_reason"),
+        "final_debrief": _hunt_json(item.get("final_debrief"), {}),
+        "created_at": item.get("created_at"),
+        "updated_at": item.get("updated_at"),
+        "next_action": f"POST /hunts/{item.get('id')}/query" if item.get("status") in {"active", "awaiting_planner"} else None,
+    }
+    if include_context:
+        result["context_pack"] = _hunt_json(item.get("context_pack"), {})
+    return _json_safe_row(result)
+
+
+async def _hunt_run_or_404(conn: Any, hunt_id: str, *, for_update: bool = False) -> Any:
+    query = "SELECT * FROM hunt_runs WHERE id=$1"
+    if for_update:
+        query += " FOR UPDATE"
+    row = await conn.fetchrow(query, _uuid_or_400(hunt_id, "hunt id"))
+    if not row:
+        raise HTTPException(status_code=404, detail="Hunt not found")
+    return row
+
+
+def _hunt_collection_selector(values: Mapping[str, Any], *, hard_limit: int) -> RequestSelector:
+    try:
+        return RequestSelector(
+            request_ids=tuple(str(item) for item in values.get("request_ids") or [])[:2_000],
+            methods=tuple(str(item) for item in values.get("methods") or [])[:20],
+            path_regex=str(values.get("path_regex") or "").strip() or None,
+            safe_methods_only=True,
+            limit=max(1, min(int(values.get("limit") or hard_limit), hard_limit)),
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+async def _hunt_bound_collection(
+    conn: Any, run: Any, context: Mapping[str, Any], collection_id: Any,
+) -> Any:
+    collection_uuid = _uuid_or_400(str(collection_id or ""), "request collection id")
+    bound = {
+        str(item.get("collection_id")) for item in context.get("request_collections") or []
+        if isinstance(item, Mapping) and item.get("collection_id")
+    }
+    if str(collection_uuid) not in bound:
+        raise HTTPException(status_code=403, detail="Request collection is not bound to this Hunt")
+    row = await conn.fetchrow(
+        """SELECT * FROM request_collections WHERE id=$1 AND is_active=true
+           AND (($2::uuid IS NOT NULL AND target_id=$2) OR
+                ($3::uuid IS NOT NULL AND device_target_id=$3))""",
+        collection_uuid, run["target_id"], run["device_target_id"],
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Bound request collection is unavailable")
+    return row
+
+
+async def _hunt_select_collection(run: Any, context: Mapping[str, Any], values: Mapping[str, Any]) -> dict[str, Any]:
+    selector = _hunt_collection_selector(values, hard_limit=200)
+    async with db_pool.acquire() as conn:
+        row = await _hunt_bound_collection(conn, run, context, values.get("collection_id"))
+        index_rows = await conn.fetch(
+            """SELECT request_id, ordinal, folder, name, method, redacted_url, normalized_path,
+                      body_mode, auth_type, safe_method, supported
+               FROM request_collection_requests WHERE collection_id=$1 ORDER BY ordinal LIMIT 20000""",
+            row["id"],
+        )
+    ids, methods = set(selector.request_ids), set(selector.methods)
+    pattern = re.compile(selector.path_regex) if selector.path_regex else None
+    selected: list[dict[str, Any]] = []
+    for raw in index_rows:
+        item = _json_safe_row(raw)
+        if not item.get("safe_method") or not item.get("supported"):
+            continue
+        if ids and item.get("request_id") not in ids:
+            continue
+        if methods and item.get("method") not in methods:
+            continue
+        if pattern and not pattern.search(str(item.get("normalized_path") or "")):
+            continue
+        selected.append(item)
+        if len(selected) >= selector.limit:
+            break
+    return {"ok": True, "collection_id": str(row["id"]), "requests": selected,
+            "count": len(selected), "secret_values_visible": False}
+
+
+async def _hunt_replay_safe_collection(run: Any, context: Mapping[str, Any], values: Mapping[str, Any]) -> dict[str, Any]:
+    selector = _hunt_collection_selector(values, hard_limit=25)
+    async with db_pool.acquire() as conn:
+        row = await _hunt_bound_collection(conn, run, context, values.get("collection_id"))
+    raw = str(decrypt_secret(row["encrypted_payload"]) or "")
+    if not raw or raw.startswith("enc:fernet:"):
+        raise HTTPException(status_code=503, detail="Bound request collection cannot be decrypted")
+    try:
+        payload = json.loads(raw)
+        requests = select_request_collection_requests(payload, selector)
+    except (json.JSONDecodeError, RequestImportError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=f"Request collection replay is invalid: {exc}") from exc
+    observations: list[dict[str, Any]] = []
+    target_url = str(context.get("target", {}).get("url") or "")
+    for imported in requests:
+        parsed = urllib.parse.urlsplit(str(imported.get("url") or imported.get("url_template") or ""))
+        path = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
+        observation = await _agent_tool_http_request(
+            run["target_id"], target_url,
+            {"method": str(imported.get("method") or "GET"), "path": path},
+            created_by=f"hunt_v2:{run['id']}", allow_write=False,
+            approval_receipt_id=None,
+            authorized_addresses=list(context.get("authorized_target_addresses") or []),
+            trusted_collection_headers=imported.get("headers") if isinstance(imported.get("headers"), Mapping) else {},
+        )
+        observations.append(observation)
+    return {"ok": all(item.get("ok") for item in observations), "collection_id": str(row["id"]),
+            "replayed": len(observations), "observations": observations,
+            "safe_methods_only": True, "secret_values_visible": False}
+
+
+@app.post("/hunts")
+async def start_hunt(request: HuntStartRequest):
+    """Create one target-kind-aware Hunt. The caller owns planning; the runtime owns authority."""
+    target_uuid = _uuid_or_400(request.target_id, "target id")
+    approval_validated = False
+    async with db_pool.acquire() as conn:
+        web = await conn.fetchrow(
+            "SELECT id, url, name, is_active FROM targets WHERE id=$1", target_uuid,
+        )
+        device = None if web else await conn.fetchrow(
+            "SELECT id, name, primary_locator, device_class, is_active FROM device_targets WHERE id=$1",
+            target_uuid,
+        )
+        if web and web["is_active"]:
+            target_kind = "web"
+            target_url = str(web["url"])
+            db_target_id, device_target_id = target_uuid, None
+            credentials_available = bool(await conn.fetchval(
+                "SELECT EXISTS(SELECT 1 FROM target_principals WHERE target_id=$1 AND is_active=true)",
+                target_uuid,
+            ))
+            origins = await _target_web_origins(conn, target_uuid, target_url)
+            collection_refs, _collection_endpoints = await _generic_collection_refs(
+                conn, target_id=target_uuid,
+                bindings=[{"id": value} for value in request.request_collection_ids],
+            )
+            context_pack = {
+                "schema_version": "hunt-context/v2",
+                "target": {"id": str(target_uuid), "kind": target_kind, "url": target_url, "origins": origins},
+                "principal_refs_available": credentials_available,
+                "secret_values_visible_to_planner": False,
+                "request_collections": collection_refs,
+                "authorized_target_addresses": await _resolve_agent_target_addresses(target_url),
+            }
+        elif device and device["is_active"]:
+            target_kind = "device"
+            target_url = str(device["primary_locator"])
+            db_target_id, device_target_id = None, target_uuid
+            credentials_available = bool(await conn.fetchval(
+                "SELECT EXISTS(SELECT 1 FROM device_credential_profiles WHERE device_target_id=$1 AND is_active=true)",
+                target_uuid,
+            ))
+            collection_refs, _collection_endpoints = await _generic_collection_refs(
+                conn, device_target_id=target_uuid,
+                bindings=[{"id": value} for value in request.request_collection_ids],
+            )
+            device_state = device_agent.seed_state(
+                objective=request.objective,
+                safety_profile="authenticated_active" if request.approval_receipt_id else "safe_remote",
+                max_turns=30,
+            )
+            device_state["device_request_collections"] = collection_refs
+            device_state["device_credential_profiles"] = []
+            context_pack = {
+                "schema_version": "hunt-context/v2",
+                "target": {
+                    "id": str(target_uuid), "kind": target_kind, "name": device["name"],
+                    "locator": target_url, "device_class": device["device_class"],
+                },
+                "principal_refs_available": credentials_available,
+                "secret_values_visible_to_planner": False,
+                "request_collections": collection_refs,
+                "device_state": device_state,
+            }
+        else:
+            raise HTTPException(status_code=404, detail="Active web or device target not found")
+
+        if request.approval_receipt_id:
+            await _validate_approval_receipt_for_action(
+                conn,
+                request.approval_receipt_id,
+                target_url=target_url,
+                target_id=db_target_id,
+                action_name="hunt.capability",
+                command="hunt.capability",
+                risk_tier="active",
+                always_require_receipt=True,
+                require_target_binding=target_kind != "device",
+                require_expiry=True,
+                created_by="hunt_v2",
+            )
+            approval_validated = True
+        else:
+            await _require_approval_receipt_if_policy_enabled(
+                conn, None, action_name="hunt.start", risk_tier="passive", created_by="hunt_v2",
+            )
+        try:
+            policy = resolve_hunt_policy(
+                target_kind=target_kind,
+                budget_profile=request.budget_profile,
+                approval_receipt_id=request.approval_receipt_id,
+                approval_validated=approval_validated,
+                credentials_available=credentials_available,
+                device_fragility_profile=("authenticated_active" if approval_validated else "safe_remote")
+                if target_kind == "device" else None,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        row = await conn.fetchrow(
+            """INSERT INTO hunt_runs (
+                   target_kind, target_id, device_target_id, objective, status, budget_profile,
+                   policy_json, budget_json, budget_used_json, context_pack,
+                   approval_receipt_id, created_by
+               ) VALUES ($1,$2,$3,$4,'active',$5,$6,$7,$8,$9,$10,'hunt_v2') RETURNING *""",
+            target_kind, db_target_id, device_target_id, request.objective,
+            request.budget_profile, json.dumps(policy.public()), json.dumps(policy.public()["budget"]),
+            json.dumps({
+                **{key: 0 for key in policy.budget.ledger_limits()},
+                "candidates": 0, "verifications": 0,
+            }),
+            json.dumps(context_pack, default=str),
+            _optional_uuid(request.approval_receipt_id) if request.approval_receipt_id else None,
+        )
+    return _hunt_public(row)
+
+
+@app.get("/hunts/{hunt_id}")
+async def get_hunt(hunt_id: str):
+    async with db_pool.acquire() as conn:
+        row = await _hunt_run_or_404(conn, hunt_id)
+    return _hunt_public(row)
+
+
+@app.get("/hunts")
+async def list_hunts(
+    target_id: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+):
+    clauses: list[str] = []
+    params: list[Any] = []
+    if target_id:
+        params.append(_uuid_or_400(target_id, "target id"))
+        clauses.append(f"(target_id=${len(params)} OR device_target_id=${len(params)})")
+    if status:
+        if status not in {"created", "active", "awaiting_planner", "completed", "cancelled", "failed", "budget_exhausted"}:
+            raise HTTPException(status_code=400, detail="invalid Hunt status")
+        params.append(status)
+        clauses.append(f"status=${len(params)}")
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    params.append(limit)
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"SELECT * FROM hunt_runs{where} ORDER BY created_at DESC LIMIT ${len(params)}", *params,
+        )
+    return {"hunts": [_hunt_public(row, include_context=False) for row in rows], "count": len(rows)}
+
+
+@app.post("/hunts/{hunt_id}/query")
+async def query_hunt(hunt_id: str, request: HuntQueryRequest):
+    async with db_pool.acquire() as conn:
+        run = await _hunt_run_or_404(conn, hunt_id)
+    kind = request.kind
+    limit = request.limit
+    if str(run["target_kind"]) != "device" and kind in {"endpoints", "findings", "principals", "notes", "receipts"}:
+        mapped = {"receipts": "tool_receipts"}.get(kind, kind)
+        result = await _agent_tool_query_kb(run["target_id"], mapped, {**request.filter, "limit": limit})
+        return {"hunt_id": hunt_id, **result}
+    async with db_pool.acquire() as conn:
+        if kind == "collections":
+            target_ref = run["device_target_id"] or run["target_id"]
+            rows = await conn.fetch(
+                """SELECT id, name, format, request_count, safe_request_count,
+                          potentially_mutating_request_count, payload_sha256, updated_at
+                   FROM request_collections
+                   WHERE is_active=true AND (target_id=$1 OR device_target_id=$1)
+                   ORDER BY updated_at DESC LIMIT $2""", target_ref, limit,
+            )
+        elif kind == "services" and run["device_target_id"]:
+            rows = await conn.fetch(
+                """SELECT transport, port, state, service_name, product, version, encrypted,
+                          web_origin, policy_disposition, last_seen_at
+                   FROM device_services WHERE device_target_id=$1
+                   ORDER BY state='open' DESC, transport, port LIMIT $2""",
+                run["device_target_id"], limit,
+            )
+        elif kind == "scans" and run["device_target_id"]:
+            rows = await conn.fetch(
+                """SELECT id, status, progress, current_phase, findings_count, created_at
+                   FROM scans WHERE device_target_id=$1 ORDER BY created_at DESC LIMIT $2""",
+                run["device_target_id"], limit,
+            )
+        elif kind == "candidates":
+            column = "device_target_id" if run["device_target_id"] else "target_id"
+            rows = await conn.fetch(
+                f"""SELECT id, family, canonical_locus, title, claim, claimed_severity,
+                            evidence_refs, verifier_contract_id, status, last_seen_at
+                     FROM investigation_candidates WHERE {column}=$1
+                     ORDER BY last_seen_at DESC LIMIT $2""",
+                run["device_target_id"] or run["target_id"], limit,
+            )
+        else:
+            return {"hunt_id": hunt_id, "kind": kind, "count": 0, "rows": [],
+                    "context": _hunt_public(run).get("context_pack") if kind == "summary" else None}
+    items = [_redact_agent_payload(_json_safe_row(row)) for row in rows]
+    return {"hunt_id": hunt_id, "kind": kind, "count": len(items), "rows": items}
+
+
+@app.post("/hunts/{hunt_id}/capabilities/{capability_name:path}")
+async def execute_hunt_capability(
+    hunt_id: str, capability_name: str, request: HuntCapabilityRequest,
+):
+    name = str(capability_name or "").strip().lower()
+    try:
+        spec = agent_tools.CAPABILITY_REGISTRY.require(name)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    action_id = uuid.uuid4()
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            run = await _hunt_run_or_404(conn, hunt_id, for_update=True)
+            if run["status"] not in {"active", "awaiting_planner"}:
+                raise HTTPException(status_code=409, detail=f"Hunt is {run['status']}")
+            policy = _hunt_json(run["policy_json"], {})
+            allowed = {item["name"] for item in _hunt_public(run, include_context=False)["capabilities"]}
+            if name not in allowed:
+                raise HTTPException(status_code=403, detail="Capability is not allowed by this Hunt policy")
+            if spec.requires_active_approval:
+                authority_context = _hunt_json(run["context_pack"], {})
+                target_context = authority_context.get("target") if isinstance(authority_context.get("target"), Mapping) else {}
+                target_url = str(target_context.get("url") or target_context.get("locator") or "")
+                await _validate_approval_receipt_for_action(
+                    conn, policy.get("approval_receipt_id"), target_url=target_url,
+                    target_id=run["target_id"], action_name=f"hunt.capability:{name}",
+                    command=name, risk_tier=str(spec.risk_tier), always_require_receipt=True,
+                    require_target_binding=str(run["target_kind"]) != "device",
+                    require_expiry=True, created_by=f"hunt_v2:{hunt_id}",
+                )
+            used = _hunt_json(run["budget_used_json"], {})
+            budget = _hunt_json(run["budget_json"], {})
+            limits = _hunt_ledger_limits(budget)
+            charges = {
+                key: int(value) for key, value in spec.budget_cost.items() if key in limits
+            }
+            charges["agent_actions"] = 1
+            if spec.requires_active_approval:
+                charges["active_actions"] = 1
+            try:
+                reserved_used = reserve_budget_snapshot(
+                    limits, {key: int(used.get(key) or 0) for key in limits}, charges,
+                )
+            except BudgetExceeded as exc:
+                dimension = next(iter(exc.shortages), "unknown")
+                await conn.execute(
+                    "UPDATE hunt_runs SET status='budget_exhausted', stop_reason=$2, updated_at=NOW() WHERE id=$1",
+                    run["id"], f"budget_exhausted:{dimension}",
+                )
+                raise HTTPException(status_code=409, detail=f"Hunt budget exhausted: {dimension}")
+            used.update(reserved_used)
+            await conn.execute("UPDATE hunt_runs SET budget_used_json=$2, status='active', updated_at=NOW() WHERE id=$1", run["id"], json.dumps(used))
+            await conn.execute(
+                """INSERT INTO hunt_actions (id, hunt_run_id, capability_name, status, input_summary)
+                   VALUES ($1,$2,$3,'running',$4)""",
+                action_id, run["id"], name, json.dumps(_redact_agent_payload(request.input)),
+            )
+
+    context = _hunt_json(run["context_pack"], {})
+    try:
+        if name == "collections.inspect":
+            refs = [item for item in context.get("request_collections") or [] if isinstance(item, dict)]
+            result = {"ok": True, "collections": refs[:200], "count": len(refs), "secret_values_visible": False}
+        elif name == "collections.select":
+            result = await _hunt_select_collection(run, context, request.input)
+        elif name == "collections.replay_safe":
+            result = await _hunt_replay_safe_collection(run, context, request.input)
+        elif str(run["target_kind"]) == "device":
+            adapter_name = str(spec.adapter).split(".")[-1]
+            device_state = context.get("device_state") if isinstance(context.get("device_state"), dict) else device_agent.seed_state(objective=str(run["objective"]), safety_profile=str(policy.get("device_fragility_profile") or "safe_remote"), max_turns=30)
+            result = await _execute_device_agent_tool(
+                run_id=run["id"], device_target_id=run["device_target_id"],
+                safety_profile=str(policy.get("device_fragility_profile") or "safe_remote"),
+                approval_receipt_id=policy.get("approval_receipt_id"), state=device_state,
+                name=adapter_name, args=request.input,
+            )
+            context["device_state"] = device_state
+        elif spec.legacy_tool_name:
+            path = str(request.input.get("path") or "").strip()
+            execution_target = str(context["target"]["url"])
+            if path:
+                execution_target = _provision_same_origin_url(execution_target, path)
+            result = await _agent_tool_run_tool(
+                run["target_id"], str(context["target"]["url"]),
+                {"name": spec.legacy_tool_name, "target": execution_target, "options": request.input},
+                created_by=f"hunt_v2:{hunt_id}", allow_active=bool(policy.get("active_testing")),
+                approval_receipt_id=policy.get("approval_receipt_id"),
+                authorized_addresses=context.get("authorized_target_addresses") or [],
+            )
+        elif name == "tls.inspect":
+            result = await _agent_tool_http_request(
+                run["target_id"], str(context["target"]["url"]), {"method": "HEAD", "path": "/"},
+                created_by=f"hunt_v2:{hunt_id}", allow_write=False,
+                approval_receipt_id=policy.get("approval_receipt_id"),
+                authorized_addresses=context.get("authorized_target_addresses") or [],
+            )
+        else:
+            raise HTTPException(status_code=422, detail="Capability adapter is not executable")
+        if result.get("partial") or result.get("status") == "partial":
+            status = "partial"
+        else:
+            status = "completed" if result.get("ok") or result.get("status") in {"success", "queued"} else "failed"
+    except HTTPException:
+        status = "blocked"
+        raise
+    except Exception as exc:
+        status = "failed"
+        result = {"ok": False, "error": f"capability_fault:{type(exc).__name__}"}
+    finally:
+        async with db_pool.acquire() as conn:
+            receipt_id = None
+            receipt_payload = locals().get("result", {})
+            is_partial = bool(
+                isinstance(receipt_payload, dict)
+                and (receipt_payload.get("partial") or receipt_payload.get("status") == "partial")
+            )
+            try:
+                receipt_result = await _record_tool_receipt(conn, ToolReceiptRequest(
+                    tool_name=str(spec.adapter),
+                    capability_name=name,
+                    adapter_name=str(spec.adapter),
+                    adapter_version=str(spec.adapter_version),
+                    redacted_argv=[request.input],
+                    target_scope={
+                        "target_kind": str(run["target_kind"]),
+                        "target_id": str(run["device_target_id"] or run["target_id"]),
+                    },
+                    approval_receipt_id=policy.get("approval_receipt_id"),
+                    status="success" if status in {"completed", "partial"} else "failed",
+                    parser_status="partial" if is_partial else "parsed" if status == "completed" else "failed",
+                    budget_json={"reserved": charges, "used_after_reservation": used},
+                    partial=is_partial,
+                    hunt_id=str(run["id"]),
+                    metadata_json={"hunt_action_id": str(action_id), "result_status": status},
+                    created_by=f"hunt_v2:{hunt_id}",
+                ))
+                receipt_id = receipt_result.get("tool_receipt", {}).get("id")
+            except Exception:
+                logger.exception("Failed to record Hunt capability receipt", extra={"hunt_id": hunt_id, "action_id": str(action_id)})
+            await conn.execute(
+                """UPDATE hunt_actions SET status=$2, result_summary=$3, receipt_id=$4, completed_at=NOW() WHERE id=$1""",
+                action_id, status, json.dumps(_redact_agent_payload(receipt_payload), default=str),
+                _optional_uuid(receipt_id) if receipt_id else None,
+            )
+            if str(run["target_kind"]) == "device":
+                await conn.execute("UPDATE hunt_runs SET context_pack=$2, updated_at=NOW() WHERE id=$1", run["id"], json.dumps(context, default=str))
+    return {"hunt_id": hunt_id, "capability": name, "action_id": str(action_id), "result": result}
+
+
+@app.post("/hunts/{hunt_id}/candidates")
+async def create_hunt_candidate(hunt_id: str, request: HuntCandidateRequest):
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            run = await _hunt_run_or_404(conn, hunt_id, for_update=True)
+            if run["status"] not in {"active", "awaiting_planner"}:
+                raise HTTPException(status_code=409, detail=f"Hunt is {run['status']}")
+            used = _hunt_json(run["budget_used_json"], {})
+            budget = _hunt_json(run["budget_json"], {})
+            if int(used.get("candidates") or 0) >= int(budget.get("max_candidates") or 0):
+                raise HTTPException(status_code=409, detail="Hunt candidate budget exhausted")
+            candidate = investigation_candidates.normalize_candidate(
+                plane="device" if run["device_target_id"] else "web",
+                target_id=str(run["target_id"]) if run["target_id"] else None,
+                device_target_id=str(run["device_target_id"]) if run["device_target_id"] else None,
+                hunt_run_id=str(run["id"]), family=request.family, locus=request.locus,
+                title=request.title, claim=request.claim, severity=request.severity,
+                evidence_refs=request.evidence_refs, verifier_contract_id=request.verifier_contract_id,
+                source_kind="hunt_v2",
+            )
+            result = await investigation_candidates.upsert_candidate(
+                conn, candidate, created_by=f"hunt_v2:{hunt_id}",
+                observation_context={"hunt_id": hunt_id, "objective": run["objective"]},
+            )
+            used["candidates"] = int(used.get("candidates") or 0) + 1
+            await conn.execute("UPDATE hunt_runs SET budget_used_json=$2, updated_at=NOW() WHERE id=$1", run["id"], json.dumps(used))
+    return {"hunt_id": hunt_id, "candidate": result, "authoritative": False, "verified": False}
+
+
+@app.post("/hunts/{hunt_id}/candidates/{candidate_id}/verify")
+async def verify_hunt_candidate(hunt_id: str, candidate_id: str):
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            run = await _hunt_run_or_404(conn, hunt_id, for_update=True)
+            policy = _hunt_json(run["policy_json"], {})
+            if not policy.get("approval_receipt_id"):
+                raise HTTPException(status_code=403, detail="Deterministic verification requires a target-bound approval receipt")
+            authority_context = _hunt_json(run["context_pack"], {})
+            target_context = authority_context.get("target") if isinstance(authority_context.get("target"), Mapping) else {}
+            await _validate_approval_receipt_for_action(
+                conn, policy["approval_receipt_id"],
+                target_url=str(target_context.get("url") or target_context.get("locator") or ""),
+                target_id=run["target_id"], action_name="hunt.verify", command="hunt.verify",
+                risk_tier="active", always_require_receipt=True,
+                require_target_binding=str(run["target_kind"]) != "device",
+                require_expiry=True, created_by=f"hunt_v2:{hunt_id}",
+            )
+            used = _hunt_json(run["budget_used_json"], {})
+            budget = _hunt_json(run["budget_json"], {})
+            if int(used.get("verifications") or 0) >= int(budget.get("max_verifications") or 0):
+                raise HTTPException(status_code=409, detail="Hunt verification budget exhausted")
+            used["verifications"] = int(used.get("verifications") or 0) + 1
+            await conn.execute("UPDATE hunt_runs SET budget_used_json=$2, updated_at=NOW() WHERE id=$1", run["id"], json.dumps(used))
+    candidate_uuid = _uuid_or_400(candidate_id, "candidate id")
+    if run["device_target_id"]:
+        context = _hunt_json(run["context_pack"], {})
+        state = context.get("device_state") or {}
+        result = await _device_verify_candidate_tool(
+            run_id=run["id"], device_target_id=run["device_target_id"],
+            safety_profile=str(policy.get("device_fragility_profile") or "authenticated_active"),
+            approval_receipt_id=policy["approval_receipt_id"], state=state,
+            candidate_id=str(candidate_uuid), reason="Hunt V2 deterministic verification",
+        )
+    else:
+        result = await _verify_suspected_finding_workflow(
+            candidate_uuid, policy["approval_receipt_id"], created_by=f"hunt_v2:{hunt_id}",
+        )
+    return {"hunt_id": hunt_id, "candidate_id": candidate_id, "verification": result}
+
+
+@app.post("/hunts/{hunt_id}/finish")
+async def finish_hunt(hunt_id: str, request: HuntFinishRequest):
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """UPDATE hunt_runs SET status='completed', stop_reason='completed', final_debrief=$2,
+                      completed_at=NOW(), updated_at=NOW()
+               WHERE id=$1 AND status IN ('active','awaiting_planner') RETURNING *""",
+            _uuid_or_400(hunt_id, "hunt id"),
+            json.dumps({"summary": request.summary, "next_actions": request.next_actions}),
+        )
+        if not row:
+            row = await _hunt_run_or_404(conn, hunt_id)
+            if row["status"] != "completed":
+                raise HTTPException(status_code=409, detail=f"Hunt is {row['status']}")
+    return _hunt_public(row)
+
+
+@app.post("/hunts/{hunt_id}/cancel")
+async def cancel_hunt(hunt_id: str):
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """UPDATE hunt_runs SET status='cancelled', stop_reason='cancelled', completed_at=NOW(), updated_at=NOW()
+               WHERE id=$1 AND status IN ('created','active','awaiting_planner') RETURNING *""",
+            _uuid_or_400(hunt_id, "hunt id"),
+        )
+        if not row:
+            row = await _hunt_run_or_404(conn, hunt_id)
+    return _hunt_public(row)
+
+
+@app.post("/hunts/{hunt_id}/resume")
+async def resume_hunt(hunt_id: str):
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """UPDATE hunt_runs SET status='active', stop_reason=NULL, updated_at=NOW()
+               WHERE id=$1 AND status='awaiting_planner' RETURNING *""",
+            _uuid_or_400(hunt_id, "hunt id"),
+        )
+        if not row:
+            row = await _hunt_run_or_404(conn, hunt_id)
+            if row["status"] != "active":
+                raise HTTPException(status_code=409, detail=f"Hunt is {row['status']} and cannot resume")
+    return _hunt_public(row)
 
 
 class AgentHuntRequest(BaseModel):
@@ -37834,7 +38895,7 @@ def _public_tool_receipt_row(row: Any) -> dict[str, Any]:
     payload = row_to_dict(row)
     for key in ("redacted_argv", "parsed_evidence_instance_ids"):
         payload[key] = _decode_json_value(payload.get(key)) or []
-    for key in ("target_scope", "metadata_json"):
+    for key in ("target_scope", "budget_json", "metadata_json"):
         payload[key] = _redact_agent_payload(_decode_json_value(payload.get(key)) or {})
     payload["execution_enabled"] = False
     payload["findings_created"] = 0
@@ -37859,6 +38920,8 @@ def _canonical_tool_receipt(req: ToolReceiptRequest) -> dict[str, Any]:
         })
     return {
         "tool_name": str(payload.get("tool_name") or "").strip(),
+        "capability_name": str(payload.get("capability_name") or "").strip() or None,
+        "adapter_name": str(payload.get("adapter_name") or "").strip() or None,
         "tool_version": str(payload.get("tool_version") or "").strip() or None,
         "adapter_version": str(payload.get("adapter_version") or "2026-07-05.v1").strip() or "2026-07-05.v1",
         "command_hash": command_hash.lower(),
@@ -37878,6 +38941,10 @@ def _canonical_tool_receipt(req: ToolReceiptRequest) -> dict[str, Any]:
         "stdout_evidence_object_id": str(payload.get("stdout_evidence_object_id") or "").strip() or None,
         "stderr_evidence_object_id": str(payload.get("stderr_evidence_object_id") or "").strip() or None,
         "parsed_evidence_instance_ids": _clean_string_list(payload.get("parsed_evidence_instance_ids"), max_items=500),
+        "budget_json": _redact_agent_payload(payload.get("budget_json") or {}),
+        "partial": bool(payload.get("partial")),
+        "output_artifact_id": str(payload.get("output_artifact_id") or "").strip() or None,
+        "hunt_id": str(payload.get("hunt_id") or "").strip() or None,
         "redaction_summary": _redact_agent_text(str(payload.get("redaction_summary") or "").strip()) or None,
         "metadata_json": metadata,
         "created_by": str(payload.get("created_by") or "").strip() or None,
@@ -37892,6 +38959,8 @@ async def _record_tool_receipt(conn, req: ToolReceiptRequest) -> dict[str, Any]:
         policy_uuid = _optional_uuid(payload.get("policy_profile_id"))
         stdout_uuid = _optional_uuid(payload.get("stdout_evidence_object_id"))
         stderr_uuid = _optional_uuid(payload.get("stderr_evidence_object_id"))
+        output_artifact_uuid = _optional_uuid(payload.get("output_artifact_id"))
+        hunt_uuid = _optional_uuid(payload.get("hunt_id"))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="receipt and evidence object ids must be UUIDs when provided") from exc
     row = await conn.fetchrow(
@@ -37902,14 +38971,16 @@ async def _record_tool_receipt(conn, req: ToolReceiptRequest) -> dict[str, Any]:
             approval_receipt_id, policy_profile_id, status, parser_status,
             exit_code, timed_out, started_at, finished_at, stdout_evidence_object_id,
             stderr_evidence_object_id, parsed_evidence_instance_ids, redaction_summary,
-            metadata_json, created_by
+            metadata_json, created_by, capability_name, adapter_name, budget_json, partial,
+            output_artifact_id, hunt_id
         ) VALUES (
             $1,$2,$3,$4,$5::jsonb,
             $6,$7,$8::jsonb,$9,
             $10,$11,$12,$13,
             $14,$15,$16,$17,$18,
             $19,$20::jsonb,$21,
-            $22::jsonb,$23
+            $22::jsonb,$23,$24,$25,$26::jsonb,$27,
+            $28,$29
         )
         RETURNING *
         """,
@@ -37936,6 +39007,12 @@ async def _record_tool_receipt(conn, req: ToolReceiptRequest) -> dict[str, Any]:
         payload.get("redaction_summary"),
         json.dumps(payload.get("metadata_json") or {}),
         payload.get("created_by"),
+        payload.get("capability_name"),
+        payload.get("adapter_name"),
+        json.dumps(payload.get("budget_json") or {}),
+        payload["partial"],
+        output_artifact_uuid,
+        hunt_uuid,
     )
     return {
         "tool_receipt": _public_tool_receipt_row(row),
@@ -63591,7 +64668,7 @@ async def create_schedule(request: ScheduleCreate):
             raise HTTPException(status_code=400, detail="day_of_week must be 0-6 (Monday-Sunday)")
 
     # Validate scan_type
-    valid_scan_types = ['quick', 'standard', 'deep', 'full', 'aggressive', 'smart']
+    valid_scan_types = ['scan', 'quick', 'standard', 'deep', 'full', 'aggressive', 'smart']
     if request.scan_type not in valid_scan_types:
         raise HTTPException(status_code=400, detail=f"scan_type must be one of: {', '.join(valid_scan_types)}")
 
@@ -63750,7 +64827,7 @@ async def update_schedule(schedule_id: str, request: ScheduleUpdate):
         effective_schedule_kind = normalized_schedule_kind or _schedule_kind_from_row(existing)
 
         if request.scan_type is not None:
-            valid_scan_types = ['quick', 'standard', 'deep', 'full', 'aggressive', 'smart']
+            valid_scan_types = ['scan', 'quick', 'standard', 'deep', 'full', 'aggressive', 'smart']
             if request.scan_type not in valid_scan_types:
                 raise HTTPException(status_code=400, detail=f"Invalid scan_type")
             updates.append(f"scan_type = ${param_idx}")

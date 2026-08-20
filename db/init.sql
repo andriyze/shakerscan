@@ -107,6 +107,12 @@ CREATE TABLE scans (
     -- Scan configuration
     options JSONB DEFAULT '{}',
     scan_type TEXT DEFAULT 'quick',  -- quick, standard, thorough, full
+    scan_generation TEXT NOT NULL DEFAULT 'legacy',
+    policy_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    budget_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    budget_used_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    coverage_status TEXT,
+    coverage_json JSONB NOT NULL DEFAULT '{}'::jsonb,
     run_kind TEXT NOT NULL DEFAULT 'web_dast',  -- web_dast, ai_api, ai_widget, ai_rag, ai_trace, ai_mcp, model_intake
     subject_ref TEXT,
 
@@ -413,6 +419,48 @@ CREATE TABLE device_request_collections (
 CREATE INDEX idx_device_request_collections_active
 ON device_request_collections(device_target_id, is_active, updated_at DESC);
 
+CREATE TABLE request_collections (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    target_id UUID REFERENCES targets(id) ON DELETE CASCADE,
+    device_target_id UUID REFERENCES device_targets(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    format TEXT NOT NULL,
+    schema_version TEXT NOT NULL DEFAULT 'request-collection/v2',
+    encrypted_payload TEXT NOT NULL,
+    payload_sha256 TEXT NOT NULL,
+    request_count INTEGER NOT NULL DEFAULT 0,
+    safe_request_count INTEGER NOT NULL DEFAULT 0,
+    potentially_mutating_request_count INTEGER NOT NULL DEFAULT 0,
+    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    is_active BOOLEAN NOT NULL DEFAULT true,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT request_collections_target_check CHECK (
+        (target_id IS NOT NULL AND device_target_id IS NULL) OR
+        (device_target_id IS NOT NULL AND target_id IS NULL)
+    ),
+    CONSTRAINT request_collections_target_name_unique UNIQUE NULLS NOT DISTINCT (target_id, device_target_id, name)
+);
+CREATE INDEX idx_request_collections_web ON request_collections(target_id, updated_at DESC) WHERE target_id IS NOT NULL AND is_active=true;
+CREATE INDEX idx_request_collections_device ON request_collections(device_target_id, updated_at DESC) WHERE device_target_id IS NOT NULL AND is_active=true;
+
+CREATE TABLE request_collection_requests (
+    collection_id UUID NOT NULL REFERENCES request_collections(id) ON DELETE CASCADE,
+    request_id TEXT NOT NULL,
+    ordinal INTEGER NOT NULL,
+    folder TEXT,
+    name TEXT,
+    method TEXT NOT NULL,
+    redacted_url TEXT,
+    normalized_path TEXT,
+    body_mode TEXT,
+    auth_type TEXT,
+    safe_method BOOLEAN NOT NULL DEFAULT false,
+    supported BOOLEAN NOT NULL DEFAULT true,
+    PRIMARY KEY (collection_id, request_id)
+);
+CREATE INDEX idx_request_collection_requests_page ON request_collection_requests(collection_id, ordinal);
+
 CREATE TABLE device_credential_attempts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     device_target_id UUID NOT NULL REFERENCES device_targets(id) ON DELETE CASCADE,
@@ -508,6 +556,52 @@ CREATE INDEX idx_device_agent_actions_run
 ON device_agent_actions(run_id, created_at);
 CREATE INDEX idx_device_agent_actions_device_day
 ON device_agent_actions(device_target_id, created_at DESC);
+
+-- Canonical Hunt V2 runtime. The external AI owns planning; this table stores only authority,
+-- budgets, durable observations, capability receipts, candidates, and the final debrief.
+CREATE TABLE hunt_runs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    target_kind TEXT NOT NULL CHECK (target_kind IN ('web','api','device','network')),
+    target_id UUID REFERENCES targets(id) ON DELETE CASCADE,
+    device_target_id UUID REFERENCES device_targets(id) ON DELETE CASCADE,
+    objective TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active' CHECK (
+        status IN ('created','active','awaiting_planner','completed','cancelled','failed','budget_exhausted')
+    ),
+    budget_profile TEXT NOT NULL DEFAULT 'balanced' CHECK (budget_profile IN ('fast','balanced','thorough')),
+    policy_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    budget_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    budget_used_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    context_pack JSONB NOT NULL DEFAULT '{}'::jsonb,
+    notes JSONB NOT NULL DEFAULT '[]'::jsonb,
+    final_debrief JSONB NOT NULL DEFAULT '{}'::jsonb,
+    approval_receipt_id UUID,
+    stop_reason TEXT,
+    created_by TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at TIMESTAMPTZ,
+    CONSTRAINT hunt_runs_target_check CHECK (
+        (target_kind IN ('web','api','network') AND target_id IS NOT NULL AND device_target_id IS NULL) OR
+        (target_kind='device' AND device_target_id IS NOT NULL AND target_id IS NULL)
+    )
+);
+CREATE INDEX idx_hunt_runs_web ON hunt_runs(target_id, created_at DESC) WHERE target_id IS NOT NULL;
+CREATE INDEX idx_hunt_runs_device ON hunt_runs(device_target_id, created_at DESC) WHERE device_target_id IS NOT NULL;
+CREATE INDEX idx_hunt_runs_status ON hunt_runs(status, updated_at DESC);
+
+CREATE TABLE hunt_actions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    hunt_run_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE,
+    capability_name TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('running','completed','blocked','failed','partial')),
+    input_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+    result_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+    receipt_id UUID,
+    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at TIMESTAMPTZ
+);
+CREATE INDEX idx_hunt_actions_run ON hunt_actions(hunt_run_id, started_at);
 
 -- ============================================================
 -- FINDINGS - Vulnerabilities discovered

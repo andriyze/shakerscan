@@ -1031,6 +1031,15 @@ async def run_schema_migrations(pool) -> None:
                 ADD COLUMN IF NOT EXISTS shard_count INTEGER
             """)
             await conn.execute("""
+                ALTER TABLE scans
+                ADD COLUMN IF NOT EXISTS scan_generation TEXT NOT NULL DEFAULT 'legacy',
+                ADD COLUMN IF NOT EXISTS policy_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                ADD COLUMN IF NOT EXISTS budget_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                ADD COLUMN IF NOT EXISTS budget_used_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                ADD COLUMN IF NOT EXISTS coverage_status TEXT,
+                ADD COLUMN IF NOT EXISTS coverage_json JSONB NOT NULL DEFAULT '{}'::jsonb
+            """)
+            await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_scans_parent
                 ON scans(parent_scan_id) WHERE parent_scan_id IS NOT NULL
             """)
@@ -2757,6 +2766,147 @@ async def run_schema_migrations(pool) -> None:
                 CREATE INDEX IF NOT EXISTS idx_device_agent_actions_device_day
                 ON device_agent_actions(device_target_id, created_at DESC)
             """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS request_collections (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    target_id UUID REFERENCES targets(id) ON DELETE CASCADE,
+                    device_target_id UUID REFERENCES device_targets(id) ON DELETE CASCADE,
+                    name TEXT NOT NULL,
+                    format TEXT NOT NULL,
+                    schema_version TEXT NOT NULL DEFAULT 'request-collection/v2',
+                    encrypted_payload TEXT NOT NULL,
+                    payload_sha256 TEXT NOT NULL,
+                    request_count INTEGER NOT NULL DEFAULT 0,
+                    safe_request_count INTEGER NOT NULL DEFAULT 0,
+                    potentially_mutating_request_count INTEGER NOT NULL DEFAULT 0,
+                    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    is_active BOOLEAN NOT NULL DEFAULT true,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT request_collections_target_check CHECK (
+                        (target_id IS NOT NULL AND device_target_id IS NULL) OR
+                        (device_target_id IS NOT NULL AND target_id IS NULL)
+                    )
+                )
+            """)
+            await conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_request_collections_target_name
+                ON request_collections(
+                    COALESCE(target_id, '00000000-0000-0000-0000-000000000000'::uuid),
+                    COALESCE(device_target_id, '00000000-0000-0000-0000-000000000000'::uuid), name
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_request_collections_web
+                ON request_collections(target_id, updated_at DESC)
+                WHERE target_id IS NOT NULL AND is_active=true
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_request_collections_device
+                ON request_collections(device_target_id, updated_at DESC)
+                WHERE device_target_id IS NOT NULL AND is_active=true
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS request_collection_requests (
+                    collection_id UUID NOT NULL REFERENCES request_collections(id) ON DELETE CASCADE,
+                    request_id TEXT NOT NULL,
+                    ordinal INTEGER NOT NULL,
+                    folder TEXT,
+                    name TEXT,
+                    method TEXT NOT NULL,
+                    redacted_url TEXT,
+                    normalized_path TEXT,
+                    body_mode TEXT,
+                    auth_type TEXT,
+                    safe_method BOOLEAN NOT NULL DEFAULT false,
+                    supported BOOLEAN NOT NULL DEFAULT true,
+                    PRIMARY KEY (collection_id, request_id)
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_request_collection_requests_page
+                ON request_collection_requests(collection_id, ordinal)
+            """)
+            await conn.execute("""
+                INSERT INTO request_collections (
+                    id, device_target_id, name, format, encrypted_payload, payload_sha256,
+                    request_count, safe_request_count, potentially_mutating_request_count,
+                    metadata_json, is_active, created_at, updated_at
+                )
+                SELECT id, device_target_id, name, format, encrypted_payload, document_sha256,
+                       COALESCE((summary_json->>'request_count')::int, 0),
+                       COALESCE((summary_json->>'safe_request_count')::int, 0),
+                       COALESCE((summary_json->>'state_changing_request_count')::int, 0),
+                       summary_json, is_active, created_at, updated_at
+                FROM device_request_collections
+                ON CONFLICT (id) DO NOTHING
+            """)
+            # Canonical Hunt V2 keeps server authority and audit state without owning model
+            # reasoning. Legacy web/device run tables remain compatibility adapters.
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS hunt_runs (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    target_kind TEXT NOT NULL,
+                    target_id UUID REFERENCES targets(id) ON DELETE CASCADE,
+                    device_target_id UUID REFERENCES device_targets(id) ON DELETE CASCADE,
+                    objective TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'active',
+                    budget_profile TEXT NOT NULL DEFAULT 'balanced',
+                    policy_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    budget_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    budget_used_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    context_pack JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    notes JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    final_debrief JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    approval_receipt_id UUID,
+                    stop_reason TEXT,
+                    created_by TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    completed_at TIMESTAMPTZ,
+                    CONSTRAINT hunt_runs_target_kind_check CHECK (target_kind IN ('web','api','device','network')),
+                    CONSTRAINT hunt_runs_status_check CHECK (status IN (
+                        'created','active','awaiting_planner','completed','cancelled','failed','budget_exhausted'
+                    )),
+                    CONSTRAINT hunt_runs_budget_profile_check CHECK (budget_profile IN ('fast','balanced','thorough')),
+                    CONSTRAINT hunt_runs_target_check CHECK (
+                        (target_kind IN ('web','api','network') AND target_id IS NOT NULL AND device_target_id IS NULL) OR
+                        (target_kind='device' AND device_target_id IS NOT NULL AND target_id IS NULL)
+                    )
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_hunt_runs_web
+                ON hunt_runs(target_id, created_at DESC) WHERE target_id IS NOT NULL
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_hunt_runs_device
+                ON hunt_runs(device_target_id, created_at DESC) WHERE device_target_id IS NOT NULL
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_hunt_runs_status
+                ON hunt_runs(status, updated_at DESC)
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS hunt_actions (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    hunt_run_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE,
+                    capability_name TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    input_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    result_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    receipt_id UUID,
+                    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    completed_at TIMESTAMPTZ,
+                    CONSTRAINT hunt_actions_status_check CHECK (
+                        status IN ('running','completed','blocked','failed','partial')
+                    )
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_hunt_actions_run
+                ON hunt_actions(hunt_run_id, started_at)
+            """)
             # Hunt output is a non-authoritative candidate until a registered server-side
             # verifier satisfies its proof contract. Web and device candidates share this
             # lifecycle while retaining mutually exclusive target namespaces.
@@ -2769,6 +2919,7 @@ async def run_schema_migrations(pool) -> None:
                     research_episode_id UUID REFERENCES research_episodes(id) ON DELETE SET NULL,
                     agent_hunt_run_id UUID REFERENCES agent_hunt_runs(id) ON DELETE SET NULL,
                     device_agent_run_id UUID REFERENCES device_agent_runs(id) ON DELETE SET NULL,
+                    hunt_run_id UUID REFERENCES hunt_runs(id) ON DELETE SET NULL,
                     family TEXT NOT NULL,
                     canonical_locus JSONB NOT NULL DEFAULT '{}'::jsonb,
                     title TEXT NOT NULL,
@@ -2823,6 +2974,10 @@ async def run_schema_migrations(pool) -> None:
                 ALTER TABLE investigation_candidates
                 ADD COLUMN IF NOT EXISTS agent_hunt_run_id UUID REFERENCES agent_hunt_runs(id) ON DELETE SET NULL
             """)
+            await conn.execute("""
+                ALTER TABLE investigation_candidates
+                ADD COLUMN IF NOT EXISTS hunt_run_id UUID REFERENCES hunt_runs(id) ON DELETE SET NULL
+            """)
             # Every hunt observation is immutable and retains its own run provenance even when the
             # canonical family+locus candidate already exists. This prevents global dedupe from
             # erasing which run made which claim and preserves later observations of terminal rows.
@@ -2833,6 +2988,7 @@ async def run_schema_migrations(pool) -> None:
                     research_episode_id UUID REFERENCES research_episodes(id) ON DELETE SET NULL,
                     agent_hunt_run_id UUID REFERENCES agent_hunt_runs(id) ON DELETE SET NULL,
                     device_agent_run_id UUID REFERENCES device_agent_runs(id) ON DELETE SET NULL,
+                    hunt_run_id UUID REFERENCES hunt_runs(id) ON DELETE SET NULL,
                     source_kind TEXT NOT NULL DEFAULT 'hunt',
                     title TEXT NOT NULL,
                     claim TEXT NOT NULL,
@@ -2850,6 +3006,10 @@ async def run_schema_migrations(pool) -> None:
             await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_investigation_candidate_observations_candidate
                 ON investigation_candidate_observations(candidate_id, observed_at DESC)
+            """)
+            await conn.execute("""
+                ALTER TABLE investigation_candidate_observations
+                ADD COLUMN IF NOT EXISTS hunt_run_id UUID REFERENCES hunt_runs(id) ON DELETE SET NULL
             """)
             await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_investigation_candidate_observations_web_run
@@ -3451,6 +3611,13 @@ async def run_schema_migrations(pool) -> None:
             """)
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_tool_receipts_tool_created ON tool_receipts(tool_name, created_at DESC)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_tool_receipts_scope ON tool_receipts(scope_receipt_id) WHERE scope_receipt_id IS NOT NULL")
+            await conn.execute("ALTER TABLE tool_receipts ADD COLUMN IF NOT EXISTS capability_name TEXT")
+            await conn.execute("ALTER TABLE tool_receipts ADD COLUMN IF NOT EXISTS adapter_name TEXT")
+            await conn.execute("ALTER TABLE tool_receipts ADD COLUMN IF NOT EXISTS budget_json JSONB NOT NULL DEFAULT '{}'::jsonb")
+            await conn.execute("ALTER TABLE tool_receipts ADD COLUMN IF NOT EXISTS partial BOOLEAN NOT NULL DEFAULT false")
+            await conn.execute("ALTER TABLE tool_receipts ADD COLUMN IF NOT EXISTS output_artifact_id UUID REFERENCES evidence_objects(id) ON DELETE SET NULL")
+            await conn.execute("ALTER TABLE tool_receipts ADD COLUMN IF NOT EXISTS hunt_id UUID REFERENCES hunt_runs(id) ON DELETE SET NULL")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_tool_receipts_hunt ON tool_receipts(hunt_id, created_at DESC) WHERE hunt_id IS NOT NULL")
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS evidence_instances (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

@@ -9340,6 +9340,21 @@ async def process_scan_job(job_data: dict):
         grade = result.get('result', {}).get('grade')
         findings = result.get('findings', [])
         error = result.get('error')
+        result_coverage = result.get("coverage") if isinstance(result.get("coverage"), dict) else {}
+        if not result_coverage:
+            smart_coverage = result.get("smart_coverage") if isinstance(result.get("smart_coverage"), dict) else {}
+            quality_metrics = result.get("quality_metrics") if isinstance(result.get("quality_metrics"), dict) else {}
+            coverage_status = str(
+                options.get("coverage_status") or smart_coverage.get("status")
+                or quality_metrics.get("coverage_status") or ("failed" if error else "complete")
+            )
+            result_coverage = {
+                "status": coverage_status,
+                "reasons": list(options.get("coverage_reasons") or []),
+            }
+        coverage_status = str(result_coverage.get("status") or ("failed" if error else "complete"))
+        scan_metadata = result.get("scan_metadata") if isinstance(result.get("scan_metadata"), dict) else {}
+        budget_used = scan_metadata.get("budget_used") if isinstance(scan_metadata.get("budget_used"), dict) else {}
 
         # Save an early artifact before DB finalization so runtime failures still
         # leave diagnostics. A later write refreshes it with receipt ids.
@@ -9460,9 +9475,12 @@ async def process_scan_job(job_data: dict):
                         completed_at = $3,
                         duration_seconds = $4,
                         progress = 100,
-                        current_phase = 'failed'
-                    WHERE id = $5
-                """, error_detail[:2000], json.dumps(failure_result), completed_at, duration, uuid.UUID(scan_id))
+                        current_phase = 'failed', coverage_status=$5, coverage_json=$6,
+                        budget_used_json=$7
+                    WHERE id = $8
+                """, error_detail[:2000], json.dumps(failure_result), completed_at, duration,
+                     coverage_status, json.dumps(result_coverage), json.dumps(budget_used),
+                     uuid.UUID(scan_id))
                 candidate_id = str((options or {}).get("candidate_id") or "")
                 if candidate_id:
                     try:
@@ -9509,10 +9527,12 @@ async def process_scan_job(job_data: dict):
                         completed_at = $5,
                         duration_seconds = $6,
                         progress = 100,
-                        current_phase = 'completed'
-                    WHERE id = $7
+                        current_phase = 'completed',
+                        coverage_status = $7, coverage_json = $8, budget_used_json = $9
+                    WHERE id = $10
                 """, json.dumps(result), score, grade, len(findings),
-                     completed_at, duration, uuid.UUID(scan_id))
+                     completed_at, duration, coverage_status, json.dumps(result_coverage),
+                     json.dumps(budget_used), uuid.UUID(scan_id))
                 candidate_settlement = result.get("candidate_verification") if isinstance(result.get("candidate_verification"), dict) else {}
                 candidate_id = str(candidate_settlement.get("candidate_id") or "")
                 if candidate_id:
@@ -10582,6 +10602,7 @@ async def process_scan_plan_job(job_data: dict):
     coverage_allocation = 'static'
     harvested: list[str] = []
     harvest_meta: dict[str, Any] | None = None
+    discovery_degraded_reason: str | None = None
     precreated_campaign_id: str | None = None
     if requested_strategy in {'coverage', 'coverage_family'}:
         # The placed discovery shard already executed target traffic. This
@@ -10604,7 +10625,9 @@ async def process_scan_plan_job(job_data: dict):
                 print(f"[{parent_id[:8]}] discovery continuation arrived before terminal result", flush=True)
                 return
             discovery_status = str(discovery.get('status') or '')
-            if discovery_status == 'failed':
+            if discovery_status == 'failed' and (
+                str(options.get('scan_generation') or 'legacy') != 'v2' or not target_url
+            ):
                 discovery_error = str(
                     discovery.get('error_message')
                     or 'Parallel endpoint discovery failed before producing a durable worklist'
@@ -10643,6 +10666,13 @@ async def process_scan_plan_job(job_data: dict):
                 print(f"[{parent_id[:8]}] {parent_error}", flush=True)
                 return
             recon_result = _as_report_dict(discovery.get('result')) or {}
+            if discovery_status == 'failed':
+                # A failed producer may still have durable, trustworthy partial output. Harvest it
+                # and continue; coverage truth is reported separately from the parent run status.
+                discovery_degraded_reason = str(
+                    discovery.get('error_message') or recon_result.get('error')
+                    or 'parallel discovery producer failed after partial output'
+                )[:1000]
         else:
             # Explicit endpoint scope can fan out immediately without target
             # discovery. This is the lowest-latency parallel path.
@@ -10752,6 +10782,9 @@ async def process_scan_plan_job(job_data: dict):
     parent_options['parallel_strategy'] = plan.strategy
     if plan.strategy in {'coverage', 'coverage_family'}:
         parent_options['coverage_allocation'] = coverage_allocation
+        if discovery_degraded_reason:
+            parent_options['coverage_status'] = 'partial'
+            parent_options['coverage_reasons'] = [discovery_degraded_reason]
         if harvest_meta is not None:
             # Surface the worklist cap so "Full Coverage" never reports ~100% over a
             # silently truncated surface (endpoints beyond the cap were discovered
@@ -13607,8 +13640,9 @@ def _worker_build_report_payload() -> tuple[str, str]:
     tool_commands = dict(DEFAULT_WORKER_TOOL_COMMANDS)
     if AGENT_TOOL_ONLY_WORKER:
         tool_commands.update({
-            name: str(spec.get("binary") or name)
-            for name, spec in agent_tools.SCANNER_ARG_TEMPLATES.items()
+            str(spec.legacy_tool_name): str(spec.binary or spec.legacy_tool_name)
+            for spec in agent_tools.CAPABILITY_REGISTRY.external_tools()
+            if spec.legacy_tool_name
         })
     payload = json.dumps({
         "build_fingerprint": _worker_build_fingerprint(),
