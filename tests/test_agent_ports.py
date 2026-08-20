@@ -336,8 +336,11 @@ def test_run_tool_schema_and_names():
     assert at.tool_schemas(include_run_tool=False) == [s for s in schemas if s["name"] != "run_tool"]
     run_tool = next(schema for schema in schemas if schema["name"] == "run_tool")
     name_schema = run_tool["parameters"]["properties"]["name"]
-    assert set(name_schema["enum"]) == {"httpx", "nuclei", "katana", "ffuf", "dalfox", "sqlmap"}
+    assert set(name_schema["enum"]) == {
+        "httpx", "nuclei", "katana", "ffuf", "dalfox", "sqlmap", "nmap", "naabu",
+    }
     assert "dalfox" in name_schema["description"] and "sqlmap" in name_schema["description"]
+    assert "nmap" in name_schema["description"] and "naabu" in name_schema["description"]
 
 
 def test_run_tool_argv_templates_hardcode_flags():
@@ -762,7 +765,8 @@ def test_bola_targets_bare_collection_route():
 
 def test_attack_scanners_dalfox_sqlmap_present_and_bounded():
     # dalfox + sqlmap join the fixed-argv arsenal: active (approval-gated), bounded reservations,
-    # GET-based XSS (no headless/blind/mining), boolean/error-only SQLi (no time-based, no crawl).
+    # GET-based XSS (no headless/blind/mining), widened SQLi (BEUT incl. time-based inside a
+    # 300s wall, level/risk 2, no crawl).
     assert {"dalfox", "sqlmap"}.issubset(at.RUN_TOOL_NAMES)
     for name in ("dalfox", "sqlmap"):
         assert at.SCANNER_ARG_TEMPLATES[name]["risk"] == "active"
@@ -776,13 +780,15 @@ def test_attack_scanners_dalfox_sqlmap_present_and_bounded():
     assert argv[argv.index("--only-poc") + 1] == "v"  # default severity -> verified-only PoCs
     assert argv[argv.index("--format") + 1] == "jsonl"
 
-    b, argv, _ = at.build_scanner_argv("sqlmap", "http://t/item?id=1", {})
+    b, argv, timeout = at.build_scanner_argv("sqlmap", "http://t/item?id=1", {})
     assert b == "sqlmap"
     assert argv[argv.index("-u") + 1] == "http://t/item?id=1"
     assert argv[argv.index("--batch") + 1] == "--technique"  # non-interactive
-    assert argv[argv.index("--technique") + 1] == "BE"       # boolean+error only
-    assert argv[argv.index("--level") + 1] == "1" and argv[argv.index("--risk") + 1] == "1"
+    assert argv[argv.index("--technique") + 1] == "BEUT"     # boolean/error/union/time-based
+    assert argv[argv.index("--level") + 1] == "2" and argv[argv.index("--risk") + 1] == "2"
     assert argv[argv.index("--threads") + 1] == "2" and argv[argv.index("--delay") + 1] == "1"
+    assert timeout == 300_000                                # wider window for time-based payloads
+    assert at.scanner_request_reservation("sqlmap") == 900
     assert "--crawl" not in " ".join(argv) and "--os-shell" not in " ".join(argv)
 
 
@@ -794,6 +800,109 @@ def test_attack_scanner_pinning_preserves_host_and_sni():
     _, argv, _ = at.build_scanner_argv("sqlmap", "https://t.test:8443/x?a=1", {}, pinned_address="10.0.0.5")
     assert argv[argv.index("-u") + 1].startswith("https://10.0.0.5:8443/")
     assert argv[argv.index("--host") + 1] == "t.test:8443"
+
+
+def test_posture_scanners_nmap_naabu_present_and_bounded():
+    # nmap + naabu join the fixed-argv arsenal: ACTIVE (they send probe traffic), bounded wall
+    # clocks and wire reservations, connect scans only (never raw SYN), no NSE scripts.
+    assert {"nmap", "naabu"}.issubset(at.RUN_TOOL_NAMES)
+    for name in ("nmap", "naabu"):
+        assert at.SCANNER_ARG_TEMPLATES[name]["risk"] == "active"
+
+    b, argv, timeout = at.build_scanner_argv("nmap", "https://example.test:8443/admin", {})
+    assert b == "nmap"
+    assert argv[argv.index("-p") + 1] == "8443"                 # single port from the URL
+    assert argv[argv.index("-sV") + 1] == "-sT"                 # service detect + connect scan
+    assert "-sS" not in argv                                    # never raw SYN
+    assert not any(str(flag).startswith("--script") for flag in argv)  # no NSE scripts
+    assert argv[argv.index("--host-timeout") + 1] == "60s"      # hard host wall
+    assert argv[argv.index("--max-retries") + 1] == "2"
+    assert argv[argv.index("-oN") + 1] == "-"                   # output on stdout only, no files
+    assert argv[-1] == "example.test"                           # positional host
+    assert timeout == 90_000
+    assert at.scanner_request_reservation("nmap") == 60
+    # scheme-default port when the URL carries none
+    _, argv, _ = at.build_scanner_argv("nmap", "http://example.test/", {})
+    assert argv[argv.index("-p") + 1] == "80"
+
+    b, argv, timeout = at.build_scanner_argv("naabu", "https://example.test:8443/", {})
+    assert b == "naabu"
+    assert argv[argv.index("-host") + 1] == "example.test"
+    assert argv[argv.index("-top-ports") + 1] == "100"          # bounded top-100 sweep
+    assert "-p-" not in argv and "-p" not in argv               # never a full-range sweep
+    assert argv[argv.index("-scan-type") + 1] == "c"            # connect scan
+    assert argv[argv.index("-rate") + 1] == "10"
+    assert argv[argv.index("-c") + 1] == "10"
+    assert timeout == 120_000
+    assert at.scanner_request_reservation("naabu") == 1200
+    # rate 10 x the 120s wall must fit inside the wire reservation
+    assert int(argv[argv.index("-rate") + 1]) * (timeout // 1000) <= at.scanner_request_reservation("naabu")
+
+
+def test_posture_scanner_pinning_replaces_host_with_pinned_ip():
+    # nmap/naabu support neither SOCKS proxies nor Host/SNI overrides: the pinned IP becomes
+    # the scan target itself (hostname dropped — no SNI needed for port/service posture).
+    _, argv, _ = at.build_scanner_argv(
+        "nmap", "https://example.test:8443/admin", {}, pinned_address="203.0.113.7",
+    )
+    assert argv[-1] == "203.0.113.7"
+    assert argv[argv.index("-p") + 1] == "8443"
+    assert "example.test" not in argv
+    assert not any("Host" in str(flag) for flag in argv)
+
+    _, argv, _ = at.build_scanner_argv(
+        "naabu", "https://example.test:8443/", {}, pinned_address="203.0.113.7",
+    )
+    assert argv[argv.index("-host") + 1] == "203.0.113.7"
+    assert "example.test" not in argv
+
+    # with BOTH a proxy broker and a pinned address, posture tools pin by address (they cannot
+    # ride SOCKS) — no proxy flags, no hostname in argv
+    _, argv, _ = at.build_scanner_argv(
+        "naabu", "https://example.test/", {},
+        pinned_address="203.0.113.7", pinned_proxy_url="socks5://127.0.0.1:45678",
+    )
+    assert argv[argv.index("-host") + 1] == "203.0.113.7"
+    assert "socks5://127.0.0.1:45678" not in argv
+    # fail-closed: a SOCKS broker with NO pinned address cannot host a posture tool
+    with pytest.raises(at.AgentToolError, match="SOCKS"):
+        at.build_scanner_argv(
+            "nmap", "https://example.test/", {},
+            pinned_proxy_url="socks5://127.0.0.1:45678",
+        )
+
+
+def test_posture_scanner_output_is_typed():
+    nmap_out = at.parse_scanner_output("nmap", "\n".join([
+        "Starting Nmap 7.94 ( https://nmap.org )",
+        "Nmap scan report for example.test (203.0.113.7)",
+        "PORT     STATE SERVICE VERSION",
+        "8443/tcp open  https  nginx 1.25.3",
+        "22/tcp   filtered ssh",
+        "Service detection performed. Please report any incorrect results.",
+    ]))
+    assert nmap_out["parser_status"] == "parsed"
+    assert nmap_out["record_count"] == 2
+    rec = nmap_out["records"][0]
+    assert rec["kind"] == "port_service"
+    assert rec["port"] == "8443/tcp" and rec["state"] == "open" and rec["service"] == "https"
+    assert rec["version"] == "nginx 1.25.3"
+    assert rec["proof_state"] == "candidate"
+    assert nmap_out["records"][1]["version"] is None  # filtered row has no version
+
+    naabu_out = at.parse_scanner_output("naabu", "\n".join([
+        json.dumps({"host": "203.0.113.7", "port": "8443", "protocol": "tcp"}),
+        json.dumps({"host": "203.0.113.7", "port": 22}),
+        json.dumps({"stats": {"count": 10}}),          # stats line is not an observation
+        "[INF] naabu scan started",                    # banner is not JSON
+    ]))
+    assert naabu_out["parser_status"] == "parsed"
+    assert naabu_out["record_count"] == 2
+    rec = naabu_out["records"][0]
+    assert rec["kind"] == "open_port"
+    assert rec["port"] == 8443 and rec["protocol"] == "tcp"
+    assert rec["host"] == "203.0.113.7"
+    assert rec["proof_state"] == "candidate"
 
 
 def test_dalfox_sqlmap_output_is_typed_and_payloads_not_exposed():

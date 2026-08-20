@@ -74,7 +74,9 @@ AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
             "to send it authenticated AS that server-managed identity — you never see the "
             "credential. Replay the same request as different principals to test access "
             "control. Reads (GET/HEAD/OPTIONS) run freely; writes (POST/PUT/PATCH/DELETE) "
-            "are approval-gated. Returns a 'ref' you can pass to diff."
+            "are approval-gated. Set follow_redirects=true (reads only) to follow up to 3 "
+            "same-origin redirects and receive the final response plus the chain. "
+            "Returns a 'ref' you can pass to diff."
         ),
         "parameters": {
             "type": "object",
@@ -87,6 +89,7 @@ AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "form_body": {"type": "object", "description": "optional form-encoded body"},
                 "headers": {"type": "object", "description": "optional benign request headers (auth headers are forbidden — use as_principal)"},
                 "as_principal": {"type": "string", "description": "optional principal slot to authenticate as; omit for anonymous"},
+                "follow_redirects": {"type": "boolean", "description": "optional: follow up to 3 STRICT same-origin (scheme+host+port) redirects; read methods (GET/HEAD/OPTIONS) only. The response is the FINAL hop plus a redirect_chain of {status, location} hops"},
             },
             "required": ["method", "path"],
         },
@@ -161,6 +164,8 @@ AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
 
 _SEV_RE = re.compile(r"^(critical|high|medium|low|info)(,(critical|high|medium|low|info))*$")
 _TAGS_RE = re.compile(r"^[a-z0-9][a-z0-9,\-]{0,80}$")
+# nmap -oN - human output: one row per scanned port, e.g. "8443/tcp open  https  nginx 1.25.3".
+_NMAP_SERVICE_LINE_RE = re.compile(r"^(\d{1,5}/(?:tcp|udp))\s+(\S+)\s+(\S+)(?:\s+(.*\S))?\s*$")
 _NUCLEI_FOCUSED_TAGS = "exposure,misconfig,auth-bypass,default-login"
 
 
@@ -230,10 +235,11 @@ def _tmpl_dalfox(url: str, opts: dict[str, Any]) -> list[str]:
 
 
 def _tmpl_sqlmap(url: str, opts: dict[str, Any]) -> list[str]:
-    # Bounded single-URL SQLi test. Non-interactive (--batch), boolean+error techniques only
-    # (no time-based/stacked queries -> bounded wall time), level/risk 1, no crawl, output to a
-    # scratch dir the worker owns; findings surface in stdout ("is vulnerable").
-    return ["-u", url, "--batch", "--technique", "BE", "--level", "1", "--risk", "1",
+    # Bounded single-URL SQLi test. Non-interactive (--batch), boolean/error/union plus
+    # time-based techniques (the widened wall window + wire reservation bound the time-based
+    # payloads), level/risk 2, no crawl, output to a scratch dir the worker owns (replaced
+    # per-job by bind_scanner_runtime_paths); findings surface in stdout ("is vulnerable").
+    return ["-u", url, "--batch", "--technique", "BEUT", "--level", "2", "--risk", "2",
             "--threads", "2", "--timeout", "8", "--retries", "1", "--delay", "1",
             "--flush-session", "--output-dir", "/tmp/shakerscan-sqlmap",
             "--smart", "--disable-coloring", "--answers", "redirect=N",
@@ -251,6 +257,32 @@ def _tmpl_ffuf(url: str, opts: dict[str, Any]) -> list[str]:
     return ["-u", f"{base}/FUZZ", "-w", wordlist,
             "-mc", "200,204,301,302,307,401,403,405", "-ac",
             "-t", "5", "-rate", "5", "-timeout", "8", "-maxtime", "40", "-s", "-json"]
+
+
+def _tmpl_nmap(url: str, opts: dict[str, Any]) -> list[str]:
+    # Read-only single-port service/version probe of the host behind the target URL. nmap takes
+    # no URL: host+port are extracted from it. Connect scan only (-sT — never raw SYN), NO NSE
+    # scripts, no host discovery (-Pn), no file output (-oN - keeps it on stdout), 60s host
+    # timeout. When pinning is active build_scanner_argv feeds this a URL whose hostname is the
+    # pinned IP, so the positional host is address-frozen.
+    parsed = urllib.parse.urlsplit(url)
+    host = str(parsed.hostname or "")
+    port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+    return ["-p", str(port), "-sV", "-sT", "--version-light", "--host-timeout", "60s",
+            "--max-retries", "2", "-T3", "-Pn", "-oN", "-", host]
+
+
+def _tmpl_naabu(url: str, opts: dict[str, Any]) -> list[str]:
+    # Bounded top-100 TCP port sweep of the host behind the target URL. Connect scan
+    # (-scan-type c — no raw SYN), rate 10 + 120s wall cap -> a 1200-request wire ceiling, JSON
+    # lines on stdout for the typed parser. No full-range -p- sweep. Pinned IP substitution is
+    # handled by build_scanner_argv exactly as for nmap.
+    parsed = urllib.parse.urlsplit(url)
+    host = str(parsed.hostname or "")
+    return ["-host", host, "-top-ports", "100", "-Pn", "-scan-type", "c",
+            "-rate", "10", "-c", "10", "-timeout", "1500ms", "-retries", "1",
+            "-json", "-silent", "-no-color", "-disable-update-check", "-no-stdin",
+            "-stats", "-stats-interval", "10"]
 
 
 # {tool: {binary, target_param, risk, default_timeout_ms, build}}. httpx is the only passive
@@ -273,9 +305,17 @@ SCANNER_ARG_TEMPLATES: dict[str, dict[str, Any]] = {
                "max_wire_requests": 400, "build": _tmpl_dalfox,
                "desc": "bounded XSS scan of one URL (GET-based, no headless, no blind callback); "
                        "options {severity: low|medium|high} — default 'high' reports verified-only PoCs"},
-    "sqlmap": {"binary": "sqlmap", "risk": "active", "default_timeout_ms": 180_000,
-               "max_wire_requests": 500, "build": _tmpl_sqlmap,
-               "desc": "bounded boolean/error SQLi test of one URL (level/risk 1, no time-based, no crawl)"},
+    "sqlmap": {"binary": "sqlmap", "risk": "active", "default_timeout_ms": 300_000,
+               "max_wire_requests": 900, "build": _tmpl_sqlmap,
+               "desc": "bounded SQLi test of one URL (techniques BEUT incl. time-based within the "
+                       "300s wall, level/risk 2, no crawl)"},
+    "nmap": {"binary": "nmap", "risk": "active", "default_timeout_ms": 90_000,
+             "max_wire_requests": 60, "build": _tmpl_nmap,
+             "desc": "read-only connect() service/version probe of the single port behind a "
+                     "target-host URL (no scripts, no raw-scan flags)"},
+    "naabu": {"binary": "naabu", "risk": "active", "default_timeout_ms": 120_000,
+              "max_wire_requests": 1200, "build": _tmpl_naabu,
+              "desc": "bounded top-100 TCP port sweep of the target host (connect scan, rate 10)"},
 }
 RUN_TOOL_NAMES: frozenset[str] = frozenset(SCANNER_ARG_TEMPLATES)
 
@@ -289,9 +329,11 @@ RUN_TOOL_SCHEMA: dict[str, Any] = {
         "JS endpoint extraction (finds linked/JS-referenced routes); ffuf = content/dir "
         "discovery over a bundled wordlist (options {wordlist: common|api|admin} — finds "
         "UNLINKED paths); dalfox = XSS scan of one URL (options {severity}); sqlmap = "
-        "boolean/error SQLi test of one URL. Use katana/ffuf to expand the surface, then "
-        "attack params with dalfox/sqlmap or probe hits with http_request. Returns the "
-        "scanner's output (bounded)."
+        "bounded SQLi test of one URL (boolean/error/union/time-based techniques, level/risk 2); "
+        "nmap = read-only service/version probe of the single port behind a target URL (no "
+        "scripts); naabu = top-100 TCP port sweep of the target host. Use katana/ffuf/naabu to "
+        "expand the surface, then attack params with dalfox/sqlmap or probe hits with "
+        "http_request. Returns the scanner's output (bounded)."
     ),
     "parameters": {
         "type": "object",
@@ -299,7 +341,7 @@ RUN_TOOL_SCHEMA: dict[str, Any] = {
             "name": {
                 "type": "string",
                 "enum": sorted(RUN_TOOL_NAMES),
-                "description": "httpx | nuclei | katana | ffuf | dalfox | sqlmap",
+                "description": "httpx | nuclei | katana | ffuf | dalfox | sqlmap | nmap | naabu",
             },
             "target": {"type": "string", "description": "absolute path (/) on the chosen origin or an http(s) URL on the selected target host"},
             "options": {
@@ -436,9 +478,20 @@ def build_scanner_argv(
     template = SCANNER_ARG_TEMPLATES[name]
     execution_url = url
     pin_args: list[str] = []
-    if pinned_proxy_url:
+    if name in ("nmap", "naabu") and pinned_address:
+        # Host/port posture tools support neither SOCKS proxies nor Host/SNI overrides, so
+        # pinning replaces the scan HOST with the pinned IP itself: the template extracts
+        # host+port from this URL. The hostname is intentionally dropped (no SNI needed for
+        # port/service posture); egress stays frozen to the authorized address. This branch
+        # takes precedence over the SOCKS broker, which these tools cannot ride.
+        execution_url, _hostname, _host_header = _pinned_scanner_url(url, pinned_address)
+    elif pinned_proxy_url:
         if not re.fullmatch(r"socks5://127\.0\.0\.1:\d{1,5}", pinned_proxy_url):
             raise AgentToolError("scanner pinned proxy must be a loopback SOCKS5 URL")
+        if name in ("nmap", "naabu"):
+            raise AgentToolError(
+                f"{name} cannot ride the SOCKS pinning broker without a pinned address to scan directly"
+            )
         proxy_flags = {
             "httpx": ["-http-proxy", pinned_proxy_url],
             "nuclei": ["-proxy", pinned_proxy_url, "-proxy-internal"],
@@ -791,6 +844,19 @@ def parse_scanner_output(
                 "proof_state": "verified" if str(data.get("type") or "").lower() == "v" else "candidate",
             }
             records.append(record)
+        elif scanner == "naabu":
+            # JSON lines: {"host":"10.0.0.4","port":8443,"protocol":"tcp"} (port may be a
+            # string). Stats/banner lines carry no port and are dropped.
+            text_port = str(item.get("port") or "").strip()
+            if not text_port.isdigit():
+                continue
+            records.append({
+                "kind": "open_port",
+                "host": str(item.get("host") or item.get("ip") or "")[:200] or None,
+                "port": int(text_port),
+                "protocol": str(item.get("protocol") or "tcp")[:16],
+                "proof_state": "candidate",
+            })
     if scanner == "sqlmap":
         for line in text.splitlines()[:500]:
             line = line.strip()
@@ -806,6 +872,20 @@ def parse_scanner_output(
                     "message": line[:300],
                     "proof_state": "candidate",
                 })
+    if scanner == "nmap":
+        # -oN - human output; only "PORT STATE SERVICE [VERSION]" table rows are observations.
+        for line in text.splitlines()[:500]:
+            match = _NMAP_SERVICE_LINE_RE.match(line.strip())
+            if not match:
+                continue
+            records.append({
+                "kind": "port_service",
+                "port": match.group(1),
+                "state": match.group(2)[:32],
+                "service": match.group(3)[:64],
+                "version": (match.group(4) or "")[:200] or None,
+                "proof_state": "candidate",
+            })
     records = [record for record in records if any(value not in (None, "", [], {}) for key, value in record.items() if key != "kind")]
     return {
         "parser": f"{scanner}-typed-v1",
