@@ -3582,6 +3582,104 @@ def bola_enrichment_decision(
     )
 
 
+def resolve_smart_discovery_deadline_seconds(scan_budget: dict[str, Any] | None) -> float | None:
+    """Wall-clock backstop (seconds) for the smart discovery phase.
+
+    Smart discovery aggregates several internally bounded sub-phases (URL
+    discovery, API-base probes, recursive fuzzing), but nothing bounded the
+    aggregate: a slow or wedged target could stall discovery until the
+    worker's process-level watchdog killed the whole scan — and since the
+    first checkpoint is only written after report assembly starts, that hard
+    kill discarded everything. Derive a discovery backstop from the overall
+    scan budget (a quarter of max_duration_minutes, clamped to a 5-30 min
+    window) so a stalled discovery degrades to the remaining sources
+    (browser/HAR capture, manual endpoints) instead of hanging the scan.
+    This is a backstop, not the expected duration: healthy smart scans
+    finish discovery far sooner.
+    """
+    if not isinstance(scan_budget, dict):
+        return None
+    try:
+        minutes = int(scan_budget.get("max_duration_minutes") or 0)
+    except (TypeError, ValueError):
+        return None
+    if minutes <= 0:
+        return None
+    return float(min(max(minutes * 60 // 4, 300), 1800))
+
+
+async def await_discovery_sources_gracefully(
+    httpx_task: "asyncio.Future[list[dict[str, Any]]]",
+    katana_task: "asyncio.Future[Any]",
+    browser_task: "asyncio.Future[dict[str, Any] | None]",
+    *,
+    katana_deadline: float | None = None,
+) -> tuple[list[dict[str, Any]], Any, dict[str, Any] | None, str | None, list[str]]:
+    """Await the discovery sources with per-source graceful degradation.
+
+    Returns ``(httpx_meta, katana_result, browser_res, browser_fetch_error,
+    truncation_reasons)``. A stalled or failed source never raises out of
+    this helper: its contribution is dropped, a truncation reason is
+    recorded, and the surviving sources (browser/HAR capture, manual
+    endpoints) still feed the scan. ``katana_deadline`` bounds the smart
+    discovery crawl so a wedged target cannot hang the whole scan until the
+    worker's process-level watchdog kills it.
+    """
+    truncation_reasons: list[str] = []
+    httpx_meta: list[dict[str, Any]] = []
+    katana_result: Any = []
+    browser_res: dict[str, Any] | None = None
+    browser_fetch_error: str | None = None
+
+    try:
+        httpx_meta = await httpx_task
+    except Exception as exc:
+        httpx_meta = []
+        truncation_reasons.append(f"httpx_probe_failed:{type(exc).__name__}")
+        print(
+            f"[scanner] HTTPX probe failed: {exc}; continuing without httpx metadata",
+            file=sys.stderr,
+        )
+
+    try:
+        if katana_deadline is not None:
+            katana_result = await asyncio.wait_for(katana_task, timeout=katana_deadline)
+        else:
+            katana_result = await katana_task
+    except (asyncio.TimeoutError, TimeoutError):
+        katana_result = []
+        truncation_reasons.append(f"discovery_deadline_exceeded:{int(katana_deadline or 0)}s")
+        print(
+            f"[scanner] Smart discovery exceeded {int(katana_deadline or 0)}s budget backstop; "
+            "continuing with browser/HAR/manual discovery results only",
+            file=sys.stderr,
+        )
+    except Exception as exc:
+        katana_result = []
+        truncation_reasons.append(f"discovery_failed:{type(exc).__name__}")
+        print(
+            f"[scanner] Discovery crawl failed: {exc}; continuing with "
+            "browser/HAR/manual discovery results",
+            file=sys.stderr,
+        )
+
+    try:
+        browser_res = await browser_task
+    except Exception as exc:
+        browser_fetch_error = str(exc)
+        print(
+            f"[scanner] Browser fetch failed: {exc}, continuing without browser data",
+            file=sys.stderr,
+        )
+        browser_res = None
+
+    browser_crawl_stats_raw = (browser_res or {}).get("crawl_stats")
+    if isinstance(browser_crawl_stats_raw, dict) and browser_crawl_stats_raw.get("timed_out"):
+        truncation_reasons.append("browser_crawl_timeout:180s")
+
+    return httpx_meta, katana_result, browser_res, browser_fetch_error, truncation_reasons
+
+
 def resolve_focused_bola_poe_settings(max_endpoints: Any) -> dict[str, int]:
     """Return bounded PoE request settings for explicit focused BOLA scans."""
     try:
@@ -4905,9 +5003,11 @@ async def build_report(target: str,
     browser_res: dict[str, Any] | None = None
     browser_fetch_error: str | None = None
     browser_seed_urls: list[str] = []
+    discovery_truncation_reasons: list[str] = []
 
     async def run_legacy_discovery() -> RegistryPhaseOutcome:
         nonlocal httpx_meta, katana_result, browser_res, browser_fetch_error, browser_seed_urls
+        nonlocal discovery_truncation_reasons
 
         httpx_task = asyncio.create_task(pd_httpx_probe(host, port))
         if public_only and quick_mode:
@@ -4979,17 +5079,26 @@ async def build_report(target: str,
                 seed_urls=browser_seed_urls if browser_seed_urls else None,
             ))
 
-        httpx_meta = await httpx_task
-        katana_result = await katana_task
-        try:
-            browser_res = await browser_task
-        except Exception as exc:
-            browser_fetch_error = str(exc)
-            print(
-                f"[scanner] Browser fetch failed: {exc}, continuing without browser data",
-                file=sys.stderr,
+        # Discovery awaits degrade gracefully: one stalled or failed source
+        # must not abort the phase or discard what the others collected.
+        # Previously an exception from httpx/smart-discovery escaped this
+        # adapter (the registry caught it, but katana/httpx partials were
+        # dropped and the browser task was orphaned, leaking its Playwright
+        # context). Each await is now rescued independently and the browser
+        # result is always collected. Smart discovery is additionally bounded
+        # by a budget-derived wall-clock backstop (see
+        # resolve_smart_discovery_deadline_seconds).
+        httpx_meta, katana_result, browser_res, browser_fetch_error, _truncation_reasons = (
+            await await_discovery_sources_gracefully(
+                httpx_task,
+                katana_task,
+                browser_task,
+                katana_deadline=(
+                    resolve_smart_discovery_deadline_seconds(scan_budget) if smart_mode else None
+                ),
             )
-            browser_res = None
+        )
+        discovery_truncation_reasons.extend(_truncation_reasons)
 
         if isinstance(katana_result, dict):
             discovered_count = len(katana_result.get("all_urls") or [])
@@ -5003,6 +5112,8 @@ async def build_report(target: str,
                 "discovered_urls": discovered_count,
                 "browser_pages": browser_page_count,
                 "browser_failed": bool(browser_fetch_error),
+                "discovery_truncated": bool(discovery_truncation_reasons),
+                "truncation_reasons": list(discovery_truncation_reasons),
             },
         )
 
@@ -6882,6 +6993,7 @@ async def build_report(target: str,
         discovery["browser_crawl"] = {
             "pages_visited": browser_crawl_stats.get("pages_visited", 0),
             "depth_reached": browser_crawl_stats.get("depth_reached", 0),
+            "timed_out": bool(browser_crawl_stats.get("timed_out")),
             "sample_pages": (browser_res.get("page_urls", []) or [])[:20],
         }
 
@@ -6979,6 +7091,18 @@ async def build_report(target: str,
     if grpc_results and grpc_results.get("services"):
         discovery_summary["methods_used"].append("grpc_reflection")
         discovery_summary["grpc_services"] = len(grpc_results.get("services", []))
+
+    # Graceful-degradation marker: discovery sources that timed out or failed
+    # are recorded (never raised) so coverage is visibly incomplete while the
+    # scan still proceeds with whatever the surviving sources collected.
+    if discovery_truncation_reasons:
+        discovery_summary["truncated"] = True
+        discovery_summary["truncation_reasons"] = list(discovery_truncation_reasons)
+        discovery_summary["warnings"].append(
+            "Discovery was truncated ("
+            + ", ".join(discovery_truncation_reasons)
+            + "). Coverage is partial; results reflect the discovery sources that completed."
+        )
 
     # Warn if no endpoints were discovered
     if not crawl_urls and not browser_api_endpoints and not manual_endpoints_norm:
@@ -12936,6 +13060,13 @@ async def build_report(target: str,
             "check": "js_secret_scanning",
             "reason": "JS secret scanning disabled in public-only mode"
         })
+    if discovery_truncation_reasons:
+        checks_skipped.append({
+            "check": "discovery",
+            "reason": "; ".join(discovery_truncation_reasons)[:200],
+            "impact": "partial_discovery_results",
+            "configured": True,
+        })
     if smart_mode and focused_active_family_name:
         checks_skipped.append({
             "check": "non_focused_active_modules",
@@ -13056,6 +13187,12 @@ async def build_report(target: str,
     coverage_gaps: list[str] = []
     if coverage.get("issues"):
         coverage_gaps.extend(coverage.get("issues") or [])
+    if discovery_truncation_reasons:
+        coverage_gaps.append(
+            "Discovery truncated ("
+            + ", ".join(discovery_truncation_reasons)
+            + ") - endpoint coverage is partial; re-scan or raise the discovery budget"
+        )
 
     smart_cov = report.get("smart_coverage")
     if not smart_cov and coverage_tracker:
@@ -13099,6 +13236,13 @@ async def build_report(target: str,
     # report["smart_coverage"] contains endpoints/params discovered/tested from CoverageTracker
     if coverage_tracker:
         report["smart_coverage"] = coverage_tracker.to_dict()
+    # Truncation marker survives even when no coverage tracker ran: a
+    # discovery source that timed out/failed must be visible as incomplete
+    # coverage, not silently absent.
+    if discovery_truncation_reasons:
+        smart_coverage_block = report.setdefault("smart_coverage", {})
+        smart_coverage_block["discovery_truncated"] = True
+        smart_coverage_block["discovery_truncation_reasons"] = list(discovery_truncation_reasons)
 
     # Hunter-campaign self miss-analysis (backward-compatible report section): what
     # was discovered/attempted/confirmed, what proof is missing, what is blocked by a
@@ -14731,6 +14875,12 @@ async def cli_main():
         args.deep_discovery = False
         args.grpc_discovery = False
         args.auto_auth = explicit_auto_auth
+
+    # Public-only scans are passive: never carry an aggressive exploit level
+    # into proof-of-exploit, even when passed explicitly alongside an allowed
+    # passive scan type (e.g. --deep --public --exploit-level aggressive).
+    if args.public and str(getattr(args, "exploit_level", "safe") or "").strip().lower() == "aggressive":
+        args.exploit_level = "safe"
 
     # Enforce active checks for smart/full/aggressive scan types
     # These scan types require active testing - public-only mode is incompatible
