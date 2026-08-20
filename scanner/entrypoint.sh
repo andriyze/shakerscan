@@ -83,6 +83,11 @@ sync_dev_sources() {
     [ -d /app/_src/scanner/wordlists ] && cp -rf /app/_src/scanner/wordlists/. /app/wordlists/ 2>/dev/null || true
     [ -d /app/_src/scanner/payloads ] && cp -rf /app/_src/scanner/payloads/. /app/payloads/ 2>/dev/null || true
     [ -d /app/_src/api/ai_gate ] && cp -rf /app/_src/api/ai_gate/. /app/ai_gate/ 2>/dev/null || true
+    for package in capabilities hunt runtime scan; do
+        [ -d "/app/_src/api/$package" ] || continue
+        mkdir -p "/app/$package"
+        cp -rf "/app/_src/api/$package/." "/app/$package/"
+    done
 }
 sync_dev_sources
 

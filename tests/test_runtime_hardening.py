@@ -363,6 +363,15 @@ def test_dockerfile_copies_api_modules_without_drift():
         assert dockerfile.index("COPY scanner/*.py /app/") < dockerfile.index("COPY api/*.py /app/")
 
 
+def test_worker_image_and_dev_sync_package_canonical_runtime_modules():
+    dockerfile = (ROOT / "scanner" / "Dockerfile").read_text()
+    entrypoint = (ROOT / "scanner" / "entrypoint.sh").read_text()
+
+    for package in ("capabilities", "hunt", "runtime", "scan"):
+        assert f"COPY api/{package} /app/{package}" in dockerfile
+    assert "for package in capabilities hunt runtime scan" in entrypoint
+
+
 def test_worker_preflight_checks_scanner_subprocess_modules_and_symbols():
     worker = (ROOT / "api" / "worker.py").read_text()
 
