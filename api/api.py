@@ -427,11 +427,15 @@ from job_queue import (
     worker_matches_placement,
 )
 from http_experiment import (
-    ExperimentContractError,
     MAX_BODY_BYTES,
+    MAX_REDIRECT_HOPS,
+    REDIRECT_STATUSES,
+    ExperimentContractError,
     compare_summaries,
     execute_experiment,
     response_summary,
+    rewrite_method_for_redirect,
+    validate_next_hop,
 )
 from workflow_experiment import (
     WorkflowContractError,
@@ -19028,7 +19032,12 @@ async def list_device_request_collections(device_id: str, include_inactive: bool
                ORDER BY updated_at DESC, name""",
             device_uuid, include_inactive,
         )
-    return {"collections": [_public_device_request_collection(row) for row in rows], "count": len(rows)}
+    # Metadata-only listing: a collection may now carry thousands of imported
+    # requests, so the full redacted inventory is only served on the detail route.
+    return {
+        "collections": [_public_device_request_collection(row, include_requests=False) for row in rows],
+        "count": len(rows),
+    }
 
 
 @app.get("/devices/{device_id}/request-collections/{collection_id}")
@@ -19042,7 +19051,15 @@ async def get_device_request_collection(device_id: str, collection_id: str):
         )
     if not row:
         raise HTTPException(status_code=404, detail="Device request collection not found")
-    return {"collection": _public_device_request_collection(row)}
+    payload = _public_device_request_collection(row, include_requests=False)
+    summary = _json_object(row.get("summary_json"))
+    requests = summary.get("requests")
+    if isinstance(requests, list):
+        # Bounded preview on detail: the full inventory is redacted but can be
+        # thousands of rows; callers paginate via the summary count.
+        payload["summary"]["requests_preview"] = requests[:200]
+        payload["summary"]["requests_total"] = len(requests)
+    return {"collection": payload}
 
 
 @app.post("/devices/{device_id}/request-collections")
@@ -31701,6 +31718,14 @@ async def _agent_tool_http_request(
             "error": f"{method} is a state-changing request; it requires a credential-tier "
             "approval receipt on the episode (gated). Use a read method to probe first.",
         }
+    # Redirect following is read-only: it must never replay a write onto a redirect hop.
+    follow_redirects = args.get("follow_redirects") is True
+    if follow_redirects and method not in {"GET", "HEAD", "OPTIONS"}:
+        return {
+            "ok": False,
+            "error": "follow_redirects is only permitted for read methods (GET/HEAD/OPTIONS); "
+            "a redirect chain must not replay a state-changing request.",
+        }
     headers = agent_tools.filter_request_headers(args.get("headers"))
     slot = agent_tools.normalize_principal_slot(args.get("as_principal"))
     query = args.get("query") if isinstance(args.get("query"), dict) else None
@@ -31748,36 +31773,78 @@ async def _agent_tool_http_request(
         "as_principal": slot,
         "body_kind": "json" if json_body is not None else "form" if form_body is not None else None,
         "pinned_address": pinned_address,
+        "follow_redirects": follow_redirects,
     }
     started_at = datetime.now(timezone.utc)
     started = time.perf_counter()
     status_label = "success"
     summary: Optional[dict[str, Any]] = None
     error: Optional[str] = None
+    redirect_chain: list[dict[str, Any]] = []
+    hops_followed = 0
     try:
         timeout = httpx.Timeout(_AGENT_TOOL_HTTP_TIMEOUT_SECONDS)
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=False) as client:
-            request = client.build_request(
-                method, pinned_url, params=query,
-                headers={**headers, **auth_headers, "Host": host_header}, cookies=cookies,
-                json=json_body if json_body is not None else None,
-                data=form_body if form_body is not None else None,
-            )
-            request.extensions["sni_hostname"] = sni_hostname
-            response = await client.send(request, stream=True)
-            chunks: list[bytes] = []
-            received = 0
-            try:
-                async for chunk in response.aiter_bytes():
-                    remaining = MAX_BODY_BYTES + 1 - received
-                    if remaining <= 0:
-                        break
-                    chunks.append(chunk[:remaining])
-                    received += min(len(chunk), remaining)
-                    if received > MAX_BODY_BYTES:
-                        break
-            finally:
-                await response.aclose()
+            # Bounded same-origin redirect following (opt-in). Each hop re-validates the
+            # Location against the STRICT same-origin rule (scheme+host+port) BEFORE the
+            # request is built, and 301/302/303 rewrite the hop to a bodyless GET.
+            current_url = url
+            current_method = method
+            current_query = query
+            current_json_body = json_body
+            current_form_body = form_body
+            while True:
+                pinned_url, sni_hostname, host_header = agent_tools._pinned_scanner_url(current_url, pinned_address)
+                request = client.build_request(
+                    current_method, pinned_url, params=current_query,
+                    headers={**headers, **auth_headers, "Host": host_header}, cookies=cookies,
+                    json=current_json_body if current_json_body is not None else None,
+                    data=current_form_body if current_form_body is not None else None,
+                )
+                request.extensions["sni_hostname"] = sni_hostname
+                response = await client.send(request, stream=True)
+                chunks: list[bytes] = []
+                received = 0
+                try:
+                    async for chunk in response.aiter_bytes():
+                        remaining = MAX_BODY_BYTES + 1 - received
+                        if remaining <= 0:
+                            break
+                        chunks.append(chunk[:remaining])
+                        received += min(len(chunk), remaining)
+                        if received > MAX_BODY_BYTES:
+                            break
+                finally:
+                    await response.aclose()
+                if not follow_redirects or response.status_code not in REDIRECT_STATUSES:
+                    break
+                location = str(response.headers.get("location") or "").strip()
+                if not location:
+                    break
+                if hops_followed >= MAX_REDIRECT_HOPS:
+                    redirect_chain.append({
+                        "status": response.status_code, "location": location[:500],
+                        "followed": False, "stopped": "max_hops",
+                    })
+                    break
+                next_url = validate_next_hop(current_url, location)
+                if next_url is None:
+                    redirect_chain.append({
+                        "status": response.status_code, "location": location[:500],
+                        "followed": False, "stopped": "cross_origin",
+                    })
+                    break
+                redirect_chain.append({
+                    "status": response.status_code, "location": location[:500], "followed": True,
+                })
+                current_method = rewrite_method_for_redirect(current_method, response.status_code)
+                # The redirect Location fully specifies the next URL (path+query); the
+                # original query/body are dropped per the method rewrite.
+                current_query = None
+                current_json_body = None
+                current_form_body = None
+                current_url = next_url
+                hops_followed += 1
             body = b"".join(chunks)
             summary = response_summary(response, body, elapsed_ms=round((time.perf_counter() - started) * 1000))
     except (httpx.InvalidURL, httpx.HTTPError, UnicodeError, ValueError) as exc:
@@ -31811,6 +31878,8 @@ async def _agent_tool_http_request(
                         "principal_identity": principal_identity,
                         "hypothesis_id": hypothesis_id,
                         "error": error,
+                        "redirect_chain": _redact_agent_payload(redirect_chain) if redirect_chain else [],
+                        "hops_followed": hops_followed,
                     },
                     created_by=created_by,
                 ))
@@ -31820,7 +31889,14 @@ async def _agent_tool_http_request(
 
     if error:
         return {"ok": False, "error": f"request_error:{error}", "request": request_view, "receipt_id": receipt_id}
-    return {"ok": True, "request": request_view, "response": safe_summary, "receipt_id": receipt_id, "provenance": "tool"}
+    result_payload: dict[str, Any] = {
+        "ok": True, "request": request_view, "response": safe_summary,
+        "receipt_id": receipt_id, "provenance": "tool",
+    }
+    if follow_redirects:
+        result_payload["redirect_chain"] = _redact_agent_payload(redirect_chain) if redirect_chain else []
+        result_payload["hops_followed"] = hops_followed
+    return result_payload
 
 
 async def _agent_tool_query_kb(target_uuid: uuid.UUID, kind: str, flt: dict[str, Any]) -> dict[str, Any]:
@@ -32834,13 +32910,32 @@ async def _agent_apply_reply(
         if name == "http_request":
             # A shaped request means the HTTP executor reached its single wire attempt; contract or
             # approval failures occur before a request is shaped and safely settle at zero.
-            actual = 1 if isinstance(result.get("request"), dict) else 0
+            # Each followed redirect hop is charged as an extra request unit + wire request at
+            # execution time (bounded by MAX_REDIRECT_HOPS, so the budget can only be overshot
+            # by that fixed cap even when every hop of every call redirects).
+            hops_followed = 0
+            if isinstance(result, dict):
+                try:
+                    hops_followed = max(0, min(MAX_REDIRECT_HOPS, int(result.get("hops_followed") or 0)))
+                except (TypeError, ValueError):
+                    hops_followed = 0
+            actual = (1 if isinstance(result.get("request"), dict) else 0) + hops_followed
             state["wire_requests_actual_confirmed"] = int(
                 state.get("wire_requests_actual_confirmed") or 0
             ) + actual
             state["wire_requests_observed_minimum"] = int(
                 state.get("wire_requests_observed_minimum") or 0
             ) + actual
+            if hops_followed:
+                state["request_units_used"] = int(state["request_units_used"] or 0) + hops_followed
+                state["wire_requests_reserved"] = int(
+                    state.get("wire_requests_reserved") or 0
+                ) + hops_followed
+                state["events"].append({
+                    "iteration": iteration,
+                    "tool": name,
+                    "redirect_hops_charged": hops_followed,
+                })
         elif name == "run_tool":
             accounting = str(result.get("wire_request_accounting") or "unavailable")
             observed = max(0, int(result.get("wire_requests_observed_minimum") or 0))

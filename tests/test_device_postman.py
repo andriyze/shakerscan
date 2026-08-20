@@ -109,6 +109,17 @@ def test_postman_rejects_empty_and_oversized_request_inventories():
         device_postman.validate_and_summarize(collection)
 
 
+def test_postman_request_cap_boundary_is_2000():
+    assert device_postman.MAX_REQUESTS == 2000
+    collection = {"info": {"name": "Boundary"}, "item": [
+        {"name": str(index), "request": {"method": "GET", "url": f"http://tv/{index}"}}
+        for index in range(device_postman.MAX_REQUESTS)
+    ]}
+    payload, summary = device_postman.validate_and_summarize(collection)
+    assert summary["request_count"] == device_postman.MAX_REQUESTS
+    assert len(device_postman.resolve_requests(payload)) == device_postman.MAX_REQUESTS
+
+
 def test_imported_requests_are_pinned_skip_mutations_and_never_follow_external_hosts(monkeypatch):
     calls = []
 

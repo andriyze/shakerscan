@@ -1,11 +1,12 @@
 import asyncio
 import os
 import sys
+import time
 
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scanner"))
 
-from scanner_tools import device_web  # noqa: E402
+from scanner_tools import device_postman, device_web  # noqa: E402
 
 
 class _Reader:
@@ -386,3 +387,89 @@ def test_dir_discovery_reserves_shared_device_web_request_budget(monkeypatch):
     assert calls == []
     assert result["device_web"]["dir_discovery"]["status"] == "budget_limited"
     assert result["device_web"]["request_budget"]["limit"] == 10
+
+
+def test_imported_request_replay_caps_and_time_budgets_per_profile():
+    assert device_web.IMPORTED_REQUEST_LIMITS == {"quick": 50, "standard": 500, "deep": 2000}
+    assert device_web.IMPORTED_REQUEST_TIME_BUDGETS == {"quick": 60.0, "standard": 300.0, "deep": 900.0}
+
+
+def test_imported_replay_enforces_quick_profile_request_limit(monkeypatch):
+    async def fake_request(**_kwargs):
+        return {"status": 200, "headers": {}, "body": b"ok", "truncated": False, "elapsed_ms": 1.0}
+
+    async def trusted_tls(**_kwargs):
+        return {"trusted": True, "verification_error": None}
+
+    monkeypatch.setattr(device_web, "_request", fake_request)
+    monkeypatch.setattr(device_web, "_assess_tls_trust", trusted_tls)
+    collection = {"info": {"name": "Pinned"}, "item": [
+        {"name": str(index), "request": {"method": "GET", "url": f"https://192.0.2.10:3001/api/{index}"}}
+        for index in range(60)
+    ]}
+    payload, _summary = device_postman.validate_and_summarize(collection)
+    result = asyncio.run(device_web.run_pinned_device_web_scan(
+        {"origin": "https://192.0.2.10:3001", "connect_address": "192.0.2.10", "port": 3001},
+        profile="quick",
+        request_collections=[{"collection_id": "c1", "name": "Pinned", "payload": payload}],
+        default_origin=True,
+    ))
+
+    imported = result["device_web"]["imported_requests"]
+    assert imported["request_limit"] == 50
+    assert imported["time_budget_seconds"] == 60.0
+    assert imported["executed"] == 50
+    assert imported["skipped"] == 10
+    assert any(item["reason"] == "profile_request_limit" for item in imported["skipped_requests"])
+
+
+def test_imported_replay_reports_deep_profile_limits_without_truncation(monkeypatch):
+    async def fake_request(**_kwargs):
+        return {"status": 200, "headers": {}, "body": b"ok", "truncated": False, "elapsed_ms": 1.0}
+
+    async def trusted_tls(**_kwargs):
+        return {"trusted": True, "verification_error": None}
+
+    monkeypatch.setattr(device_web, "_request", fake_request)
+    monkeypatch.setattr(device_web, "_assess_tls_trust", trusted_tls)
+    collection = {"info": {"name": "Deep"}, "item": [
+        {"name": "Status", "request": {"method": "GET", "url": "https://192.0.2.10:8443/api/status"}},
+    ]}
+    payload, _summary = device_postman.validate_and_summarize(collection)
+    result = asyncio.run(device_web.run_pinned_device_web_scan(
+        {"origin": "https://192.0.2.10:8443", "connect_address": "192.0.2.10", "port": 8443},
+        profile="deep",
+        request_collections=[{"collection_id": "c1", "name": "Deep", "payload": payload}],
+        default_origin=True,
+    ))
+
+    imported = result["device_web"]["imported_requests"]
+    assert imported["request_limit"] == 2000
+    assert imported["time_budget_seconds"] == 900.0
+    assert imported["executed"] == 1
+
+
+def test_imported_replay_time_budget_skips_remaining_requests():
+    collection = {"info": {"name": "Budget"}, "item": [
+        {"name": str(index), "request": {"method": "GET", "url": f"https://192.0.2.10:3001/api/{index}"}}
+        for index in range(3)
+    ]}
+    payload, _summary = device_postman.validate_and_summarize(collection)
+    result, findings = asyncio.run(device_web._run_imported_requests(
+        origin_info={"origin": "https://192.0.2.10:3001", "connect_address": "192.0.2.10"},
+        request_collections=[{"collection_id": "c1", "name": "Budget", "payload": payload}],
+        profile="deep",
+        allow_state_changing_requests=False,
+        default_origin=True,
+        base_headers=None,
+        tls_assessment=None,
+        allow_untrusted_tls_credentials=False,
+        deadline=time.monotonic() - 1,
+        cancel_check=None,
+    ))
+
+    assert result["executed"] == 0
+    assert result["wire_attempts"] == 0
+    assert result["skipped"] == 3
+    assert [item["reason"] for item in result["skipped_requests"]] == ["profile_time_budget"] * 3
+    assert findings == []

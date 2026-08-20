@@ -30,9 +30,9 @@ from .device_request_formats import resolve_imported_requests
 
 MAX_RESPONSE_BYTES = 256 * 1024
 MAX_REDIRECTS = 5
-IMPORTED_REQUEST_LIMITS = {"quick": 50, "standard": 200, "deep": 500}
-IMPORTED_REQUEST_TIME_BUDGETS = {"quick": 60.0, "standard": 180.0, "deep": 480.0}
-DEVICE_WEB_REQUEST_LIMITS = {"quick": 100, "standard": 750, "deep": 1500, "thorough": 1500}
+IMPORTED_REQUEST_LIMITS = {"quick": 50, "standard": 500, "deep": 2000}
+IMPORTED_REQUEST_TIME_BUDGETS = {"quick": 60.0, "standard": 300.0, "deep": 900.0}
+DEVICE_WEB_REQUEST_LIMITS = {"quick": 100, "standard": 750, "deep": 3000, "thorough": 3000}
 CREDENTIAL_HEADER_NAMES = {
     "authorization", "proxy-authorization", "cookie", "x-api-key", "api-key",
     "x-auth-token", "x-session-token",

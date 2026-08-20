@@ -2260,6 +2260,26 @@ def _scanner_preflight(scanner_path: str) -> str | None:
     return err
 
 
+def _resolve_deep_intent_exploit_level(scan_type: str, options: dict[str, Any]) -> str | None:
+    """Return the CLI exploit level for an explicit deep-intent scan, else None.
+
+    ``exploit_depth`` is the operator's explicit deep-intent option (the same
+    signal used for retest gating). On smart/full scans it unlocks the
+    aggressive proof-of-exploit profile by passing ``--exploit-level
+    aggressive`` to the scanner (the scanner maps that flag to
+    ``resolve_scan_poe_config``). Aggressive scan types already set it via
+    ``--aggressive``. Public-only scans must never get it.
+    """
+    normalized = (scan_type or "").strip().lower()
+    if normalized not in {"smart", "full"}:
+        return None
+    if not options.get("exploit_depth"):
+        return None
+    if options.get("public"):
+        return None
+    return "aggressive"
+
+
 async def run_scan(
     target: str,
     options: dict,
@@ -2409,6 +2429,16 @@ async def run_scan(
     elif scan_type == 'quick' or options.get('quick'):
         cmd.append('--quick')
     # If no scan_type, run standard scan (no flag needed)
+
+    # Explicit deep intent (exploit_depth) on smart/full scans unlocks the
+    # aggressive proof-of-exploit profile via --exploit-level. The API never
+    # passes --exploit-level itself, so without this the deep-intent signal
+    # (the same option that gates retest depth) silently kept safe proofs.
+    # Public scans must never get it; public+active scan types are already
+    # rejected above, and the guard here is defense in depth.
+    deep_intent_exploit_level = _resolve_deep_intent_exploit_level(scan_type, options)
+    if deep_intent_exploit_level:
+        cmd.extend(['--exploit-level', deep_intent_exploit_level])
 
     # Additional flags (can be combined with scan types)
     # Pass --active when explicitly requested (even with explicit scan_type)
@@ -8823,7 +8853,10 @@ async def run_device_web_children(
             "custom_budget": {
                 "max_duration_minutes": 20 if web_scan_type == "deep" else 10,
                 "max_urls": 250,
-                "request_max": 1500 if web_scan_type == "deep" else 750,
+                # Deep child scans may replay up to 2000 imported requests
+                # (IMPORTED_REQUEST_LIMITS["deep"]); the budget must not silently
+                # cap the scanner-side limit below it.
+                "request_max": 3000 if web_scan_type == "deep" else 750,
                 "active_max_endpoints": 0,
             },
         }

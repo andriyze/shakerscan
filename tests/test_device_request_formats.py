@@ -129,6 +129,30 @@ def test_openapi_never_fetches_external_refs_and_accepts_device_base_override():
     assert all(item["url"].startswith("https://192.0.2.10:9443/device-api/") for item in requests)
 
 
+def test_har_and_openapi_import_caps_follow_the_2000_request_limit():
+    assert device_request_formats.MAX_REQUESTS == 2000
+    har = {"log": {"version": "1.2", "entries": [
+        {"request": {"method": "GET", "url": f"https://192.0.2.10:3001/api/{index}"}}
+        for index in range(device_request_formats.MAX_REQUESTS)
+    ]}}
+    payload, summary = device_request_formats.validate_request_document(har)
+    assert summary["request_count"] == device_request_formats.MAX_REQUESTS
+    assert len(device_request_formats.resolve_imported_requests(payload)) == device_request_formats.MAX_REQUESTS
+
+    har["log"]["entries"].append({"request": {"method": "GET", "url": "https://192.0.2.10:3001/extra"}})
+    with pytest.raises(device_request_formats.RequestImportError, match="request limit"):
+        device_request_formats.validate_request_document(har)
+
+    openapi = {
+        "openapi": "3.0.3",
+        "info": {"title": "Wide TV API", "version": "1"},
+        "servers": [{"url": "https://192.0.2.10:3001"}],
+        "paths": {f"/p{index}": {"get": {}} for index in range(device_request_formats.MAX_REQUESTS + 1)},
+    }
+    with pytest.raises(device_request_formats.RequestImportError, match="operation limit"):
+        device_request_formats.validate_request_document(openapi)
+
+
 def test_har_replay_stays_pinned_and_inherits_bound_web_credential(monkeypatch):
     calls = []
 
