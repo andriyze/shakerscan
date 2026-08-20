@@ -273,17 +273,16 @@ The device detail page displays a structured activity feed while a selected scan
 shows reachability, discovery, fingerprinting, web/API execution counts, failures, findings, and
 safety stops while suppressing command noise, payloads, and secrets.
 
-## Device Hunt
+## Device targets in Hunt
 
-**Device Hunt** is ShakerScan's keyless, turn-based agentic workflow for one connected device—the
-connected-device counterpart to web-focused Deep Hunt. The current Codex, Claude, or OpenCode
-session is the planner, while ShakerScan executes a closed device-tool contract. Start it through
-`POST /devices/{device_id}/agent/session`; drive turns through
-`POST /device-agent/session/{run_id}/reply`; inspect or cancel through the matching GET and cancel
-routes. The `/devices/{device_id}/agent` UI shows live state, budgets, evidence-backed leads, and the
-exact fixed safety profile.
+Connected devices use ShakerScan's canonical, target-kind-aware Hunt runtime. The current Codex,
+Claude, or OpenCode session is the planner, while ShakerScan executes a closed device capability
+contract. Start through `POST /hunts`, drive only capabilities returned by that run, and confirm an
+immutable SSH plan through `POST /hunts/{hunt_id}/shell-plans/{plan_id}/confirm`. The former
+`/devices/{device_id}/agent/session` and `/device-agent/session/*` writes are quarantined migration
+surfaces; their UI URL redirects to `/hunt`.
 
-Device Hunt receives a server-owned 24-capability pack derived from the Smart TV assessment
+Device Hunt compatibility wording refers to the device-target Hunt capability pack derived from the Smart TV assessment
 playbooks. `GET /devices/{device_id}/capabilities` resolves each capability as ready, completed,
 blocked, planned, sensor-required, lab-only, or not applicable using current device evidence,
 credentials, platform hints, and sensor readiness. `inspect_capabilities` refreshes this view during

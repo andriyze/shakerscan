@@ -1,7 +1,11 @@
-# Deep Hunt Engine Architecture
+# Legacy Deep Hunt Engine Architecture
 
-**Status (2026-07-23):** current implementation reference for the Deep Hunt AI-investigator engine.
-This is the single design authority for the engine; it restores the design content previously spread
+**Status (2026-08-20):** historical compatibility reference. The canonical architecture is
+[`ai-native-architecture-rfc.md`](ai-native-architecture-rfc.md), and all new investigations use
+`/hunts/*`. Legacy `/agent/hunt/*` writes return `410 Gone` by default; historical reads and emergency
+cancellation remain during the migration sunset.
+
+This document preserves the retired engine design content previously spread
 across `product-model.md` and `functionality-reference.md` §11.6 after the older
 `autonomous-agent-architecture.md` was retired. User-facing vocabulary lives in
 [product-model.md](product-model.md); the exhaustive route/schema inventory is in
@@ -12,9 +16,9 @@ across `product-model.md` and `functionality-reference.md` §11.6 after the olde
 Code, schema, and tests remain authoritative when this document disagrees. Symbols (functions,
 constants, tables) are named rather than line-numbered so the references survive edits.
 
-## What Deep Hunt is
+## What the retired Deep Hunt engine was
 
-Deep Hunt is the keyless, AI-driven investigation workflow reached through `/agent/hunt/*`. A coding
+Before quarantine, Deep Hunt was the keyless, AI-driven investigation workflow reached through `/agent/hunt/*`. A coding
 agent (Claude/Codex/OpenCode) — or a configured provider model — drives a bounded ReAct loop: it reads
 a redacted target context, composes its own target-host probes and bounded active-scanner runs,
 records only tool-evidence-backed claims, and asks the server's deterministic proof workflows to
@@ -270,7 +274,10 @@ a recall/quality gain that must preserve the zero-false-VERIFIED guarantee.
    receipt-backed recovery for a keyless turn interrupted while `planning`. Between-turn keyless
    durability already works; neither driver should replay uncertain active traffic.
 
-## API surface
+## Retired compatibility API surface
+
+The write endpoints below are migration-only and return `410 Gone` unless an operator deliberately
+sets `SHAKERSCAN_LEGACY_HUNT_WRITES_ENABLED`. GET and cancellation remain for old-run recovery.
 
 ```text
 POST /agent/hunt/{target_id}/session        # start a keyless Deep Hunt

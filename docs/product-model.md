@@ -9,7 +9,7 @@ documentation should use the terms below.
 | User goal | Product workflow | Execution |
 |---|---|---|
 | Run established automated checks | **DAST Scan** | `/scans`, scanner workers |
-| Let an AI investigate autonomously | **Deep Hunt** | keyless `/agent/hunt/*` loop |
+| Let an AI investigate adaptively | **Hunt** | canonical `/hunts/*` runtime |
 | Test manually with a browser or multiple users | **Interactive Testing** | `/session/*` |
 | Review and triage results | **Findings** | `/findings*`, `/retests*` |
 
@@ -18,8 +18,8 @@ Specialized scanners remain first-class:
 - **Continuous ASM** keeps a target’s endpoint inventory and coverage current.
 - **AI Gate** tests chat, RAG, agent, and MCP systems.
 - **Model Intake** checks model artifacts, provenance, signatures, and policy.
-- **Device Hunt** is the agentic investigation workflow for one registered connected device. It is
-  separate from web-focused Deep Hunt and runs through the connected-device safety boundary.
+- Connected devices use the same **Hunt** runtime with stricter capability, credential, fragility,
+  health-circuit-breaker, and exact-confirmation policy.
 
 The web **Targets** inventory contains HTTP(S) applications only. Model repositories and artifacts stay in
 Model Intake, where their exact revision and content digests are the identity. They may still appear in
@@ -31,35 +31,35 @@ Agents must preserve these distinctions:
 
 | User phrase | Route |
 |---|---|
-| “scan example.com” | Quick DAST, the documented default |
-| “quick/standard/deep/full/aggressive/smart scan” | Exact DAST scan type |
-| “deep hunt”, “autonomous hunt”, “investigate autonomously” | Deep Hunt |
-| “device hunt”, “investigate/hunt this TV, camera, printer, router, or device” | Device Hunt |
+| “scan example.com” | DAST Scan with the default resource budget |
+| “quick/standard/deep/full/aggressive/smart scan” | Compatibility input mapped to a Scan budget and explicit policy |
+| “deep hunt”, “autonomous hunt”, “investigate autonomously” | Hunt |
+| “device hunt”, “investigate/hunt this TV, camera, printer, router, or device” | Hunt with `target_kind=device` |
 | “verify this finding” | Deterministic finding verifier/retest |
 | “interactive testing”, “test manually”, “browser session” | Interactive Testing |
 
-`deep scan` is DAST. `Deep Hunt` is AI-driven exploration and bounded exploitation.
+`deep scan` is a legacy DAST budget alias. `Deep Hunt` and `Device Hunt` are compatibility names for Hunt.
 
-## Device Hunt
+## Device targets in Hunt
 
-Device Hunt is the connected-device counterpart to Deep Hunt. The current coding-agent session
-plans a bounded investigation of one registered device through `/devices/{device_id}/agent/session`
-and `/device-agent/session/*`. ShakerScan fixes the durable device identity, current locator, safety
+The current coding-agent session plans a bounded investigation of one registered device through
+`/hunts/*`. ShakerScan fixes the durable device identity, current locator, safety
 profile, credentials, traffic budgets, and health circuit breaker. Deterministic device scans remain
 authoritative; AI leads are evidence-cited hypotheses.
 
-Device Hunt may propose exact remote-device SSH commands only when an authenticated profile and
+Hunt may propose exact remote-device SSH commands only when an authenticated profile and
 pinned host key are available. A proposal is inert until the user separately confirms the immutable
 command plan in the UI. Imported Postman, HAR 1.2, OpenAPI 3.x, and Swagger 2.0 request documents
-are encrypted and pinned to the device; Device Hunt sees only their redacted request inventory and
+are encrypted and pinned to the device; Hunt sees only their redacted request inventory and
 can include them in a scan only when the user fixed that authority at session start. Postman scripts,
 HAR responses, and external specification references never execute, and state-changing HTTP
-methods require a separate authenticated-active approval. The internal `device-agent` API name
-remains for compatibility; UI and documentation use **Device Hunt**.
+methods require a separate authenticated-active approval. The old `device-agent` API is migration-only:
+historical reads and cancellation remain available, but new starts, replies, and shell confirmations
+return `410 Gone` by default and point to `/hunts`.
 
-## Deep Hunt
+## Hunt
 
-Deep Hunt is one user workflow. The current coding-agent session:
+Hunt is one user workflow. The current coding-agent session:
 
 1. reads a redacted target context;
 2. composes its own probes against an explicit HTTP(S) origin on the selected target host;
@@ -70,18 +70,14 @@ Deep Hunt is one user workflow. The current coding-agent session:
 7. asks the server’s deterministic proof workflows to verify supported claims.
 
 The user does not choose between “Operator” and “Explorer.” Those were implementation concepts.
-The compatibility `/research/*` controller remains available for specialized guided verification,
-but a Deep Hunt request launches `/agent/hunt/{target_id}/session` with `mode:"deep_hunt"`.
+The `/research/*` controller remains available only for specialized guided verification and the
+advanced Test Builder. It is not a Hunt launcher. A Hunt request creates one `/hunts` run.
 
-Deep Hunt requires:
+Active Hunt capabilities require explicit confirmation that the target is owned or authorized and a
+target-bound, expiring approval. Every Hunt retains hard ceilings for capability calls, requests,
+active actions, wall time, ports, hosts, browser actions, device fragility, and candidates.
 
-- explicit confirmation that the target is owned or authorized;
-- a target-bound, expiring credential-tier approval;
-- the server gated-execution policy, enabled in standard installs and globally disabled with
-  `AI_OPS_ROUTER_EXECUTE_ENABLED=false` when required;
-- hard turn, request, and active-action ceilings.
-
-DAST and Deep Hunt treat a web host as one durable target across schemes and ports. Concrete origins
+DAST and Hunt treat a web host as one durable target across schemes and ports. Concrete origins
 remain explicit execution choices, so `http://app:8080` and `https://app:9090` share history without
 silently redirecting requests between them.
 
@@ -118,7 +114,7 @@ technical metadata.
 
 ## Supporting surfaces
 
-- **Leads** is the hypothesis backlog used by Deep Hunt and verification.
+- **Leads** is the hypothesis backlog used by Hunt and verification.
 - **Test Builder** is an advanced, hand-crafted experiment tool.
 - **Mission Ledger** is the read-only `/campaigns` action history; it does not launch Deep Hunt.
 - **Evidence** stores proof objects and export/retention records.
@@ -128,13 +124,15 @@ technical metadata.
 
 | Compatibility term | User-facing term |
 |---|---|
-| Autonomous Hunt | Deep Hunt |
-| Explorer | Deep Hunt implementation |
+| Autonomous Hunt | Hunt |
+| Deep Hunt | Hunt |
+| Device Hunt | Hunt (`target_kind=device`) |
+| Explorer | Retired Hunt implementation name |
 | Operator | Guided verifier implementation |
-| Research Agent | Deep Hunt or guided verifier, depending on route |
-| AI Device Investigation / device agent | Device Hunt |
+| Research Agent | Hunt or guided verifier, depending on route |
+| AI Device Investigation / device agent | Hunt (`target_kind=device`) |
 | AI Session / `ai_session` | Interactive |
-| Autonomous / `autonomous` finding source | Deep Hunt |
+| Autonomous / `autonomous` finding source | Hunt |
 | Plan a test | Test Builder |
 | Campaigns | Mission Ledger |
 

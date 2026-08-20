@@ -1,12 +1,12 @@
-# Deep Hunt
+# Hunt compatibility command
 
-Run an authorized, AI-driven Deep Hunt against the supplied target.
+Run an authorized, AI-driven Hunt against the supplied target.
 
 **Usage:** `/deep-hunt <target-url-or-id> [objective]`
 
-Use the `research-agent` skill. Deep Hunt means the keyless `/agent/hunt/*` workflow: autonomous
-exploration, bounded active tools, evidence-backed Suspected findings, and deterministic promotion
-where supported. It is not a DAST scan and must not use `/research/campaigns/launch`.
+Use the `research-agent` skill. Deep Hunt is a compatibility name for the canonical `/hunts/*`
+workflow: adaptive exploration, bounded capabilities, evidence-backed candidates, and deterministic
+promotion where supported. It is not a DAST scan and must not use either legacy planner engine.
 
-Confirm target authorization, create the required target-scoped credential approval, start with
-`mode:"deep_hunt"`, and drive each `awaiting_planner` turn from the current coding-agent session.
+Confirm target authorization, create the required target-scoped credential approval when active
+testing is requested, start one `/hunts` run, and plan through its returned capability manifest.

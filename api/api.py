@@ -428,8 +428,10 @@ except ModuleNotFoundError:
     from api.scan.contracts import normalize_scan_authentication, resolve_scan_contract
 try:
     from hunt.contracts import capability_manifest, resolve_hunt_policy
+    from hunt.legacy import LegacyHuntIsolationMiddleware
 except ModuleNotFoundError:
     from api.hunt.contracts import capability_manifest, resolve_hunt_policy
+    from api.hunt.legacy import LegacyHuntIsolationMiddleware
 try:
     from runtime.budgets import BudgetExceeded, reconcile_budget_snapshot, reserve_budget_snapshot
     from runtime.models import ScanPolicy, TargetBinding
@@ -3935,6 +3937,9 @@ app.add_middleware(
     allow_origins=_cors_kwargs["allow_origins"],
     allow_origin_regex=str(_cors_kwargs.get("allow_origin_regex") or ""),
 )
+
+
+app.add_middleware(LegacyHuntIsolationMiddleware)
 
 
 @app.exception_handler(ValueError)

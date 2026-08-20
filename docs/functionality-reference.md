@@ -562,9 +562,8 @@ capability-labeled sensor extension rather than an implied Docker-worker capabil
 Device coverage depth and action safety are independent. `observe_only`, `safe_remote`, and
 `authenticated_active` are available; `lab_invasive` remains declared but fails closed until its
 dedicated runner is ready. Device reports carry `device-safety/v1` receipts plus a
-stable `device-evidence/v1` node/edge/observation graph. The keyless device investigator uses
-`POST /devices/{device_id}/agent/session` and `/device-agent/session/*` to let the current coding
-agent inspect device state, inspect redacted user-bound request collections, compare scans, recall prior hypotheses, query effective policy, use
+stable `device-evidence/v1` node/edge/observation graph. A device-target `POST /hunts` run lets the
+current coding agent inspect device state, inspect redacted user-bound request collections, compare scans, recall prior hypotheses, query effective policy, use
 size-capped SHA-256-pinned offline advisory candidates and protocol playbooks, queue bounded deterministic scans, and query
 normalized evidence. Its context pack treats network data as untrusted, its target and safety profile
 are immutable, and its tool/turn/scan/daily-device/fragility budgets are server-enforced and recorded
@@ -827,41 +826,40 @@ Safe/Balanced plan to Lab.
 The UI binds execution confirmation to the exact prompt and target that produced the visible preview;
 editing either input invalidates the preview and clears its confirmations.
 
-### 11.6 Deep Hunt
+### 11.6 Hunt
 
-Deep Hunt is the canonical AI-driven web-investigation workflow. The current Codex, Claude, or
-OpenCode session plans turns through the keyless `POST /agent/hunt/{target_id}/session` and
-`POST /agent/hunt/session/{run_id}/reply` loop; ShakerScan alone executes tools. Starting with
-`mode: deep_hunt` requires a live, target-bound, expiring credential-tier approval. Gated execution
-is enabled in standard installs and can be disabled globally with
-`AI_OPS_ROUTER_EXECUTE_ENABLED=false`. The approval is revalidated before every turn.
+Hunt is the canonical AI-driven investigation workflow for web, API, network, and device targets.
+The current Codex, Claude, or OpenCode session plans through `POST /hunts`, `/query`, and the
+server-returned capability manifest; ShakerScan alone executes actions. Active or credentialed
+capabilities require a live, target-bound, expiring approval that is revalidated per call.
 
-The free-form loop can issue read probes on any explicit HTTP(S) origin of the selected target host,
-compare managed principal contexts when they
-are configured, query stored knowledge, record notes, and invoke bounded active scanner templates. It cannot issue
-arbitrary state-changing HTTP. Tool calls, request units, active actions, and turns are bounded. A
+The planner can issue read probes on explicit target-bound origins, compare managed principal
+contexts when they are configured, query stored knowledge, record candidates, and invoke bounded
+active capabilities. It cannot issue
+arbitrary state-changing HTTP. Capability calls, requests, active actions, wall time, ports, hosts,
+browser actions, device fragility, and candidate counts are bounded. A
 direct HTTP call consumes one request; external scanners reserve their fail-closed maximum wire
 request allowance before execution, and cannot run when that reservation does not fit. Receipts
 report reserved traffic, exact settled traffic when the scanner exposes it, and observed-minimum
 traffic otherwise. Scanner subprocesses run on the worker plane, which independently rebuilds fixed
-argv and revalidates the target host; the API never spawns them. Model-token budgets bound the configured-provider loop only; a keyless
-session uses its token budget to size the seed context pack, because the server cannot meter an
-external coding agent's tokens. A debrief persists evidence-backed claims only as durable,
+argv and revalidates the target host; the API never spawns them. The external coding agent owns its
+model context while ShakerScan meters every executable capability. A final debrief persists evidence-backed claims only as durable,
 non-authoritative investigation candidates outside the findings table. Candidate lifecycle is linked
 to the server verification record and typed evidence. A finding is materialized only after a
 supported family reaches **Verified** through server-run deterministic proof. Legacy unverified
-`autonomous_agent` rows are migrated into the candidate ledger and retired. The compatibility `/research/*`
-controller remains available for specialized guided verification and is not the Deep Hunt launcher.
+`autonomous_agent` rows are migrated into the candidate ledger and retired. The `/research/*`
+controller remains available for specialized guided verification and is not a Hunt launcher. Legacy
+`/agent/hunt/*` and `/device-agent/*` writes return `410 Gone` by default; reads and cancellation remain
+temporarily available with deprecation headers.
 
 Web target identity is host-level: scheme and port variants share one target record and durable
 security history, while each scan and hunt retains the exact concrete origin it executes against.
-The target APIs return `origins` ordered by recent DAST use. Deep Hunt start requests accept
-`origin_url`; the UI offers known origins and permits a new same-host origin. Cross-host origins are
-rejected. Model Intake subjects retain exact artifact/revision identity in the Model Intake evidence model;
+The target APIs return `origins` ordered by recent DAST use. Hunt binds the target and its known
+origins at creation; capability calls cannot replace that destination. Model Intake subjects retain exact artifact/revision identity in the Model Intake evidence model;
 they do not appear in the normal web-target inventory.
 
-Natural-language routing treats an unqualified “scan” as Quick DAST, named scan types as DAST,
-“Deep Hunt” as this workflow, “verify this finding” as deterministic retest/verification, and manual
+Natural-language routing treats an unqualified “scan” as DAST, named scan types as compatibility
+budget/policy mappings, “Deep Hunt” as Hunt, “verify this finding” as deterministic retest/verification, and manual
 browser work as Interactive Testing. See [`product-model.md`](product-model.md).
 
 ### 11.7 Test scenario catalog and Honey demo
@@ -1123,8 +1121,8 @@ State-changing commands are not exposed. See [`docs/read-only-mcp.md`](read-only
 `POST /devices/{id}/verify-service` · `GET /device-scans` ·
 `GET|POST /devices/{id}/credentials` · `POST /devices/{id}/credentials/{profile_id}/rotate` ·
 `DELETE /devices/{id}/credentials/{profile_id}` · `POST /devices/{id}/credentials/{profile_id}/acknowledge-lockout` ·
-`POST /devices/{id}/agent/session` · `GET /device-agent/session/{run_id}` ·
-`POST /device-agent/session/{run_id}/reply|cancel` ·
+`POST /hunts` · `GET /hunts/{hunt_id}` · `POST /hunts/{hunt_id}/query` ·
+`POST /hunts/{hunt_id}/capabilities/{capability_name}` ·
 `GET|POST /device-policies` · `PATCH /device-policies/{id}`
 
 **Continuous ASM**: `GET /asm/check-families` · `GET /targets/{id}/asm/endpoints` ·
@@ -1282,7 +1280,8 @@ concurrency-limited with per-tool timeouts and a global deadline.
 | `/settings/policy-profiles` | Deployment policy profile lifecycle across DAST, AI Gate, and Model Intake |
 | `/exceptions` | Finding-exception queue, repair, expiry visibility, and lifecycle sweep |
 | `/settings/arsenal` | Command contracts, receipts, plans, actions, hypotheses (claim/signal/plan-campaign, from-plan/from-benchmark generators), refuters, tools, local agents, context packs, and traces |
-| `/deep-hunt` | Launch and drive a keyless, AI-driven Deep Hunt through `/agent/hunt/*`: start/pause/resume/cancel hunt sessions, read the live transcript and observations, inspect run state and hunt-driven findings |
+| `/hunt` | Launch and inspect the canonical target-kind-aware Hunt runtime through `/hunts/*` |
+| `/deep-hunt` | Compatibility redirect to `/hunt` |
 | `/deep-hunt/experiment` | Create bounded HTTP-differential or managed-principal workflow experiments |
 | `/deep-hunt/runs/{id}` | Inspect a durable experiment run and its proof handoff |
 | `/deep-hunt/leads` | Review durable research leads and route them to the appropriate product workflow |

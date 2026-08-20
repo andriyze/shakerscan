@@ -1,6 +1,6 @@
 # AI-Native Scan and Hunt Architecture RFC
 
-**Status:** accepted migration architecture
+**Status:** implemented; legacy web/device Hunt engines quarantined for migration reads and cancellation
 **Plan date:** 2026-08-19
 **Pinned `origin/smart` baseline:** `84c185538990e9403b5c972ff91b5f212799910d`
 
@@ -93,9 +93,12 @@ origin binding, SSH confirmation, and cleanup contracts remain deterministic run
 5. Generalize request collections with separate import, replay, preview, and page limits.
 6. Add incremental discovery manifests and graceful deadlines.
 7. Build deterministic Scan V2 behind a flag, then make it the default and deprecate old names.
-8. Add unified Hunt V2 and route web/device compatibility endpoints through it.
+8. Add unified Hunt V2. Route compatibility URLs in the UI to it; quarantine incompatible legacy
+   API writes with an explicit `410 Gone` response rather than translating authority-bearing requests.
 9. Consolidate Hunt skills and expose the same runtime through API/MCP.
-10. Delete legacy engines and duplicate registries after parity and migration tests pass.
+10. Delete quarantined legacy engine code after the published migration sunset. Until then, historical
+    reads and emergency cancellation remain available, carry deprecation headers, and cannot create or
+    advance work unless an operator deliberately enables `SHAKERSCAN_LEGACY_HUNT_WRITES_ENABLED`.
 
 New work must not add scan-type branching or a second target-specific Hunt engine during this
 migration.
