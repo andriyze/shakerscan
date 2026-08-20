@@ -6,7 +6,7 @@ the target-agnostic redacted inventory contract used by Scan and Hunt.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import re
 from typing import Any, Iterable, Mapping
 
@@ -28,6 +28,96 @@ REQUEST_COLLECTION_DOCUMENT_DEFAULT_BYTES = 25 * 1024 * 1024
 REQUEST_COLLECTION_DOCUMENT_HARD_MAX_BYTES = HARD_MAX_COLLECTION_BYTES
 
 
+def _compile_safe_path_regex(value: str) -> re.Pattern[str]:
+    """Compile the deliberately small selector-regex subset.
+
+    Python's backtracking engine has no per-match deadline. These expressions run across as many
+    as 20k attacker-influenced paths, so reject group repetition and heavily variable patterns
+    instead of trying to enumerate known catastrophic spellings.
+    """
+    if len(value) > 500:
+        raise ValueError("selector path_regex exceeds complexity bounds")
+    if re.search(r"\\[1-9]|\(\?(?:[=!]|<[=!]|P=|\()", value):
+        raise ValueError("selector path_regex contains unsupported backtracking constructs")
+
+    escaped = False
+    in_class = False
+    group_depth = 0
+    closed_group = False
+    variable_quantifiers = 0
+    unbounded_quantifiers = 0
+    index = 0
+    while index < len(value):
+        character = value[index]
+        if escaped:
+            escaped = False
+            closed_group = False
+            index += 1
+            continue
+        if character == "\\":
+            escaped = True
+            closed_group = False
+            index += 1
+            continue
+        if in_class:
+            if character == "]":
+                in_class = False
+            index += 1
+            continue
+        if character == "[":
+            in_class = True
+            closed_group = False
+            index += 1
+            continue
+        if character == "(":
+            group_depth += 1
+            closed_group = False
+            index += 1
+            continue
+        if character == ")":
+            group_depth = max(0, group_depth - 1)
+            closed_group = True
+            index += 1
+            continue
+
+        is_variable = character in "*+?"
+        is_unbounded = character in "*+"
+        if character == "{":
+            match = re.match(r"\{(\d+)(?:,(\d*)?)?\}", value[index:])
+            if match:
+                lower = int(match.group(1))
+                upper_text = match.group(2)
+                has_comma = "," in match.group(0)
+                upper = int(upper_text) if upper_text else None
+                is_variable = has_comma and upper != lower
+                is_unbounded = has_comma and upper is None
+                if upper is not None and upper - lower > 100:
+                    raise ValueError("selector path_regex repeat range is too wide")
+                index += len(match.group(0))
+            else:
+                closed_group = False
+                index += 1
+                continue
+        else:
+            index += 1
+        if is_variable:
+            if closed_group:
+                raise ValueError("selector path_regex contains unsupported backtracking constructs")
+            variable_quantifiers += 1
+            unbounded_quantifiers += int(is_unbounded)
+            if variable_quantifiers > 8 or unbounded_quantifiers > 1:
+                raise ValueError("selector path_regex exceeds repetition bounds")
+        closed_group = False
+
+    try:
+        compiled = re.compile(value)
+    except re.error as exc:
+        raise ValueError("selector path_regex is invalid") from exc
+    if compiled.groups > 20:
+        raise ValueError("selector path_regex exceeds complexity bounds")
+    return compiled
+
+
 @dataclass(frozen=True)
 class RequestSelector:
     request_ids: tuple[str, ...] = ()
@@ -36,6 +126,7 @@ class RequestSelector:
     path_regex: str | None = None
     safe_methods_only: bool = True
     limit: int = REQUEST_COLLECTION_REPLAY_DEFAULT
+    _path_pattern: re.Pattern[str] | None = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not 1 <= int(self.limit) <= REQUEST_COLLECTION_REPLAY_HARD_MAX:
@@ -47,16 +138,12 @@ class RequestSelector:
             raise ValueError("selector methods are invalid")
         object.__setattr__(self, "methods", methods)
         if self.path_regex:
-            # Selectors run across as many as 20k index rows. Reject constructs that can create
-            # non-linear backtracking; this surface intentionally supports simple path matching.
-            if re.search(r"\\[1-9]|\(\?(?:[=!]|<[=!])|\([^)]*[+*][^)]*\)[+*{]|(?:\*|\+|\{\d+(?:,\d*)?\})\s*(?:\*|\+|\{)", self.path_regex):
-                raise ValueError("selector path_regex contains unsupported backtracking constructs")
-            try:
-                compiled = re.compile(self.path_regex)
-            except re.error as exc:
-                raise ValueError("selector path_regex is invalid") from exc
-            if len(self.path_regex) > 500 or compiled.groups > 20:
-                raise ValueError("selector path_regex exceeds complexity bounds")
+            object.__setattr__(self, "_path_pattern", _compile_safe_path_regex(self.path_regex))
+
+    def matches_path(self, value: str) -> bool:
+        if self._path_pattern is None:
+            return True
+        return self._path_pattern.search(str(value)) is not None
 
 
 def validate_and_index(
@@ -145,7 +232,6 @@ def select_requests(
     ids = set(selector.request_ids)
     folders = set(selector.folders)
     methods = set(selector.methods)
-    pattern = re.compile(selector.path_regex) if selector.path_regex else None
     selected: list[dict[str, Any]] = []
     for request in resolved:
         method = str(request.get("method") or "GET").upper()
@@ -158,7 +244,7 @@ def select_requests(
         if methods and method not in methods:
             continue
         candidate_path = str(request.get("url_template") or request.get("url") or "")
-        if pattern and not pattern.search(candidate_path):
+        if not selector.matches_path(candidate_path):
             continue
         selected.append(dict(request))
         if len(selected) >= selector.limit:

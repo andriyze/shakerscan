@@ -110,6 +110,10 @@ def test_page_and_regex_guards_fail_closed():
         RequestSelector(path_regex="(")
     with pytest.raises(ValueError, match="backtracking"):
         RequestSelector(path_regex=r"(a+)+$")
+    with pytest.raises(ValueError, match="backtracking"):
+        RequestSelector(path_regex=r"(?:a|a)+$")
+    with pytest.raises(ValueError, match="backtracking"):
+        RequestSelector(path_regex=r"(?:a|aa){1,}$")
 
 
 def test_generic_storage_and_scan_hunt_api_contracts_are_wired():

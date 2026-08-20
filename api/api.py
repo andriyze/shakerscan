@@ -26160,7 +26160,6 @@ async def select_request_collection_index(collection_id: str, request: RequestCo
             collection_uuid,
         )
     ids, folders, methods = set(selector.request_ids), set(selector.folders), set(selector.methods)
-    pattern = re.compile(selector.path_regex) if selector.path_regex else None
     selected: list[dict[str, Any]] = []
     for raw in rows:
         item = _json_safe_row(raw)
@@ -26172,7 +26171,7 @@ async def select_request_collection_index(collection_id: str, request: RequestCo
             continue
         if methods and item.get("method") not in methods:
             continue
-        if pattern and not pattern.search(str(item.get("normalized_path") or "")):
+        if not selector.matches_path(str(item.get("normalized_path") or "")):
             continue
         selected.append(item)
         if len(selected) >= selector.limit:
@@ -34517,7 +34516,6 @@ async def _hunt_select_collection(run: Any, context: Mapping[str, Any], values: 
             row["id"],
         )
     ids, methods = set(selector.request_ids), set(selector.methods)
-    pattern = re.compile(selector.path_regex) if selector.path_regex else None
     selected: list[dict[str, Any]] = []
     for raw in index_rows:
         item = _json_safe_row(raw)
@@ -34527,7 +34525,7 @@ async def _hunt_select_collection(run: Any, context: Mapping[str, Any], values: 
             continue
         if methods and item.get("method") not in methods:
             continue
-        if pattern and not pattern.search(str(item.get("normalized_path") or "")):
+        if not selector.matches_path(str(item.get("normalized_path") or "")):
             continue
         selected.append(item)
         if len(selected) >= selector.limit:
