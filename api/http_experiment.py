@@ -442,6 +442,72 @@ def compare_summaries(control: dict[str, Any], candidate: dict[str, Any]) -> dic
     }
 
 
+# --------------------------------------------------------------------------------------
+# Bounded same-origin redirect following (Deep Hunt http_request follow_redirects).
+# Pure helpers so hop validation, method rewrite, and the hop cap stay host-testable;
+# the pinned-address executor wiring lives in api.py.
+# --------------------------------------------------------------------------------------
+
+REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+MAX_REDIRECT_HOPS = 3
+
+
+def _same_origin_parts(value: Any) -> tuple[str, str, int] | None:
+    """Strict origin tuple (scheme, lowercase host, effective port) or None if unusable.
+
+    Default ports normalize to the scheme default (80/443), so ``https://a.test/`` and
+    ``https://a.test:443/`` compare equal while any explicit port change compares unequal.
+    """
+    try:
+        parsed = urlparse(str(value or ""))
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return None
+        port = parsed.port  # raises ValueError on a malformed authority such as host:bad
+        if port is None:
+            port = 443 if parsed.scheme == "https" else 80
+        return parsed.scheme, parsed.hostname.lower().rstrip("."), port
+    except (ValueError, UnicodeError):
+        return None
+
+
+def validate_next_hop(current_url: str, location: Any) -> str | None:
+    """Resolve one redirect Location against the current URL under STRICT same-origin.
+
+    Scheme, host, AND port must all match (another port on the same host is a different
+    origin and is rejected). Returns the absolute next-hop URL, or None when the hop is
+    cross-origin, malformed, non-HTTP(S), or contains control characters.
+    """
+    if not isinstance(location, str):
+        return None
+    text = location.strip()
+    if not text or _contains_control_character(text):
+        return None
+    current = _same_origin_parts(current_url)
+    if current is None:
+        return None
+    try:
+        joined = urljoin(str(current_url), text)
+    except (ValueError, UnicodeError):
+        return None
+    target = _same_origin_parts(joined)
+    if target is None or target != current:
+        return None
+    if not (urlparse(joined).path or "").startswith("/"):
+        return None
+    return joined
+
+
+def rewrite_method_for_redirect(method: str, status: int) -> str:
+    """301/302/303 rewrite the next hop to GET (request body dropped); 307/308 repeat."""
+    try:
+        code = int(status)
+    except (TypeError, ValueError):
+        return str(method or "GET").strip().upper()
+    if code in (301, 302, 303):
+        return "GET"
+    return str(method or "GET").strip().upper()
+
+
 async def execute_experiment(target_url: str, raw: Any, *, transport: httpx.AsyncBaseTransport | None = None) -> dict[str, Any]:
     experiment = normalize_experiment(target_url, raw)
     observations: list[dict[str, Any]] = []
