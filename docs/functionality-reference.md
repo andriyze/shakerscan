@@ -843,7 +843,8 @@ request allowance before execution, and cannot run when that reservation does no
 report reserved traffic, exact settled traffic when the scanner exposes it, and observed-minimum
 traffic otherwise. Scanner subprocesses run on the worker plane, which independently rebuilds fixed
 argv and revalidates the target host; the API never spawns them. The external coding agent owns its
-model context while ShakerScan meters every executable capability. A final debrief persists evidence-backed claims only as durable,
+model context: ShakerScan cannot meter an external coding agent's tokens, and makes no token-budget
+claim for that planner. It meters every executable capability. A final debrief persists evidence-backed claims only as durable,
 non-authoritative investigation candidates outside the findings table. Candidate lifecycle is linked
 to the server verification record and typed evidence. A finding is materialized only after a
 supported family reaches **Verified** through server-run deterministic proof. Legacy unverified
@@ -2445,10 +2446,10 @@ Only key names and declaring sources are documented; secret values are never rea
 | `/ai-gate` | AI Gate | Create/list AI Gate targets and queue AI safety scans. | `.claude/commands/ai-gate.md` |
 | `/ai-security-session` | Interactive Testing | Drive an authorized Interactive Testing browser workflow with the compatibility-named `ai-security-session` skill. | `.claude/commands/ai-security-session.md` |
 | `/content-discovery` | Content Discovery | Build a high-signal route and file discovery plan for a target using ShakerScan evidence, JS outputs, and framework clues. | `.claude/commands/content-discovery.md` |
-| `/deep-hunt` | Deep Hunt | Run an authorized, AI-driven Deep Hunt against the supplied target. | `.claude/commands/deep-hunt.md` |
+| `/deep-hunt` | Hunt compatibility command | Run an authorized, AI-driven Hunt against the supplied target. | `.claude/commands/deep-hunt.md` |
 | `/findings` | List Security Findings | Show security findings from scans. | `.claude/commands/findings.md` |
 | `/js-analyze` | JS Analyze | Run JavaScript and frontend attack-surface analysis for a target, completed scan, or supplied JS bundle set. | `.claude/commands/js-analyze.md` |
-| `/research` | Deep Hunt compatibility command | Use the `research-agent` skill. | `.claude/commands/research.md` |
+| `/research` | Hunt compatibility command | Use the `research-agent` skill. | `.claude/commands/research.md` |
 | `/review-skills` | Review Skills | Review all ShakerScan skills, commands, and agents for prompt bugs and quality gaps. | `.claude/commands/review-skills.md` |
 | `/save-finding` | Save Finding | Save an evidence-backed finding from authorized manual or interactive testing. | `.claude/commands/save-finding.md` |
 | `/scan-full` | Full Security Assessment | Run a comprehensive security assessment with the Full profile, including authorized active | `.claude/commands/scan-full.md` |

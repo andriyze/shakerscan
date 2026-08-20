@@ -78,9 +78,10 @@ def test_multi_node_doc_states_semaphore_failure_posture():
     assert "A partitioned node runs uncapped." not in text
 
 
-def test_deep_hunt_design_authority_is_honest_about_driver_limits():
+def test_legacy_deep_hunt_reference_is_honest_about_driver_limits():
     text = _flat(DEEP_HUNT_DOC)
-    assert "current implementation reference" in text
+    assert "historical compatibility reference" in text
+    assert "Legacy `/agent/hunt/*` writes return `410 Gone` by default" in text
     assert "reserves that scanner template's fail-closed maximum wire-request allowance" in text
     assert "conservative accounting" in text
     assert "external coding agent's tokens" in text
