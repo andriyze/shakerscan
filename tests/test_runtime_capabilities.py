@@ -47,10 +47,13 @@ def test_registry_filters_target_kind_and_active_permission():
     all_device = {spec.name for spec in CAPABILITY_REGISTRY.list(target_kind="device")}
 
     assert safe_web == {
-        "web.probe", "subdomains.discover", "tls.inspect", "collections.inspect",
+        "web.probe", "http.request", "subdomains.discover", "tls.inspect", "collections.inspect",
         "collections.select", "collections.replay_safe",
     }
-    assert {"ports.discover", "service.fingerprint", "web.probe"} <= all_device
+    assert all_device == {
+        "device.inspect", "device.capabilities.inspect", "device.http.probe",
+        "device.scan", "device.service.verify", "collections.inspect", "collections.select",
+    }
     assert not CAPABILITY_REGISTRY.require("web.probe").requires_active_approval
     assert CAPABILITY_REGISTRY.require("ports.discover").requires_active_approval
 

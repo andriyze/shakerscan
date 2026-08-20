@@ -16,6 +16,8 @@ def test_hunt_without_receipt_is_passive_and_target_filtered():
     names = {item["name"] for item in capability_manifest(policy)}
     assert policy.active_testing is False
     assert "web.probe" in names
+    assert "http.request" in names
+    assert "tls.inspect" in names
     assert "collections.replay_safe" in names
     assert "templates.scan" not in names
     assert "ports.discover" not in names
@@ -31,7 +33,12 @@ def test_hunt_with_valid_receipt_gets_active_capabilities_but_never_mutation():
     assert policy.active_testing is True
     assert policy.credential_access is True
     assert policy.mutation_allowed is False
-    assert {item["name"] for item in capabilities} >= {"web.probe", "ports.discover"}
+    names = {item["name"] for item in capabilities}
+    assert names >= {"device.inspect", "device.http.probe", "device.scan"}
+    assert not names & {
+        "web.probe", "templates.scan", "web.crawl", "web.content_discover",
+        "xss.verify", "sqli.verify", "service.fingerprint", "ports.discover", "tls.inspect",
+    }
 
 
 def test_hunt_budget_profile_is_bounded():
@@ -57,6 +64,9 @@ def test_hunt_actions_emit_capability_receipts_and_never_accept_raw_argv():
     assert "trusted_collection_headers" in api
     assert 'action_name=f"hunt.capability:{name}"' in api
     assert "require_expiry=True" in api
+    assert "require_target_binding=True" in api
+    assert 'elif name == "http.request"' in api
+    assert "_hunt_tls_inspect" in api
     assert "ADD COLUMN IF NOT EXISTS capability_name" in migration
     assert "ADD COLUMN IF NOT EXISTS hunt_id" in migration
     assert "argv" not in capability_manifest(resolve_hunt_policy(

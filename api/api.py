@@ -25,6 +25,7 @@ import secrets
 import shlex
 import shutil
 import socket
+import ssl
 import subprocess
 import threading
 import time
@@ -34565,6 +34566,89 @@ async def _hunt_replay_safe_collection(run: Any, context: Mapping[str, Any], val
             "safe_methods_only": True, "secret_values_visible": False}
 
 
+async def _hunt_tls_inspect(target_url: str, authorized_addresses: Sequence[str]) -> dict[str, Any]:
+    """Perform one SNI-preserving TLS handshake against the frozen target address."""
+    parsed = urllib.parse.urlsplit(str(target_url or ""))
+    if parsed.scheme.lower() != "https" or not parsed.hostname:
+        return {
+            "ok": False,
+            "status": "not_applicable",
+            "error": "tls inspection requires an HTTPS target",
+            "budget_consumed": {"tcp_ports_attempted": 0, "tool_wall_seconds": 0},
+        }
+    frozen_addresses = list(authorized_addresses or [])[:16]
+    if not frozen_addresses:
+        return {"ok": False, "status": "blocked", "error": "hunt has no frozen target resolution set"}
+    try:
+        pinned_address = agent_tools.validate_pinned_scanner_address(
+            frozen_addresses[0], frozen_addresses,
+        )
+    except agent_tools.AgentToolError as exc:
+        return {"ok": False, "status": "blocked", "error": f"scope:{exc}"}
+
+    port = parsed.port or 443
+    tls_context = ssl.create_default_context()
+    tls_context.check_hostname = False
+    tls_context.verify_mode = ssl.CERT_NONE
+    tls_context.set_alpn_protocols(["h2", "http/1.1"])
+    started = time.perf_counter()
+    writer: asyncio.StreamWriter | None = None
+    try:
+        _reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(
+                host=pinned_address,
+                port=port,
+                ssl=tls_context,
+                server_hostname=parsed.hostname,
+            ),
+            timeout=10,
+        )
+        tls_object = writer.get_extra_info("ssl_object")
+        if tls_object is None:
+            raise ssl.SSLError("TLS handshake produced no SSL object")
+        certificate = tls_object.getpeercert(binary_form=True) or b""
+        cipher = tls_object.cipher()
+        elapsed = max(1, math.ceil(time.perf_counter() - started))
+        observation = {
+            "kind": "tls_protocol",
+            "origin": urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "", "", "")),
+            "server_hostname": parsed.hostname,
+            "pinned_address": pinned_address,
+            "port": port,
+            "protocol": tls_object.version(),
+            "cipher": cipher[0] if cipher else None,
+            "cipher_protocol": cipher[1] if cipher else None,
+            "cipher_bits": cipher[2] if cipher else None,
+            "alpn_protocol": tls_object.selected_alpn_protocol(),
+            "certificate_sha256": hashlib.sha256(certificate).hexdigest() if certificate else None,
+            "certificate_bytes": len(certificate),
+            "certificate_trust": "not_evaluated",
+        }
+        return {
+            "ok": True,
+            "status": "success",
+            "observation": observation,
+            "budget_consumed": {"tcp_ports_attempted": 1, "tool_wall_seconds": elapsed},
+        }
+    except (OSError, ssl.SSLError, asyncio.TimeoutError) as exc:
+        return {
+            "ok": False,
+            "status": "failed",
+            "error": f"tls_handshake:{type(exc).__name__}",
+            "budget_consumed": {
+                "tcp_ports_attempted": 1,
+                "tool_wall_seconds": max(1, math.ceil(time.perf_counter() - started)),
+            },
+        }
+    finally:
+        if writer is not None:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except (OSError, ssl.SSLError):
+                pass
+
+
 @app.post("/hunts")
 async def start_hunt(request: HuntStartRequest):
     """Create one target-kind-aware Hunt. The caller owns planning; the runtime owns authority."""
@@ -34637,12 +34721,12 @@ async def start_hunt(request: HuntStartRequest):
                 conn,
                 request.approval_receipt_id,
                 target_url=target_url,
-                target_id=db_target_id,
+                target_id=target_uuid,
                 action_name="hunt.capability",
                 command="hunt.capability",
                 risk_tier="active",
                 always_require_receipt=True,
-                require_target_binding=target_kind != "device",
+                require_target_binding=True,
                 require_expiry=True,
                 created_by="hunt_v2",
             )
@@ -34782,15 +34866,20 @@ async def execute_hunt_capability(
             allowed = {item["name"] for item in _hunt_public(run, include_context=False)["capabilities"]}
             if name not in allowed:
                 raise HTTPException(status_code=403, detail="Capability is not allowed by this Hunt policy")
-            if spec.requires_active_approval:
+            principal_slot = (
+                agent_tools.normalize_principal_slot(request.input.get("as_principal"))
+                if name == "http.request" else "anonymous"
+            )
+            requires_call_approval = spec.requires_active_approval or principal_slot != "anonymous"
+            if requires_call_approval:
                 authority_context = _hunt_json(run["context_pack"], {})
                 target_context = authority_context.get("target") if isinstance(authority_context.get("target"), Mapping) else {}
                 target_url = str(target_context.get("url") or target_context.get("locator") or "")
                 await _validate_approval_receipt_for_action(
                     conn, policy.get("approval_receipt_id"), target_url=target_url,
-                    target_id=run["target_id"], action_name=f"hunt.capability:{name}",
-                    command=name, risk_tier=str(spec.risk_tier), always_require_receipt=True,
-                    require_target_binding=str(run["target_kind"]) != "device",
+                    target_id=run["target_id"] or run["device_target_id"], action_name=f"hunt.capability:{name}",
+                    command=name, risk_tier="credential" if principal_slot != "anonymous" else str(spec.risk_tier), always_require_receipt=True,
+                    require_target_binding=True,
                     require_expiry=True, created_by=f"hunt_v2:{hunt_id}",
                 )
             used = _hunt_json(run["budget_used_json"], {})
@@ -34800,7 +34889,7 @@ async def execute_hunt_capability(
                 key: int(value) for key, value in spec.budget_cost.items() if key in limits
             }
             charges["agent_actions"] = 1
-            if spec.requires_active_approval:
+            if requires_call_approval:
                 charges["active_actions"] = 1
             try:
                 reserved_used = reserve_budget_snapshot(
@@ -34840,6 +34929,16 @@ async def execute_hunt_capability(
                 name=adapter_name, args=request.input,
             )
             context["device_state"] = device_state
+        elif name == "http.request":
+            http_input = dict(request.input)
+            http_input.setdefault("method", "GET")
+            http_input.setdefault("path", "/")
+            result = await _agent_tool_http_request(
+                run["target_id"], str(context["target"]["url"]), http_input,
+                created_by=f"hunt_v2:{hunt_id}", allow_write=False,
+                approval_receipt_id=policy.get("approval_receipt_id"),
+                authorized_addresses=context.get("authorized_target_addresses") or [],
+            )
         elif spec.legacy_tool_name:
             path = str(request.input.get("path") or "").strip()
             execution_target = str(context["target"]["url"])
@@ -34853,11 +34952,9 @@ async def execute_hunt_capability(
                 authorized_addresses=context.get("authorized_target_addresses") or [],
             )
         elif name == "tls.inspect":
-            result = await _agent_tool_http_request(
-                run["target_id"], str(context["target"]["url"]), {"method": "HEAD", "path": "/"},
-                created_by=f"hunt_v2:{hunt_id}", allow_write=False,
-                approval_receipt_id=policy.get("approval_receipt_id"),
-                authorized_addresses=context.get("authorized_target_addresses") or [],
+            result = await _hunt_tls_inspect(
+                str(context["target"]["url"]),
+                context.get("authorized_target_addresses") or [],
             )
         else:
             raise HTTPException(status_code=422, detail="Capability adapter is not executable")

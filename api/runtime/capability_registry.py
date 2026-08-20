@@ -133,8 +133,8 @@ class CapabilityRegistry:
         return frozenset(spec.binary for spec in self.external_tools() if spec.binary)
 
 
-_HTTP_TARGETS = frozenset({"web", "api", "device"})
-_NETWORK_TARGETS = frozenset({"web", "api", "device", "network"})
+_HTTP_TARGETS = frozenset({"web", "api"})
+_NETWORK_TARGETS = frozenset({"web", "api", "network"})
 
 
 def _schema(properties: Mapping[str, Any] | None = None) -> Mapping[str, Any]:
@@ -224,9 +224,24 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             version_args=("-version",), common_paths=("/opt/tools/subfinder",),
         ),
         CapabilitySpec(
+            "http.request", "Send one target-pinned read-only request, optionally as a managed principal.",
+            "http", "passive", _HTTP_TARGETS, "agent.http_request", "1",
+            None, {"http_requests": 1, "tool_wall_seconds": 15},
+            {"network_reachability": True, "credentials_resolved_server_side": True},
+            _schema({
+                "method": {"type": "string", "enum": ["GET", "HEAD", "OPTIONS"]},
+                "path": {"type": "string"},
+                "query": {"type": "object"},
+                "headers": {"type": "object"},
+                "as_principal": {"type": "string"},
+                "follow_redirects": {"type": "boolean"},
+            }),
+            "http-observation/v1", ("http_observation", "tool_receipt"),
+        ),
+        CapabilitySpec(
             "tls.inspect", "Inspect TLS configuration for a target-bound origin.",
             "internal", "passive", _HTTP_TARGETS, "scanner.tls", "1", None,
-            {"http_requests": 1, "tool_wall_seconds": 60},
+            {"tcp_ports_attempted": 1, "tool_wall_seconds": 15},
             {"network_reachability": True}, _schema({"origin": {"type": "string"}}),
             "tls-observation/v1", ("tls_protocol_observation",),
         ),
