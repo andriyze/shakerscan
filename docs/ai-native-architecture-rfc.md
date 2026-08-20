@@ -1,7 +1,7 @@
 # AI-Native Scan and Hunt Architecture RFC
 
-**Status:** accepted migration architecture  
-**Plan date:** 2026-08-19  
+**Status:** accepted migration architecture
+**Plan date:** 2026-08-19
 **Pinned `origin/smart` baseline:** `84c185538990e9403b5c972ff91b5f212799910d`
 
 ## Decision
