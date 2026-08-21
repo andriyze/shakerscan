@@ -26,6 +26,8 @@ Modules:
 - breach_check: Credential breach monitoring (HIBP, GitHub code search, email detection)
 - sarif_output: SARIF output format for CI/CD integration (GitHub Security, Azure DevOps)
 - vendor_risk: Third-party/vendor risk scoring (CDN analysis, supply chain security)
+- request_collections: generic encrypted request collection parsing and selection
+- request_replay: exact target-bound replay plans with redacted public descriptors
 - model_intake: Model artifact intake checks (provenance, serialization, signatures, approval)
 """
 
@@ -54,6 +56,8 @@ __all__ = [
     "nmap",
     "nuclei",
     "oauth_auth",
+    "request_collections",
+    "request_replay",
     "sarif_output",
     "smtp_scanner",
     "ssh_scanner",
