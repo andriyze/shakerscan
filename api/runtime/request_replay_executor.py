@@ -3,6 +3,11 @@
 The planner never calls this module with raw HTTP. The worker decrypts a selected
 collection, builds a target-bound :class:`ReplayPlan`, and invokes this executor with a
 server-owned transport that pins connections to the frozen target address set.
+
+The executor adds a second, worker-owned deadline around every transport call. Transport
+implementations are still expected to enforce their own socket deadlines, but a buggy
+adapter cannot hold the durable reservation indefinitely. Evidence contains only redacted
+URLs, response header names, and body hashes; exact request/response values stay private.
 """
 
 from __future__ import annotations
@@ -13,6 +18,7 @@ from datetime import datetime, timezone
 import hashlib
 import inspect
 import ipaddress
+import math
 import re
 from typing import Any, Awaitable, Callable, Mapping, Protocol, Sequence
 import urllib.parse
@@ -28,11 +34,68 @@ from .receipts import CapabilityReceipt
 
 
 MAX_REPLAY_RESPONSE_BODY_BYTES = 2 * 1024 * 1024
+MAX_REPLAY_RESPONSE_HEADERS = 200
 _ERROR_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,119}$")
+_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]{1,200}$")
 
 
 class ReplayExecutionError(ValueError):
     """The replay cannot be executed inside the frozen target/runtime authority."""
+
+
+def _canonical_authority(value: str) -> tuple[str, str, int | None]:
+    """Return scheme/authority/port while rejecting userinfo and malformed hosts."""
+    try:
+        parsed = urllib.parse.urlsplit(str(value or "").strip())
+        port = parsed.port
+    except ValueError as exc:
+        raise ReplayExecutionError("transport URL has an invalid authority") from exc
+    scheme = parsed.scheme.lower()
+    if scheme not in {"http", "https"} or not parsed.hostname:
+        raise ReplayExecutionError("transport URL is not HTTP(S)")
+    if parsed.username is not None or parsed.password is not None:
+        raise ReplayExecutionError("transport URL must not contain user information")
+    try:
+        host = parsed.hostname.encode("idna").decode("ascii").lower().rstrip(".")
+    except UnicodeError as exc:
+        raise ReplayExecutionError("transport URL hostname is invalid") from exc
+    display = f"[{host}]" if ":" in host else host
+    default = 443 if scheme == "https" else 80
+    authority = display if port in {None, default} else f"{display}:{port}"
+    return scheme, authority, port
+
+
+def _origin(value: str) -> str:
+    scheme, authority, _port = _canonical_authority(value)
+    return f"{scheme}://{authority}"
+
+
+def _redacted_url(value: str) -> str:
+    parsed = urllib.parse.urlsplit(str(value or "").strip())
+    scheme, authority, _port = _canonical_authority(value)
+    query = urllib.parse.urlencode([
+        (str(name)[:200], "<redacted>")
+        for name, _item in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    ])
+    return urllib.parse.urlunsplit(
+        (scheme, authority, parsed.path or "/", query, "")
+    )[:2_000]
+
+
+def _response_headers(value: Mapping[str, str]) -> dict[str, str]:
+    headers = dict(value or {})
+    if len(headers) > MAX_REPLAY_RESPONSE_HEADERS:
+        raise ReplayExecutionError("transport returned too many response headers")
+    normalized: dict[str, str] = {}
+    for raw_name, raw_value in headers.items():
+        name = str(raw_name or "").strip()
+        item = str(raw_value or "")
+        if not _HEADER_NAME_RE.fullmatch(name):
+            raise ReplayExecutionError("transport returned an invalid response header name")
+        if "\r" in item or "\n" in item:
+            raise ReplayExecutionError("transport returned a response header with line breaks")
+        normalized[name] = item[:8_192]
+    return normalized
 
 
 @dataclass(frozen=True)
@@ -58,19 +121,20 @@ class ReplayTransportResult:
         body = bytes(self.response_body or b"")
         if len(body) > MAX_REPLAY_RESPONSE_BODY_BYTES:
             raise ReplayExecutionError("transport response body exceeds the capture limit")
-        headers = dict(self.response_headers or {})
-        if len(headers) > 200:
-            raise ReplayExecutionError("transport returned too many response headers")
         error = str(self.error_code or "").strip().lower() or None
         if error is not None and not _ERROR_RE.fullmatch(error):
             raise ReplayExecutionError("transport error_code is invalid")
         if self.timed_out and error is None:
             error = "timeout"
+        address = None
+        if self.connected_address:
+            try:
+                address = str(ipaddress.ip_address(self.connected_address))
+            except ValueError as exc:
+                raise ReplayExecutionError("transport connected_address is invalid") from exc
         object.__setattr__(self, "status_code", int(self.status_code) if self.status_code else None)
-        object.__setattr__(self, "connected_address", (
-            str(ipaddress.ip_address(self.connected_address)) if self.connected_address else None
-        ))
-        object.__setattr__(self, "response_headers", headers)
+        object.__setattr__(self, "connected_address", address)
+        object.__setattr__(self, "response_headers", _response_headers(self.response_headers))
         object.__setattr__(self, "response_body", body)
         object.__setattr__(self, "elapsed_ms", int(self.elapsed_ms))
         object.__setattr__(self, "error_code", error)
@@ -130,32 +194,6 @@ def _utc(clock: Clock) -> datetime:
     return value.astimezone(timezone.utc)
 
 
-def _origin(value: str) -> str:
-    try:
-        parsed = urllib.parse.urlsplit(str(value or ""))
-        port = parsed.port
-    except ValueError as exc:
-        raise ReplayExecutionError("transport final URL has an invalid authority") from exc
-    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
-        raise ReplayExecutionError("transport final URL is not HTTP(S)")
-    host = parsed.hostname.lower().rstrip(".")
-    display = f"[{host}]" if ":" in host else host
-    default = 443 if parsed.scheme.lower() == "https" else 80
-    authority = display if port in {None, default} else f"{display}:{port}"
-    return f"{parsed.scheme.lower()}://{authority}"
-
-
-def _redacted_url(value: str) -> str:
-    parsed = urllib.parse.urlsplit(str(value or ""))
-    query = urllib.parse.urlencode([
-        (str(name)[:200], "<redacted>")
-        for name, _item in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
-    ])
-    return urllib.parse.urlunsplit(
-        (parsed.scheme, parsed.netloc, parsed.path or "/", query, "")
-    )[:2_000]
-
-
 def _validate_runtime_binding(plan: ReplayPlan, target: TargetBinding) -> None:
     target_origins = set(target.allowed_origins)
     if not target_origins or not set(plan.allowed_origins) <= target_origins:
@@ -170,7 +208,17 @@ def _validate_transport_result(
     plan: ReplayPlan,
     target: TargetBinding,
 ) -> None:
-    if result.connected_address not in set(target.allowed_addresses):
+    """Verify target pinning without misclassifying a pre-connect failure as scope escape."""
+    if result.connected_address is None:
+        if not result.error_code or result.status_code is not None:
+            raise ReplayExecutionError(
+                "transport omitted connected_address for a completed HTTP exchange"
+            )
+        if result.response_headers or result.response_body:
+            raise ReplayExecutionError(
+                "pre-connect transport failure cannot contain an HTTP response"
+            )
+    elif result.connected_address not in set(target.allowed_addresses):
         raise ReplayExecutionError("transport connected outside the frozen target address set")
     if _origin(result.final_url) not in set(plan.allowed_origins):
         raise ReplayExecutionError("transport final URL escaped the replay origin binding")
@@ -254,6 +302,37 @@ def _receipt(
     )
 
 
+async def _send_with_worker_deadline(
+    transport: ReplayTransport,
+    request: ReplayRequest,
+    *,
+    target: TargetBinding,
+    timeout_seconds: float,
+) -> ReplayTransportResult:
+    """Apply a worker-owned wall deadline in addition to transport socket timeouts."""
+    try:
+        return await asyncio.wait_for(
+            transport.send(
+                request,
+                target=target,
+                timeout_seconds=timeout_seconds,
+                follow_redirects=False,
+            ),
+            timeout=timeout_seconds + 0.5,
+        )
+    except asyncio.TimeoutError:
+        return ReplayTransportResult(
+            status_code=None,
+            connected_address=None,
+            final_url=request.url,
+            response_headers={},
+            response_body=b"",
+            elapsed_ms=max(1, math.ceil(timeout_seconds * 1_000)),
+            error_code="worker_timeout",
+            timed_out=True,
+        )
+
+
 async def execute_replay_plan(
     plan: ReplayPlan,
     *,
@@ -272,12 +351,7 @@ async def execute_replay_plan(
     on_reservation: ReservationSink | None = None,
     on_settlement: SettlementSink | None = None,
 ) -> ReplayExecutionOutcome:
-    """Execute one exact ReplayPlan with reserve-before-send accounting.
-
-    Persistence callbacks are intentionally explicit. The caller stores requested,
-    reserved, and running states as they occur; ``on_settlement`` atomically stores the
-    terminal reservation, receipt, and reconciled ledger snapshot.
-    """
+    """Execute one exact ReplayPlan with reserve-before-send accounting."""
     if owner_kind not in {"scan", "hunt"}:
         raise ReplayExecutionError("owner_kind must be scan or hunt")
     owner = str(owner_id or "").strip()
@@ -320,11 +394,11 @@ async def execute_replay_plan(
     try:
         for request in plan.requests:
             attempted += 1  # Charge conservatively before the target may receive bytes.
-            result = await transport.send(
+            result = await _send_with_worker_deadline(
+                transport,
                 request,
                 target=target,
                 timeout_seconds=float(timeout_seconds),
-                follow_redirects=False,
             )
             if not isinstance(result, ReplayTransportResult):
                 raise ReplayExecutionError("transport returned an invalid result type")
@@ -337,29 +411,16 @@ async def execute_replay_plan(
         actual = _actual_budget(plan, attempted)
         finished_at = _utc(clock)
         receipt = _receipt(
-            plan=plan,
-            target=target,
-            owner_kind=owner_kind,
-            owner_id=owner,
-            worker_id=worker,
-            reservation=running,
-            reservation_state="failed",
-            actual=actual,
-            status="partial",
-            partial=True,
-            timed_out=False,
-            started_at=started_at,
-            finished_at=finished_at,
-            observations=observations,
-            errors=(*errors, "execution_cancelled"),
+            plan=plan, target=target, owner_kind=owner_kind, owner_id=owner,
+            worker_id=worker, reservation=running, reservation_state="failed",
+            actual=actual, status="partial", partial=True, timed_out=False,
+            started_at=started_at, finished_at=finished_at,
+            observations=observations, errors=(*errors, "execution_cancelled"),
             receipt_id=receipt_id,
         )
         failed = running.fail(
-            reason="execution_cancelled",
-            now=finished_at,
-            actual=actual,
-            execution_receipt_hash=receipt.receipt_hash,
-            execution_may_have_started=True,
+            reason="execution_cancelled", now=finished_at, actual=actual,
+            execution_receipt_hash=receipt.receipt_hash, execution_may_have_started=True,
         )
         settled = failed.reconcile_consumed(held_ledger)
         if on_settlement is not None:
@@ -371,27 +432,14 @@ async def execute_replay_plan(
         error_code = f"executor_{type(exc).__name__.lower()}"[:120]
         partial = attempted > 0
         receipt = _receipt(
-            plan=plan,
-            target=target,
-            owner_kind=owner_kind,
-            owner_id=owner,
-            worker_id=worker,
-            reservation=running,
-            reservation_state="failed",
-            actual=actual,
-            status="partial" if partial else "failed",
-            partial=partial,
-            timed_out=False,
-            started_at=started_at,
-            finished_at=finished_at,
-            observations=observations,
-            errors=(*errors, error_code),
-            receipt_id=receipt_id,
+            plan=plan, target=target, owner_kind=owner_kind, owner_id=owner,
+            worker_id=worker, reservation=running, reservation_state="failed",
+            actual=actual, status="partial" if partial else "failed", partial=partial,
+            timed_out=False, started_at=started_at, finished_at=finished_at,
+            observations=observations, errors=(*errors, error_code), receipt_id=receipt_id,
         )
         failed = running.fail(
-            reason=error_code,
-            now=finished_at,
-            actual=actual,
+            reason=error_code, now=finished_at, actual=actual,
             execution_receipt_hash=receipt.receipt_hash,
             execution_may_have_started=attempted > 0,
         )
@@ -403,27 +451,14 @@ async def execute_replay_plan(
     partial = bool(errors)
     finished_at = _utc(clock)
     receipt = _receipt(
-        plan=plan,
-        target=target,
-        owner_kind=owner_kind,
-        owner_id=owner,
-        worker_id=worker,
-        reservation=running,
-        reservation_state="committed",
-        actual=actual,
-        status="partial" if partial else "succeeded",
-        partial=partial,
-        timed_out=any_timeout,
-        started_at=started_at,
-        finished_at=finished_at,
-        observations=observations,
-        errors=errors,
-        receipt_id=receipt_id,
+        plan=plan, target=target, owner_kind=owner_kind, owner_id=owner,
+        worker_id=worker, reservation=running, reservation_state="committed",
+        actual=actual, status="partial" if partial else "succeeded", partial=partial,
+        timed_out=any_timeout, started_at=started_at, finished_at=finished_at,
+        observations=observations, errors=errors, receipt_id=receipt_id,
     )
     committed = running.commit(
-        actual=actual,
-        execution_receipt_hash=receipt.receipt_hash,
-        now=finished_at,
+        actual=actual, execution_receipt_hash=receipt.receipt_hash, now=finished_at,
     )
     settled = committed.reconcile_consumed(held_ledger)
     await _invoke(on_settlement, committed, receipt, settled)

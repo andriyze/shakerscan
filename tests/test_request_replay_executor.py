@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 import os
 import sys
@@ -44,6 +45,13 @@ class FakeTransport:
         if self.error:
             raise self.error
         return self.results.pop(0)
+
+
+class HangingTransport(FakeTransport):
+    async def send(self, request, *, target, timeout_seconds, follow_redirects):
+        self.calls.append({"request": request, "target": target})
+        await asyncio.sleep(60)
+        raise AssertionError("worker deadline did not interrupt the transport")
 
 
 def _target(address="192.0.2.10"):
@@ -184,6 +192,41 @@ async def test_partial_timeout_is_measured_and_committed_without_refund_of_attem
 
 
 @pytest.mark.asyncio
+async def test_preconnect_timeout_preserves_timeout_status_without_scope_false_positive():
+    transport = FakeTransport([_result(
+        status_code=None,
+        connected_address=None,
+        error_code="connect_timeout",
+        timed_out=True,
+        response_headers={},
+        response_body=b"",
+    )])
+    outcome = await execute_replay_plan(
+        _plan(), target=_target(), owner_kind="scan", owner_id="scan-1",
+        worker_id="worker-1", limits={"http_requests": 10},
+        consumed={"http_requests": 0}, transport=transport, clock=Clock(),
+    )
+    assert outcome.status == "partial"
+    assert outcome.reservation.status == "committed"
+    assert outcome.receipt.timed_out is True
+    assert outcome.receipt.observations[0]["connected_address"] is None
+
+
+@pytest.mark.asyncio
+async def test_worker_owned_deadline_interrupts_hanging_transport_and_charges_attempt():
+    outcome = await execute_replay_plan(
+        _plan(), target=_target(), owner_kind="scan", owner_id="scan-1",
+        worker_id="worker-1", limits={"http_requests": 10},
+        consumed={"http_requests": 0}, transport=HangingTransport(),
+        timeout_seconds=0.1, clock=Clock(),
+    )
+    assert outcome.status == "partial"
+    assert outcome.receipt.timed_out is True
+    assert outcome.receipt.errors == ("request-1:worker_timeout",)
+    assert outcome.ledger_consumed == {"http_requests": 1}
+
+
+@pytest.mark.asyncio
 async def test_transport_scope_escape_fails_closed_and_charges_attempted_request():
     transport = FakeTransport([_result(connected_address="192.0.2.99")])
     outcome = await execute_replay_plan(
@@ -203,6 +246,21 @@ async def test_transport_scope_escape_fails_closed_and_charges_attempted_request
     assert outcome.reservation.actual == {"http_requests": 1}
     assert outcome.ledger_consumed == {"http_requests": 1}
     assert outcome.receipt.budget_reservation_state == "failed"
+    assert any("replayexecutionerror" in item for item in outcome.receipt.errors)
+
+
+@pytest.mark.asyncio
+async def test_transport_url_userinfo_is_rejected_without_leaking_credentials():
+    transport = FakeTransport([_result(
+        final_url="https://user:password-secret@api.example.test/orders/1",
+    )])
+    outcome = await execute_replay_plan(
+        _plan(), target=_target(), owner_kind="scan", owner_id="scan-1",
+        worker_id="worker-1", limits={"http_requests": 10},
+        consumed={"http_requests": 0}, transport=transport, clock=Clock(),
+    )
+    assert outcome.reservation.status == "failed"
+    assert "password-secret" not in repr(outcome.receipt.public_dict())
     assert any("replayexecutionerror" in item for item in outcome.receipt.errors)
 
 
@@ -278,4 +336,11 @@ def test_executor_requires_bounded_transport_results():
             connected_address="192.0.2.10",
             final_url="https://api.example.test/",
             response_body=b"x" * (2 * 1024 * 1024 + 1),
+        )
+    with pytest.raises(ReplayExecutionError, match="line breaks"):
+        ReplayTransportResult(
+            status_code=200,
+            connected_address="192.0.2.10",
+            final_url="https://api.example.test/",
+            response_headers={"X-Test": "ok\r\nInjected: yes"},
         )
