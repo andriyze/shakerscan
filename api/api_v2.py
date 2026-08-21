@@ -2,8 +2,8 @@
 """V2 API entrypoint layered over the existing control-plane application.
 
 The legacy application still owns the mature database, queue, fleet, evidence, and route
-implementation.  This wrapper adds a fail-closed, structured Hunt start contract without
-editing the multi-megabyte compatibility module.  It can be removed after `/hunts` natively
+implementation. This wrapper adds a fail-closed, structured Hunt start contract without
+editing the multi-megabyte compatibility module. It can be removed after `/hunts` natively
 accepts the same contract.
 """
 
@@ -21,7 +21,14 @@ from hunt.start_contract import (
 )
 
 
-ASGIApp = Callable[[dict[str, Any], Callable[[], Awaitable[dict[str, Any]]], Callable[[dict[str, Any]], Awaitable[None]]], Awaitable[None]]
+ASGIApp = Callable[
+    [
+        dict[str, Any],
+        Callable[[], Awaitable[dict[str, Any]]],
+        Callable[[dict[str, Any]], Awaitable[None]],
+    ],
+    Awaitable[None],
+]
 
 
 async def _json_response(
@@ -84,26 +91,38 @@ class HuntStartContractMiddleware:
         raw_body = b"".join(chunks)
         try:
             decoded = json.loads(raw_body.decode("utf-8"))
-            contract = normalize_hunt_start_payload(decoded)
         except (UnicodeDecodeError, json.JSONDecodeError):
             await _json_response(send, 400, {"detail": "Hunt request body must be valid JSON"})
             return
-        except HuntStartContractError as exc:
-            await _json_response(
-                send,
-                422,
-                {"detail": str(exc), "schema_version": "hunt-start/v2"},
-            )
+        if not isinstance(decoded, Mapping):
+            await _json_response(send, 422, {"detail": "Hunt request body must be an object"})
             return
 
-        # The compatibility route predates the structured policy object. The wrapper enforces it,
-        # then forwards only fields the existing route already understands. It intentionally never
-        # inserts raw credentials; all credential values remain opaque profile references.
-        forwarded = json.dumps(
-            contract.legacy_payload(decoded),
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
+        # Compatibility window: old clients did not have a structured policy field. Preserve
+        # those requests unchanged so upgrading the API does not break stored-credential Hunt
+        # flows. As soon as a client submits `policy`, the complete V2 contract is mandatory and
+        # fail-closed. The migration UI patch switches the normal web client to this explicit path.
+        explicit_policy = "policy" in decoded
+        if explicit_policy:
+            try:
+                contract = normalize_hunt_start_payload(decoded)
+            except HuntStartContractError as exc:
+                await _json_response(
+                    send,
+                    422,
+                    {"detail": str(exc), "schema_version": "hunt-start/v2"},
+                )
+                return
+            forwarded = json.dumps(
+                contract.legacy_payload(decoded),
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            contract_header = b"v2"
+        else:
+            forwarded = raw_body
+            contract_header = b"legacy-compatible"
+
         delivered = False
 
         async def replay_receive() -> dict[str, Any]:
@@ -116,7 +135,7 @@ class HuntStartContractMiddleware:
         async def contract_send(message: dict[str, Any]) -> None:
             if message.get("type") == "http.response.start":
                 headers = list(message.get("headers") or [])
-                headers.append((b"x-shakerscan-hunt-contract", b"v2"))
+                headers.append((b"x-shakerscan-hunt-contract", contract_header))
                 message = {**message, "headers": headers}
             await send(message)
 
