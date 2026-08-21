@@ -10,6 +10,13 @@ try:
 except ModuleNotFoundError:  # package import in host-side tests
     from ..runtime.models import ScanBudget, ScanPolicy
 
+from .execution import ScanExecutionPlan
+from .legacy import (
+    LEGACY_SCAN_MAPPING,
+    compatibility_executor_alias,
+    translate_legacy_scan_type,
+)
+
 
 BUDGET_PROFILES: Mapping[str, ScanBudget] = {
     "fast": ScanBudget(300, 1_000, 500, 50, 1_000, 180, 2),
@@ -27,44 +34,6 @@ _BUDGET_CEILINGS = {
     "max_workers": 128,
 }
 
-LEGACY_SCAN_MAPPING: Mapping[str, Mapping[str, Any]] = {
-    "quick": {"budget_profile": "fast", "active_testing": False},
-    "standard": {"budget_profile": "balanced", "active_testing": False},
-    "deep": {"budget_profile": "thorough", "active_testing": False},
-    "full": {"budget_profile": "thorough", "active_testing": True},
-    "aggressive": {"budget_profile": "thorough", "active_testing": True,
-                   "advanced": {"max_duration_seconds": 7_200, "max_http_requests": 40_000}},
-    "smart": {"budget_profile": "thorough", "active_testing": True},
-}
-
-SCAN_AUTHENTICATION_KEYS = frozenset({
-    "auth_cookies", "auth_header", "auth_headers_json", "auth_scenario_json",
-    "login_url", "login_username", "login_password", "login_extra_fields", "auto_auth",
-    "oauth_client_id", "oauth_client_secret", "oauth_token_url", "oauth_scope",
-    "oauth_username", "oauth_password", "user2_cookies", "user2_header",
-    "user2_login_username", "user2_login_password",
-})
-
-
-def normalize_scan_authentication(value: Mapping[str, Any] | None) -> dict[str, Any]:
-    authentication = dict(value or {})
-    unknown = set(authentication) - set(SCAN_AUTHENTICATION_KEYS)
-    if unknown:
-        raise ValueError(f"unsupported authentication fields: {', '.join(sorted(unknown))}")
-    normalized: dict[str, Any] = {}
-    for key, item in authentication.items():
-        if item in (None, "", [], {}):
-            continue
-        if key == "auto_auth":
-            if not isinstance(item, bool):
-                raise ValueError("auto_auth must be a boolean")
-            normalized[key] = item
-            continue
-        if not isinstance(item, str) or len(item) > 131_072:
-            raise ValueError(f"{key} must be a string of at most 131072 characters")
-        normalized[key] = item
-    return normalized
-
 
 @dataclass(frozen=True)
 class ResolvedScanContract:
@@ -72,19 +41,31 @@ class ResolvedScanContract:
     policy: ScanPolicy
     budget_profile: str
     budget: ScanBudget
-    execution_scan_type: str
+    execution_plan: ScanExecutionPlan
+    legacy_executor_alias: str
     legacy_scan_type: str | None = None
     deprecations: tuple[Mapping[str, Any], ...] = ()
 
+    @property
+    def execution_scan_type(self) -> str:
+        """Deprecated compatibility property for the current monolithic worker.
+
+        Canonical consumers must use ``execution_plan``. This property can be removed
+        once worker/scanner dispatch no longer accepts six legacy mode names.
+        """
+        return self.legacy_executor_alias
+
     def option_metadata(self) -> dict[str, Any]:
-        return {
-            "scan_generation": self.generation,
-            "scan_policy": asdict(self.policy),
-            "resolved_scan_budget": asdict(self.budget),
-            "budget_profile": self.budget_profile,
+        metadata = self.execution_plan.option_metadata()
+        metadata.update({
             "legacy_scan_type": self.legacy_scan_type,
             "deprecations": [dict(item) for item in self.deprecations],
-        }
+            "scan_compatibility": {
+                "legacy_executor_alias": self.legacy_executor_alias,
+                "temporary": True,
+            },
+        })
+        return metadata
 
 
 def _resolve_budget(profile: str, advanced: Mapping[str, Any] | None) -> ScanBudget:
@@ -124,45 +105,23 @@ def resolve_scan_contract(
     approval_receipt_id: str | None = None,
     legacy_scan_type: str | None = None,
 ) -> ResolvedScanContract:
-    """Resolve a reproducible V2 policy/budget snapshot.
+    """Resolve one immutable V2 Scan plan plus a temporary old-worker adapter.
 
-    Legacy type affects only the compatibility mapping and old executor adapter. It never maps to
-    Hunt and is always returned with explicit deprecation metadata.
+    Legacy ``scan_type`` is translated exactly once at this boundary. The canonical
+    execution plan always has engine identity ``scan``; it never becomes Hunt and it
+    never embeds ``quick``, ``deep``, ``full``, ``aggressive``, or ``smart``.
     """
-    legacy = str(legacy_scan_type or "").strip().lower() or None
+    translation = translate_legacy_scan_type(legacy_scan_type)
     compatibility_advanced: dict[str, Any] = {}
-    deprecation_items: list[Mapping[str, Any]] = []
-    if legacy:
-        try:
-            mapping = LEGACY_SCAN_MAPPING[legacy]
-        except KeyError as exc:
-            raise ValueError("legacy scan_type is invalid") from exc
-        profile = str(mapping["budget_profile"])
-        active_testing = bool(mapping["active_testing"])
-        compatibility_advanced.update(mapping.get("advanced") or {})
-        deprecation_items.append({
-            "field": "scan_type",
-            "value": legacy,
-            "replacement": {
-                "active_testing": active_testing,
-                "budget_profile": profile,
-            },
-        })
-        execution_scan_type = legacy
+    deprecations: tuple[Mapping[str, Any], ...] = ()
+    if translation is not None:
+        profile = translation.budget_profile
+        active_testing = translation.active_testing
+        compatibility_advanced.update(translation.advanced)
+        deprecations = (translation.deprecation(),)
     else:
-        requested_profile = str(budget_profile or "balanced").strip().lower()
-        if requested_profile == "exhaustive":
-            profile = "thorough"
-            deprecation_items.append({
-                "field": "budget_profile", "value": "exhaustive",
-                "replacement": "thorough",
-            })
-        else:
-            profile = requested_profile
+        profile = str(budget_profile or "balanced").strip().lower()
         active_testing = bool((policy or {}).get("active_testing", False))
-        # Temporary compatibility adapter into the existing deterministic phase implementations.
-        # V2 policy remains authoritative and is persisted independently from this internal alias.
-        execution_scan_type = "full" if active_testing else "deep"
 
     policy_data = policy if isinstance(policy, Mapping) else {}
     allowed_policy_keys = {
@@ -172,7 +131,9 @@ def resolve_scan_contract(
     unknown_policy = set(policy_data) - allowed_policy_keys
     if unknown_policy:
         raise ValueError(f"unsupported scan policy fields: {', '.join(sorted(unknown_policy))}")
-    active_testing = bool(active_testing if legacy else policy_data.get("active_testing", False))
+    active_testing = bool(
+        active_testing if translation is not None else policy_data.get("active_testing", False)
+    )
     include = tuple(dict.fromkeys(
         str(item).strip().lower() for item in (
             policy_data.get("include_families") or (advanced or {}).get("include_families") or []
@@ -196,13 +157,22 @@ def resolve_scan_contract(
     )
     if resolved_policy.allow_state_changing_http and not resolved_policy.active_testing:
         raise ValueError("state-changing HTTP requires active_testing")
-    if resolved_policy.network_discovery and not resolved_policy.active_testing:
-        raise ValueError("network_discovery requires active_testing")
-    if resolved_policy.network_discovery and not resolved_policy.approval_receipt_id:
-        raise ValueError("network_discovery requires a target-bound approval receipt")
     merged_advanced = {**compatibility_advanced, **dict(advanced or {})}
     budget = _resolve_budget(profile, merged_advanced)
+    execution_plan = ScanExecutionPlan(
+        policy=resolved_policy,
+        budget_profile=profile,
+        budget=budget,
+    )
     return ResolvedScanContract(
-        "v2", resolved_policy, profile, budget, execution_scan_type, legacy,
-        tuple(deprecation_items),
+        generation="v2",
+        policy=resolved_policy,
+        budget_profile=profile,
+        budget=budget,
+        execution_plan=execution_plan,
+        legacy_executor_alias=compatibility_executor_alias(
+            policy=resolved_policy, translation=translation
+        ),
+        legacy_scan_type=(translation.legacy_scan_type if translation is not None else None),
+        deprecations=deprecations,
     )
