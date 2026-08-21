@@ -40,6 +40,7 @@ class LegacyScanTranslation:
 
     @property
     def legacy_executor_alias(self) -> str:
+        """Deprecated inspection-only original name; never use it for V2 dispatch."""
         return self.legacy_scan_type
 
     def deprecation(self) -> Mapping[str, Any]:
@@ -72,11 +73,11 @@ def translate_legacy_scan_type(value: str | None) -> LegacyScanTranslation | Non
 def compatibility_executor_alias(
     *, policy: ScanPolicy, translation: LegacyScanTranslation | None
 ) -> str:
-    """Return the old worker alias while legacy execution remains wired.
+    """Return one temporary passive/active backing preset for every V2 Scan.
 
-    This function is intentionally isolated so removal of the old six-mode worker
-    requires deleting one adapter rather than changing canonical Scan semantics.
+    The original legacy name remains deprecation metadata only. It must not resurrect
+    six execution paths after translation. Once the monolithic scanner consumes the
+    canonical plan directly, this two-value adapter can be deleted as well.
     """
-    if translation is not None:
-        return translation.legacy_executor_alias
+    _ = translation
     return "full" if policy.active_testing else "deep"

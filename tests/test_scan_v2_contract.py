@@ -47,11 +47,31 @@ def test_every_legacy_type_translates_to_one_scan_plan_with_deprecation(
     assert contract.policy.active_testing is active
     assert contract.execution_plan.engine == "scan"
     assert contract.execution_plan.canonical_dict()["engine"] == "scan"
-    assert contract.execution_scan_type == legacy  # isolated compatibility adapter
+    assert contract.execution_scan_type == ("full" if active else "deep")
+    assert contract.option_metadata()["scan_compatibility"] == {
+        "legacy_executor_alias": "full" if active else "deep",
+        "temporary": True,
+    }
     assert contract.deprecations == ({
         "field": "scan_type", "value": legacy,
         "replacement": {"active_testing": active, "budget_profile": profile},
     },)
+
+
+def test_all_legacy_names_collapse_to_two_temporary_worker_backing_presets():
+    aliases = {
+        legacy: resolve_scan_contract(legacy_scan_type=legacy).execution_scan_type
+        for legacy in LEGACY_SCAN_MAPPING
+    }
+    assert aliases == {
+        "quick": "deep",
+        "standard": "deep",
+        "deep": "deep",
+        "full": "full",
+        "aggressive": "full",
+        "smart": "full",
+    }
+    assert set(aliases.values()) == {"deep", "full"}
 
 
 def test_smart_legacy_mapping_never_becomes_hunt_or_enters_canonical_plan():
