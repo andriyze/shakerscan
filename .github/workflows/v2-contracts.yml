@@ -7,6 +7,8 @@ on:
     paths:
       - api/runtime/**
       - api/scan/**
+      - api/worker_v2.py
+      - scanner/entrypoint.sh
       - scanner/manifests.py
       - scanner/scanner_tools/request_collections.py
       - scanner/scanner_tools/request_replay.py
@@ -21,11 +23,14 @@ on:
       - tests/test_scan_job_contract.py
       - tests/test_scan_v2_contract.py
       - tests/test_scan_worker_contract.py
+      - tests/test_scan_worker_dispatch.py
       - .github/workflows/v2-contracts.yml
   pull_request:
     paths:
       - api/runtime/**
       - api/scan/**
+      - api/worker_v2.py
+      - scanner/entrypoint.sh
       - scanner/manifests.py
       - scanner/scanner_tools/request_collections.py
       - scanner/scanner_tools/request_replay.py
@@ -40,6 +45,7 @@ on:
       - tests/test_scan_job_contract.py
       - tests/test_scan_v2_contract.py
       - tests/test_scan_worker_contract.py
+      - tests/test_scan_worker_dispatch.py
       - .github/workflows/v2-contracts.yml
   workflow_dispatch:
 
@@ -72,7 +78,8 @@ jobs:
             tests/test_scan_v2_contract.py \
             tests/test_scan_execution_plan.py \
             tests/test_scan_job_contract.py \
-            tests/test_scan_worker_contract.py
+            tests/test_scan_worker_contract.py \
+            tests/test_scan_worker_dispatch.py
 
       - name: Validate durable budget and receipt contracts
         env:
@@ -102,6 +109,7 @@ jobs:
           python -m compileall -q \
             api/runtime \
             api/scan \
+            api/worker_v2.py \
             scanner/manifests.py \
             scanner/scanner_tools/request_replay.py \
             scanner/scanner_tools/request_replay_executor.py
