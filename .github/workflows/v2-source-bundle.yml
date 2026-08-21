@@ -1,0 +1,43 @@
+name: V2 source bundle
+
+on:
+  push:
+    branches:
+      - v2
+    paths:
+      - .github/workflows/v2-source-bundle.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Record source identity
+        run: |
+          git rev-parse HEAD > V2_SOURCE_SHA
+          git status --short --branch > V2_SOURCE_STATUS
+
+      - name: Build source archive
+        run: |
+          tar \
+            --exclude=.git \
+            --exclude='**/node_modules' \
+            --exclude='**/.next' \
+            --exclude='**/__pycache__' \
+            --exclude='**/.pytest_cache' \
+            -czf shakerscan-v2-source.tar.gz .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shakerscan-v2-source-${{ github.sha }}
+          path: shakerscan-v2-source.tar.gz
+          retention-days: 1
+          if-no-files-found: error
