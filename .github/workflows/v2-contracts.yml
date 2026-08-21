@@ -10,12 +10,15 @@ on:
       - scanner/manifests.py
       - scanner/scanner_tools/request_collections.py
       - scanner/scanner_tools/request_replay.py
+      - scanner/scanner_tools/request_replay_executor.py
       - tests/test_request_collections_v2.py
       - tests/test_budget_reservation_lifecycle.py
       - tests/test_runtime_receipts.py
       - tests/test_discovery_recovery_checkpoint.py
       - tests/test_request_replay.py
+      - tests/test_request_replay_executor.py
       - tests/test_scan_execution_plan.py
+      - tests/test_scan_job_contract.py
       - tests/test_scan_v2_contract.py
       - tests/test_scan_worker_contract.py
       - .github/workflows/v2-contracts.yml
@@ -26,12 +29,15 @@ on:
       - scanner/manifests.py
       - scanner/scanner_tools/request_collections.py
       - scanner/scanner_tools/request_replay.py
+      - scanner/scanner_tools/request_replay_executor.py
       - tests/test_request_collections_v2.py
       - tests/test_budget_reservation_lifecycle.py
       - tests/test_runtime_receipts.py
       - tests/test_discovery_recovery_checkpoint.py
       - tests/test_request_replay.py
+      - tests/test_request_replay_executor.py
       - tests/test_scan_execution_plan.py
+      - tests/test_scan_job_contract.py
       - tests/test_scan_v2_contract.py
       - tests/test_scan_worker_contract.py
       - .github/workflows/v2-contracts.yml
@@ -65,6 +71,7 @@ jobs:
           python -m pytest -q -p no:cacheprovider \
             tests/test_scan_v2_contract.py \
             tests/test_scan_execution_plan.py \
+            tests/test_scan_job_contract.py \
             tests/test_scan_worker_contract.py
 
       - name: Validate durable budget and receipt contracts
@@ -77,10 +84,11 @@ jobs:
 
       - name: Validate exact request replay contracts
         env:
-          PYTHONPATH: scanner
+          PYTHONPATH: api:scanner
         run: |
           python -m pytest -q -p no:cacheprovider \
-            tests/test_request_replay.py
+            tests/test_request_replay.py \
+            tests/test_request_replay_executor.py
 
       - name: Validate discovery recovery contracts
         env:
@@ -95,4 +103,5 @@ jobs:
             api/runtime \
             api/scan \
             scanner/manifests.py \
-            scanner/scanner_tools/request_replay.py
+            scanner/scanner_tools/request_replay.py \
+            scanner/scanner_tools/request_replay_executor.py
