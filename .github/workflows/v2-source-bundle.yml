@@ -4,8 +4,6 @@ on:
   push:
     branches:
       - v2
-    paths:
-      - .github/workflows/v2-source-bundle.yml
   workflow_dispatch:
 
 permissions:
@@ -13,6 +11,7 @@ permissions:
 
 jobs:
   bundle:
+    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
