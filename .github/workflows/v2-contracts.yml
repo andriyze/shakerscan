@@ -1,0 +1,71 @@
+name: V2 migration contracts
+
+on:
+  push:
+    branches:
+      - v2
+    paths:
+      - api/runtime/**
+      - api/scan/**
+      - scanner/scanner_tools/request_collections.py
+      - scanner/scanner_tools/request_replay.py
+      - tests/test_request_collections_v2.py
+      - tests/test_request_replay.py
+      - tests/test_scan_execution_plan.py
+      - tests/test_scan_v2_contract.py
+      - .github/workflows/v2-contracts.yml
+  pull_request:
+    paths:
+      - api/runtime/**
+      - api/scan/**
+      - scanner/scanner_tools/request_collections.py
+      - scanner/scanner_tools/request_replay.py
+      - tests/test_request_collections_v2.py
+      - tests/test_request_replay.py
+      - tests/test_scan_execution_plan.py
+      - tests/test_scan_v2_contract.py
+      - .github/workflows/v2-contracts.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: v2-contracts-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install focused test dependency
+        run: python -m pip install --disable-pip-version-check pytest
+
+      - name: Validate canonical Scan contracts
+        env:
+          PYTHONPATH: api
+        run: |
+          python -m pytest -q -p no:cacheprovider \
+            tests/test_scan_v2_contract.py \
+            tests/test_scan_execution_plan.py
+
+      - name: Validate exact request replay contracts
+        env:
+          PYTHONPATH: scanner
+        run: |
+          python -m pytest -q -p no:cacheprovider \
+            tests/test_request_replay.py
+
+      - name: Compile V2 runtime modules
+        run: |
+          python -m compileall -q \
+            api/runtime \
+            api/scan \
+            scanner/scanner_tools/request_replay.py
