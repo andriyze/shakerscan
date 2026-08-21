@@ -10,6 +10,8 @@ on:
       - scanner/scanner_tools/request_collections.py
       - scanner/scanner_tools/request_replay.py
       - tests/test_request_collections_v2.py
+      - tests/test_budget_reservation_lifecycle.py
+      - tests/test_runtime_receipts.py
       - tests/test_request_replay.py
       - tests/test_scan_execution_plan.py
       - tests/test_scan_v2_contract.py
@@ -21,6 +23,8 @@ on:
       - scanner/scanner_tools/request_collections.py
       - scanner/scanner_tools/request_replay.py
       - tests/test_request_collections_v2.py
+      - tests/test_budget_reservation_lifecycle.py
+      - tests/test_runtime_receipts.py
       - tests/test_request_replay.py
       - tests/test_scan_execution_plan.py
       - tests/test_scan_v2_contract.py
@@ -55,6 +59,14 @@ jobs:
           python -m pytest -q -p no:cacheprovider \
             tests/test_scan_v2_contract.py \
             tests/test_scan_execution_plan.py
+
+      - name: Validate durable budget and receipt contracts
+        env:
+          PYTHONPATH: api
+        run: |
+          python -m pytest -q -p no:cacheprovider \
+            tests/test_budget_reservation_lifecycle.py \
+            tests/test_runtime_receipts.py
 
       - name: Validate exact request replay contracts
         env:
