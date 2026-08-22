@@ -12,6 +12,11 @@ import urllib.request
 from collections.abc import Collection
 from typing import Any
 
+try:
+    from .url_redaction import redact_path
+except ImportError:  # direct host-side import in focused tests
+    from url_redaction import redact_path
+
 
 REQUEST_METER_SCHEMA_V1 = "request_meter_v1"
 REQUEST_BUDGET_MODES = frozenset({"off", "compatibility", "enforce"})
@@ -299,7 +304,7 @@ class RequestMeter:
             "event": event,
             "phase": str(phase)[:100],
             "host": (parsed.hostname or "")[:253] or None,
-            "path": (parsed.path or "/")[:500],
+            "path": redact_path(parsed.path or "/")[:500],
             **extra,
         })
         if len(self.events) > 100:

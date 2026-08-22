@@ -21,6 +21,11 @@ except ModuleNotFoundError:  # package imports in host-side tests
     from ..runtime.models import PreparedExecution, TargetBinding
     from ..runtime.secret_material import contains_secret_material
 
+try:
+    from scanner_tools.url_redaction import redact_url
+except ModuleNotFoundError:  # package imports in host-side tests
+    from scanner.scanner_tools.url_redaction import redact_url
+
 
 SAFE_BROWSER_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 MAX_BROWSER_RESPONSE_OBSERVATIONS = 200
@@ -63,13 +68,7 @@ def _origin_key(value: str) -> tuple[str, str, int]:
 
 
 def _redacted_path(value: str) -> str:
-    parsed = urllib.parse.urlsplit(value)
-    names = [
-        str(name)[:100]
-        for name, _item in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)[:50]
-    ]
-    query = urllib.parse.urlencode([(name, "<redacted>") for name in names])
-    return urllib.parse.urlunsplit(("", "", parsed.path or "/", query, ""))
+    return redact_url(value, max_length=2_000)
 
 
 @dataclass(frozen=True)
@@ -807,10 +806,7 @@ def _is_ip_literal(value: str | None) -> bool:
 
 
 def _observation_url(value: str) -> str:
-    parsed = urllib.parse.urlsplit(str(value or ""))
-    return urllib.parse.urlunsplit(
-        (parsed.scheme.lower(), parsed.netloc.lower(), parsed.path or "/", "", "")
-    )[:2_000]
+    return redact_url(str(value or ""), max_length=2_000)
 
 
 def _safe_content_type(value: Any) -> str:

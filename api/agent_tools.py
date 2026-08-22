@@ -25,6 +25,11 @@ from typing import Any, Optional
 
 from runtime.capability_registry import CAPABILITY_REGISTRY
 
+try:
+    from scanner_tools.url_redaction import redact_url
+except ModuleNotFoundError:  # package import in host-side tests
+    from scanner.scanner_tools.url_redaction import redact_url
+
 # Methods the model may request. Reads are read-only; writes are credential/active-gated.
 READ_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "OPTIONS"})
 WRITE_METHODS: frozenset[str] = frozenset({"POST", "PUT", "PATCH", "DELETE"})
@@ -701,19 +706,14 @@ def scanner_request_settlement(name: str, stdout: str) -> dict[str, Any]:
 
 
 def _public_observed_url(value: Any) -> str | None:
-    """Retain route and parameter names while removing query values from scanner output."""
+    """Retain route shape while removing secrets from untrusted scanner output."""
     text = str(value or "").strip()
     if not text:
         return None
     try:
-        parsed = urllib.parse.urlsplit(text)
+        return redact_url(text, max_length=2_000)
     except ValueError:
-        return text.split("?", 1)[0][:1000]
-    if not parsed.scheme or not parsed.netloc:
-        return text.split("?", 1)[0][:1000]
-    query_names = [name for name, _ in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)]
-    safe_query = urllib.parse.urlencode([(name[:100], "<redacted>") for name in query_names[:50]])
-    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, safe_query, ""))[:2000]
+        return None
 
 
 def parse_scanner_output(

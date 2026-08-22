@@ -412,9 +412,10 @@ def test_katana_argv_is_bounded_and_same_host():
 
 
 def test_external_scanner_output_is_typed_and_query_values_are_redacted():
+    secret = "AbCdEf0123456789AbCdEf0123456789"
     output = at.parse_scanner_output("nuclei", json.dumps({
         "template-id": "cve-test",
-        "matched-at": "https://app.test/search?q=secret-value",
+        "matched-at": f"https://app.test/reset/{secret}?q=secret-value",
         "matcher-name": "body",
         "info": {"name": "Test match", "severity": "high"},
     }))
@@ -423,6 +424,8 @@ def test_external_scanner_output_is_typed_and_query_values_are_redacted():
     record = output["records"][0]
     assert record["kind"] == "template_match"
     assert record["proof_state"] == "candidate"
+    assert secret not in record["matched_at"]
+    assert "/reset/<redacted>" in record["matched_at"]
     assert "secret-value" not in record["matched_at"]
     assert "q=%3Credacted%3E" in record["matched_at"]
 

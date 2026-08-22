@@ -12,6 +12,8 @@ from api.capabilities.browser import (
     BrowserCapabilityInputError,
     BrowserInteractAdapter,
     BrowserNavigateAdapter,
+    _observation_url,
+    _redacted_path,
     _validate_read_only_interaction,
     browser_capability_adapter,
 )
@@ -159,6 +161,17 @@ def test_browser_prepare_rejects_raw_secrets_before_queue_admission(path):
             base_url="https://app.example.test",
             args={"path": path},
         )
+
+
+def test_browser_public_paths_redact_opaque_secret_segments():
+    secret = "AbCdEf0123456789AbCdEf0123456789"
+    relative = f"/reset/{secret}?page=2"
+    observed = f"https://app.example.test/reset/{secret}?page=2"
+
+    assert secret not in _redacted_path(relative)
+    assert secret not in _observation_url(observed)
+    assert "/reset/<redacted>" in _redacted_path(relative)
+    assert "page=%3Credacted%3E" in _redacted_path(relative)
 
 
 def test_browser_interaction_prepare_is_deterministic_bounded_and_redacted():

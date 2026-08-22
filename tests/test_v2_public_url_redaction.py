@@ -5,8 +5,8 @@ import os
 import sys
 
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scanner"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from scanner.manifests import DiscoveryRecoverySink, EndpointManifest, normalize_endpoint
 from scanner_tools.url_redaction import redact_path, redact_url

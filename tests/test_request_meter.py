@@ -57,6 +57,25 @@ def test_request_meter_tracks_attempt_completion_retry_and_rejection():
     }
 
 
+def test_request_meter_events_redact_opaque_secret_path_segments():
+    secret = "AbCdEf0123456789AbCdEf0123456789"
+    meter = configure_request_meter(
+        limit=1,
+        target_host="app.test",
+        mode="enforce",
+        planned=1,
+        reserved=1,
+    )
+
+    assert meter.before_request(
+        phase="probe", url=f"https://app.test/reset/{secret}",
+    ) is True
+
+    serialized = str(meter.snapshot()["events"])
+    assert secret not in serialized
+    assert "/reset/<redacted>" in serialized
+
+
 def test_request_meter_enforces_and_reports_state_changing_reservation():
     meter = configure_request_meter(
         limit=5,
