@@ -1786,7 +1786,9 @@ def test_canonical_submit_clears_legacy_mode_selectors_before_worker_admission()
     assert "CanonicalScanJob.create(" in submit
     assert "scan_job_payload, scan_job_digest" in submit
     assert "job_data = canonical_job.queue_payload(" in submit
-    assert "placement=normalize_placement(options_payload.get(\"placement\") or {})" in submit
+    assert "else normalize_placement(options_payload.get(\"placement\") or {})" in submit
+    assert "None if parallel_enabled" in submit
+    assert "_configure_scan_plan_job(job_data, parallel_worker_count)" in submit
     assert "'queue_schema': canonical_job.schema_version" in submit
 
 

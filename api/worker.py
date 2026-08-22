@@ -114,7 +114,7 @@ from scan.worker_dispatch import (
     is_deterministic_dast,
     prepare_worker_dispatch,
 )
-from scan.jobs import SCAN_JOB_SCHEMA
+from scan.jobs import CanonicalScanJob, CanonicalScanJobError, SCAN_JOB_SCHEMA
 from scan.job_runtime import (
     CanonicalScanJobMaterializationError,
     materialize_canonical_scan_job,
@@ -11974,13 +11974,29 @@ async def process_scan_plan_job(job_data: dict):
                 "UPDATE scans SET scan_role = 'standalone', options = $1 WHERE id = $2",
                 json.dumps(single_opts), uuid.UUID(parent_id),
             )
-        enqueue_job(r, QUEUE_NAME, {
-            'job_id': parent_job_id,
-            'scan_id': parent_id,
-            'target': target_url,
-            'options': single_opts,
-            'submitted_at': utc_now_iso(),
-        })
+        canonical_source = job_data.get("_canonical_queue_payload")
+        if isinstance(canonical_source, Mapping):
+            try:
+                parent_job = CanonicalScanJob.from_queue_payload(canonical_source)
+                standalone_payload = parent_job.queue_payload(
+                    placement=(
+                        single_opts.get("placement")
+                        if isinstance(single_opts.get("placement"), Mapping) else None
+                    ),
+                )
+            except CanonicalScanJobError as exc:
+                raise ExecutionScopeError(
+                    f"parallel fallback lost canonical Scan authority: {exc}"
+                ) from exc
+        else:
+            standalone_payload = {
+                'job_id': parent_job_id,
+                'scan_id': parent_id,
+                'target': target_url,
+                'options': single_opts,
+                'submitted_at': utc_now_iso(),
+            }
+        enqueue_job(r, QUEUE_NAME, standalone_payload)
         return
 
     # Mark parent running and fan out child shard rows + jobs. Record the

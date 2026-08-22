@@ -120,6 +120,32 @@ def test_canonical_scan_job_queue_transport_allows_only_normalized_routing_metad
         CanonicalScanJob.from_queue_payload(changed)
 
 
+def test_parallel_parent_transport_is_local_bounded_and_mode_free():
+    job = _job()
+    queued = job.queue_payload()
+    queued.update({
+        "type": "scan_plan",
+        "placement": {"node_scope": "local"},
+        "attempt": 1,
+        "plan_version": 1,
+        "parallel_worker_count": 4,
+    })
+
+    assert CanonicalScanJob.from_queue_payload(queued) == job
+    assert "options" not in queued
+    assert "target" in queued and isinstance(queued["target"], dict)
+
+    remote = copy.deepcopy(queued)
+    remote["placement"] = {"node_scope": "remote"}
+    with pytest.raises(CanonicalScanJobError, match="must remain local"):
+        CanonicalScanJob.from_queue_payload(remote)
+
+    oversized = copy.deepcopy(queued)
+    oversized["parallel_worker_count"] = 5
+    with pytest.raises(CanonicalScanJobError, match="worker budget"):
+        CanonicalScanJob.from_queue_payload(oversized)
+
+
 @pytest.mark.parametrize("legacy", ["quick", "standard", "deep", "full", "aggressive", "smart"])
 def test_legacy_alias_is_translated_before_queue_boundary(legacy):
     contract = resolve_scan_contract(legacy_scan_type=legacy)

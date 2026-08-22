@@ -131,3 +131,17 @@ def test_primary_worker_materializes_scan_job_v2_before_scope_and_freshness_chec
     freshness = handler.index("_refuse_stale_job_if_needed")
     assert materialize < scope < freshness
     assert handler.count("_safe_requeue_payload(job_data)") == 3
+
+
+def test_parallel_parent_fallback_requeues_canonical_scan_authority():
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "api" / "worker.py").read_text()
+    start = source.index("async def process_scan_plan_job(")
+    end = source.index("\n\nasync def process_scan_shard_job", start)
+    handler = source[start:end]
+    fallback = handler[handler.index("# Not worth parallelizing"):]
+
+    assert 'canonical_source = job_data.get("_canonical_queue_payload")' in fallback
+    assert "CanonicalScanJob.from_queue_payload(canonical_source)" in fallback
+    assert "standalone_payload = parent_job.queue_payload(" in fallback
+    assert "enqueue_job(r, QUEUE_NAME, standalone_payload)" in fallback

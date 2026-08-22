@@ -28005,6 +28005,11 @@ async def submit_scan(request: ScanRequest):
             options_payload,
             scan_type,
         )
+        if parallel_worker_count is not None:
+            parallel_worker_count = min(
+                max(0, int(parallel_worker_count)),
+                scan_contract.budget.max_workers,
+            )
         if executable_collection_refs and parallel_enabled:
             # Exact replay owns one logical Scan ledger.  The current compatibility
             # fan-out would execute the same saved selection once per shard, so keep
@@ -28095,16 +28100,13 @@ async def submit_scan(request: ScanRequest):
         )
 
     # Queue the job
-    canonical_queue = not parallel_enabled
+    canonical_queue = True
     job_data = canonical_job.queue_payload(
-        placement=normalize_placement(options_payload.get("placement") or {}),
-    ) if canonical_queue else {
-        'job_id': job_id,
-        'scan_id': scan_id,
-        'target': scan_target,
-        'options': persisted_options,
-        'submitted_at': utc_now_iso()
-    }
+        placement=(
+            None if parallel_enabled
+            else normalize_placement(options_payload.get("placement") or {})
+        ),
+    )
     # Parallel scans are routed to the plan stage, which decomposes the parent
     # into shard jobs. Everything else stays on the standard scan path.
     if parallel_enabled:

@@ -65,7 +65,10 @@ _JOB_KEYS = frozenset({
     "execution_plan", "execution_plan_digest", "request_collections",
     "credential_profile_ids", "endpoint_manifest_id",
 })
-_QUEUE_TRANSPORT_KEYS = frozenset({"placement", "_base_queue_name"})
+_QUEUE_TRANSPORT_KEYS = frozenset({
+    "placement", "_base_queue_name", "type", "attempt", "plan_version",
+    "parallel_worker_count",
+})
 _PLACEMENT_SCALAR_KEYS = frozenset({
     "region", "egress_group", "network", "scan_tier", "tier",
     "data_residency", "node_id", "node_scope",
@@ -187,6 +190,36 @@ def scan_job_queue_transport(value: Mapping[str, Any]) -> dict[str, Any]:
             value.get("_base_queue_name"), name="_base_queue_name"
         )
         transport["_base_queue_name"] = base
+    if "type" in value:
+        job_type = str(value.get("type") or "").strip()
+        if job_type != "scan_plan":
+            raise CanonicalScanJobError("scan-job/v2 queue type is invalid")
+        transport["type"] = job_type
+    for key, minimum, maximum in (
+        ("attempt", 1, 100),
+        ("plan_version", 1, 100),
+        ("parallel_worker_count", 0, 128),
+    ):
+        if key not in value:
+            continue
+        item = value.get(key)
+        if isinstance(item, bool) or not isinstance(item, int) or not minimum <= item <= maximum:
+            raise CanonicalScanJobError(f"scan-job/v2 queue {key} is invalid")
+        transport[key] = item
+    if transport.get("type") == "scan_plan":
+        for required in ("placement", "attempt", "plan_version"):
+            if required not in transport:
+                raise CanonicalScanJobError(
+                    f"scan-job/v2 scan_plan transport requires {required}"
+                )
+        if transport["placement"] != {"node_scope": "local"}:
+            raise CanonicalScanJobError(
+                "scan-job/v2 scan_plan transport must remain local"
+            )
+    elif any(key in transport for key in ("attempt", "plan_version", "parallel_worker_count")):
+        raise CanonicalScanJobError(
+            "scan-job/v2 orchestration metadata requires scan_plan type"
+        )
     return transport
 
 
@@ -563,8 +596,14 @@ class CanonicalScanJob:
             raise CanonicalScanJobError("scan job queue payload must be an object")
         raw = dict(value)
         _reject_forbidden_keys(raw)
-        scan_job_queue_transport(raw)
-        return cls.from_payload({key: raw[key] for key in _JOB_KEYS if key in raw})
+        transport = scan_job_queue_transport(raw)
+        job = cls.from_payload({key: raw[key] for key in _JOB_KEYS if key in raw})
+        worker_count = transport.get("parallel_worker_count")
+        if worker_count is not None and worker_count > job.execution_plan.budget.max_workers:
+            raise CanonicalScanJobError(
+                "parallel_worker_count exceeds the canonical Scan worker budget"
+            )
+        return job
 
     @property
     def payload_digest(self) -> str:
