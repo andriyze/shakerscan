@@ -66,9 +66,13 @@ __all__ = [
     "vendor_risk",
 ]
 
-# Load narrow, idempotent request-replay hardening while older worker images remain supported.
+# Load narrow, idempotent V2 hardening while older worker images remain supported.
 from .v2_request_replay_hardening import (
     apply_request_replay_hardening as _apply_request_replay_hardening,
 )
+from .v2_fingerprint_hardening import (
+    apply_v2_fingerprint_hardening as _apply_v2_fingerprint_hardening,
+)
 
 _apply_request_replay_hardening()
+_apply_v2_fingerprint_hardening()
