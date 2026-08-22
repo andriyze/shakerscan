@@ -880,32 +880,14 @@ class _CancellableFakeProcess:
 
 
 class _FakeCredentialPool:
-    async def fetchrow(self, query, target_id):
-        return {
-            "auth_kind": "bearer",
-            "header_name": None,
-            "secret_value": "runtime-target-secret",
-            "metadata_json": {},
-        }
+    def acquire(self):
+        return self
 
-    async def fetch(self, query, target_id):
-        return []
+    async def __aenter__(self):
+        return object()
 
-
-class _FakePrincipalPool(_FakeCredentialPool):
-    async def fetch(self, query, target_id):
-        return [
-            {
-                "id": "00000000-0000-0000-0000-000000000010",
-                "label": "tenant-a-user",
-                "role": "attacker",
-                "tenant_id": "tenant-a",
-                "auth_kind": "bearer",
-                "header_name": None,
-                "secret_value": "principal-runtime-secret",
-                "metadata_json": {"purpose": "cross-tenant"},
-            }
-        ]
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
 
 
 class _FakeFinalizeConnection:
@@ -2526,6 +2508,7 @@ def test_broker_shard_result_ingest_never_reclaims_execution_slots_or_budget(mon
 
 def test_hydrate_ai_gate_options_loads_secrets_only_in_worker(monkeypatch):
     target_id = "00000000-0000-0000-0000-000000000001"
+    profile_id = "00000000-0000-4000-8000-000000000002"
     monkeypatch.setattr(worker, "db_pool", _FakeCredentialPool())
     monkeypatch.setattr(
         worker,
@@ -2538,27 +2521,97 @@ def test_hydrate_ai_gate_options_loads_secrets_only_in_worker(monkeypatch):
         },
     )
 
+    async def validate(*_args, **_kwargs):
+        return types.SimpleNamespace()
+
+    class Resolver:
+        @asynccontextmanager
+        async def resolve(self, *_args, **_kwargs):
+            yield types.SimpleNamespace(
+                profile=types.SimpleNamespace(
+                    profile_id=profile_id,
+                    current_version=2,
+                    auth_kind="bearer_token",
+                    principal_slot="service",
+                ),
+                immediate_http=lambda: types.SimpleNamespace(
+                    secret="runtime-target-secret",
+                    username=None,
+                    header_name=None,
+                    custom_headers={},
+                ),
+            )
+
+    monkeypatch.setattr(worker, "validate_worker_credential_authority", validate)
+    monkeypatch.setattr(worker, "WorkerCredentialResolver", Resolver)
+
     options = {
         "run_kind": "ai_api",
         "ai_target_id": target_id,
         "ai_target": {
             "id": target_id,
             "endpoint_url": "https://example.test/chat",
-            "credential_ref": {"ai_target_id": target_id, "configured": True},
+            "credential_profile_ref": {
+                "profile_id": profile_id,
+                "profile_version": 2,
+                "auth_kind": "bearer_token",
+                "principal_slot": "service",
+                "source": "credential_profiles",
+            },
         },
+        "credential_action_name": "ai_gate.scan",
+        "approval_receipt_id": "00000000-0000-4000-8000-000000000003",
+        "scope_receipt_id": "scope-1",
+        "runtime_scope_guard": {"allowed_root_domains": ["example.test"]},
     }
 
-    hydrated = asyncio.run(worker._hydrate_ai_gate_options(options))
+    retained = None
 
-    assert hydrated["ai_target"]["credential"]["secret"] == "runtime-target-secret"
-    assert "credential_ref" not in hydrated["ai_target"]
-    assert hydrated["ai_api_key"] == "runtime-ai-key"
+    async def exercise():
+        nonlocal retained
+        async with worker._hydrate_ai_gate_options(
+            options, "00000000-0000-4000-8000-000000000004"
+        ) as hydrated:
+            retained = hydrated
+            assert hydrated["ai_target"]["credential"]["secret"] == "runtime-target-secret"
+            assert "credential_profile_ref" not in hydrated["ai_target"]
+            assert hydrated["ai_api_key"] == "runtime-ai-key"
+
+    asyncio.run(exercise())
+
+    assert retained is not None
+    assert "credential" not in retained["ai_target"]
 
 
 def test_hydrate_ai_gate_options_loads_principal_credentials_in_worker(monkeypatch):
     target_id = "00000000-0000-0000-0000-000000000001"
-    monkeypatch.setattr(worker, "db_pool", _FakePrincipalPool())
+    profile_id = "00000000-0000-4000-8000-000000000010"
+    monkeypatch.setattr(worker, "db_pool", _FakeCredentialPool())
     monkeypatch.setattr(worker, "_load_runtime_ai_settings", lambda: {})
+
+    async def validate(*_args, **_kwargs):
+        return types.SimpleNamespace()
+
+    class Resolver:
+        @asynccontextmanager
+        async def resolve(self, *_args, **_kwargs):
+            yield types.SimpleNamespace(
+                profile=types.SimpleNamespace(
+                    profile_id=profile_id,
+                    current_version=4,
+                    auth_kind="bearer_token",
+                    principal_slot="secondary",
+                ),
+                immediate_http=lambda: types.SimpleNamespace(
+                    secret="principal-runtime-secret",
+                    username=None,
+                    header_name=None,
+                    custom_headers={},
+                ),
+            )
+
+    monkeypatch.setattr(worker, "validate_worker_credential_authority", validate)
+    monkeypatch.setattr(worker, "WorkerCredentialResolver", Resolver)
 
     options = {
         "run_kind": "ai_rag",
@@ -2566,23 +2619,120 @@ def test_hydrate_ai_gate_options_loads_principal_credentials_in_worker(monkeypat
         "ai_target": {
             "id": target_id,
             "endpoint_url": "https://example.test/rag",
-            "credential_ref": {"ai_target_id": target_id, "configured": True},
+            "credential_profile_ref": None,
             "principal_refs": [
                 {
                     "id": "00000000-0000-0000-0000-000000000010",
                     "label": "tenant-a-user",
                     "role": "attacker",
                     "credential_configured": True,
+                    "credential_profile_ref": {
+                        "profile_id": profile_id,
+                        "profile_version": 4,
+                        "auth_kind": "bearer_token",
+                        "principal_slot": "secondary",
+                        "source": "credential_profiles",
+                    },
                 }
             ],
         },
+        "credential_action_name": "ai_gate.scan",
+        "approval_receipt_id": "00000000-0000-4000-8000-000000000003",
+        "scope_receipt_id": "scope-1",
+        "runtime_scope_guard": {"allowed_root_domains": ["example.test"]},
     }
 
-    hydrated = asyncio.run(worker._hydrate_ai_gate_options(options))
+    async def exercise():
+        async with worker._hydrate_ai_gate_options(
+            options, "00000000-0000-4000-8000-000000000004"
+        ) as hydrated:
+            assert hydrated["ai_target"]["principals"][0]["credential"]["secret"] == "principal-runtime-secret"
+            assert hydrated["ai_target"]["principals"][0]["role"] == "attacker"
+            assert "principal_refs" not in hydrated["ai_target"]
 
-    assert hydrated["ai_target"]["principals"][0]["credential"]["secret"] == "principal-runtime-secret"
-    assert hydrated["ai_target"]["principals"][0]["role"] == "attacker"
-    assert "principal_refs" not in hydrated["ai_target"]
+    asyncio.run(exercise())
+
+
+def test_hydrate_ai_gate_options_rejects_legacy_configured_refs():
+    options = {
+        "run_kind": "ai_api",
+        "ai_target_id": "00000000-0000-0000-0000-000000000001",
+        "ai_target": {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "endpoint_url": "https://example.test/chat",
+            "credential_ref": {
+                "ai_target_id": "00000000-0000-0000-0000-000000000001",
+                "configured": True,
+            },
+        },
+    }
+
+    async def exercise():
+        with pytest.raises(
+            worker.CredentialResolutionError, match="legacy AI Gate credential"
+        ):
+            async with worker._hydrate_ai_gate_options(
+                options, "00000000-0000-4000-8000-000000000004"
+            ):
+                pass
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected_kind", "expected"),
+    [
+        (
+            "authorization_header",
+            "custom_header",
+            {"header_name": "Authorization", "secret": "Bearer opaque"},
+        ),
+        ("bearer_token", "bearer", {"secret": "opaque"}),
+        (
+            "api_key_header",
+            "api_key_header",
+            {"header_name": "X-API-Key", "secret": "opaque"},
+        ),
+        ("cookie", "cookie", {"secret": "sid=opaque"}),
+        ("basic_auth", "basic_auth", {"secret": "analyst:opaque"}),
+        (
+            "custom_headers",
+            "multi_header",
+            {"metadata_json": {"headers": [{"name": "X-Key", "value": "opaque"}]}},
+        ),
+        (
+            "query_parameter",
+            "query_param",
+            {"header_name": "access_key", "secret": "opaque"},
+        ),
+    ],
+)
+def test_ai_gate_generic_credential_projection_preserves_legacy_adapter_semantics(
+    kind, expected_kind, expected,
+):
+    material = types.SimpleNamespace(
+        secret=(
+            "Bearer opaque"
+            if kind == "authorization_header"
+            else "sid=opaque"
+            if kind == "cookie"
+            else "opaque"
+        ),
+        username="analyst" if kind == "basic_auth" else None,
+        header_name="X-API-Key" if kind == "api_key_header" else None,
+        custom_headers={"X-Key": "opaque"} if kind == "custom_headers" else {},
+    )
+    resolved = types.SimpleNamespace(
+        profile=types.SimpleNamespace(auth_kind=kind),
+        immediate_http=lambda: material,
+        query_parameter=lambda: types.SimpleNamespace(name="access_key", value="opaque"),
+    )
+
+    projected = worker._ai_gate_runtime_credential(resolved)
+
+    assert projected["auth_kind"] == expected_kind
+    for key, value in expected.items():
+        assert projected[key] == value
 
 
 def test_finalize_ai_finding_retest_marks_reproduced_finding(monkeypatch):

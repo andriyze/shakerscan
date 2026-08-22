@@ -174,6 +174,23 @@ class SecretQueryParameter:
 
 
 @dataclass(frozen=True, repr=False)
+class ImmediateHTTPCredential:
+    auth_kind: str
+    secret: str | None = field(repr=False)
+    username: str | None = field(repr=False)
+    header_name: str | None
+    custom_headers: Mapping[str, str] = field(repr=False)
+
+    def __repr__(self) -> str:
+        return (
+            f"ImmediateHTTPCredential(auth_kind={self.auth_kind!r}, "
+            f"header_name={self.header_name!r}, "
+            f"custom_header_names={sorted(self.custom_headers)}, "
+            "values_visible=False)"
+        )
+
+
+@dataclass(frozen=True, repr=False)
 class InteractiveHTTPCredential:
     auth_kind: str
     username: str | None = field(repr=False)
@@ -242,6 +259,25 @@ class ResolvedCredential:
             return SecretHTTPHeaders(immediate_http_headers(self._material))
         except CredentialContractError as exc:
             raise CredentialResolutionError(str(exc)) from exc
+
+    def immediate_http(self) -> ImmediateHTTPCredential:
+        self._require_open()
+        if self.profile.auth_kind not in IMMEDIATE_HTTP_HEADER_KINDS:
+            raise CredentialResolutionError(
+                "credential requires an interactive login or token exchange"
+            )
+        return ImmediateHTTPCredential(
+            auth_kind=self.profile.auth_kind,
+            secret=str(self._material.get("secret") or "") or None,
+            username=str(self._material.get("username") or "") or None,
+            header_name=str(self._material.get("header_name") or "") or None,
+            custom_headers={
+                str(name): str(value)
+                for name, value in dict(
+                    self._material.get("custom_headers") or {}
+                ).items()
+            },
+        )
 
     def interactive_http(self) -> InteractiveHTTPCredential:
         self._require_open()

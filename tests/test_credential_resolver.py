@@ -63,6 +63,8 @@ def _metadata(kind, target_kind="api", principal_slot="primary"):
     kwargs = {"secret": "placeholder"}
     if kind.startswith("ssh_"):
         kwargs["username"] = "operator"
+    if kind == "basic_auth":
+        kwargs["username"] = "operator"
     if kind == "form_login":
         kwargs.update({"username": "operator", "endpoint_url": "/login"})
     if kind == "query_parameter":
@@ -205,6 +207,30 @@ def test_http_resolution_is_exact_content_free_and_scrubbed_after_context():
     assert retained._material == {}
     with pytest.raises(CredentialResolutionError, match="closed"):
         retained.http_headers()
+
+
+def test_immediate_http_material_is_worker_private_and_hides_values_in_repr():
+    envelope = build_credential_secret(
+        "basic_auth", username="private-user", secret="private-password"
+    )
+    store = FakeStore(metadata=_metadata("basic_auth"))
+    resolver = WorkerCredentialResolver(store=store, decryptor=_decryptor(envelope))
+
+    async def exercise():
+        async with resolver.resolve(
+            object(),
+            profile_id=PROFILE_ID,
+            target=_target(),
+            capability="request.replay",
+            authority=_authority(),
+        ) as credential:
+            material = credential.immediate_http()
+            assert material.username == "private-user"
+            assert material.secret == "private-password"
+            assert "private-user" not in repr(material)
+            assert "private-password" not in repr(material)
+
+    asyncio.run(exercise())
 
 
 def test_interactive_http_material_hides_values_in_repr():

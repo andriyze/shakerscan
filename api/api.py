@@ -6620,7 +6620,76 @@ def _sanitize_ai_principal(row: Any) -> dict[str, Any]:
     return principal
 
 
-def _ai_principal_ref(row: Any) -> dict[str, Any]:
+AI_GATE_GENERIC_CREDENTIAL_CAPABILITY = "ai_gate.scan"
+AI_GATE_GENERIC_AUTH_KINDS = {
+    "authorization_header",
+    "bearer_token",
+    "api_key_header",
+    "cookie",
+    "basic_auth",
+    "custom_headers",
+    "query_parameter",
+}
+
+
+def _generic_ai_credential_ref(profile: Any) -> dict[str, Any]:
+    return {
+        "profile_id": profile.profile_id,
+        "profile_version": profile.current_version,
+        "auth_kind": profile.auth_kind,
+        "principal_slot": profile.principal_slot,
+        "allowed_capabilities": list(profile.allowed_capabilities),
+        "source": "credential_profiles",
+        "secret_values_visible": False,
+    }
+
+
+async def _resolve_ai_gate_credential_profile(
+    conn: Any,
+    row: Any,
+    *,
+    target_id: Any,
+) -> dict[str, Any] | None:
+    item = row_to_dict(row) if row else {}
+    if str(item.get("auth_kind") or "none") == "none":
+        return None
+    profile_id = item.get("id")
+    try:
+        profile = await _generic_credential_store.get_profile(
+            conn, profile_id=profile_id,
+        )
+    except CredentialStoreError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="AI Gate credential migration is incomplete; restart the API and workers",
+        ) from exc
+    expires_at = profile.expires_at
+    if expires_at is not None and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if not profile.is_active or (
+        expires_at is not None and expires_at <= datetime.now(timezone.utc)
+    ):
+        raise HTTPException(status_code=409, detail="AI Gate credential is inactive or expired")
+    if profile.target_kind != "api" or profile.target_id != str(target_id):
+        raise HTTPException(status_code=409, detail="AI Gate credential target binding changed")
+    if profile.auth_kind not in AI_GATE_GENERIC_AUTH_KINDS:
+        raise HTTPException(
+            status_code=409,
+            detail="AI Gate credential authentication kind is not executable",
+        )
+    allowed = tuple(profile.allowed_capabilities)
+    if allowed and AI_GATE_GENERIC_CREDENTIAL_CAPABILITY not in allowed:
+        raise HTTPException(
+            status_code=409,
+            detail=f"AI Gate credential does not allow {AI_GATE_GENERIC_CREDENTIAL_CAPABILITY}",
+        )
+    return _generic_ai_credential_ref(profile)
+
+
+def _ai_principal_ref(
+    row: Any,
+    credential_profile_ref: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     principal = row_to_dict(row)
     metadata = _decode_json_value(principal.get("metadata_json")) or {}
     return {
@@ -6628,22 +6697,33 @@ def _ai_principal_ref(row: Any) -> dict[str, Any]:
         "label": principal.get("label"),
         "role": principal.get("role"),
         "tenant_id": principal.get("tenant_id"),
-        "auth_kind": principal.get("auth_kind") or "none",
-        "credential_configured": bool(principal.get("secret_value")),
+        "auth_kind": (
+            credential_profile_ref.get("auth_kind")
+            if credential_profile_ref else "none"
+        ),
+        "credential_configured": credential_profile_ref is not None,
+        "credential_profile_ref": credential_profile_ref,
         "metadata_json": _sanitize_scan_options(metadata),
     }
 
 
-def _runtime_ai_principal_from_row(row: dict[str, Any]) -> dict[str, Any]:
-    credential = _runtime_credential_from_row(row)
-    return {
-        "id": str(row.get("id")),
-        "label": row.get("label"),
-        "role": row.get("role") or "attacker",
-        "tenant_id": row.get("tenant_id"),
-        "metadata_json": _decode_json_value(row.get("metadata_json")) or {},
-        "credential": credential,
-    }
+async def _resolve_ai_gate_credential_refs(
+    conn: Any,
+    *,
+    target_id: Any,
+    credential_row: Any,
+    principal_rows: list[Any],
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    default_ref = await _resolve_ai_gate_credential_profile(
+        conn, credential_row, target_id=target_id,
+    )
+    principal_refs: list[dict[str, Any]] = []
+    for row in principal_rows:
+        profile_ref = await _resolve_ai_gate_credential_profile(
+            conn, row, target_id=target_id,
+        )
+        principal_refs.append(_ai_principal_ref(row, profile_ref))
+    return default_ref, principal_refs
 
 
 def _ai_target_response(target_row: Any, credential_row: Optional[Any] = None) -> dict[str, Any]:
@@ -6793,23 +6873,38 @@ async def _queue_ai_target_scan(target_id: str, request: AITargetScanRequest) ->
             """,
             uuid.UUID(target_id),
         )
+        credential_profile_ref, principal_refs = await _resolve_ai_gate_credential_refs(
+            conn,
+            target_id=target_id,
+            credential_row=credential_row,
+            principal_rows=list(principal_rows),
+        )
+        credentials_selected = bool(credential_profile_ref) or any(
+            item.get("credential_profile_ref") for item in principal_refs
+        )
         approval_context = await _validate_approval_receipt_for_action(
             conn,
             request.approval_receipt_id,
             target_url=target_row["endpoint_url"],
+            target_id=target_id if credentials_selected else None,
             action_name="ai_gate.scan",
+            risk_tier="credential" if credentials_selected else "active",
+            always_require_receipt=credentials_selected,
+            require_target_binding=credentials_selected,
+            require_expiry=credentials_selected,
         )
 
         target = row_to_dict(target_row)
         for key in ("headers_template", "request_template", "metadata_json"):
             target[key] = _decode_json_value(target.get(key)) or {}
-        credential = _runtime_credential_from_row(dict(credential_row) if credential_row else None)
         worker_options, storage_options = _build_ai_worker_options(
             target=target,
-            credential=credential,
+            credential_profile_ref=credential_profile_ref,
             request=request,
-            principals=list(principal_rows),
+            principal_refs=principal_refs,
         )
+        if credentials_selected:
+            worker_options["credential_action_name"] = "ai_gate.scan"
         if approval_context:
             worker_options.update(approval_context)
             storage_options.update(approval_context)
@@ -6833,7 +6928,7 @@ async def _queue_ai_target_scan(target_id: str, request: AITargetScanRequest) ->
             conn,
             command="ai_gate.scan",
             status="queued",
-            risk_tier="active",
+            risk_tier="credential" if credentials_selected else "active",
             scan_id=scan_id,
             scope_receipt_id=storage_options.get("scope_receipt_id"),
             approval_receipt_id=storage_options.get("approval_receipt_id"),
@@ -8244,9 +8339,9 @@ def _runtime_credential_from_row(row: Optional[dict[str, Any]]) -> dict[str, Any
 def _build_ai_worker_options(
     *,
     target: dict[str, Any],
-    credential: dict[str, Any],
+    credential_profile_ref: dict[str, Any] | None,
     request: AITargetScanRequest,
-    principals: Optional[list[Any]] = None,
+    principal_refs: Optional[list[dict[str, Any]]] = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     probe_pack = request.probe_pack if request.probe_pack in AI_PROBE_PACKS else "shaker-ai-smoke"
     scan_profile = request.scan_profile if request.scan_profile in AI_SCAN_PROFILES else "smoke"
@@ -8293,13 +8388,16 @@ def _build_ai_worker_options(
     }
     if production_confirmation:
         storage_options["production_confirmation"] = production_confirmation
-    principal_refs = [_ai_principal_ref(row) for row in (principals or [])]
-    if principal_refs:
-        metadata_json["principal_count"] = len(principal_refs)
+    admitted_principal_refs = [dict(row) for row in (principal_refs or [])]
+    if admitted_principal_refs:
+        metadata_json["principal_count"] = len(admitted_principal_refs)
         metadata_json["principal_roles"] = sorted(
-            {str(item.get("role") or "") for item in principal_refs if item.get("role")}
+            {
+                str(item.get("role") or "")
+                for item in admitted_principal_refs if item.get("role")
+            }
         )
-        storage_options["ai_principal_count"] = len(principal_refs)
+        storage_options["ai_principal_count"] = len(admitted_principal_refs)
         storage_options["ai_principal_roles"] = metadata_json["principal_roles"]
     worker_options = {
         **storage_options,
@@ -8318,15 +8416,11 @@ def _build_ai_worker_options(
             "request_budget": target.get("request_budget"),
             "production_mode": target.get("production_mode"),
             "metadata_json": metadata_json,
-            "credential_ref": {
-                "ai_target_id": target["id"],
-                "configured": bool(credential.get("secret"))
-                or bool((credential.get("metadata_json") or {}).get("headers")),
-            },
+            "credential_profile_ref": credential_profile_ref,
         },
     }
-    if principal_refs:
-        worker_options["ai_target"]["principal_refs"] = principal_refs
+    if admitted_principal_refs:
+        worker_options["ai_target"]["principal_refs"] = admitted_principal_refs
     return worker_options, storage_options
 
 
@@ -8363,12 +8457,12 @@ def _ai_scan_options_from_row(scan_row: Any) -> dict[str, Any]:
 def _build_ai_finding_retest_scan_options(
     *,
     target: dict[str, Any],
-    credential: dict[str, Any],
+    credential_profile_ref: dict[str, Any] | None,
     finding: dict[str, Any],
     original_scan_options: dict[str, Any],
     request: AIFindingRetestRequest,
     verification_id: uuid.UUID,
-    principals: Optional[list[Any]] = None,
+    principal_refs: Optional[list[dict[str, Any]]] = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     context = _ai_finding_probe_context(finding)
     probe_id = context.get("probe_id")
@@ -8390,9 +8484,9 @@ def _build_ai_finding_retest_scan_options(
     )
     worker_options, storage_options = _build_ai_worker_options(
         target=target,
-        credential=credential,
+        credential_profile_ref=credential_profile_ref,
         request=scan_request,
-        principals=principals,
+        principal_refs=principal_refs,
     )
 
     focus_probe_ids = [probe_id] if request.mode in {"same_probe", "strict_replay"} and probe_id else []
@@ -62211,11 +62305,25 @@ async def retest_ai_finding(finding_id: str, request: AIFindingRetestRequest | N
             """,
             finding_data["ai_target_id"],
         )
+        credential_profile_ref, principal_refs = await _resolve_ai_gate_credential_refs(
+            conn,
+            target_id=finding_data["ai_target_id"],
+            credential_row=credential_row,
+            principal_rows=list(principal_rows),
+        )
+        credentials_selected = bool(credential_profile_ref) or any(
+            item.get("credential_profile_ref") for item in principal_refs
+        )
         approval_context = await _validate_approval_receipt_for_action(
             conn,
             request.approval_receipt_id,
             target_url=target_row["endpoint_url"],
+            target_id=finding_data["ai_target_id"] if credentials_selected else None,
             action_name="ai_gate.finding_replay",
+            risk_tier="credential" if credentials_selected else "active",
+            always_require_receipt=credentials_selected,
+            require_target_binding=credentials_selected,
+            require_expiry=credentials_selected,
         )
         original_scan = None
         if finding_data.get("scan_id"):
@@ -62227,17 +62335,18 @@ async def retest_ai_finding(finding_id: str, request: AIFindingRetestRequest | N
         target = row_to_dict(target_row)
         for key in ("headers_template", "request_template", "metadata_json"):
             target[key] = _decode_json_value(target.get(key)) or {}
-        credential = _runtime_credential_from_row(dict(credential_row) if credential_row else None)
         original_options = _ai_scan_options_from_row(original_scan)
         worker_options, storage_options, replay_plan = _build_ai_finding_retest_scan_options(
             target=target,
-            credential=credential,
+            credential_profile_ref=credential_profile_ref,
             finding=finding_data,
             original_scan_options=original_options,
             request=request,
             verification_id=verification_id,
-            principals=list(principal_rows),
+            principal_refs=principal_refs,
         )
+        if credentials_selected:
+            worker_options["credential_action_name"] = "ai_gate.finding_replay"
         if approval_context:
             worker_options.update(approval_context)
             storage_options.update(approval_context)
@@ -62463,17 +62572,30 @@ async def replay_ai_scan(scan_id: str, request: AIScanReplayRequest | None = Non
             """,
             original_scan["ai_target_id"],
         )
+        credential_profile_ref, principal_refs = await _resolve_ai_gate_credential_refs(
+            conn,
+            target_id=original_scan["ai_target_id"],
+            credential_row=credential_row,
+            principal_rows=list(principal_rows),
+        )
+        credentials_selected = bool(credential_profile_ref) or any(
+            item.get("credential_profile_ref") for item in principal_refs
+        )
         approval_context = await _validate_approval_receipt_for_action(
             conn,
             request.approval_receipt_id,
             target_url=target_row["endpoint_url"],
+            target_id=original_scan["ai_target_id"] if credentials_selected else None,
             action_name="ai_gate.campaign_replay",
+            risk_tier="credential" if credentials_selected else "active",
+            always_require_receipt=credentials_selected,
+            require_target_binding=credentials_selected,
+            require_expiry=credentials_selected,
         )
 
         target = row_to_dict(target_row)
         for key in ("headers_template", "request_template", "metadata_json"):
             target[key] = _decode_json_value(target.get(key)) or {}
-        credential = _runtime_credential_from_row(dict(credential_row) if credential_row else None)
         original_options = _ai_scan_options_from_row(original_scan)
         original_confirmation = original_options.get("production_confirmation")
         original_confirmed = isinstance(original_confirmation, dict) and original_confirmation.get("confirmed") is True
@@ -62488,10 +62610,12 @@ async def replay_ai_scan(scan_id: str, request: AIScanReplayRequest | None = Non
         )
         worker_options, storage_options = _build_ai_worker_options(
             target=target,
-            credential=credential,
+            credential_profile_ref=credential_profile_ref,
             request=scan_request,
-            principals=list(principal_rows),
+            principal_refs=principal_refs,
         )
+        if credentials_selected:
+            worker_options["credential_action_name"] = "ai_gate.campaign_replay"
         metadata_json = worker_options["ai_target"].setdefault("metadata_json", {})
         if replay_plan.get("probe_ids"):
             worker_options["ai_focus_probe_ids"] = replay_plan["probe_ids"]

@@ -21,7 +21,7 @@ import threading
 import time
 import urllib.parse
 import uuid
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -1602,31 +1602,6 @@ def _load_runtime_ai_settings() -> dict[str, Any]:
     return settings
 
 
-def _runtime_ai_target_credential_from_row(row: dict[str, Any] | None) -> dict[str, Any]:
-    if not row:
-        return {"auth_kind": "none", "header_name": None, "secret": None, "metadata_json": {}}
-
-    metadata = parse_json_field(row.get("metadata_json")) or {}
-    auth_kind = row.get("auth_kind") or "none"
-    secret = decrypt_secret(row.get("secret_value"))
-    if auth_kind == "multi_header":
-        try:
-            headers = json.loads(secret or "[]")
-        except json.JSONDecodeError:
-            headers = []
-        metadata = {**metadata, "headers": headers}
-        secret = None
-    elif auth_kind == "query_param":
-        metadata = {**metadata, "param_name": row.get("header_name") or metadata.get("param_name")}
-
-    return {
-        "auth_kind": auth_kind,
-        "header_name": row.get("header_name"),
-        "secret": secret,
-        "metadata_json": metadata,
-    }
-
-
 _MANAGED_SCAN_AUTH_OPTION_KEYS = {
     "user1": {"authorization_header": "auth_header", "cookie": "auth_cookies"},
     "user2": {"authorization_header": "user2_header", "cookie": "user2_cookies"},
@@ -2005,64 +1980,254 @@ async def _persist_device_credential_attempts(result: dict[str, Any], scan_id: s
             )
 
 
-async def _hydrate_ai_gate_options(options: dict[str, Any]) -> dict[str, Any]:
+AI_GATE_CREDENTIAL_CAPABILITY = "ai_gate.scan"
+
+
+def _ai_gate_runtime_credential(resolved: Any) -> dict[str, Any]:
+    kind = resolved.profile.auth_kind
+    if kind == "query_parameter":
+        material = resolved.query_parameter()
+        return {
+            "auth_kind": "query_param",
+            "header_name": material.name,
+            "secret": material.value,
+            "metadata_json": {"param_name": material.name},
+        }
+    material = resolved.immediate_http()
+    if kind == "authorization_header":
+        return {
+            "auth_kind": "custom_header",
+            "header_name": "Authorization",
+            "secret": material.secret,
+            "metadata_json": {},
+        }
+    if kind == "bearer_token":
+        return {
+            "auth_kind": "bearer",
+            "header_name": "Authorization",
+            "secret": material.secret,
+            "metadata_json": {},
+        }
+    if kind == "api_key_header":
+        return {
+            "auth_kind": "api_key_header",
+            "header_name": material.header_name,
+            "secret": material.secret,
+            "metadata_json": {},
+        }
+    if kind == "cookie":
+        return {
+            "auth_kind": "cookie",
+            "header_name": "Cookie",
+            "secret": material.secret,
+            "metadata_json": {},
+        }
+    if kind == "basic_auth":
+        return {
+            "auth_kind": "basic_auth",
+            "header_name": "Authorization",
+            "secret": f"{material.username or ''}:{material.secret or ''}",
+            "metadata_json": {},
+        }
+    if kind == "custom_headers":
+        return {
+            "auth_kind": "multi_header",
+            "header_name": None,
+            "secret": None,
+            "metadata_json": {
+                "headers": [
+                    {"name": name, "value": value}
+                    for name, value in sorted(material.custom_headers.items())
+                ],
+            },
+        }
+    raise CredentialResolutionError(
+        "AI Gate credential authentication kind is not executable"
+    )
+
+
+def _validate_ai_gate_resolved_ref(resolved: Any, ref: Mapping[str, Any]) -> None:
+    try:
+        expected_version = int(ref.get("profile_version") or 0)
+    except (TypeError, ValueError) as exc:
+        raise CredentialResolutionError(
+            "AI Gate credential profile version is invalid"
+        ) from exc
+    if (
+        expected_version < 1
+        or resolved.profile.current_version != expected_version
+        or resolved.profile.auth_kind != str(ref.get("auth_kind") or "")
+        or resolved.profile.principal_slot != str(ref.get("principal_slot") or "")
+        or str(ref.get("source") or "") != "credential_profiles"
+    ):
+        raise CredentialResolutionError(
+            "AI Gate credential changed after admission"
+        )
+
+
+def _ai_gate_target_binding(
+    hydrated: Mapping[str, Any],
+    ai_target: Mapping[str, Any],
+    target_id: str,
+) -> TargetBinding:
+    endpoint_url = str(ai_target.get("endpoint_url") or "")
+    parsed = urllib.parse.urlsplit(endpoint_url)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        raise CredentialResolutionError("AI Gate target URL is invalid")
+    guard = (
+        dict(hydrated.get("runtime_scope_guard") or {})
+        if isinstance(hydrated.get("runtime_scope_guard"), Mapping)
+        else {}
+    )
+    roots = tuple(
+        str(item).strip().lower().rstrip(".")
+        for item in guard.get("allowed_root_domains") or ()
+        if str(item).strip()
+    ) or (parsed.hostname.lower().rstrip("."),)
+    origins = tuple(
+        str(item).strip().lower().rstrip("/")
+        for item in guard.get("allowed_origins") or ()
+        if str(item).strip()
+    ) or (f"{parsed.scheme.lower()}://{parsed.netloc.lower()}",)
+    addresses = tuple(
+        str(item).strip()
+        for item in guard.get("allowed_addresses") or ()
+        if str(item).strip()
+    )
+    return TargetBinding(
+        target_id=target_id,
+        target_kind="api",
+        canonical_host=parsed.hostname,
+        allowed_origins=origins,
+        allowed_addresses=addresses,
+        allowed_root_domains=roots,
+        environment=str(guard.get("environment") or "unknown"),
+        scope_receipt_id=str(hydrated.get("scope_receipt_id") or "") or None,
+    )
+
+
+@asynccontextmanager
+async def _hydrate_ai_gate_options(
+    options: dict[str, Any], scan_id: str,
+):
     hydrated = dict(options)
     ai_target = dict(hydrated.get("ai_target") or {})
     if not ai_target:
-        return hydrated
+        yield hydrated
+        return
+    target_id = str(ai_target.get("id") or hydrated.get("ai_target_id") or "")
+    try:
+        uuid.UUID(target_id)
+        uuid.UUID(str(scan_id))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise CredentialResolutionError("AI Gate credential authority is invalid") from exc
 
-    credential_ref = ai_target.get("credential_ref") if isinstance(ai_target.get("credential_ref"), dict) else {}
-    target_id = ai_target.get("id") or hydrated.get("ai_target_id") or credential_ref.get("ai_target_id")
-    if "credential" not in ai_target and target_id and db_pool is not None:
-        try:
-            credential_row = await db_pool.fetchrow(
-                "SELECT * FROM ai_target_credentials WHERE ai_target_id = $1",
-                uuid.UUID(str(target_id)),
-            )
-            ai_target["credential"] = _runtime_ai_target_credential_from_row(
-                dict(credential_row) if credential_row else None
-            )
-        except (ValueError, TypeError, ASYNC_PG_ERROR):
-            ai_target["credential"] = {"auth_kind": "none", "header_name": None, "secret": None, "metadata_json": {}}
+    default_ref = ai_target.pop("credential_profile_ref", None)
+    legacy_ref = ai_target.pop("credential_ref", None)
+    principal_refs = ai_target.pop("principal_refs", [])
+    if legacy_ref and isinstance(legacy_ref, Mapping) and legacy_ref.get("configured"):
+        raise CredentialResolutionError(
+            "legacy AI Gate credential references are no longer executable"
+        )
+    if not isinstance(principal_refs, list) or any(
+        not isinstance(item, Mapping) for item in principal_refs
+    ):
+        raise CredentialResolutionError("AI Gate principal references are invalid")
+    has_credentials = isinstance(default_ref, Mapping) or any(
+        isinstance(item.get("credential_profile_ref"), Mapping)
+        for item in principal_refs
+    )
+    if any(
+        item.get("credential_configured")
+        and not isinstance(item.get("credential_profile_ref"), Mapping)
+        for item in principal_refs
+    ):
+        raise CredentialResolutionError(
+            "legacy AI Gate principal credentials are no longer executable"
+        )
 
-    ai_target.pop("credential_ref", None)
-    if "principals" not in ai_target and target_id and db_pool is not None:
-        principal_refs = ai_target.get("principal_refs")
-        try:
-            principal_rows = await db_pool.fetch(
-                """
-                SELECT * FROM ai_target_principals
-                WHERE ai_target_id = $1 AND is_active = true
-                ORDER BY role, label
-                """,
-                uuid.UUID(str(target_id)),
-            )
-            principals: list[dict[str, Any]] = []
-            for row in principal_rows:
-                principal = dict(row)
-                principals.append({
-                    "id": str(principal.get("id")),
-                    "label": principal.get("label"),
-                    "role": principal.get("role") or "attacker",
-                    "tenant_id": principal.get("tenant_id"),
-                    "metadata_json": parse_json_field(principal.get("metadata_json")) or {},
-                    "credential": _runtime_ai_target_credential_from_row(principal),
-                })
-            if principals:
-                ai_target["principals"] = principals
-        except (ValueError, TypeError, ASYNC_PG_ERROR):
-            if isinstance(principal_refs, list):
-                ai_target["principal_refs"] = principal_refs
-    ai_target.pop("principal_refs", None)
+    ai_target["credential"] = {
+        "auth_kind": "none", "header_name": None, "secret": None, "metadata_json": {},
+    }
+    ai_target["principals"] = [
+        {
+            "id": str(item.get("id") or ""),
+            "label": item.get("label"),
+            "role": item.get("role") or "attacker",
+            "tenant_id": item.get("tenant_id"),
+            "metadata_json": dict(item.get("metadata_json") or {}),
+            "credential": {
+                "auth_kind": "none", "header_name": None, "secret": None,
+                "metadata_json": {},
+            },
+        }
+        for item in principal_refs
+    ]
     hydrated["ai_target"] = ai_target
+    action_name = str(hydrated.pop("credential_action_name", "") or "").strip()
 
-    ai_runtime = _load_runtime_ai_settings()
-    if ai_runtime.get("ai_url") and ai_runtime.get("ai_api_key"):
-        hydrated.setdefault("ai_url", ai_runtime.get("ai_url"))
-        hydrated.setdefault("ai_api_key", ai_runtime.get("ai_api_key"))
-        hydrated.setdefault("ai_model", ai_runtime.get("ai_model") or "gpt-4o-mini")
-        hydrated.setdefault("ai_model_fallback", ai_runtime.get("ai_model_fallback") or "")
-    return hydrated
+    resolver = WorkerCredentialResolver()
+    try:
+        async with AsyncExitStack() as stack:
+            if has_credentials:
+                if db_pool is None or not action_name:
+                    raise CredentialResolutionError(
+                        "AI Gate credential authority is incomplete"
+                    )
+                target = _ai_gate_target_binding(hydrated, ai_target, target_id)
+                conn = await stack.enter_async_context(db_pool.acquire())
+                authority = await validate_worker_credential_authority(
+                    conn,
+                    owner_kind="scan",
+                    owner_id=scan_id,
+                    target=target,
+                    approval_receipt_id=hydrated.get("approval_receipt_id"),
+                    scope_receipt_id=hydrated.get("scope_receipt_id"),
+                    action_name=action_name,
+                )
+                if isinstance(default_ref, Mapping):
+                    resolved = await stack.enter_async_context(resolver.resolve(
+                        conn,
+                        profile_id=default_ref.get("profile_id"),
+                        target=target,
+                        capability=AI_GATE_CREDENTIAL_CAPABILITY,
+                        authority=authority,
+                    ))
+                    _validate_ai_gate_resolved_ref(resolved, default_ref)
+                    ai_target["credential"] = _ai_gate_runtime_credential(resolved)
+                for index, item in enumerate(principal_refs):
+                    profile_ref = item.get("credential_profile_ref")
+                    if not isinstance(profile_ref, Mapping):
+                        continue
+                    resolved = await stack.enter_async_context(resolver.resolve(
+                        conn,
+                        profile_id=profile_ref.get("profile_id"),
+                        target=target,
+                        capability=AI_GATE_CREDENTIAL_CAPABILITY,
+                        authority=authority,
+                    ))
+                    _validate_ai_gate_resolved_ref(resolved, profile_ref)
+                    ai_target["principals"][index]["credential"] = (
+                        _ai_gate_runtime_credential(resolved)
+                    )
+
+            ai_runtime = _load_runtime_ai_settings()
+            if ai_runtime.get("ai_url") and ai_runtime.get("ai_api_key"):
+                hydrated.setdefault("ai_url", ai_runtime.get("ai_url"))
+                hydrated.setdefault("ai_api_key", ai_runtime.get("ai_api_key"))
+                hydrated.setdefault(
+                    "ai_model", ai_runtime.get("ai_model") or "gpt-4o-mini"
+                )
+                hydrated.setdefault(
+                    "ai_model_fallback",
+                    ai_runtime.get("ai_model_fallback") or "",
+                )
+            yield hydrated
+    finally:
+        ai_target.pop("credential", None)
+        for principal in ai_target.get("principals") or []:
+            if isinstance(principal, dict):
+                principal.pop("credential", None)
 
 
 def _int_env(name: str, default: int) -> int:
@@ -2567,7 +2732,10 @@ async def run_scan(
             await update_scan_progress(scan_id, "ai_gate", 15, job_id=job_id)
         from ai_gate_scan import run_ai_target_scan
 
-        result = await run_ai_target_scan(target, await _hydrate_ai_gate_options(options))
+        if not scan_id:
+            raise CredentialResolutionError("AI Gate scan identity is unavailable")
+        async with _hydrate_ai_gate_options(options, scan_id) as hydrated_options:
+            result = await run_ai_target_scan(target, hydrated_options)
         if scan_id:
             await update_scan_progress(scan_id, "ai_gate_finalize", 95, job_id=job_id)
         return result

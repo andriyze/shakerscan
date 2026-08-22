@@ -1968,7 +1968,14 @@ def test_build_ai_worker_options_records_production_confirmation():
 
     worker_options, storage_options = api_module._build_ai_worker_options(
         target=target,
-        credential={"auth_kind": "bearer", "secret": "secret-token", "metadata_json": {}},
+        credential_profile_ref={
+            "profile_id": "11111111-1111-4111-8111-111111111111",
+            "profile_version": 2,
+            "auth_kind": "bearer_token",
+            "principal_slot": "service",
+            "source": "credential_profiles",
+            "secret_values_visible": False,
+        },
         request=request,
     )
 
@@ -1979,8 +1986,8 @@ def test_build_ai_worker_options_records_production_confirmation():
     assert "https://example.test/chat" not in str(storage_options["production_confirmation"])
     assert worker_options["ai_target"]["metadata_json"]["production_confirmation"]["probe_pack"] == "shaker-ai-smoke"
     assert worker_options["ai_target"]["metadata_json"]["production_confirmation"]["endpoint_hash"] == f"sha256:{expected_endpoint_hash}"
-    assert worker_options["ai_target"]["credential_ref"]["configured"] is True
-    assert "secret-token" not in str(worker_options)
+    assert worker_options["ai_target"]["credential_profile_ref"]["profile_version"] == 2
+    assert '"secret":' not in json.dumps(worker_options).lower()
 
 
 def test_build_ai_worker_options_uses_principal_refs_without_secrets():
@@ -2009,17 +2016,24 @@ def test_build_ai_worker_options_uses_principal_refs_without_secrets():
 
     worker_options, storage_options = api_module._build_ai_worker_options(
         target=target,
-        credential={"auth_kind": "none", "secret": None, "metadata_json": {}},
+        credential_profile_ref=None,
         request=request,
-        principals=[
+        principal_refs=[
             {
-                "id": principal_id,
+                "id": str(principal_id),
                 "label": "tenant-a-user",
                 "role": "attacker",
                 "tenant_id": "tenant-a",
-                "auth_kind": "bearer",
-                "header_name": "Authorization",
-                "secret_value": "principal-secret",
+                "auth_kind": "bearer_token",
+                "credential_configured": True,
+                "credential_profile_ref": {
+                    "profile_id": str(principal_id),
+                    "profile_version": 3,
+                    "auth_kind": "bearer_token",
+                    "principal_slot": "secondary",
+                    "source": "credential_profiles",
+                    "secret_values_visible": False,
+                },
                 "metadata_json": {"note": "ok"},
             }
         ],
@@ -2031,6 +2045,173 @@ def test_build_ai_worker_options_uses_principal_refs_without_secrets():
     assert principal_refs[0]["credential_configured"] is True
     assert storage_options["ai_principal_roles"] == ["attacker"]
     assert "principal-secret" not in str(worker_options)
+
+
+def test_ai_gate_credential_admission_freezes_generic_versions_without_secrets(monkeypatch):
+    target_id = uuid.uuid4()
+    default_id = uuid.uuid4()
+    principal_id = uuid.uuid4()
+    profiles = {
+        str(default_id): types.SimpleNamespace(
+            profile_id=str(default_id),
+            current_version=2,
+            auth_kind="query_parameter",
+            principal_slot="service",
+            allowed_capabilities=("ai_gate.scan",),
+            target_kind="api",
+            target_id=str(target_id),
+            is_active=True,
+            expires_at=None,
+        ),
+        str(principal_id): types.SimpleNamespace(
+            profile_id=str(principal_id),
+            current_version=4,
+            auth_kind="bearer_token",
+            principal_slot="secondary",
+            allowed_capabilities=("ai_gate.scan",),
+            target_kind="api",
+            target_id=str(target_id),
+            is_active=True,
+            expires_at=None,
+        ),
+    }
+
+    class Store:
+        async def get_profile(self, _conn, *, profile_id):
+            return profiles[str(profile_id)]
+
+    monkeypatch.setattr(api_module, "_generic_credential_store", Store())
+    default_ref, principal_refs = asyncio.run(
+        api_module._resolve_ai_gate_credential_refs(
+            object(),
+            target_id=target_id,
+            credential_row={"id": default_id, "auth_kind": "query_param"},
+            principal_rows=[{
+                "id": principal_id,
+                "label": "tenant-a-user",
+                "role": "attacker",
+                "tenant_id": "tenant-a",
+                "auth_kind": "bearer",
+                "secret_value": "must-not-enter-reference",
+                "metadata_json": {},
+            }],
+        )
+    )
+
+    assert default_ref["profile_version"] == 2
+    assert default_ref["auth_kind"] == "query_parameter"
+    assert principal_refs[0]["credential_profile_ref"]["profile_version"] == 4
+    serialized = json.dumps({"default": default_ref, "principals": principal_refs})
+    assert "must-not-enter-reference" not in serialized
+    assert '"secret":' not in serialized
+
+
+def test_ai_gate_credential_queue_requires_bound_expiring_credential_approval(monkeypatch):
+    target_id = uuid.uuid4()
+    credential_id = uuid.uuid4()
+    captured: dict[str, object] = {}
+    target = {
+        "id": target_id,
+        "name": "Credentialed bot",
+        "target_type": "api_chat",
+        "endpoint_url": "https://example.test/chat",
+        "method": "POST",
+        "headers_template": {},
+        "request_template": {"message": "{{prompt}}"},
+        "response_path": "$.answer",
+        "streaming_mode": "json",
+        "rate_limit_rps": None,
+        "token_budget": None,
+        "request_budget": 3,
+        "production_mode": False,
+        "metadata_json": {},
+        "is_active": True,
+    }
+
+    class Conn:
+        async def fetchrow(self, query, *_args):
+            if "FROM ai_targets" in query:
+                return target
+            if "FROM ai_target_credentials" in query:
+                return {"id": credential_id, "auth_kind": "bearer"}
+            raise AssertionError(query)
+
+        async def fetch(self, query, *_args):
+            if "FROM ai_target_principals" in query:
+                return []
+            raise AssertionError(query)
+
+        async def execute(self, query, *_args):
+            assert "INSERT INTO scans" in query
+            return "INSERT 0 1"
+
+    class Acquire:
+        async def __aenter__(self):
+            return Conn()
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Pool:
+        def acquire(self):
+            return Acquire()
+
+    class Redis:
+        def hset(self, *_args, **_kwargs):
+            return 1
+
+    async def resolve_refs(*_args, **_kwargs):
+        return ({
+            "profile_id": str(credential_id),
+            "profile_version": 3,
+            "auth_kind": "bearer_token",
+            "principal_slot": "service",
+            "source": "credential_profiles",
+            "secret_values_visible": False,
+        }, [])
+
+    async def validate(*_args, **kwargs):
+        captured["approval_kwargs"] = kwargs
+        return {
+            "approval_receipt_id": str(uuid.uuid4()),
+            "scope_receipt_id": "scope-1",
+            "runtime_scope_guard": {"allowed_root_domains": ["example.test"]},
+        }
+
+    async def record(*_args, **_kwargs):
+        return {"id": str(uuid.uuid4())}
+
+    def enqueue(_redis, _queue, payload):
+        captured["job"] = payload
+
+    monkeypatch.setattr(api_module, "db_pool", Pool())
+    monkeypatch.setattr(api_module, "get_redis", lambda: Redis())
+    monkeypatch.setattr(api_module, "_resolve_ai_gate_credential_refs", resolve_refs)
+    monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", validate)
+    monkeypatch.setattr(api_module, "_record_command_result", record)
+    monkeypatch.setattr(api_module, "enqueue_job", enqueue)
+
+    result = asyncio.run(api_module._queue_ai_target_scan(
+        str(target_id),
+        api_module.AITargetScanRequest(
+            probe_pack="shaker-ai-smoke",
+            scan_profile="smoke",
+            environment="staging",
+            approval_receipt_id=str(uuid.uuid4()),
+        ),
+    ))
+
+    approval = captured["approval_kwargs"]
+    assert approval["target_id"] == str(target_id)
+    assert approval["risk_tier"] == "credential"
+    assert approval["always_require_receipt"] is True
+    assert approval["require_target_binding"] is True
+    assert approval["require_expiry"] is True
+    job = captured["job"]
+    assert job["options"]["credential_action_name"] == "ai_gate.scan"
+    assert job["options"]["ai_target"]["credential_profile_ref"]["profile_version"] == 3
+    assert '"secret":' not in json.dumps(job)
+    assert result["status"] == "queued"
 
 
 def test_build_ai_finding_retest_options_focuses_original_probe():
@@ -2054,7 +2235,7 @@ def test_build_ai_finding_retest_options_focuses_original_probe():
 
     worker_options, storage_options, replay_plan = api_module._build_ai_finding_retest_scan_options(
         target=target,
-        credential={"auth_kind": "none", "secret": None, "metadata_json": {}},
+        credential_profile_ref=None,
         finding={
             "id": finding_id,
             "evidence": {
