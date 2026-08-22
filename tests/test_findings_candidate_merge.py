@@ -78,6 +78,9 @@ if "fastapi" not in sys.modules:
 
 from pathlib import Path
 
+from tests.api_import_stubs import install_fastapi_exception_stubs  # noqa: E402
+
+install_fastapi_exception_stubs()
 import api as api_module  # noqa: E402
 
 

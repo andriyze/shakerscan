@@ -91,6 +91,9 @@ except ModuleNotFoundError:
             self.method = scope.get("method", "")
             self.url = types.SimpleNamespace(path=scope.get("path", ""))
 
+from tests.api_import_stubs import install_fastapi_exception_stubs  # noqa: E402
+
+install_fastapi_exception_stubs()
 import api  # noqa: E402
 
 if "fastapi.responses" in sys.modules:

@@ -222,6 +222,9 @@ if "fastapi" not in sys.modules:
     responses_mod.JSONResponse = _FakeResponse
     sys.modules["fastapi.responses"] = responses_mod
 
+from tests.api_import_stubs import install_fastapi_exception_stubs  # noqa: E402
+
+install_fastapi_exception_stubs()
 import api as api_module  # noqa: E402
 
 
@@ -10818,7 +10821,18 @@ def test_update_target_principal_returns_409_for_active_slot_collision(monkeypat
         pass
 
     class FakeConn:
+        def transaction(self):
+            return self
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
         async def fetchrow(self, query, *args):
+            if "SELECT credential_profile FROM target_principals" in str(query):
+                return {"credential_profile": None}
             if "UPDATE target_principals" in str(query):
                 raise UniqueViolationError("idx_target_principals_active_auth_slot")
             raise AssertionError(str(query))
