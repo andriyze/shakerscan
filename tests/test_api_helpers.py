@@ -228,6 +228,149 @@ install_fastapi_exception_stubs()
 import api as api_module  # noqa: E402
 
 
+def test_scan_detail_exposes_verified_content_free_stage_prefix(monkeypatch):
+    scan_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
+    checkpoint = {
+        "schema_version": "canonical-scan-stage-checkpoint/v1",
+        "last_stage": "discover_surface",
+        "status": "completed",
+        "stages": [{"index": 2, "name": "discover_surface"}],
+        "history_digest": "a" * 64,
+        "content_free": True,
+    }
+
+    class _Conn:
+        async def fetchrow(self, query, *args):
+            return {
+                "id": scan_id,
+                "job_id": "job-1",
+                "scan_role": "standalone",
+                "options": {},
+                "execution_context": {},
+                "result": None,
+            }
+
+        async def fetch(self, query, *args):
+            return []
+
+    class _Acquire:
+        async def __aenter__(self):
+            return _Conn()
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    class _Pool:
+        def acquire(self):
+            return _Acquire()
+
+    class _Store:
+        async def load_prefix(self, conn, *, scan_id, job_id):
+            assert scan_id == "11111111-1111-4111-8111-111111111111"
+            assert job_id == "job-1"
+            return checkpoint
+
+    monkeypatch.setattr(api_module, "db_pool", _Pool())
+    monkeypatch.setattr(api_module, "PostgresScanStageCheckpointStore", _Store)
+
+    detail = asyncio.run(api_module.get_scan(str(scan_id)))
+
+    assert detail["canonical_stage_checkpoint"] == checkpoint
+    assert "observations" not in json.dumps(checkpoint)
+
+
+def test_stale_scan_stage_checkpoint_preserves_failure_truth(monkeypatch, tmp_path):
+    scan_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
+    checkpoint = {
+        "schema_version": "canonical-scan-stage-checkpoint/v1",
+        "execution_plan_digest": "a" * 64,
+        "target_binding_digest": "b" * 64,
+        "last_stage": "discover_surface",
+        "status": "completed",
+        "stages": [{
+            "index": 2,
+            "name": "discover_surface",
+            "status": "completed",
+            "output_keys": ["web.probe"],
+        }],
+        "history_digest": "c" * 64,
+        "content_free": True,
+    }
+
+    class _Redis:
+        def keys(self, _pattern):
+            return []
+
+        def lrange(self, *_args):
+            return []
+
+    class _Conn:
+        def __init__(self):
+            self.update_args = None
+
+        async def fetch(self, query, *args):
+            if "WHERE status = 'running'" in query:
+                return [{
+                    "id": scan_id,
+                    "job_id": "job-1",
+                    "scan_type": "balanced",
+                    "started_at": datetime.now() - timedelta(hours=1),
+                    "target_id": None,
+                    "current_phase": "discover_surface",
+                    "progress": 35,
+                    "options": {},
+                    "scan_role": "standalone",
+                    "parent_scan_id": None,
+                }]
+            return []
+
+        async def fetchrow(self, query, *args):
+            if "FROM scan_artifacts" in query:
+                return None
+            raise AssertionError(query)
+
+        async def execute(self, query, *args):
+            if "UPDATE scans" in query and "completed_at" in query:
+                self.update_args = args
+                return "UPDATE 1"
+            raise AssertionError(query)
+
+    conn = _Conn()
+
+    class _Acquire:
+        async def __aenter__(self):
+            return conn
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    class _Pool:
+        def acquire(self):
+            return _Acquire()
+
+    class _Store:
+        async def load_prefix(self, _conn, *, scan_id, job_id):
+            assert scan_id == "11111111-1111-4111-8111-111111111111"
+            assert job_id == "job-1"
+            return checkpoint
+
+    monkeypatch.setattr(api_module, "get_redis", lambda: _Redis())
+    monkeypatch.setattr(api_module, "RESULTS_DIR", tmp_path)
+    monkeypatch.setattr(api_module, "PostgresScanStageCheckpointStore", _Store)
+
+    asyncio.run(api_module.cleanup_stale_scans(_Pool()))
+
+    assert conn.update_args is not None
+    persisted = json.loads(conn.update_args[2])
+    # Content-free orchestration state is useful, but it is not detector proof
+    # and must never turn a dead worker into a successful Scan.
+    assert conn.update_args[7] == "failed"
+    assert persisted["canonical_stage_checkpoint"] == checkpoint
+    assert persisted["scan_metadata"]["degraded"] is True
+    assert persisted["scan_metadata"]["durable_stage_checkpoint_recovered"] is True
+    assert persisted["scan_metadata"]["terminated_at_phase"] == "discover_surface"
+
+
 class _BodyRequest:
     def __init__(self, payload: bytes):
         self._payload = payload

@@ -16,6 +16,7 @@ from scan.stage_store import (
     PostgresScanStageCheckpointStore,
     SCAN_STAGE_CHECKPOINT_SCHEMA_SQL,
     ScanStageCheckpointError,
+    _history_digest,
     public_stage_row,
     stage_row_digest,
 )
@@ -76,6 +77,17 @@ class FakeConn:
         self.rows[key] = incoming
         return incoming
 
+    async def fetch(self, query, *args):
+        scan_id, job_id = str(args[0]), args[1]
+        return sorted(
+            (
+                row
+                for (row_scan_id, row_job_id, _index), row in self.rows.items()
+                if row_scan_id == scan_id and row_job_id == job_id
+            ),
+            key=lambda row: row["stage_index"],
+        )
+
 
 def _persist(store, conn, row=None, **overrides):
     values = {
@@ -124,6 +136,40 @@ def test_persist_is_idempotent_for_one_stage_and_rejects_authority_change():
 
     with pytest.raises(ScanStageCheckpointError, match="immutable Scan authority"):
         _persist(store, conn, execution_plan_digest="e" * 64)
+
+
+def test_load_prefix_rejects_tampering_and_returns_only_content_free_rows():
+    conn = FakeConn()
+    store = PostgresScanStageCheckpointStore()
+    first = _row(
+        index=0, name="bind_target", capability_names=[], output_keys=[],
+    )
+    _persist(store, conn, row=first, history_digest=_history_digest([first]))
+    second = _row(
+        index=1, name="resolve_inputs", capability_names=[], output_keys=[],
+    )
+    _persist(
+        store,
+        conn,
+        row=second,
+        history_digest=_history_digest([first, second]),
+    )
+
+    prefix = asyncio.run(store.load_prefix(
+        conn, scan_id=SCAN_ID, job_id="scan/job:1",
+    ))
+    assert prefix["last_stage"] == "resolve_inputs"
+    assert prefix["content_free"] is True
+    assert prefix["stages"] == [first, second]
+    assert "secret" not in json.dumps(prefix)
+
+    conn.rows[(SCAN_ID, "scan/job:1", 1)]["stage_row_json"][
+        "status"
+    ] = "failed"
+    with pytest.raises(ScanStageCheckpointError, match="status mismatch"):
+        asyncio.run(store.load_prefix(
+            conn, scan_id=SCAN_ID, job_id="scan/job:1",
+        ))
 
 
 def test_checkpoint_schema_matches_init_and_upgrade_repair():

@@ -454,6 +454,10 @@ try:
         prepare_worker_dispatch,
     )
     from scan.executor import build_native_scan_execution
+    from scan.stage_store import (
+        PostgresScanStageCheckpointStore,
+        ScanStageCheckpointError,
+    )
     from scan.broker_execution import (
         BrokerScanExecutionError,
         heartbeat_broker_scan_execution,
@@ -489,6 +493,10 @@ except ModuleNotFoundError:
         prepare_worker_dispatch,
     )
     from api.scan.executor import build_native_scan_execution
+    from api.scan.stage_store import (
+        PostgresScanStageCheckpointStore,
+        ScanStageCheckpointError,
+    )
     from api.scan.broker_execution import (
         BrokerScanExecutionError,
         heartbeat_broker_scan_execution,
@@ -2872,8 +2880,8 @@ async def cleanup_stale_scans(pool: asyncpg.Pool):
         # heartbeat; they are finalized by the merge job and reconciled below,
         # so exclude them from heartbeat/duration staleness here.
         running_scans = await conn.fetch("""
-            SELECT id, scan_type, started_at, target_id, current_phase, progress,
-                   options, scan_role, parent_scan_id
+            SELECT id, job_id, scan_type, started_at, target_id, current_phase,
+                   progress, options, scan_role, parent_scan_id
             FROM scans
             WHERE status = 'running' AND started_at IS NOT NULL
               AND (scan_role IS NULL OR scan_role <> 'parent')
@@ -2969,6 +2977,32 @@ async def cleanup_stale_scans(pool: asyncpg.Pool):
             if is_stale:
                 print(f"[cleanup] Terminating scan {scan_id[:8]}: {reason}", flush=True)
 
+                # The fixed V2 graph checkpoints only content-free orchestration
+                # metadata. Recover it independently from the legacy report file:
+                # it is trustworthy partial state, but never enough to turn a
+                # crashed scan into a successful or clean security result.
+                canonical_stage_checkpoint = None
+                stage_checkpoint_phase = None
+                if scan.get("job_id"):
+                    try:
+                        canonical_stage_checkpoint = await (
+                            PostgresScanStageCheckpointStore().load_prefix(
+                                conn,
+                                scan_id=scan_id,
+                                job_id=str(scan["job_id"]),
+                            )
+                        )
+                        if canonical_stage_checkpoint:
+                            stage_checkpoint_phase = str(
+                                canonical_stage_checkpoint.get("last_stage") or ""
+                            ) or None
+                    except ScanStageCheckpointError as exc:
+                        print(
+                            f"[cleanup] Rejected corrupt stage checkpoint for "
+                            f"scan {scan_id[:8]}: {exc}",
+                            flush=True,
+                        )
+
                 # Try to recover partial results from checkpoint file
                 partial_result = None
                 checkpoint_phase = None
@@ -3031,6 +3065,11 @@ async def cleanup_stale_scans(pool: asyncpg.Pool):
                 error_msg = f"Scan terminated: {reason}"
                 if checkpoint_phase:
                     error_msg += f"\nPartial results recovered from phase: {checkpoint_phase}"
+                if stage_checkpoint_phase:
+                    error_msg += (
+                        "\nDurable stage checkpoint recovered through phase: "
+                        f"{stage_checkpoint_phase}"
+                    )
                 if last_logs:
                     error_msg += f"\n\nLast logs:\n{last_logs}"
 
@@ -3075,6 +3114,16 @@ async def cleanup_stale_scans(pool: asyncpg.Pool):
                         progress=progress,
                         error_message=error_msg,
                     )
+                if canonical_stage_checkpoint:
+                    partial_result["canonical_stage_checkpoint"] = dict(
+                        canonical_stage_checkpoint
+                    )
+                    metadata = partial_result.setdefault("scan_metadata", {})
+                    if isinstance(metadata, dict):
+                        metadata["durable_stage_checkpoint_recovered"] = True
+                        metadata["terminated_at_phase"] = (
+                            checkpoint_phase or stage_checkpoint_phase
+                        )
                 await conn.execute("""
                     UPDATE scans
                     SET status = $8,
@@ -28712,6 +28761,22 @@ async def get_scan(scan_id: str, verified_only: bool = False):
                 END
         """, uuid.UUID(scan_id))
 
+        canonical_stage_checkpoint = None
+        if scan.get("job_id"):
+            try:
+                canonical_stage_checkpoint = await (
+                    PostgresScanStageCheckpointStore().load_prefix(
+                        conn,
+                        scan_id=scan_id,
+                        job_id=str(scan["job_id"]),
+                    )
+                )
+            except ScanStageCheckpointError as exc:
+                logger.warning(
+                    "Rejected corrupt Scan stage checkpoint",
+                    extra={"scan_id": scan_id, "error": str(exc)},
+                )
+
     result = dict(scan)
     result['execution_context'] = _json_object(result.get('execution_context'))
     if result.get('result') is not None:
@@ -28727,6 +28792,10 @@ async def get_scan(scan_id: str, verified_only: bool = False):
             continue
         merged_findings.append(finding)
     result['findings'] = merged_findings
+    if canonical_stage_checkpoint:
+        result["canonical_stage_checkpoint"] = dict(
+            canonical_stage_checkpoint
+        )
     if result.get('options') is not None:
         result['options'] = _sanitize_scan_options(result['options'])
 

@@ -8,6 +8,8 @@ import re
 from typing import Any, Mapping, Protocol
 import uuid
 
+from .executor import NATIVE_SCAN_STAGES
+
 
 MIGRATION_NAME = "v2_scan_stage_checkpoints_v1"
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -92,6 +94,7 @@ class ScanStageCheckpointError(RuntimeError):
 class ScanStageCheckpointDatabase(Protocol):
     async def execute(self, query: str, *args: Any) -> Any: ...
     async def fetchrow(self, query: str, *args: Any) -> Any: ...
+    async def fetch(self, query: str, *args: Any) -> Any: ...
 
 
 def _digest(value: Any, *, name: str) -> str:
@@ -171,6 +174,24 @@ def stage_row_digest(row: Mapping[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _history_digest(rows: list[dict[str, Any]]) -> str:
+    encoded = json.dumps(
+        rows, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _json_object(value: Any, *, name: str) -> dict[str, Any]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ScanStageCheckpointError(f"{name} is invalid JSON") from exc
+    if not isinstance(value, Mapping):
+        raise ScanStageCheckpointError(f"{name} must be an object")
+    return dict(value)
+
+
 class PostgresScanStageCheckpointStore:
     async def ensure_schema(self, conn: ScanStageCheckpointDatabase) -> None:
         await conn.execute(SCAN_STAGE_CHECKPOINT_SCHEMA_SQL)
@@ -213,3 +234,87 @@ class PostgresScanStageCheckpointStore:
                 "stage checkpoint conflicts with immutable Scan authority"
             )
         return stored
+
+    async def load_prefix(
+        self,
+        conn: ScanStageCheckpointDatabase,
+        *,
+        scan_id: str,
+        job_id: str,
+    ) -> Mapping[str, Any] | None:
+        """Load and verify one contiguous, digest-linked public stage prefix."""
+        try:
+            normalized_scan_id = uuid.UUID(str(scan_id))
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ScanStageCheckpointError("scan_id is invalid") from exc
+        normalized_job_id = _identifier(job_id, name="job_id")
+        rows = await conn.fetch(
+            """SELECT stage_index, stage_name, status,
+                      execution_plan_digest, target_binding_digest,
+                      history_digest, stage_row_digest, stage_row_json
+               FROM scan_stage_checkpoints
+               WHERE scan_id=$1 AND job_id=$2
+               ORDER BY stage_index""",
+            normalized_scan_id,
+            normalized_job_id,
+        )
+        if not rows:
+            return None
+
+        public_rows: list[dict[str, Any]] = []
+        plan_digest: str | None = None
+        target_digest: str | None = None
+        for expected_index, stored in enumerate(rows):
+            stage_row = public_stage_row(
+                _json_object(stored["stage_row_json"], name="stage_row_json")
+            )
+            stored_index = int(stored["stage_index"])
+            if stored_index != expected_index or stage_row["index"] != expected_index:
+                raise ScanStageCheckpointError(
+                    "stage checkpoint prefix is not contiguous"
+                )
+            if (
+                expected_index >= len(NATIVE_SCAN_STAGES)
+                or stage_row["name"] != NATIVE_SCAN_STAGES[expected_index]
+            ):
+                raise ScanStageCheckpointError(
+                    "stage checkpoint does not match the fixed Scan graph"
+                )
+            if str(stored["stage_name"]) != stage_row["name"]:
+                raise ScanStageCheckpointError("stage checkpoint name mismatch")
+            if str(stored["status"]) != stage_row["status"]:
+                raise ScanStageCheckpointError("stage checkpoint status mismatch")
+            if _digest(
+                stored["stage_row_digest"], name="stage_row_digest"
+            ) != stage_row_digest(stage_row):
+                raise ScanStageCheckpointError("stage checkpoint row digest mismatch")
+            row_plan = _digest(
+                stored["execution_plan_digest"], name="execution_plan_digest"
+            )
+            row_target = _digest(
+                stored["target_binding_digest"], name="target_binding_digest"
+            )
+            if plan_digest is None:
+                plan_digest, target_digest = row_plan, row_target
+            elif row_plan != plan_digest or row_target != target_digest:
+                raise ScanStageCheckpointError(
+                    "stage checkpoint authority changed within one prefix"
+                )
+            public_rows.append(stage_row)
+            if _digest(
+                stored["history_digest"], name="history_digest"
+            ) != _history_digest(public_rows):
+                raise ScanStageCheckpointError(
+                    "stage checkpoint history digest mismatch"
+                )
+
+        return {
+            "schema_version": "canonical-scan-stage-checkpoint/v1",
+            "execution_plan_digest": plan_digest,
+            "target_binding_digest": target_digest,
+            "status": public_rows[-1]["status"],
+            "last_stage": public_rows[-1]["name"],
+            "stages": public_rows,
+            "history_digest": _history_digest(public_rows),
+            "content_free": True,
+        }
