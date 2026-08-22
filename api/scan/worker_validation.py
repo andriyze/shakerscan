@@ -27,7 +27,7 @@ from .execution import (
 V2_KEYS = frozenset({
     "scan_generation", "scan_engine", "scan_execution_plan_schema",
     "scan_execution_plan_digest", "scan_execution_plan", "scan_policy",
-    "resolved_scan_budget", "scan_compatibility",
+    "resolved_scan_budget",
 })
 REQUIRED_V2_KEYS = V2_KEYS | {"budget_profile"}
 PLAN_KEYS = frozenset({

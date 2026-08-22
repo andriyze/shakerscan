@@ -66,10 +66,7 @@ def test_every_legacy_type_translates_to_one_scan_plan_with_deprecation(
     assert contract.execution_plan.engine == "scan"
     assert contract.execution_plan.canonical_dict()["engine"] == "scan"
     assert contract.execution_scan_type == ("full" if active else "deep")
-    assert contract.option_metadata()["scan_compatibility"] == {
-        "legacy_executor_alias": "full" if active else "deep",
-        "temporary": True,
-    }
+    assert "scan_compatibility" not in contract.option_metadata()
     assert contract.deprecations == ({
         "field": "scan_type", "value": legacy,
         "replacement": {"active_testing": active, "budget_profile": profile},
@@ -193,7 +190,7 @@ def test_v2_authentication_keeps_both_bola_principals_and_rejects_unknown_fields
         normalize_scan_authentication({"auto_auth": "yes"})
 
 
-def test_resolved_metadata_contains_canonical_plan_and_explicit_compatibility():
+def test_resolved_metadata_contains_only_canonical_plan_and_deprecation_data():
     contract = resolve_scan_contract(
         budget_profile="fast", policy={"subdomain_discovery": True},
         approval_receipt_id="approval-1",
@@ -206,9 +203,7 @@ def test_resolved_metadata_contains_canonical_plan_and_explicit_compatibility():
     assert metadata["resolved_scan_budget"] == BUDGET_PROFILES["fast"].__dict__
     assert metadata["scan_execution_plan"]["engine"] == "scan"
     assert metadata["scan_execution_plan_digest"] == contract.execution_plan.digest
-    assert metadata["scan_compatibility"] == {
-        "legacy_executor_alias": "deep", "temporary": True,
-    }
+    assert "scan_compatibility" not in metadata
     assert set(LEGACY_SCAN_MAPPING) == {
         "quick", "standard", "deep", "full", "aggressive", "smart"
     }

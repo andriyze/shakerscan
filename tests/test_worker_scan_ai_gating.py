@@ -3875,10 +3875,6 @@ def test_run_scan_uses_native_fixed_stage_contract_for_canonical_plan(monkeypatc
     )
     options = plan.option_metadata()
     options.update({
-        "scan_compatibility": {
-            "legacy_executor_alias": "full",
-            "temporary": True,
-        },
         "scan_type": "full",
         "active": True,
         "network_discovery": False,

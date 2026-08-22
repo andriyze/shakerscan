@@ -101,7 +101,7 @@ def test_worker_rejects_unknown_or_alias_family_in_persisted_plan():
             resolve_worker_scan_admission(changed)
 
 
-def test_flattened_snapshots_and_compatibility_alias_must_match_plan():
+def test_flattened_snapshots_must_match_plan():
     options = _options(active=True)
     changed = copy.deepcopy(options)
     changed["scan_policy"]["active_testing"] = False
@@ -112,12 +112,6 @@ def test_flattened_snapshots_and_compatibility_alias_must_match_plan():
     changed["resolved_scan_budget"]["max_workers"] = 3
     with pytest.raises(WorkerScanContractError, match="flattened resolved_scan_budget"):
         resolve_worker_scan_admission(changed)
-
-    changed = copy.deepcopy(options)
-    changed["scan_compatibility"]["legacy_executor_alias"] = "deep"
-    with pytest.raises(WorkerScanContractError, match="scan_compatibility"):
-        resolve_worker_scan_admission(changed)
-
 
 def test_caller_cannot_reintroduce_smart_aggressive_or_quick_execution():
     active = _options(active=True)

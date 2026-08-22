@@ -47,10 +47,6 @@ def _authority(*, enabled: bool = True, network: bool = False):
     )
     options = plan.option_metadata()
     options.update({
-        "scan_compatibility": {
-            "legacy_executor_alias": "full" if network else "deep",
-            "temporary": True,
-        },
         "scan_type": "full" if network else "deep",
         "active": network,
         "network_discovery": network,

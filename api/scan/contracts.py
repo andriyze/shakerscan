@@ -94,10 +94,6 @@ class ResolvedScanContract:
         metadata.update({
             "legacy_scan_type": self.legacy_scan_type,
             "deprecations": [dict(item) for item in self.deprecations],
-            "scan_compatibility": {
-                "legacy_executor_alias": self.legacy_executor_alias,
-                "temporary": True,
-            },
         })
         return metadata
 

@@ -10,8 +10,6 @@ from .legacy import LEGACY_SCAN_MAPPING, translate_legacy_scan_type
 from .worker_validation import (
     V2_KEYS,
     WorkerScanContractError,
-    exact_keys,
-    object_value,
     validate_execution_plan,
 )
 
@@ -65,15 +63,6 @@ def resolve_worker_scan_admission(options: Mapping[str, Any]) -> WorkerScanAdmis
 
     plan = validate_execution_plan(options)
     backing = "full" if plan.policy.active_testing else "deep"
-    compatibility = object_value(options["scan_compatibility"], "scan_compatibility")
-    exact_keys(
-        compatibility,
-        frozenset({"legacy_executor_alias", "temporary"}),
-        "scan_compatibility",
-    )
-    if compatibility != {"legacy_executor_alias": backing, "temporary": True}:
-        raise WorkerScanContractError("scan_compatibility does not match canonical policy")
-
     submitted = str(options.get("scan_type") or "").strip().lower()
     if submitted and submitted != backing:
         raise WorkerScanContractError(

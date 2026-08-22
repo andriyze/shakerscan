@@ -30,10 +30,6 @@ def _plan(*, active: bool = False) -> ScanExecutionPlan:
 
 def _options(plan: ScanExecutionPlan) -> dict:
     metadata = plan.option_metadata()
-    metadata["scan_compatibility"] = {
-        "legacy_executor_alias": "full" if plan.policy.active_testing else "deep",
-        "temporary": True,
-    }
     metadata["scan_type"] = "full" if plan.policy.active_testing else "deep"
     metadata["active"] = plan.policy.active_testing
     metadata["network_discovery"] = plan.policy.network_discovery

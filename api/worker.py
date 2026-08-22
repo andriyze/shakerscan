@@ -14164,10 +14164,6 @@ def _canonicalize_shard_options(
     active = parent_job.execution_plan.policy.active_testing
     backing_scan_type = "full" if active else "deep"
     child_options.update({
-        "scan_compatibility": {
-            "legacy_executor_alias": backing_scan_type,
-            "temporary": True,
-        },
         "scan_type": backing_scan_type,
         "active": active,
         "network_discovery": parent_job.execution_plan.policy.network_discovery,

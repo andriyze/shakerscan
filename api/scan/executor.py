@@ -454,7 +454,6 @@ def validate_native_scan_execution_payload(value: Any) -> dict[str, Any]:
             "scan_policy": plan.get("policy"),
             "resolved_scan_budget": plan.get("budget"),
             "budget_profile": plan.get("budget_profile"),
-            "scan_compatibility": {},
         })
     except (TypeError, ValueError, WorkerScanContractError) as exc:
         raise NativeScanExecutionError(f"native Scan plan is invalid: {exc}") from exc
