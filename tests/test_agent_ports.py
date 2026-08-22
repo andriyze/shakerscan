@@ -923,6 +923,10 @@ def test_dalfox_sqlmap_output_is_typed_and_payloads_not_exposed():
     kinds = {r["kind"] for r in out["records"]}
     assert kinds == {"sqli_finding", "sqli_dbms_fingerprint"}
     assert not any("Do you want" in r["message"] for r in out["records"])
+    sqli = next(r for r in out["records"] if r["kind"] == "sqli_finding")
+    assert sqli["param"] == "q"
+    assert sqli["method"] is None
+    assert sqli["proof_state"] == "candidate"
     # no trailing id segment -> the route itself is the collection
     t = at.derive_bola_verification_targets("/rest/basket", {"basket_id": "15"}, {"basket_id": "16"})
     assert t["collection"] == "/rest/basket"

@@ -159,6 +159,91 @@ def _xss_verification_placement_summary():
     }
 
 
+def _sqli_verification_placement_summary():
+    return {
+        "schema_version": "canonical-scan-sqli-verification-execution/v1",
+        "capability_name": "sqli.verify",
+        "enabled": True,
+        "status": "success",
+        "reason": None,
+        "observations": [{
+            "kind": "sqli_finding",
+            "url": "https://app.example.test/search?q=%3Credacted%3E",
+            "method": "GET",
+            "param": "q",
+            "message": "Parameter 'q' is vulnerable.",
+            "proof_state": "candidate",
+        }, {
+            "kind": "sqli_dbms_fingerprint",
+            "url": "https://app.example.test/search?q=%3Credacted%3E",
+            "method": "GET",
+            "message": "[INFO] back-end DBMS: PostgreSQL",
+            "proof_state": "candidate",
+        }],
+        "observation_count": 2,
+        "partial": False,
+        "timed_out": False,
+        "errors": [],
+        "budget_consumed": {"http_requests": 2, "tool_wall_seconds": 2},
+        "receipt": {"receipt_hash": "8" * 64},
+        "durable_budget_settled": True,
+        "idempotent_redelivery": False,
+    }
+
+
+def test_canonical_sqli_verification_is_bound_and_stays_suspected(monkeypatch):
+    execution = {
+        "execution_plan_digest": "a" * 64,
+        "target_binding_digest": "b" * 64,
+    }
+    monkeypatch.setenv(
+        "SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS",
+        json.dumps({
+            "schema_version": "canonical-scan-placements/v1",
+            **execution,
+            "capabilities": {
+                "sqli.verify": _sqli_verification_placement_summary(),
+            },
+        }),
+    )
+
+    placements = scanner_mod._load_canonical_scan_placements(execution)
+    observations = scanner_mod._canonical_sqli_observations(
+        placements["sqli.verify"]
+    )
+
+    assert observations[0] == {
+        "url": "https://app.example.test/search?q=%3Credacted%3E",
+        "method": "GET",
+        "param": "q",
+        "message": "Parameter 'q' is vulnerable.",
+        "kind": "sqli_finding",
+        "proof_state": "candidate",
+        "canonical_capability": "sqli.verify",
+    }
+    findings = scanner_mod._canonical_sqli_findings(
+        placements["sqli.verify"]
+    )
+    assert len(findings) == 1
+    assert findings[0]["tool"] == "sqlmap"
+    assert findings[0]["cwe"] == "CWE-89"
+    assert findings[0]["evidence"]["capability_receipt"]["receipt_hash"] == (
+        "8" * 64
+    )
+    validated = apply_validation_to_finding(
+        findings[0], validate_finding(findings[0], ""),
+    )
+    [suspected] = apply_dast_precision_policy([validated])
+    assert suspected["verified"] is False
+    assert suspected["needs_verification"] is True
+    assert suspected["proof_state"] == "likely_vulnerable"
+    assert "proof_contract_v2" not in suspected
+    assert suspected["registry_contract"]["contract_satisfied"] is False
+    assert {"payload", "response_delta"}.issubset(
+        suspected["registry_contract"]["proof_fields_missing"]
+    )
+
+
 def test_canonical_xss_verification_is_bound_and_adapted(monkeypatch):
     execution = {
         "execution_plan_digest": "a" * 64,

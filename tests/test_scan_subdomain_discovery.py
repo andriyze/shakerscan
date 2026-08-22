@@ -454,20 +454,41 @@ def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch)
                 },
                 "settlement": {"mode": "exact", "actual": 3},
             }
-        assert tool == "dalfox"
+        if tool == "dalfox":
+            return {
+                "status": "success",
+                "elapsed_seconds": 2,
+                "typed_output": {
+                    "parser": "dalfox-typed-v1",
+                    "records": [{
+                        "kind": "xss_alert",
+                        "alert_type": "V",
+                        "url": "https://app.example.test/api/orders?q=%3Credacted%3E",
+                        "param": "q",
+                        "payload_sha256": "a" * 64,
+                        "message": "verified alert",
+                        "proof_state": "verified",
+                    }],
+                    "errors": [],
+                },
+                "settlement": {"mode": "exact", "actual": 2},
+            }
+        assert tool == "sqlmap"
         return {
             "status": "success",
             "elapsed_seconds": 2,
             "typed_output": {
-                "parser": "dalfox-typed-v1",
+                "parser": "sqlmap-typed-v1",
                 "records": [{
-                    "kind": "xss_alert",
-                    "alert_type": "V",
-                    "url": "https://app.example.test/api/orders?q=%3Credacted%3E",
+                    "kind": "sqli_finding",
+                    "message": "Parameter 'q' is vulnerable.",
                     "param": "q",
-                    "payload_sha256": "a" * 64,
-                    "message": "verified alert",
-                    "proof_state": "verified",
+                    "method": None,
+                    "proof_state": "candidate",
+                }, {
+                    "kind": "sqli_dbms_fingerprint",
+                    "message": "[INFO] back-end DBMS: PostgreSQL",
+                    "proof_state": "candidate",
                 }],
                 "errors": [],
             },
@@ -487,12 +508,12 @@ def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch)
         placement_seen.update(canonical_placed_capabilities or {})
         assert target == "https://app.example.test"
         assert canonical_runtime_budget == {
-            "http_requests": 90,
+            "http_requests": 88,
             "state_changing_requests": 0,
             "browser_actions": 20,
             "tcp_ports_attempted": 1,
             "hosts_attempted": 50,
-            "tool_wall_seconds": 51,
+            "tool_wall_seconds": 49,
         }
         return {
             "target": target,
@@ -535,6 +556,7 @@ def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch)
     assert ("ffuf", "running") in events
     assert ("nuclei", "running") in events
     assert ("dalfox", "running") in events
+    assert ("sqlmap", "running") in events
     assert ("baseline", "running") in events
     assert events.index(("httpx", "running")) < events.index(
         ("katana", "running")
@@ -549,6 +571,9 @@ def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch)
         ("dalfox", "running")
     )
     assert events.index(("dalfox", "running")) < events.index(
+        ("sqlmap", "running")
+    )
+    assert events.index(("sqlmap", "running")) < events.index(
         ("baseline", "running")
     )
     assert placement_seen["templates.scan"]["status"] == "success"
@@ -569,10 +594,20 @@ def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch)
     assert placement_seen["xss.verify"]["observations"][0][
         "proof_state"
     ] == "verified"
+    assert placement_seen["sqli.verify"]["status"] == "success"
+    assert placement_seen["sqli.verify"]["observations"][0]["url"] == (
+        "https://app.example.test/api/orders?q=%3Credacted%3E"
+    )
+    assert placement_seen["sqli.verify"]["observations"][0][
+        "proof_state"
+    ] == "candidate"
     assert result["canonical_capabilities"]["templates.scan"][
         "receipt"
     ]["budget_reservation_state"] == "committed"
     assert result["canonical_capabilities"]["xss.verify"][
+        "receipt"
+    ]["budget_reservation_state"] == "committed"
+    assert result["canonical_capabilities"]["sqli.verify"][
         "receipt"
     ]["budget_reservation_state"] == "committed"
 
@@ -874,6 +909,7 @@ def _stored_network_capability(
         "web.crawl": ("katana", "katana-typed-v1"),
         "web.content_discover": ("ffuf", "ffuf-typed-v1"),
         "xss.verify": ("dalfox", "dalfox-typed-v1"),
+        "sqli.verify": ("sqlmap", "sqlmap-typed-v1"),
     }[capability_name]
     terminal, receipt = terminalize_capability_reservation(
         running,
@@ -1016,6 +1052,81 @@ def test_verify_stage_never_runs_without_active_permission(monkeypatch):
         worker, "_execute_reserved_scan_capability", execute_capability,
     )
     summary = asyncio.run(worker._execute_scan_xss_verification_capability(
+        "https://app.example.test/search?q=test",
+        options,
+        scan_id="00000000-0000-0000-0000-000000000001",
+        job_id="job-1",
+    ))
+
+    assert summary["status"] == "skipped"
+    assert summary["reason"] == "active_testing_not_authorized"
+
+
+def test_verify_stage_places_one_reserved_sqli_result(monkeypatch):
+    _plan, _target, options = _authority(enabled=False, network=True)
+    calls = []
+
+    async def execute_capability(**kwargs):
+        calls.append(kwargs)
+        return _stored_network_capability(
+            "sqli.verify",
+            observations=[{
+                "kind": "sqli_finding",
+                "message": "Parameter 'q' is vulnerable.",
+                "param": "q",
+                "method": None,
+                "proof_state": "candidate",
+            }],
+            amounts={"http_requests": 2, "tool_wall_seconds": 2},
+        ), False
+
+    monkeypatch.setattr(
+        worker, "_execute_reserved_scan_capability", execute_capability,
+    )
+    summary = asyncio.run(worker._execute_scan_sqli_verification_capability(
+        "https://app.example.test/search?q=test",
+        options,
+        scan_id="00000000-0000-0000-0000-000000000001",
+        job_id="job-1",
+    ))
+
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["capability_name"] == "sqli.verify"
+    assert call["action_id"].startswith("deterministic_verify.sqli.")
+    assert call["reservation_limits"] == {
+        "http_requests": 10,
+        "tool_wall_seconds": 6,
+    }
+    assert call["scanner_process_payload"]["tool_name"] == "sqlmap"
+    assert call["scanner_process_payload"]["execution_target"] == (
+        "https://app.example.test/search?q=test"
+    )
+    assert call["scanner_process_payload"]["registered_target"] == (
+        "https://app.example.test"
+    )
+    assert call["scanner_process_payload"]["scanner_options"] == {}
+    assert call["scanner_process_payload"]["pinned_address"] == "192.0.2.10"
+    assert call["scanner_process_payload"]["oob_interactsh_server"] is None
+    assert summary["status"] == "success"
+    assert summary["observations"][0]["url"] == (
+        "https://app.example.test/search?q=%3Credacted%3E"
+    )
+    assert summary["observations"][0]["method"] == "GET"
+    assert summary["observations"][0]["proof_state"] == "candidate"
+    assert summary["receipt"]["budget_reservation_state"] == "committed"
+
+
+def test_sqli_verify_stage_never_runs_without_active_permission(monkeypatch):
+    _plan, _target, options = _authority(enabled=True, network=False)
+
+    async def execute_capability(**_kwargs):
+        raise AssertionError("passive Scan launched SQLMap")
+
+    monkeypatch.setattr(
+        worker, "_execute_reserved_scan_capability", execute_capability,
+    )
+    summary = asyncio.run(worker._execute_scan_sqli_verification_capability(
         "https://app.example.test/search?q=test",
         options,
         scan_id="00000000-0000-0000-0000-000000000001",

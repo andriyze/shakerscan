@@ -122,6 +122,7 @@ from scan.capability_execution import (
     scan_external_execution_target,
     scan_network_capability_allocation,
     scan_parameterized_execution_candidates,
+    scan_sqli_verification_capability_allocation,
     scan_template_capability_allocation,
     scan_web_crawl_capability_allocation,
     scan_web_probe_capability_allocation,
@@ -10984,6 +10985,161 @@ async def _execute_scan_xss_verification_capability(
     )
 
 
+def _skipped_scan_sqli_verification_summary(reason: str) -> dict[str, Any]:
+    return {
+        "schema_version": "canonical-scan-sqli-verification-execution/v1",
+        "capability_name": "sqli.verify",
+        "enabled": False,
+        "status": "skipped",
+        "reason": str(reason)[:200],
+        "observations": [],
+        "observation_count": 0,
+        "partial": False,
+        "timed_out": False,
+        "errors": [],
+        "budget_consumed": {},
+        "receipt": {},
+        "durable_budget_settled": True,
+        "idempotent_redelivery": False,
+    }
+
+
+def _scan_sqli_verification_summary_from_stored(
+    stored: Any,
+    *,
+    target_url: str,
+    idempotent_redelivery: bool,
+) -> dict[str, Any]:
+    receipt = dict(stored.receipt or {})
+    receipt_status = str(receipt.get("status") or "failed").strip().lower()
+    status = {
+        "succeeded": "success",
+        "success": "success",
+        "partial": "partial",
+        "blocked": "blocked",
+        "cancelled": "cancelled",
+    }.get(receipt_status, "failed")
+    public_target = agent_tools._public_observed_url(target_url)
+    observations = []
+    for item in receipt.get("observations") or []:
+        if (
+            not isinstance(item, Mapping)
+            or item.get("kind") not in {
+                "sqli_finding", "sqli_dbms_fingerprint",
+            }
+        ):
+            continue
+        observation = dict(item)
+        observation["url"] = public_target
+        observation["method"] = "GET"
+        observations.append(observation)
+        if len(observations) >= 100:
+            break
+    return {
+        "schema_version": "canonical-scan-sqli-verification-execution/v1",
+        "capability_name": "sqli.verify",
+        "enabled": True,
+        "status": status,
+        "reason": None,
+        "observations": observations,
+        "observation_count": len(observations),
+        "partial": bool(receipt.get("partial")),
+        "timed_out": bool(receipt.get("timed_out")),
+        "errors": list(receipt.get("errors") or [])[:20],
+        "budget_consumed": dict(stored.record.actual),
+        "receipt": _scan_capability_receipt_reference(receipt),
+        "durable_budget_settled": bool(stored.record.terminal),
+        "idempotent_redelivery": bool(idempotent_redelivery),
+    }
+
+
+async def _execute_scan_sqli_verification_capability(
+    target_url: str | None,
+    options: Mapping[str, Any],
+    *,
+    scan_id: str,
+    job_id: str,
+) -> dict[str, Any]:
+    """Run one candidate-bound SQLMap contract under Scan authority."""
+    _normalized, admission = prepare_worker_dispatch(options)
+    if not admission.canonical or admission.plan is None:
+        return _skipped_scan_sqli_verification_summary("legacy_scan")
+    execution = build_native_scan_execution(admission.plan, options)
+    policy = admission.plan.policy
+    if execution.discovery_manifest_only:
+        return _skipped_scan_sqli_verification_summary(
+            "discovery_manifest_only"
+        )
+    if execution.focused_family and execution.focused_family != "sqli":
+        return _skipped_scan_sqli_verification_summary("focused_other_family")
+    include = set(policy.include_families)
+    exclude = set(policy.exclude_families)
+    if "sqli" in exclude:
+        return _skipped_scan_sqli_verification_summary("policy_excluded")
+    if include and "sqli" not in include:
+        return _skipped_scan_sqli_verification_summary("policy_not_included")
+    if not policy.active_testing:
+        return _skipped_scan_sqli_verification_summary(
+            "active_testing_not_authorized"
+        )
+    if not policy.approval_receipt_id:
+        return _skipped_scan_sqli_verification_summary(
+            "active_approval_missing"
+        )
+    if not target_url:
+        return _skipped_scan_sqli_verification_summary(
+            "no_parameterized_candidate"
+        )
+    allocation = scan_sqli_verification_capability_allocation(
+        execution.payload()["execution_budget"]
+    )
+    if allocation is None:
+        return _skipped_scan_sqli_verification_summary(
+            "insufficient_stage_budget"
+        )
+
+    target = execution.target_binding
+    execution_target = scan_external_execution_target(target_url, target=target)
+    parsed_target = urllib.parse.urlsplit(execution_target)
+    registered_target = urllib.parse.urlunsplit((
+        parsed_target.scheme, parsed_target.netloc, "", "", "",
+    ))
+    authorized_addresses = list(target.allowed_addresses)
+    pinned_address = agent_tools.validate_pinned_scanner_address(
+        authorized_addresses[0], authorized_addresses,
+    )
+    candidate_digest = hashlib.sha256(execution_target.encode()).hexdigest()[:16]
+    stored, idempotent_redelivery = await _execute_reserved_scan_capability(
+        admission=admission,
+        execution=execution,
+        scan_id=scan_id,
+        job_id=job_id,
+        capability_name="sqli.verify",
+        capability_args={},
+        action_id=f"deterministic_verify.sqli.{candidate_digest}",
+        target_binding=target,
+        reservation_limits=allocation,
+        scanner_process_payload={
+            "job_id": f"{job_id}:sqli.verify:{candidate_digest}",
+            "tool_name": "sqlmap",
+            "execution_target": execution_target,
+            "registered_target": registered_target,
+            "scanner_options": {},
+            "timeout_ms": int(allocation["tool_wall_seconds"]) * 1_000,
+            "pinned_address": pinned_address,
+            "authorized_addresses": authorized_addresses,
+            "oob_interactsh_server": None,
+            "oob_interactsh_token": None,
+        },
+        scanner_process_runner=_execute_agent_scanner_process,
+    )
+    return _scan_sqli_verification_summary_from_stored(
+        stored,
+        target_url=execution_target,
+        idempotent_redelivery=idempotent_redelivery,
+    )
+
+
 async def _execute_scan_template_capability(
     target_url: str,
     options: Mapping[str, Any],
@@ -11115,6 +11271,12 @@ async def _execute_reserved_deterministic_scan(
         scan_id=scan_id,
         job_id=job_id,
     )
+    sqli_verification_summary = await _execute_scan_sqli_verification_capability(
+        parameterized_candidates[0] if parameterized_candidates else None,
+        normalized,
+        scan_id=scan_id,
+        job_id=job_id,
+    )
     result_holder: dict[str, Any] = {}
 
     async def scan_runner(runtime_budget: Mapping[str, int]) -> Mapping[str, Any]:
@@ -11130,6 +11292,7 @@ async def _execute_reserved_deterministic_scan(
                 "web.content_discover": content_discovery_summary,
                 "templates.scan": template_summary,
                 "xss.verify": xss_verification_summary,
+                "sqli.verify": sqli_verification_summary,
             },
         )
 
@@ -11180,6 +11343,7 @@ async def _execute_reserved_deterministic_scan(
         )
         canonical_capabilities["templates.scan"] = template_summary
         canonical_capabilities["xss.verify"] = xss_verification_summary
+        canonical_capabilities["sqli.verify"] = sqli_verification_summary
     result["deterministic_scan_execution"] = summary
     return result
 

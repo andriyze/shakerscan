@@ -9620,7 +9620,10 @@ async def build_report(target: str,
                             )
                         tasks["custom_xss"] = asyncio.create_task(custom_xss_test(u, auth_session=auth_session))
                     if run_sqli:
-                        tasks["sqlmap"] = asyncio.create_task(sqlmap_test(u, quick_mode, auth_session=auth_session))
+                        if canonical_scan_execution is None:
+                            tasks["sqlmap"] = asyncio.create_task(
+                                sqlmap_test(u, quick_mode, auth_session=auth_session)
+                            )
                         tasks["custom_sqli"] = asyncio.create_task(custom_sqli_test(u))
 
                     if not tasks:
@@ -11512,7 +11515,14 @@ async def build_report(target: str,
                         )
                     else:
                         sqlmap_decision = None
-                    if run_sqli and not sqlmap_decision.run:
+                    if run_sqli and canonical_scan_execution is not None:
+                        record_active_enrichment_skip(
+                            active_block,
+                            "sqlmap",
+                            "canonical_capability_placed",
+                            candidate_reason="canonical_sqli_verification",
+                        )
+                    elif run_sqli and not sqlmap_decision.run:
                         record_active_enrichment_skip(
                             active_block,
                             "sqlmap",
@@ -12219,6 +12229,18 @@ async def build_report(target: str,
                 dict(placed_xss) if isinstance(placed_xss, Mapping) else {
                     "status": "blocked",
                     "reason": "canonical_xss_placement_missing",
+                }
+            )
+            placed_sqli = (
+                canonical_scan_placements.get("sqli.verify")
+                if isinstance(canonical_scan_placements, dict) else None
+            )
+            active_block["sqlmap"] = _canonical_sqli_observations(placed_sqli)
+            report["findings"].extend(_canonical_sqli_findings(placed_sqli))
+            active_block["canonical_sqli_verification"] = (
+                dict(placed_sqli) if isinstance(placed_sqli, Mapping) else {
+                    "status": "blocked",
+                    "reason": "canonical_sqli_placement_missing",
                 }
             )
         async def run_asm_endpoint_batch_auth() -> RegistryPhaseOutcome:
@@ -14277,7 +14299,7 @@ def _load_canonical_scan_placements(
         raise SystemExit("canonical Scan placement capabilities are invalid")
     unknown = set(capabilities) - {
         "web.probe", "web.crawl", "web.content_discover", "templates.scan",
-        "xss.verify",
+        "xss.verify", "sqli.verify",
     }
     if unknown:
         raise SystemExit(
@@ -14453,6 +14475,53 @@ def _load_canonical_scan_placements(
             if not re.fullmatch(r"[0-9a-f]{64}", receipt_hash):
                 raise SystemExit("canonical xss.verify receipt is missing")
         result["xss.verify"] = xss_verification
+    sqli_verification = capabilities.get("sqli.verify")
+    if sqli_verification is not None:
+        if not isinstance(sqli_verification, dict) or set(sqli_verification) != {
+            "schema_version", "capability_name", "enabled", "status", "reason",
+            "observations", "observation_count", "partial", "timed_out",
+            "errors", "budget_consumed", "receipt", "durable_budget_settled",
+            "idempotent_redelivery",
+        }:
+            raise SystemExit("canonical sqli.verify placement is malformed")
+        if (
+            sqli_verification.get("schema_version")
+            != "canonical-scan-sqli-verification-execution/v1"
+            or sqli_verification.get("capability_name") != "sqli.verify"
+            or not isinstance(sqli_verification.get("enabled"), bool)
+            or sqli_verification.get("status") not in {
+                "success", "partial", "failed", "blocked", "cancelled", "skipped",
+            }
+        ):
+            raise SystemExit("canonical sqli.verify placement contract is invalid")
+        observations = sqli_verification.get("observations")
+        if not isinstance(observations, list) or len(observations) > 100:
+            raise SystemExit("canonical sqli.verify observations are invalid")
+        if any(
+            not isinstance(item, dict)
+            or item.get("kind") not in {
+                "sqli_finding", "sqli_dbms_fingerprint",
+            }
+            or item.get("proof_state") not in {"candidate", "verified"}
+            or not item.get("url")
+            or item.get("method") != "GET"
+            for item in observations
+        ):
+            raise SystemExit("canonical sqli.verify observation contract is invalid")
+        if sqli_verification.get("observation_count") != len(observations):
+            raise SystemExit("canonical sqli.verify observation count is invalid")
+        if not isinstance(sqli_verification.get("receipt"), dict):
+            raise SystemExit("canonical sqli.verify receipt reference is invalid")
+        if (
+            sqli_verification.get("enabled")
+            and sqli_verification.get("status") != "skipped"
+        ):
+            receipt_hash = str(
+                sqli_verification["receipt"].get("receipt_hash") or ""
+            )
+            if not re.fullmatch(r"[0-9a-f]{64}", receipt_hash):
+                raise SystemExit("canonical sqli.verify receipt is missing")
+        result["sqli.verify"] = sqli_verification
     template = capabilities.get("templates.scan")
     if template is None:
         return result
@@ -14603,6 +14672,69 @@ def _canonical_xss_findings(summary: Any) -> list[dict[str, Any]]:
             evidence,
             "CWE-79",
         ))
+    return findings[:100]
+
+
+def _canonical_sqli_observations(summary: Any) -> list[dict[str, Any]]:
+    """Adapt bounded SQLMap records into active-report observations."""
+    if not isinstance(summary, Mapping):
+        return []
+    return [
+        {
+            "url": item.get("url"),
+            "method": item.get("method") or "GET",
+            "param": item.get("param"),
+            "message": item.get("message"),
+            "kind": item.get("kind"),
+            "proof_state": item.get("proof_state"),
+            "canonical_capability": "sqli.verify",
+        }
+        for item in summary.get("observations") or []
+        if isinstance(item, Mapping)
+        and item.get("kind") in {
+            "sqli_finding", "sqli_dbms_fingerprint",
+        }
+    ][:100]
+
+
+def _canonical_sqli_findings(summary: Any) -> list[dict[str, Any]]:
+    """Retain affirmative SQLMap output as a proof-gated suspected finding."""
+    if not isinstance(summary, Mapping):
+        return []
+    receipt = dict(summary.get("receipt") or {})
+    findings: list[dict[str, Any]] = []
+    for item in summary.get("observations") or []:
+        if (
+            not isinstance(item, Mapping)
+            or item.get("kind") != "sqli_finding"
+            or not item.get("url")
+        ):
+            continue
+        evidence = {
+            "url": item.get("url"),
+            "method": item.get("method") or "GET",
+            "param": item.get("param"),
+            "summary": "possible SQLi (deterministic proof contract incomplete)",
+            "sqlmap_message": item.get("message"),
+            "canonical_capability": "sqli.verify",
+            "capability_receipt": receipt,
+        }
+        finding = normalize_finding(
+            "sqlmap",
+            "Potential SQL injection",
+            "high",
+            evidence,
+            "CWE-89",
+        )
+        finding["verified"] = False
+        finding["suspected"] = True
+        finding["needs_verification"] = True
+        finding["proof_state"] = "likely_vulnerable"
+        finding["verification_reason"] = (
+            "SQLMap signal lacks the payload/control differential required by "
+            "the SQLi proof contract"
+        )
+        findings.append(finding)
     return findings[:100]
 
 

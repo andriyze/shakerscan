@@ -849,9 +849,19 @@ def parse_scanner_output(
         for line in text.splitlines()[:500]:
             line = line.strip()
             if "is vulnerable" in line:
+                parameter_match = re.search(
+                    r"(?:\b(GET|POST|PUT|PATCH|DELETE)\s+)?parameter\s+['\"]([^'\"]+)['\"]\s+is vulnerable",
+                    line,
+                    re.I,
+                )
                 records.append({
                     "kind": "sqli_finding",
                     "message": line.split("Do you want")[0].strip()[:500],
+                    "param": parameter_match.group(2)[:200] if parameter_match else None,
+                    "method": (
+                        parameter_match.group(1).upper()
+                        if parameter_match and parameter_match.group(1) else None
+                    ),
                     "proof_state": "candidate",
                 })
             elif line.startswith("[INFO] back-end DBMS:") or "back-end DBMS" in line:

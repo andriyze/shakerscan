@@ -179,6 +179,20 @@ def scan_xss_verification_capability_allocation(
     }
 
 
+def scan_sqli_verification_capability_allocation(
+    budget: Mapping[str, Any],
+) -> dict[str, int] | None:
+    """Reserve one deterministic SQLi verifier slice inside Scan ceilings."""
+    http = _budget_integer(budget, "max_http_requests")
+    wall = _budget_integer(budget, "max_tool_wall_seconds")
+    if http < 4 or wall < 4:
+        return None
+    return {
+        "http_requests": min(900, max(1, http // 10)),
+        "tool_wall_seconds": min(300, max(1, wall // 10)),
+    }
+
+
 def scan_external_execution_target(
     target_url: str,
     *,

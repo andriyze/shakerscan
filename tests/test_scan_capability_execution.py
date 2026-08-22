@@ -23,6 +23,7 @@ from scan.capability_execution import (
     scan_external_execution_target,
     scan_network_capability_allocation,
     scan_parameterized_execution_candidates,
+    scan_sqli_verification_capability_allocation,
     scan_template_capability_allocation,
     scan_content_discovery_capability_allocation,
     scan_web_crawl_capability_allocation,
@@ -231,6 +232,19 @@ def test_xss_verification_allocation_preserves_the_scan_backbone():
     ) == {
         "http_requests": 400,
         "tool_wall_seconds": 120,
+    }
+
+
+def test_sqli_verification_allocation_preserves_the_scan_backbone():
+    assert scan_sqli_verification_capability_allocation(_budget()) == {
+        "http_requests": 10,
+        "tool_wall_seconds": 6,
+    }
+    assert scan_sqli_verification_capability_allocation(
+        _budget(max_http_requests=20_000, max_tool_wall_seconds=2_700)
+    ) == {
+        "http_requests": 900,
+        "tool_wall_seconds": 270,
     }
 
 
