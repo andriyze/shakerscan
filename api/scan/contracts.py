@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Any, Mapping
 
 try:
@@ -95,6 +95,29 @@ class ResolvedScanContract:
             },
         })
         return metadata
+
+
+def bind_scan_scope_receipt(
+    contract: ResolvedScanContract, scope_receipt_id: str | None,
+) -> ResolvedScanContract:
+    """Bind a validated scope receipt into every canonical Scan snapshot.
+
+    Target-bound approval is validated only after the target row exists. Rebuild
+    the immutable plan at that boundary instead of mutating the flattened policy
+    and leaving the execution-plan digest stale.
+    """
+    scope_id = str(scope_receipt_id or "").strip() or None
+    if contract.policy.scope_receipt_id == scope_id:
+        return contract
+    if contract.policy.scope_receipt_id and scope_id != contract.policy.scope_receipt_id:
+        raise ValueError("validated scope receipt conflicts with the Scan contract")
+    policy = replace(contract.policy, scope_receipt_id=scope_id)
+    plan = ScanExecutionPlan(
+        policy=policy,
+        budget_profile=contract.budget_profile,
+        budget=contract.budget,
+    )
+    return replace(contract, policy=policy, execution_plan=plan)
 
 
 def _resolve_budget(profile: str, advanced: Mapping[str, Any] | None) -> ScanBudget:

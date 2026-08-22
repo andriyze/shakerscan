@@ -427,14 +427,26 @@ import agent_budget
 try:
     from scan.contracts import (
         SCAN_AUTHENTICATION_KEYS,
+        bind_scan_scope_receipt,
         normalize_scan_authentication,
         resolve_scan_contract,
+    )
+    from scan.collection_replay import (
+        EXECUTABLE_REPLAY_POLICIES,
+        ScanCollectionReplayContractError,
+        scan_replay_authorization,
     )
 except ModuleNotFoundError:
     from api.scan.contracts import (
         SCAN_AUTHENTICATION_KEYS,
+        bind_scan_scope_receipt,
         normalize_scan_authentication,
         resolve_scan_contract,
+    )
+    from api.scan.collection_replay import (
+        EXECUTABLE_REPLAY_POLICIES,
+        ScanCollectionReplayContractError,
+        scan_replay_authorization,
     )
 try:
     from hunt.contracts import capability_manifest, resolve_hunt_policy
@@ -26468,7 +26480,10 @@ async def _generic_collection_refs(
     """Freeze exact target-bound selection refs and derive safe endpoint seeds."""
     requested: list[tuple[uuid.UUID, Mapping[str, Any]]] = []
     for raw in list(bindings)[:16]:
-        value = raw.get("id") or raw.get("collection_id")
+        # Prefer the public V2 selection identity so a complete
+        # collection_id/binding_id/selection_id tuple cannot silently degrade
+        # into a discovery-only collection reference.
+        value = raw.get("selection_id") or raw.get("id") or raw.get("collection_id")
         if not value:
             raise HTTPException(status_code=422, detail="request collection binding requires id")
         requested.append((
@@ -26509,6 +26524,20 @@ async def _generic_collection_refs(
                 status_code=422,
                 detail="request collection or selection is unavailable",
             )
+        supplied_collection_id = str(raw.get("collection_id") or "").strip()
+        if supplied_collection_id and supplied_collection_id != str(row["id"]):
+            raise HTTPException(
+                status_code=422,
+                detail="request collection selection does not match collection_id",
+            )
+        supplied_selection_id = str(raw.get("selection_id") or "").strip()
+        if supplied_selection_id and supplied_selection_id != str(
+            row.get("selection_id") or ""
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="request collection selection_id is unavailable",
+            )
         owner_id = row["device_target_id"] if normalized_kind == "device" else row["target_id"]
         if str(owner_id or "") != str(bound_target_id):
             raise HTTPException(
@@ -26530,6 +26559,12 @@ async def _generic_collection_refs(
                 status_code=422,
                 detail="request collection has no exact active binding for this target",
             )
+        supplied_binding_id = str(raw.get("binding_id") or "").strip()
+        if supplied_binding_id and supplied_binding_id != str(binding["id"]):
+            raise HTTPException(
+                status_code=422,
+                detail="request collection selection does not match binding_id",
+            )
         selection_id = row.get("selection_id")
         if selection_id:
             if str(row.get("selection_binding_id") or "") != str(binding["id"]):
@@ -26541,6 +26576,12 @@ async def _generic_collection_refs(
                 _decode_json_value(row.get("selector_json")) or {}
             )
             replay_policy = str(row.get("replay_policy") or "")
+            supplied_replay_policy = str(raw.get("replay_policy") or "").strip()
+            if supplied_replay_policy and supplied_replay_policy != replay_policy:
+                raise HTTPException(
+                    status_code=422,
+                    detail="request collection replay_policy does not match saved selection",
+                )
             try:
                 selection_digest = request_collection_selection_digest(
                     collection_id=row["id"],
@@ -26619,6 +26660,82 @@ async def _generic_collection_refs(
             "secret_values_visible": False,
         })
     return refs, list(dict.fromkeys(endpoints))[:2000]
+
+
+def _executable_scan_collection_refs(
+    refs: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return only saved selections that authorize worker-side exact replay."""
+    return [
+        dict(item)
+        for item in refs
+        if str(item.get("replay_policy") or "").strip().lower()
+        in EXECUTABLE_REPLAY_POLICIES
+    ]
+
+
+async def _freeze_scan_collection_target_binding(
+    *,
+    target_id: Any,
+    target_kind: str,
+    target_url: str,
+    refs: Sequence[Mapping[str, Any]],
+    existing_guard: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Freeze the exact origins and DNS addresses used by Scan replay transport."""
+    executable = _executable_scan_collection_refs(refs)
+    if not executable:
+        return dict(existing_guard or {})
+    parsed_target = urllib.parse.urlsplit(str(target_url or ""))
+    canonical_host = str(parsed_target.hostname or "").strip().lower().rstrip(".")
+    if not canonical_host:
+        raise HTTPException(
+            status_code=422,
+            detail="request collection replay requires a valid Scan target host",
+        )
+    allowed_origins: list[str] = []
+    for ref in executable:
+        for raw_origin in ref.get("allowed_origins") or ():
+            try:
+                origin = canonical_collection_origin(raw_origin)
+            except RequestCollectionContractError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            if urllib.parse.urlsplit(origin).hostname != canonical_host:
+                raise HTTPException(
+                    status_code=422,
+                    detail="request collection replay origin is outside the Scan target host",
+                )
+            if origin not in allowed_origins:
+                allowed_origins.append(origin)
+    if not allowed_origins:
+        raise HTTPException(
+            status_code=422,
+            detail="request collection replay requires an exact origin binding",
+        )
+    allowed_addresses = await _resolve_runtime_target_addresses(
+        target_url, subject="Scan request collection target",
+    )
+    guard = dict(existing_guard or {})
+    roots = [
+        str(item).strip().lower().rstrip(".")
+        for item in guard.get("allowed_root_domains") or ()
+        if str(item).strip()
+    ]
+    if not roots:
+        roots = [extract_root_domain(target_url) or canonical_host]
+    guard.update({
+        "target_id": str(target_id),
+        "target_kind": str(target_kind or "web").strip().lower(),
+        "canonical_host": canonical_host,
+        "allowed_origins": allowed_origins,
+        "allowed_addresses": allowed_addresses,
+        "allowed_root_domains": roots,
+        "environment": str(guard.get("environment") or "unknown"),
+        "requires_runtime_destination_check": True,
+        "requires_runtime_dns_check": True,
+        "address_binding_source": "submission_dns_snapshot",
+    })
+    return guard
 
 
 @app.post("/request-collections")
@@ -27248,8 +27365,12 @@ async def submit_scan(request: ScanRequest):
     public_scan_type = legacy_scan_type or "scan"
     request.options.scan_type = scan_type
     request.options.active = scan_contract.policy.active_testing
-    request.options.quick = scan_type == "quick"
-    request.options.thorough = scan_type in {"deep", "full", "aggressive", "smart"}
+    # quick/thorough are caller-era mode selectors, not execution flags. A V2
+    # worker derives its temporary legacy backing adapter only after validating
+    # the immutable Scan plan, so persisting either selector would make the API's
+    # own canonical job fail worker admission.
+    request.options.quick = False
+    request.options.thorough = False
     request.options.approval_receipt_id = approval_receipt_id
     request.options.budget_profile = scan_contract.budget_profile
     request.options.subfinder = bool(scan_contract.policy.subdomain_discovery)
@@ -27401,6 +27522,20 @@ async def submit_scan(request: ScanRequest):
             options_payload["custom_endpoints"] = list(dict.fromkeys([
                 *list(options_payload.get("custom_endpoints") or []), *collection_endpoints,
             ]))[:2000]
+        executable_collection_refs = _executable_scan_collection_refs(collection_refs)
+        confirmed_active_collection_replay = any(
+            str(item.get("replay_policy") or "") == "confirmed_active"
+            for item in executable_collection_refs
+        )
+        if confirmed_active_collection_replay:
+            try:
+                scan_replay_authorization(
+                    "confirmed_active",
+                    options_payload.get("scan_policy") or {},
+                    approval_receipt_id=approval_receipt_id,
+                )
+            except ScanCollectionReplayContractError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
 
         credential_refs = await _admit_generic_scan_credential_profiles(
             conn,
@@ -27419,12 +27554,39 @@ async def submit_scan(request: ScanRequest):
             target_id=target_id,
             action_name=credential_action_name,
             risk_tier="credential" if credential_refs else "active",
-            always_require_receipt=bool(credential_refs),
-            require_target_binding=bool(credential_refs),
+            always_require_receipt=bool(
+                credential_refs or confirmed_active_collection_replay
+            ),
+            require_target_binding=bool(
+                credential_refs or confirmed_active_collection_replay
+            ),
             require_expiry=bool(credential_refs),
         )
         if approval_context:
             options_payload.update(approval_context)
+            scan_contract = bind_scan_scope_receipt(
+                scan_contract, approval_context.get("scope_receipt_id"),
+            )
+            options_payload.update(scan_contract.option_metadata())
+        if executable_collection_refs:
+            options_payload["runtime_scope_guard"] = (
+                await _freeze_scan_collection_target_binding(
+                    target_id=target_id,
+                    target_kind=request.target_kind,
+                    target_url=normalized_target,
+                    refs=executable_collection_refs,
+                    existing_guard=options_payload.get("runtime_scope_guard"),
+                )
+            )
+        if (
+            isinstance(options_payload.get("scan_policy"), dict)
+            and options_payload["scan_policy"].get("scope_receipt_id")
+            != options_payload.get("scope_receipt_id")
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="validated scope receipt is not bound to the canonical Scan plan",
+            )
         if credential_refs:
             options_payload["credential_profile_refs"] = credential_refs
             options_payload["credential_target_kind"] = request.target_kind
@@ -27438,6 +27600,19 @@ async def submit_scan(request: ScanRequest):
             options_payload,
             scan_type,
         )
+        if executable_collection_refs and parallel_enabled:
+            # Exact replay owns one logical Scan ledger.  The current compatibility
+            # fan-out would execute the same saved selection once per shard, so keep
+            # this Scan single-owner until CanonicalScanJob replaces shard dictionaries.
+            parallel_enabled = False
+            parallel_worker_count = None
+            options_payload["parallel"] = False
+            options_payload["shards"] = None
+            options_payload["shard_strategy"] = None
+            options_payload["auto_sharded"] = False
+            options_payload["parallel_disabled_reason"] = (
+                "request_collection_exact_replay_requires_single_scan_owner"
+            )
 
         # Parallel scans become a parent row; the scan_plan job fans out shards.
         scan_role = 'parent' if parallel_enabled else 'standalone'
@@ -33188,12 +33363,16 @@ _AGENT_TOOL_MAX_QUERY_ROWS = 100
 _AGENT_TOOL_HTTP_TIMEOUT_SECONDS = 15
 
 
-async def _resolve_agent_target_addresses(url: str) -> list[str]:
-    """Resolve once at authorization time; execution connects only to this address set."""
+async def _resolve_runtime_target_addresses(
+    url: str, *, subject: str = "runtime target",
+) -> list[str]:
+    """Resolve once at admission time; execution connects only to this address set."""
     parsed = urllib.parse.urlsplit(str(url or ""))
     hostname = str(parsed.hostname or "").strip().rstrip(".")
     if not hostname:
-        raise HTTPException(status_code=400, detail="Deep Hunt target has no resolvable hostname")
+        raise HTTPException(
+            status_code=400, detail=f"{subject} has no resolvable hostname"
+        )
     try:
         return [str(ipaddress.ip_address(hostname))]
     except ValueError:
@@ -33204,7 +33383,9 @@ async def _resolve_agent_target_addresses(url: str) -> list[str]:
             hostname, port, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP,
         )
     except OSError as exc:
-        raise HTTPException(status_code=422, detail="Deep Hunt target DNS resolution failed") from exc
+        raise HTTPException(
+            status_code=422, detail=f"{subject} DNS resolution failed"
+        ) from exc
     addresses: list[str] = []
     for record in records:
         try:
@@ -33216,8 +33397,15 @@ async def _resolve_agent_target_addresses(url: str) -> list[str]:
         if len(addresses) >= 16:
             break
     if not addresses:
-        raise HTTPException(status_code=422, detail="Deep Hunt target DNS returned no usable address")
+        raise HTTPException(
+            status_code=422, detail=f"{subject} DNS returned no usable address"
+        )
     return addresses
+
+
+async def _resolve_agent_target_addresses(url: str) -> list[str]:
+    """Compatibility name for Hunt's frozen runtime target binding."""
+    return await _resolve_runtime_target_addresses(url, subject="Deep Hunt target")
 
 
 async def _agent_tool_http_request(

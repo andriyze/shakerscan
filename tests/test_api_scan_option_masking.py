@@ -193,7 +193,12 @@ def test_generic_collection_ref_freezes_saved_selection_and_exact_binding():
         Connection(),
         target_id=target_id,
         target_kind="web",
-        bindings=[{"id": str(selection_id)}],
+        bindings=[{
+            "collection_id": str(collection_id),
+            "binding_id": str(binding_id),
+            "selection_id": str(selection_id),
+            "replay_policy": "safe_reads",
+        }],
     ))
 
     assert endpoints == ["GET /health"]
@@ -202,6 +207,20 @@ def test_generic_collection_ref_freezes_saved_selection_and_exact_binding():
     assert refs[0]["environment_id"] == str(environment_id)
     assert refs[0]["selection_digest"] == digest
     assert refs[0]["secret_values_visible"] is False
+
+    with pytest.raises(api_module.HTTPException) as error:
+        asyncio.run(api_module._generic_collection_refs(
+            Connection(),
+            target_id=target_id,
+            target_kind="web",
+            bindings=[{
+                "collection_id": str(collection_id),
+                "binding_id": str(uuid.uuid4()),
+                "selection_id": str(selection_id),
+                "replay_policy": "safe_reads",
+            }],
+        ))
+    assert error.value.status_code == 422
 
     collection["selection_digest"] = "c" * 64
     with pytest.raises(api_module.HTTPException) as error:
@@ -212,6 +231,47 @@ def test_generic_collection_ref_freezes_saved_selection_and_exact_binding():
             bindings=[{"id": str(selection_id)}],
         ))
     assert error.value.status_code == 409
+
+
+def test_scan_collection_replay_freezes_exact_origins_and_addresses(monkeypatch):
+    target_id = uuid.uuid4()
+    calls = []
+
+    async def resolve(url, *, subject):
+        calls.append((url, subject))
+        return ["192.0.2.10", "2001:db8::10"]
+
+    monkeypatch.setattr(api_module, "_resolve_runtime_target_addresses", resolve)
+    guard = asyncio.run(api_module._freeze_scan_collection_target_binding(
+        target_id=target_id,
+        target_kind="api",
+        target_url="https://api.example.test/root",
+        refs=[{
+            "replay_policy": "safe_reads",
+            "allowed_origins": [
+                "https://api.example.test",
+                "https://api.example.test:8443",
+            ],
+        }],
+        existing_guard={
+            "scope_receipt_id": "scope-1",
+            "allowed_root_domains": ["example.test"],
+            "environment": "staging",
+        },
+    ))
+
+    assert guard["target_id"] == str(target_id)
+    assert guard["target_kind"] == "api"
+    assert guard["canonical_host"] == "api.example.test"
+    assert guard["allowed_origins"] == [
+        "https://api.example.test",
+        "https://api.example.test:8443",
+    ]
+    assert guard["allowed_addresses"] == ["192.0.2.10", "2001:db8::10"]
+    assert guard["scope_receipt_id"] == "scope-1"
+    assert calls == [
+        ("https://api.example.test/root", "Scan request collection target"),
+    ]
 
 
 def test_parallel_parent_rollup_derives_progress_from_shards():
@@ -1708,6 +1768,17 @@ def test_normalize_dast_scan_options_explicit_type_syncs_legacy_flags():
     assert options.quick is True
     assert options.active is False
     assert options.thorough is False
+
+
+def test_canonical_submit_clears_legacy_mode_selectors_before_worker_admission():
+    with open(api_module.__file__, encoding="utf-8") as handle:
+        source = handle.read()
+    submit_start = source.index("async def submit_scan")
+    submit_end = source.index('\n\n@app.get("/scans/{scan_id}")', submit_start)
+    submit = source[submit_start:submit_end]
+
+    assert "request.options.quick = False" in submit
+    assert "request.options.thorough = False" in submit
 
 
 def test_scan_options_reject_crlf_in_auth_header():

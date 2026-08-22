@@ -9,8 +9,8 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 
 from scan.contracts import (
-    BUDGET_PROFILES, LEGACY_SCAN_MAPPING, normalize_scan_authentication,
-    resolve_scan_contract,
+    BUDGET_PROFILES, LEGACY_SCAN_MAPPING, bind_scan_scope_receipt,
+    normalize_scan_authentication, resolve_scan_contract,
 )
 
 
@@ -26,6 +26,24 @@ def test_canonical_scan_defaults_to_balanced_passive_v2():
     assert contract.execution_scan_type == "deep"  # temporary old-worker adapter only
     assert contract.legacy_scan_type is None
     assert contract.deprecations == ()
+
+
+def test_validated_scope_binding_rebuilds_plan_and_flattened_snapshots():
+    contract = resolve_scan_contract(
+        budget_profile="fast",
+        policy={"active_testing": True, "allow_state_changing_http": True},
+        approval_receipt_id="approval-1",
+    )
+    original_digest = contract.execution_plan.digest
+
+    bound = bind_scan_scope_receipt(contract, "scope-1")
+    metadata = bound.option_metadata()
+
+    assert bound.policy.scope_receipt_id == "scope-1"
+    assert metadata["scan_policy"]["scope_receipt_id"] == "scope-1"
+    assert metadata["scan_execution_plan"]["policy"]["scope_receipt_id"] == "scope-1"
+    assert metadata["scan_execution_plan_digest"] == bound.execution_plan.digest
+    assert metadata["scan_execution_plan_digest"] != original_digest
 
 
 @pytest.mark.parametrize(

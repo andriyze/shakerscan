@@ -53,6 +53,7 @@ from retest_contract import (
     run_schema_migrations,
     validate_retest_job_payload,
 )
+from runtime.json_fields import json_array_field, json_object_field
 import parallel_scan
 import asm_inventory
 import family_proof
@@ -79,6 +80,16 @@ from runtime.scan_credentials import (
     SCAN_CREDENTIAL_CAPABILITY,
     ScanCredentialError,
     bind_resolved_scan_credential,
+)
+from scan.collection_replay import (
+    EXECUTABLE_REPLAY_POLICIES,
+    ScanCollectionReplayContractError,
+    merge_scan_budget_usage,
+    remaining_scan_replay_capacity,
+    scan_replay_authorization,
+    scan_replay_ledger_limits,
+    scan_replay_runtime_http_ceiling,
+    scan_replay_selector,
 )
 from runtime.pinned_http_replay import PinnedAiohttpReplayTransport
 from runtime.request_replay_executor import (
@@ -9424,6 +9435,712 @@ async def run_device_web_children(
     return result
 
 
+def _scan_replay_receipt_reference(receipt: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep Scan results bounded while the complete receipt remains durable."""
+    return {
+        "receipt_id": receipt.get("receipt_id"),
+        "receipt_hash": receipt.get("receipt_hash"),
+        "status": receipt.get("status"),
+        "partial": bool(receipt.get("partial")),
+        "timed_out": bool(receipt.get("timed_out")),
+        "input_digest": receipt.get("input_digest"),
+        "budget_reservation_id": receipt.get("budget_reservation_id"),
+        "budget_reservation_state": receipt.get("budget_reservation_state"),
+        "budget_reserved": dict(receipt.get("budget_reserved") or {}),
+        "budget_consumed": dict(receipt.get("budget_consumed") or {}),
+        "observation_count": len(receipt.get("observations") or []),
+        "errors": list(receipt.get("errors") or [])[:50],
+    }
+
+
+async def _bind_scan_replay_primary_credential(
+    conn: Any,
+    *,
+    plan: Any,
+    target: TargetBinding,
+    scan_id: str,
+    options: Mapping[str, Any],
+) -> tuple[Any, dict[str, Any] | None]:
+    """Independently resolve the Scan primary identity into one exact replay plan."""
+    refs = [
+        dict(item)
+        for item in options.get("credential_profile_refs") or []
+        if isinstance(item, Mapping)
+    ]
+    primary = next(
+        (item for item in refs if str(item.get("scan_lane") or "") == "primary"),
+        None,
+    )
+    if primary is None:
+        return plan, None
+    try:
+        expected_version = int(primary.get("profile_version") or 0)
+        profile_id = str(uuid.UUID(str(primary.get("profile_id") or "")))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise ReplayExecutionError(
+            "Scan replay credential reference is invalid"
+        ) from exc
+    if expected_version < 1:
+        raise ReplayExecutionError("Scan replay credential version is invalid")
+    action_name = str(options.get("credential_action_name") or "").strip()
+    authority = await validate_worker_credential_authority(
+        conn,
+        owner_kind="scan",
+        owner_id=scan_id,
+        target=target,
+        approval_receipt_id=options.get("approval_receipt_id"),
+        scope_receipt_id=options.get("scope_receipt_id"),
+        action_name=action_name,
+    )
+    async with WorkerCredentialResolver().resolve(
+        conn,
+        profile_id=profile_id,
+        target=target,
+        capability=SCAN_CREDENTIAL_CAPABILITY,
+        authority=authority,
+    ) as resolved:
+        if (
+            resolved.profile.current_version != expected_version
+            or resolved.profile.auth_kind != str(primary.get("auth_kind") or "")
+            or resolved.profile.principal_slot
+            != str(primary.get("principal_slot") or "")
+            or resolved.profile.target_kind != target.target_kind
+        ):
+            raise ReplayExecutionError(
+                "Scan replay credential changed after admission"
+            )
+        try:
+            headers = resolved.http_headers().as_dict()
+        except CredentialResolutionError as exc:
+            raise ReplayExecutionError(
+                "exact collection replay requires a non-interactive primary credential"
+            ) from exc
+        bound = bind_replay_credential_headers(
+            plan, headers, auth_kind=resolved.profile.auth_kind,
+        )
+        receipt_context = {
+            "principal_profile_ref": resolved.profile.profile_id,
+            "principal_profile_version": resolved.profile.current_version,
+            "principal_slot": resolved.profile.principal_slot,
+        }
+    return bound, receipt_context
+
+
+async def _execute_scan_request_collections(
+    options: Mapping[str, Any], scan_id: str, *, job_id: str,
+    runtime_request_grant: int | None = None,
+) -> dict[str, Any]:
+    """Execute saved Scan selections through the canonical exact replay executor."""
+    try:
+        scan_uuid = uuid.UUID(str(scan_id))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise ScanCollectionReplayContractError("Scan replay owner ID is invalid") from exc
+
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """SELECT s.id, s.target_id, s.target_url, s.status, s.options,
+                      s.policy_json, s.budget_json, s.budget_used_json,
+                      t.root_domain
+               FROM scans s JOIN targets t ON t.id=s.target_id
+               WHERE s.id=$1""",
+            scan_uuid,
+        )
+    if not row:
+        raise ScanCollectionReplayContractError("Scan replay owner is unavailable")
+    persisted_options = _worker_json_object(row["options"])
+    refs = [
+        dict(item)
+        for item in persisted_options.get("request_collections") or []
+        if isinstance(item, Mapping)
+    ]
+    executable = [
+        item
+        for item in refs
+        if str(item.get("replay_policy") or "").strip().lower()
+        in EXECUTABLE_REPLAY_POLICIES
+    ]
+    summary: dict[str, Any] = {
+        "schema_version": "scan-request-collection-replay/v1",
+        "attached_collections": len(refs),
+        "executable_collections": len(executable),
+        "discovery_only_collections": len(refs) - len(executable),
+        "collections": [],
+        "replayed": 0,
+        "observation_count": 0,
+        "observations": [],
+        "budget_consumed": {},
+        "partial": False,
+        "secret_values_visible": False,
+        "durable_budget_settled": True,
+        "network_binding": "runtime_target_binding",
+    }
+    if not executable:
+        return summary
+    if str(row["status"] or "") != "running":
+        raise ScanCollectionReplayContractError("Scan is no longer executable")
+
+    scan_policy = _worker_json_object(row["policy_json"])
+    if not scan_policy:
+        scan_policy = _worker_json_object(persisted_options.get("scan_policy"))
+    budget = _worker_json_object(row["budget_json"])
+    limits = scan_replay_ledger_limits(budget)
+    runtime_budget_options = dict(persisted_options)
+    if runtime_request_grant is not None:
+        runtime_budget_options["request_budget_mode"] = "enforce"
+        runtime_budget_options["request_budget_reserved"] = runtime_request_grant
+    runtime_http_ceiling = scan_replay_runtime_http_ceiling(
+        runtime_budget_options, budget,
+    )
+    guard = _worker_json_object(persisted_options.get("runtime_scope_guard"))
+    target_id = str(row["target_id"] or "")
+    parsed_target = urllib.parse.urlsplit(str(row["target_url"] or ""))
+    canonical_host = str(parsed_target.hostname or "").strip().lower().rstrip(".")
+    target_kind = str(guard.get("target_kind") or executable[0].get("target_kind") or "")
+    if (
+        str(guard.get("target_id") or "") != target_id
+        or str(guard.get("canonical_host") or "").lower().rstrip(".") != canonical_host
+        or target_kind not in {"web", "api"}
+    ):
+        raise ScanCollectionReplayContractError(
+            "Scan replay runtime target binding is incomplete"
+        )
+    allowed_addresses = tuple(
+        str(item) for item in guard.get("allowed_addresses") or () if str(item)
+    )
+    guard_origins = tuple(
+        str(item) for item in guard.get("allowed_origins") or () if str(item)
+    )
+    if not allowed_addresses or not guard_origins:
+        raise ScanCollectionReplayContractError(
+            "Scan replay requires frozen origins and target addresses"
+        )
+    roots = tuple(
+        str(item).strip().lower().rstrip(".")
+        for item in guard.get("allowed_root_domains") or ()
+        if str(item).strip()
+    ) or (str(row["root_domain"] or canonical_host).lower().rstrip("."),)
+    store = PostgresBudgetReservationStore()
+    worker_id = _worker_runtime_identity() or f"worker:{job_id[:8]}"
+
+    for ref in executable:
+        try:
+            collection_id = str(uuid.UUID(str(ref.get("collection_id") or "")))
+            binding_id = str(uuid.UUID(str(ref.get("binding_id") or "")))
+            selection_id = str(uuid.UUID(str(ref.get("selection_id") or "")))
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ScanCollectionReplayContractError(
+                "Scan replay requires a saved collection selection"
+            ) from exc
+        replay_policy = str(ref.get("replay_policy") or "").strip().lower()
+        expected_payload_sha256 = str(ref.get("payload_sha256") or "").lower()
+        expected_selection_digest = str(ref.get("selection_digest") or "").lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_payload_sha256):
+            raise ScanCollectionReplayContractError(
+                "Scan replay collection digest is invalid"
+            )
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_selection_digest):
+            raise ScanCollectionReplayContractError(
+                "Scan replay selection digest is invalid"
+            )
+        expected_environment_id = str(ref.get("environment_id") or "").strip() or None
+        if expected_environment_id:
+            expected_environment_id = str(uuid.UUID(expected_environment_id))
+        expected_environment_sha256 = str(
+            ref.get("environment_sha256") or ""
+        ).lower() or None
+        if expected_environment_sha256 and not re.fullmatch(
+            r"[0-9a-f]{64}", expected_environment_sha256
+        ):
+            raise ScanCollectionReplayContractError(
+                "Scan replay environment digest is invalid"
+            )
+        queued_origins = tuple(
+            str(item) for item in ref.get("allowed_origins") or () if str(item)
+        )
+        if (
+            str(ref.get("target_id") or "") != target_id
+            or str(ref.get("target_kind") or "") != target_kind
+            or not queued_origins
+            or any(origin not in guard_origins for origin in queued_origins)
+        ):
+            raise ScanCollectionReplayContractError(
+                "Scan replay selection exceeds the frozen target binding"
+            )
+
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                collection = await conn.fetchrow(
+                    """SELECT c.id, c.encrypted_payload, c.payload_sha256,
+                              b.id AS binding_id, b.allowed_origins, b.environment_id,
+                              e.encrypted_payload AS encrypted_environment,
+                              e.payload_sha256 AS environment_sha256,
+                              s.id AS selection_id, s.replay_policy, s.selector_json,
+                              s.selection_digest
+                       FROM request_collections c
+                       JOIN request_collection_bindings b
+                         ON b.id=$2 AND b.collection_id=c.id AND b.is_active=true
+                       JOIN request_collection_selections s
+                         ON s.id=$3 AND s.collection_id=c.id
+                        AND s.binding_id=b.id AND s.is_active=true
+                       LEFT JOIN request_collection_environments e
+                         ON e.id=b.environment_id AND e.collection_id=c.id
+                        AND e.is_active=true
+                       WHERE c.id=$1 AND c.target_id=$4 AND c.is_active=true
+                         AND b.target_id=$4 AND b.target_kind=$5
+                       FOR UPDATE OF c, b, s""",
+                    uuid.UUID(collection_id), uuid.UUID(binding_id),
+                    uuid.UUID(selection_id), row["target_id"], target_kind,
+                )
+        if not collection:
+            raise ScanCollectionReplayContractError(
+                "Scan request collection selection is unavailable or target-mismatched"
+            )
+        stored_origins = tuple(
+            str(item) for item in _worker_json_array(collection["allowed_origins"])
+            if str(item)
+        )
+        stored_environment_id = (
+            str(collection["environment_id"])
+            if collection["environment_id"] else None
+        )
+        stored_environment_sha256 = (
+            str(collection["environment_sha256"] or "").lower() or None
+        )
+        if str(collection["payload_sha256"] or "").lower() != expected_payload_sha256:
+            raise ScanCollectionReplayContractError(
+                "Scan request collection payload changed after admission"
+            )
+        if stored_origins != queued_origins:
+            raise ScanCollectionReplayContractError(
+                "Scan request collection origin binding changed after admission"
+            )
+        if stored_environment_id != expected_environment_id:
+            raise ScanCollectionReplayContractError(
+                "Scan request collection environment binding changed after admission"
+            )
+        if stored_environment_sha256 != expected_environment_sha256:
+            raise ScanCollectionReplayContractError(
+                "Scan request collection environment changed after admission"
+            )
+        if str(collection["replay_policy"] or "") != replay_policy:
+            raise ScanCollectionReplayContractError(
+                "Scan request collection replay policy changed after admission"
+            )
+        stored_selection = RequestCollectionSelection.from_mapping(
+            _worker_json_object(collection["selector_json"])
+        )
+        recomputed_selection_digest = request_collection_selection_digest(
+            collection_id=collection_id,
+            payload_sha256=expected_payload_sha256,
+            binding_id=binding_id,
+            allowed_origins=stored_origins,
+            selector=stored_selection,
+            replay_policy=replay_policy,
+            environment_sha256=stored_environment_sha256,
+        )
+        if (
+            str(collection["selection_digest"] or "").lower()
+            != expected_selection_digest
+            or recomputed_selection_digest != expected_selection_digest
+        ):
+            raise ScanCollectionReplayContractError(
+                "Scan request collection selection changed after admission"
+            )
+
+        raw_payload = str(decrypt_secret(collection["encrypted_payload"]) or "")
+        if not raw_payload or raw_payload.startswith("enc:fernet:"):
+            raise ScanCollectionReplayContractError(
+                "Scan request collection could not be decrypted on the worker"
+            )
+        try:
+            payload = json.loads(raw_payload)
+        except json.JSONDecodeError as exc:
+            raise ScanCollectionReplayContractError(
+                "Scan request collection payload is invalid"
+            ) from exc
+        if not isinstance(payload, Mapping):
+            raise ScanCollectionReplayContractError(
+                "Scan request collection payload is not an object"
+            )
+        payload_digest = hashlib.sha256(json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        ).encode("utf-8")).hexdigest()
+        if payload_digest != expected_payload_sha256:
+            raise ScanCollectionReplayContractError(
+                "Scan request collection failed its worker integrity check"
+            )
+        if expected_environment_id:
+            raw_environment = str(
+                decrypt_secret(collection["encrypted_environment"]) or ""
+            )
+            if not raw_environment or raw_environment.startswith("enc:fernet:"):
+                raise ScanCollectionReplayContractError(
+                    "Scan request collection environment could not be decrypted on the worker"
+                )
+            try:
+                environment = json.loads(raw_environment)
+            except json.JSONDecodeError as exc:
+                raise ScanCollectionReplayContractError(
+                    "Scan request collection environment payload is invalid"
+                ) from exc
+            if not isinstance(environment, Mapping):
+                raise ScanCollectionReplayContractError(
+                    "Scan request collection environment payload is not an object"
+                )
+            environment_digest = hashlib.sha256(json.dumps(
+                environment, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+            ).encode("utf-8")).hexdigest()
+            if environment_digest != expected_environment_sha256:
+                raise ScanCollectionReplayContractError(
+                    "Scan request collection environment failed its integrity check"
+                )
+            payload = {**dict(payload), "environment": dict(environment)}
+
+        async with db_pool.acquire() as conn:
+            current_used = _worker_json_object(await conn.fetchval(
+                "SELECT budget_used_json FROM scans WHERE id=$1", scan_uuid,
+            ))
+        consumed = {key: int(current_used.get(key) or 0) for key in limits}
+        capacity = remaining_scan_replay_capacity(
+            limits=limits,
+            consumed=consumed,
+            runtime_http_ceiling=runtime_http_ceiling,
+        )
+        if capacity.http_requests < 1 or capacity.tool_wall_seconds < 1:
+            raise ScanCollectionReplayContractError(
+                "Scan budget leaves no capacity for exact collection replay"
+            )
+        wall_reservation = min(300, capacity.tool_wall_seconds)
+        runtime_limit = min(capacity.http_requests, wall_reservation * 10)
+        runtime_selector = scan_replay_selector(
+            stored_selection, replay_policy, runtime_limit=runtime_limit,
+        )
+        selected = select_requests(payload, runtime_selector)
+        if not selected:
+            summary["collections"].append({
+                "collection_id": collection_id,
+                "selection_id": selection_id,
+                "replay_policy": replay_policy,
+                "status": "skipped",
+                "reason": "saved_selection_resolved_to_no_requests",
+                "secret_values_visible": False,
+            })
+            continue
+        target_binding = TargetBinding(
+            target_id=target_id,
+            target_kind=target_kind,
+            canonical_host=canonical_host,
+            allowed_origins=stored_origins,
+            allowed_addresses=allowed_addresses,
+            allowed_root_domains=roots,
+            environment=str(guard.get("environment") or "unknown"),
+            scope_receipt_id=str(persisted_options.get("scope_receipt_id") or "") or None,
+        )
+        authorization = scan_replay_authorization(
+            replay_policy,
+            scan_policy,
+            approval_receipt_id=persisted_options.get("approval_receipt_id"),
+        )
+        plan = build_selected_replay_plan(
+            payload,
+            runtime_selector,
+            allowed_origins=target_binding.allowed_origins,
+            default_origin=(
+                target_binding.allowed_origins[0]
+                if target_binding.allowed_origins else None
+            ),
+            authorization=authorization,
+        )
+        async with db_pool.acquire() as conn:
+            plan, receipt_context = await _bind_scan_replay_primary_credential(
+                conn,
+                plan=plan,
+                target=target_binding,
+                scan_id=scan_id,
+                options=persisted_options,
+            )
+
+        additional_budget = {"tool_wall_seconds": wall_reservation}
+        requested_budget = replay_reservation_budget(plan, additional_budget)
+        reservation_id = str(uuid.uuid4())
+        action_id = f"collection_replay:{selection_id}"
+        requested = DurableBudgetReservation.request(
+            owner_kind="scan",
+            owner_id=scan_id,
+            capability_name="collections.replay",
+            amounts=requested_budget,
+            reservation_id=reservation_id,
+        )
+        persisted = None
+        held_ledger: dict[str, int] = {}
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                locked = await conn.fetchrow(
+                    "SELECT status, budget_json, budget_used_json FROM scans "
+                    "WHERE id=$1 FOR UPDATE",
+                    scan_uuid,
+                )
+                if not locked or str(locked["status"] or "") != "running":
+                    raise ReplayExecutionError(
+                        "Scan stopped before collection replay admission"
+                    )
+                stored = await store.create_requested(
+                    conn,
+                    action_id=action_id,
+                    action_digest=plan.input_digest,
+                    record=requested,
+                )
+                if stored.record.terminal:
+                    if stored.record.status != "committed" or not stored.receipt:
+                        raise ReplayExecutionError(
+                            "previous Scan collection replay is terminal without success"
+                        )
+                    public_receipt = dict(stored.receipt)
+                    observations = list(public_receipt.get("observations") or [])
+                    summary["collections"].append({
+                        "collection_id": collection_id,
+                        "selection_id": selection_id,
+                        "replay_policy": replay_policy,
+                        "status": "succeeded",
+                        "replayed": int(stored.record.actual.get("http_requests") or 0),
+                        "idempotent_redelivery": True,
+                        "receipt": _scan_replay_receipt_reference(public_receipt),
+                        "secret_values_visible": False,
+                    })
+                    summary["replayed"] += int(
+                        stored.record.actual.get("http_requests") or 0
+                    )
+                    summary["observation_count"] += len(observations)
+                    remaining_observation_slots = max(
+                        0, 500 - len(summary["observations"])
+                    )
+                    summary["observations"].extend(
+                        observations[:remaining_observation_slots]
+                    )
+                    summary["budget_consumed"] = merge_scan_budget_usage(
+                        summary["budget_consumed"], stored.record.actual,
+                    )
+                    continue
+                if stored.record.status != "requested":
+                    raise ReservationConflict(
+                        "Scan collection replay already has an active durable reservation"
+                    )
+                current_used = _worker_json_object(locked["budget_used_json"])
+                current_consumed = {
+                    key: int(current_used.get(key) or 0) for key in limits
+                }
+                try:
+                    reserved, held_ledger = stored.record.reserve_against(
+                        limits=limits,
+                        consumed=current_consumed,
+                        lease_seconds=max(90, wall_reservation + 10),
+                    )
+                except BudgetExceeded as exc:
+                    released = stored.record.release(
+                        proof_not_started=True,
+                        reason="budget_exhausted_before_execution",
+                    )
+                    await store.persist_terminal(
+                        conn,
+                        previous=stored,
+                        terminal=released,
+                        ledger_after_settlement=current_consumed,
+                        receipt=None,
+                    )
+                    dimension = next(iter(exc.shortages), "unknown")
+                    raise ScanCollectionReplayContractError(
+                        f"Scan collection replay budget exhausted: {dimension}"
+                    ) from exc
+                persisted = await store.persist_transition(
+                    conn,
+                    previous=stored,
+                    current=reserved,
+                    ledger_after_hold=held_ledger,
+                )
+                current_used.update(held_ledger)
+                await conn.execute(
+                    "UPDATE scans SET budget_used_json=$2 WHERE id=$1",
+                    scan_uuid, json.dumps(current_used),
+                )
+
+        settled_ledger = dict(held_ledger)
+
+        async def persist_runtime_transition(
+            current: DurableBudgetReservation, _ledger: Mapping[str, int],
+        ) -> None:
+            nonlocal persisted
+            if persisted is None:
+                raise ReservationStoreError(
+                    "Scan replay reservation persistence was not initialized"
+                )
+            async with db_pool.acquire() as conn:
+                async with conn.transaction():
+                    owner = await conn.fetchrow(
+                        "SELECT status FROM scans WHERE id=$1 FOR UPDATE", scan_uuid,
+                    )
+                    if not owner or str(owner["status"] or "") != "running":
+                        raise ReplayExecutionError(
+                            "Scan stopped before the next collection replay request"
+                        )
+                    latest = await store.load(
+                        conn, persisted.record.reservation_id, for_update=True,
+                    )
+                    if (
+                        latest is None
+                        or latest.record.state_digest != persisted.record.state_digest
+                    ):
+                        raise ReservationConflict(
+                            "Scan replay reservation changed before worker transition"
+                        )
+                    persisted = await store.persist_transition(
+                        conn, previous=latest, current=current,
+                    )
+
+        async def persist_runtime_settlement(
+            terminal: DurableBudgetReservation,
+            receipt: Any,
+            _ledger: Mapping[str, int],
+        ) -> None:
+            nonlocal persisted, settled_ledger
+            if persisted is None:
+                raise ReservationStoreError(
+                    "Scan replay reservation persistence was not initialized"
+                )
+            async with db_pool.acquire() as conn:
+                async with conn.transaction():
+                    locked = await conn.fetchrow(
+                        "SELECT budget_json, budget_used_json FROM scans "
+                        "WHERE id=$1 FOR UPDATE",
+                        scan_uuid,
+                    )
+                    if not locked:
+                        raise ReservationStoreError(
+                            "Scan disappeared during collection replay settlement"
+                        )
+                    latest = await store.load(
+                        conn, persisted.record.reservation_id, for_update=True,
+                    )
+                    if (
+                        latest is None
+                        or latest.record.state_digest != persisted.record.state_digest
+                    ):
+                        raise ReservationConflict(
+                            "Scan replay reservation changed before settlement"
+                        )
+                    current_used = _worker_json_object(locked["budget_used_json"])
+                    current_ledger = {
+                        key: int(current_used.get(key) or 0) for key in limits
+                    }
+                    settled_ledger = terminal.reconcile_consumed(current_ledger)
+                    persisted = await store.persist_terminal(
+                        conn,
+                        previous=latest,
+                        terminal=terminal,
+                        ledger_after_settlement=settled_ledger,
+                        receipt=receipt,
+                    )
+                    current_used.update(settled_ledger)
+                    await conn.execute(
+                        "UPDATE scans SET budget_used_json=$2 WHERE id=$1",
+                        scan_uuid, json.dumps(current_used),
+                    )
+
+        outcome = await execute_replay_plan(
+            plan,
+            target=target_binding,
+            owner_kind="scan",
+            owner_id=scan_id,
+            worker_id=worker_id,
+            limits=limits,
+            consumed=held_ledger,
+            transport=PinnedAiohttpReplayTransport(),
+            timeout_seconds=max(
+                0.1, min(30.0, float(wall_reservation) / len(plan.requests)),
+            ),
+            reservation_id=persisted.record.reservation_id,
+            lease_seconds=max(90, wall_reservation + 10),
+            on_reservation=persist_runtime_transition,
+            on_settlement=persist_runtime_settlement,
+            require_durable_persistence=True,
+            additional_budget=additional_budget,
+            initial_reservation=persisted.record,
+            receipt_context=receipt_context,
+        )
+        public_receipt = outcome.receipt.public_dict()
+        observations = list(public_receipt.get("observations") or [])
+        item_status = (
+            "succeeded" if outcome.reservation.status == "committed"
+            and outcome.status == "succeeded" else outcome.status
+        )
+        summary["collections"].append({
+            "collection_id": collection_id,
+            "selection_id": selection_id,
+            "replay_policy": replay_policy,
+            "status": item_status,
+            "partial": outcome.status == "partial",
+            "replayed": int(outcome.reservation.actual.get("http_requests") or 0),
+            "safe_methods_only": runtime_selector.safe_methods_only,
+            "runtime_limit": runtime_selector.limit,
+            "selection_truncated_by_budget": (
+                runtime_selector.limit < stored_selection.max_requests
+            ),
+            "receipt": _scan_replay_receipt_reference(public_receipt),
+            "secret_values_visible": False,
+        })
+        summary["partial"] = bool(summary["partial"] or outcome.status == "partial")
+        summary["replayed"] += int(
+            outcome.reservation.actual.get("http_requests") or 0
+        )
+        summary["observation_count"] += len(observations)
+        remaining_observation_slots = max(0, 500 - len(summary["observations"]))
+        summary["observations"].extend(
+            observations[:remaining_observation_slots]
+        )
+        summary["budget_consumed"] = merge_scan_budget_usage(
+            summary["budget_consumed"], outcome.reservation.actual,
+        )
+        if outcome.reservation.status != "committed":
+            raise ScanCollectionReplayContractError(
+                "Scan collection replay failed before producing a trusted terminal result: "
+                f"{outcome.reservation.failure_reason or 'executor_failed'}"
+            )
+
+    summary["observations_truncated"] = (
+        summary["observation_count"] > len(summary["observations"])
+    )
+    return summary
+
+
+def _apply_scan_collection_replay_remaining_budget(
+    options: Mapping[str, Any], summary: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Prevent the compatibility scanner from reusing exact replay request budget."""
+    adjusted = dict(options or {})
+    consumed = _worker_json_object(summary.get("budget_consumed"))
+    http_used = max(0, int(consumed.get("http_requests") or 0))
+    writes_used = max(0, int(consumed.get("state_changing_requests") or 0))
+    custom = dict(adjusted.get("custom_budget") or {})
+    try:
+        current_request_max = int(custom.get("request_max") or 0)
+    except (TypeError, ValueError):
+        current_request_max = 0
+    if current_request_max > 0 and http_used:
+        custom["request_max"] = max(1, current_request_max - http_used)
+    try:
+        current_active_max = int(custom.get("active_max_endpoints") or 0)
+    except (TypeError, ValueError):
+        current_active_max = 0
+    if current_active_max > 0 and writes_used:
+        custom["active_max_endpoints"] = max(1, current_active_max - writes_used)
+    adjusted["custom_budget"] = custom
+    adjusted["request_collection_replay_consumed"] = {
+        "http_requests": http_used,
+        "state_changing_requests": writes_used,
+        "secret_values_visible": False,
+    }
+    return adjusted
+
+
 async def process_scan_job(job_data: dict):
     """Process a scan job."""
     job_id = job_data.get('job_id', 'unknown')
@@ -9520,6 +10237,7 @@ async def process_scan_job(job_data: dict):
     # doing so can strand a submitted result behind its own still-live broker
     # reservation and can requeue trusted ingestion as executable work.
     reserve_amount = 0 if broker_ingest else _standalone_scan_rate_reservation_amount(options)
+    runtime_request_grant: int | None = None
     enforcing_request_budget = _effective_request_budget_mode(options) == "enforce"
     if reserve_amount > 0 and target_id:
         try:
@@ -9575,6 +10293,8 @@ async def process_scan_job(job_data: dict):
         if granted > 0:
             options = dict(options or {})
             options["request_budget_reserved"] = granted
+            if enforcing_request_budget:
+                runtime_request_grant = granted
             if rate.get("root_domain"):
                 options["request_budget_domain"] = str(rate["root_domain"])
 
@@ -9591,11 +10311,28 @@ async def process_scan_job(job_data: dict):
     )
     heartbeat_thread.start()
 
+    collection_replay_summary: dict[str, Any] | None = None
     try:
         try:
             if job_data.get("_broker_result_id"):
                 result = await _load_broker_result(job_data, scan_id)
             else:
+                run_kind = str((options or {}).get("run_kind") or "web_dast")
+                if (
+                    target_id
+                    and not device_target_id
+                    and not ai_target_id
+                    and run_kind not in AI_GATE_RUN_KINDS | MODEL_INTAKE_RUN_KINDS
+                ):
+                    collection_replay_summary = await _execute_scan_request_collections(
+                        options,
+                        scan_id,
+                        job_id=job_id,
+                        runtime_request_grant=runtime_request_grant,
+                    )
+                    options = _apply_scan_collection_replay_remaining_budget(
+                        options, collection_replay_summary,
+                    )
                 options = await _hydrate_generic_scan_credentials(options, scan_id)
                 options = await _hydrate_managed_scan_credentials(options, scan_id)
                 if device_target_id and (options or {}).get("run_kind") == "device_posture":
@@ -9662,6 +10399,8 @@ async def process_scan_job(job_data: dict):
             result = _unexpected_scan_exception_result(str(target or ""), e)
             print(f"[{job_id[:8]}] Unexpected scan failure: {result['error']}", flush=True)
 
+        if collection_replay_summary is not None:
+            result["request_collection_replay"] = collection_replay_summary
         result['job_id'] = job_id
         result['scan_id'] = scan_id
         result = _apply_runtime_scope_guard_to_result(result, options)
@@ -9703,7 +10442,23 @@ async def process_scan_job(job_data: dict):
             }
         coverage_status = str(result_coverage.get("status") or ("failed" if error else "complete"))
         scan_metadata = result.get("scan_metadata") if isinstance(result.get("scan_metadata"), dict) else {}
-        budget_used = scan_metadata.get("budget_used") if isinstance(scan_metadata.get("budget_used"), dict) else {}
+        scanner_budget_used = (
+            scan_metadata.get("budget_used")
+            if isinstance(scan_metadata.get("budget_used"), dict) else {}
+        )
+        # Durable replay settlement is authoritative even when a later collection
+        # contract fails before the helper can return its summary.  Reload it so the
+        # legacy terminal Scan update can never erase a held or settled reservation.
+        async with db_pool.acquire() as conn:
+            replay_budget_used = _worker_json_object(await conn.fetchval(
+                "SELECT budget_used_json FROM scans WHERE id=$1", uuid.UUID(scan_id),
+            ))
+        budget_used = merge_scan_budget_usage(
+            replay_budget_used, scanner_budget_used,
+        )
+        if budget_used:
+            scan_metadata["budget_used"] = budget_used
+            result["scan_metadata"] = scan_metadata
 
         # Save an early artifact before DB finalization so runtime failures still
         # leave diagnostics. A later write refreshes it with receipt ids.
@@ -13594,17 +14349,11 @@ def _worker_hunt_ledger_limits(budget: Mapping[str, Any]) -> dict[str, int]:
 
 
 def _worker_json_object(value: Any) -> dict[str, Any]:
-    if isinstance(value, Mapping):
-        return dict(value)
-    parsed = parse_json_field(value)
-    return dict(parsed) if isinstance(parsed, Mapping) else {}
+    return json_object_field(value)
 
 
 def _worker_json_array(value: Any) -> list[Any]:
-    if isinstance(value, list):
-        return list(value)
-    parsed = parse_json_field(value)
-    return list(parsed) if isinstance(parsed, list) else []
+    return json_array_field(value)
 
 
 def _worker_terminal_replay_result(stored: Any, *, job_id: str) -> dict[str, Any]:
