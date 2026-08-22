@@ -98,7 +98,7 @@ async def _persist_owner_ledger(
             """UPDATE hunt_actions
                SET status='failed', completed_at=COALESCE(completed_at, NOW()),
                    result_summary=$2::jsonb
-               WHERE id=$1 AND status='running'""",
+               WHERE id=$1 AND status IN ('reserved','running')""",
             action_id,
             json.dumps({
                 "error": "stale_reservation_recovered",

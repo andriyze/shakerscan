@@ -449,12 +449,25 @@ except ModuleNotFoundError:
         scan_replay_authorization,
     )
 try:
+    from hunt.capability_reservations import (
+        DURABLE_INLINE_HUNT_CAPABILITIES,
+        hunt_capability_action_digest,
+        hunt_capability_lease_seconds,
+        terminalize_hunt_capability,
+    )
     from hunt.contracts import capability_manifest, resolve_hunt_policy
     from hunt.legacy import LegacyHuntIsolationMiddleware
 except ModuleNotFoundError:
+    from api.hunt.capability_reservations import (
+        DURABLE_INLINE_HUNT_CAPABILITIES,
+        hunt_capability_action_digest,
+        hunt_capability_lease_seconds,
+        terminalize_hunt_capability,
+    )
     from api.hunt.contracts import capability_manifest, resolve_hunt_policy
     from api.hunt.legacy import LegacyHuntIsolationMiddleware
 try:
+    from runtime.budget_reservations import DurableBudgetReservation
     from runtime.budgets import BudgetExceeded, reconcile_budget_snapshot, reserve_budget_snapshot
     from runtime.credential_refs import (
         CredentialReferenceError,
@@ -470,6 +483,7 @@ try:
         sync_legacy_web_credential_by_name,
     )
     from runtime.models import ScanPolicy, TargetBinding
+    from runtime.reservation_store import PostgresBudgetReservationStore
     from runtime.request_collection_store import (
         REPLAY_POLICIES as REQUEST_COLLECTION_REPLAY_POLICIES,
         RequestCollectionContractError,
@@ -484,6 +498,7 @@ try:
     )
     from capabilities.network import CapabilityInputError, network_capability_adapter
 except ModuleNotFoundError:
+    from api.runtime.budget_reservations import DurableBudgetReservation
     from api.runtime.budgets import BudgetExceeded, reconcile_budget_snapshot, reserve_budget_snapshot
     from api.runtime.credential_refs import (
         CredentialReferenceError,
@@ -499,6 +514,7 @@ except ModuleNotFoundError:
         sync_legacy_web_credential_by_name,
     )
     from api.runtime.models import ScanPolicy, TargetBinding
+    from api.runtime.reservation_store import PostgresBudgetReservationStore
     from api.runtime.request_collection_store import (
         REPLAY_POLICIES as REQUEST_COLLECTION_REPLAY_POLICIES,
         RequestCollectionContractError,
@@ -33419,6 +33435,7 @@ async def _agent_tool_http_request(
     hypothesis_id: Optional[str] = None,
     authorized_addresses: Optional[list[str]] = None,
     trusted_collection_headers: Optional[Mapping[str, Any]] = None,
+    record_receipt: bool = True,
 ) -> dict[str, Any]:
     import httpx  # container-local; api.py has no top-level httpx dependency
 
@@ -33580,38 +33597,39 @@ async def _agent_tool_http_request(
     safe_summary = _redact_agent_payload(summary) if summary else None
     finished_at = datetime.now(timezone.utc)
     receipt_id = None
-    try:
-        async with db_pool.acquire() as conn:
-            async with conn.transaction():
-                receipt_result = await _record_tool_receipt(conn, ToolReceiptRequest(
-                    tool_name="agent.http_request",
-                    adapter_version="2026-07-18.v1",
-                    redacted_argv=["agent.http_request", method, path, f"as:{slot}"],
-                    target_scope={
-                        "target_id": str(target_uuid),
-                        "target_url": request_origin,
-                        "same_target_host_only": True,
-                    },
-                    approval_receipt_id=approval_receipt_id,
-                    status=status_label,
-                    parser_status="parsed" if safe_summary else "not_applicable",
-                    started_at=started_at.isoformat(),
-                    finished_at=finished_at.isoformat(),
-                    redaction_summary="Credential headers server-injected from principal; response bounded + redacted.",
-                    metadata_json={
-                        "request": request_view,
-                        "status": (safe_summary or {}).get("status"),
-                        "principal_identity": principal_identity,
-                        "hypothesis_id": hypothesis_id,
-                        "error": error,
-                        "redirect_chain": _redact_agent_payload(redirect_chain) if redirect_chain else [],
-                        "hops_followed": hops_followed,
-                    },
-                    created_by=created_by,
-                ))
-                receipt_id = (receipt_result.get("tool_receipt") or {}).get("id")
-    except Exception:
-        receipt_id = None
+    if record_receipt:
+        try:
+            async with db_pool.acquire() as conn:
+                async with conn.transaction():
+                    receipt_result = await _record_tool_receipt(conn, ToolReceiptRequest(
+                        tool_name="agent.http_request",
+                        adapter_version="2026-07-18.v1",
+                        redacted_argv=["agent.http_request", method, path, f"as:{slot}"],
+                        target_scope={
+                            "target_id": str(target_uuid),
+                            "target_url": request_origin,
+                            "same_target_host_only": True,
+                        },
+                        approval_receipt_id=approval_receipt_id,
+                        status=status_label,
+                        parser_status="parsed" if safe_summary else "not_applicable",
+                        started_at=started_at.isoformat(),
+                        finished_at=finished_at.isoformat(),
+                        redaction_summary="Credential headers server-injected from principal; response bounded + redacted.",
+                        metadata_json={
+                            "request": request_view,
+                            "status": (safe_summary or {}).get("status"),
+                            "principal_identity": principal_identity,
+                            "hypothesis_id": hypothesis_id,
+                            "error": error,
+                            "redirect_chain": _redact_agent_payload(redirect_chain) if redirect_chain else [],
+                            "hops_followed": hops_followed,
+                        },
+                        created_by=created_by,
+                    ))
+                    receipt_id = (receipt_result.get("tool_receipt") or {}).get("id")
+        except Exception:
+            receipt_id = None
 
     if error:
         return {"ok": False, "error": f"request_error:{error}", "request": request_view, "receipt_id": receipt_id}
@@ -36402,6 +36420,13 @@ async def execute_hunt_capability(
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     action_id = uuid.uuid4()
+    durable_store = PostgresBudgetReservationStore()
+    durable_reservation = None
+    durable_action_digest: str | None = None
+    durable_worker_id = (
+        f"api:{str(os.environ.get('HOSTNAME') or 'local')[:64]}:{os.getpid()}"
+    )
+    durable_lease_seconds = 120
     async with db_pool.acquire() as conn:
         async with conn.transaction():
             run = await _hunt_run_or_404(conn, hunt_id, for_update=True)
@@ -36496,6 +36521,10 @@ async def execute_hunt_capability(
                 charges = {
                     key: int(value) for key, value in spec.budget_cost.items() if key in limits
                 }
+                if name == "http.request" and request.input.get("follow_redirects") is True:
+                    # Reserve the complete same-origin redirect envelope before the
+                    # first request. The planner cannot expand this fixed server limit.
+                    charges["http_requests"] = 1 + MAX_REDIRECT_HOPS
                 if validated_device_input is not None and device_adapter_name is not None:
                     fragility_cost = device_agent.tool_fragility_cost(
                         device_adapter_name, validated_device_input,
@@ -36520,7 +36549,86 @@ async def execute_hunt_capability(
             if requires_call_approval:
                 charges["active_actions"] = 1
             worker_managed_budget = name == "collections.replay_safe"
-            if not worker_managed_budget:
+            api_managed_budget = name in DURABLE_INLINE_HUNT_CAPABILITIES
+            if api_managed_budget:
+                durable_action_digest = hunt_capability_action_digest(
+                    hunt_id=run["id"],
+                    action_id=action_id,
+                    capability_name=name,
+                    target_kind=str(run["target_kind"]),
+                    target_id=run["device_target_id"] or run["target_id"],
+                    capability_input=request.input,
+                    requested_budget=charges,
+                    scope_receipt_id=validated_scope_receipt_id,
+                    approval_receipt_id=policy.get("approval_receipt_id"),
+                )
+                requested_reservation = DurableBudgetReservation.request(
+                    owner_kind="hunt",
+                    owner_id=str(run["id"]),
+                    capability_name=name,
+                    amounts=charges,
+                )
+                stored_reservation = await durable_store.create_requested(
+                    conn,
+                    action_id=str(action_id),
+                    action_digest=durable_action_digest,
+                    record=requested_reservation,
+                )
+                if stored_reservation.record.status != "requested":
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Hunt capability reservation is already active",
+                    )
+                durable_lease_seconds = hunt_capability_lease_seconds(charges)
+                try:
+                    reserved_record, reserved_used = (
+                        stored_reservation.record.reserve_against(
+                            limits=limits,
+                            consumed={
+                                key: int(used.get(key) or 0) for key in limits
+                            },
+                            lease_seconds=durable_lease_seconds,
+                        )
+                    )
+                except BudgetExceeded as exc:
+                    released = stored_reservation.record.release(
+                        proof_not_started=True,
+                        reason="budget_exhausted_before_execution",
+                    )
+                    await durable_store.persist_terminal(
+                        conn,
+                        previous=stored_reservation,
+                        terminal=released,
+                        ledger_after_settlement={
+                            key: int(used.get(key) or 0) for key in limits
+                        },
+                        receipt=None,
+                    )
+                    dimension = next(iter(exc.shortages), "unknown")
+                    await conn.execute(
+                        "UPDATE hunt_runs SET status='budget_exhausted', "
+                        "stop_reason=$2, updated_at=NOW() WHERE id=$1",
+                        run["id"],
+                        f"budget_exhausted:{dimension}",
+                    )
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"Hunt budget exhausted: {dimension}",
+                    ) from exc
+                durable_reservation = await durable_store.persist_transition(
+                    conn,
+                    previous=stored_reservation,
+                    current=reserved_record,
+                    ledger_after_hold=reserved_used,
+                )
+                used.update(reserved_used)
+                await conn.execute(
+                    "UPDATE hunt_runs SET budget_used_json=$2, status='active', "
+                    "updated_at=NOW() WHERE id=$1",
+                    run["id"],
+                    json.dumps(used),
+                )
+            elif not worker_managed_budget:
                 try:
                     reserved_used = reserve_budget_snapshot(
                         limits, {key: int(used.get(key) or 0) for key in limits}, charges,
@@ -36538,9 +36646,60 @@ async def execute_hunt_capability(
                 """INSERT INTO hunt_actions (id, hunt_run_id, capability_name, status, input_summary)
                    VALUES ($1,$2,$3,$4,$5)""",
                 action_id, run["id"], name,
-                "running",
+                "reserved" if api_managed_budget else "running",
                 json.dumps(_redact_agent_payload(request.input)),
             )
+
+    if api_managed_budget:
+        if durable_reservation is None or durable_action_digest is None:
+            raise HTTPException(
+                status_code=500,
+                detail="Hunt capability reservation was not initialized",
+            )
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                dispatch_run = await _hunt_run_or_404(conn, hunt_id, for_update=True)
+                if dispatch_run["status"] not in {"active", "awaiting_planner"}:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"Hunt is {dispatch_run['status']}",
+                    )
+                latest_reservation = await durable_store.load(
+                    conn,
+                    durable_reservation.record.reservation_id,
+                    for_update=True,
+                )
+                if (
+                    latest_reservation is None
+                    or latest_reservation.record.state_digest
+                    != durable_reservation.record.state_digest
+                    or latest_reservation.record.status != "reserved"
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Hunt capability reservation changed before dispatch",
+                    )
+                running_reservation = latest_reservation.record.start(
+                    worker_id=durable_worker_id,
+                    lease_seconds=durable_lease_seconds,
+                )
+                durable_reservation = await durable_store.persist_transition(
+                    conn,
+                    previous=latest_reservation,
+                    current=running_reservation,
+                )
+                updated_action = await conn.execute(
+                    """UPDATE hunt_actions
+                       SET status='running', started_at=NOW()
+                       WHERE id=$1 AND hunt_run_id=$2 AND status='reserved'""",
+                    action_id,
+                    dispatch_run["id"],
+                )
+                if not str(updated_action).endswith(" 1"):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Hunt capability action changed before dispatch",
+                    )
 
     context = _hunt_json(run["context_pack"], {})
     execution_started = time.perf_counter()
@@ -36573,6 +36732,7 @@ async def execute_hunt_capability(
                 created_by=f"hunt_v2:{hunt_id}", allow_write=False,
                 approval_receipt_id=policy.get("approval_receipt_id"),
                 authorized_addresses=context.get("authorized_target_addresses") or [],
+                record_receipt=False,
             )
         elif name in network_capability_names:
             assert prepared_network is not None and network_target is not None and network_policy is not None
@@ -36628,13 +36788,28 @@ async def execute_hunt_capability(
                 if dimension in charges:
                     actual_charges[dimension] = min(int(charges[dimension]), max(0, int(amount)))
             elapsed_wall = max(0, math.ceil(time.perf_counter() - execution_started))
+            if api_managed_budget and status != "blocked" and "tool_wall_seconds" in charges:
+                actual_charges["tool_wall_seconds"] = min(
+                    int(charges["tool_wall_seconds"]), max(1, elapsed_wall),
+                )
             if status == "blocked":
                 for dimension in charges:
                     if dimension not in {"agent_actions", "active_actions"}:
                         actual_charges[dimension] = 0
             elif name == "http.request":
-                actual_charges["http_requests"] = min(int(charges.get("http_requests") or 0), 1)
-                actual_charges["tool_wall_seconds"] = min(int(charges.get("tool_wall_seconds") or 0), elapsed_wall)
+                followed = max(
+                    0,
+                    min(
+                        MAX_REDIRECT_HOPS,
+                        int(
+                            (receipt_payload.get("hops_followed") or 0)
+                            if isinstance(receipt_payload, Mapping) else 0
+                        ),
+                    ),
+                )
+                actual_charges["http_requests"] = min(
+                    int(charges.get("http_requests") or 0), 1 + followed,
+                )
             elif name == "collections.replay_safe" and isinstance(receipt_payload, dict):
                 actual_charges["http_requests"] = min(
                     int(charges.get("http_requests") or 0), max(0, int(receipt_payload.get("replayed") or 0)),
@@ -36647,72 +36822,247 @@ async def execute_hunt_capability(
                     )
                 actual_charges["tool_wall_seconds"] = min(int(charges.get("tool_wall_seconds") or 0), elapsed_wall)
             reconciled_used = dict(used)
-            try:
-                async with conn.transaction():
-                    locked = await _hunt_run_or_404(conn, hunt_id, for_update=True)
-                    current_used = _hunt_json(locked["budget_used_json"], {})
-                    if worker_managed_budget:
-                        # The worker already replaced its exact hold with measured usage
-                        # in the same transaction as the canonical receipt, or still owns
-                        # the live reservation after an API-side result timeout.
-                        reconciled_used = current_used
-                    else:
-                        current_ledger = {key: int(current_used.get(key) or 0) for key in limits}
-                        reconciled_ledger = reconcile_budget_snapshot(
-                            current_ledger, charges, actual_charges,
-                        )
-                        current_used.update(reconciled_ledger)
-                        await conn.execute(
-                            "UPDATE hunt_runs SET budget_used_json=$2, updated_at=NOW() WHERE id=$1",
-                            locked["id"], json.dumps(current_used),
-                        )
-                        reconciled_used = current_used
-            except Exception:
-                logger.exception("Failed to reconcile Hunt capability budget", extra={"hunt_id": hunt_id, "action_id": str(action_id)})
             is_partial = bool(
                 isinstance(receipt_payload, dict)
                 and (receipt_payload.get("partial") or receipt_payload.get("status") == "partial")
             )
-            try:
-                receipt_result = await _record_tool_receipt(conn, ToolReceiptRequest(
-                    tool_name=str(spec.adapter),
-                    capability_name=name,
-                    adapter_name=str(spec.adapter),
-                    adapter_version=str(spec.adapter_version),
-                    redacted_argv=[request.input],
-                    target_scope={
-                        "target_kind": str(run["target_kind"]),
-                        "target_id": str(run["device_target_id"] or run["target_id"]),
-                    },
-                    approval_receipt_id=policy.get("approval_receipt_id"),
-                    status="success" if status in {"completed", "partial"} else "failed",
-                    parser_status="partial" if is_partial else "parsed" if status == "completed" else "failed",
-                    budget_json={
-                        "reserved": charges, "actual": actual_charges,
-                        "used_after_reconciliation": reconciled_used,
-                    },
-                    partial=is_partial,
-                    hunt_id=str(run["id"]),
-                    metadata_json={
-                        "hunt_action_id": str(action_id),
-                        "result_status": status,
-                        "durable_budget_reservation_id": (
-                            receipt_payload.get("reservation_id")
-                            if isinstance(receipt_payload, dict) else None
+            if api_managed_budget:
+                if durable_reservation is None or durable_action_digest is None:
+                    raise RuntimeError(
+                        "Hunt capability reservation disappeared before settlement"
+                    )
+                async with conn.transaction():
+                    locked = await _hunt_run_or_404(conn, hunt_id, for_update=True)
+                    current_used = _hunt_json(locked["budget_used_json"], {})
+                    latest_reservation = await durable_store.load(
+                        conn,
+                        durable_reservation.record.reservation_id,
+                        for_update=True,
+                    )
+                    if (
+                        latest_reservation is None
+                        or latest_reservation.record.state_digest
+                        != durable_reservation.record.state_digest
+                        or latest_reservation.record.status != "running"
+                        or latest_reservation.record.worker_id != durable_worker_id
+                    ):
+                        raise RuntimeError(
+                            "Hunt capability reservation changed before settlement"
+                        )
+                    current_ledger = {
+                        key: int(current_used.get(key) or 0) for key in limits
+                    }
+                    prospective_ledger = reconcile_budget_snapshot(
+                        current_ledger,
+                        latest_reservation.record.requested,
+                        actual_charges,
+                    )
+                    prospective_used = dict(current_used)
+                    prospective_used.update(prospective_ledger)
+                    receipt_result = await _record_tool_receipt(
+                        conn,
+                        ToolReceiptRequest(
+                            tool_name=str(spec.adapter),
+                            capability_name=name,
+                            adapter_name=str(spec.adapter),
+                            adapter_version=str(spec.adapter_version),
+                            redacted_argv=[request.input],
+                            target_scope={
+                                "target_kind": str(run["target_kind"]),
+                                "target_id": str(
+                                    run["device_target_id"] or run["target_id"]
+                                ),
+                            },
+                            scope_receipt_id=validated_scope_receipt_id,
+                            approval_receipt_id=policy.get("approval_receipt_id"),
+                            status=(
+                                "success"
+                                if status in {"completed", "partial"}
+                                else "failed"
+                            ),
+                            parser_status=(
+                                "partial"
+                                if is_partial
+                                else "parsed"
+                                if status == "completed"
+                                else "failed"
+                            ),
+                            budget_json={
+                                "reserved": charges,
+                                "actual": actual_charges,
+                                "used_after_reconciliation": prospective_used,
+                            },
+                            partial=is_partial,
+                            hunt_id=str(run["id"]),
+                            metadata_json={
+                                "hunt_action_id": str(action_id),
+                                "result_status": status,
+                                "durable_budget_reservation_id": (
+                                    latest_reservation.record.reservation_id
+                                ),
+                            },
+                            created_by=f"hunt_v2:{hunt_id}",
                         ),
-                    },
-                    created_by=f"hunt_v2:{hunt_id}",
-                ))
-                receipt_id = receipt_result.get("tool_receipt", {}).get("id")
-            except Exception:
-                logger.exception("Failed to record Hunt capability receipt", extra={"hunt_id": hunt_id, "action_id": str(action_id)})
-            await conn.execute(
-                """UPDATE hunt_actions SET status=$2, result_summary=$3, receipt_id=$4, completed_at=NOW() WHERE id=$1""",
-                action_id, status, json.dumps(_redact_agent_payload(receipt_payload), default=str),
-                _optional_uuid(receipt_id) if receipt_id else None,
-            )
-            if str(run["target_kind"]) == "device":
-                await conn.execute("UPDATE hunt_runs SET context_pack=$2, updated_at=NOW() WHERE id=$1", run["id"], json.dumps(context, default=str))
+                    )
+                    receipt_id = receipt_result.get("tool_receipt", {}).get("id")
+                    if not receipt_id:
+                        raise RuntimeError(
+                            "Hunt capability receipt was not persisted"
+                        )
+                    terminal_record, capability_receipt = (
+                        terminalize_hunt_capability(
+                            latest_reservation.record,
+                            action_digest=durable_action_digest,
+                            capability_name=name,
+                            adapter_name=str(spec.adapter),
+                            adapter_version=str(spec.adapter_version),
+                            target_id=(
+                                run["device_target_id"] or run["target_id"]
+                            ),
+                            target_kind=str(run["target_kind"]),
+                            capability_input=request.input,
+                            action_status=status,
+                            actual_budget=actual_charges,
+                            worker_id=durable_worker_id,
+                            started_at=(
+                                latest_reservation.record.started_at.isoformat()
+                                if latest_reservation.record.started_at
+                                else datetime.now(timezone.utc).isoformat()
+                            ),
+                            finished_at=datetime.now(timezone.utc).isoformat(),
+                            receipt_id=str(receipt_id),
+                            scope_receipt_id=validated_scope_receipt_id,
+                            approval_receipt_id=policy.get(
+                                "approval_receipt_id"
+                            ),
+                            result=(
+                                receipt_payload
+                                if isinstance(receipt_payload, Mapping)
+                                else {}
+                            ),
+                        )
+                    )
+                    reconciled_ledger = terminal_record.reconcile_consumed(
+                        current_ledger
+                    )
+                    if reconciled_ledger != prospective_ledger:
+                        raise RuntimeError(
+                            "Hunt capability reconciliation changed during settlement"
+                        )
+                    durable_reservation = await durable_store.persist_terminal(
+                        conn,
+                        previous=latest_reservation,
+                        terminal=terminal_record,
+                        ledger_after_settlement=reconciled_ledger,
+                        receipt=capability_receipt,
+                    )
+                    current_used.update(reconciled_ledger)
+                    reconciled_used = current_used
+                    await conn.execute(
+                        "UPDATE hunt_runs SET budget_used_json=$2, updated_at=NOW() "
+                        "WHERE id=$1",
+                        locked["id"],
+                        json.dumps(current_used),
+                    )
+                    if isinstance(receipt_payload, dict):
+                        receipt_payload["receipt_id"] = str(receipt_id)
+                        receipt_payload["budget_reservation_id"] = (
+                            terminal_record.reservation_id
+                        )
+                        receipt_payload["budget_reservation_state"] = (
+                            terminal_record.status
+                        )
+                        receipt_payload["durable_budget_settled"] = True
+                        receipt_payload["budget_consumed"] = dict(
+                            terminal_record.actual
+                        )
+                    updated_action = await conn.execute(
+                        """UPDATE hunt_actions
+                           SET status=$2, result_summary=$3, receipt_id=$4,
+                               completed_at=NOW()
+                           WHERE id=$1 AND hunt_run_id=$5 AND status='running'""",
+                        action_id,
+                        status,
+                        json.dumps(
+                            _redact_agent_payload(receipt_payload), default=str
+                        ),
+                        _optional_uuid(str(receipt_id)),
+                        locked["id"],
+                    )
+                    if not str(updated_action).endswith(" 1"):
+                        raise RuntimeError(
+                            "Hunt capability action changed before settlement"
+                        )
+            else:
+                try:
+                    async with conn.transaction():
+                        locked = await _hunt_run_or_404(conn, hunt_id, for_update=True)
+                        current_used = _hunt_json(locked["budget_used_json"], {})
+                        if worker_managed_budget:
+                            # The worker already replaced its exact hold with measured
+                            # usage in the same transaction as the canonical receipt,
+                            # or still owns the live reservation after an API timeout.
+                            reconciled_used = current_used
+                        else:
+                            current_ledger = {
+                                key: int(current_used.get(key) or 0)
+                                for key in limits
+                            }
+                            reconciled_ledger = reconcile_budget_snapshot(
+                                current_ledger, charges, actual_charges,
+                            )
+                            current_used.update(reconciled_ledger)
+                            await conn.execute(
+                                "UPDATE hunt_runs SET budget_used_json=$2, "
+                                "updated_at=NOW() WHERE id=$1",
+                                locked["id"], json.dumps(current_used),
+                            )
+                            reconciled_used = current_used
+                except Exception:
+                    logger.exception(
+                        "Failed to reconcile Hunt capability budget",
+                        extra={"hunt_id": hunt_id, "action_id": str(action_id)},
+                    )
+                try:
+                    receipt_result = await _record_tool_receipt(conn, ToolReceiptRequest(
+                        tool_name=str(spec.adapter),
+                        capability_name=name,
+                        adapter_name=str(spec.adapter),
+                        adapter_version=str(spec.adapter_version),
+                        redacted_argv=[request.input],
+                        target_scope={
+                            "target_kind": str(run["target_kind"]),
+                            "target_id": str(run["device_target_id"] or run["target_id"]),
+                        },
+                        approval_receipt_id=policy.get("approval_receipt_id"),
+                        status="success" if status in {"completed", "partial"} else "failed",
+                        parser_status="partial" if is_partial else "parsed" if status == "completed" else "failed",
+                        budget_json={
+                            "reserved": charges, "actual": actual_charges,
+                            "used_after_reconciliation": reconciled_used,
+                        },
+                        partial=is_partial,
+                        hunt_id=str(run["id"]),
+                        metadata_json={
+                            "hunt_action_id": str(action_id),
+                            "result_status": status,
+                            "durable_budget_reservation_id": (
+                                receipt_payload.get("reservation_id")
+                                if isinstance(receipt_payload, dict) else None
+                            ),
+                        },
+                        created_by=f"hunt_v2:{hunt_id}",
+                    ))
+                    receipt_id = receipt_result.get("tool_receipt", {}).get("id")
+                except Exception:
+                    logger.exception("Failed to record Hunt capability receipt", extra={"hunt_id": hunt_id, "action_id": str(action_id)})
+                await conn.execute(
+                    """UPDATE hunt_actions SET status=$2, result_summary=$3, receipt_id=$4, completed_at=NOW() WHERE id=$1""",
+                    action_id, status, json.dumps(_redact_agent_payload(receipt_payload), default=str),
+                    _optional_uuid(receipt_id) if receipt_id else None,
+                )
+                if str(run["target_kind"]) == "device":
+                    await conn.execute("UPDATE hunt_runs SET context_pack=$2, updated_at=NOW() WHERE id=$1", run["id"], json.dumps(context, default=str))
     return {"hunt_id": hunt_id, "capability": name, "action_id": str(action_id), "result": result}
 
 

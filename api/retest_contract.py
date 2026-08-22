@@ -2920,9 +2920,37 @@ async def run_schema_migrations(pool) -> None:
                     started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     completed_at TIMESTAMPTZ,
                     CONSTRAINT hunt_actions_status_check CHECK (
-                        status IN ('running','completed','blocked','failed','partial')
+                        status IN ('reserved','running','completed','blocked','failed','partial')
                     )
                 )
+            """)
+            await conn.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conrelid = 'hunt_actions'::regclass
+                          AND conname = 'hunt_actions_status_check'
+                    ) THEN
+                        ALTER TABLE hunt_actions
+                        ADD CONSTRAINT hunt_actions_status_check CHECK (
+                            status IN ('reserved','running','completed','blocked','failed','partial')
+                        );
+                    ELSIF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conrelid = 'hunt_actions'::regclass
+                          AND conname = 'hunt_actions_status_check'
+                          AND pg_get_constraintdef(oid) LIKE '%reserved%'
+                    ) THEN
+                        ALTER TABLE hunt_actions
+                        DROP CONSTRAINT hunt_actions_status_check;
+                        ALTER TABLE hunt_actions
+                        ADD CONSTRAINT hunt_actions_status_check CHECK (
+                            status IN ('reserved','running','completed','blocked','failed','partial')
+                        );
+                    END IF;
+                END
+                $$
             """)
             await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_hunt_actions_run
