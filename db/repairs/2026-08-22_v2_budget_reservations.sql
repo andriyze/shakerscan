@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS budget_reservations (
     owner_kind TEXT NOT NULL CHECK (owner_kind IN ('scan','hunt')),
     owner_id TEXT NOT NULL,
     action_id TEXT NOT NULL,
+    action_digest TEXT NOT NULL CHECK (action_digest ~ '^[0-9a-f]{64}$'),
     capability_name TEXT NOT NULL,
     status TEXT NOT NULL CHECK (
         status IN ('requested','reserved','running','committed','released','failed')
@@ -55,6 +56,23 @@ CREATE TABLE IF NOT EXISTS budget_reservations (
         execution_uncertain = false OR (status = 'failed' AND hold_applied = true)
     )
 );
+ALTER TABLE budget_reservations ADD COLUMN IF NOT EXISTS action_digest TEXT;
+UPDATE budget_reservations
+SET action_digest = repeat('0', 64)
+WHERE action_digest IS NULL;
+ALTER TABLE budget_reservations ALTER COLUMN action_digest SET NOT NULL;
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'budget_reservations_action_digest_check'
+          AND conrelid = 'budget_reservations'::regclass
+    ) THEN
+        ALTER TABLE budget_reservations
+        ADD CONSTRAINT budget_reservations_action_digest_check
+        CHECK (action_digest ~ '^[0-9a-f]{64}$');
+    END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS idx_budget_reservations_owner
     ON budget_reservations(owner_kind, owner_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_budget_reservations_stale
@@ -65,7 +83,7 @@ CREATE TABLE IF NOT EXISTS app_schema_migrations (
     applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 INSERT INTO app_schema_migrations(name)
-VALUES ('v2_budget_reservations_v1')
+VALUES ('v2_budget_reservations_v1'), ('v2_budget_reservations_v2')
 ON CONFLICT (name) DO NOTHING;
 
 COMMIT;

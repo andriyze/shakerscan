@@ -38,7 +38,7 @@ async def _assert_common(conn) -> None:
         raise RuntimeError("budget_reservations is missing after migration")
     if not await conn.fetchval(
         "SELECT EXISTS (SELECT 1 FROM app_schema_migrations "
-        "WHERE name='v2_budget_reservations_v1')"
+        "WHERE name='v2_budget_reservations_v2')"
     ):
         raise RuntimeError("V2 budget reservation migration marker is missing")
     if not await conn.fetchval("SELECT to_regclass('public.model_intake_submission_events') IS NOT NULL"):

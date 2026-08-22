@@ -19,8 +19,9 @@ from .budget_reservations import DurableBudgetReservation
 from .receipts import CapabilityReceipt
 
 
-MIGRATION_NAME = "v2_budget_reservations_v1"
+MIGRATION_NAME = "v2_budget_reservations_v2"
 _ACTION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$")
+_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 
 BUDGET_RESERVATION_SCHEMA_SQL = r"""
 CREATE TABLE IF NOT EXISTS budget_reservations (
@@ -28,6 +29,7 @@ CREATE TABLE IF NOT EXISTS budget_reservations (
     owner_kind TEXT NOT NULL CHECK (owner_kind IN ('scan','hunt')),
     owner_id TEXT NOT NULL,
     action_id TEXT NOT NULL,
+    action_digest TEXT NOT NULL CHECK (action_digest ~ '^[0-9a-f]{64}$'),
     capability_name TEXT NOT NULL,
     status TEXT NOT NULL CHECK (
         status IN ('requested','reserved','running','committed','released','failed')
@@ -75,6 +77,23 @@ CREATE TABLE IF NOT EXISTS budget_reservations (
         execution_uncertain = false OR (status = 'failed' AND hold_applied = true)
     )
 );
+ALTER TABLE budget_reservations ADD COLUMN IF NOT EXISTS action_digest TEXT;
+UPDATE budget_reservations
+SET action_digest = repeat('0', 64)
+WHERE action_digest IS NULL;
+ALTER TABLE budget_reservations ALTER COLUMN action_digest SET NOT NULL;
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'budget_reservations_action_digest_check'
+          AND conrelid = 'budget_reservations'::regclass
+    ) THEN
+        ALTER TABLE budget_reservations
+        ADD CONSTRAINT budget_reservations_action_digest_check
+        CHECK (action_digest ~ '^[0-9a-f]{64}$');
+    END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS idx_budget_reservations_owner
     ON budget_reservations(owner_kind, owner_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_budget_reservations_stale
@@ -85,7 +104,7 @@ CREATE TABLE IF NOT EXISTS app_schema_migrations (
     applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 INSERT INTO app_schema_migrations(name)
-VALUES ('v2_budget_reservations_v1')
+VALUES ('v2_budget_reservations_v1'), ('v2_budget_reservations_v2')
 ON CONFLICT (name) DO NOTHING;
 """
 
@@ -135,6 +154,13 @@ def _action_id(value: Any) -> str:
     return normalized
 
 
+def _digest(value: Any, *, name: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if not _DIGEST_RE.fullmatch(normalized):
+        raise ReservationStoreError(f"{name} must be 64 lowercase hex characters")
+    return normalized
+
+
 def _record_from_state(value: Any) -> DurableBudgetReservation:
     state = _json_object(value, name="state_json")
     for key in (
@@ -151,6 +177,7 @@ def _record_from_state(value: Any) -> DurableBudgetReservation:
 @dataclass(frozen=True)
 class StoredBudgetReservation:
     action_id: str
+    action_digest: str
     record: DurableBudgetReservation
     ledger_after_hold: Mapping[str, int] | None = None
     ledger_after_settlement: Mapping[str, int] | None = None
@@ -165,6 +192,7 @@ class StoredBudgetReservation:
             raise ReservationStoreError("reservation row state digest mismatch")
         return cls(
             action_id=_action_id(row["action_id"]),
+            action_digest=_digest(row["action_digest"], name="action_digest"),
             record=record,
             ledger_after_hold=(
                 _json_object(row.get("ledger_after_hold_json"), name="ledger_after_hold_json")
@@ -239,10 +267,10 @@ INSERT INTO budget_reservations (
     started_at, finished_at, execution_receipt_hash, failure_reason,
     execution_uncertain, version, state_digest, state_json,
     ledger_after_hold_json, ledger_after_settlement_json, receipt_json,
-    created_at, updated_at
+    created_at, updated_at, action_digest
 ) VALUES (
     $1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9,$10,$11,$12,$13,$14,$15,$16,
-    $17,$18,$19::jsonb,$20::jsonb,$21::jsonb,$22::jsonb,$23,$24
+    $17,$18,$19::jsonb,$20::jsonb,$21::jsonb,$22::jsonb,$23,$24,$25
 )
 ON CONFLICT (owner_kind, owner_id, action_id) DO NOTHING
 RETURNING *
@@ -258,9 +286,9 @@ UPDATE budget_reservations SET
     ledger_after_hold_json=$20::jsonb,
     ledger_after_settlement_json=$21::jsonb,
     receipt_json=$22::jsonb, updated_at=$24
-WHERE id=$1 AND version=$25 AND state_digest=$26
+WHERE id=$1 AND version=$26 AND state_digest=$27
   AND owner_kind=$2 AND owner_id=$3 AND action_id=$4
-  AND capability_name=$5 AND created_at=$23
+  AND capability_name=$5 AND created_at=$23 AND action_digest=$25
 RETURNING *
 """
 
@@ -309,6 +337,7 @@ class PostgresBudgetReservationStore:
         conn: ReservationDatabase,
         *,
         action_id: str,
+        action_digest: str,
         record: DurableBudgetReservation,
     ) -> StoredBudgetReservation:
         if record.status != "requested" or record.version != 1:
@@ -320,7 +349,8 @@ class PostgresBudgetReservationStore:
             ledger_after_settlement=None,
             receipt=None,
         )
-        row = await conn.fetchrow(_INSERT_SQL, *args)
+        digest = _digest(action_digest, name="action_digest")
+        row = await conn.fetchrow(_INSERT_SQL, *args, digest)
         if row:
             return StoredBudgetReservation.from_row(row)
         existing = await self.load_by_action(
@@ -335,9 +365,10 @@ class PostgresBudgetReservationStore:
         if (
             existing.record.capability_name != record.capability_name
             or dict(existing.record.requested) != dict(record.requested)
+            or existing.action_digest != digest
         ):
             raise ReservationConflict(
-                "action_id already belongs to a different capability or budget request"
+                "action_id already belongs to a different capability, input, or budget request"
             )
         return existing
 
@@ -365,6 +396,7 @@ class PostgresBudgetReservationStore:
         row = await conn.fetchrow(
             _UPDATE_SQL,
             *args,
+            previous.action_digest,
             previous.record.version,
             previous.record.state_digest,
         )
@@ -392,6 +424,8 @@ class PostgresBudgetReservationStore:
                 raise ReservationStoreError("receipt reservation state does not match terminal state")
             if receipt.receipt_hash != terminal.execution_receipt_hash:
                 raise ReservationStoreError("receipt hash does not match terminal reservation")
+            if receipt.input_digest != previous.action_digest:
+                raise ReservationStoreError("receipt input digest does not match durable action")
             receipt_json = receipt.public_dict()
         elif terminal.execution_receipt_hash is not None:
             raise ReservationStoreError("terminal reservation has a receipt hash but no receipt")
@@ -409,6 +443,7 @@ class PostgresBudgetReservationStore:
         row = await conn.fetchrow(
             _UPDATE_SQL,
             *args,
+            previous.action_digest,
             previous.record.version,
             previous.record.state_digest,
         )
@@ -444,6 +479,15 @@ class PostgresBudgetReservationStore:
     ) -> None:
         if previous.terminal:
             raise ReservationStoreError("terminal reservations are immutable")
+        allowed = {
+            "requested": {"reserved", "released", "failed"},
+            "reserved": {"running", "released", "failed"},
+            "running": {"running", "committed", "failed"},
+        }
+        if current.status not in allowed.get(previous.status, set()):
+            raise ReservationStoreError(
+                f"invalid reservation transition: {previous.status} -> {current.status}"
+            )
         for name in (
             "reservation_id", "owner_kind", "owner_id", "capability_name", "requested"
         ):
