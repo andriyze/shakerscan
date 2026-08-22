@@ -111,6 +111,18 @@ def test_credential_references_require_explicit_authority_and_remain_opaque():
     assert contract.credential_refs == {"ssh_credential_profile_id": "credential-1"}
     assert "password" not in repr(contract.public_dict()).lower()
 
+    with pytest.raises(HuntStartContractError, match="distinct profile IDs"):
+        normalize_hunt_start_payload(_payload(
+            credential_refs={
+                "primary_credential_profile_id": "credential-1",
+                "secondary_credential_profile_id": "credential-1",
+            },
+            policy={
+                "authorization_confirmed": True,
+                "approval_receipt_id": "approval-1",
+            },
+        ))
+
 
 def test_budget_overrides_can_lower_but_not_raise_profile_limits():
     with pytest.raises(HuntStartContractError, match="exceeds the fast Hunt profile ceiling"):

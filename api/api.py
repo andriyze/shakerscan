@@ -436,10 +436,18 @@ except ModuleNotFoundError:
     from api.hunt.legacy import LegacyHuntIsolationMiddleware
 try:
     from runtime.budgets import BudgetExceeded, reconcile_budget_snapshot, reserve_budget_snapshot
+    from runtime.credential_refs import (
+        CredentialReferenceError,
+        select_hunt_principal_reference,
+    )
     from runtime.models import ScanPolicy, TargetBinding
     from capabilities.network import CapabilityInputError, network_capability_adapter
 except ModuleNotFoundError:
     from api.runtime.budgets import BudgetExceeded, reconcile_budget_snapshot, reserve_budget_snapshot
+    from api.runtime.credential_refs import (
+        CredentialReferenceError,
+        select_hunt_principal_reference,
+    )
     from api.runtime.models import ScanPolicy, TargetBinding
     from api.capabilities.network import CapabilityInputError, network_capability_adapter
 import device_agent
@@ -34642,6 +34650,15 @@ async def _hunt_select_collection(run: Any, context: Mapping[str, Any], values: 
             "count": len(selected), "secret_values_visible": False}
 
 
+def _hunt_managed_principal_reference(
+    context: Mapping[str, Any], value: Any,
+) -> dict[str, Any] | None:
+    try:
+        return select_hunt_principal_reference(context, value)
+    except CredentialReferenceError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
 async def _hunt_replay_safe_collection(
     run: Any,
     context: Mapping[str, Any],
@@ -34651,6 +34668,9 @@ async def _hunt_replay_safe_collection(
 ) -> dict[str, Any]:
     """Queue worker-only exact replay without exposing decrypted requests to the API."""
     selector = _hunt_collection_selector(values, hard_limit=25)
+    principal = _hunt_managed_principal_reference(
+        context, values.get("as_principal"),
+    )
     async with db_pool.acquire() as conn:
         row = await _hunt_bound_collection(conn, run, context, values.get("collection_id"))
     redis_client = get_redis()
@@ -34676,6 +34696,12 @@ async def _hunt_replay_safe_collection(
         "submitted_at": utc_now_iso(),
         "_base_queue_name": AGENT_TOOL_QUEUE_NAME,
     }
+    if principal is not None:
+        payload.update({
+            "credential_profile_id": principal["profile_id"],
+            "principal_slot": principal["principal_slot"],
+            "expected_profile_version": principal["profile_version"],
+        })
     redis_client.hset(f"job:{job_id}", mapping={
         "status": "queued",
         "current_phase": "request_collection_replay_queued",
@@ -35025,8 +35051,15 @@ async def execute_hunt_capability(
                 raise HTTPException(status_code=403, detail="Capability is not allowed by this Hunt policy")
             principal_slot = (
                 agent_tools.normalize_principal_slot(request.input.get("as_principal"))
-                if name == "http.request" else "anonymous"
+                if name in {"http.request", "collections.replay_safe"} else "anonymous"
             )
+            if name == "collections.replay_safe":
+                principal = _hunt_managed_principal_reference(
+                    _hunt_json(run["context_pack"], {}), principal_slot,
+                )
+                principal_slot = (
+                    str(principal["principal_slot"]) if principal is not None else "anonymous"
+                )
             if str(run["target_kind"]) == "device" and not name.startswith("collections."):
                 device_adapter_name = str(spec.adapter).split(".")[-1]
                 try:

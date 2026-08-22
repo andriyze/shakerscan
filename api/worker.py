@@ -21,6 +21,7 @@ import threading
 import time
 import urllib.parse
 import uuid
+from contextlib import AsyncExitStack
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -59,6 +60,15 @@ import agent_tools
 from capabilities.network import CapabilityInputError, network_capability_adapter
 from runtime.budget_reservations import DurableBudgetReservation
 from runtime.budgets import BudgetExceeded
+from runtime.credential_resolver import (
+    CredentialResolutionError,
+    WorkerCredentialResolver,
+    validate_worker_credential_authority,
+)
+from runtime.credential_refs import (
+    CredentialReferenceError,
+    select_hunt_principal_reference,
+)
 from runtime.models import ScanPolicy, TargetBinding
 from runtime.pinned_http_replay import PinnedAiohttpReplayTransport
 from runtime.request_replay_executor import (
@@ -97,6 +107,7 @@ try:
     from scanner_tools.request_replay import (
         ReplayAuthorization,
         RequestReplayError,
+        bind_replay_credential_headers,
         build_selected_replay_plan,
     )
     from scanner_tools import device_advisories
@@ -112,6 +123,7 @@ except ModuleNotFoundError:
     from scanner.scanner_tools.request_replay import (
         ReplayAuthorization,
         RequestReplayError,
+        bind_replay_credential_headers,
         build_selected_replay_plan,
     )
     from scanner.scanner_tools import device_advisories
@@ -13280,6 +13292,23 @@ def _worker_json_object(value: Any) -> dict[str, Any]:
     return dict(parsed) if isinstance(parsed, Mapping) else {}
 
 
+def _worker_terminal_replay_result(stored: Any, *, job_id: str) -> dict[str, Any]:
+    receipt = dict(stored.receipt or {})
+    return {
+        "job_id": job_id,
+        "status": "success" if stored.record.status == "committed" else "failed",
+        "error": stored.record.failure_reason,
+        "replayed": int(stored.record.actual.get("http_requests") or 0),
+        "budget_consumed": dict(stored.record.actual),
+        "used_after_reconciliation": dict(stored.ledger_after_settlement or {}),
+        "reservation_id": stored.record.reservation_id,
+        "receipt": receipt,
+        "observations": list(receipt.get("observations") or []),
+        "durable_budget_settled": True,
+        "idempotent_redelivery": True,
+    }
+
+
 async def process_request_collection_replay_job(job_data: dict[str, Any]) -> None:
     """Decrypt and execute one exact collection selection on the assigned worker.
 
@@ -13293,6 +13322,8 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
     cancel_key = f"agent_tool_cancel:{job_id}"
     redis_client = get_redis()
     store = PostgresBudgetReservationStore()
+    credential_stack = AsyncExitStack()
+    receipt_context: dict[str, Any] | None = None
     result: dict[str, Any] = {
         "job_id": job_id,
         "status": "failed",
@@ -13317,6 +13348,21 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
             safe_methods_only=True,
             limit=max(1, min(int(selector_raw.get("limit") or 25), 25)),
         )
+        credential_profile_id = str(job_data.get("credential_profile_id") or "").strip()
+        principal_slot = str(job_data.get("principal_slot") or "").strip().lower()
+        raw_expected_profile_version = job_data.get("expected_profile_version")
+        if credential_profile_id or principal_slot or raw_expected_profile_version is not None:
+            try:
+                credential_profile_id = str(uuid.UUID(credential_profile_id))
+                expected_profile_version = int(raw_expected_profile_version)
+            except (TypeError, ValueError, AttributeError) as exc:
+                raise ReplayExecutionError("managed principal queue binding is invalid") from exc
+            if principal_slot not in {"primary", "secondary", "service"}:
+                raise ReplayExecutionError("managed principal queue slot is invalid")
+            if expected_profile_version < 1:
+                raise ReplayExecutionError("managed principal queue version is invalid")
+        else:
+            expected_profile_version = None
 
         async with db_pool.acquire() as conn:
             async with conn.transaction():
@@ -13348,6 +13394,24 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                     raise ReplayExecutionError("request collection changed after action admission")
                 context = _worker_json_object(run["context_pack"])
                 hunt_policy = _worker_json_object(run["policy_json"])
+                existing_reservation = await store.load(
+                    conn, reservation_id, for_update=True,
+                )
+                if existing_reservation is not None:
+                    if (
+                        existing_reservation.action_id != action_id
+                        or existing_reservation.record.owner_kind != "hunt"
+                        or existing_reservation.record.owner_id != hunt_id
+                        or existing_reservation.record.capability_name != "collections.replay"
+                    ):
+                        raise ReservationConflict(
+                            "replay reservation identity does not match the queued action"
+                        )
+                    if existing_reservation.record.terminal:
+                        result = _worker_terminal_replay_result(
+                            existing_reservation, job_id=job_id,
+                        )
+                        return
 
         raw_payload = str(decrypt_secret(collection["encrypted_payload"]) or "")
         if not raw_payload or raw_payload.startswith("enc:fernet:"):
@@ -13395,6 +13459,46 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
             default_origin=(target.allowed_origins[0] if target.allowed_origins else None),
             authorization=ReplayAuthorization(),
         )
+        if credential_profile_id:
+            context_ref = select_hunt_principal_reference(context, principal_slot)
+            if context_ref is None or context_ref["profile_id"] != credential_profile_id:
+                raise ReplayExecutionError("managed principal queue reference changed")
+            if context_ref["profile_version"] != expected_profile_version:
+                raise ReplayExecutionError("managed principal context version changed")
+            async with db_pool.acquire() as conn:
+                authority = await validate_worker_credential_authority(
+                    conn,
+                    owner_kind="hunt",
+                    owner_id=hunt_id,
+                    target=target,
+                    approval_receipt_id=hunt_policy.get("approval_receipt_id"),
+                    scope_receipt_id=hunt_policy.get("scope_receipt_id"),
+                    action_name="hunt.capability:collections.replay_safe",
+                )
+                resolved = await credential_stack.enter_async_context(
+                    WorkerCredentialResolver().resolve(
+                        conn,
+                        profile_id=credential_profile_id,
+                        target=target,
+                        capability="request.replay",
+                        authority=authority,
+                    )
+                )
+            if (
+                resolved.profile.current_version != expected_profile_version
+                or resolved.profile.principal_slot != principal_slot
+            ):
+                raise ReplayExecutionError("managed principal profile changed after admission")
+            plan = bind_replay_credential_headers(
+                plan,
+                resolved.http_headers().as_dict(),
+                auth_kind=resolved.profile.auth_kind,
+            )
+            receipt_context = {
+                "principal_profile_ref": resolved.profile.profile_id,
+                "principal_profile_version": resolved.profile.current_version,
+                "principal_slot": resolved.profile.principal_slot,
+            }
         additional_budget = {
             "agent_actions": 1,
             "tool_wall_seconds": max(
@@ -13426,22 +13530,7 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                     record=requested,
                 )
                 if stored.record.terminal:
-                    receipt = dict(stored.receipt or {})
-                    result = {
-                        "job_id": job_id,
-                        "status": "success" if stored.record.status == "committed" else "failed",
-                        "error": stored.record.failure_reason,
-                        "replayed": int(stored.record.actual.get("http_requests") or 0),
-                        "budget_consumed": dict(stored.record.actual),
-                        "used_after_reconciliation": dict(
-                            stored.ledger_after_settlement or {}
-                        ),
-                        "reservation_id": stored.record.reservation_id,
-                        "receipt": receipt,
-                        "observations": list(receipt.get("observations") or []),
-                        "durable_budget_settled": True,
-                        "idempotent_redelivery": True,
-                    }
+                    result = _worker_terminal_replay_result(stored, job_id=job_id)
                     return
                 if stored.record.status != "requested":
                     raise ReservationConflict(
@@ -13605,6 +13694,7 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
             require_durable_persistence=True,
             additional_budget=additional_budget,
             initial_reservation=persisted.record if persisted is not None else None,
+            receipt_context=receipt_context,
         )
         public_receipt = outcome.receipt.public_dict()
         result = {
@@ -13629,6 +13719,8 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
     except (
         ReplayExecutionError,
         RequestReplayError,
+        CredentialReferenceError,
+        CredentialResolutionError,
         ReservationConflict,
         ReservationStoreError,
         ValueError,
@@ -13649,6 +13741,10 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
             "durable_budget_settled": False,
         }
     finally:
+        try:
+            await credential_stack.aclose()
+        except Exception:  # noqa: BLE001 - cleanup must not suppress durable replay results
+            pass
         if job_id:
             redis_client.set(
                 result_key,

@@ -10,11 +10,13 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
 import tempfile
 from typing import Any, AsyncIterator, Callable, Iterator, Mapping
+import uuid
 
 from .credential_store import (
     CredentialProfileMetadata,
@@ -63,6 +65,92 @@ class CredentialResolutionAuthority:
             raise CredentialResolutionError(
                 "credential approval scope does not match the target binding"
             )
+
+
+async def validate_worker_credential_authority(
+    conn: Any,
+    *,
+    owner_kind: str,
+    owner_id: str,
+    target: TargetBinding,
+    approval_receipt_id: Any,
+    scope_receipt_id: Any,
+    action_name: str,
+) -> CredentialResolutionAuthority:
+    """Reload approval and scope rows on the worker immediately before decryption."""
+    try:
+        approval_uuid = uuid.UUID(str(approval_receipt_id or ""))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise CredentialResolutionError("credential approval receipt is invalid") from exc
+    scope_id = str(scope_receipt_id or "").strip()
+    if not scope_id or scope_id != str(target.scope_receipt_id or "").strip():
+        raise CredentialResolutionError(
+            "credential approval scope does not match the target binding"
+        )
+    row = await conn.fetchrow(
+        """SELECT a.scope_receipt_id, a.risk_tier, a.confirmations, a.approved_by,
+                  a.denial_reason, a.expires_at, a.action_name, s.target_id, s.verdict
+           FROM approval_receipts a
+           JOIN scope_receipts s ON s.id=a.scope_receipt_id
+           WHERE a.id=$1""",
+        approval_uuid,
+    )
+    if not row:
+        raise CredentialResolutionError("credential approval receipt is unavailable")
+    item = dict(row)
+    if (
+        not item.get("approved_by")
+        or item.get("denial_reason")
+        or str(item.get("risk_tier") or "") not in {"credential", "dangerous"}
+    ):
+        raise CredentialResolutionError("credential approval receipt does not authorize access")
+    expires_at = item.get("expires_at")
+    if not isinstance(expires_at, datetime) or expires_at.tzinfo is None:
+        raise CredentialResolutionError("credential approval receipt requires a bounded expiry")
+    if expires_at.astimezone(timezone.utc) <= datetime.now(timezone.utc):
+        raise CredentialResolutionError("credential approval receipt is expired")
+    raw_confirmations = item.get("confirmations") or []
+    if isinstance(raw_confirmations, str):
+        try:
+            raw_confirmations = json.loads(raw_confirmations)
+        except json.JSONDecodeError as exc:
+            raise CredentialResolutionError(
+                "credential approval confirmations are invalid"
+            ) from exc
+    confirmations = {
+        str(value) for value in raw_confirmations if isinstance(value, str)
+    }
+    if "confirm_authorized" not in confirmations:
+        raise CredentialResolutionError(
+            "credential approval is missing confirm_authorized"
+        )
+    if str(item.get("verdict") or "") == "blocked":
+        raise CredentialResolutionError("credential approval scope is blocked")
+    if (
+        str(item.get("verdict") or "") == "needs_approval"
+        and "confirm_scope_reviewed" not in confirmations
+    ):
+        raise CredentialResolutionError(
+            "credential approval is missing confirm_scope_reviewed"
+        )
+    if str(item.get("scope_receipt_id") or "") != scope_id:
+        raise CredentialResolutionError("credential approval scope changed")
+    if str(item.get("target_id") or "") != target.target_id:
+        raise CredentialResolutionError("credential approval target changed")
+    receipt_action = str(item.get("action_name") or "").strip()
+    expected_action = str(action_name or "").strip()
+    if not expected_action:
+        raise CredentialResolutionError("credential capability action is invalid")
+    if receipt_action and receipt_action != expected_action:
+        raise CredentialResolutionError("credential approval action changed")
+    return CredentialResolutionAuthority(
+        owner_kind=owner_kind,
+        owner_id=owner_id,
+        credential_access_allowed=True,
+        approval_validated=True,
+        approval_receipt_id=str(approval_uuid),
+        scope_receipt_id=scope_id,
+    )
 
 
 @dataclass(frozen=True, repr=False)
@@ -215,8 +303,8 @@ class ResolvedCredential:
 
     def receipt_metadata(self) -> dict[str, Any]:
         return {
-            "credential_profile_id": self.profile.profile_id,
-            "credential_profile_version": self.profile.current_version,
+            "principal_profile_ref": self.profile.profile_id,
+            "principal_profile_version": self.profile.current_version,
             "auth_kind": self.profile.auth_kind,
             "principal_slot": self.profile.principal_slot,
             "target_kind": self.profile.target_kind,

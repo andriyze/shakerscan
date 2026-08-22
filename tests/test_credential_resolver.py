@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
 import stat
+import uuid
 
 import pytest
 
@@ -13,6 +14,7 @@ from api.runtime.credential_resolver import (
     CredentialResolutionAuthority,
     CredentialResolutionError,
     WorkerCredentialResolver,
+    validate_worker_credential_authority,
 )
 from api.runtime.credential_store import (
     CredentialProfileMetadata,
@@ -188,7 +190,7 @@ def test_http_resolution_is_exact_content_free_and_scrubbed_after_context():
             assert "top-secret" not in repr(credential)
             receipt = json.dumps(credential.receipt_metadata())
             assert "top-secret" not in receipt
-            assert credential.receipt_metadata()["credential_profile_version"] == 3
+            assert credential.receipt_metadata()["principal_profile_version"] == 3
 
     asyncio.run(exercise())
     assert store.calls[0][1] == {
@@ -297,3 +299,79 @@ def test_invalid_ciphertext_and_metadata_fail_without_leaking_values():
         assert "top-secret" not in str(error.value)
 
     asyncio.run(exercise())
+
+
+class ApprovalConn:
+    def __init__(self, row):
+        self.row = row
+        self.calls = []
+
+    async def fetchrow(self, query, *args):
+        self.calls.append((query, args))
+        return self.row
+
+
+def test_worker_reloads_bounded_credential_approval_before_resolution():
+    approval_id = uuid.UUID("44444444-4444-4444-8444-444444444444")
+    conn = ApprovalConn({
+        "scope_receipt_id": "scope-1",
+        "risk_tier": "credential",
+        "confirmations": ["confirm_authorized", "confirm_scope_reviewed"],
+        "approved_by": "operator",
+        "denial_reason": None,
+        "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
+        "target_id": TARGET_ID,
+        "verdict": "needs_approval",
+        "action_name": "hunt.capability:collections.replay_safe",
+    })
+
+    authority = asyncio.run(validate_worker_credential_authority(
+        conn,
+        owner_kind="hunt",
+        owner_id="hunt-1",
+        target=_target(),
+        approval_receipt_id=approval_id,
+        scope_receipt_id="scope-1",
+        action_name="hunt.capability:collections.replay_safe",
+    ))
+    assert authority.approval_validated is True
+    assert authority.approval_receipt_id == str(approval_id)
+    assert conn.calls[0][1] == (approval_id,)
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"risk_tier": "active"}, "does not authorize"),
+        ({"approved_by": None}, "does not authorize"),
+        ({"denial_reason": "denied"}, "does not authorize"),
+        ({"expires_at": datetime.now(timezone.utc) - timedelta(seconds=1)}, "expired"),
+        ({"confirmations": []}, "confirm_authorized"),
+        ({"target_id": "another-target"}, "target changed"),
+        ({"verdict": "blocked"}, "scope is blocked"),
+        ({"action_name": "hunt.capability:http.request"}, "action changed"),
+    ],
+)
+def test_worker_approval_revalidation_fails_closed(changes, message):
+    row = {
+        "scope_receipt_id": "scope-1",
+        "risk_tier": "credential",
+        "confirmations": ["confirm_authorized"],
+        "approved_by": "operator",
+        "denial_reason": None,
+        "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
+        "target_id": TARGET_ID,
+        "verdict": "allowed",
+        "action_name": "hunt.capability:collections.replay_safe",
+    }
+    row.update(changes)
+    with pytest.raises(CredentialResolutionError, match=message):
+        asyncio.run(validate_worker_credential_authority(
+            ApprovalConn(row),
+            owner_kind="hunt",
+            owner_id="hunt-1",
+            target=_target(),
+            approval_receipt_id="44444444-4444-4444-8444-444444444444",
+            scope_receipt_id="scope-1",
+            action_name="hunt.capability:collections.replay_safe",
+        ))

@@ -14,6 +14,7 @@ from runtime.budget_reservations import (
     DurableBudgetReservation,
     ReservationTransitionError,
 )
+from runtime.capability_registry import CAPABILITY_REGISTRY
 from scanner_tools.request_replay import (
     ReplayAuthorization,
     ReplayPlan,
@@ -68,6 +69,13 @@ def test_replay_plan_owns_typed_budget_and_secret_free_url_representation():
     assert "AbCdEf0123456789AbCdEf0123456789" not in public
     assert "wire-secret-value" not in public
     assert "/reset/<redacted>" in public
+
+
+def test_safe_collection_replay_declares_bounded_managed_principal_input():
+    schema = CAPABILITY_REGISTRY.require("collections.replay_safe").input_schema
+    assert schema["properties"]["as_principal"]["enum"] == [
+        "anonymous", "primary", "secondary", "service",
+    ]
 
 
 def test_reserve_against_applies_hold_before_execution():

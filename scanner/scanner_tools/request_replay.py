@@ -7,7 +7,7 @@ execution. Secret header/body values never appear in the public representation.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import re
@@ -392,3 +392,43 @@ def build_selected_replay_plan(
         authorization=authorization,
         limit=selector_limit,
     )
+
+
+def bind_replay_credential_headers(
+    plan: ReplayPlan,
+    headers: Mapping[str, Any],
+    *,
+    auth_kind: str,
+) -> ReplayPlan:
+    """Replace captured principal headers with one worker-resolved profile.
+
+    This function is worker-private: the returned plan contains wire values and must
+    never cross a public API boundary.  Captured Authorization/Cookie material is
+    always removed when a managed principal is selected, even when the new profile
+    uses a different header name.
+    """
+    managed_headers = _wire_headers(headers)
+    if not managed_headers:
+        raise RequestReplayError("managed replay credential produced no HTTP headers")
+    normalized_kind = str(auth_kind or "").strip().lower()
+    if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", normalized_kind):
+        raise RequestReplayError("managed replay credential auth kind is invalid")
+    replaced_names = {name.lower() for name, _ in managed_headers}
+    removed_names = replaced_names | {"authorization", "cookie"}
+    bound_requests: list[ReplayRequest] = []
+    for request in plan.requests:
+        retained = tuple(
+            (name, value)
+            for name, value in request.headers
+            if name.lower() not in removed_names
+        )
+        combined = (*retained, *managed_headers)
+        if len(combined) > 100:
+            raise RequestReplayError("managed replay request contains too many headers")
+        bound_requests.append(replace(
+            request,
+            headers=combined,
+            auth_type=f"managed:{normalized_kind}",
+            has_sensitive_material=True,
+        ))
+    return replace(plan, requests=tuple(bound_requests))

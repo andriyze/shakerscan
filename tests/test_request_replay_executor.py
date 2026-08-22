@@ -139,6 +139,11 @@ async def test_exact_wire_request_executes_with_reservation_and_redacted_receipt
         clock=Clock(),
         on_reservation=state,
         on_settlement=settle,
+        receipt_context={
+            "principal_profile_ref": "profile-1",
+            "principal_profile_version": 3,
+            "principal_slot": "primary",
+        },
     )
 
     assert [item[0] for item in states] == ["requested", "reserved", "running"]
@@ -159,6 +164,9 @@ async def test_exact_wire_request_executes_with_reservation_and_redacted_receipt
     ):
         assert secret not in public
     observation = outcome.receipt.observations[0]
+    assert outcome.receipt.redacted_execution["principal_profile_ref"] == "profile-1"
+    assert outcome.receipt.redacted_execution["principal_profile_version"] == 3
+    assert outcome.receipt.redacted_execution["principal_slot"] == "primary"
     assert observation["response_header_names"] == ["Content-Type", "Set-Cookie"]
     assert observation["response_body_size"] == len(b'{"secret":"response-body"}')
     assert len(observation["response_body_sha256"]) == 64
@@ -299,6 +307,23 @@ async def test_budget_exhaustion_prevents_any_wire_execution():
             consumed={"http_requests": 2},
             transport=transport,
             clock=Clock(),
+        )
+    assert transport.calls == []
+
+
+@pytest.mark.asyncio
+async def test_invalid_principal_receipt_context_fails_before_wire_execution():
+    transport = FakeTransport([_result()])
+    with pytest.raises(ReplayExecutionError, match="receipt profile binding"):
+        await execute_replay_plan(
+            _plan(), target=_target(), owner_kind="scan", owner_id="scan-1",
+            worker_id="worker-1", limits={"http_requests": 10},
+            consumed={"http_requests": 0}, transport=transport,
+            receipt_context={
+                "principal_profile_ref": "",
+                "principal_profile_version": 1,
+                "principal_slot": "primary",
+            },
         )
     assert transport.calls == []
 

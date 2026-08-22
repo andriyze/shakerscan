@@ -153,6 +153,10 @@ def _credential_refs(value: Any) -> dict[str, str]:
         item = _identifier(value, key)
         if item:
             result[key] = item
+    if len(result.values()) != len(set(result.values())):
+        raise HuntStartContractError(
+            "credential references must use distinct profile IDs"
+        )
     return result
 
 

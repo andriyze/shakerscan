@@ -28,6 +28,11 @@ from hunt.start_contract import (
     normalize_hunt_start_payload,
 )
 from runtime.capability_registry import CAPABILITY_REGISTRY, CapabilitySpec
+from runtime.credential_refs import (
+    CredentialReferenceError,
+    validate_generic_credential_references,
+)
+from runtime.credential_store import PostgresCredentialProfileStore
 
 
 _LEGACY_START_HUNT = _legacy_api.start_hunt
@@ -37,6 +42,7 @@ _DEVICE_CREDENTIAL_KEYS = frozenset({
     "ssh_credential_profile_id", "web_credential_profile_id",
 })
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+_credential_store = PostgresCredentialProfileStore()
 
 
 def _legacy_hunt_starts_enabled() -> bool:
@@ -132,12 +138,12 @@ def _hunt_public_v2(row: Any, *, include_context: bool = True) -> dict[str, Any]
 _legacy_api._hunt_public = _hunt_public_v2
 
 
-async def _validate_device_credentials(
+async def _validate_legacy_device_credentials(
     conn: Any,
-    contract: HuntStartContract,
+    refs: Mapping[str, str],
     device_id: uuid.UUID,
 ) -> list[dict[str, Any]]:
-    unsupported = sorted(set(contract.credential_refs) - _DEVICE_CREDENTIAL_KEYS)
+    unsupported = sorted(set(refs) - _DEVICE_CREDENTIAL_KEYS)
     if unsupported:
         raise HTTPException(
             status_code=422,
@@ -149,20 +155,40 @@ async def _validate_device_credentials(
     return await _legacy_api._validate_device_credential_refs(
         conn,
         device_id,
-        ssh_profile_id=contract.credential_refs.get("ssh_credential_profile_id"),
-        web_profile_id=contract.credential_refs.get("web_credential_profile_id"),
+        ssh_profile_id=refs.get("ssh_credential_profile_id"),
+        web_profile_id=refs.get("web_credential_profile_id"),
     )
 
 
-def _reject_unmigrated_web_credentials(contract: HuntStartContract) -> None:
-    if contract.credential_refs:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "generic web/API credential-profile binding is not yet available in the native "
-                "Hunt worker; refusing to discard or broaden the submitted credential references"
-            ),
+async def _validate_credential_references(
+    conn: Any,
+    contract: HuntStartContract,
+    target_id: uuid.UUID,
+) -> list[dict[str, Any]]:
+    if not contract.credential_refs:
+        return []
+    profiles = await _credential_store.list_profiles(
+        conn,
+        target_kind=contract.target_kind,
+        target_id=target_id,
+        include_inactive=True,
+    )
+    try:
+        generic, missing_legacy = validate_generic_credential_references(
+            contract.credential_refs,
+            profiles,
+            target_kind=contract.target_kind,
+            allow_missing_legacy_device_refs=contract.target_kind == "device",
         )
+    except CredentialReferenceError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    legacy: list[dict[str, Any]] = []
+    if missing_legacy:
+        legacy = await _validate_legacy_device_credentials(conn, missing_legacy, target_id)
+        for item in legacy:
+            item["source"] = "legacy_device_credential_profiles"
+            item["secret_values_visible"] = False
+    return [*generic, *legacy]
 
 
 async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
@@ -184,10 +210,11 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
         if contract.target_kind in {"web", "api", "network"}:
             if not web or not web["is_active"]:
                 raise HTTPException(status_code=404, detail="Active web/API/network target not found")
-            _reject_unmigrated_web_credentials(contract)
             target_url = str(web["url"])
             db_target_id, device_target_id = target_uuid, None
-            credential_rows: list[dict[str, Any]] = []
+            credential_rows = await _validate_credential_references(
+                conn, contract, target_uuid,
+            )
             origins = await _legacy_api._target_web_origins(conn, target_uuid, target_url)
             collection_refs, _collection_endpoints = await _legacy_api._generic_collection_refs(
                 conn,
@@ -207,8 +234,8 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
                         or "unknown"
                     ),
                 },
-                "principal_refs_available": False,
-                "credential_refs": [],
+                "principal_refs_available": bool(credential_rows),
+                "credential_refs": credential_rows,
                 "secret_values_visible_to_planner": False,
                 "request_collections": collection_refs,
                 "authorized_target_addresses": await _legacy_api._resolve_agent_target_addresses(
@@ -220,7 +247,9 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
                 raise HTTPException(status_code=404, detail="Active device target not found")
             target_url = str(device["primary_locator"])
             db_target_id, device_target_id = None, target_uuid
-            credential_rows = await _validate_device_credentials(conn, contract, target_uuid)
+            credential_rows = await _validate_credential_references(
+                conn, contract, target_uuid,
+            )
             collection_refs, _collection_endpoints = await _legacy_api._generic_collection_refs(
                 conn,
                 device_target_id=target_uuid,

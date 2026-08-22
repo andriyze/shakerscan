@@ -13,6 +13,7 @@ from scanner_tools.request_replay import (
     MAX_BODY_BYTES,
     ReplayAuthorization,
     RequestReplayError,
+    bind_replay_credential_headers,
     build_replay_plan,
     build_selected_replay_plan,
 )
@@ -168,3 +169,34 @@ def test_selected_collection_rows_feed_exact_replay_plan_without_public_secrets(
     )
     assert plan.wire_requests()[0]["headers"]["Authorization"] == "Bearer top-secret"
     assert "top-secret" not in repr(plan.public_dict()).lower()
+
+
+def test_managed_principal_replaces_captured_auth_without_public_values():
+    plan = build_replay_plan(
+        [_request()], allowed_origins=["https://api.example.test"], limit=1,
+    )
+    bound = bind_replay_credential_headers(
+        plan,
+        {"X-API-Key": "managed-secret"},
+        auth_kind="api_key_header",
+    )
+
+    wire = bound.wire_requests()[0]
+    assert "Authorization" not in wire["headers"]
+    assert "Cookie" not in wire["headers"]
+    assert wire["headers"]["X-API-Key"] == "managed-secret"
+    assert wire["headers"]["Content-Type"] == "application/json"
+    assert wire["auth_type"] == "managed:api_key_header"
+    public = repr(bound.public_dict())
+    assert "managed-secret" not in public
+    assert bound.public_dict()["requests"][0]["has_sensitive_material"] is True
+
+
+def test_managed_principal_header_validation_fails_closed():
+    plan = build_replay_plan(
+        [_request()], allowed_origins=["https://api.example.test"], limit=1,
+    )
+    with pytest.raises(RequestReplayError, match="control characters"):
+        bind_replay_credential_headers(
+            plan, {"Authorization": "Bearer ok\r\nX-Evil: value"}, auth_kind="bearer_token",
+        )

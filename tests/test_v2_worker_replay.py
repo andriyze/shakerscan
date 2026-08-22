@@ -182,6 +182,8 @@ def test_hunt_api_never_decrypts_collection_replay_payloads():
     assert "decrypt_secret" not in replay_helper
     assert '"type": "request_collection_replay"' in replay_helper
     assert "expected_payload_sha256" in replay_helper
+    assert '"credential_profile_id"' in replay_helper
+    assert "principal_profile_version" not in replay_helper
 
 
 def test_worker_replay_uses_durable_store_and_exact_plan():
@@ -195,3 +197,7 @@ def test_worker_replay_uses_durable_store_and_exact_plan():
     assert "persist_transition" in handler
     assert "persist_terminal" in handler
     assert "Pinn" in handler and "ReplayTransport" in handler
+    assert "validate_worker_credential_authority" in handler
+    assert "WorkerCredentialResolver" in handler
+    assert "bind_replay_credential_headers" in handler
+    assert "receipt_context=receipt_context" in handler

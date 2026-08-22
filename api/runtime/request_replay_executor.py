@@ -328,6 +328,27 @@ def _settled_budget(
     return actual
 
 
+def _normalize_receipt_context(value: Mapping[str, Any] | None) -> dict[str, Any]:
+    context = dict(value or {})
+    if not context:
+        return {}
+    profile_ref = str(context.get("principal_profile_ref") or "").strip()
+    principal_slot = str(context.get("principal_slot") or "").strip().lower()
+    try:
+        profile_version = int(context.get("principal_profile_version") or 0)
+    except (TypeError, ValueError) as exc:
+        raise ReplayExecutionError("principal receipt profile version is invalid") from exc
+    if not profile_ref or len(profile_ref) > 200 or profile_version < 1:
+        raise ReplayExecutionError("principal receipt profile binding is invalid")
+    if principal_slot not in {"primary", "secondary", "service"}:
+        raise ReplayExecutionError("principal receipt slot is invalid")
+    return {
+        "principal_profile_ref": profile_ref,
+        "principal_profile_version": profile_version,
+        "principal_slot": principal_slot,
+    }
+
+
 def _receipt(
     *,
     plan: ReplayPlan,
@@ -346,7 +367,10 @@ def _receipt(
     observations: Sequence[Mapping[str, Any]],
     errors: Sequence[str],
     receipt_id: str | None,
+    receipt_context: Mapping[str, Any] | None,
 ) -> CapabilityReceipt:
+    redacted_execution = plan.public_dict()
+    redacted_execution.update(_normalize_receipt_context(receipt_context))
     return CapabilityReceipt(
         capability_name="collections.replay",
         adapter_name="pinned_http_replay",
@@ -365,7 +389,7 @@ def _receipt(
         receipt_id=receipt_id or reservation.reservation_id,
         started_at=started_at.isoformat(),
         finished_at=finished_at.isoformat(),
-        redacted_execution=plan.public_dict(),
+        redacted_execution=redacted_execution,
         budget_reservation_id=reservation.reservation_id,
         budget_reservation_state=reservation_state,
         budget_reserved=reservation.requested,
@@ -426,6 +450,7 @@ async def execute_replay_plan(
     require_durable_persistence: bool = False,
     additional_budget: Mapping[str, int] | None = None,
     initial_reservation: DurableBudgetReservation | None = None,
+    receipt_context: Mapping[str, Any] | None = None,
 ) -> ReplayExecutionOutcome:
     """Execute one exact ReplayPlan with reserve-before-send accounting.
 
@@ -448,6 +473,7 @@ async def execute_replay_plan(
         raise ReplayExecutionError(
             "durable replay requires reservation and settlement persistence callbacks"
         )
+    receipt_context = _normalize_receipt_context(receipt_context)
     _validate_runtime_binding(plan, target)
     effective_lease = _effective_lease_seconds(
         lease_seconds=lease_seconds,
@@ -539,7 +565,7 @@ async def execute_replay_plan(
             actual=actual, status="partial", partial=True, timed_out=False,
             started_at=started_at, finished_at=finished_at,
             observations=observations, errors=(*errors, "execution_cancelled"),
-            receipt_id=receipt_id,
+            receipt_id=receipt_id, receipt_context=receipt_context,
         )
         failed = running.fail(
             reason="execution_cancelled", now=finished_at, actual=actual,
@@ -563,6 +589,7 @@ async def execute_replay_plan(
             actual=actual, status="partial" if partial else "failed", partial=partial,
             timed_out=False, started_at=started_at, finished_at=finished_at,
             observations=observations, errors=(*errors, error_code), receipt_id=receipt_id,
+            receipt_context=receipt_context,
         )
         failed = running.fail(
             reason=error_code, now=finished_at, actual=actual,
@@ -585,6 +612,7 @@ async def execute_replay_plan(
         actual=actual, status="partial" if partial else "succeeded", partial=partial,
         timed_out=any_timeout, started_at=started_at, finished_at=finished_at,
         observations=observations, errors=errors, receipt_id=receipt_id,
+        receipt_context=receipt_context,
     )
     committed = running.commit(
         actual=actual,

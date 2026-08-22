@@ -291,7 +291,10 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             {"http_requests": 25, "tool_wall_seconds": 60}, {"network_reachability": True},
             _schema({"collection_id": {"type": "string"}, "request_ids": {"type": "array"},
                      "methods": {"type": "array"}, "path_regex": {"type": "string"},
-                     "limit": {"type": "integer", "maximum": 25}}),
+                     "limit": {"type": "integer", "maximum": 25},
+                     "as_principal": {"type": "string", "enum": [
+                         "anonymous", "primary", "secondary", "service",
+                     ]}}),
             "request-collection-replay/v2", ("http_observation", "tool_receipt"),
         ),
         CapabilitySpec(
