@@ -2214,6 +2214,115 @@ def test_ai_gate_credential_queue_requires_bound_expiring_credential_approval(mo
     assert result["status"] == "queued"
 
 
+class _AIPreflightConnection:
+    def __init__(self, auth_kind):
+        self.auth_kind = auth_kind
+
+    async def fetchrow(self, query, *_args):
+        if "FROM ai_targets" in query:
+            return {
+                "id": uuid.UUID("00000000-0000-4000-8000-000000000001"),
+                "name": "Preflight target",
+                "target_type": "api_chat",
+                "endpoint_url": "https://example.test/chat",
+                "method": "POST",
+                "headers_template": {},
+                "request_template": {"message": "{{prompt}}"},
+                "response_path": "$.answer",
+                "streaming_mode": "json",
+                "metadata_json": {},
+            }
+        if "FROM ai_target_credentials" in query:
+            return {
+                "auth_kind": self.auth_kind,
+                "secret_value": "enc:fernet:must-never-be-decrypted",
+            }
+        raise AssertionError(query)
+
+
+class _AIPreflightPool:
+    def __init__(self, auth_kind):
+        self.connection = _AIPreflightConnection(auth_kind)
+
+    def acquire(self):
+        return self
+
+    async def __aenter__(self):
+        return self.connection
+
+    async def __aexit__(self, *_args):
+        return False
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "payload"),
+    [
+        (
+            api_module.test_ai_target_connectivity,
+            api_module.AITargetConnectivityTestRequest(),
+        ),
+        (
+            api_module.test_ai_target_mcp_live_readiness,
+            api_module.AIMCPLiveReadinessRequest(),
+        ),
+    ],
+)
+def test_credentialed_ai_preflights_never_decrypt_in_api(
+    monkeypatch, endpoint, payload,
+):
+    monkeypatch.setattr(api_module, "db_pool", _AIPreflightPool("bearer"))
+    monkeypatch.setattr(
+        api_module,
+        "decrypt_secret",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("API preflight attempted to decrypt a target credential")
+        ),
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_run_ai_target_connectivity_probe",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("credentialed connectivity probe reached the API transport")
+        ),
+    )
+    monkeypatch.setattr(
+        api_module,
+        "run_mcp_live_readiness_probe",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("credentialed MCP probe reached the API transport")
+        ),
+    )
+
+    with pytest.raises(api_module.HTTPException) as exc_info:
+        asyncio.run(endpoint(
+            "00000000-0000-4000-8000-000000000001", payload
+        ))
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["error"] == "credentialed_preflight_requires_worker"
+
+
+def test_anonymous_ai_connectivity_preflight_remains_available(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(api_module, "db_pool", _AIPreflightPool("none"))
+
+    def run_probe(target, **kwargs):
+        captured["target"] = target
+        captured["kwargs"] = kwargs
+        return {"ok": True, "stage": "complete"}
+
+    monkeypatch.setattr(api_module, "_run_ai_target_connectivity_probe", run_probe)
+
+    result = asyncio.run(api_module.test_ai_target_connectivity(
+        "00000000-0000-4000-8000-000000000001",
+        api_module.AITargetConnectivityTestRequest(prompt="safe probe"),
+    ))
+
+    assert result["ok"] is True
+    assert captured["target"]["credential"] == api_module._anonymous_ai_runtime_credential()
+    assert captured["kwargs"]["prompt"] == "safe probe"
+
+
 def test_build_ai_finding_retest_options_focuses_original_probe():
     target = {
         "id": "target-id",

@@ -8311,29 +8311,30 @@ def _cluster_exposure_findings(
     return new_nodes, new_edges
 
 
-def _runtime_credential_from_row(row: Optional[dict[str, Any]]) -> dict[str, Any]:
-    if not row or row.get("auth_kind") == "none":
-        return {"auth_kind": "none", "header_name": None, "secret": None, "metadata_json": {}}
-
-    auth_kind = row.get("auth_kind")
-    metadata = _decode_json_value(row.get("metadata_json")) or {}
-    secret = decrypt_secret(row.get("secret_value"))
-    if auth_kind == "multi_header":
-        try:
-            headers = json.loads(secret or "[]")
-        except json.JSONDecodeError:
-            headers = []
-        metadata = {**metadata, "headers": headers}
-        secret = None
-    elif auth_kind == "query_param":
-        metadata = {**metadata, "param_name": row.get("header_name") or metadata.get("param_name")}
-
+def _anonymous_ai_runtime_credential() -> dict[str, Any]:
     return {
-        "auth_kind": auth_kind,
-        "header_name": row.get("header_name"),
-        "secret": secret,
-        "metadata_json": metadata,
+        "auth_kind": "none",
+        "header_name": None,
+        "secret": None,
+        "metadata_json": {},
     }
+
+
+def _reject_api_side_ai_credential_preflight(row: Any) -> None:
+    item = row_to_dict(row) if row else {}
+    if str(item.get("auth_kind") or "none").strip().lower() == "none":
+        return
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "error": "credentialed_preflight_requires_worker",
+            "message": (
+                "Credentialed AI target checks must run through AI Gate Scan so the "
+                "target-bound worker resolves the credential after approval."
+            ),
+            "next_action": "Queue an AI Gate Scan for this target.",
+        },
+    )
 
 
 def _build_ai_worker_options(
@@ -23333,10 +23334,12 @@ async def test_ai_target_connectivity(target_id: str, request: AITargetConnectiv
             uuid.UUID(target_id),
         )
 
+    _reject_api_side_ai_credential_preflight(credential_row)
+
     target = row_to_dict(target_row)
     for key in ("headers_template", "request_template", "metadata_json"):
         target[key] = _decode_json_value(target.get(key)) or {}
-    target["credential"] = _runtime_credential_from_row(dict(credential_row) if credential_row else None)
+    target["credential"] = _anonymous_ai_runtime_credential()
 
     result = await asyncio.to_thread(
         _run_ai_target_connectivity_probe,
@@ -23364,10 +23367,12 @@ async def test_ai_target_mcp_live_readiness(target_id: str, request: AIMCPLiveRe
             uuid.UUID(target_id),
         )
 
+    _reject_api_side_ai_credential_preflight(credential_row)
+
     target = row_to_dict(target_row)
     for key in ("headers_template", "request_template", "metadata_json"):
         target[key] = _decode_json_value(target.get(key)) or {}
-    target["credential"] = _runtime_credential_from_row(dict(credential_row) if credential_row else None)
+    target["credential"] = _anonymous_ai_runtime_credential()
 
     result = await asyncio.to_thread(
         run_mcp_live_readiness_probe,
