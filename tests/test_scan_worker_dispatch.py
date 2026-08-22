@@ -46,9 +46,37 @@ def test_canonical_dispatch_maps_plan_budget_and_families():
         "max_duration_minutes": 20,
         "request_max": 5000,
         "max_urls": 2000,
+        "browser_max_pages": 200,
+        "api_probe_limit": 2000,
+        "phase4_max_seconds": 900,
+        "nuclei_max_targets": 2000,
+        "active_worklist_max": 2000,
+        "active_max_seconds": 900,
+        "active_max_endpoints": 2000,
     }
+    assert prepared["max_workers"] == 4
+    assert prepared["allow_state_changing_http"] is True
     assert prepared["include_families"] == ["xss", "sqli"]
     assert prepared["_v2_worker_authority"]["plan_digest"] == admission.plan.digest
+
+
+def test_caller_legacy_tuning_cannot_expand_canonical_budget():
+    options = _options(_plan(active=True))
+    options["custom_budget"] = {
+        "max_duration_minutes": 2880,
+        "request_max": 1_000_000,
+        "browser_max_pages": 2000,
+        "nuclei_max_targets": 100_000,
+        "active_max_endpoints": 10_000,
+    }
+    options["parallel_worker_count"] = 99
+    prepared, _admission = prepare_worker_dispatch(options)
+    assert prepared["custom_budget"]["max_duration_minutes"] == 20
+    assert prepared["custom_budget"]["request_max"] == 5000
+    assert prepared["custom_budget"]["browser_max_pages"] == 200
+    assert prepared["custom_budget"]["nuclei_max_targets"] == 2000
+    assert prepared["custom_budget"]["active_max_endpoints"] == 2000
+    assert prepared["parallel_worker_count"] == 4
 
 
 def test_passive_dispatch_uses_same_engine_with_passive_backing():
@@ -56,6 +84,7 @@ def test_passive_dispatch_uses_same_engine_with_passive_backing():
     assert admission.plan.engine == "scan"
     assert prepared["scan_type"] == "deep"
     assert prepared["active"] is False
+    assert "active_max_seconds" not in prepared["custom_budget"]
 
 
 def test_result_metadata_is_canonical_and_legacy_is_untouched():
