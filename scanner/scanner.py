@@ -5254,7 +5254,29 @@ async def build_report(target: str,
         nonlocal httpx_meta, katana_result, browser_res, browser_fetch_error, browser_seed_urls
         nonlocal discovery_truncation_reasons
 
-        httpx_task = asyncio.create_task(pd_httpx_probe(host, port))
+        if canonical_scan_execution is not None:
+            placed_probe = (
+                canonical_scan_placements.get("web.probe")
+                if isinstance(canonical_scan_placements, dict) else None
+            )
+            if not isinstance(placed_probe, Mapping):
+                discovery_truncation_reasons.append(
+                    "canonical_web_probe_placement_missing"
+                )
+            elif placed_probe.get("status") == "partial":
+                discovery_truncation_reasons.append(
+                    "canonical_web_probe_partial"
+                )
+            elif placed_probe.get("status") not in {"success", "skipped"}:
+                discovery_truncation_reasons.append(
+                    "canonical_web_probe_"
+                    + str(placed_probe.get("status") or "failed")
+                )
+            httpx_task = asyncio.create_task(_focused_async_value(
+                _canonical_httpx_rows(placed_probe)
+            ))
+        else:
+            httpx_task = asyncio.create_task(pd_httpx_probe(host, port))
         if public_only and quick_mode:
             katana_task = asyncio.create_task(_focused_async_value([]))
         elif zero_rediscovery_scope:
@@ -14194,15 +14216,53 @@ def _load_canonical_scan_placements(
     capabilities = payload.get("capabilities")
     if not isinstance(capabilities, dict):
         raise SystemExit("canonical Scan placement capabilities are invalid")
-    unknown = set(capabilities) - {"templates.scan"}
+    unknown = set(capabilities) - {"web.probe", "templates.scan"}
     if unknown:
         raise SystemExit(
             "unsupported canonical Scan placement: "
             + ", ".join(sorted(str(name) for name in unknown))
         )
+    result: dict[str, Any] = {}
+    probe = capabilities.get("web.probe")
+    if probe is not None:
+        if not isinstance(probe, dict) or set(probe) != {
+            "schema_version", "capability_name", "enabled", "status", "reason",
+            "observations", "observation_count", "partial", "timed_out",
+            "errors", "budget_consumed", "receipt", "durable_budget_settled",
+            "idempotent_redelivery",
+        }:
+            raise SystemExit("canonical web.probe placement is malformed")
+        if (
+            probe.get("schema_version")
+            != "canonical-scan-web-probe-execution/v1"
+            or probe.get("capability_name") != "web.probe"
+            or not isinstance(probe.get("enabled"), bool)
+            or probe.get("status") not in {
+                "success", "partial", "failed", "blocked", "cancelled", "skipped",
+            }
+        ):
+            raise SystemExit("canonical web.probe placement contract is invalid")
+        observations = probe.get("observations")
+        if not isinstance(observations, list) or len(observations) > 50:
+            raise SystemExit("canonical web.probe observations are invalid")
+        if any(
+            not isinstance(item, dict)
+            or item.get("kind") != "http_fingerprint"
+            for item in observations
+        ):
+            raise SystemExit("canonical web.probe observation contract is invalid")
+        if probe.get("observation_count") != len(observations):
+            raise SystemExit("canonical web.probe observation count is invalid")
+        if not isinstance(probe.get("receipt"), dict):
+            raise SystemExit("canonical web.probe receipt reference is invalid")
+        if probe.get("enabled") and probe.get("status") != "skipped":
+            receipt_hash = str(probe["receipt"].get("receipt_hash") or "")
+            if not re.fullmatch(r"[0-9a-f]{64}", receipt_hash):
+                raise SystemExit("canonical web.probe receipt is missing")
+        result["web.probe"] = probe
     template = capabilities.get("templates.scan")
     if template is None:
-        return {}
+        return result
     if not isinstance(template, dict) or set(template) != {
         "schema_version", "capability_name", "enabled", "status", "reason",
         "observations", "observation_count", "partial", "timed_out",
@@ -14238,7 +14298,28 @@ def _load_canonical_scan_placements(
         receipt_hash = str(template["receipt"].get("receipt_hash") or "")
         if not re.fullmatch(r"[0-9a-f]{64}", receipt_hash):
             raise SystemExit("canonical templates.scan receipt is missing")
-    return {"templates.scan": template}
+    result["templates.scan"] = template
+    return result
+
+
+def _canonical_httpx_rows(summary: Any) -> list[dict[str, Any]]:
+    """Adapt typed HTTP fingerprints into the existing discovery report shape."""
+    if not isinstance(summary, Mapping):
+        return []
+    return [
+        {
+            "url": item.get("url"),
+            "status_code": item.get("status"),
+            "title": item.get("title"),
+            "webserver": item.get("webserver"),
+            "tech": list(item.get("technologies") or [])[:50],
+            "canonical_capability": "web.probe",
+        }
+        for item in summary.get("observations") or []
+        if isinstance(item, Mapping)
+        and item.get("kind") == "http_fingerprint"
+        and item.get("url")
+    ][:50]
 
 
 def _canonical_nuclei_result(summary: Mapping[str, Any]) -> dict[str, Any]:

@@ -317,9 +317,17 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
             "scan_metadata": {"schema_version": "scan-report/v2"},
         }
 
+    async def skip_web_probe(*_args, **_kwargs):
+        return worker._skipped_scan_web_probe_summary("test_isolation")
+
     monkeypatch.setattr(worker, "db_pool", _Pool(connection))
     monkeypatch.setattr(worker, "PostgresBudgetReservationStore", lambda: store)
     monkeypatch.setattr(worker, "run_scan", fake_run_scan)
+    monkeypatch.setattr(
+        worker,
+        "_execute_scan_web_probe_capability",
+        skip_web_probe,
+    )
     monkeypatch.setattr(worker, "_worker_runtime_identity", lambda: "worker:test")
     monkeypatch.setattr(worker, "_scan_cancel_requested", lambda _scan_id: False)
 
@@ -364,11 +372,30 @@ def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch)
     store = _ReservationStore(events)
     placement_seen = {}
 
-    async def fake_nuclei(payload, *, heartbeat):
-        events.append(("nuclei", store.current.record.status))
-        assert payload["tool_name"] == "nuclei"
+    async def fake_external_tool(payload, *, heartbeat):
+        tool = payload["tool_name"]
+        events.append((tool, store.current.record.status))
         assert payload["_cancelled"]() is False
         await heartbeat()
+        if tool == "httpx":
+            return {
+                "status": "success",
+                "elapsed_seconds": 1,
+                "typed_output": {
+                    "parser": "httpx-typed-v1",
+                    "records": [{
+                        "kind": "http_fingerprint",
+                        "url": "https://app.example.test/",
+                        "status": 200,
+                        "title": "Example",
+                        "webserver": "nginx",
+                        "technologies": ["nginx"],
+                    }],
+                    "errors": [],
+                },
+                "settlement": {"mode": "exact", "actual": 1},
+            }
+        assert tool == "nuclei"
         return {
             "status": "success",
             "elapsed_seconds": 2,
@@ -400,12 +427,12 @@ def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch)
         placement_seen.update(canonical_placed_capabilities or {})
         assert target == "https://app.example.test"
         assert canonical_runtime_budget == {
-            "http_requests": 97,
+            "http_requests": 96,
             "state_changing_requests": 0,
             "browser_actions": 20,
             "tcp_ports_attempted": 1,
             "hosts_attempted": 50,
-            "tool_wall_seconds": 58,
+            "tool_wall_seconds": 57,
         }
         return {
             "target": target,
@@ -431,7 +458,7 @@ def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch)
 
     monkeypatch.setattr(worker, "db_pool", _Pool(connection))
     monkeypatch.setattr(worker, "PostgresBudgetReservationStore", lambda: store)
-    monkeypatch.setattr(worker, "_execute_agent_scanner_process", fake_nuclei)
+    monkeypatch.setattr(worker, "_execute_agent_scanner_process", fake_external_tool)
     monkeypatch.setattr(worker, "run_scan", fake_run_scan)
     monkeypatch.setattr(worker, "_worker_runtime_identity", lambda: "worker:test")
     monkeypatch.setattr(worker, "_scan_cancel_requested", lambda _scan_id: False)
@@ -443,12 +470,18 @@ def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch)
         job_id="job-1",
     ))
 
+    assert ("httpx", "running") in events
     assert ("nuclei", "running") in events
     assert ("baseline", "running") in events
+    assert events.index(("httpx", "running")) < events.index(
+        ("nuclei", "running")
+    )
     assert events.index(("nuclei", "running")) < events.index(
         ("baseline", "running")
     )
     assert placement_seen["templates.scan"]["status"] == "success"
+    assert placement_seen["web.probe"]["status"] == "success"
+    assert placement_seen["web.probe"]["observations"][0]["status"] == 200
     assert placement_seen["templates.scan"]["observations"][0][
         "proof_state"
     ] == "candidate"
@@ -750,6 +783,7 @@ def _stored_network_capability(
         "ports.discover": ("naabu", "naabu-jsonl/v1"),
         "service.fingerprint": ("nmap", "nmap-xml/v1"),
         "templates.scan": ("nuclei", "nuclei-typed-v1"),
+        "web.probe": ("httpx", "httpx-typed-v1"),
     }[capability_name]
     terminal, receipt = terminalize_capability_reservation(
         running,
@@ -824,6 +858,52 @@ def test_template_stage_places_one_reserved_nuclei_result(monkeypatch):
     assert call["scanner_process_payload"]["oob_interactsh_server"] is None
     assert summary["status"] == "success"
     assert summary["observations"][0]["proof_state"] == "candidate"
+    assert summary["receipt"]["budget_reservation_state"] == "committed"
+
+
+def test_recon_stage_places_one_reserved_http_fingerprint(monkeypatch):
+    _plan, _target, options = _authority(enabled=True, network=False)
+    calls = []
+
+    async def execute_capability(**kwargs):
+        calls.append(kwargs)
+        return _stored_network_capability(
+            "web.probe",
+            observations=[{
+                "kind": "http_fingerprint",
+                "url": "https://app.example.test/",
+                "status": 200,
+                "title": "Example",
+                "webserver": "nginx",
+                "technologies": ["nginx"],
+            }],
+            amounts={"http_requests": 1, "tool_wall_seconds": 1},
+        ), False
+
+    monkeypatch.setattr(
+        worker, "_execute_reserved_scan_capability", execute_capability,
+    )
+    summary = asyncio.run(worker._execute_scan_web_probe_capability(
+        "https://app.example.test/account?id=1",
+        options,
+        scan_id="00000000-0000-0000-0000-000000000001",
+        job_id="job-1",
+    ))
+
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["capability_name"] == "web.probe"
+    assert call["action_id"] == "deterministic_recon.web.probe"
+    assert call["reservation_limits"] == {
+        "http_requests": 4,
+        "tool_wall_seconds": 30,
+    }
+    assert call["scanner_process_payload"]["tool_name"] == "httpx"
+    assert call["scanner_process_payload"]["execution_target"] == (
+        "https://app.example.test/account?id=1"
+    )
+    assert summary["status"] == "success"
+    assert summary["observations"][0]["kind"] == "http_fingerprint"
     assert summary["receipt"]["budget_reservation_state"] == "committed"
 
 

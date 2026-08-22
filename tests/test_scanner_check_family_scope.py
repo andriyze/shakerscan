@@ -52,6 +52,59 @@ def _template_placement_summary():
     }
 
 
+def _web_probe_placement_summary():
+    return {
+        "schema_version": "canonical-scan-web-probe-execution/v1",
+        "capability_name": "web.probe",
+        "enabled": True,
+        "status": "success",
+        "reason": None,
+        "observations": [{
+            "kind": "http_fingerprint",
+            "url": "https://app.example.test/",
+            "status": 200,
+            "title": "Example",
+            "webserver": "nginx",
+            "technologies": ["nginx"],
+        }],
+        "observation_count": 1,
+        "partial": False,
+        "timed_out": False,
+        "errors": [],
+        "budget_consumed": {"http_requests": 1, "tool_wall_seconds": 1},
+        "receipt": {"receipt_hash": "d" * 64},
+        "durable_budget_settled": True,
+        "idempotent_redelivery": False,
+    }
+
+
+def test_canonical_web_probe_placement_is_bound_and_adapted(monkeypatch):
+    execution = {
+        "execution_plan_digest": "a" * 64,
+        "target_binding_digest": "b" * 64,
+    }
+    monkeypatch.setenv(
+        "SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS",
+        json.dumps({
+            "schema_version": "canonical-scan-placements/v1",
+            **execution,
+            "capabilities": {"web.probe": _web_probe_placement_summary()},
+        }),
+    )
+
+    placements = scanner_mod._load_canonical_scan_placements(execution)
+    rows = scanner_mod._canonical_httpx_rows(placements["web.probe"])
+
+    assert rows == [{
+        "url": "https://app.example.test/",
+        "status_code": 200,
+        "title": "Example",
+        "webserver": "nginx",
+        "tech": ["nginx"],
+        "canonical_capability": "web.probe",
+    }]
+
+
 def test_canonical_template_placement_is_bound_and_adapted_to_candidates(
     monkeypatch,
 ):

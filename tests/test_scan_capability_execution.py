@@ -23,6 +23,7 @@ from scan.capability_execution import (
     scan_external_execution_target,
     scan_network_capability_allocation,
     scan_template_capability_allocation,
+    scan_web_probe_capability_allocation,
     prepare_scan_external_capability,
     prepare_scan_process_capability,
 )
@@ -163,6 +164,24 @@ def test_template_allocation_preserves_budget_for_the_baseline_scan():
     }
     assert scan_template_capability_allocation(
         _budget(max_http_requests=1)
+    ) is None
+
+
+def test_web_probe_allocation_preserves_later_stage_capacity():
+    assert scan_web_probe_capability_allocation(_budget()) == {
+        "http_requests": 4,
+        "tool_wall_seconds": 30,
+    }
+    assert scan_web_probe_capability_allocation(
+        _budget(max_http_requests=3, max_tool_wall_seconds=3),
+        preserve_http_requests=2,
+        preserve_tool_wall_seconds=2,
+    ) == {
+        "http_requests": 1,
+        "tool_wall_seconds": 1,
+    }
+    assert scan_web_probe_capability_allocation(
+        _budget(max_http_requests=2), preserve_http_requests=2,
     ) is None
 
 

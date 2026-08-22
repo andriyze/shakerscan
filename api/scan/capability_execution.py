@@ -113,6 +113,25 @@ def scan_template_capability_allocation(
     }
 
 
+def scan_web_probe_capability_allocation(
+    budget: Mapping[str, Any],
+    *,
+    preserve_http_requests: int = 1,
+    preserve_tool_wall_seconds: int = 1,
+) -> dict[str, int] | None:
+    """Reserve HTTPX while preserving capacity for later canonical stages."""
+    http = _budget_integer(budget, "max_http_requests")
+    wall = _budget_integer(budget, "max_tool_wall_seconds")
+    preserved_http = max(1, int(preserve_http_requests))
+    preserved_wall = max(1, int(preserve_tool_wall_seconds))
+    if http <= preserved_http or wall <= preserved_wall:
+        return None
+    return {
+        "http_requests": min(4, http - preserved_http),
+        "tool_wall_seconds": min(30, wall - preserved_wall),
+    }
+
+
 def scan_external_execution_target(
     target_url: str,
     *,
