@@ -321,6 +321,11 @@ def derive_scan_shard_budget(
     custom = dict(custom) if isinstance(custom, Mapping) else {}
     resolved = options.get("resolved_budget")
     resolved = dict(resolved) if isinstance(resolved, Mapping) else {}
+    placed_discovery = options.get("parallel_discovery") is True
+    placed_network = placed_discovery and options.get("network_discovery") is True
+    placed_tool = placed_discovery and (
+        placed_network or options.get("subfinder") is True
+    )
 
     def bounded(
         parent_value: int, *values: Any, scale: int = 1, allow_zero: bool = False,
@@ -361,18 +366,22 @@ def derive_scan_shard_budget(
             allow_zero=True,
         ),
         max_tcp_ports=(
-            0 if options.get("skip_global_checks")
+            parent_budget.max_tcp_ports if placed_network
+            else 0 if options.get("skip_global_checks")
             else bounded(
                 parent_budget.max_tcp_ports,
                 custom.get("max_tcp_ports"), resolved.get("max_tcp_ports"),
                 allow_zero=True,
             )
         ),
-        max_tool_wall_seconds=bounded(
-            parent_budget.max_tool_wall_seconds,
-            custom.get("phase4_max_seconds"), custom.get("active_max_seconds"),
-            resolved.get("phase4_max_seconds"), resolved.get("active_max_seconds"),
-            allow_zero=True,
+        max_tool_wall_seconds=(
+            parent_budget.max_tool_wall_seconds if placed_tool
+            else bounded(
+                parent_budget.max_tool_wall_seconds,
+                custom.get("phase4_max_seconds"), custom.get("active_max_seconds"),
+                resolved.get("phase4_max_seconds"), resolved.get("active_max_seconds"),
+                allow_zero=True,
+            )
         ),
         max_workers=1,
     )

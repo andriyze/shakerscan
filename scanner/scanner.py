@@ -14051,7 +14051,10 @@ def _apply_canonical_scan_execution(args: Any, execution: Mapping[str, Any]) -> 
     args.active = active
     args.active_enforced = active
     args.public = False
-    args.network_discovery = bool(policy["network_discovery"] and not discovery_only)
+    # Canonical network policy executes in worker-owned registry capabilities
+    # with durable per-action reservations. The scanner subprocess must never
+    # repeat that traffic through its legacy internal network-discovery branch.
+    args.network_discovery = False
     args.check_family = focused_family
     args.xss = False
     args.sqli = False
@@ -14065,7 +14068,7 @@ def _apply_canonical_scan_execution(args: Any, execution: Mapping[str, Any]) -> 
     args.websocket_testing = active and not bool(focused_family)
     args.enhanced_dns = not skip_global and not discovery_only
     args.deep_discovery = active and not bool(scope["zero_rediscovery"])
-    args.grpc_discovery = bool(policy["network_discovery"] and not discovery_only)
+    args.grpc_discovery = False
     args.json_link_following = not bool(scope["zero_rediscovery"])
     args.options_method_discovery = not bool(scope["zero_rediscovery"])
     args.skip_global_checks = skip_global

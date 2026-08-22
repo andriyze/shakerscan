@@ -17,6 +17,16 @@ class ScanCapabilityContractError(ValueError):
     """A capability cannot execute within its immutable Scan authority."""
 
 
+# Stable, deliberately small TCP service set used by deterministic Scan. Hunt can
+# request broader registry profiles, but Scan divides its exact port ceiling
+# between discovery and follow-up fingerprinting instead of hiding an unbounded
+# second pass inside the scanner subprocess.
+CANONICAL_SCAN_NETWORK_PORTS: tuple[int, ...] = (
+    21, 22, 25, 53, 80, 110, 143, 443, 445, 587, 993, 995,
+    1433, 1521, 1883, 3000, 3306, 5432, 6379, 8080, 8443, 8883, 9200,
+)
+
+
 def _budget_integer(
     budget: Mapping[str, Any], name: str, *, allow_zero: bool = False,
 ) -> int:
@@ -33,6 +43,53 @@ def _budget_integer(
             f"Scan {name} must be a {qualifier} integer"
         )
     return normalized
+
+
+def scan_network_capability_allocation(
+    budget: Mapping[str, Any],
+    *,
+    available_address_count: int,
+) -> dict[str, Any]:
+    """Partition exact Scan ceilings across port discovery and fingerprinting."""
+    addresses = int(available_address_count)
+    if addresses <= 0:
+        raise ScanCapabilityContractError(
+            "network discovery requires at least one bound address"
+        )
+    endpoints = _budget_integer(budget, "max_endpoints")
+    ports = _budget_integer(budget, "max_tcp_ports")
+    wall = _budget_integer(budget, "max_tool_wall_seconds")
+    can_fingerprint = endpoints >= 2 and ports >= 2 and wall >= 2
+    passes = 2 if can_fingerprint else 1
+    address_count = min(
+        addresses,
+        max(1, endpoints // passes),
+        max(1, ports // passes),
+    )
+    port_capacity = max(1, ports // passes)
+    ports_per_address = max(1, port_capacity // address_count)
+    selected_ports = CANONICAL_SCAN_NETWORK_PORTS[
+        :min(len(CANONICAL_SCAN_NETWORK_PORTS), ports_per_address)
+    ]
+    attempt_count = len(selected_ports) * address_count
+    first_wall = max(1, wall // passes)
+    result: dict[str, Any] = {
+        "address_count": address_count,
+        "ports": selected_ports,
+        "port_discovery_limits": {
+            "hosts_attempted": address_count,
+            "tcp_ports_attempted": attempt_count,
+            "tool_wall_seconds": first_wall,
+        },
+        "fingerprint_limits": None,
+    }
+    if can_fingerprint:
+        result["fingerprint_limits"] = {
+            "hosts_attempted": address_count,
+            "tcp_ports_attempted": attempt_count,
+            "tool_wall_seconds": wall - first_wall,
+        }
+    return result
 
 
 def scan_budget_ledger_limits(

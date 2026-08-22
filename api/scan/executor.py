@@ -169,13 +169,17 @@ class NativeScanExecution:
             if name == "discover_surface" and self.zero_rediscovery:
                 enabled, reason = False, "assigned_endpoint_scope"
             elif name == "discover_network":
+                placed_discovery = bool(
+                    self.shard_authority is not None
+                    and self.shard_authority.parallel_discovery
+                )
                 enabled = bool(
                     policy.network_discovery
-                    and not self.skip_global_checks
-                    and not self.discovery_manifest_only
+                    and (not self.skip_global_checks or placed_discovery)
+                    and (not self.discovery_manifest_only or placed_discovery)
                 )
                 if enabled:
-                    reason = "policy_enabled"
+                    reason = "worker_capability_stage"
                 elif self.discovery_manifest_only:
                     reason = "discovery_manifest_only"
                 elif self.skip_global_checks:
@@ -221,7 +225,9 @@ class NativeScanExecution:
         policy = self.execution_plan.policy
         normalized.update({
             "active": policy.active_testing,
-            "network_discovery": policy.network_discovery,
+            # Network policy is executed by worker-owned registry capabilities.
+            # The scanner subprocess must not repeat unreserved port traffic.
+            "network_discovery": False,
             "subfinder": False,
             "request_budget_mode": "enforce",
             "native_scan_execution": self.payload(),

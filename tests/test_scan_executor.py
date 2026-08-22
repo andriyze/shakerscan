@@ -72,6 +72,33 @@ def test_native_scan_uses_one_fixed_stage_graph_for_passive_and_active_policy():
         "enabled": False,
         "reason": "discovery_manifest_only",
     }
+    assert active.normalize_options({})["network_discovery"] is False
+
+
+def test_placed_discovery_shard_owns_network_stage_outside_scanner_subprocess():
+    plan = _plan(active=True, network=True)
+    authority = ScanShardAuthority(
+        parent_scan_id="parent-1",
+        parent_execution_plan_digest=plan.digest,
+        options_digest="d" * 64,
+        shard_index=-1,
+        shard_count=0,
+        shard_label="discovery",
+        sub_budget=ScanShardBudget(120, 50, 10, 0, 10, 60, 1),
+        parallel_discovery=True,
+    )
+    execution = _build(plan, {
+        "canonical_shard_authority": authority.payload(),
+        "parallel_discovery": True,
+        "skip_global_checks": True,
+    })
+
+    assert execution.stage_rows()[3] == {
+        "name": "discover_network",
+        "enabled": True,
+        "reason": "worker_capability_stage",
+    }
+    assert execution.normalize_options({})["network_discovery"] is False
 
 
 def test_native_scan_removes_legacy_behavior_selectors_after_admission():

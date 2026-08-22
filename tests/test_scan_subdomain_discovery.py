@@ -22,11 +22,14 @@ from runtime.reservation_store import StoredBudgetReservation
 from scan.execution import ScanExecutionPlan
 
 
-def _authority(*, enabled: bool = True):
+def _authority(*, enabled: bool = True, network: bool = False):
     plan = ScanExecutionPlan(
         policy=ScanPolicy(
+            active_testing=network,
+            network_discovery=network,
             subdomain_discovery=enabled,
             scope_receipt_id="scope-1",
+            approval_receipt_id="approval-1" if network else None,
         ),
         budget_profile="balanced",
         budget=ScanBudget(1_200, 100, 50, 20, 10, 60, 2),
@@ -43,12 +46,12 @@ def _authority(*, enabled: bool = True):
     options = plan.option_metadata()
     options.update({
         "scan_compatibility": {
-            "legacy_executor_alias": "deep",
+            "legacy_executor_alias": "full" if network else "deep",
             "temporary": True,
         },
-        "scan_type": "deep",
-        "active": False,
-        "network_discovery": False,
+        "scan_type": "full" if network else "deep",
+        "active": network,
+        "network_discovery": network,
         "subfinder": enabled,
         "_canonical_target_binding": target.canonical_dict(),
     })
@@ -238,6 +241,73 @@ def test_scan_subdomain_discovery_reserves_before_target_traffic_and_settles(
     assert connection.row["budget_used_json"]["hosts_attempted"] == 1
 
 
+def test_scan_port_discovery_uses_same_reserve_before_traffic_boundary(
+    monkeypatch,
+):
+    plan, target, options = _authority(enabled=False, network=True)
+    connection = _Connection(plan)
+    events = []
+    store = _ReservationStore(events)
+    _normalized, admission = worker.prepare_worker_dispatch(options)
+    execution = worker.build_native_scan_execution(plan, options)
+
+    async def run_streaming(argv, **kwargs):
+        events.append(("traffic", store.current.record.status))
+        assert argv == [
+            "naabu", "-host", "192.0.2.10", "-p", "21,22,25,53,80",
+            "-Pn", "-scan-type", "c", "-rate", "10", "-c", "10",
+            "-timeout", "1500ms", "-retries", "1", "-json", "-silent",
+            "-no-color", "-disable-update-check", "-no-stdin",
+        ]
+        assert kwargs["hard_timeout"] == 30.0
+        return SimpleNamespace(
+            stdout='{"ip":"192.0.2.10","port":21}\n',
+            returncode=0,
+            timed_out=False,
+            partial=False,
+            stdout_truncated=False,
+            cancelled=False,
+        )
+
+    monkeypatch.setattr(worker, "db_pool", _Pool(connection))
+    monkeypatch.setattr(worker, "PostgresBudgetReservationStore", lambda: store)
+    monkeypatch.setattr(worker, "run_streaming", run_streaming)
+    monkeypatch.setattr(worker, "_worker_runtime_identity", lambda: "worker:test")
+    monkeypatch.setattr(worker, "_scan_cancel_requested", lambda _scan_id: False)
+
+    stored, redelivery = asyncio.run(
+        worker._execute_reserved_scan_capability(
+            admission=admission,
+            execution=execution,
+            scan_id="00000000-0000-0000-0000-000000000001",
+            job_id="job-1",
+            capability_name="ports.discover",
+            capability_args={"ports": [21, 22, 25, 53, 80]},
+            action_id="discover_network.ports",
+            target_binding=target,
+            reservation_limits={
+                "hosts_attempted": 1,
+                "tcp_ports_attempted": 5,
+                "tool_wall_seconds": 30,
+            },
+        )
+    )
+
+    assert events[:3] == [
+        ("create", "requested"),
+        ("transition", "reserved"),
+        ("transition", "running"),
+    ]
+    assert ("traffic", "running") in events
+    assert events[-1] == ("terminal", "committed")
+    assert stored.record.capability_name == "ports.discover"
+    assert stored.receipt["scan_id"] == (
+        "00000000-0000-0000-0000-000000000001"
+    )
+    assert stored.receipt["observations"][0]["port"] == 21
+    assert redelivery is False
+
+
 def test_parent_standalone_reuses_verified_placed_discovery_without_traffic(
     monkeypatch,
 ):
@@ -320,9 +390,180 @@ def test_parent_standalone_reuses_verified_placed_discovery_without_traffic(
     assert reused["observations"] == summary["observations"]
 
 
+def test_parent_reuses_receiptless_placed_failure_only_as_partial_truth(monkeypatch):
+    parent_id = "00000000-0000-0000-0000-000000000001"
+    source_id = "00000000-0000-0000-0000-000000000002"
+    subdomain = {
+        "schema_version": "canonical-scan-subdomain-discovery/v1",
+        "enabled": True,
+        "status": "failed",
+        "observations": [],
+        "observation_count": 0,
+        "durable_budget_settled": False,
+    }
+    network = {
+        "schema_version": "canonical-scan-network-discovery/v1",
+        "enabled": True,
+        "status": "failed",
+        "actions": [],
+        "observations": [],
+        "observation_count": 0,
+        "durable_budget_settled": False,
+    }
+
+    class _FailedSourceConnection:
+        async def fetchrow(self, query, *_args):
+            assert "scan_role" in query
+            return {
+                "status": "failed",
+                "result": {
+                    "subdomain_discovery": subdomain,
+                    "network_discovery": network,
+                },
+            }
+
+    monkeypatch.setattr(worker, "db_pool", _Pool(_FailedSourceConnection()))
+    reused_subdomain = asyncio.run(
+        worker._reuse_placed_scan_subdomain_discovery(
+            parent_scan_id=parent_id,
+            source_scan_id=source_id,
+            expected_summary=subdomain,
+        )
+    )
+    reused_network = asyncio.run(worker._reuse_placed_scan_network_discovery(
+        parent_scan_id=parent_id,
+        source_scan_id=source_id,
+        expected_summary=network,
+    ))
+
+    assert reused_subdomain["status"] == "failed"
+    assert reused_network["status"] == "failed"
+    assert reused_subdomain["reused_from_placed_discovery"] is True
+    assert reused_network["reused_from_placed_discovery"] is True
+
+
+def _stored_network_capability(
+    capability_name,
+    *,
+    observations,
+    amounts,
+):
+    requested = DurableBudgetReservation.request(
+        owner_kind="scan",
+        owner_id="00000000-0000-0000-0000-000000000001",
+        capability_name=capability_name,
+        amounts=amounts,
+    )
+    running = requested.reserve(lease_seconds=90).start(
+        worker_id="worker:test", lease_seconds=90,
+    )
+    adapter = {
+        "ports.discover": ("naabu", "naabu-jsonl/v1"),
+        "service.fingerprint": ("nmap", "nmap-xml/v1"),
+    }[capability_name]
+    terminal, receipt = terminalize_capability_reservation(
+        running,
+        action_digest="c" * 64,
+        capability_name=capability_name,
+        adapter_name=adapter[0],
+        adapter_version="1",
+        parser_version=adapter[1],
+        target_id="target-1",
+        target_kind="web",
+        capability_input={},
+        action_status="completed",
+        actual_budget=amounts,
+        worker_id="worker:test",
+        started_at=running.started_at.isoformat(),
+        finished_at=(running.started_at + timedelta(seconds=1)).isoformat(),
+        receipt_id=f"receipt-{capability_name}",
+        scope_receipt_id="scope-1",
+        approval_receipt_id="approval-1",
+        result={"receipt_observations": observations},
+    )
+    return StoredBudgetReservation(
+        action_id=capability_name,
+        action_digest="c" * 64,
+        record=terminal,
+        ledger_after_settlement=dict(amounts),
+        receipt=receipt.public_dict(),
+    )
+
+
+def test_network_policy_runs_two_registry_actions_with_partitioned_budget(
+    monkeypatch,
+):
+    _plan, _target, options = _authority(enabled=False, network=True)
+    calls = []
+
+    async def execute_capability(**kwargs):
+        calls.append(kwargs)
+        if kwargs["capability_name"] == "ports.discover":
+            return _stored_network_capability(
+                "ports.discover",
+                observations=[{
+                    "kind": "open_port",
+                    "address": "192.0.2.10",
+                    "port": 21,
+                    "transport": "tcp",
+                }],
+                amounts={
+                    "hosts_attempted": 1,
+                    "tcp_ports_attempted": 5,
+                    "tool_wall_seconds": 30,
+                },
+            ), False
+        return _stored_network_capability(
+            "service.fingerprint",
+            observations=[{
+                "kind": "service",
+                "address": "192.0.2.10",
+                "port": 21,
+                "service": "ftp",
+            }],
+            amounts={
+                "hosts_attempted": 1,
+                "tcp_ports_attempted": 1,
+                "tool_wall_seconds": 30,
+            },
+        ), False
+
+    monkeypatch.setattr(
+        worker,
+        "_execute_reserved_scan_capability",
+        execute_capability,
+    )
+    summary = asyncio.run(worker._execute_scan_network_discovery(
+        options,
+        "00000000-0000-0000-0000-000000000001",
+        job_id="job-1",
+    ))
+
+    assert [call["capability_name"] for call in calls] == [
+        "ports.discover", "service.fingerprint",
+    ]
+    assert calls[0]["capability_args"]["ports"] == [21, 22, 25, 53, 80]
+    assert calls[1]["capability_args"]["ports"] == [21]
+    assert calls[0]["target_binding"].allowed_addresses == ("192.0.2.10",)
+    assert sum(
+        call["reservation_limits"]["tcp_ports_attempted"] for call in calls
+    ) == 10
+    assert sum(
+        call["reservation_limits"]["tool_wall_seconds"] for call in calls
+    ) == 60
+    assert summary["status"] == "success"
+    assert summary["open_ports"][0]["port"] == 21
+    assert summary["services"][0]["service"] == "ftp"
+    assert summary["durable_budget_settled"] is True
+
+
 def test_worker_wires_discovery_before_credentials_and_only_once_per_scan_role():
     source = (Path(__file__).resolve().parents[1] / "api" / "worker.py").read_text()
+    reservation_start = source.index(
+        "async def _execute_reserved_scan_capability("
+    )
     helper_start = source.index("async def _execute_scan_subdomain_discovery(")
+    reservation_helper = source[reservation_start:helper_start]
     helper_end = source.index("\n\ndef _attach_scan_subdomain_summary", helper_start)
     helper = source[helper_start:helper_end]
     standalone_start = source.index("async def process_scan_job(")
@@ -335,23 +576,32 @@ def test_worker_wires_discovery_before_credentials_and_only_once_per_scan_role()
     plan = source[plan_start:shard_start]
     merge = source[shard_end:source.index("\n\nasync def process_exploit_batch_job", shard_end)]
 
-    assert "network_capability_adapter(\"subdomains.discover\")" in helper
-    assert "PostgresBudgetReservationStore" in helper
-    assert helper.index("reserve_against(") < helper.index(
+    assert "network_capability_adapter(capability_name)" in reservation_helper
+    assert "PostgresBudgetReservationStore" in reservation_helper
+    assert reservation_helper.index("reserve_against(") < reservation_helper.index(
         "CapabilityExecutor().execute("
     )
-    assert "heartbeat_reservation" in helper
-    assert "terminalize_capability_reservation(" in helper
-    assert "persist_terminal(" in helper
+    assert "heartbeat_reservation" in reservation_helper
+    assert "terminalize_capability_reservation(" in reservation_helper
+    assert "persist_terminal(" in reservation_helper
+    assert 'capability_name="subdomains.discover"' in helper
+    assert "async def _execute_scan_network_discovery(" in helper
+    assert 'capability_name="ports.discover"' in helper
+    assert 'capability_name="service.fingerprint"' in helper
     assert "automatically_scanned_discovered_hosts" in source
     assert standalone.index("_execute_scan_subdomain_discovery(") < standalone.index(
         "_hydrate_generic_scan_credentials("
     ) < standalone.index("run_scan(")
+    assert standalone.index("_execute_scan_network_discovery(") < standalone.index(
+        "_hydrate_generic_scan_credentials("
+    )
     assert "parallel_discovery" in shard
     assert shard.index("_execute_scan_subdomain_discovery(") < shard.index(
         "result = await run_scan("
     )
     assert "canonical_subdomain_discovery" in plan
+    assert "canonical_network_discovery" in plan
     assert "needs_placed_discovery" in plan
     assert "canonical_subdomain_discovery" in merge
+    assert "canonical_network_discovery" in merge
     assert "_attach_scan_subdomain_summary(" in merge

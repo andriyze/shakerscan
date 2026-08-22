@@ -14,10 +14,12 @@ from runtime.budget_reservations import DurableBudgetReservation
 from runtime.capability_settlement import terminalize_capability_reservation
 from runtime.models import ScanPolicy, TargetBinding
 from scan.capability_execution import (
+    CANONICAL_SCAN_NETWORK_PORTS,
     ScanCapabilityContractError,
     fit_prepared_scan_capability,
     scan_budget_ledger_limits,
     scan_capability_action_digest,
+    scan_network_capability_allocation,
 )
 
 
@@ -107,6 +109,40 @@ def test_scan_capability_is_clamped_before_reservation_and_digest_binds_authorit
                 _budget(max_endpoints=0), allow_zero=True,
             ),
         )
+
+
+def test_network_allocation_reserves_two_bounded_passes_within_scan_ceiling():
+    allocation = scan_network_capability_allocation(
+        _budget(
+            max_endpoints=6,
+            max_tcp_ports=10,
+            max_tool_wall_seconds=61,
+        ),
+        available_address_count=4,
+    )
+
+    assert allocation["address_count"] == 3
+    assert allocation["ports"] == CANONICAL_SCAN_NETWORK_PORTS[:1]
+    first = allocation["port_discovery_limits"]
+    second = allocation["fingerprint_limits"]
+    assert first["hosts_attempted"] + second["hosts_attempted"] == 6
+    assert first["tcp_ports_attempted"] + second["tcp_ports_attempted"] == 6
+    assert first["tool_wall_seconds"] + second["tool_wall_seconds"] == 61
+
+
+def test_network_allocation_degrades_to_port_only_when_budget_cannot_fingerprint():
+    allocation = scan_network_capability_allocation(
+        _budget(
+            max_endpoints=1,
+            max_tcp_ports=1,
+            max_tool_wall_seconds=1,
+        ),
+        available_address_count=2,
+    )
+
+    assert allocation["address_count"] == 1
+    assert allocation["ports"] == CANONICAL_SCAN_NETWORK_PORTS[:1]
+    assert allocation["fingerprint_limits"] is None
 
 
 def test_shared_terminalizer_binds_scan_receipt_and_partial_observations():
