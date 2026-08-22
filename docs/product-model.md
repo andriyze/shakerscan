@@ -55,7 +55,7 @@ can include them in a scan only when the user fixed that authority at session st
 HAR responses, and external specification references never execute, and state-changing HTTP
 methods require a separate authenticated-active approval. The old `device-agent` API is migration-only:
 historical reads and cancellation remain available, but new starts, replies, and shell confirmations
-return `410 Gone` by default and point to `/hunts`.
+always return `410 Gone` and point to `/hunts`.
 
 ## Hunt
 

@@ -192,7 +192,8 @@ jobs:
         run: |
           PYTHONPATH=. python -m pytest -q -p no:cacheprovider \
             tests/test_hunt_start_contract.py \
-            tests/test_hunt_authority_integrity.py
+            tests/test_hunt_authority_integrity.py \
+            tests/test_legacy_hunt_isolation.py
           PYTHONPATH=api:scanner python -m pytest -q -p no:cacheprovider \
             tests/test_api_helpers.py::test_primary_api_parses_typed_native_hunt_start \
             tests/test_api_helpers.py::test_primary_api_preserves_policy_profile_alias_when_budget_profile_is_omitted \

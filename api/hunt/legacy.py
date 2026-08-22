@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 from typing import Any
 
 
-LEGACY_HUNT_WRITES_ENV = "SHAKERSCAN_LEGACY_HUNT_WRITES_ENABLED"
 LEGACY_HUNT_SUNSET = "Wed, 30 Sep 2026 23:59:59 GMT"
 
 
@@ -23,9 +21,9 @@ def is_legacy_hunt_surface(path: str) -> bool:
     )
 
 
-def legacy_hunt_write_blocked(path: str, method: str, *, override_enabled: bool) -> bool:
-    """Quarantine duplicate Hunt engines while preserving history and emergency cancellation."""
-    if override_enabled or not is_legacy_hunt_surface(path):
+def legacy_hunt_write_blocked(path: str, method: str) -> bool:
+    """Retire duplicate Hunt writes while preserving history and cancellation."""
+    if not is_legacy_hunt_surface(path):
         return False
     if str(method or "GET").upper() in {"GET", "HEAD", "OPTIONS"}:
         return False
@@ -33,7 +31,7 @@ def legacy_hunt_write_blocked(path: str, method: str, *, override_enabled: bool)
 
 
 class LegacyHuntIsolationMiddleware:
-    """Make legacy web/device Hunt APIs migration-only and impossible to start accidentally."""
+    """Make legacy web/device Hunt APIs permanently read-only except cancellation."""
 
     _HEADERS = (
         (b"deprecation", b"true"),
@@ -53,18 +51,14 @@ class LegacyHuntIsolationMiddleware:
         if not is_legacy_hunt_surface(path):
             await self.app(scope, receive, send)
             return
-        override_enabled = os.getenv(LEGACY_HUNT_WRITES_ENV, "").strip().lower() in {
-            "1", "true", "yes", "on",
-        }
         if legacy_hunt_write_blocked(
-            path, str(scope.get("method") or "GET"), override_enabled=override_enabled,
+            path, str(scope.get("method") or "GET"),
         ):
             body = json.dumps({
-                "detail": "This legacy Hunt engine is migration-only; create and drive investigations through /hunts",
+                "detail": "This legacy Hunt engine is retired; create and drive investigations through /hunts",
                 "canonical_endpoint": "/hunts",
                 "legacy_history_readable": True,
                 "legacy_cancel_allowed": True,
-                "temporary_override_env": LEGACY_HUNT_WRITES_ENV,
             }).encode("utf-8")
             await send({
                 "type": "http.response.start", "status": 410,

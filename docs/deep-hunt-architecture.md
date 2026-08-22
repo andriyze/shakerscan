@@ -276,8 +276,8 @@ a recall/quality gain that must preserve the zero-false-VERIFIED guarantee.
 
 ## Retired compatibility API surface
 
-The write endpoints below are migration-only and return `410 Gone` unless an operator deliberately
-sets `SHAKERSCAN_LEGACY_HUNT_WRITES_ENABLED`. GET and cancellation remain for old-run recovery.
+The write endpoints below are retired and always return `410 Gone`. GET and cancellation remain for
+old-run recovery.
 
 ```text
 POST /agent/hunt/{target_id}/session        # start a keyless Deep Hunt

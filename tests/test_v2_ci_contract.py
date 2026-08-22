@@ -51,6 +51,7 @@ def test_v2_workflow_executes_new_runtime_contracts_and_release_gates():
         "tests/test_capability_executor.py",
         "tests/test_hunt_browser_capability.py",
         "tests/test_hunt_scanner_reservations.py",
+        "tests/test_legacy_hunt_isolation.py",
         "tests/test_inline_capability_adapters.py",
         "tests/test_replay_capability_adapter.py",
         "tests/test_scanner_execution_adapter.py",

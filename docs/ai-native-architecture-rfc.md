@@ -97,8 +97,8 @@ origin binding, SSH confirmation, and cleanup contracts remain deterministic run
    API writes with an explicit `410 Gone` response rather than translating authority-bearing requests.
 9. Consolidate Hunt skills and expose the same runtime through API/MCP.
 10. Delete quarantined legacy engine code after the published migration sunset. Until then, historical
-    reads and emergency cancellation remain available, carry deprecation headers, and cannot create or
-    advance work unless an operator deliberately enables `SHAKERSCAN_LEGACY_HUNT_WRITES_ENABLED`.
+    reads and emergency cancellation remain available and carry deprecation headers, but cannot create
+    or advance work.
 
 New work must not add scan-type branching or a second target-specific Hunt engine during this
 migration.
