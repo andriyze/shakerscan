@@ -28,6 +28,7 @@ def _postman(count: int) -> dict:
                 "request": {
                     "method": "GET" if index % 2 == 0 else "POST",
                     "url": f"https://api.example.test/items/{index}?token=secret-{index}",
+                    "tags": ["safe", "smoke"] if index % 2 == 0 else ["write"],
                     "header": [
                         {"key": "Authorization", "value": f"Bearer secret-{index}"},
                         {"key": "X-Label", "value": f"visible-{index}"},
@@ -103,6 +104,21 @@ def test_selector_defaults_to_safe_reads_and_never_returns_more_than_replay_limi
         RequestSelector(limit=REQUEST_COLLECTION_REPLAY_HARD_MAX + 1)
 
 
+def test_tags_are_redacted_index_metadata_and_filter_worker_selection():
+    payload, _summary, rows = validate_and_index(_postman(8))
+
+    assert rows[0]["tags"] == ["safe", "smoke"]
+    assert rows[1]["tags"] == ["write"]
+    selected = select_requests(
+        payload,
+        RequestSelector(tags=("smoke",), safe_methods_only=True, limit=8),
+    )
+
+    assert len(selected) == 4
+    assert {item["method"] for item in selected} == {"GET"}
+    assert all("smoke" in item["tags"] for item in selected)
+
+
 def test_page_and_regex_guards_fail_closed():
     with pytest.raises(ValueError):
         page_index([], limit=REQUEST_COLLECTION_PAGE_MAX + 1)
@@ -126,5 +142,8 @@ def test_generic_storage_and_scan_hunt_api_contracts_are_wired():
     assert 'app.post("/request-collections")' in api
     assert 'app.get("/request-collections/{collection_id}/requests")' in api
     assert 'app.post("/request-collections/{collection_id}/select")' in api
+    assert 'app.post("/request-collections/{collection_id}/environments")' in api
+    assert 'app.post("/request-collections/{collection_id}/bindings")' in api
+    assert 'app.post("/request-collections/{collection_id}/selections")' in api
     assert "collection_refs, collection_endpoints = await _generic_collection_refs" in api
     assert "secret_values_visible" in api

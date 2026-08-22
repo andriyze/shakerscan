@@ -219,6 +219,18 @@ def _redacted_label(value: Any) -> str:
     return re.sub(r"(?<![A-Za-z0-9])[A-Za-z0-9_=-]{24,}(?![A-Za-z0-9])", "<redacted>", text)[:300]
 
 
+def _request_tags(value: Any) -> list[str]:
+    tags = value if isinstance(value, list) else []
+    normalized: list[str] = []
+    for item in tags[:200]:
+        candidate = str(
+            item.get("name") if isinstance(item, dict) else item or ""
+        ).strip()[:120]
+        if candidate and candidate not in normalized:
+            normalized.append(candidate)
+    return normalized
+
+
 def _redacted_path(path: str) -> str:
     segments = path.split("/")
     previous_sensitive = False
@@ -330,6 +342,7 @@ def validate_and_summarize(
             "header_names": sorted({str(item.get("key") or "")[:120] for item in headers if item.get("key")})[:MAX_HEADERS],
             "body_mode": str(body.get("mode") or "none")[:40],
             "auth_type": auth_kind,
+            "tags": _request_tags(request.get("tags")),
             "safe_method": method in SAFE_METHODS,
             "supported": method in SUPPORTED_METHODS and bool(raw_url),
         })
@@ -506,6 +519,7 @@ def resolve_requests(
             "sensitive_header_names": sorted(key.lower() for key in headers if _SENSITIVE_NAME_RE.search(key)),
             "body": body,
             "auth_type": auth_kind,
+            "tags": _request_tags(request.get("tags")),
             "has_sensitive_material": auth_kind not in {"inherit", "noauth", ""} or any(_SENSITIVE_NAME_RE.search(key) for key in headers),
             "unresolved_variables": sorted(set(unresolved_url + unresolved_path + unresolved_headers + unresolved_body)),
             "error": body_error,

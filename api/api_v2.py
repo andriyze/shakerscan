@@ -219,6 +219,7 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
             collection_refs, _collection_endpoints = await _legacy_api._generic_collection_refs(
                 conn,
                 target_id=target_uuid,
+                target_kind=contract.target_kind,
                 bindings=[{"id": value} for value in contract.request_collection_ids],
             )
             context_pack: dict[str, Any] = {
@@ -253,6 +254,7 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
             collection_refs, _collection_endpoints = await _legacy_api._generic_collection_refs(
                 conn,
                 device_target_id=target_uuid,
+                target_kind="device",
                 bindings=[{"id": value} for value in contract.request_collection_ids],
             )
             device_state = _legacy_api.device_agent.seed_state(

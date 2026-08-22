@@ -458,6 +458,14 @@ try:
         sync_legacy_web_credential_by_name,
     )
     from runtime.models import ScanPolicy, TargetBinding
+    from runtime.request_collection_store import (
+        REPLAY_POLICIES as REQUEST_COLLECTION_REPLAY_POLICIES,
+        RequestCollectionContractError,
+        RequestCollectionSelection,
+        canonical_collection_origin,
+        canonical_collection_origins,
+        request_collection_selection_digest,
+    )
     from runtime.scan_credentials import (
         ScanCredentialError,
         admit_scan_credential_profiles,
@@ -479,6 +487,14 @@ except ModuleNotFoundError:
         sync_legacy_web_credential_by_name,
     )
     from api.runtime.models import ScanPolicy, TargetBinding
+    from api.runtime.request_collection_store import (
+        REPLAY_POLICIES as REQUEST_COLLECTION_REPLAY_POLICIES,
+        RequestCollectionContractError,
+        RequestCollectionSelection,
+        canonical_collection_origin,
+        canonical_collection_origins,
+        request_collection_selection_digest,
+    )
     from api.runtime.scan_credentials import (
         ScanCredentialError,
         admit_scan_credential_profiles,
@@ -4516,6 +4532,7 @@ class RequestCollectionCreate(BaseModel):
     format: str = Field(default="auto", max_length=40)
     document: Any
     environment: Any = None
+    environment_name: Optional[str] = Field(default=None, max_length=160)
     base_url: Optional[str] = Field(default=None, max_length=2048)
     import_limit: int = Field(default=5000, ge=1, le=20000)
     max_document_bytes: int = Field(default=25 * 1024 * 1024, ge=1, le=50 * 1024 * 1024)
@@ -4527,8 +4544,39 @@ class RequestCollectionSelect(BaseModel):
     folders: list[str] = Field(default_factory=list, max_length=200)
     methods: list[str] = Field(default_factory=list, max_length=20)
     path_regex: Optional[str] = Field(default=None, max_length=500)
+    tags: list[str] = Field(default_factory=list, max_length=200)
     safe_methods_only: bool = True
     limit: int = Field(default=500, ge=1, le=2000)
+
+
+class RequestCollectionEnvironmentCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=160)
+    document: dict[str, Any]
+
+
+class RequestCollectionBindingUpsert(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    target_kind: Literal["web", "api", "device"]
+    target_id: str
+    allowed_origins: list[str] = Field(min_length=1, max_length=32)
+    environment_id: Optional[str] = None
+
+
+class RequestCollectionSelectionUpsert(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=160)
+    binding_id: str
+    replay_policy: Literal["discovery_only", "safe_reads", "confirmed_active"] = (
+        "safe_reads"
+    )
+    request_ids: list[str] = Field(default_factory=list, max_length=2000)
+    folders: list[str] = Field(default_factory=list, max_length=200)
+    methods: list[str] = Field(default_factory=list, max_length=20)
+    path_regex: Optional[str] = Field(default=None, max_length=500)
+    tags: list[str] = Field(default_factory=list, max_length=200)
+    safe_methods_only: bool = True
+    max_requests: int = Field(default=500, ge=1, le=2000)
 
 
 class ModelIntakeScanRequest(BaseModel):
@@ -26252,56 +26300,322 @@ def _public_request_collection(row: Any) -> dict[str, Any]:
     return _json_safe_row(item)
 
 
+def _public_request_collection_environment(row: Any) -> dict[str, Any]:
+    item = row_to_dict(row) if row is not None and not isinstance(row, dict) else dict(row or {})
+    item.pop("encrypted_payload", None)
+    item["id"] = str(item.get("id")) if item.get("id") else None
+    item["collection_id"] = str(item.get("collection_id")) if item.get("collection_id") else None
+    item["storage_encrypted"] = True
+    item["secret_values_visible"] = False
+    return _json_safe_row(item)
+
+
+def _public_request_collection_binding(row: Any) -> dict[str, Any]:
+    item = row_to_dict(row) if row is not None and not isinstance(row, dict) else dict(row or {})
+    for key in ("id", "collection_id", "target_id", "environment_id"):
+        item[key] = str(item.get(key)) if item.get(key) else None
+    item["allowed_origins"] = list(_decode_json_value(item.get("allowed_origins")) or [])
+    item["secret_values_visible"] = False
+    return _json_safe_row(item)
+
+
+def _public_request_collection_selection(row: Any) -> dict[str, Any]:
+    item = row_to_dict(row) if row is not None and not isinstance(row, dict) else dict(row or {})
+    for key in ("id", "collection_id", "binding_id"):
+        item[key] = str(item.get(key)) if item.get(key) else None
+    item["selector"] = _decode_json_value(item.pop("selector_json", None)) or {}
+    item["secret_values_visible"] = False
+    return _json_safe_row(item)
+
+
+def _request_collection_json_digest(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _encrypt_request_collection_payload(value: Any, *, kind: str) -> str:
+    encrypted = encrypt_secret(
+        json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+    )
+    if not str(encrypted or "").startswith("enc:fernet:"):
+        raise HTTPException(
+            status_code=503,
+            detail=f"Encrypted request-collection {kind} storage is unavailable",
+        )
+    return str(encrypted)
+
+
+def _request_collection_environment_count(document: Mapping[str, Any]) -> int:
+    values = document.get("values")
+    if not isinstance(values, list):
+        values = document.get("variable")
+    return len([item for item in values or [] if isinstance(item, Mapping)])
+
+
+def _request_collection_selector(value: Any) -> RequestCollectionSelection:
+    try:
+        if isinstance(value, RequestCollectionSelect):
+            raw = value.model_dump(mode="json")
+            raw["max_requests"] = raw.pop("limit")
+        elif isinstance(value, RequestCollectionSelectionUpsert):
+            raw = value.model_dump(
+                mode="json", exclude={"name", "binding_id", "replay_policy"}
+            )
+        elif isinstance(value, Mapping):
+            raw = dict(value)
+        else:
+            raw = {}
+        return RequestCollectionSelection.from_mapping(raw)
+    except RequestCollectionContractError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def _request_collection_index_item(row: Any) -> dict[str, Any]:
+    item = _json_safe_row(row)
+    item["tags"] = list(_decode_json_value(item.pop("tags_json", None)) or [])
+    return item
+
+
+def _select_request_collection_index_rows(
+    rows: Sequence[Any], selector: RequestCollectionSelection,
+) -> list[dict[str, Any]]:
+    ids = set(selector.request_ids)
+    folders = set(selector.folders)
+    methods = set(selector.methods)
+    tags = set(selector.tags)
+    try:
+        path_pattern = re.compile(selector.path_regex) if selector.path_regex else None
+    except re.error as exc:
+        raise HTTPException(status_code=422, detail="selection path_regex is invalid") from exc
+    selected: list[dict[str, Any]] = []
+    for raw in rows:
+        item = _request_collection_index_item(raw)
+        if selector.safe_methods_only and not item.get("safe_method"):
+            continue
+        if ids and item.get("request_id") not in ids:
+            continue
+        if folders and item.get("folder") not in folders:
+            continue
+        if methods and item.get("method") not in methods:
+            continue
+        if tags and not tags.intersection(str(tag) for tag in item.get("tags") or []):
+            continue
+        if path_pattern and not path_pattern.search(str(item.get("normalized_path") or "")):
+            continue
+        selected.append(item)
+        if len(selected) >= selector.max_requests:
+            break
+    return selected
+
+
+async def _request_collection_owner(conn: Any, collection_id: uuid.UUID) -> dict[str, Any]:
+    row = await conn.fetchrow(
+        """SELECT rc.*, t.url AS target_url, d.primary_locator AS device_locator
+           FROM request_collections rc
+           LEFT JOIN targets t ON t.id=rc.target_id
+           LEFT JOIN device_targets d ON d.id=rc.device_target_id
+           WHERE rc.id=$1 AND rc.is_active=true""",
+        collection_id,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Request collection not found")
+    return row_to_dict(row)
+
+
+def _request_collection_owner_binding(
+    collection: Mapping[str, Any], *, target_kind: str, target_id: uuid.UUID,
+    allowed_origins: Sequence[str],
+) -> tuple[str, ...]:
+    owner_id = collection.get("target_id") or collection.get("device_target_id")
+    if str(owner_id or "") != str(target_id):
+        raise HTTPException(
+            status_code=422,
+            detail="request collection binding target does not match its owner",
+        )
+    expected_kind = "device" if collection.get("device_target_id") else target_kind
+    if collection.get("device_target_id") and target_kind != "device":
+        raise HTTPException(status_code=422, detail="device collection requires a device binding")
+    if not collection.get("device_target_id") and target_kind not in {"web", "api"}:
+        raise HTTPException(status_code=422, detail="web collection requires a web or API binding")
+    try:
+        origins = canonical_collection_origins(list(allowed_origins))
+    except RequestCollectionContractError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    expected_host = urllib.parse.urlsplit(
+        str(collection.get("target_url") or "")
+    ).hostname
+    if expected_kind == "device":
+        expected_host = str(collection.get("device_locator") or "").strip().lower().rstrip(".")
+    if expected_host and any(
+        urllib.parse.urlsplit(origin).hostname != expected_host.lower().rstrip(".")
+        for origin in origins
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="request collection binding origin is outside the exact target host",
+        )
+    return origins
+
+
 async def _generic_collection_refs(
     conn: Any, *, target_id: Any = None, device_target_id: Any = None,
+    target_kind: str | None = None,
     bindings: Sequence[Mapping[str, Any]] = (),
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    """Validate collection IDs against one target and derive bounded safe endpoint seeds."""
-    ids: list[uuid.UUID] = []
-    selectors: dict[str, Mapping[str, Any]] = {}
+    """Freeze exact target-bound selection refs and derive safe endpoint seeds."""
+    requested: list[tuple[uuid.UUID, Mapping[str, Any]]] = []
     for raw in list(bindings)[:16]:
         value = raw.get("id") or raw.get("collection_id")
         if not value:
             raise HTTPException(status_code=422, detail="request collection binding requires id")
-        collection_id = _uuid_or_400(str(value), "request collection id")
-        ids.append(collection_id)
-        selectors[str(collection_id)] = raw.get("selector") if isinstance(raw.get("selector"), Mapping) else {}
-    if not ids:
+        requested.append((
+            _uuid_or_400(str(value), "request collection or selection id"), raw,
+        ))
+    if not requested:
         return [], []
-    rows = await conn.fetch(
-        """SELECT id, target_id, device_target_id, name, format, request_count,
-                  safe_request_count, potentially_mutating_request_count, payload_sha256
-           FROM request_collections
-           WHERE id=ANY($1::uuid[]) AND is_active=true
-             AND (($2::uuid IS NOT NULL AND target_id=$2) OR
-                  ($3::uuid IS NOT NULL AND device_target_id=$3))""",
-        ids, target_id, device_target_id,
-    )
-    if len(rows) != len(set(ids)):
-        raise HTTPException(status_code=422, detail="request collection is missing or bound to another target")
+    if len({value for value, _raw in requested}) != len(requested):
+        raise HTTPException(status_code=422, detail="request collection references must be unique")
+    normalized_kind = str(target_kind or ("device" if device_target_id else "web")).lower()
+    if normalized_kind not in {"web", "api", "device"}:
+        raise HTTPException(
+            status_code=422,
+            detail="request collections require a web, API, or device target",
+        )
+    bound_target_id = device_target_id if normalized_kind == "device" else target_id
+    if not bound_target_id:
+        raise HTTPException(status_code=422, detail="request collection target is missing")
     endpoints: list[str] = []
     refs: list[dict[str, Any]] = []
-    for row in rows:
-        selector = dict(selectors.get(str(row["id"])) or {})
-        limit = max(1, min(int(selector.get("limit") or 500), 2000))
-        methods = [str(item).upper() for item in selector.get("methods") or []]
-        request_ids = [str(item) for item in selector.get("request_ids") or []]
-        index_rows = await conn.fetch(
-            """SELECT request_id, method, normalized_path FROM request_collection_requests
-               WHERE collection_id=$1 AND safe_method=true AND supported=true
-                 AND ($2::text[]='{}'::text[] OR method=ANY($2::text[]))
-                 AND ($3::text[]='{}'::text[] OR request_id=ANY($3::text[]))
-               ORDER BY ordinal LIMIT $4""",
-            row["id"], methods, request_ids, limit,
+    for reference_id, raw in requested:
+        row = await conn.fetchrow(
+            """SELECT rc.id, rc.target_id, rc.device_target_id, rc.name, rc.format,
+                      rc.request_count, rc.safe_request_count,
+                      rc.potentially_mutating_request_count, rc.payload_sha256,
+                      s.id AS selection_id, s.binding_id AS selection_binding_id,
+                      s.replay_policy, s.selector_json, s.selection_digest,
+                      s.selected_request_count, s.selected_mutating_count
+               FROM request_collections rc
+               LEFT JOIN request_collection_selections s
+                 ON s.collection_id=rc.id AND s.id=$1 AND s.is_active=true
+               WHERE rc.is_active=true AND (rc.id=$1 OR s.id=$1)
+               ORDER BY (s.id=$1) DESC LIMIT 1""",
+            reference_id,
         )
-        for item in index_rows:
+        if not row:
+            raise HTTPException(
+                status_code=422,
+                detail="request collection or selection is unavailable",
+            )
+        owner_id = row["device_target_id"] if normalized_kind == "device" else row["target_id"]
+        if str(owner_id or "") != str(bound_target_id):
+            raise HTTPException(
+                status_code=422,
+                detail="request collection is bound to another target",
+            )
+        binding = await conn.fetchrow(
+            """SELECT b.*, e.payload_sha256 AS environment_sha256
+               FROM request_collection_bindings b
+               LEFT JOIN request_collection_environments e
+                 ON e.id=b.environment_id AND e.is_active=true
+               WHERE b.collection_id=$1 AND b.target_kind=$2 AND b.target_id=$3
+                 AND b.is_active=true
+               ORDER BY b.updated_at DESC LIMIT 1""",
+            row["id"], normalized_kind, bound_target_id,
+        )
+        if not binding:
+            raise HTTPException(
+                status_code=422,
+                detail="request collection has no exact active binding for this target",
+            )
+        selection_id = row.get("selection_id")
+        if selection_id:
+            if str(row.get("selection_binding_id") or "") != str(binding["id"]):
+                raise HTTPException(
+                    status_code=422,
+                    detail="request collection selection belongs to another target binding",
+                )
+            selector = _request_collection_selector(
+                _decode_json_value(row.get("selector_json")) or {}
+            )
+            replay_policy = str(row.get("replay_policy") or "")
+            try:
+                selection_digest = request_collection_selection_digest(
+                    collection_id=row["id"],
+                    payload_sha256=str(row["payload_sha256"]),
+                    binding_id=binding["id"],
+                    allowed_origins=(
+                        _decode_json_value(binding.get("allowed_origins")) or []
+                    ),
+                    selector=selector,
+                    replay_policy=replay_policy,
+                    environment_sha256=binding.get("environment_sha256"),
+                )
+            except RequestCollectionContractError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            if selection_digest != str(row.get("selection_digest") or ""):
+                raise HTTPException(
+                    status_code=409,
+                    detail="request collection selection changed after it was saved",
+                )
+        else:
+            selector_raw = (
+                raw.get("selector") if isinstance(raw.get("selector"), Mapping) else {}
+            )
+            selector = _request_collection_selector({
+                **dict(selector_raw),
+                "safe_methods_only": True,
+            })
+            replay_policy = "discovery_only"
+            try:
+                selection_digest = request_collection_selection_digest(
+                    collection_id=row["id"],
+                    payload_sha256=str(row["payload_sha256"]),
+                    binding_id=binding["id"],
+                    allowed_origins=(
+                        _decode_json_value(binding.get("allowed_origins")) or []
+                    ),
+                    selector=selector,
+                    replay_policy=replay_policy,
+                    environment_sha256=binding.get("environment_sha256"),
+                )
+            except RequestCollectionContractError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+        index_rows = await conn.fetch(
+            """SELECT request_id, ordinal, folder, name, method, redacted_url,
+                      normalized_path, body_mode, auth_type, tags_json,
+                      safe_method, supported
+               FROM request_collection_requests
+               WHERE collection_id=$1 AND supported=true
+               ORDER BY ordinal LIMIT 20000""",
+            row["id"],
+        )
+        selected_rows = _select_request_collection_index_rows(index_rows, selector)
+        for item in selected_rows:
+            if not item.get("safe_method"):
+                continue
             path = str(item["normalized_path"] or "").strip()
             if path:
                 endpoints.append(f"{str(item['method']).upper()} {path}")
         refs.append({
             "collection_id": str(row["id"]), "name": row["name"], "format": row["format"],
             "request_count": int(row["request_count"] or 0),
-            "selected_safe_requests": len(index_rows), "payload_sha256": row["payload_sha256"],
+            "selection_id": str(selection_id) if selection_id else None,
+            "binding_id": str(binding["id"]),
+            "environment_id": str(binding["environment_id"]) if binding.get("environment_id") else None,
+            "target_kind": normalized_kind,
+            "target_id": str(bound_target_id),
+            "allowed_origins": list(_decode_json_value(binding.get("allowed_origins")) or []),
+            "selector": selector.public_dict(),
+            "replay_policy": replay_policy,
+            "selection_digest": selection_digest,
+            "selected_requests": len(selected_rows),
+            "selected_safe_requests": sum(1 for item in selected_rows if item.get("safe_method")),
+            "selected_mutating_requests": sum(1 for item in selected_rows if not item.get("safe_method")),
+            "payload_sha256": row["payload_sha256"],
+            "environment_sha256": binding.get("environment_sha256"),
             "secret_values_visible": False,
         })
     return refs, list(dict.fromkeys(endpoints))[:2000]
@@ -26318,23 +26632,41 @@ async def create_request_collection(request: RequestCollectionCreate):
         )
     except RequestImportError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    encrypted_payload = encrypt_secret(json.dumps(payload, separators=(",", ":"), ensure_ascii=False))
-    if not str(encrypted_payload or "").startswith("enc:fernet:"):
-        raise HTTPException(status_code=503, detail="Encrypted request-collection storage is unavailable")
+    collection_payload = dict(payload)
+    environment_payload = collection_payload.pop("environment", None)
+    collection_digest = _request_collection_json_digest(collection_payload)
+    encrypted_payload = _encrypt_request_collection_payload(
+        collection_payload, kind="document",
+    )
+    summary = {
+        **dict(summary),
+        "document_sha256": collection_digest,
+        "payload_sha256": collection_digest,
+        "environment_stored_separately": environment_payload is not None,
+    }
     async with db_pool.acquire() as conn:
-        web = await conn.fetchval("SELECT EXISTS(SELECT 1 FROM targets WHERE id=$1 AND is_active=true)", target_uuid)
-        device = False if web else await conn.fetchval("SELECT EXISTS(SELECT 1 FROM device_targets WHERE id=$1 AND is_active=true)", target_uuid)
-        if not web and not device:
+        web_target = await conn.fetchrow(
+            "SELECT id, url FROM targets WHERE id=$1 AND is_active=true", target_uuid,
+        )
+        device_target = None if web_target else await conn.fetchrow(
+            """SELECT id, primary_locator FROM device_targets
+               WHERE id=$1 AND is_active=true""",
+            target_uuid,
+        )
+        if not web_target and not device_target:
             raise HTTPException(status_code=404, detail="Active web or device target not found")
         async with conn.transaction():
             collection_name = summary.get("name") or request.name or "Request collection"
-            collection_id = await conn.fetchval(
-                """SELECT id FROM request_collections
+            existing = await conn.fetchrow(
+                """SELECT id, payload_sha256 FROM request_collections
                    WHERE name=$1 AND (($2::uuid IS NOT NULL AND target_id=$2) OR
                                       ($3::uuid IS NOT NULL AND device_target_id=$3))
                    FOR UPDATE""",
-                collection_name, target_uuid if web else None, target_uuid if device else None,
-            ) or uuid.uuid4()
+                collection_name,
+                target_uuid if web_target else None,
+                target_uuid if device_target else None,
+            )
+            collection_id = existing["id"] if existing else uuid.uuid4()
             row = await conn.fetchrow(
                 """INSERT INTO request_collections (
                        id, target_id, device_target_id, name, format, encrypted_payload,
@@ -26348,9 +26680,11 @@ async def create_request_collection(request: RequestCollectionCreate):
                        potentially_mutating_request_count=EXCLUDED.potentially_mutating_request_count,
                        metadata_json=EXCLUDED.metadata_json, updated_at=NOW(), is_active=true
                    RETURNING *""",
-                collection_id, target_uuid if web else None, target_uuid if device else None,
+                collection_id,
+                target_uuid if web_target else None,
+                target_uuid if device_target else None,
                 collection_name, summary.get("format") or request.format,
-                encrypted_payload, summary.get("document_sha256") or summary.get("payload_sha256"),
+                encrypted_payload, collection_digest,
                 int(summary.get("request_count") or len(index)),
                 sum(1 for item in index if item.get("safe_method")),
                 sum(1 for item in index if not item.get("safe_method")),
@@ -26361,14 +26695,119 @@ async def create_request_collection(request: RequestCollectionCreate):
                 await conn.executemany(
                     """INSERT INTO request_collection_requests (
                            collection_id, request_id, ordinal, folder, name, method, redacted_url,
-                           normalized_path, body_mode, auth_type, safe_method, supported
-                       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)""",
+                           normalized_path, body_mode, auth_type, tags_json, safe_method, supported
+                       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)""",
                     [(row["id"], item["request_id"], item["ordinal"], item.get("folder"), item.get("name"),
                       item["method"], item.get("redacted_url"), item.get("normalized_path"),
-                      item.get("body_mode"), item.get("auth_type"), item.get("safe_method", False),
+                      item.get("body_mode"), item.get("auth_type"), json.dumps(item.get("tags") or []),
+                      item.get("safe_method", False),
                       item.get("supported", True)) for item in index],
                 )
-    return _public_request_collection(row)
+            if existing and str(existing.get("payload_sha256") or "") != collection_digest:
+                await conn.execute(
+                    """UPDATE request_collection_selections
+                       SET is_active=false, updated_at=NOW()
+                       WHERE collection_id=$1 AND is_active=true""",
+                    row["id"],
+                )
+
+            environment_row = None
+            if environment_payload is not None:
+                if not isinstance(environment_payload, Mapping):
+                    raise HTTPException(
+                        status_code=422,
+                        detail="Postman environment must be one JSON object",
+                    )
+                environment_digest = _request_collection_json_digest(environment_payload)
+                environment_name = str(
+                    request.environment_name
+                    or environment_payload.get("name")
+                    or "Default environment"
+                ).strip()[:160]
+                existing_environment = await conn.fetchrow(
+                    """SELECT id, payload_sha256
+                       FROM request_collection_environments
+                       WHERE collection_id=$1 AND name=$2 FOR UPDATE""",
+                    row["id"], environment_name,
+                )
+                environment_row = await conn.fetchrow(
+                    """INSERT INTO request_collection_environments (
+                           collection_id, name, encrypted_payload, payload_sha256,
+                           variable_count, metadata_json
+                       ) VALUES ($1,$2,$3,$4,$5,$6)
+                       ON CONFLICT (collection_id, name) DO UPDATE SET
+                           encrypted_payload=EXCLUDED.encrypted_payload,
+                           payload_sha256=EXCLUDED.payload_sha256,
+                           variable_count=EXCLUDED.variable_count,
+                           metadata_json=EXCLUDED.metadata_json,
+                           is_active=true, updated_at=NOW()
+                       RETURNING *""",
+                    row["id"],
+                    environment_name,
+                    _encrypt_request_collection_payload(
+                        environment_payload, kind="environment",
+                    ),
+                    environment_digest,
+                    _request_collection_environment_count(environment_payload),
+                    json.dumps({
+                        "schema_version": "request-collection-environment/v1",
+                        "secret_values_visible": False,
+                    }),
+                )
+                if (
+                    existing_environment
+                    and str(existing_environment.get("payload_sha256") or "")
+                    != environment_digest
+                ):
+                    await conn.execute(
+                        """UPDATE request_collection_selections s
+                           SET is_active=false, updated_at=NOW()
+                           FROM request_collection_bindings b
+                           WHERE s.binding_id=b.id
+                             AND b.environment_id=$1
+                             AND s.is_active=true""",
+                        environment_row["id"],
+                    )
+
+            binding_row = None
+            binding_origin = None
+            binding_kind = "web"
+            if web_target:
+                parsed_target = urllib.parse.urlsplit(str(web_target["url"] or ""))
+                binding_origin = canonical_collection_origin(
+                    f"{parsed_target.scheme}://{parsed_target.netloc}"
+                )
+            elif request.base_url:
+                parsed_base = urllib.parse.urlsplit(request.base_url)
+                binding_origin = canonical_collection_origin(
+                    f"{parsed_base.scheme}://{parsed_base.netloc}"
+                )
+                binding_kind = "device"
+            if binding_origin:
+                binding_row = await conn.fetchrow(
+                    """INSERT INTO request_collection_bindings (
+                           collection_id, target_kind, target_id, allowed_origins,
+                           environment_id
+                       ) VALUES ($1,$2,$3,$4,$5)
+                       ON CONFLICT (collection_id, target_kind, target_id) DO UPDATE SET
+                           allowed_origins=EXCLUDED.allowed_origins,
+                           environment_id=COALESCE(EXCLUDED.environment_id,
+                               request_collection_bindings.environment_id),
+                           is_active=true, updated_at=NOW()
+                       RETURNING *""",
+                    row["id"], binding_kind, target_uuid,
+                    json.dumps([binding_origin]),
+                    environment_row["id"] if environment_row else None,
+                )
+    result = _public_request_collection(row)
+    result["environment"] = (
+        _public_request_collection_environment(environment_row)
+        if environment_row else None
+    )
+    result["binding"] = (
+        _public_request_collection_binding(binding_row) if binding_row else None
+    )
+    return result
 
 
 @app.get("/request-collections")
@@ -26392,53 +26831,333 @@ async def list_request_collection_requests(collection_id: str, limit: int = Quer
             raise HTTPException(status_code=404, detail="Request collection not found")
         rows = await conn.fetch(
             """SELECT request_id, ordinal, folder, name, method, redacted_url, normalized_path,
-                      body_mode, auth_type, safe_method, supported
+                      body_mode, auth_type, tags_json, safe_method, supported
                FROM request_collection_requests WHERE collection_id=$1
                ORDER BY ordinal LIMIT $2 OFFSET $3""", collection_uuid, limit, offset,
         )
         total = int(await conn.fetchval("SELECT COUNT(*) FROM request_collection_requests WHERE collection_id=$1", collection_uuid) or 0)
-    return {"requests": [_json_safe_row(row) for row in rows], "count": len(rows), "total": total, "offset": offset, "limit": limit, "next_offset": offset + len(rows) if offset + len(rows) < total else None, "secret_values_visible": False}
+    return {"requests": [_request_collection_index_item(row) for row in rows], "count": len(rows), "total": total, "offset": offset, "limit": limit, "next_offset": offset + len(rows) if offset + len(rows) < total else None, "secret_values_visible": False}
 
 
 @app.post("/request-collections/{collection_id}/select")
 async def select_request_collection_index(collection_id: str, request: RequestCollectionSelect):
     collection_uuid = _uuid_or_400(collection_id, "request collection id")
     try:
-        selector = RequestSelector(
-            request_ids=tuple(request.request_ids), folders=tuple(request.folders),
-            methods=tuple(request.methods), path_regex=request.path_regex,
-            safe_methods_only=request.safe_methods_only, limit=request.limit,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        selector = _request_collection_selector(request)
+    except HTTPException:
+        raise
     async with db_pool.acquire() as conn:
         exists = await conn.fetchval("SELECT EXISTS(SELECT 1 FROM request_collections WHERE id=$1 AND is_active=true)", collection_uuid)
         if not exists:
             raise HTTPException(status_code=404, detail="Request collection not found")
         rows = await conn.fetch(
             """SELECT request_id, ordinal, folder, name, method, redacted_url, normalized_path,
-                      body_mode, auth_type, safe_method, supported
+                      body_mode, auth_type, tags_json, safe_method, supported
                FROM request_collection_requests WHERE collection_id=$1 ORDER BY ordinal LIMIT 20000""",
             collection_uuid,
         )
-    ids, folders, methods = set(selector.request_ids), set(selector.folders), set(selector.methods)
-    selected: list[dict[str, Any]] = []
-    for raw in rows:
-        item = _json_safe_row(raw)
-        if selector.safe_methods_only and not item.get("safe_method"):
-            continue
-        if ids and item.get("request_id") not in ids:
-            continue
-        if folders and item.get("folder") not in folders:
-            continue
-        if methods and item.get("method") not in methods:
-            continue
-        if not selector.matches_path(str(item.get("normalized_path") or "")):
-            continue
-        selected.append(item)
-        if len(selected) >= selector.limit:
-            break
-    return {"collection_id": collection_id, "requests": selected, "count": len(selected), "limit": selector.limit, "secret_values_visible": False}
+    selected = _select_request_collection_index_rows(rows, selector)
+    return {"collection_id": collection_id, "requests": selected, "count": len(selected), "limit": selector.max_requests, "secret_values_visible": False}
+
+
+@app.get("/request-collections/{collection_id}")
+async def get_request_collection(collection_id: str):
+    collection_uuid = _uuid_or_400(collection_id, "request collection id")
+    async with db_pool.acquire() as conn:
+        collection = await _request_collection_owner(conn, collection_uuid)
+        environments = await conn.fetch(
+            """SELECT id, collection_id, name, payload_sha256, variable_count,
+                      metadata_json, is_active, created_at, updated_at
+               FROM request_collection_environments
+               WHERE collection_id=$1 AND is_active=true
+               ORDER BY lower(name), id""",
+            collection_uuid,
+        )
+        bindings = await conn.fetch(
+            """SELECT * FROM request_collection_bindings
+               WHERE collection_id=$1 AND is_active=true
+               ORDER BY target_kind, target_id, id""",
+            collection_uuid,
+        )
+        selections = await conn.fetch(
+            """SELECT * FROM request_collection_selections
+               WHERE collection_id=$1 AND is_active=true
+               ORDER BY lower(name), id""",
+            collection_uuid,
+        )
+    return {
+        "collection": _public_request_collection(collection),
+        "environments": [
+            _public_request_collection_environment(row) for row in environments
+        ],
+        "bindings": [_public_request_collection_binding(row) for row in bindings],
+        "selections": [
+            _public_request_collection_selection(row) for row in selections
+        ],
+        "secret_values_visible": False,
+    }
+
+
+@app.post("/request-collections/{collection_id}/environments")
+async def upsert_request_collection_environment(
+    collection_id: str, request: RequestCollectionEnvironmentCreate,
+):
+    collection_uuid = _uuid_or_400(collection_id, "request collection id")
+    try:
+        serialized = json.dumps(
+            request.document, separators=(",", ":"), ensure_ascii=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=422, detail="Postman environment must be valid JSON",
+        ) from exc
+    if len(serialized) > 2 * 1024 * 1024:
+        raise HTTPException(status_code=422, detail="Postman environment exceeds the 2 MiB limit")
+    digest = _request_collection_json_digest(request.document)
+    async with db_pool.acquire() as conn:
+        await _request_collection_owner(conn, collection_uuid)
+        async with conn.transaction():
+            existing = await conn.fetchrow(
+                """SELECT id, payload_sha256 FROM request_collection_environments
+                   WHERE collection_id=$1 AND name=$2 FOR UPDATE""",
+                collection_uuid, request.name,
+            )
+            row = await conn.fetchrow(
+                """INSERT INTO request_collection_environments (
+                       collection_id, name, encrypted_payload, payload_sha256,
+                       variable_count, metadata_json
+                   ) VALUES ($1,$2,$3,$4,$5,$6)
+                   ON CONFLICT (collection_id, name) DO UPDATE SET
+                       encrypted_payload=EXCLUDED.encrypted_payload,
+                       payload_sha256=EXCLUDED.payload_sha256,
+                       variable_count=EXCLUDED.variable_count,
+                       metadata_json=EXCLUDED.metadata_json,
+                       is_active=true, updated_at=NOW()
+                   RETURNING *""",
+                collection_uuid,
+                request.name,
+                _encrypt_request_collection_payload(
+                    request.document, kind="environment",
+                ),
+                digest,
+                _request_collection_environment_count(request.document),
+                json.dumps({
+                    "schema_version": "request-collection-environment/v1",
+                    "secret_values_visible": False,
+                }),
+            )
+            if existing and str(existing.get("payload_sha256") or "") != digest:
+                await conn.execute(
+                    """UPDATE request_collection_selections s
+                       SET is_active=false, updated_at=NOW()
+                       FROM request_collection_bindings b
+                       WHERE s.binding_id=b.id
+                         AND b.environment_id=$1
+                         AND s.is_active=true""",
+                    row["id"],
+                )
+    return {"environment": _public_request_collection_environment(row)}
+
+
+@app.delete("/request-collections/{collection_id}/environments/{environment_id}")
+async def deactivate_request_collection_environment(
+    collection_id: str, environment_id: str,
+):
+    collection_uuid = _uuid_or_400(collection_id, "request collection id")
+    environment_uuid = _uuid_or_400(environment_id, "request collection environment id")
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """UPDATE request_collection_environments
+                   SET is_active=false, updated_at=NOW()
+                   WHERE id=$1 AND collection_id=$2 AND is_active=true
+                   RETURNING id, collection_id, name, payload_sha256, variable_count,
+                             metadata_json, is_active, created_at, updated_at""",
+                environment_uuid, collection_uuid,
+            )
+            if not row:
+                raise HTTPException(
+                    status_code=404, detail="Request collection environment not found",
+                )
+            await conn.execute(
+                """UPDATE request_collection_bindings
+                   SET environment_id=NULL, updated_at=NOW()
+                   WHERE collection_id=$1 AND environment_id=$2""",
+                collection_uuid, environment_uuid,
+            )
+            await conn.execute(
+                """UPDATE request_collection_selections s
+                   SET is_active=false, updated_at=NOW()
+                   FROM request_collection_bindings b
+                   WHERE s.binding_id=b.id AND b.collection_id=$1""",
+                collection_uuid,
+            )
+    return {
+        "status": "deactivated",
+        "environment": _public_request_collection_environment(row),
+    }
+
+
+@app.post("/request-collections/{collection_id}/bindings")
+async def upsert_request_collection_binding(
+    collection_id: str, request: RequestCollectionBindingUpsert,
+):
+    collection_uuid = _uuid_or_400(collection_id, "request collection id")
+    target_uuid = _uuid_or_400(request.target_id, "request collection target id")
+    environment_uuid = (
+        _uuid_or_400(request.environment_id, "request collection environment id")
+        if request.environment_id else None
+    )
+    async with db_pool.acquire() as conn:
+        collection = await _request_collection_owner(conn, collection_uuid)
+        origins = _request_collection_owner_binding(
+            collection,
+            target_kind=request.target_kind,
+            target_id=target_uuid,
+            allowed_origins=request.allowed_origins,
+        )
+        if environment_uuid and not await conn.fetchval(
+            """SELECT EXISTS(
+                   SELECT 1 FROM request_collection_environments
+                   WHERE id=$1 AND collection_id=$2 AND is_active=true
+               )""",
+            environment_uuid, collection_uuid,
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="request collection environment is unavailable or belongs to another collection",
+            )
+        async with conn.transaction():
+            existing = await conn.fetchrow(
+                """SELECT * FROM request_collection_bindings
+                   WHERE collection_id=$1 AND target_kind=$2 AND target_id=$3
+                   FOR UPDATE""",
+                collection_uuid, request.target_kind, target_uuid,
+            )
+            row = await conn.fetchrow(
+                """INSERT INTO request_collection_bindings (
+                       collection_id, target_kind, target_id, allowed_origins,
+                       environment_id
+                   ) VALUES ($1,$2,$3,$4,$5)
+                   ON CONFLICT (collection_id, target_kind, target_id) DO UPDATE SET
+                       allowed_origins=EXCLUDED.allowed_origins,
+                       environment_id=EXCLUDED.environment_id,
+                       is_active=true, updated_at=NOW()
+                   RETURNING *""",
+                collection_uuid, request.target_kind, target_uuid,
+                json.dumps(origins), environment_uuid,
+            )
+            if existing and (
+                tuple(_decode_json_value(existing.get("allowed_origins")) or ()) != origins
+                or str(existing.get("environment_id") or "")
+                != str(environment_uuid or "")
+            ):
+                await conn.execute(
+                    """UPDATE request_collection_selections
+                       SET is_active=false, updated_at=NOW()
+                       WHERE binding_id=$1 AND is_active=true""",
+                    row["id"],
+                )
+    return {"binding": _public_request_collection_binding(row)}
+
+
+@app.post("/request-collections/{collection_id}/selections")
+async def upsert_request_collection_selection(
+    collection_id: str, request: RequestCollectionSelectionUpsert,
+):
+    collection_uuid = _uuid_or_400(collection_id, "request collection id")
+    binding_uuid = _uuid_or_400(request.binding_id, "request collection binding id")
+    selector = _request_collection_selector(request)
+    if request.replay_policy not in REQUEST_COLLECTION_REPLAY_POLICIES:
+        raise HTTPException(status_code=422, detail="request collection replay policy is invalid")
+    async with db_pool.acquire() as conn:
+        collection = await _request_collection_owner(conn, collection_uuid)
+        binding = await conn.fetchrow(
+            """SELECT b.*, e.payload_sha256 AS environment_sha256
+               FROM request_collection_bindings b
+               LEFT JOIN request_collection_environments e
+                 ON e.id=b.environment_id AND e.is_active=true
+               WHERE b.id=$1 AND b.collection_id=$2 AND b.is_active=true""",
+            binding_uuid, collection_uuid,
+        )
+        if not binding:
+            raise HTTPException(
+                status_code=422,
+                detail="request collection binding is unavailable or belongs to another collection",
+            )
+        rows = await conn.fetch(
+            """SELECT request_id, ordinal, folder, name, method, redacted_url,
+                      normalized_path, body_mode, auth_type, tags_json,
+                      safe_method, supported
+               FROM request_collection_requests
+               WHERE collection_id=$1 ORDER BY ordinal LIMIT 20000""",
+            collection_uuid,
+        )
+        selected = _select_request_collection_index_rows(rows, selector)
+        if not selected:
+            raise HTTPException(
+                status_code=422, detail="request collection selection is empty",
+            )
+        try:
+            digest = request_collection_selection_digest(
+                collection_id=collection_uuid,
+                payload_sha256=str(collection.get("payload_sha256") or ""),
+                binding_id=binding_uuid,
+                allowed_origins=_decode_json_value(binding.get("allowed_origins")) or [],
+                selector=selector,
+                replay_policy=request.replay_policy,
+                environment_sha256=binding.get("environment_sha256"),
+            )
+        except RequestCollectionContractError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        mutating_count = sum(1 for item in selected if not item.get("safe_method"))
+        row = await conn.fetchrow(
+            """INSERT INTO request_collection_selections (
+                   collection_id, binding_id, name, replay_policy, selector_json,
+                   selection_digest, selected_request_count, selected_mutating_count
+               ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+               ON CONFLICT (binding_id, name) DO UPDATE SET
+                   replay_policy=EXCLUDED.replay_policy,
+                   selector_json=EXCLUDED.selector_json,
+                   selection_digest=EXCLUDED.selection_digest,
+                   selected_request_count=EXCLUDED.selected_request_count,
+                   selected_mutating_count=EXCLUDED.selected_mutating_count,
+                   is_active=true, updated_at=NOW()
+               RETURNING *""",
+            collection_uuid, binding_uuid, request.name, request.replay_policy,
+            json.dumps(selector.public_dict()), digest, len(selected), mutating_count,
+        )
+    return {
+        "selection": _public_request_collection_selection(row),
+        "preview": {
+            "requests": selected[:200],
+            "count": len(selected),
+            "preview_truncated": len(selected) > 200,
+            "secret_values_visible": False,
+        },
+    }
+
+
+@app.delete("/request-collections/{collection_id}/selections/{selection_id}")
+async def deactivate_request_collection_selection(
+    collection_id: str, selection_id: str,
+):
+    collection_uuid = _uuid_or_400(collection_id, "request collection id")
+    selection_uuid = _uuid_or_400(selection_id, "request collection selection id")
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """UPDATE request_collection_selections
+               SET is_active=false, updated_at=NOW()
+               WHERE id=$1 AND collection_id=$2 AND is_active=true
+               RETURNING *""",
+            selection_uuid, collection_uuid,
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="Request collection selection not found")
+    return {
+        "status": "deactivated",
+        "selection": _public_request_collection_selection(row),
+    }
 
 
 def normalize_dast_scan_options(options: ScanOptions) -> str:
@@ -26674,7 +27393,8 @@ async def submit_scan(request: ScanRequest):
                  json.dumps(_default_asm_config_for_new_web_target("manual")))
 
         collection_refs, collection_endpoints = await _generic_collection_refs(
-            conn, target_id=target_id, bindings=request.request_collections,
+            conn, target_id=target_id, target_kind=request.target_kind,
+            bindings=request.request_collections,
         )
         if collection_refs:
             options_payload["request_collections"] = collection_refs
@@ -34957,8 +35677,10 @@ def _hunt_collection_selector(values: Mapping[str, Any], *, hard_limit: int) -> 
     try:
         return RequestSelector(
             request_ids=tuple(str(item) for item in values.get("request_ids") or [])[:2_000],
+            folders=tuple(str(item) for item in values.get("folders") or [])[:200],
             methods=tuple(str(item) for item in values.get("methods") or [])[:20],
             path_regex=str(values.get("path_regex") or "").strip() or None,
+            tags=tuple(str(item) for item in values.get("tags") or [])[:200],
             safe_methods_only=True,
             limit=max(1, min(int(values.get("limit") or hard_limit), hard_limit)),
         )
@@ -34968,44 +35690,82 @@ def _hunt_collection_selector(values: Mapping[str, Any], *, hard_limit: int) -> 
 
 async def _hunt_bound_collection(
     conn: Any, run: Any, context: Mapping[str, Any], collection_id: Any,
-) -> Any:
+) -> tuple[Any, dict[str, Any]]:
     collection_uuid = _uuid_or_400(str(collection_id or ""), "request collection id")
-    bound = {
-        str(item.get("collection_id")) for item in context.get("request_collections") or []
-        if isinstance(item, Mapping) and item.get("collection_id")
-    }
-    if str(collection_uuid) not in bound:
+    refs = [
+        dict(item) for item in context.get("request_collections") or []
+        if isinstance(item, Mapping)
+    ]
+    ref = next((
+        item for item in refs
+        if str(item.get("collection_id") or "") == str(collection_uuid)
+        or str(item.get("selection_id") or "") == str(collection_uuid)
+    ), None)
+    if ref is None:
         raise HTTPException(status_code=403, detail="Request collection is not bound to this Hunt")
+    actual_collection_uuid = _uuid_or_400(
+        str(ref.get("collection_id") or ""), "bound request collection id",
+    )
     row = await conn.fetchrow(
         """SELECT * FROM request_collections WHERE id=$1 AND is_active=true
            AND (($2::uuid IS NOT NULL AND target_id=$2) OR
                 ($3::uuid IS NOT NULL AND device_target_id=$3))""",
-        collection_uuid, run["target_id"], run["device_target_id"],
+        actual_collection_uuid, run["target_id"], run["device_target_id"],
     )
     if not row:
         raise HTTPException(status_code=404, detail="Bound request collection is unavailable")
-    return row
+    if str(row.get("payload_sha256") or "") != str(ref.get("payload_sha256") or ""):
+        raise HTTPException(
+            status_code=409,
+            detail="Bound request collection changed after Hunt admission",
+        )
+    return row, ref
+
+
+def _hunt_bound_selector(ref: Mapping[str, Any], *, hard_limit: int) -> RequestCollectionSelection:
+    try:
+        selector = RequestCollectionSelection.from_mapping(
+            ref.get("selector") if isinstance(ref.get("selector"), Mapping) else {}
+        )
+    except RequestCollectionContractError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return RequestCollectionSelection(
+        request_ids=selector.request_ids,
+        folders=selector.folders,
+        methods=selector.methods,
+        path_regex=selector.path_regex,
+        tags=selector.tags,
+        safe_methods_only=True,
+        max_requests=min(selector.max_requests, hard_limit),
+    )
 
 
 async def _hunt_select_collection(run: Any, context: Mapping[str, Any], values: Mapping[str, Any]) -> dict[str, Any]:
     selector = _hunt_collection_selector(values, hard_limit=200)
     async with db_pool.acquire() as conn:
-        row = await _hunt_bound_collection(conn, run, context, values.get("collection_id"))
+        row, ref = await _hunt_bound_collection(
+            conn, run, context, values.get("collection_id")
+        )
         index_rows = await conn.fetch(
             """SELECT request_id, ordinal, folder, name, method, redacted_url, normalized_path,
-                      body_mode, auth_type, safe_method, supported
+                      body_mode, auth_type, tags_json, safe_method, supported
                FROM request_collection_requests WHERE collection_id=$1 ORDER BY ordinal LIMIT 20000""",
             row["id"],
         )
-    ids, methods = set(selector.request_ids), set(selector.methods)
-    selected: list[dict[str, Any]] = []
-    for raw in index_rows:
-        item = _json_safe_row(raw)
-        if not item.get("safe_method") or not item.get("supported"):
-            continue
+    base_selected = _select_request_collection_index_rows(
+        index_rows, _hunt_bound_selector(ref, hard_limit=2_000),
+    )
+    selected = []
+    ids, folders = set(selector.request_ids), set(selector.folders)
+    methods, tags = set(selector.methods), set(selector.tags)
+    for item in base_selected:
         if ids and item.get("request_id") not in ids:
             continue
+        if folders and item.get("folder") not in folders:
+            continue
         if methods and item.get("method") not in methods:
+            continue
+        if tags and not tags.intersection(str(tag) for tag in item.get("tags") or []):
             continue
         if not selector.matches_path(str(item.get("normalized_path") or "")):
             continue
@@ -35013,6 +35773,7 @@ async def _hunt_select_collection(run: Any, context: Mapping[str, Any], values: 
         if len(selected) >= selector.limit:
             break
     return {"ok": True, "collection_id": str(row["id"]), "requests": selected,
+            "selection_id": ref.get("selection_id"),
             "count": len(selected), "secret_values_visible": False}
 
 
@@ -35038,7 +35799,47 @@ async def _hunt_replay_safe_collection(
         context, values.get("as_principal"),
     )
     async with db_pool.acquire() as conn:
-        row = await _hunt_bound_collection(conn, run, context, values.get("collection_id"))
+        row, ref = await _hunt_bound_collection(
+            conn, run, context, values.get("collection_id")
+        )
+        if not ref.get("selection_id"):
+            raise HTTPException(
+                status_code=403,
+                detail="Safe replay requires a saved request collection selection",
+            )
+        if str(ref.get("replay_policy") or "") == "discovery_only":
+            raise HTTPException(
+                status_code=403,
+                detail="This request collection selection is discovery-only",
+            )
+        index_rows = await conn.fetch(
+            """SELECT request_id, ordinal, folder, name, method, redacted_url,
+                      normalized_path, body_mode, auth_type, tags_json,
+                      safe_method, supported
+               FROM request_collection_requests
+               WHERE collection_id=$1 ORDER BY ordinal LIMIT 20000""",
+            row["id"],
+        )
+    base_selected = _select_request_collection_index_rows(
+        index_rows, _hunt_bound_selector(ref, hard_limit=25),
+    )
+    narrowed_ids = set(selector.request_ids)
+    narrowed_folders = set(selector.folders)
+    narrowed_methods = set(selector.methods)
+    narrowed_tags = set(selector.tags)
+    replay_ids = [
+        str(item["request_id"]) for item in base_selected
+        if (not narrowed_ids or str(item["request_id"]) in narrowed_ids)
+        and (not narrowed_folders or str(item.get("folder") or "") in narrowed_folders)
+        and (not narrowed_methods or str(item["method"]) in narrowed_methods)
+        and (
+            not narrowed_tags
+            or narrowed_tags.intersection(str(tag) for tag in item.get("tags") or [])
+        )
+        and selector.matches_path(str(item.get("normalized_path") or ""))
+    ][:selector.limit]
+    if not replay_ids:
+        raise HTTPException(status_code=422, detail="Safe replay selection is empty")
     redis_client = get_redis()
     job_id = str(uuid.uuid4())
     reservation_id = str(uuid.uuid4())
@@ -35052,11 +35853,18 @@ async def _hunt_replay_safe_collection(
         "reservation_id": reservation_id,
         "collection_id": str(row["id"]),
         "expected_payload_sha256": str(row["payload_sha256"] or ""),
+        "binding_id": ref.get("binding_id"),
+        "selection_id": ref.get("selection_id"),
+        "selection_digest": ref.get("selection_digest"),
+        "environment_id": ref.get("environment_id"),
+        "expected_environment_sha256": ref.get("environment_sha256"),
+        "allowed_origins": list(ref.get("allowed_origins") or []),
+        "replay_policy": ref.get("replay_policy"),
         "selector": {
-            "request_ids": list(selector.request_ids),
-            "methods": list(selector.methods),
-            "path_regex": selector.path_regex,
-            "limit": selector.limit,
+            "request_ids": replay_ids,
+            "methods": [],
+            "path_regex": None,
+            "limit": len(replay_ids),
         },
         "tool_wall_seconds": timeout_seconds,
         "submitted_at": utc_now_iso(),
@@ -35209,7 +36017,7 @@ async def start_hunt(request: HuntStartRequest):
             ))
             origins = await _target_web_origins(conn, target_uuid, target_url)
             collection_refs, _collection_endpoints = await _generic_collection_refs(
-                conn, target_id=target_uuid,
+                conn, target_id=target_uuid, target_kind="web",
                 bindings=[{"id": value} for value in request.request_collection_ids],
             )
             context_pack = {
@@ -35234,7 +36042,7 @@ async def start_hunt(request: HuntStartRequest):
             )
             credentials_available = bool(credential_refs)
             collection_refs, _collection_endpoints = await _generic_collection_refs(
-                conn, device_target_id=target_uuid,
+                conn, device_target_id=target_uuid, target_kind="device",
                 bindings=[{"id": value} for value in request.request_collection_ids],
             )
             device_state = device_agent.seed_state(

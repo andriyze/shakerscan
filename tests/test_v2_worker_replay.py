@@ -192,6 +192,11 @@ def test_worker_replay_uses_durable_store_and_exact_plan():
     end = source.index("\n\nasync def process_canonical_network_capability_job", start)
     handler = source[start:end]
     assert "decrypt_secret" in handler
+    assert 'collection["encrypted_environment"]' in handler
+    assert "expected_selection_digest" in handler
+    assert "request_collection_selection_digest" in handler
+    assert "queued_allowed_origins" in handler
+    assert "select_requests(payload, stored_runtime_selector)" in handler
     assert "build_selected_replay_plan" in handler
     assert "create_requested" in handler
     assert "persist_transition" in handler

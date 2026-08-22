@@ -80,6 +80,140 @@ install_fastapi_exception_stubs()
 import api as api_module  # noqa: E402
 
 
+def test_request_collection_binding_rejects_cross_target_origins():
+    target_id = uuid.uuid4()
+    collection = {
+        "target_id": target_id,
+        "device_target_id": None,
+        "target_url": "https://api.example.test/root",
+    }
+
+    assert api_module._request_collection_owner_binding(
+        collection,
+        target_kind="web",
+        target_id=target_id,
+        allowed_origins=["HTTPS://API.EXAMPLE.TEST:443"],
+    ) == ("https://api.example.test",)
+
+    with pytest.raises(api_module.HTTPException) as error:
+        api_module._request_collection_owner_binding(
+            collection,
+            target_kind="web",
+            target_id=target_id,
+            allowed_origins=["https://other.example.test"],
+        )
+    assert error.value.status_code == 422
+
+
+def test_request_collection_environment_digest_is_canonical():
+    first = {"values": [{"key": "token", "value": "worker-only"}], "name": "prod"}
+    second = {"name": "prod", "values": [{"value": "worker-only", "key": "token"}]}
+
+    assert api_module._request_collection_json_digest(first) == (
+        api_module._request_collection_json_digest(second)
+    )
+
+
+def test_generic_collection_ref_freezes_saved_selection_and_exact_binding():
+    target_id = uuid.uuid4()
+    collection_id = uuid.uuid4()
+    binding_id = uuid.uuid4()
+    selection_id = uuid.uuid4()
+    environment_id = uuid.uuid4()
+    selector = api_module.RequestCollectionSelection.from_mapping({
+        "tags": ["smoke"],
+        "safe_methods_only": True,
+        "max_requests": 10,
+    })
+    origins = ["https://api.example.test"]
+    digest = api_module.request_collection_selection_digest(
+        collection_id=collection_id,
+        payload_sha256="a" * 64,
+        binding_id=binding_id,
+        allowed_origins=origins,
+        selector=selector,
+        replay_policy="safe_reads",
+        environment_sha256="b" * 64,
+    )
+    collection = {
+        "id": collection_id,
+        "target_id": target_id,
+        "device_target_id": None,
+        "name": "API smoke",
+        "format": "postman",
+        "request_count": 2,
+        "safe_request_count": 1,
+        "potentially_mutating_request_count": 1,
+        "payload_sha256": "a" * 64,
+        "selection_id": selection_id,
+        "selection_binding_id": binding_id,
+        "replay_policy": "safe_reads",
+        "selector_json": selector.public_dict(),
+        "selection_digest": digest,
+        "selected_request_count": 1,
+        "selected_mutating_count": 0,
+    }
+    binding = {
+        "id": binding_id,
+        "collection_id": collection_id,
+        "target_kind": "web",
+        "target_id": target_id,
+        "allowed_origins": origins,
+        "environment_id": environment_id,
+        "environment_sha256": "b" * 64,
+    }
+    index = [{
+        "request_id": "get-health",
+        "ordinal": 0,
+        "folder": "Health",
+        "name": "Health",
+        "method": "GET",
+        "redacted_url": "https://api.example.test/health",
+        "normalized_path": "/health",
+        "body_mode": "none",
+        "auth_type": "bearer",
+        "tags_json": ["smoke"],
+        "safe_method": True,
+        "supported": True,
+    }]
+
+    class Connection:
+        async def fetchrow(self, query, *_args):
+            if "FROM request_collections rc" in query:
+                return collection
+            if "FROM request_collection_bindings b" in query:
+                return binding
+            raise AssertionError(query)
+
+        async def fetch(self, query, *_args):
+            assert "FROM request_collection_requests" in query
+            return index
+
+    refs, endpoints = asyncio.run(api_module._generic_collection_refs(
+        Connection(),
+        target_id=target_id,
+        target_kind="web",
+        bindings=[{"id": str(selection_id)}],
+    ))
+
+    assert endpoints == ["GET /health"]
+    assert refs[0]["selection_id"] == str(selection_id)
+    assert refs[0]["binding_id"] == str(binding_id)
+    assert refs[0]["environment_id"] == str(environment_id)
+    assert refs[0]["selection_digest"] == digest
+    assert refs[0]["secret_values_visible"] is False
+
+    collection["selection_digest"] = "c" * 64
+    with pytest.raises(api_module.HTTPException) as error:
+        asyncio.run(api_module._generic_collection_refs(
+            Connection(),
+            target_id=target_id,
+            target_kind="web",
+            bindings=[{"id": str(selection_id)}],
+        ))
+    assert error.value.status_code == 409
+
+
 def test_parallel_parent_rollup_derives_progress_from_shards():
     result = {"status": "running", "progress": 5}
     shards = [

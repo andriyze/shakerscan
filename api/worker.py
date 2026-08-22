@@ -70,6 +70,11 @@ from runtime.credential_refs import (
     select_hunt_principal_reference,
 )
 from runtime.models import ScanPolicy, TargetBinding
+from runtime.request_collection_store import (
+    RequestCollectionContractError,
+    RequestCollectionSelection,
+    request_collection_selection_digest,
+)
 from runtime.scan_credentials import (
     SCAN_CREDENTIAL_CAPABILITY,
     ScanCredentialError,
@@ -109,7 +114,7 @@ try:
     )
     from scanner_tools.build_fingerprint import hash_source_files, runtime_file_map
     from scanner_tools.device_web import run_pinned_device_web_scan
-    from scanner_tools.request_collections import RequestSelector
+    from scanner_tools.request_collections import RequestSelector, select_requests
     from scanner_tools.request_replay import (
         ReplayAuthorization,
         RequestReplayError,
@@ -125,7 +130,7 @@ except ModuleNotFoundError:
     )
     from scanner.scanner_tools.build_fingerprint import hash_source_files, runtime_file_map
     from scanner.scanner_tools.device_web import run_pinned_device_web_scan
-    from scanner.scanner_tools.request_collections import RequestSelector
+    from scanner.scanner_tools.request_collections import RequestSelector, select_requests
     from scanner.scanner_tools.request_replay import (
         ReplayAuthorization,
         RequestReplayError,
@@ -13595,6 +13600,13 @@ def _worker_json_object(value: Any) -> dict[str, Any]:
     return dict(parsed) if isinstance(parsed, Mapping) else {}
 
 
+def _worker_json_array(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return list(value)
+    parsed = parse_json_field(value)
+    return list(parsed) if isinstance(parsed, list) else []
+
+
 def _worker_terminal_replay_result(stored: Any, *, job_id: str) -> dict[str, Any]:
     receipt = dict(stored.receipt or {})
     return {
@@ -13639,10 +13651,33 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
         hunt_id = str(uuid.UUID(str(job_data.get("hunt_id") or "")))
         action_id = str(uuid.UUID(str(job_data.get("action_id") or "")))
         collection_id = str(uuid.UUID(str(job_data.get("collection_id") or "")))
+        binding_id = str(uuid.UUID(str(job_data.get("binding_id") or "")))
+        selection_id = str(uuid.UUID(str(job_data.get("selection_id") or "")))
         reservation_id = str(uuid.UUID(str(job_data.get("reservation_id") or "")))
         expected_payload_sha256 = str(job_data.get("expected_payload_sha256") or "").lower()
         if not re.fullmatch(r"[0-9a-f]{64}", expected_payload_sha256):
             raise ReplayExecutionError("replay job collection digest is invalid")
+        expected_selection_digest = str(job_data.get("selection_digest") or "").lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_selection_digest):
+            raise ReplayExecutionError("replay job selection digest is invalid")
+        expected_environment_id = str(job_data.get("environment_id") or "").strip() or None
+        if expected_environment_id:
+            expected_environment_id = str(uuid.UUID(expected_environment_id))
+        expected_environment_sha256 = str(
+            job_data.get("expected_environment_sha256") or ""
+        ).lower() or None
+        if expected_environment_sha256 and not re.fullmatch(
+            r"[0-9a-f]{64}", expected_environment_sha256
+        ):
+            raise ReplayExecutionError("replay job environment digest is invalid")
+        replay_policy = str(job_data.get("replay_policy") or "").strip()
+        if replay_policy not in {"safe_reads", "confirmed_active"}:
+            raise ReplayExecutionError("replay job policy is not executable")
+        queued_allowed_origins = tuple(
+            str(item) for item in job_data.get("allowed_origins") or () if str(item)
+        )
+        if not queued_allowed_origins:
+            raise ReplayExecutionError("replay job has no exact origin binding")
         selector_raw = _worker_json_object(job_data.get("selector"))
         selector = RequestSelector(
             request_ids=tuple(str(item) for item in selector_raw.get("request_ids") or ()),
@@ -13684,17 +13719,71 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                 if not action or str(action["capability_name"]) != "collections.replay_safe":
                     raise ReplayExecutionError("replay action identity is not valid")
                 collection = await conn.fetchrow(
-                    """SELECT id, encrypted_payload, payload_sha256
-                       FROM request_collections
-                       WHERE id=$1 AND target_id=$2 AND is_active=true FOR UPDATE""",
-                    uuid.UUID(collection_id), run["target_id"],
+                    """SELECT c.id, c.encrypted_payload, c.payload_sha256,
+                              b.id AS binding_id, b.allowed_origins, b.environment_id,
+                              e.encrypted_payload AS encrypted_environment,
+                              e.payload_sha256 AS environment_sha256,
+                              s.id AS selection_id, s.replay_policy, s.selector_json,
+                              s.selection_digest
+                       FROM request_collections c
+                       JOIN request_collection_bindings b
+                         ON b.id=$2 AND b.collection_id=c.id AND b.is_active=true
+                       JOIN request_collection_selections s
+                         ON s.id=$3 AND s.collection_id=c.id
+                        AND s.binding_id=b.id AND s.is_active=true
+                       LEFT JOIN request_collection_environments e
+                         ON e.id=b.environment_id AND e.collection_id=c.id
+                        AND e.is_active=true
+                       WHERE c.id=$1 AND c.target_id=$4 AND c.is_active=true
+                         AND b.target_id=$4 AND b.target_kind=$5
+                       FOR UPDATE OF c, b, s""",
+                    uuid.UUID(collection_id), uuid.UUID(binding_id),
+                    uuid.UUID(selection_id), run["target_id"], str(run["target_kind"]),
                 )
                 if not collection:
                     raise ReplayExecutionError(
-                        "request collection is unavailable or bound to another target"
+                        "request collection selection is unavailable or bound to another target"
                     )
                 if str(collection["payload_sha256"] or "").lower() != expected_payload_sha256:
                     raise ReplayExecutionError("request collection changed after action admission")
+                stored_origins = tuple(
+                    str(item) for item in _worker_json_array(collection["allowed_origins"])
+                    if str(item)
+                )
+                if stored_origins != queued_allowed_origins:
+                    raise ReplayExecutionError("request collection origin binding changed")
+                stored_environment_id = (
+                    str(collection["environment_id"])
+                    if collection["environment_id"] else None
+                )
+                stored_environment_sha256 = (
+                    str(collection["environment_sha256"] or "").lower() or None
+                )
+                if (
+                    stored_environment_id != expected_environment_id
+                    or stored_environment_sha256 != expected_environment_sha256
+                ):
+                    raise ReplayExecutionError("request collection environment binding changed")
+                if str(collection["replay_policy"] or "") != replay_policy:
+                    raise ReplayExecutionError("request collection replay policy changed")
+                stored_selection = RequestCollectionSelection.from_mapping(
+                    _worker_json_object(collection["selector_json"])
+                )
+                recomputed_selection_digest = request_collection_selection_digest(
+                    collection_id=collection_id,
+                    payload_sha256=expected_payload_sha256,
+                    binding_id=binding_id,
+                    allowed_origins=stored_origins,
+                    selector=stored_selection,
+                    replay_policy=replay_policy,
+                    environment_sha256=stored_environment_sha256,
+                )
+                if (
+                    str(collection["selection_digest"] or "").lower()
+                    != expected_selection_digest
+                    or recomputed_selection_digest != expected_selection_digest
+                ):
+                    raise ReplayExecutionError("request collection selection changed")
                 context = _worker_json_object(run["context_pack"])
                 hunt_policy = _worker_json_object(run["policy_json"])
                 existing_reservation = await store.load(
@@ -13732,6 +13821,37 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
         ).hexdigest()
         if payload_digest != expected_payload_sha256:
             raise ReplayExecutionError("decrypted request collection failed its integrity check")
+        if expected_environment_id:
+            raw_environment = str(
+                decrypt_secret(collection["encrypted_environment"]) or ""
+            )
+            if not raw_environment or raw_environment.startswith("enc:fernet:"):
+                raise ReplayExecutionError(
+                    "request collection environment could not be decrypted on the worker"
+                )
+            try:
+                environment = json.loads(raw_environment)
+            except json.JSONDecodeError as exc:
+                raise ReplayExecutionError(
+                    "request collection environment payload is invalid"
+                ) from exc
+            if not isinstance(environment, Mapping):
+                raise ReplayExecutionError(
+                    "request collection environment payload is not an object"
+                )
+            environment_digest = hashlib.sha256(
+                json.dumps(
+                    environment,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            ).hexdigest()
+            if environment_digest != expected_environment_sha256:
+                raise ReplayExecutionError(
+                    "decrypted request collection environment failed its integrity check"
+                )
+            payload = {**dict(payload), "environment": dict(environment)}
 
         target_context = (
             dict(context.get("target") or {})
@@ -13740,11 +13860,18 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
         origins = tuple(str(item) for item in target_context.get("origins") or () if str(item))
         target_url = str(target_context.get("url") or "")
         parsed_target = urllib.parse.urlsplit(target_url)
+        hunt_origins = tuple(
+            str(item) for item in origins if str(item)
+        )
+        if any(origin not in hunt_origins for origin in queued_allowed_origins):
+            raise ReplayExecutionError(
+                "request collection binding exceeds the Hunt target origins"
+            )
         target = TargetBinding(
             target_id=str(run["target_id"]),
             target_kind=str(run["target_kind"]),
             canonical_host=parsed_target.hostname,
-            allowed_origins=origins,
+            allowed_origins=queued_allowed_origins,
             allowed_addresses=tuple(
                 str(item) for item in context.get("authorized_target_addresses") or () if str(item)
             ),
@@ -13755,6 +13882,25 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
             environment=str(target_context.get("environment") or "unknown"),
             scope_receipt_id=str(hunt_policy.get("scope_receipt_id") or "") or None,
         )
+        stored_runtime_selector = RequestSelector(
+            request_ids=stored_selection.request_ids,
+            folders=stored_selection.folders,
+            methods=stored_selection.methods,
+            path_regex=stored_selection.path_regex,
+            tags=stored_selection.tags,
+            safe_methods_only=True,
+            limit=min(stored_selection.max_requests, 2_000),
+        )
+        allowed_request_ids = {
+            str(item.get("id") or "")
+            for item in select_requests(payload, stored_runtime_selector)
+            if item.get("id")
+        }
+        queued_request_ids = set(selector.request_ids)
+        if not queued_request_ids or not queued_request_ids.issubset(allowed_request_ids):
+            raise ReplayExecutionError(
+                "queued replay requests exceed the saved collection selection"
+            )
         plan = build_selected_replay_plan(
             payload,
             selector,
@@ -14022,6 +14168,7 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
     except (
         ReplayExecutionError,
         RequestReplayError,
+        RequestCollectionContractError,
         CredentialReferenceError,
         CredentialResolutionError,
         ReservationConflict,

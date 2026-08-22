@@ -510,6 +510,11 @@ def _openapi_requests(
                 "body": body,
                 "body_mode": content_type or "none",
                 "auth_type": auth_type,
+                "tags": [
+                    str(tag).strip()[:120]
+                    for tag in list(operation.get("tags") or [])[:200]
+                    if str(tag).strip()
+                ],
                 "has_sensitive_material": any(_SENSITIVE_NAME_RE.search(key) for key in headers),
                 "unresolved_variables": sorted(set(unresolved)),
                 "error": body_error,

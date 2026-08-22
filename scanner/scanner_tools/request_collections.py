@@ -124,6 +124,7 @@ class RequestSelector:
     folders: tuple[str, ...] = ()
     methods: tuple[str, ...] = ()
     path_regex: str | None = None
+    tags: tuple[str, ...] = ()
     safe_methods_only: bool = True
     limit: int = REQUEST_COLLECTION_REPLAY_DEFAULT
     _path_pattern: re.Pattern[str] | None = field(default=None, init=False, repr=False, compare=False)
@@ -137,6 +138,12 @@ class RequestSelector:
         if any(not re.fullmatch(r"[A-Z]{3,10}", method) for method in methods):
             raise ValueError("selector methods are invalid")
         object.__setattr__(self, "methods", methods)
+        tags = tuple(dict.fromkeys(
+            str(item).strip()[:120] for item in self.tags if str(item).strip()
+        ))
+        if len(tags) > 200:
+            raise ValueError("selector accepts at most 200 tags")
+        object.__setattr__(self, "tags", tags)
         if self.path_regex:
             object.__setattr__(self, "_path_pattern", _compile_safe_path_regex(self.path_regex))
 
@@ -198,6 +205,11 @@ def redacted_index(requests: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]
             "normalized_path": str(request.get("url_template") or request.get("url") or "")[:2_000],
             "body_mode": str(request.get("body_mode") or "none")[:80],
             "auth_type": str(request.get("auth_type") or "none")[:160],
+            "tags": [
+                str(tag).strip()[:120]
+                for tag in list(request.get("tags") or [])[:200]
+                if str(tag).strip()
+            ],
             "safe_method": bool(request.get("safe_method", method in SAFE_METHODS)),
             "supported": bool(request.get("supported", True)),
         })
@@ -232,6 +244,7 @@ def select_requests(
     ids = set(selector.request_ids)
     folders = set(selector.folders)
     methods = set(selector.methods)
+    tags = set(selector.tags)
     selected: list[dict[str, Any]] = []
     for request in resolved:
         method = str(request.get("method") or "GET").upper()
@@ -242,6 +255,10 @@ def select_requests(
         if folders and str(request.get("folder") or "") not in folders:
             continue
         if methods and method not in methods:
+            continue
+        if tags and not tags.intersection(
+            str(tag) for tag in request.get("tags") or []
+        ):
             continue
         candidate_path = str(request.get("url_template") or request.get("url") or "")
         if not selector.matches_path(candidate_path):
