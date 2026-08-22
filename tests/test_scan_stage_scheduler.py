@@ -113,7 +113,8 @@ def test_scheduler_fails_closed_on_missing_enabled_runner():
         asyncio.run(execute_scan_stage_graph(context, {}))
 
     assert failure.value.stage_name == "bind_target"
-    assert failure.value.history == ()
+    assert failure.value.history[0]["status"] == "failed"
+    assert failure.value.history[0]["reason"] == "stage_runner_missing"
 
 
 def test_scheduler_stops_before_traffic_when_cancelled():
@@ -170,3 +171,53 @@ def test_scheduler_never_copies_exception_text_into_public_history():
     row = failure.value.history[-1]
     assert row["reason"] == "stage_adapter_error:RuntimeError"
     assert "opaque-secret" not in str(row)
+
+
+def test_scheduler_checkpoints_each_public_stage_without_private_values():
+    context = _context(active=False)
+    checkpoints = []
+
+    def runner(name):
+        async def run(_context):
+            return ScanStageRunResult(
+                output={"private_value": f"secret-{name}"},
+                capability_names=(f"capability.{name}",),
+            )
+        return run
+
+    async def checkpoint(row, history_digest):
+        checkpoints.append((dict(row), history_digest))
+
+    result = asyncio.run(execute_scan_stage_graph(
+        context,
+        {name: runner(name) for name in NATIVE_SCAN_STAGES},
+        checkpoint=checkpoint,
+    ))
+
+    assert len(checkpoints) == len(NATIVE_SCAN_STAGES)
+    assert checkpoints[-1][1] == result["history_digest"]
+    assert all(len(digest) == 64 for _row, digest in checkpoints)
+    assert all("private_value" in row["output_keys"] for row, _digest in checkpoints if row["enabled"])
+    assert "secret-" not in str(checkpoints)
+
+
+def test_scheduler_checkpoints_failure_before_stopping():
+    context = _context(active=True)
+    checkpoints = []
+
+    async def fail(_context):
+        raise RuntimeError("secret failure detail")
+
+    async def checkpoint(row, history_digest):
+        checkpoints.append((dict(row), history_digest))
+
+    with pytest.raises(ScanStageExecutionError):
+        asyncio.run(execute_scan_stage_graph(
+            context,
+            {"bind_target": fail},
+            checkpoint=checkpoint,
+        ))
+
+    assert checkpoints[0][0]["status"] == "failed"
+    assert checkpoints[0][0]["reason"] == "stage_adapter_error:RuntimeError"
+    assert "secret failure detail" not in str(checkpoints)

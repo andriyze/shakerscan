@@ -78,6 +78,14 @@ class _Connection:
         return _Transaction()
 
     async def fetchrow(self, query, *_args):
+        if "INSERT INTO scan_stage_checkpoints" in query:
+            return {
+                "scan_id": _args[0],
+                "job_id": _args[1],
+                "stage_index": _args[2],
+                "stage_name": _args[3],
+                "status": _args[4],
+            }
         if "policy_json" in query:
             return dict(self.row)
         if "budget_used_json" in query:

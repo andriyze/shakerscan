@@ -94,6 +94,7 @@ class ScanStageContext:
 
 
 ScanStageRunner = Callable[[ScanStageContext], Awaitable[ScanStageRunResult]]
+ScanStageCheckpoint = Callable[[Mapping[str, Any], str], Awaitable[None]]
 
 
 def _history_digest(rows: list[dict[str, Any]]) -> str:
@@ -112,6 +113,7 @@ async def execute_scan_stage_graph(
     runners: Mapping[str, ScanStageRunner],
     *,
     cancel_requested: Callable[[], bool] | None = None,
+    checkpoint: ScanStageCheckpoint | None = None,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> dict[str, Any]:
     """Execute every enabled stage exactly once in the canonical fixed order."""
@@ -130,7 +132,7 @@ async def execute_scan_stage_graph(
         enabled = bool(stage["enabled"])
         if not enabled:
             context.outputs[name] = {}
-            history.append({
+            row = {
                 "index": index,
                 "name": name,
                 "enabled": False,
@@ -140,7 +142,10 @@ async def execute_scan_stage_graph(
                 "capability_names": [],
                 "output_keys": [],
                 "elapsed_ms": 0,
-            })
+            }
+            history.append(row)
+            if checkpoint is not None:
+                await checkpoint(dict(row), _history_digest(history))
             continue
 
         if cancel_requested is not None and cancel_requested():
@@ -156,6 +161,8 @@ async def execute_scan_stage_graph(
                 "elapsed_ms": 0,
             }
             history.append(row)
+            if checkpoint is not None:
+                await checkpoint(dict(row), _history_digest(history))
             raise ScanStageCancelled(
                 f"canonical Scan cancelled before stage {name}",
                 stage_name=name,
@@ -164,6 +171,20 @@ async def execute_scan_stage_graph(
 
         runner = runners.get(name)
         if runner is None:
+            row = {
+                "index": index,
+                "name": name,
+                "enabled": True,
+                "status": "failed",
+                "reason": "stage_runner_missing",
+                "adapter": None,
+                "capability_names": [],
+                "output_keys": [],
+                "elapsed_ms": 0,
+            }
+            history.append(row)
+            if checkpoint is not None:
+                await checkpoint(dict(row), _history_digest(history))
             raise ScanStageExecutionError(
                 f"enabled canonical Scan stage has no runner: {name}",
                 stage_name=name,
@@ -178,7 +199,7 @@ async def execute_scan_stage_graph(
             raise
         except Exception as exc:
             finished = monotonic()
-            history.append({
+            row = {
                 "index": index,
                 "name": name,
                 "enabled": True,
@@ -188,7 +209,10 @@ async def execute_scan_stage_graph(
                 "capability_names": [],
                 "output_keys": [],
                 "elapsed_ms": _elapsed_ms(started, finished),
-            })
+            }
+            history.append(row)
+            if checkpoint is not None:
+                await checkpoint(dict(row), _history_digest(history))
             raise ScanStageExecutionError(
                 f"canonical Scan stage failed: {name}",
                 stage_name=name,
@@ -198,13 +222,27 @@ async def execute_scan_stage_graph(
         private_output = dict(result.output)
         output_keys = [str(key) for key in private_output]
         if any(not _PUBLIC_TOKEN_RE.fullmatch(key) for key in output_keys):
+            row = {
+                "index": index,
+                "name": name,
+                "enabled": True,
+                "status": "failed",
+                "reason": "stage_output_key_invalid",
+                "adapter": None,
+                "capability_names": [],
+                "output_keys": [],
+                "elapsed_ms": _elapsed_ms(started, finished),
+            }
+            history.append(row)
+            if checkpoint is not None:
+                await checkpoint(dict(row), _history_digest(history))
             raise ScanStageExecutionError(
                 f"canonical Scan stage emitted an invalid output key: {name}",
                 stage_name=name,
                 history=tuple(history),
             )
         context.outputs[name] = private_output
-        history.append({
+        row = {
             "index": index,
             "name": name,
             "enabled": True,
@@ -214,7 +252,10 @@ async def execute_scan_stage_graph(
             "capability_names": list(result.capability_names),
             "output_keys": sorted(output_keys),
             "elapsed_ms": _elapsed_ms(started, finished),
-        })
+        }
+        history.append(row)
+        if checkpoint is not None:
+            await checkpoint(dict(row), _history_digest(history))
         if result.status == "cancelled":
             raise ScanStageCancelled(
                 f"canonical Scan cancelled during stage {name}",

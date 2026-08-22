@@ -141,6 +141,7 @@ from scan.stages import (
     ScanStageRunResult,
     execute_scan_stage_graph,
 )
+from scan.stage_store import PostgresScanStageCheckpointStore
 from scan.jobs import (
     CanonicalScanJob,
     CanonicalScanJobError,
@@ -11494,6 +11495,24 @@ async def _execute_reserved_deterministic_scan(
         )
 
     try:
+        checkpoint_store = PostgresScanStageCheckpointStore()
+        checkpoint_worker_id = _worker_runtime_identity() or f"worker:{job_id[:8]}"
+
+        async def persist_stage_checkpoint(
+            stage_row: Mapping[str, Any], history_digest: str,
+        ) -> None:
+            async with db_pool.acquire() as conn:
+                await checkpoint_store.persist(
+                    conn,
+                    scan_id=scan_id,
+                    job_id=job_id,
+                    execution_plan_digest=execution.execution_plan.digest,
+                    target_binding_digest=execution.target_binding.digest,
+                    history_digest=history_digest,
+                    stage_row=stage_row,
+                    worker_id=checkpoint_worker_id,
+                )
+
         stage_execution = await execute_scan_stage_graph(
             context,
             {
@@ -11507,6 +11526,7 @@ async def _execute_reserved_deterministic_scan(
                 "finalize_evidence": finalize_evidence_stage,
             },
             cancel_requested=lambda: _scan_cancel_requested(scan_id),
+            checkpoint=persist_stage_checkpoint,
         )
     except ScanStageCancelled as exc:
         raise ValueError("Cancelled by user") from exc

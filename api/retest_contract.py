@@ -24,6 +24,7 @@ from runtime.credential_migration import (
 )
 from runtime.reservation_store import PostgresBudgetReservationStore
 from runtime.request_collection_store import PostgresRequestCollectionStore
+from scan.stage_store import PostgresScanStageCheckpointStore
 
 RETEST_QUEUE_SCHEMA_VERSION = 1
 ASM_ENDPOINT_FINGERPRINT_MIGRATION = "asm_endpoint_fingerprint_v2"
@@ -952,6 +953,11 @@ async def run_schema_migrations(pool) -> None:
             # control-plane schema so rolling API and worker starts cannot observe a half-created
             # ledger.
             await PostgresBudgetReservationStore().ensure_schema(conn)
+
+            # The fixed Scan graph records content-free stage outcomes after each
+            # stage so worker loss does not erase trustworthy partial orchestration
+            # state. Capability observations remain in their evidence/receipt stores.
+            await PostgresScanStageCheckpointStore().ensure_schema(conn)
 
             # Scan and Hunt share one encrypted, target-bound credential system.  Install it
             # under the same startup lock so neither API nor workers can observe profiles
