@@ -4599,7 +4599,7 @@ def test_scan_plan_coverage_family_dynamic_respects_explicit_bola_focus(monkeypa
 
 def test_exploit_batch_without_endpoint_telemetry_marks_partial_not_tested(monkeypatch):
     endpoint_id = "11111111-1111-1111-1111-111111111111"
-    calls = {"mark_partial": [], "record": []}
+    calls = {"mark_partial": [], "record": [], "reserved_scan": None}
 
     async def fake_claim_test_batch(conn, target_id, **kwargs):
         return [
@@ -4614,7 +4614,8 @@ def test_exploit_batch_without_endpoint_telemetry_marks_partial_not_tested(monke
             }
         ]
 
-    async def fake_run_scan(target, options, *, scan_id=None, job_id=None):
+    async def fake_reserved_scan(target, options, *, scan_id=None, job_id=None):
+        calls["reserved_scan"] = {"scan_id": scan_id, "job_id": job_id}
         assert options["custom_endpoints"] == ["GET /api/users?id=1"]
         return {
             "target": target,
@@ -4642,7 +4643,7 @@ def test_exploit_batch_without_endpoint_telemetry_marks_partial_not_tested(monke
     monkeypatch.setattr(worker, "db_pool", _FakeAsmPool())
     monkeypatch.setattr(worker, "get_redis", lambda: _FakeJobRedis())
     monkeypatch.setattr(worker, "save_result_file", lambda result, job_id: f"/tmp/{job_id}.json")
-    monkeypatch.setattr(worker, "run_scan", fake_run_scan)
+    monkeypatch.setattr(worker, "_execute_reserved_deterministic_scan", fake_reserved_scan)
     monkeypatch.setattr(worker.asm_inventory, "claim_test_batch", fake_claim_test_batch)
     monkeypatch.setattr(worker.asm_inventory, "mark_partial", fake_mark_partial)
     monkeypatch.setattr(worker.asm_inventory, "mark_tested", fake_mark_tested)
@@ -4667,6 +4668,10 @@ def test_exploit_batch_without_endpoint_telemetry_marks_partial_not_tested(monke
     assert calls["mark_partial"] == [
         {"endpoint_ids": [endpoint_id], "verdict": "missing_endpoint_telemetry"}
     ]
+    assert calls["reserved_scan"] == {
+        "scan_id": "22222222-2222-2222-2222-222222222222",
+        "job_id": "job-no-telemetry",
+    }
     assert len(calls["record"]) == 1
     record = calls["record"][0]
     assert record["endpoint_ids"] == [endpoint_id]

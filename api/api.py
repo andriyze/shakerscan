@@ -426,6 +426,7 @@ import agent_tools
 import agent_budget
 try:
     from scan.contracts import (
+        ResolvedScanContract,
         SCAN_AUTHENTICATION_KEYS,
         bind_scan_scope_receipt,
         normalize_scan_authentication,
@@ -460,6 +461,7 @@ try:
     )
 except ModuleNotFoundError:
     from api.scan.contracts import (
+        ResolvedScanContract,
         SCAN_AUTHENTICATION_KEYS,
         bind_scan_scope_receipt,
         normalize_scan_authentication,
@@ -17174,7 +17176,7 @@ async def promote_model_intake_submission(
 async def _verify_model_intake_admission_v2_request(
     request: ModelAdmissionV2VerifyRequest,
     http_request: Request,
-) -> tuple[dict[str, Any], Any]:
+) -> tuple[dict[str, Any], ResolvedScanContract]:
     _model_intake_authenticated_subject(http_request)
     async with db_pool.acquire() as conn:
         anchors = await conn.fetch(
@@ -61885,6 +61887,93 @@ async def _confirm_asm_queue_handoff(
         raise
 
 
+async def _canonical_asm_scan_options(
+    *,
+    target_id: str,
+    target_url: str,
+    base_options: Mapping[str, Any] | None,
+    check_family: str | None,
+) -> tuple[dict[str, Any], Any]:
+    """Resolve one internal ASM test batch to canonical Scan V2 authority.
+
+    Continuous ASM chooses a bounded endpoint subset, but that selection does not
+    create another scanner identity.  The resulting target traffic is still one
+    deterministic Scan action and therefore needs the same immutable policy,
+    budget, target binding, and durable reservation contract as an interactive
+    Scan submission.
+    """
+    options = dict(base_options or {})
+    existing_policy = (
+        dict(options.get("scan_policy") or {})
+        if isinstance(options.get("scan_policy"), Mapping)
+        else {}
+    )
+    family = _normalize_asm_check_family(check_family)
+    include_families = list(existing_policy.get("include_families") or ())
+    if family and family != "all":
+        include_families = [family]
+    approval_receipt_id = str(
+        options.get("approval_receipt_id")
+        or existing_policy.get("approval_receipt_id")
+        or ""
+    ).strip() or None
+    contract = resolve_scan_contract(
+        budget_profile=options.get("budget_profile"),
+        policy={
+            "active_testing": True,
+            # ASM has no first-class state-changing permission in its request
+            # contract, so an old target option or stale receipt can never grant it.
+            "allow_state_changing_http": False,
+            "network_discovery": False,
+            "subdomain_discovery": False,
+            "include_families": include_families,
+            "exclude_families": list(existing_policy.get("exclude_families") or ()),
+        },
+        approval_receipt_id=approval_receipt_id,
+    )
+    contract = bind_scan_scope_receipt(
+        contract,
+        str(
+            options.get("scope_receipt_id")
+            or existing_policy.get("scope_receipt_id")
+            or ""
+        ).strip() or None,
+    )
+    options.update(contract.option_metadata())
+    options.update({
+        "scan_type": contract.execution_scan_type,
+        "active": True,
+        "network_discovery": False,
+        "subfinder": False,
+        "budget_profile": contract.budget_profile,
+    })
+    target_guard = await _freeze_scan_target_binding(
+        target_id=target_id,
+        target_kind="web",
+        target_url=target_url,
+        scope_receipt_id=contract.policy.scope_receipt_id,
+        scheme_inferred=False,
+        existing_guard=(
+            options.get("runtime_scope_guard")
+            if isinstance(options.get("runtime_scope_guard"), Mapping)
+            else None
+        ),
+        subject="ASM Scan target",
+    )
+    options["runtime_scope_guard"] = target_guard
+    options["_canonical_target_binding"] = TargetBinding(
+        target_id=str(target_id),
+        target_kind="web",
+        canonical_host=target_guard.get("canonical_host"),
+        allowed_origins=tuple(target_guard.get("allowed_origins") or ()),
+        allowed_addresses=tuple(target_guard.get("allowed_addresses") or ()),
+        allowed_root_domains=tuple(target_guard.get("allowed_root_domains") or ()),
+        environment=str(target_guard.get("environment") or "unknown"),
+        scope_receipt_id=contract.policy.scope_receipt_id,
+    ).canonical_dict()
+    return options, contract
+
+
 async def _enqueue_asm_exploit_batch(
     conn, r, target_id: str, target_url: str, base_opts: dict,
     *, batch_size: int, stale_days: int, exploit_depth: bool,
@@ -61897,9 +61986,15 @@ async def _enqueue_asm_exploit_batch(
     POST /asm/test and the continuous dispatcher."""
     scan_id = str(uuid.uuid4())
     job_id = str(uuid.uuid4())
-    opts = _apply_asm_check_family(base_opts or {}, check_family)
-    opts["run_kind"] = "asm_batch"
     family = _normalize_asm_check_family(check_family)
+    opts = _apply_asm_check_family(base_opts or {}, family)
+    opts, scan_contract = await _canonical_asm_scan_options(
+        target_id=target_id,
+        target_url=target_url,
+        base_options=opts,
+        check_family=family,
+    )
+    opts["run_kind"] = "asm_batch"
     endpoint_filter = _validate_asm_endpoint_filter_value(endpoint_filter)
     _enforce_asm_family_preconditions(family, opts, exploit_depth=exploit_depth)
     if endpoint_filter:
@@ -61931,11 +62026,20 @@ async def _enqueue_asm_exploit_batch(
         },
     )
     await conn.execute(
-        """INSERT INTO scans (id, target_id, target_url, job_id, status, options, scan_type, scan_role, campaign_id)
-           VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, $8)""",
+        """INSERT INTO scans (
+               id, target_id, target_url, job_id, status, options, scan_type,
+               scan_role, campaign_id, scan_generation, policy_json, budget_json,
+               coverage_status, coverage_json
+           ) VALUES (
+               $1, $2, $3, $4, 'pending', $5, $6, $7, $8,
+               'v2', $9, $10, 'pending', $11
+           )""",
         uuid.UUID(scan_id), uuid.UUID(target_id), target_url, job_id,
-        json.dumps(persisted_opts), (opts.get("scan_type") or "smart"),
+        json.dumps(persisted_opts), "scan",
         asm_inventory.ASM_BATCH_ROLE, uuid.UUID(campaign_id),
+        json.dumps(scan_contract.execution_plan.canonical_dict()["policy"]),
+        json.dumps(scan_contract.execution_plan.canonical_dict()["budget"]),
+        json.dumps({"status": "pending", "reasons": []}),
     )
     job_payload = {
         "type": asm_inventory.EXPLOIT_BATCH_JOB_TYPE,

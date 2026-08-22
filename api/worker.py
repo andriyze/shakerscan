@@ -15417,7 +15417,9 @@ async def process_exploit_batch_job(job_data: dict):
         try:
             scan_opts = await _hydrate_generic_scan_credentials(scan_opts, scan_id)
             scan_opts = await _hydrate_managed_scan_credentials(scan_opts, scan_id)
-            result = await run_scan(target, scan_opts, scan_id=scan_id, job_id=job_id)
+            result = await _execute_reserved_deterministic_scan(
+                target, scan_opts, scan_id=scan_id, job_id=job_id,
+            )
         except Exception as e:
             result = {'target': target, 'error': str(e), 'result': {'score': None, 'grade': None}, 'findings': []}
         findings = result.get('findings', []) or []

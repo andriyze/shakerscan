@@ -2563,10 +2563,30 @@ async def _fake_create_asm_campaign(*_args, **_kwargs):
     return "22222222-2222-4222-8222-222222222222"
 
 
+def _freeze_test_asm_target(monkeypatch):
+    async def freeze(**kwargs):
+        return {
+            "target_id": str(kwargs["target_id"]),
+            "target_kind": "web",
+            "canonical_host": "example.test",
+            "allowed_origins": ["https://example.test"],
+            "allowed_addresses": ["192.0.2.10"],
+            "allowed_root_domains": ["example.test"],
+            "environment": "test",
+            "scope_receipt_id": kwargs.get("scope_receipt_id"),
+            "requires_runtime_destination_check": True,
+            "requires_runtime_dns_check": True,
+            "address_binding_source": "test_snapshot",
+        }
+
+    monkeypatch.setattr(api_module, "_freeze_scan_target_binding", freeze)
+
+
 def test_enqueue_asm_exploit_batch_fails_committed_scan_when_queue_handoff_fails(monkeypatch):
     conn = _AsmEnqueueConn()
     redis_client = _FailingRedis()
     monkeypatch.setattr(api_module.asm_inventory, "create_campaign", _fake_create_asm_campaign)
+    _freeze_test_asm_target(monkeypatch)
 
     with pytest.raises(RuntimeError, match="redis down"):
         asyncio.run(api_module._enqueue_asm_exploit_batch(
@@ -2591,7 +2611,18 @@ def test_enqueue_asm_exploit_batch_fails_committed_scan_when_queue_handoff_fails
         insert[1][0],
     )
     assert "other.campaign_id=campaign.id AND other.id<>$2" in campaign_failed[0]
-    assert json.loads(insert[1][4])["queue_handoff_confirmed"] is False
+    persisted_options = json.loads(insert[1][4])
+    assert persisted_options["queue_handoff_confirmed"] is False
+    assert persisted_options["scan_generation"] == "v2"
+    assert persisted_options["scan_engine"] == "scan"
+    assert persisted_options["scan_type"] == "full"
+    assert persisted_options["_canonical_target_binding"]["allowed_addresses"] == [
+        "192.0.2.10"
+    ]
+    assert json.loads(insert[1][8])["active_testing"] is True
+    assert json.loads(insert[1][8])["allow_state_changing_http"] is False
+    assert json.loads(insert[1][9])["max_http_requests"] > 0
+    assert "scan_generation" in insert[0]
     assert len(redis_client.rpush_calls) == 1
 
 
@@ -2651,6 +2682,8 @@ def test_asm_enqueue_persists_research_dispatch_correlation_before_queue_handoff
     conn = _AsmEnqueueConn()
     redis_client = _RecordingRedis()
     monkeypatch.setattr(api_module.asm_inventory, "create_campaign", _fake_create_asm_campaign)
+    if kind == "exploit":
+        _freeze_test_asm_target(monkeypatch)
     correlation = (
         "research_episode:11111111-1111-4111-8111-111111111111:"
         "decision:22222222-2222-4222-8222-222222222222"
@@ -2716,13 +2749,15 @@ def test_enqueue_asm_confirmation_ack_loss_uses_exact_fresh_readback(
             return {
                 "status": readback_status,
                 "job_id": insert[1][3],
-                "campaign_id": insert[1][-1],
+                "campaign_id": insert[1][7] if kind == "exploit" else insert[1][-1],
                 "options": options,
             }
 
     redis_client = _RecordingRedis()
     monkeypatch.setattr(api_module.asm_inventory, "create_campaign", _fake_create_asm_campaign)
     monkeypatch.setattr(api_module, "db_pool", _FakePool(ReadbackConn()))
+    if kind == "exploit":
+        _freeze_test_asm_target(monkeypatch)
 
     if kind == "exploit":
         result = asyncio.run(api_module._enqueue_asm_exploit_batch(
@@ -2763,6 +2798,8 @@ def test_enqueue_asm_confirmation_write_failure_fails_scan_and_campaign(monkeypa
     redis_client = _RecordingRedis()
     monkeypatch.setattr(api_module.asm_inventory, "create_campaign", _fake_create_asm_campaign)
     monkeypatch.setattr(api_module, "db_pool", None)
+    if kind == "exploit":
+        _freeze_test_asm_target(monkeypatch)
 
     with pytest.raises(RuntimeError, match="confirmation write failed"):
         if kind == "exploit":
