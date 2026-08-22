@@ -26,7 +26,15 @@ except ImportError:
 from .common import (
     detect_spa_catch_all, get_auth_curl_args, normalize_hash_route_url, run, run_streaming,
 )
-from .http_scanner import HAS_PLAYWRIGHT, _pw
+from .http_scanner import (
+    HAS_PLAYWRIGHT,
+    _browser_capture_request_is_safe,
+    _browser_capture_url,
+    _browser_origin,
+    _guard_browser_interaction_request,
+    _harden_passive_browser_context,
+    _pw,
+)
 try:
     from ..manifests import DiscoveryDeadlines, EndpointManifest, normalize_endpoint
 except ImportError:  # top-level scanner_tools execution inside the scanner image
@@ -1111,10 +1119,30 @@ async def browser_crawl_fallback(url: str) -> list[str]:
     urls: list[str] = []
     if not HAS_PLAYWRIGHT:
         return urls
+    allowed_origin = _browser_origin(url)
     try:
         async with _pw() as browser:
-            ctx = await browser.new_context(ignore_https_errors=True, user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            ctx = await browser.new_context(
+                ignore_https_errors=True,
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                service_workers="block",
+            )
             page = await ctx.new_page()
+            interaction_guard: dict[str, Any] = {
+                "enabled": True,
+                "allowed_origin": allowed_origin,
+                "blocked_count": 0,
+                "blocked_samples": [],
+                "cross_origin_blocked_count": 0,
+                "cross_origin_blocked_samples": [],
+                "sample_truncated": False,
+            }
+
+            async def guard_request(route, request) -> None:
+                await _guard_browser_interaction_request(route, request, interaction_guard)
+
+            await ctx.route("**/*", guard_request)
+            await _harden_passive_browser_context(ctx)
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
             links = await page.evaluate(
                 """
@@ -1140,7 +1168,13 @@ async def browser_crawl_fallback(url: str) -> list[str]:
                 }
                 """
             )
-            urls = links[:200] if isinstance(links, list) else []
+            urls = [
+                _browser_capture_url(link)
+                for link in (links if isinstance(links, list) else [])
+                if _browser_capture_request_is_safe(
+                    url=link, method="GET", allowed_origin=allowed_origin,
+                )
+            ][:200]
             await ctx.close()
     except Exception:
         pass

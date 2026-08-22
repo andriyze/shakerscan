@@ -100,23 +100,109 @@ def _browser_navigation_url_is_safe(value: str) -> bool:
     )
 
 
+def _browser_origin(value: str) -> str | None:
+    parsed = urllib.parse.urlsplit(str(value or ""))
+    scheme = parsed.scheme.lower()
+    hostname = (parsed.hostname or "").lower()
+    if scheme not in {"http", "https"} or not hostname:
+        return None
+    port = parsed.port
+    if port is None:
+        port = 443 if scheme == "https" else 80
+    return f"{scheme}://{hostname}:{port}"
+
+
+def _browser_capture_url(value: str) -> str:
+    """Keep endpoint shape while discarding query values and fragments."""
+    parsed = urllib.parse.urlsplit(str(value or ""))
+    query_keys = sorted({key for key, _value in urllib.parse.parse_qsl(
+        parsed.query, keep_blank_values=True,
+    ) if key})
+    safe_query = urllib.parse.urlencode([(key, "") for key in query_keys])
+    return urllib.parse.urlunsplit((
+        parsed.scheme,
+        parsed.netloc,
+        parsed.path,
+        safe_query,
+        "",
+    ))
+
+
+def _browser_capture_request_is_safe(
+    *, url: str, method: str, allowed_origin: str | None,
+) -> bool:
+    return bool(
+        allowed_origin
+        and _browser_origin(url) == allowed_origin
+        and _browser_interaction_method_allowed(method)
+    )
+
+
+def _browser_capture_response_header(name: str, value: Any) -> str:
+    """Retain security-header structure without retaining credentials."""
+    header_name = str(name or "").strip().lower()
+    header_value = str(value if value is not None else "")
+    if header_name == "set-cookie":
+        sanitized: list[str] = []
+        for raw_cookie in header_value.splitlines() or [header_value]:
+            first, separator, attributes = raw_cookie.partition(";")
+            cookie_name = first.split("=", 1)[0].strip() or "cookie"
+            safe_cookie = f"{cookie_name}=<redacted>"
+            if separator:
+                safe_cookie += f";{attributes}"
+            sanitized.append(safe_cookie)
+        return "\n".join(sanitized)
+    if (
+        header_name in {
+            "authorization", "cookie", "proxy-authorization", "www-authenticate",
+        }
+        or any(marker in header_name for marker in ("token", "secret", "api-key", "auth-key"))
+    ):
+        return "<redacted>"
+    return header_value
+
+
+async def _harden_passive_browser_context(ctx: Any) -> None:
+    """Disable browser channels that cannot provide target-bound passive evidence."""
+    await ctx.add_init_script("""
+        (() => {
+          const deny = () => { throw new Error('Blocked by passive browser policy'); };
+          Object.defineProperty(window, 'WebSocket', {value: class { constructor() { deny(); } }});
+          Object.defineProperty(window, 'EventSource', {value: class { constructor() { deny(); } }});
+          Object.defineProperty(window, 'open', {value: () => null});
+          if (navigator && typeof navigator.sendBeacon === 'function') {
+            Object.defineProperty(navigator, 'sendBeacon', {value: () => false});
+          }
+        })();
+    """)
+
+
 async def _guard_browser_interaction_request(route: Any, request: Any, guard: dict[str, Any]) -> None:
     """Route one request while enforcing the passive interaction method boundary."""
     method = str(request.method or "").upper()
+    allowed_origin = guard.get("allowed_origin")
+    request_origin = _browser_origin(str(request.url or ""))
+    if allowed_origin and request_origin != allowed_origin:
+        guard["cross_origin_blocked_count"] = int(
+            guard.get("cross_origin_blocked_count") or 0
+        ) + 1
+        samples = guard.setdefault("cross_origin_blocked_samples", [])
+        if len(samples) < 20:
+            samples.append({
+                "method": method,
+                "url": _browser_capture_url(str(request.url or "")).split("?", 1)[0],
+            })
+        else:
+            guard["sample_truncated"] = True
+        await route.abort("blockedbyclient")
+        return
     if guard.get("enabled", True) and not _browser_interaction_method_allowed(method):
         guard["blocked_count"] = int(guard.get("blocked_count") or 0) + 1
         samples = guard.setdefault("blocked_samples", [])
         if len(samples) < 20:
-            parsed = urllib.parse.urlsplit(str(request.url or ""))
             samples.append({
                 "method": method,
-                "url": urllib.parse.urlunsplit((
-                    parsed.scheme,
-                    parsed.netloc,
-                    parsed.path,
-                    "",
-                    "",
-                )),
+                "url": _browser_capture_url(str(request.url or "")).split("?", 1)[0],
             })
         else:
             guard["sample_truncated"] = True
@@ -407,9 +493,11 @@ async def browser_fetch(
     max_links_per_page: int = 40,
     seed_urls: list[str] | None = None
 ) -> dict:
+    allowed_origin = _browser_origin(url)
+
     async def curl_fallback(reason: str = "unknown"):
         print(f"[browser_fetch] Using curl fallback ({reason}) - no network capture available", file=sys.stderr)
-        out, err, rc = await run(["curl", "-sS", "-I", "-L", "-k", url])
+        out, err, rc = await run(["curl", "-sS", "-I", "-k", url])
         headers = {}
         status = None
         if out:
@@ -419,7 +507,8 @@ async def browser_fetch(
                 for line in lines[1:]:
                     if ":" in line:
                         k, v = line.split(":", 1)
-                        headers[k.strip().lower()] = [v.strip()]
+                        name = k.strip().lower()
+                        headers[name] = [_browser_capture_response_header(name, v.strip())]
         if not status:
             status = "HTTP/? 0"
         return {
@@ -437,7 +526,9 @@ async def browser_fetch(
             "crawl_stats": None,
             "interaction_safety": {
                 "unsafe_methods_blocked": 0,
+                "cross_origin_requests_blocked": 0,
                 "blocked_request_samples": [],
+                "cross_origin_blocked_samples": [],
                 "sample_truncated": False,
                 "allowed_methods": sorted(_BROWSER_SAFE_INTERACTION_METHODS),
             },
@@ -455,6 +546,7 @@ async def browser_fetch(
             ctx_kwargs: dict[str, Any] = {
                 "ignore_https_errors": True,
                 "user_agent": "Mozilla/5.0",
+                "service_workers": "block",
             }
             auth_cookies: list[dict[str, Any]] = []
             if auth_session:
@@ -488,8 +580,11 @@ async def browser_fetch(
             interaction_guard: dict[str, Any] = {
                 "enabled": True,
                 "active": False,
+                "allowed_origin": allowed_origin,
                 "blocked_count": 0,
                 "blocked_samples": [],
+                "cross_origin_blocked_count": 0,
+                "cross_origin_blocked_samples": [],
                 "sample_truncated": False,
             }
 
@@ -498,12 +593,14 @@ async def browser_fetch(
                 await _guard_browser_interaction_request(route, request, interaction_guard)
 
             await ctx.route("**/*", guard_interaction_request)
+            await _harden_passive_browser_context(ctx)
             status_line = None
             http_version = "?"
             tech_stack: list[str] = []
 
             # Network capture for API endpoint discovery
             captured_requests: list[dict[str, Any]] = []
+            captured_by_raw_url: dict[str, dict[str, Any]] = {}
             seen_urls: set = set()
 
             # Resource types to skip (static assets)
@@ -514,6 +611,14 @@ async def browser_fetch(
                 try:
                     resource_type = request.resource_type
                     req_url = request.url
+                    method = str(request.method or "").upper()
+
+                    if not _browser_capture_request_is_safe(
+                        url=req_url,
+                        method=method,
+                        allowed_origin=allowed_origin,
+                    ):
+                        return
 
                     # Skip static assets and already-seen URLs
                     if resource_type in skip_types:
@@ -524,6 +629,8 @@ async def browser_fetch(
 
                     # Parse URL to extract path and query params
                     parsed = urllib.parse.urlparse(req_url)
+                    capture_url = _browser_capture_url(req_url)
+                    capture_parsed = urllib.parse.urlparse(capture_url)
 
                     # Focus on XHR/fetch requests (most likely API calls)
                     is_api_call = (
@@ -537,26 +644,26 @@ async def browser_fetch(
                     req_headers = request.headers
                     auth_header = req_headers.get("authorization", "")
                     content_type = req_headers.get("content-type", "")
+                    capture_headers = {
+                        key: value
+                        for key, value in req_headers.items()
+                        if str(key).lower() in {"accept", "content-type"}
+                    }
 
-                    # Capture POST/PUT/PATCH body for replay
-                    post_data = None
-                    try:
-                        post_data = request.post_data
-                    except Exception:
-                        pass
-
-                    captured_requests.append({
-                        "url": req_url,
-                        "method": request.method,
+                    captured = {
+                        "url": capture_url,
+                        "method": method,
                         "resource_type": resource_type,
-                        "path": parsed.path,
-                        "query": parsed.query,
+                        "path": capture_parsed.path,
+                        "query": capture_parsed.query,
                         "is_api_call": is_api_call,
                         "has_auth": bool(auth_header),
                         "content_type": content_type,
-                        "headers": dict(req_headers),  # Full headers for replay
-                        "post_data": post_data,  # Request body for replay
-                    })
+                        "headers": capture_headers,
+                        "post_data": None,
+                    }
+                    captured_requests.append(captured)
+                    captured_by_raw_url[req_url] = captured
                 except Exception:
                     pass  # Don't let capture errors break the scan
 
@@ -565,12 +672,11 @@ async def browser_fetch(
                 try:
                     resp_url = response.url
                     # Find matching request and add response info
-                    for req in captured_requests:
-                        if req["url"] == resp_url and "status" not in req:
-                            req["status"] = response.status
-                            resp_headers = response.headers
-                            req["response_content_type"] = resp_headers.get("content-type", "")
-                            break
+                    req = captured_by_raw_url.get(resp_url)
+                    if req is not None and "status" not in req:
+                        req["status"] = response.status
+                        resp_headers = response.headers
+                        req["response_content_type"] = resp_headers.get("content-type", "")
                 except Exception:
                     pass
 
@@ -582,6 +688,9 @@ async def browser_fetch(
                 """Capture WebSocket connections for security testing."""
                 try:
                     ws_url = ws.url
+                    ws_http_url = re.sub(r"^ws", "http", ws_url, count=1)
+                    if _browser_origin(ws_http_url) != allowed_origin:
+                        return
                     if ws_url not in seen_ws_urls:
                         seen_ws_urls.add(ws_url)
                         websocket_endpoints.append(ws_url)
@@ -1171,7 +1280,10 @@ async def browser_fetch(
             await ctx.close()
             h_norm: dict[str, list[str]] = {}
             for k, v in headers.items():
-                h_norm.setdefault(k.lower(), []).append(v if isinstance(v, str) else str(v))
+                name = k.lower()
+                h_norm.setdefault(name, []).append(
+                    _browser_capture_response_header(name, v)
+                )
 
             # Extract API endpoints from captured traffic
             api_endpoints: list[dict[str, Any]] = []
@@ -1216,7 +1328,13 @@ async def browser_fetch(
                 "crawl_stats": crawl_stats,
                 "interaction_safety": {
                     "unsafe_methods_blocked": int(interaction_guard["blocked_count"]),
+                    "cross_origin_requests_blocked": int(
+                        interaction_guard["cross_origin_blocked_count"]
+                    ),
                     "blocked_request_samples": list(interaction_guard["blocked_samples"]),
+                    "cross_origin_blocked_samples": list(
+                        interaction_guard["cross_origin_blocked_samples"]
+                    ),
                     "sample_truncated": bool(interaction_guard["sample_truncated"]),
                     "allowed_methods": sorted(_BROWSER_SAFE_INTERACTION_METHODS),
                 },
@@ -1739,19 +1857,16 @@ async def interactive_browser_crawl(
     screenshot_dir: str = "/tmp",
 ) -> dict[str, Any]:
     """
-    Enhanced browser crawl with automatic interaction.
+    Passive browser crawl with bounded semantic interaction.
 
-    Goes beyond passive network capture to actively interact with the page:
-    1. Clicks buttons and links
-    2. Fills and submits forms
-    3. Scrolls to trigger lazy loading
-    4. Opens dropdowns and modals
-    5. Captures all network traffic during interactions
+    It may scroll and use navigation, tab, or disclosure controls while the
+    request guard permits only same-origin GET/HEAD/OPTIONS. It never fills or
+    submits forms, selects values, opens arbitrary controls, or retains secrets.
 
     Interaction Levels:
     - low: Navigate and capture network only
-    - medium: Click buttons, scroll, fill forms
-    - high: Full interaction including dropdowns, modals, tabs
+    - medium: Scroll and use bounded semantic controls
+    - high: Same passive ceiling with a larger caller-selected page budget
 
     Args:
         url: Target URL
@@ -1763,6 +1878,7 @@ async def interactive_browser_crawl(
     Returns:
         Dict with discovered endpoints and interaction results
     """
+    allowed_origin = _browser_origin(url)
     if not HAS_PLAYWRIGHT:
         return {
             "error": "Playwright not installed",
@@ -1781,6 +1897,7 @@ async def interactive_browser_crawl(
         "pages_visited": 0,
         "api_endpoints": [],
         "captured_requests": [],
+        "interaction_safety": {},
     }
 
     seen_endpoints = set()
@@ -1795,6 +1912,7 @@ async def interactive_browser_crawl(
             ctx_kwargs = {
                 "ignore_https_errors": True,
                 "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "service_workers": "block",
             }
 
             auth_cookies = []
@@ -1829,8 +1947,11 @@ async def interactive_browser_crawl(
             page = await ctx.new_page()
             interaction_guard: dict[str, Any] = {
                 "enabled": True,
+                "allowed_origin": allowed_origin,
                 "blocked_count": 0,
                 "blocked_samples": [],
+                "cross_origin_blocked_count": 0,
+                "cross_origin_blocked_samples": [],
                 "sample_truncated": False,
             }
 
@@ -1838,22 +1959,31 @@ async def interactive_browser_crawl(
                 await _guard_browser_interaction_request(route, request, interaction_guard)
 
             await ctx.route("**/*", guard_interactive_request)
+            await _harden_passive_browser_context(ctx)
 
             # Set up network capture
             def handle_request(request):
                 try:
                     req_url = request.url
-                    if req_url not in seen_endpoints:
-                        seen_endpoints.add(req_url)
-                        parsed = urllib.parse.urlparse(req_url)
+                    method = str(request.method or "").upper()
+                    if not _browser_capture_request_is_safe(
+                        url=req_url,
+                        method=method,
+                        allowed_origin=allowed_origin,
+                    ):
+                        return
+                    capture_url = _browser_capture_url(req_url)
+                    if capture_url not in seen_endpoints:
+                        seen_endpoints.add(capture_url)
+                        parsed = urllib.parse.urlparse(capture_url)
                         is_api = (
                             request.resource_type in ("xhr", "fetch") or
                             "/api/" in parsed.path.lower() or
                             parsed.path.endswith((".json", ".graphql"))
                         )
                         captured_requests.append({
-                            "url": req_url,
-                            "method": request.method,
+                            "url": capture_url,
+                            "method": method,
                             "path": parsed.path,
                             "is_api": is_api,
                             "resource_type": request.resource_type,
@@ -1895,15 +2025,35 @@ async def interactive_browser_crawl(
                 except Exception:
                     pass
 
-                # Find and click visible buttons (non-submit)
+                # Only use semantic navigation/disclosure controls. Generic
+                # buttons and form controls are not passive discovery actions.
                 try:
-                    buttons = await page.query_selector_all("button:not([type='submit']), [role='button']")
+                    buttons = await page.query_selector_all(
+                        ", ".join(_BROWSER_SAFE_INTERACTION_SELECTORS)
+                    )
                     for btn in buttons[:5]:  # Limit to prevent infinite loops
                         try:
-                            if await btn.is_visible():
-                                await btn.click()
-                                results["buttons_clicked"] += 1
-                                await page.wait_for_timeout(300)
+                            if not await btn.is_visible():
+                                continue
+                            metadata = await btn.evaluate("""
+                                el => ({
+                                  text: (el.innerText || el.textContent || '').trim(),
+                                  href: el.getAttribute('href') || '',
+                                  id: el.id || '',
+                                  name: el.getAttribute('name') || '',
+                                  aria: el.getAttribute('aria-label') || '',
+                                  testid: el.getAttribute('data-testid') || ''
+                                })
+                            """)
+                            if not _browser_interaction_element_is_safe(
+                                metadata.get("text"), metadata.get("href"),
+                                metadata.get("id"), metadata.get("name"),
+                                metadata.get("aria"), metadata.get("testid"),
+                            ):
+                                continue
+                            await btn.click()
+                            results["buttons_clicked"] += 1
+                            await page.wait_for_timeout(300)
                         except Exception:
                             pass
                 except Exception:
@@ -1931,79 +2081,6 @@ async def interactive_browser_crawl(
                                 "fields": fields,
                             })
 
-                            # Auto-fill form fields for discovery (medium level)
-                            for inp in inputs[:10]:
-                                try:
-                                    inp_type = await inp.get_attribute("type") or "text"
-                                    inp_name = (await inp.get_attribute("name") or "").lower()
-
-                                    if inp_type == "hidden":
-                                        continue
-
-                                    if await inp.is_visible():
-                                        if inp_type == "email" or "email" in inp_name:
-                                            await inp.fill("test@example.com")
-                                        elif inp_type == "password" or "password" in inp_name:
-                                            await inp.fill("TestPassword123!")
-                                        elif inp_type in ["text", "search"]:
-                                            await inp.fill("test")
-                                        elif inp_type == "tel":
-                                            await inp.fill("1234567890")
-                                        elif inp_type == "number":
-                                            await inp.fill("42")
-                                except Exception:
-                                    pass
-
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-
-            if interaction_level == "high":
-                # Click dropdown menus
-                try:
-                    dropdowns = await page.query_selector_all("select, [role='listbox'], [role='combobox']")
-                    for dd in dropdowns[:5]:
-                        try:
-                            if await dd.is_visible():
-                                await dd.click()
-                                await page.wait_for_timeout(200)
-                                # Try to select first option
-                                options = await dd.query_selector_all("option")
-                                if options and len(options) > 1:
-                                    await options[1].click()
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-
-                # Click tabs and navigation items
-                try:
-                    tabs = await page.query_selector_all("[role='tab'], .tab, .nav-tab, .nav-link")
-                    for tab in tabs[:5]:
-                        try:
-                            if await tab.is_visible():
-                                await tab.click()
-                                results["interactions"].append({"type": "tab_click"})
-                                await page.wait_for_timeout(300)
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-
-                # Try to open modals
-                try:
-                    modal_triggers = await page.query_selector_all("[data-toggle='modal'], [data-bs-toggle='modal']")
-                    for trigger in modal_triggers[:3]:
-                        try:
-                            if await trigger.is_visible():
-                                await trigger.click()
-                                results["interactions"].append({"type": "modal_open"})
-                                await page.wait_for_timeout(500)
-                                # Try to close modal
-                                close_btn = await page.query_selector(".modal .close, .modal [data-dismiss='modal']")
-                                if close_btn and await close_btn.is_visible():
-                                    await close_btn.click()
                         except Exception:
                             pass
                 except Exception:
@@ -2021,6 +2098,19 @@ async def interactive_browser_crawl(
     results["captured_requests"] = captured_requests
     results["api_endpoints"] = [r for r in captured_requests if r.get("is_api")]
     results["endpoints"] = list(seen_endpoints)
+    if "interaction_guard" in locals():
+        results["interaction_safety"] = {
+            "unsafe_methods_blocked": int(interaction_guard["blocked_count"]),
+            "cross_origin_requests_blocked": int(
+                interaction_guard["cross_origin_blocked_count"]
+            ),
+            "blocked_request_samples": list(interaction_guard["blocked_samples"]),
+            "cross_origin_blocked_samples": list(
+                interaction_guard["cross_origin_blocked_samples"]
+            ),
+            "sample_truncated": bool(interaction_guard["sample_truncated"]),
+            "allowed_methods": sorted(_BROWSER_SAFE_INTERACTION_METHODS),
+        }
 
     print(f"[interactive_crawl] Completed: {len(results['endpoints'])} endpoints, "
           f"{results['buttons_clicked']} buttons clicked, {len(results['forms_found'])} forms found",
