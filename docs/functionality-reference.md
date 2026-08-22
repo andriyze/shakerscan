@@ -1176,7 +1176,8 @@ target-bound approval and decrypt the admitted version immediately before execut
 `PATCH|DELETE /targets/{id}/principals/{principal_id}` · `GET|POST /targets/{id}/principal-matrix`.
 This compatibility surface remains metadata-only and write-only for secrets. Existing rows are
 backfilled under the schema migration lock and every create, rotation, principal-slot change, and
-deactivation is transactionally mirrored to the generic immutable store. The ciphertext is never
+deactivation is transactionally mirrored to the generic immutable store. Generic rename, rotation,
+expiry, and deactivation changes are mirrored back while legacy execution remains enabled. Ciphertext is never
 returned or logged. An ID/target/auth-kind collision fails closed instead of overwriting a generic
 identity. These routes will be removed after remaining legacy callers migrate.
 

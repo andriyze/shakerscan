@@ -209,7 +209,13 @@ async def sync_legacy_web_credential(
     )
     if not current:
         raise LegacyCredentialMigrationError("generic credential version is unavailable")
-    if str(current["encrypted_secret"] or "") != ciphertext:
+    legacy_rotated_at = _utc(legacy.get("rotated_at"))
+    secret_changed = (
+        legacy_rotated_at > existing.rotated_at.astimezone(timezone.utc)
+        if legacy_rotated_at is not None
+        else str(current["encrypted_secret"] or "") != ciphertext
+    )
+    if secret_changed:
         existing = await repository.rotate_profile(
             conn,
             profile_id=legacy_id,

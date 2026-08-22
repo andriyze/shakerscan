@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 import json
+import uuid
 
 import pytest
 
@@ -17,6 +19,10 @@ from tests.test_credential_store import MemoryCredentialConn, TARGET_ID
 
 
 class ApiCredentialConn(MemoryCredentialConn):
+    def __init__(self):
+        super().__init__()
+        self.legacy_web = None
+
     def transaction(self):
         @asynccontextmanager
         async def transaction_context():
@@ -29,7 +35,29 @@ class ApiCredentialConn(MemoryCredentialConn):
             return {"id": args[0]} if args[0] == TARGET_ID else None
         if query.lstrip().startswith("SELECT id FROM device_targets"):
             return None
+        if "FROM target_credential_profiles WHERE id" in query:
+            if self.legacy_web and self.legacy_web["id"] == args[0]:
+                return dict(self.legacy_web)
+            return None
         return await super().fetchrow(query, *args)
+
+    async def execute(self, query, *args):
+        if "UPDATE target_principals" in query:
+            assert self.legacy_web and self.legacy_web["target_id"] == args[0]
+            self.legacy_web["principal_profile_name"] = args[2]
+            return "UPDATE 1"
+        if "UPDATE target_credential_profiles" in query:
+            assert self.legacy_web and self.legacy_web["id"] == args[0]
+            self.legacy_web.update({
+                "name": args[1],
+                "expires_at": args[2],
+                "is_active": args[3],
+                "secret_value": args[4] or self.legacy_web["secret_value"],
+                "rotated_at": args[5] if args[4] else self.legacy_web["rotated_at"],
+                "updated_at": args[5],
+            })
+            return "UPDATE 1"
+        return await super().execute(query, *args)
 
 
 class ApiCredentialPool:
@@ -201,3 +229,55 @@ def test_unknown_fields_are_rejected_before_secret_storage(client):
     assert response.status_code == 422
     assert "leak" not in response.text
     assert pool.conn.profile is None
+
+
+def test_migrated_web_profile_changes_stay_synchronized_with_legacy_execution(client):
+    http, pool = client
+    created = http.post(
+        "/credential-profiles",
+        json=_create_payload(
+            target_kind="web",
+            name="Legacy primary",
+            auth_kind="authorization_header",
+            secret="Bearer original",
+        ),
+    )
+    assert created.status_code == 201, created.text
+    profile = created.json()["profile"]
+    pool.conn.legacy_web = {
+        "id": uuid.UUID(profile["id"]),
+        "target_id": TARGET_ID,
+        "auth_kind": "authorization_header",
+        "name": "Legacy primary",
+        "secret_value": "enc:fernet:legacy-original",
+        "is_active": True,
+        "expires_at": None,
+        "rotated_at": datetime.now(timezone.utc),
+    }
+
+    patched = http.patch(
+        f"/credential-profiles/{profile['id']}",
+        json={
+            "expected_record_version": profile["record_version"],
+            "name": "Canonical primary",
+            "clear_expiry": True,
+        },
+    )
+    assert patched.status_code == 200, patched.text
+    assert pool.conn.legacy_web["name"] == "Canonical primary"
+    assert pool.conn.legacy_web["principal_profile_name"] == "Canonical primary"
+
+    rotated = http.post(
+        f"/credential-profiles/{profile['id']}/rotate",
+        json={
+            "expected_record_version": patched.json()["profile"]["record_version"],
+            "secret": "Bearer canonical-rotation",
+            "clear_expiry": True,
+        },
+    )
+    assert rotated.status_code == 200, rotated.text
+    assert pool.conn.legacy_web["secret_value"] == "enc:fernet:opaque-ciphertext"
+
+    deleted = http.delete(f"/credential-profiles/{profile['id']}")
+    assert deleted.status_code == 200, deleted.text
+    assert pool.conn.legacy_web["is_active"] is False

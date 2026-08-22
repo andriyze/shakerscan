@@ -221,6 +221,74 @@ def _store_error(exc: CredentialStoreError) -> HTTPException:
     return HTTPException(status_code=422, detail=str(exc))
 
 
+async def _legacy_web_profile(
+    conn: Any, profile: CredentialProfileMetadata,
+) -> dict[str, Any] | None:
+    """Return the compatibility row sharing this migrated profile identity."""
+    if profile.target_kind != "web":
+        return None
+    row = await conn.fetchrow(
+        """SELECT id, target_id, auth_kind, name
+           FROM target_credential_profiles WHERE id=$1""",
+        uuid.UUID(profile.profile_id),
+    )
+    if not row:
+        return None
+    item = dict(row)
+    if (
+        str(item.get("target_id") or "") != profile.target_id
+        or str(item.get("auth_kind") or "") != profile.auth_kind
+    ):
+        raise CredentialStoreError(
+            "migrated legacy credential identity no longer matches its generic profile"
+        )
+    return item
+
+
+async def _sync_legacy_web_from_generic(
+    conn: Any,
+    profile: CredentialProfileMetadata,
+    *,
+    material: Mapping[str, Any] | None = None,
+    rotated_at: datetime | None = None,
+) -> None:
+    legacy = await _legacy_web_profile(conn, profile)
+    if legacy is None:
+        return
+    secret_value = None
+    if material is not None:
+        secret = str(material.get("secret") or "")
+        if not secret:
+            raise CredentialStoreError("migrated legacy credential secret is invalid")
+        secret_value = _encrypt(secret)
+    timestamp = rotated_at or datetime.now(timezone.utc)
+    legacy_name = str(legacy.get("name") or "")
+    await conn.execute(
+        """UPDATE target_credential_profiles
+           SET name=$2, expires_at=$3, is_active=$4,
+               secret_value=COALESCE($5, secret_value),
+               rotated_at=CASE WHEN $5 IS NULL THEN rotated_at ELSE $6 END,
+               updated_at=$6
+           WHERE id=$1""",
+        uuid.UUID(profile.profile_id),
+        profile.name,
+        profile.expires_at,
+        profile.is_active,
+        secret_value,
+        timestamp,
+    )
+    if legacy_name and legacy_name.lower() != profile.name.lower():
+        await conn.execute(
+            """UPDATE target_principals
+               SET credential_profile=$3, updated_at=$4
+               WHERE target_id=$1 AND lower(credential_profile)=lower($2)""",
+            uuid.UUID(profile.target_id),
+            legacy_name,
+            profile.name,
+            timestamp,
+        )
+
+
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def create_credential_profile(request: Request, payload: CredentialProfileCreate):
     envelope, configuration = _material(payload.auth_kind, payload)
@@ -327,6 +395,7 @@ async def patch_credential_profile(
                     allowed_capabilities=payload.allowed_capabilities,
                     now=datetime.now(timezone.utc),
                 )
+                await _sync_legacy_web_from_generic(conn, profile)
     except CredentialStoreError as exc:
         raise _store_error(exc) from exc
     return {"profile": _public(profile)}
@@ -349,6 +418,7 @@ async def rotate_credential_profile(
                     if "expires_at" in payload.model_fields_set
                     else existing.expires_at
                 )
+                timestamp = datetime.now(timezone.utc)
                 profile = await _store.rotate_profile(
                     conn,
                     profile_id=profile_id,
@@ -360,7 +430,13 @@ async def rotate_credential_profile(
                     configuration=configuration,
                     expires_at=expires_at,
                     created_by=payload.created_by,
-                    now=datetime.now(timezone.utc),
+                    now=timestamp,
+                )
+                await _sync_legacy_web_from_generic(
+                    conn,
+                    profile,
+                    material=parse_credential_secret(existing.auth_kind, envelope),
+                    rotated_at=timestamp,
                 )
     except CredentialStoreError as exc:
         raise _store_error(exc) from exc
@@ -381,6 +457,7 @@ async def delete_credential_profile(request: Request, profile_id: uuid.UUID):
                     target_id=existing.target_id,
                     now=datetime.now(timezone.utc),
                 )
+                await _sync_legacy_web_from_generic(conn, profile)
     except CredentialStoreError as exc:
         raise _store_error(exc) from exc
     return {"status": "deactivated", "profile": _public(profile)}
