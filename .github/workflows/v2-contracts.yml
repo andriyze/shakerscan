@@ -11,6 +11,7 @@ on:
       - api/api_v2.py
       - api/worker_v2.py
       - scanner/manifests.py
+      - scanner/scanner_tools/build_fingerprint.py
       - scanner/scanner_tools/request_collections.py
       - scanner/scanner_tools/request_replay.py
       - scanner/scanner_tools/url_redaction.py
@@ -19,6 +20,7 @@ on:
       - tests/test_request_collections_v2.py
       - tests/test_budget_reservation_lifecycle.py
       - tests/test_runtime_receipts.py
+      - tests/test_v2_native_fingerprint.py
       - tests/test_v2_native_receipt_hardening.py
       - tests/test_discovery_recovery_checkpoint.py
       - tests/test_hunt_start_contract.py
@@ -40,6 +42,7 @@ on:
       - api/api_v2.py
       - api/worker_v2.py
       - scanner/manifests.py
+      - scanner/scanner_tools/build_fingerprint.py
       - scanner/scanner_tools/request_collections.py
       - scanner/scanner_tools/request_replay.py
       - scanner/scanner_tools/url_redaction.py
@@ -48,6 +51,7 @@ on:
       - tests/test_request_collections_v2.py
       - tests/test_budget_reservation_lifecycle.py
       - tests/test_runtime_receipts.py
+      - tests/test_v2_native_fingerprint.py
       - tests/test_v2_native_receipt_hardening.py
       - tests/test_discovery_recovery_checkpoint.py
       - tests/test_hunt_start_contract.py
@@ -128,6 +132,13 @@ jobs:
             tests/test_discovery_recovery_checkpoint.py \
             tests/test_v2_public_url_redaction.py
 
+      - name: Validate V2 worker freshness manifest
+        env:
+          PYTHONPATH: scanner
+        run: |
+          python -m pytest -q -p no:cacheprovider \
+            tests/test_v2_native_fingerprint.py
+
       - name: Compile V2 runtime modules
         run: |
           python -m compileall -q \
@@ -137,6 +148,7 @@ jobs:
             api/api_v2.py \
             api/worker_v2.py \
             scanner/manifests.py \
+            scanner/scanner_tools/build_fingerprint.py \
             scanner/scanner_tools/request_replay.py \
             scanner/scanner_tools/url_redaction.py \
             scanner/scanner_tools/v2_request_replay_hardening.py \

@@ -32,6 +32,16 @@ FINGERPRINT_SOURCE_FILES: tuple[tuple[str, str, str], ...] = (
     ("build_fingerprint.py", "scanner/scanner_tools/build_fingerprint.py", "scanner_tools/build_fingerprint.py"),
 )
 
+# These packages define the canonical V2 authority and executable capability surface. A worker
+# running stale code in any one of them must never advertise the same build fingerprint.
+V2_API_RUNTIME_PACKAGES: tuple[str, ...] = (
+    "capabilities",
+    "hunt",
+    "runtime",
+    "scan",
+)
+_NATIVE_V2_FINGERPRINT_MARKER = "_shakerscan_v2_package_fingerprint"
+
 
 def _is_runtime_source(path: Path) -> bool:
     return "__pycache__" not in path.parts and path.suffix != ".pyc" and path.is_file()
@@ -45,12 +55,17 @@ def _add_tree(files: dict[str, str], root: Path, logical_root: str) -> None:
             files[f"{logical_root}/{path.relative_to(root).as_posix()}"] = str(path)
 
 
+def _add_v2_api_packages(files: dict[str, str], api_root: Path) -> None:
+    for package in V2_API_RUNTIME_PACKAGES:
+        _add_tree(files, api_root / package, package)
+
+
 def source_file_map(workspace_root: str = "/workspace") -> dict[str, str]:
     """Map deterministic source/config copied into the API/worker image.
 
-    Freshness must change for security rules, corpora, wordlists, dependency locks, and the fixed
-    Firecracker runtime as well as Python. Otherwise a worker can truthfully report current source
-    while executing stale scanner or model-runtime inputs.
+    Freshness must change for security rules, corpora, wordlists, dependency locks, the
+    canonical V2 authority packages, and the fixed Firecracker runtime as well as Python.
+    Otherwise a worker can report current source while executing stale policy or adapters.
     """
     root = Path(workspace_root)
     files: dict[str, str] = {}
@@ -80,6 +95,7 @@ def source_file_map(workspace_root: str = "/workspace") -> dict[str, str]:
         (scanner_root / "payloads", "payloads"),
     ):
         _add_tree(files, package_root, logical_root)
+    _add_v2_api_packages(files, api_root)
     _add_tree(files, scanner_root / "model_intake_tools", "model_intake_locks")
     auxiliary = (
         ("runtime/requirements.lock", scanner_root / "requirements.lock"),
@@ -110,6 +126,7 @@ def runtime_file_map(
         for logical_root in ("scanner_tools", "ai_gate", "wordlists", "payloads"):
             package_root = root / logical_root
             _add_tree(files, package_root, logical_root)
+        _add_v2_api_packages(files, root)
         lock_root = Path(model_intake_lock_root)
         _add_tree(files, lock_root, "model_intake_locks")
         auxiliary = (
@@ -148,3 +165,9 @@ def hash_source_files(file_map: dict[str, str], *, require_all: bool = False) ->
             if require_all:
                 return None
     return digest.hexdigest()[:16] if hashed else None
+
+
+# Mixed-version images still import the former compatibility shim. Mark the native functions so
+# that shim becomes a no-op rather than wrapping the same behavior twice.
+setattr(source_file_map, _NATIVE_V2_FINGERPRINT_MARKER, True)
+setattr(runtime_file_map, _NATIVE_V2_FINGERPRINT_MARKER, True)
