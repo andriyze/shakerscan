@@ -166,6 +166,8 @@ def test_typed_receipt_requires_scan_or_hunt_and_honest_timeout_state():
         target_id="target", hunt_id="hunt", status="timed_out", input_digest="b" * 64,
         parser_version="katana-lines/v1", partial=True, timed_out=True,
         budget_reserved={"http_requests": 150}, budget_consumed={"http_requests": 57},
+        started_at="2026-08-22T12:00:00+00:00",
+        finished_at="2026-08-22T12:01:00+00:00",
     )
     public = receipt.public_dict()
     assert public["partial"] is True
