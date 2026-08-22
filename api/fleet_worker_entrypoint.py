@@ -27,10 +27,10 @@ def validate_runtime() -> tuple[str, str]:
 
 def main() -> int:
     validate_runtime()
-    worker_entrypoint = Path("/app/worker_v2.py")
+    worker_entrypoint = Path("/app/worker.py")
     if not worker_entrypoint.is_file():
         raise RuntimeError(
-            "owned-fleet worker image is missing /app/worker_v2.py; refusing legacy Scan execution"
+            "owned-fleet worker image is missing /app/worker.py; refusing Scan execution"
         )
     os.execv(sys.executable, [sys.executable, str(worker_entrypoint)])
     return 0

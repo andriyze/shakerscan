@@ -11,7 +11,6 @@ on:
       - api/api_v2.py
       - api/api.py
       - api/worker.py
-      - api/worker_v2.py
       - api/retest_contract.py
       - scripts/upgrade_schema_smoke.py
       - db/repairs/2026-08-22_v2_budget_reservations.sql
@@ -52,7 +51,6 @@ on:
       - api/api_v2.py
       - api/api.py
       - api/worker.py
-      - api/worker_v2.py
       - api/retest_contract.py
       - scripts/upgrade_schema_smoke.py
       - db/repairs/2026-08-22_v2_budget_reservations.sql
@@ -173,7 +171,6 @@ jobs:
             api/api.py \
             api/api_v2.py \
             api/worker.py \
-            api/worker_v2.py \
             scanner/manifests.py \
             scanner/scanner_tools/build_fingerprint.py \
             scanner/scanner_tools/request_replay.py \

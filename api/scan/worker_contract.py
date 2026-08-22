@@ -45,7 +45,10 @@ class WorkerScanAdmission:
 def _legacy(options: Mapping[str, Any]) -> WorkerScanAdmission:
     scan_type = str(options.get("scan_type") or "standard").strip().lower()
     if scan_type not in LEGACY_SCAN_MAPPING:
-        raise WorkerScanContractError("legacy scan_type is invalid")
+        allowed = ", ".join(sorted(LEGACY_SCAN_MAPPING))
+        raise WorkerScanContractError(
+            f"scan_type must be one of: {allowed}"
+        )
     return WorkerScanAdmission(False, scan_type, legacy_source=scan_type)
 
 

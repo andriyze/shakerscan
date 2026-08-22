@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from runtime.models import ScanBudget, ScanPolicy
 from scan.execution import ScanExecutionPlan
 from scan.worker_contract import WorkerScanAdmission
@@ -100,3 +102,18 @@ def test_non_dast_run_kinds_bypass_scan_admission():
     assert is_deterministic_dast({"run_kind": "web_dast"}) is True
     assert is_deterministic_dast({"run_kind": "device_posture"}) is False
     assert is_deterministic_dast({"run_kind": "model_intake"}) is False
+
+
+def test_primary_worker_owns_v2_admission_without_a_monkeypatch_wrapper():
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "api" / "worker.py").read_text()
+    start = source.index("async def run_scan(")
+    end = source.index("\n\nasync def run_discovery", start)
+    run_scan = source[start:end]
+
+    assert "prepare_worker_dispatch(options)" in run_scan
+    assert "execution_result_metadata" in source
+    assert "_finalize_deterministic_scan_result(" in run_scan
+    assert not (root / "api" / "worker_v2.py").exists()
+    entrypoint = (root / "scanner" / "entrypoint.sh").read_text()
+    assert "/app/worker_v2.py" not in entrypoint

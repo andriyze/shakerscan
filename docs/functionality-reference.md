@@ -2357,7 +2357,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_DEVICE_DENY_CIDRS` | `scanner/scanner_tools/device_posture.py` |
 | `SHAKERSCAN_DEVICE_QUEUE_VISIBILITY_TIMEOUT_SECONDS` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_DISABLE_DISCOVERY_RECOVERY` | `scanner/manifests.py` |
-| `SHAKERSCAN_DISABLE_LEGACY_SCAN_EXECUTION` | `api/worker_v2.py` |
+| `SHAKERSCAN_DISABLE_LEGACY_SCAN_EXECUTION` | `api/worker.py` |
 | `SHAKERSCAN_ENABLE_ADAPTIVE_THROTTLE` | `scanner/scanner.py` |
 | `SHAKERSCAN_ENDPOINT_MANIFEST_FILE` | `scanner/manifests.py` |
 | `SHAKERSCAN_ENFORCE_FLEET_LIMITS` | `api/worker.py` |

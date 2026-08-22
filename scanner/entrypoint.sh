@@ -91,13 +91,6 @@ sync_dev_sources() {
 }
 sync_dev_sources
 
-# Route every worker role through the V2 admission entrypoint. The wrapper keeps
-# the existing queue/fleet/device plumbing and delegates non-DAST jobs unchanged.
-if [ "${1:-}" = "python3" ] && [ "${2:-}" = "/app/worker.py" ] && [ -f /app/worker_v2.py ]; then
-    shift 2
-    set -- python3 /app/worker_v2.py "$@"
-fi
-
 # Route the API through the V2 Hunt-start contract while the compatibility
 # application continues to own persistence, queues, fleet operations, and routes.
 if [ "${1:-}" = "python3" ] && [ "${2:-}" = "/app/api.py" ] && [ -f /app/api_v2.py ]; then

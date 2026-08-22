@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
-"""V2 admission wrapper for the outbound-only broker worker.
+"""V2 entrypoint for the outbound-only broker worker.
 
-The broker transport remains unchanged, but every deterministic Scan lease is admitted through
-``worker_v2.run_scan_v2`` before the legacy scanner subprocess is allowed to start. Non-DAST
-run kinds continue to delegate through the existing worker implementation.
+The primary worker now owns canonical Scan admission directly. The broker transport
+keeps this small entrypoint only to select its outbound-only lease loop.
 """
 
 from __future__ import annotations
 
 import broker_worker as _broker
-from worker_v2 import run_scan_v2
+from worker import run_scan
 
 
 # broker_worker resolves this module global when a lease is executed.
-_broker.run_scan = run_scan_v2
+_broker.run_scan = run_scan
 
 
 def main() -> int:

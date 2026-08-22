@@ -108,6 +108,11 @@ from scan.collection_replay import (
     scan_replay_runtime_http_ceiling,
     scan_replay_selector,
 )
+from scan.worker_dispatch import (
+    execution_result_metadata,
+    is_deterministic_dast,
+    prepare_worker_dispatch,
+)
 from runtime.pinned_http_replay import PinnedAiohttpReplayTransport
 from runtime.request_replay_executor import (
     ReplayExecutionError,
@@ -2592,6 +2597,26 @@ _SCANNER_MAIN_MARKERS = ('if __name__ == "__main__"', "if __name__ == '__main__'
 _scanner_preflight_cache: dict[str, tuple[tuple[int, float], str | None]] = {}
 
 
+def _finalize_deterministic_scan_result(
+    result: Any,
+    admission: Any,
+    scan_id: str | None,
+) -> Any:
+    """Attach canonical authority evidence and remove completed recovery state."""
+    metadata = execution_result_metadata(admission) if admission is not None else None
+    if metadata is not None and isinstance(result, dict):
+        result = dict(result)
+        result["scan_execution"] = metadata
+    if isinstance(result, dict) and scan_id:
+        sidecar = RESULTS_DIR / f"{scan_id}_checkpoint.json.endpoint-manifest.json"
+        try:
+            sidecar.unlink(missing_ok=True)
+        except OSError:
+            # Artifact cleanup must never replace an otherwise valid result.
+            pass
+    return result
+
+
 def _scanner_preflight(scanner_path: str) -> str | None:
     """Return a clear error if the scanner entrypoint is missing / stale / truncated
     (e.g. macOS single-file bind-mount inode-pinning), else None. Turns the silent
@@ -2659,6 +2684,17 @@ async def run_scan(
     persist_checkpoint_artifacts: bool = True,
 ) -> dict:
     """Execute scanner and return results."""
+    scan_admission = None
+    if is_deterministic_dast(options):
+        options, scan_admission = prepare_worker_dispatch(options)
+        if not scan_admission.canonical and os.getenv(
+            "SHAKERSCAN_DISABLE_LEGACY_SCAN_EXECUTION", ""
+        ).strip().lower() in {"1", "true", "yes", "on"}:
+            raise ValueError(
+                "legacy deterministic Scan execution is disabled; submit a "
+                "canonical V2 plan"
+            )
+
     if options.get("run_kind") == "device_probe":
         if scan_id:
             await update_scan_progress(scan_id, "device_service_probe", 20, job_id=job_id)
@@ -3092,13 +3128,13 @@ async def run_scan(
                 os.unlink(scanner_auth_config_file)
             except OSError:
                 pass
-        return {
+        return _finalize_deterministic_scan_result({
             "target": target,
             "error": _pf_err,
             "findings": [],
             "result": {"score": None, "grade": None},
             "scan_metadata": {"status": "failed", "preflight_failed": True},
-        }
+        }, scan_admission, scan_id)
 
     # Memory-aware admission control: wait (bounded, heartbeating) for a fleet-wide
     # active-scan slot before launching the heavy scanner subprocess, so a large
@@ -3111,7 +3147,7 @@ async def run_scan(
                 os.unlink(scanner_auth_config_file)
             except OSError:
                 pass
-        return {
+        return _finalize_deterministic_scan_result({
             "target": target,
             "error": str(exc),
             "findings": [],
@@ -3121,7 +3157,7 @@ async def run_scan(
                 "admission_control_failed": True,
                 "retryable": True,
             },
-        }
+        }, scan_admission, scan_id)
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -3472,13 +3508,20 @@ async def run_scan(
                     meta["partial"] = True
                     meta["timed_out"] = True
                     meta["terminated_reason"] = timeout_reason
-                    return _strip_null_bytes(partial) if isinstance(partial, dict) else partial
+                    partial = (
+                        _strip_null_bytes(partial)
+                        if isinstance(partial, dict)
+                        else partial
+                    )
+                    return _finalize_deterministic_scan_result(
+                        partial, scan_admission, scan_id,
+                    )
             except Exception:
                 pass
         # Always surface a non-empty error: the caller marks a scan failed only
         # when result["error"] is truthy. A crashed/silent scanner (no JSON, no
         # stderr, no timeout) must not be mislabeled "completed".
-        return {
+        return _finalize_deterministic_scan_result({
             'error': (
                 cancel_reason
                 or timeout_reason
@@ -3497,7 +3540,7 @@ async def run_scan(
                 'stdout_head': (stdout_text or '')[:1000],
                 'scanner_version': os.environ.get('SCANNER_VERSION') or os.environ.get('GIT_COMMIT') or 'dev',
             },
-        }
+        }, scan_admission, scan_id)
 
     if stderr_text:
         print(stderr_text, flush=True)
@@ -3523,7 +3566,9 @@ async def run_scan(
     # every caller (standalone/shard/ASM-batch/recon) in one place.
     if isinstance(result, dict):
         result = _strip_null_bytes(result)
-    return result
+    return _finalize_deterministic_scan_result(
+        result, scan_admission, scan_id,
+    )
 
 
 async def run_discovery(root_domain: str) -> dict:
