@@ -105,10 +105,11 @@ def test_broker_artifact_centralization_rewrites_only_results_files(tmp_path, mo
     assert len(uploads) == 1
 
 
-def test_broker_compose_has_no_redis_or_postgres_configuration():
+def test_broker_compose_uses_v2_admission_without_data_store_configuration():
     compose = Path(__file__).resolve().parents[1] / "docker-compose.broker-worker.yml"
     text = compose.read_text(encoding="utf-8")
-    assert "broker_worker.py" in text
+    assert 'command: ["python3", "/app/broker_worker_v2.py"]' in text
+    assert '"/app/broker_worker.py"' not in text
     assert "REDIS_URL" not in text
     assert "DATABASE_URL" not in text
     assert "postgres:" not in text
