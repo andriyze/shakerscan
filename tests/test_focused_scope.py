@@ -35,7 +35,11 @@ def test_scanner_zero_rediscovery_flag_guards_discovery_branches():
     assert "if zero_rediscovery_scope or nuclei_target_limit <= 0:" in source
     assert "if args.discovery_manifest_only or args.zero_rediscovery:" in source
     assert "args.auto_auth = explicit_auto_auth" in source
-    assert "and not zero_rediscovery\n    )" in source
+    assert (
+        "and not zero_rediscovery\n"
+        "        and not discovery_manifest_only\n"
+        "    )"
+    ) in source
     assert "and not zero_rediscovery_scope" in source
     assert '"recon",\n        {"legacy_discovery": run_legacy_discovery}' in source
     assert "recon_dispatch_receipts = await recon_phase_task" in source

@@ -4048,7 +4048,8 @@ async def build_report(target: str,
                        oob_max_findings: int=SMART_SCAN_BUDGETS.oob_max_findings,
                        # Active enforcement metadata
                        active_enforced: bool=False,
-                       canonical_scan_execution: dict[str, Any] | None=None) -> dict[str, Any]:
+                       canonical_scan_execution: dict[str, Any] | None=None,
+                       canonical_scan_placements: dict[str, Any] | None=None) -> dict[str, Any]:
 
     reset_subprocess_receipts()
 
@@ -6114,6 +6115,44 @@ async def build_report(target: str,
 
     async def run_legacy_nuclei_template() -> RegistryPhaseOutcome:
         nonlocal nuclei_results
+        if canonical_scan_execution is not None:
+            placed = (
+                canonical_scan_placements.get("templates.scan")
+                if isinstance(canonical_scan_placements, dict) else None
+            )
+            if not isinstance(placed, Mapping):
+                nuclei_results = _canonical_nuclei_result({
+                    "status": "blocked",
+                    "reason": "canonical_template_placement_missing",
+                    "observations": [],
+                })
+                return RegistryPhaseOutcome(
+                    "blocked",
+                    "canonical_template_placement_missing",
+                    {
+                        "scan_completed": False,
+                        "templates_used": 0,
+                        "findings_count": 0,
+                    },
+                )
+            nuclei_results = _canonical_nuclei_result(placed)
+            placed_status = str(placed.get("status") or "failed")
+            telemetry = {
+                "scan_completed": bool(nuclei_results.get("scan_completed")),
+                "templates_used": int(nuclei_results.get("templates_used") or 0),
+                "findings_count": len(nuclei_results.get("vulnerabilities") or []),
+                "partial": bool(placed.get("partial")),
+                "canonical_capability": "templates.scan",
+            }
+            if placed_status in {"success", "partial"}:
+                return RegistryPhaseOutcome("completed", telemetry=telemetry)
+            return RegistryPhaseOutcome(
+                placed_status if placed_status in {
+                    "skipped", "blocked", "failed", "cancelled",
+                } else "failed",
+                str(placed.get("reason") or f"canonical_templates_{placed_status}"),
+                telemetry,
+            )
         nuclei_target_limits = {
             "quick": 120,
             "standard": 400,
@@ -7883,22 +7922,34 @@ async def build_report(target: str,
                         if port not in open_ports_set:
                             evidence_extra["port_unverified"] = True
                             evidence_extra["unverified_port"] = port
-                report["findings"].append(normalize_finding(
+                nuclei_finding = normalize_finding(
                     "nuclei",
                     title,
                     severity,
-                {
-                    "template_id": vuln.get("template_id"),
-                    "description": vuln.get("description"),
-                    **evidence_extra,
-                    "matched_at": vuln.get("matched_at"),
-                    "tags": vuln.get("tags", []),
-                    "reference": vuln.get("reference", []),
-                    "cvss_score": vuln.get("cvss_score", 0),
-                    "cvss_metrics": vuln.get("cvss_metrics", "")
-                },
-                cwe
-            ))
+                    {
+                        "template_id": vuln.get("template_id"),
+                        "description": vuln.get("description"),
+                        **evidence_extra,
+                        "matched_at": vuln.get("matched_at"),
+                        "tags": vuln.get("tags", []),
+                        "reference": vuln.get("reference", []),
+                        "cvss_score": vuln.get("cvss_score", 0),
+                        "cvss_metrics": vuln.get("cvss_metrics", "")
+                    },
+                    cwe
+                )
+                if vuln.get("proof_state") == "candidate":
+                    nuclei_finding.update({
+                        "verified": False,
+                        "suspected": True,
+                        "needs_verification": True,
+                        "proof_state": "candidate",
+                        "verification_reason": (
+                            "Nuclei template match is a candidate until a "
+                            "deterministic proof contract succeeds"
+                        ),
+                    })
+                report["findings"].append(nuclei_finding)
 
     if cors_results.get("vulnerable"):
         # FIX: Deduplicate CORS issues and consolidate into a single finding
@@ -14109,6 +14160,135 @@ def _load_canonical_scan_execution(enabled: bool) -> dict[str, Any] | None:
         raise SystemExit(f"invalid native Scan execution envelope: {exc}") from exc
 
 
+def _load_canonical_scan_placements(
+    execution: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Load worker-produced capability results bound to this exact execution."""
+    raw = os.environ.get("SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS")
+    if not raw:
+        return {}
+    if execution is None:
+        raise SystemExit(
+            "canonical Scan placements require a validated execution envelope"
+        )
+    if len(raw.encode("utf-8")) > 500_000:
+        raise SystemExit("canonical Scan placements exceed their size limit")
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"invalid canonical Scan placements: {exc}") from exc
+    if not isinstance(payload, dict) or set(payload) != {
+        "schema_version", "execution_plan_digest",
+        "target_binding_digest", "capabilities",
+    }:
+        raise SystemExit("canonical Scan placement fields are invalid")
+    if payload.get("schema_version") != "canonical-scan-placements/v1":
+        raise SystemExit("canonical Scan placement schema is invalid")
+    if (
+        payload.get("execution_plan_digest")
+        != execution.get("execution_plan_digest")
+        or payload.get("target_binding_digest")
+        != execution.get("target_binding_digest")
+    ):
+        raise SystemExit("canonical Scan placements do not match this execution")
+    capabilities = payload.get("capabilities")
+    if not isinstance(capabilities, dict):
+        raise SystemExit("canonical Scan placement capabilities are invalid")
+    unknown = set(capabilities) - {"templates.scan"}
+    if unknown:
+        raise SystemExit(
+            "unsupported canonical Scan placement: "
+            + ", ".join(sorted(str(name) for name in unknown))
+        )
+    template = capabilities.get("templates.scan")
+    if template is None:
+        return {}
+    if not isinstance(template, dict) or set(template) != {
+        "schema_version", "capability_name", "enabled", "status", "reason",
+        "observations", "observation_count", "partial", "timed_out",
+        "errors", "budget_consumed", "receipt", "durable_budget_settled",
+        "idempotent_redelivery",
+    }:
+        raise SystemExit("canonical templates.scan placement is malformed")
+    if (
+        template.get("schema_version")
+        != "canonical-scan-template-execution/v1"
+        or template.get("capability_name") != "templates.scan"
+        or not isinstance(template.get("enabled"), bool)
+        or template.get("status") not in {
+            "success", "partial", "failed", "blocked", "cancelled", "skipped",
+        }
+    ):
+        raise SystemExit("canonical templates.scan placement contract is invalid")
+    observations = template.get("observations")
+    if not isinstance(observations, list) or len(observations) > 200:
+        raise SystemExit("canonical templates.scan observations are invalid")
+    if any(
+        not isinstance(item, dict)
+        or item.get("kind") != "template_match"
+        or item.get("proof_state") != "candidate"
+        for item in observations
+    ):
+        raise SystemExit("canonical templates.scan observation contract is invalid")
+    if template.get("observation_count") != len(observations):
+        raise SystemExit("canonical templates.scan observation count is invalid")
+    if not isinstance(template.get("receipt"), dict):
+        raise SystemExit("canonical templates.scan receipt reference is invalid")
+    if template.get("enabled") and template.get("status") != "skipped":
+        receipt_hash = str(template["receipt"].get("receipt_hash") or "")
+        if not re.fullmatch(r"[0-9a-f]{64}", receipt_hash):
+            raise SystemExit("canonical templates.scan receipt is missing")
+    return {"templates.scan": template}
+
+
+def _canonical_nuclei_result(summary: Mapping[str, Any]) -> dict[str, Any]:
+    """Adapt typed template candidates into the existing report shape."""
+    status = str(summary.get("status") or "failed")
+    observations = [
+        dict(item)
+        for item in summary.get("observations") or []
+        if isinstance(item, Mapping)
+        and item.get("kind") == "template_match"
+    ][:200]
+    vulnerabilities = [
+        {
+            "template_id": str(item.get("template_id") or "")[:200],
+            "name": str(item.get("name") or item.get("template_id") or "Nuclei template match")[:300],
+            "severity": (
+                str(item.get("severity") or "info").lower()
+                if str(item.get("severity") or "info").lower()
+                in {"critical", "high", "medium", "low", "info"}
+                else "info"
+            ),
+            "matched_at": item.get("matched_at"),
+            "matcher_name": item.get("matcher_name"),
+            "proof_state": "candidate",
+            "tags": [],
+            "cwe_ids": [],
+        }
+        for item in observations
+    ]
+    return {
+        "vulnerabilities": vulnerabilities,
+        "info": [],
+        "scan_completed": status in {"success", "partial"},
+        "templates_used": len({
+            item["template_id"] for item in vulnerabilities
+            if item.get("template_id")
+        }),
+        "templates_executed": 0,
+        "templates_matched": len(vulnerabilities),
+        "skipped": status == "skipped",
+        "reason": summary.get("reason") or (
+            None if status in {"success", "partial"}
+            else f"canonical_templates_{status}"
+        ),
+        "partial": bool(summary.get("partial")),
+        "timed_out": bool(summary.get("timed_out")),
+        "canonical_capability": dict(summary),
+    }
+
+
 def _validate_canonical_scan_target(
     target: str | None,
     execution: Mapping[str, Any],
@@ -14559,6 +14739,9 @@ async def cli_main():
     args = ap.parse_args()
     _apply_auth_config_file_args(args, args.auth_config_file)
     canonical_scan_execution = _load_canonical_scan_execution(args.canonical_scan)
+    canonical_scan_placements = _load_canonical_scan_placements(
+        canonical_scan_execution
+    )
     if canonical_scan_execution is not None:
         _validate_canonical_scan_target(args.target, canonical_scan_execution)
         _reject_canonical_cli_behavior(args)
@@ -15615,6 +15798,7 @@ async def cli_main():
         # Active enforcement metadata
         active_enforced=getattr(args, 'active_enforced', False),
         canonical_scan_execution=canonical_scan_execution,
+        canonical_scan_placements=canonical_scan_placements,
     )
     # Optional AI review attachment (batch classification + executive summary)
     if args.ai:

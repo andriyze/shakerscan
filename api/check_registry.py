@@ -62,7 +62,8 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         phase="template",
         family="nuclei",
         label="Nuclei",
-        is_active=False,
+        is_active=True,
+        risk_level="medium",
         telemetry_schema="nuclei_template",
         proof_contract=("template_id", "matched_at", "matcher_name", "request_url"),
         severity_rules={"template_severity_is_input": True, "promotion_requires": ["matched_at", "template_id"]},
@@ -523,7 +524,12 @@ def scanner_execution_plan(
             expected = enabled
             reason = "global_checks_skipped" if skip_global_checks else "default_passive"
         elif spec.name == "nuclei":
-            enabled = not public_only and not quick_mode and not focused_endpoints_only
+            enabled = bool(
+                active_checks
+                and not public_only
+                and not quick_mode
+                and not focused_endpoints_only
+            )
             expected = enabled
             if public_only:
                 reason = "public_only"
@@ -531,6 +537,8 @@ def scanner_execution_plan(
                 reason = "quick_mode"
             elif focused_endpoints_only:
                 reason = "focused_endpoints_only"
+            elif not active_checks:
+                reason = "active_testing_required"
             else:
                 reason = "template_scan_expected"
         elif spec.name == "endpoint_security":

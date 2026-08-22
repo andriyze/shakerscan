@@ -20,7 +20,9 @@ from scan.capability_execution import (
     fit_prepared_scan_capability,
     scan_budget_ledger_limits,
     scan_capability_action_digest,
+    scan_external_execution_target,
     scan_network_capability_allocation,
+    scan_template_capability_allocation,
     prepare_scan_external_capability,
     prepare_scan_process_capability,
 )
@@ -146,6 +148,40 @@ def test_network_allocation_degrades_to_port_only_when_budget_cannot_fingerprint
     assert allocation["address_count"] == 1
     assert allocation["ports"] == CANONICAL_SCAN_NETWORK_PORTS[:1]
     assert allocation["fingerprint_limits"] is None
+
+
+def test_template_allocation_preserves_budget_for_the_baseline_scan():
+    assert scan_template_capability_allocation(_budget()) == {
+        "http_requests": 25,
+        "tool_wall_seconds": 15,
+    }
+    assert scan_template_capability_allocation(
+        _budget(max_http_requests=20_000, max_tool_wall_seconds=2_700)
+    ) == {
+        "http_requests": 4_000,
+        "tool_wall_seconds": 300,
+    }
+    assert scan_template_capability_allocation(
+        _budget(max_http_requests=1)
+    ) is None
+
+
+def test_external_target_must_match_the_exact_frozen_origin():
+    assert scan_external_execution_target(
+        "https://app.example.test/account?id=1#secret",
+        target=_target(),
+    ) == "https://app.example.test/account?id=1"
+
+    with pytest.raises(ScanCapabilityContractError, match="origin"):
+        scan_external_execution_target(
+            "http://app.example.test/account",
+            target=_target(),
+        )
+    with pytest.raises(ScanCapabilityContractError, match="host"):
+        scan_external_execution_target(
+            "https://evil.example.test/account",
+            target=_target(),
+        )
 
 
 def test_scan_process_reserves_exact_remaining_multidimensional_budget():

@@ -1,6 +1,7 @@
 import asyncio
 import importlib.util
 import inspect
+import json
 import os
 import sys
 from pathlib import Path
@@ -22,6 +23,94 @@ scanner_mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(scanner_mod)
 if _added_scanner_dir:
     sys.path.remove(_SCANNER_DIR)
+
+
+def _template_placement_summary():
+    return {
+        "schema_version": "canonical-scan-template-execution/v1",
+        "capability_name": "templates.scan",
+        "enabled": True,
+        "status": "success",
+        "reason": None,
+        "observations": [{
+            "kind": "template_match",
+            "template_id": "example-cve",
+            "name": "Example CVE",
+            "severity": "high",
+            "matched_at": "https://app.example.test/account",
+            "matcher_name": "body",
+            "proof_state": "candidate",
+        }],
+        "observation_count": 1,
+        "partial": False,
+        "timed_out": False,
+        "errors": [],
+        "budget_consumed": {"http_requests": 3, "tool_wall_seconds": 2},
+        "receipt": {"receipt_hash": "c" * 64},
+        "durable_budget_settled": True,
+        "idempotent_redelivery": False,
+    }
+
+
+def test_canonical_template_placement_is_bound_and_adapted_to_candidates(
+    monkeypatch,
+):
+    execution = {
+        "execution_plan_digest": "a" * 64,
+        "target_binding_digest": "b" * 64,
+    }
+    monkeypatch.setenv(
+        "SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS",
+        json.dumps({
+            "schema_version": "canonical-scan-placements/v1",
+            **execution,
+            "capabilities": {
+                "templates.scan": _template_placement_summary(),
+            },
+        }),
+    )
+
+    placements = scanner_mod._load_canonical_scan_placements(execution)
+    result = scanner_mod._canonical_nuclei_result(
+        placements["templates.scan"]
+    )
+
+    assert result["scan_completed"] is True
+    assert result["templates_used"] == 1
+    assert result["vulnerabilities"][0] == {
+        "template_id": "example-cve",
+        "name": "Example CVE",
+        "severity": "high",
+        "matched_at": "https://app.example.test/account",
+        "matcher_name": "body",
+        "proof_state": "candidate",
+        "tags": [],
+        "cwe_ids": [],
+    }
+    assert result["canonical_capability"]["receipt"]["receipt_hash"] == (
+        "c" * 64
+    )
+
+
+def test_canonical_template_placement_rejects_other_authority(monkeypatch):
+    execution = {
+        "execution_plan_digest": "a" * 64,
+        "target_binding_digest": "b" * 64,
+    }
+    monkeypatch.setenv(
+        "SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS",
+        json.dumps({
+            "schema_version": "canonical-scan-placements/v1",
+            "execution_plan_digest": "d" * 64,
+            "target_binding_digest": "b" * 64,
+            "capabilities": {
+                "templates.scan": _template_placement_summary(),
+            },
+        }),
+    )
+
+    with pytest.raises(SystemExit, match="do not match"):
+        scanner_mod._load_canonical_scan_placements(execution)
 
 
 def test_network_discovery_plan_is_permission_gated_even_for_deep_complete_mode():
@@ -229,12 +318,12 @@ def test_discovery_manifest_clears_legacy_active_family_metadata():
     assert scope["legacy_flags"] == {"xss": False, "sqli": False}
 
 
-def test_nuclei_dispatch_uses_registry_profile_gate():
+def test_nuclei_dispatch_requires_active_permission_and_profile_gate():
     standard_plan = scanner_mod.build_scanner_execution_plan(
         scan_mode="standard",
         public_only=False,
         quick_mode=False,
-        active_checks=False,
+        active_checks=True,
         check_family_scope={"families": []},
         skip_global_checks=False,
         focused_endpoints_only=False,
@@ -244,7 +333,7 @@ def test_nuclei_dispatch_uses_registry_profile_gate():
         scan_mode="quick",
         public_only=False,
         quick_mode=True,
-        active_checks=False,
+        active_checks=True,
         check_family_scope={"families": []},
         skip_global_checks=False,
         focused_endpoints_only=False,
@@ -255,13 +344,13 @@ def test_nuclei_dispatch_uses_registry_profile_gate():
     assert scanner_mod.registry_dispatch_decision(quick_plan, "nuclei")["dispatch_enabled"] is False
 
 
-def test_nuclei_template_phase_dispatches_only_registry_enabled_adapter():
+def test_nuclei_template_phase_dispatches_only_active_registry_adapter():
     called = []
     standard_plan = scanner_mod.build_scanner_execution_plan(
         scan_mode="standard",
         public_only=False,
         quick_mode=False,
-        active_checks=False,
+        active_checks=True,
         check_family_scope={"families": []},
         skip_global_checks=False,
         focused_endpoints_only=False,
@@ -271,7 +360,7 @@ def test_nuclei_template_phase_dispatches_only_registry_enabled_adapter():
         scan_mode="quick",
         public_only=False,
         quick_mode=True,
-        active_checks=False,
+        active_checks=True,
         check_family_scope={"families": []},
         skip_global_checks=False,
         focused_endpoints_only=False,

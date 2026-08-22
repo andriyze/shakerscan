@@ -237,10 +237,14 @@ def test_scanner_execution_plan_enforces_canonical_family_policy_at_dispatch():
     }
 
 
-def test_scanner_execution_plan_dispatches_registered_nuclei_only_when_profile_allows_it():
+def test_scanner_execution_plan_dispatches_nuclei_only_with_active_permission():
     standard = r.scanner_execution_plan(
         scan_mode="standard",
         active_checks=False,
+    )
+    active = r.scanner_execution_plan(
+        scan_mode="standard",
+        active_checks=True,
     )
     quick = r.scanner_execution_plan(
         scan_mode="quick",
@@ -248,10 +252,13 @@ def test_scanner_execution_plan_dispatches_registered_nuclei_only_when_profile_a
         active_checks=False,
     )
     standard_families = {item["name"]: item for item in standard["families"]}
+    active_families = {item["name"]: item for item in active["families"]}
     quick_families = {item["name"]: item for item in quick["families"]}
 
-    assert standard_families["nuclei"]["enabled"] is True
-    assert standard_families["nuclei"]["dispatch_adapter"] == "legacy_nuclei_template"
+    assert standard_families["nuclei"]["enabled"] is False
+    assert standard_families["nuclei"]["reason"] == "active_testing_required"
+    assert active_families["nuclei"]["enabled"] is True
+    assert active_families["nuclei"]["dispatch_adapter"] == "legacy_nuclei_template"
     assert quick_families["nuclei"]["enabled"] is False
     assert quick_families["nuclei"]["reason"] == "quick_mode"
 

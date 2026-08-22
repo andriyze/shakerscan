@@ -357,6 +357,106 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
     ] is True
 
 
+def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch):
+    plan, _target, options = _authority(enabled=False, network=True)
+    connection = _Connection(plan)
+    events = []
+    store = _ReservationStore(events)
+    placement_seen = {}
+
+    async def fake_nuclei(payload, *, heartbeat):
+        events.append(("nuclei", store.current.record.status))
+        assert payload["tool_name"] == "nuclei"
+        assert payload["_cancelled"]() is False
+        await heartbeat()
+        return {
+            "status": "success",
+            "elapsed_seconds": 2,
+            "typed_output": {
+                "parser": "nuclei-typed-v1",
+                "records": [{
+                    "kind": "template_match",
+                    "template_id": "example-cve",
+                    "name": "Example CVE",
+                    "severity": "high",
+                    "matched_at": "https://app.example.test/",
+                    "proof_state": "candidate",
+                }],
+                "errors": [],
+            },
+            "settlement": {"mode": "exact", "actual": 3},
+        }
+
+    async def fake_run_scan(
+        target,
+        runtime_options,
+        scan_id=None,
+        job_id=None,
+        canonical_runtime_budget=None,
+        canonical_placed_capabilities=None,
+        **_kwargs,
+    ):
+        events.append(("baseline", store.current.record.status))
+        placement_seen.update(canonical_placed_capabilities or {})
+        assert target == "https://app.example.test"
+        assert canonical_runtime_budget == {
+            "http_requests": 97,
+            "state_changing_requests": 0,
+            "browser_actions": 20,
+            "tcp_ports_attempted": 1,
+            "hosts_attempted": 50,
+            "tool_wall_seconds": 58,
+        }
+        return {
+            "target": target,
+            "findings": [],
+            "result": {"score": 90, "grade": "A"},
+            "coverage": {"status": "complete"},
+            "discovery": {"browser_crawl": {"pages_visited": 0}},
+            "tls": {
+                "canonical_runtime": {
+                    "schema_version": "canonical-tls-runtime/v1",
+                    "tcp_ports_attempted": 1,
+                },
+            },
+            "request_budget": {
+                "schema_version": "request_meter_v1",
+                "mode": "enforce",
+                "fully_metered": True,
+                "attempted_requests": 4,
+                "state_changing_attempted_requests": 0,
+            },
+            "scan_metadata": {"schema_version": "scan-report/v2"},
+        }
+
+    monkeypatch.setattr(worker, "db_pool", _Pool(connection))
+    monkeypatch.setattr(worker, "PostgresBudgetReservationStore", lambda: store)
+    monkeypatch.setattr(worker, "_execute_agent_scanner_process", fake_nuclei)
+    monkeypatch.setattr(worker, "run_scan", fake_run_scan)
+    monkeypatch.setattr(worker, "_worker_runtime_identity", lambda: "worker:test")
+    monkeypatch.setattr(worker, "_scan_cancel_requested", lambda _scan_id: False)
+
+    result = asyncio.run(worker._execute_reserved_deterministic_scan(
+        "https://app.example.test",
+        options,
+        scan_id="00000000-0000-0000-0000-000000000001",
+        job_id="job-1",
+    ))
+
+    assert ("nuclei", "running") in events
+    assert ("baseline", "running") in events
+    assert events.index(("nuclei", "running")) < events.index(
+        ("baseline", "running")
+    )
+    assert placement_seen["templates.scan"]["status"] == "success"
+    assert placement_seen["templates.scan"]["observations"][0][
+        "proof_state"
+    ] == "candidate"
+    assert result["canonical_capabilities"]["templates.scan"][
+        "receipt"
+    ]["budget_reservation_state"] == "committed"
+
+
 def test_scan_port_discovery_uses_same_reserve_before_traffic_boundary(
     monkeypatch,
 ):
@@ -649,6 +749,7 @@ def _stored_network_capability(
     adapter = {
         "ports.discover": ("naabu", "naabu-jsonl/v1"),
         "service.fingerprint": ("nmap", "nmap-xml/v1"),
+        "templates.scan": ("nuclei", "nuclei-typed-v1"),
     }[capability_name]
     terminal, receipt = terminalize_capability_reservation(
         running,
@@ -677,6 +778,73 @@ def _stored_network_capability(
         ledger_after_settlement=dict(amounts),
         receipt=receipt.public_dict(),
     )
+
+
+def test_template_stage_places_one_reserved_nuclei_result(monkeypatch):
+    _plan, _target, options = _authority(enabled=False, network=True)
+    calls = []
+
+    async def execute_capability(**kwargs):
+        calls.append(kwargs)
+        return _stored_network_capability(
+            "templates.scan",
+            observations=[{
+                "kind": "template_match",
+                "template_id": "example-cve",
+                "name": "Example CVE",
+                "severity": "high",
+                "matched_at": "https://app.example.test/account",
+                "proof_state": "candidate",
+            }],
+            amounts={"http_requests": 3, "tool_wall_seconds": 2},
+        ), False
+
+    monkeypatch.setattr(
+        worker, "_execute_reserved_scan_capability", execute_capability,
+    )
+    summary = asyncio.run(worker._execute_scan_template_capability(
+        "https://app.example.test/account?id=1",
+        options,
+        scan_id="00000000-0000-0000-0000-000000000001",
+        job_id="job-1",
+    ))
+
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["capability_name"] == "templates.scan"
+    assert call["action_id"] == "deterministic_baseline.templates.scan"
+    assert call["reservation_limits"] == {
+        "http_requests": 25,
+        "tool_wall_seconds": 15,
+    }
+    assert call["scanner_process_payload"]["execution_target"] == (
+        "https://app.example.test/account?id=1"
+    )
+    assert call["scanner_process_payload"]["pinned_address"] == "192.0.2.10"
+    assert call["scanner_process_payload"]["oob_interactsh_server"] is None
+    assert summary["status"] == "success"
+    assert summary["observations"][0]["proof_state"] == "candidate"
+    assert summary["receipt"]["budget_reservation_state"] == "committed"
+
+
+def test_template_stage_never_runs_without_active_permission(monkeypatch):
+    _plan, _target, options = _authority(enabled=True, network=False)
+
+    async def execute_capability(**_kwargs):
+        raise AssertionError("passive Scan launched Nuclei")
+
+    monkeypatch.setattr(
+        worker, "_execute_reserved_scan_capability", execute_capability,
+    )
+    summary = asyncio.run(worker._execute_scan_template_capability(
+        "https://app.example.test",
+        options,
+        scan_id="00000000-0000-0000-0000-000000000001",
+        job_id="job-1",
+    ))
+
+    assert summary["status"] == "skipped"
+    assert summary["reason"] == "active_testing_not_authorized"
 
 
 def test_network_policy_runs_two_registry_actions_with_partitioned_budget(

@@ -118,7 +118,9 @@ from scan.capability_execution import (
     prepare_scan_external_capability,
     scan_budget_ledger_limits,
     scan_capability_action_digest,
+    scan_external_execution_target,
     scan_network_capability_allocation,
+    scan_template_capability_allocation,
     prepare_scan_process_capability,
 )
 from scan.worker_dispatch import (
@@ -2711,6 +2713,7 @@ async def run_scan(
     progress_callback: Any = None,
     persist_checkpoint_artifacts: bool = True,
     canonical_runtime_budget: Mapping[str, int] | None = None,
+    canonical_placed_capabilities: Mapping[str, Any] | None = None,
 ) -> dict:
     """Execute scanner and return results."""
     scan_admission = None
@@ -2746,6 +2749,10 @@ async def run_scan(
     elif canonical_runtime_budget is not None:
         raise ValueError(
             "canonical runtime budget is valid only for deterministic Scan"
+        )
+    if canonical_placed_capabilities is not None and native_scan_execution is None:
+        raise ValueError(
+            "canonical placed capabilities require canonical Scan authority"
         )
 
     if options.get("run_kind") == "device_probe":
@@ -3114,12 +3121,43 @@ async def run_scan(
     # Set up checkpoint file for partial result recovery
     checkpoint_file = None
     scan_env = os.environ.copy()
+    scan_env.pop("SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS", None)
     if native_scan_execution is not None:
+        native_payload = native_scan_execution.payload()
         scan_env["SHAKERSCAN_CANONICAL_SCAN_EXECUTION"] = json.dumps(
-            native_scan_execution.payload(),
+            native_payload,
             sort_keys=True,
             separators=(",", ":"),
         )
+        if canonical_placed_capabilities is not None:
+            if (
+                len(canonical_placed_capabilities) > 16
+                or any(
+                    not isinstance(summary, Mapping)
+                    for summary in canonical_placed_capabilities.values()
+                )
+            ):
+                raise ValueError(
+                    "canonical placed capabilities are invalid"
+                )
+            placement_payload = {
+                "schema_version": "canonical-scan-placements/v1",
+                "execution_plan_digest": native_payload[
+                    "execution_plan_digest"
+                ],
+                "target_binding_digest": native_payload[
+                    "target_binding_digest"
+                ],
+                "capabilities": {
+                    str(name): dict(summary)
+                    for name, summary in canonical_placed_capabilities.items()
+                },
+            }
+            scan_env["SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS"] = json.dumps(
+                placement_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
     if scan_ai_enabled and ai_api_key:
         scan_env["AI_API_KEY"] = ai_api_key
     # Stamp the real deployed commit (published by the API from the live checkout)
@@ -10331,6 +10369,144 @@ def _deterministic_scan_terminal_failure_result(
     }
 
 
+def _skipped_scan_template_summary(reason: str) -> dict[str, Any]:
+    return {
+        "schema_version": "canonical-scan-template-execution/v1",
+        "capability_name": "templates.scan",
+        "enabled": False,
+        "status": "skipped",
+        "reason": str(reason)[:200],
+        "observations": [],
+        "observation_count": 0,
+        "partial": False,
+        "timed_out": False,
+        "errors": [],
+        "budget_consumed": {},
+        "receipt": {},
+        "durable_budget_settled": True,
+        "idempotent_redelivery": False,
+    }
+
+
+def _scan_template_summary_from_stored(
+    stored: Any,
+    *,
+    idempotent_redelivery: bool,
+) -> dict[str, Any]:
+    receipt = dict(stored.receipt or {})
+    receipt_status = str(receipt.get("status") or "failed").strip().lower()
+    status = {
+        "succeeded": "success",
+        "success": "success",
+        "partial": "partial",
+        "blocked": "blocked",
+        "cancelled": "cancelled",
+    }.get(receipt_status, "failed")
+    observations = [
+        dict(item)
+        for item in receipt.get("observations") or []
+        if isinstance(item, Mapping)
+        and str(item.get("kind") or "") == "template_match"
+    ][:200]
+    return {
+        "schema_version": "canonical-scan-template-execution/v1",
+        "capability_name": "templates.scan",
+        "enabled": True,
+        "status": status,
+        "reason": None,
+        "observations": observations,
+        "observation_count": len(observations),
+        "partial": bool(receipt.get("partial")),
+        "timed_out": bool(receipt.get("timed_out")),
+        "errors": list(receipt.get("errors") or [])[:20],
+        "budget_consumed": dict(stored.record.actual),
+        "receipt": _scan_capability_receipt_reference(receipt),
+        "durable_budget_settled": bool(stored.record.terminal),
+        "idempotent_redelivery": bool(idempotent_redelivery),
+    }
+
+
+async def _execute_scan_template_capability(
+    target_url: str,
+    options: Mapping[str, Any],
+    *,
+    scan_id: str,
+    job_id: str,
+) -> dict[str, Any]:
+    """Run canonical Nuclei once, outside the compatibility scanner process."""
+    _normalized, admission = prepare_worker_dispatch(options)
+    if not admission.canonical or admission.plan is None:
+        return _skipped_scan_template_summary("legacy_scan")
+    execution = build_native_scan_execution(admission.plan, options)
+    policy = admission.plan.policy
+    if execution.discovery_manifest_only:
+        return _skipped_scan_template_summary("discovery_manifest_only")
+    if execution.skip_global_checks:
+        return _skipped_scan_template_summary("global_checks_skipped")
+    if execution.focused_endpoints_only or execution.zero_rediscovery:
+        return _skipped_scan_template_summary("assigned_endpoint_scope")
+    if execution.focused_family and execution.focused_family != "nuclei":
+        return _skipped_scan_template_summary("focused_other_family")
+    include = set(policy.include_families)
+    exclude = set(policy.exclude_families)
+    if "nuclei" in exclude:
+        return _skipped_scan_template_summary("policy_excluded")
+    if include and "nuclei" not in include:
+        return _skipped_scan_template_summary("policy_not_included")
+    if not policy.active_testing:
+        return _skipped_scan_template_summary("active_testing_not_authorized")
+    if not policy.approval_receipt_id:
+        return _skipped_scan_template_summary("active_approval_missing")
+    allocation = scan_template_capability_allocation(
+        execution.payload()["execution_budget"]
+    )
+    if allocation is None:
+        return _skipped_scan_template_summary("insufficient_stage_budget")
+
+    target = execution.target_binding
+    execution_target = scan_external_execution_target(
+        target_url, target=target,
+    )
+    parsed_target = urllib.parse.urlsplit(execution_target)
+    registered_target = urllib.parse.urlunsplit((
+        parsed_target.scheme, parsed_target.netloc, "", "", "",
+    ))
+    authorized_addresses = list(target.allowed_addresses)
+    pinned_address = agent_tools.validate_pinned_scanner_address(
+        authorized_addresses[0], authorized_addresses,
+    )
+    stored, idempotent_redelivery = await _execute_reserved_scan_capability(
+        admission=admission,
+        execution=execution,
+        scan_id=scan_id,
+        job_id=job_id,
+        capability_name="templates.scan",
+        capability_args={},
+        action_id="deterministic_baseline.templates.scan",
+        target_binding=target,
+        reservation_limits=allocation,
+        scanner_process_payload={
+            "job_id": f"{job_id}:templates.scan",
+            "tool_name": "nuclei",
+            "execution_target": execution_target,
+            "registered_target": registered_target,
+            "scanner_options": {},
+            "timeout_ms": int(allocation["tool_wall_seconds"]) * 1_000,
+            "pinned_address": pinned_address,
+            "authorized_addresses": authorized_addresses,
+            # Scan does not grant an additional OOB destination. Nuclei's fixed
+            # template therefore retains -no-interactsh for this capability.
+            "oob_interactsh_server": None,
+            "oob_interactsh_token": None,
+        },
+        scanner_process_runner=_execute_agent_scanner_process,
+    )
+    return _scan_template_summary_from_stored(
+        stored,
+        idempotent_redelivery=idempotent_redelivery,
+    )
+
+
 async def _execute_reserved_deterministic_scan(
     target: str,
     options: Mapping[str, Any],
@@ -10345,6 +10521,12 @@ async def _execute_reserved_deterministic_scan(
             target, dict(options), scan_id=scan_id, job_id=job_id,
         )
     execution = build_native_scan_execution(admission.plan, normalized)
+    template_summary = await _execute_scan_template_capability(
+        target,
+        normalized,
+        scan_id=scan_id,
+        job_id=job_id,
+    )
     result_holder: dict[str, Any] = {}
 
     async def scan_runner(runtime_budget: Mapping[str, int]) -> Mapping[str, Any]:
@@ -10354,6 +10536,9 @@ async def _execute_reserved_deterministic_scan(
             scan_id=scan_id,
             job_id=job_id,
             canonical_runtime_budget=runtime_budget,
+            canonical_placed_capabilities={
+                "templates.scan": template_summary,
+            },
         )
 
     stored, idempotent_redelivery = await _execute_reserved_scan_capability(
@@ -10381,17 +10566,22 @@ async def _execute_reserved_deterministic_scan(
             )
         result = _as_report_dict(durable_result) or {}
         if not result:
-            return _deterministic_scan_terminal_failure_result(
+            result = _deterministic_scan_terminal_failure_result(
                 target=target,
                 stored=stored,
                 summary=summary,
             )
     else:
-        return _deterministic_scan_terminal_failure_result(
+        result = _deterministic_scan_terminal_failure_result(
             target=target,
             stored=stored,
             summary=summary,
         )
+    canonical_capabilities = result.setdefault(
+        "canonical_capabilities", {}
+    )
+    if isinstance(canonical_capabilities, dict):
+        canonical_capabilities["templates.scan"] = template_summary
     result["deterministic_scan_execution"] = summary
     return result
 

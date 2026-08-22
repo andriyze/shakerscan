@@ -6,6 +6,7 @@ from dataclasses import replace
 import hashlib
 import json
 from typing import Any, Mapping
+import urllib.parse
 
 try:
     from runtime.capability_registry import CapabilitySpec
@@ -96,6 +97,59 @@ def scan_network_capability_allocation(
             "tool_wall_seconds": wall - first_wall,
         }
     return result
+
+
+def scan_template_capability_allocation(
+    budget: Mapping[str, Any],
+) -> dict[str, int] | None:
+    """Reserve a bounded Nuclei slice without starving the baseline Scan."""
+    http = _budget_integer(budget, "max_http_requests")
+    wall = _budget_integer(budget, "max_tool_wall_seconds")
+    if http < 2 or wall < 2:
+        return None
+    return {
+        "http_requests": min(4_000, max(1, http // 4)),
+        "tool_wall_seconds": min(300, max(1, wall // 4)),
+    }
+
+
+def scan_external_execution_target(
+    target_url: str,
+    *,
+    target: TargetBinding,
+) -> str:
+    """Bind an external web tool to one exact frozen Scan origin."""
+    try:
+        parsed = urllib.parse.urlsplit(str(target_url or "").strip())
+        _ = parsed.port
+    except ValueError as exc:
+        raise ScanCapabilityContractError(
+            "external Scan target has an invalid authority"
+        ) from exc
+    host = str(parsed.hostname or "").lower().rstrip(".")
+    if parsed.scheme.lower() not in {"http", "https"} or not host:
+        raise ScanCapabilityContractError(
+            "external Scan target must be an absolute HTTP(S) URL"
+        )
+    if parsed.username or parsed.password:
+        raise ScanCapabilityContractError(
+            "external Scan target must not contain user information"
+        )
+    if host != target.canonical_host:
+        raise ScanCapabilityContractError(
+            "external Scan target host does not match its frozen binding"
+        )
+    origin = urllib.parse.urlunsplit((
+        parsed.scheme.lower(), parsed.netloc.lower(), "", "", "",
+    ))
+    if origin not in target.allowed_origins:
+        raise ScanCapabilityContractError(
+            "external Scan target origin is outside its frozen binding"
+        )
+    return urllib.parse.urlunsplit((
+        parsed.scheme.lower(), parsed.netloc.lower(), parsed.path or "/",
+        parsed.query, "",
+    ))
 
 
 def scan_budget_ledger_limits(
