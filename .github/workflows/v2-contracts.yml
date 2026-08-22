@@ -19,6 +19,7 @@ on:
       - tests/test_request_collections_v2.py
       - tests/test_budget_reservation_lifecycle.py
       - tests/test_runtime_receipts.py
+      - tests/test_v2_native_receipt_hardening.py
       - tests/test_discovery_recovery_checkpoint.py
       - tests/test_hunt_start_contract.py
       - tests/test_request_replay.py
@@ -47,6 +48,7 @@ on:
       - tests/test_request_collections_v2.py
       - tests/test_budget_reservation_lifecycle.py
       - tests/test_runtime_receipts.py
+      - tests/test_v2_native_receipt_hardening.py
       - tests/test_discovery_recovery_checkpoint.py
       - tests/test_hunt_start_contract.py
       - tests/test_request_replay.py
@@ -106,7 +108,8 @@ jobs:
         run: |
           python -m pytest -q -p no:cacheprovider \
             tests/test_budget_reservation_lifecycle.py \
-            tests/test_runtime_receipts.py
+            tests/test_runtime_receipts.py \
+            tests/test_v2_native_receipt_hardening.py
 
       - name: Validate exact request replay contracts
         env:

@@ -22,6 +22,11 @@ from .budgets import BUDGET_DIMENSIONS
 _TERMINAL_RESERVATION_STATES = frozenset({"committed", "released", "failed"})
 _HEX_64_RE = re.compile(r"^[0-9a-f]{64}$")
 _STATUS_RE = re.compile(r"^[a-z][a-z0-9_.:-]{0,63}$")
+_CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+_SENSITIVE_PARTS = frozenset({
+    "authorization", "auth", "bearer", "cookie", "credential", "password", "passwd",
+    "private", "secret", "signature", "token", "api", "key", "access", "refresh",
+})
 _SENSITIVE_KEY_RE = re.compile(
     r"(?:^|[_-])(?:authorization|auth|bearer|cookie|credential|password|passwd|"
     r"private[_-]?key|secret|signature|token|api[_-]?key)(?:$|[_-])",
@@ -39,6 +44,20 @@ _INLINE_SECRET_PATTERNS = (
     ),
     re.compile(r"(://)[^/@\s]+@"),
 )
+
+
+def _key_is_sensitive(value: Any) -> bool:
+    expanded = _CAMEL_BOUNDARY_RE.sub("_", str(value or ""))
+    parts = tuple(
+        part for part in re.split(r"[^A-Za-z0-9]+", expanded.lower()) if part
+    )
+    return bool(
+        any(part in _SENSITIVE_PARTS for part in parts)
+        or "_".join(parts) in {
+            "access_token", "refresh_token", "api_key", "private_key",
+            "client_secret", "session_id", "session_token",
+        }
+    )
 
 
 def _normalize_budget(values: Mapping[str, int], *, allow_zero: bool) -> dict[str, int]:
@@ -74,7 +93,7 @@ def _redact_string(value: str) -> str:
 
 def redact_receipt_value(value: Any, *, key: str | None = None) -> Any:
     """Return stable JSON-safe receipt material with secret values removed."""
-    if key and _SENSITIVE_KEY_RE.search(str(key)):
+    if key and (_key_is_sensitive(key) or _SENSITIVE_KEY_RE.search(str(key))):
         return "***" if value not in (None, "", [], {}, ()) else value
     if isinstance(value, Mapping):
         return {
@@ -168,14 +187,29 @@ class CapabilityReceipt:
                 raise ValueError(f"budget_consumed exceeds the reservation for {kind}")
         if reservation_id and not reserved:
             raise ValueError("budget reservation linkage requires budget_reserved")
+        if reservation_state == "released" and any(consumed.values()):
+            raise ValueError("released budget reservation cannot report consumed budget")
+        if reservation_state in {"released", "failed"} and status in {
+            "completed", "success", "succeeded"
+        }:
+            raise ValueError(
+                "successful receipt requires a committed budget reservation"
+            )
 
         started = _iso_timestamp(self.started_at, field_name="started_at", required=True)
         finished = _iso_timestamp(self.finished_at, field_name="finished_at", required=False)
         if finished and datetime.fromisoformat(finished) < datetime.fromisoformat(started):
             raise ValueError("finished_at must not be earlier than started_at")
+        if status in {
+            "blocked", "cancelled", "completed", "failed", "partial",
+            "success", "succeeded", "timed_out",
+        } and not finished:
+            raise ValueError("terminal capability receipt requires finished_at")
 
         artifact_refs = tuple(dict.fromkeys(
-            str(item).strip() for item in self.artifact_refs if str(item).strip()
+            _redact_string(str(item).strip())
+            for item in self.artifact_refs
+            if str(item).strip()
         ))
         observations = tuple(
             redact_receipt_value(dict(item))
