@@ -23,7 +23,7 @@ import urllib.parse
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import asyncpg
 import redis
@@ -57,7 +57,20 @@ import asm_inventory
 import family_proof
 import agent_tools
 from capabilities.network import CapabilityInputError, network_capability_adapter
+from runtime.budget_reservations import DurableBudgetReservation
+from runtime.budgets import BudgetExceeded
 from runtime.models import ScanPolicy, TargetBinding
+from runtime.pinned_http_replay import PinnedAiohttpReplayTransport
+from runtime.request_replay_executor import (
+    ReplayExecutionError,
+    execute_replay_plan,
+    replay_reservation_budget,
+)
+from runtime.reservation_store import (
+    PostgresBudgetReservationStore,
+    ReservationConflict,
+    ReservationStoreError,
+)
 from pinned_socks_proxy import PinnedSocksProxy
 import investigation_candidates
 from worker_queue_policy import base_worker_queue_keys, worker_role
@@ -80,6 +93,12 @@ try:
     )
     from scanner_tools.build_fingerprint import hash_source_files, runtime_file_map
     from scanner_tools.device_web import run_pinned_device_web_scan
+    from scanner_tools.request_collections import RequestSelector
+    from scanner_tools.request_replay import (
+        ReplayAuthorization,
+        RequestReplayError,
+        build_selected_replay_plan,
+    )
     from scanner_tools import device_advisories
     from scanner_tools.common import run_streaming
 except ModuleNotFoundError:
@@ -89,6 +108,12 @@ except ModuleNotFoundError:
     )
     from scanner.scanner_tools.build_fingerprint import hash_source_files, runtime_file_map
     from scanner.scanner_tools.device_web import run_pinned_device_web_scan
+    from scanner.scanner_tools.request_collections import RequestSelector
+    from scanner.scanner_tools.request_replay import (
+        ReplayAuthorization,
+        RequestReplayError,
+        build_selected_replay_plan,
+    )
     from scanner.scanner_tools import device_advisories
     from scanner.scanner_tools.common import run_streaming
 from evidence_storage import serialize_evidence_content, store_evidence_content
@@ -13232,6 +13257,414 @@ async def process_agent_scanner_tool_job(job_data: dict[str, Any]) -> None:
         redis_client.delete(cancel_key)
 
 
+def _worker_hunt_ledger_limits(budget: Mapping[str, Any]) -> dict[str, int]:
+    return {
+        "agent_actions": int(budget.get("max_capability_calls") or 0),
+        "active_actions": int(budget.get("max_active_actions") or 0),
+        "http_requests": int(budget.get("max_http_requests") or 0),
+        "tcp_ports_attempted": int(budget.get("max_tcp_ports") or 0),
+        "browser_actions": int(budget.get("max_browser_actions") or 0),
+        "state_changing_requests": int(budget.get("max_state_changing_requests") or 0),
+        "tool_wall_seconds": int(budget.get("max_duration_seconds") or 0),
+        "device_fragility_points": int(budget.get("max_device_fragility_points") or 0),
+        "hosts_attempted": int(budget.get("max_hosts") or 0),
+        "udp_ports_attempted": int(budget.get("max_udp_ports") or 0),
+        "oob_interactions": int(budget.get("max_oob_interactions") or 0),
+    }
+
+
+def _worker_json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, Mapping):
+        return dict(value)
+    parsed = parse_json_field(value)
+    return dict(parsed) if isinstance(parsed, Mapping) else {}
+
+
+async def process_request_collection_replay_job(job_data: dict[str, Any]) -> None:
+    """Decrypt and execute one exact collection selection on the assigned worker.
+
+    The queue contains only opaque IDs, a selector, and the collection digest observed
+    by the control plane.  The worker reloads every authority object from PostgreSQL,
+    creates the exact plan in private memory, and holds the Hunt ledger before sending
+    any target bytes.
+    """
+    job_id = str(job_data.get("job_id") or "").strip()
+    result_key = f"agent_tool_result:{job_id}"
+    cancel_key = f"agent_tool_cancel:{job_id}"
+    redis_client = get_redis()
+    store = PostgresBudgetReservationStore()
+    result: dict[str, Any] = {
+        "job_id": job_id,
+        "status": "failed",
+        "error": "worker_fault",
+        "durable_budget_settled": False,
+    }
+    try:
+        if not job_id:
+            raise ReplayExecutionError("replay job requires an identity")
+        hunt_id = str(uuid.UUID(str(job_data.get("hunt_id") or "")))
+        action_id = str(uuid.UUID(str(job_data.get("action_id") or "")))
+        collection_id = str(uuid.UUID(str(job_data.get("collection_id") or "")))
+        reservation_id = str(uuid.UUID(str(job_data.get("reservation_id") or "")))
+        expected_payload_sha256 = str(job_data.get("expected_payload_sha256") or "").lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_payload_sha256):
+            raise ReplayExecutionError("replay job collection digest is invalid")
+        selector_raw = _worker_json_object(job_data.get("selector"))
+        selector = RequestSelector(
+            request_ids=tuple(str(item) for item in selector_raw.get("request_ids") or ()),
+            methods=tuple(str(item) for item in selector_raw.get("methods") or ()),
+            path_regex=str(selector_raw.get("path_regex") or "") or None,
+            safe_methods_only=True,
+            limit=max(1, min(int(selector_raw.get("limit") or 25), 25)),
+        )
+
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                run = await conn.fetchrow(
+                    "SELECT * FROM hunt_runs WHERE id=$1 FOR UPDATE", uuid.UUID(hunt_id),
+                )
+                if not run:
+                    raise ReplayExecutionError("replay Hunt does not exist")
+                if str(run["target_kind"]) not in {"web", "api"} or not run["target_id"]:
+                    raise ReplayExecutionError("collection replay requires a web or API Hunt")
+                action = await conn.fetchrow(
+                    """SELECT id, capability_name, status FROM hunt_actions
+                       WHERE id=$1 AND hunt_run_id=$2 FOR UPDATE""",
+                    uuid.UUID(action_id), uuid.UUID(hunt_id),
+                )
+                if not action or str(action["capability_name"]) != "collections.replay_safe":
+                    raise ReplayExecutionError("replay action identity is not valid")
+                collection = await conn.fetchrow(
+                    """SELECT id, encrypted_payload, payload_sha256
+                       FROM request_collections
+                       WHERE id=$1 AND target_id=$2 AND is_active=true FOR UPDATE""",
+                    uuid.UUID(collection_id), run["target_id"],
+                )
+                if not collection:
+                    raise ReplayExecutionError(
+                        "request collection is unavailable or bound to another target"
+                    )
+                if str(collection["payload_sha256"] or "").lower() != expected_payload_sha256:
+                    raise ReplayExecutionError("request collection changed after action admission")
+                context = _worker_json_object(run["context_pack"])
+
+        raw_payload = str(decrypt_secret(collection["encrypted_payload"]) or "")
+        if not raw_payload or raw_payload.startswith("enc:fernet:"):
+            raise ReplayExecutionError("request collection could not be decrypted on the worker")
+        try:
+            payload = json.loads(raw_payload)
+        except json.JSONDecodeError as exc:
+            raise ReplayExecutionError("request collection payload is invalid") from exc
+        if not isinstance(payload, Mapping):
+            raise ReplayExecutionError("request collection payload is not an object")
+        payload_digest = hashlib.sha256(
+            json.dumps(
+                payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        if payload_digest != expected_payload_sha256:
+            raise ReplayExecutionError("decrypted request collection failed its integrity check")
+
+        target_context = (
+            dict(context.get("target") or {})
+            if isinstance(context.get("target"), Mapping) else {}
+        )
+        origins = tuple(str(item) for item in target_context.get("origins") or () if str(item))
+        target_url = str(target_context.get("url") or "")
+        parsed_target = urllib.parse.urlsplit(target_url)
+        target = TargetBinding(
+            target_id=str(run["target_id"]),
+            target_kind=str(run["target_kind"]),
+            canonical_host=parsed_target.hostname,
+            allowed_origins=origins,
+            allowed_addresses=tuple(
+                str(item) for item in context.get("authorized_target_addresses") or () if str(item)
+            ),
+            allowed_root_domains=(
+                str(target_context.get("root_domain") or parsed_target.hostname or "")
+                .lower().rstrip("."),
+            ),
+            environment=str(target_context.get("environment") or "unknown"),
+        )
+        plan = build_selected_replay_plan(
+            payload,
+            selector,
+            allowed_origins=target.allowed_origins,
+            default_origin=(target.allowed_origins[0] if target.allowed_origins else None),
+            authorization=ReplayAuthorization(),
+        )
+        additional_budget = {
+            "agent_actions": 1,
+            "tool_wall_seconds": max(
+                1, min(int(job_data.get("tool_wall_seconds") or 60), 300),
+            ),
+        }
+        requested_budget = replay_reservation_budget(plan, additional_budget)
+        requested = DurableBudgetReservation.request(
+            owner_kind="hunt",
+            owner_id=hunt_id,
+            capability_name="collections.replay",
+            amounts=requested_budget,
+            reservation_id=reservation_id,
+        )
+
+        persisted = None
+        held_ledger: dict[str, int] = {}
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                locked = await conn.fetchrow(
+                    "SELECT * FROM hunt_runs WHERE id=$1 FOR UPDATE", uuid.UUID(hunt_id),
+                )
+                if not locked or str(locked["status"]) not in {"active", "awaiting_planner"}:
+                    raise ReplayExecutionError("Hunt is no longer executable")
+                stored = await store.create_requested(
+                    conn,
+                    action_id=action_id,
+                    action_digest=plan.input_digest,
+                    record=requested,
+                )
+                if stored.record.terminal:
+                    receipt = dict(stored.receipt or {})
+                    result = {
+                        "job_id": job_id,
+                        "status": "success" if stored.record.status == "committed" else "failed",
+                        "error": stored.record.failure_reason,
+                        "replayed": int(stored.record.actual.get("http_requests") or 0),
+                        "budget_consumed": dict(stored.record.actual),
+                        "used_after_reconciliation": dict(
+                            stored.ledger_after_settlement or {}
+                        ),
+                        "reservation_id": stored.record.reservation_id,
+                        "receipt": receipt,
+                        "observations": list(receipt.get("observations") or []),
+                        "durable_budget_settled": True,
+                        "idempotent_redelivery": True,
+                    }
+                    return
+                if stored.record.status != "requested":
+                    raise ReservationConflict(
+                        "replay action already has an active durable reservation"
+                    )
+                budget = _worker_json_object(locked["budget_json"])
+                limits = _worker_hunt_ledger_limits(budget)
+                used = _worker_json_object(locked["budget_used_json"])
+                consumed = {key: int(used.get(key) or 0) for key in limits}
+                try:
+                    reserved, held_ledger = stored.record.reserve_against(
+                        limits=limits,
+                        consumed=consumed,
+                        lease_seconds=max(90, additional_budget["tool_wall_seconds"] + 10),
+                    )
+                except BudgetExceeded as exc:
+                    released = stored.record.release(
+                        proof_not_started=True,
+                        reason="budget_exhausted_before_execution",
+                    )
+                    await store.persist_terminal(
+                        conn,
+                        previous=stored,
+                        terminal=released,
+                        ledger_after_settlement=consumed,
+                        receipt=None,
+                    )
+                    dimension = next(iter(exc.shortages), "unknown")
+                    await conn.execute(
+                        """UPDATE hunt_runs SET status='budget_exhausted', stop_reason=$2,
+                                  updated_at=NOW() WHERE id=$1""",
+                        uuid.UUID(hunt_id), f"budget_exhausted:{dimension}",
+                    )
+                    await conn.execute(
+                        """UPDATE hunt_actions SET status='failed', completed_at=NOW(),
+                                  result_summary=$2 WHERE id=$1""",
+                        uuid.UUID(action_id), json.dumps({"error": f"budget_exhausted:{dimension}"}),
+                    )
+                    result = {
+                        "job_id": job_id,
+                        "status": "failed",
+                        "error": f"budget_exhausted:{dimension}",
+                        "reservation_id": reservation_id,
+                        "budget_consumed": {},
+                        "durable_budget_settled": True,
+                    }
+                    return
+                persisted = await store.persist_transition(
+                    conn,
+                    previous=stored,
+                    current=reserved,
+                    ledger_after_hold=held_ledger,
+                )
+                used.update(held_ledger)
+                await conn.execute(
+                    """UPDATE hunt_runs SET budget_used_json=$2, status='active',
+                              updated_at=NOW() WHERE id=$1""",
+                    uuid.UUID(hunt_id), json.dumps(used),
+                )
+                await conn.execute(
+                    "UPDATE hunt_actions SET status='running' WHERE id=$1",
+                    uuid.UUID(action_id),
+                )
+
+        settled_ledger = dict(held_ledger)
+
+        async def persist_runtime_transition(
+            current: DurableBudgetReservation, _ledger: Mapping[str, int],
+        ) -> None:
+            nonlocal persisted
+            if persisted is None:
+                raise ReservationStoreError("replay reservation persistence was not initialized")
+            async with db_pool.acquire() as conn:
+                async with conn.transaction():
+                    owner = await conn.fetchrow(
+                        "SELECT id, status FROM hunt_runs WHERE id=$1 FOR UPDATE",
+                        uuid.UUID(hunt_id),
+                    )
+                    if not owner or str(owner["status"]) not in {"active", "awaiting_planner"}:
+                        raise ReplayExecutionError("Hunt stopped before the next replay request")
+                    latest = await store.load(
+                        conn, reservation_id, for_update=True,
+                    )
+                    if latest is None or latest.record.state_digest != persisted.record.state_digest:
+                        raise ReservationConflict("replay reservation changed before worker transition")
+                    persisted = await store.persist_transition(
+                        conn, previous=latest, current=current,
+                    )
+
+        async def persist_runtime_settlement(
+            terminal: DurableBudgetReservation,
+            receipt: Any,
+            _ledger: Mapping[str, int],
+        ) -> None:
+            nonlocal persisted, settled_ledger
+            if persisted is None:
+                raise ReservationStoreError("replay reservation persistence was not initialized")
+            async with db_pool.acquire() as conn:
+                async with conn.transaction():
+                    locked = await conn.fetchrow(
+                        "SELECT * FROM hunt_runs WHERE id=$1 FOR UPDATE", uuid.UUID(hunt_id),
+                    )
+                    if not locked:
+                        raise ReservationStoreError("replay Hunt disappeared during settlement")
+                    latest = await store.load(conn, reservation_id, for_update=True)
+                    if latest is None or latest.record.state_digest != persisted.record.state_digest:
+                        raise ReservationConflict("replay reservation changed before settlement")
+                    current_used = _worker_json_object(locked["budget_used_json"])
+                    current_ledger = {
+                        key: int(current_used.get(key) or 0)
+                        for key in _worker_hunt_ledger_limits(
+                            _worker_json_object(locked["budget_json"])
+                        )
+                    }
+                    settled_ledger = terminal.reconcile_consumed(current_ledger)
+                    persisted = await store.persist_terminal(
+                        conn,
+                        previous=latest,
+                        terminal=terminal,
+                        ledger_after_settlement=settled_ledger,
+                        receipt=receipt,
+                    )
+                    current_used.update(settled_ledger)
+                    await conn.execute(
+                        "UPDATE hunt_runs SET budget_used_json=$2, updated_at=NOW() WHERE id=$1",
+                        uuid.UUID(hunt_id), json.dumps(current_used),
+                    )
+                    await conn.execute(
+                        """UPDATE hunt_actions SET status=$2, result_summary=$3,
+                                  completed_at=NOW() WHERE id=$1""",
+                        uuid.UUID(action_id),
+                        "completed" if terminal.status == "committed" else "failed",
+                        json.dumps({
+                            "reservation_id": reservation_id,
+                            "receipt_hash": receipt.receipt_hash,
+                            "status": receipt.status,
+                        }),
+                    )
+
+        worker_id = _worker_runtime_identity() or f"worker:{job_id[:8]}"
+        outcome = await execute_replay_plan(
+            plan,
+            target=target,
+            owner_kind="hunt",
+            owner_id=hunt_id,
+            worker_id=worker_id,
+            limits=_worker_hunt_ledger_limits(_worker_json_object(run["budget_json"])),
+            consumed=held_ledger,
+            transport=PinnedAiohttpReplayTransport(),
+            timeout_seconds=max(
+                0.1,
+                min(
+                    30.0,
+                    float(additional_budget["tool_wall_seconds"]) / len(plan.requests),
+                ),
+            ),
+            reservation_id=reservation_id,
+            lease_seconds=max(90, additional_budget["tool_wall_seconds"] + 10),
+            on_reservation=persist_runtime_transition,
+            on_settlement=persist_runtime_settlement,
+            require_durable_persistence=True,
+            additional_budget=additional_budget,
+            initial_reservation=persisted.record if persisted is not None else None,
+        )
+        public_receipt = outcome.receipt.public_dict()
+        result = {
+            "job_id": job_id,
+            "status": "success" if outcome.status == "succeeded" else outcome.status,
+            "error": None if outcome.reservation.status == "committed" else outcome.reservation.failure_reason,
+            "ok": outcome.status == "succeeded",
+            "partial": outcome.status == "partial",
+            "replayed": int(outcome.reservation.actual.get("http_requests") or 0),
+            "observations": list(public_receipt.get("observations") or []),
+            "budget_consumed": dict(outcome.reservation.actual),
+            "used_after_reconciliation": settled_ledger,
+            "reservation_id": reservation_id,
+            "receipt": public_receipt,
+            "safe_methods_only": True,
+            "secret_values_visible": False,
+            "durable_budget_settled": True,
+            "network_binding": "runtime_target_binding",
+        }
+    except asyncio.CancelledError:
+        raise
+    except (
+        ReplayExecutionError,
+        RequestReplayError,
+        ReservationConflict,
+        ReservationStoreError,
+        ValueError,
+        TypeError,
+        KeyError,
+    ) as exc:
+        result = {
+            "job_id": job_id,
+            "status": "failed",
+            "error": f"contract:{str(exc)[:240]}",
+            "durable_budget_settled": False,
+        }
+    except Exception as exc:  # noqa: BLE001 - publish a bounded operational result
+        result = {
+            "job_id": job_id,
+            "status": "failed",
+            "error": f"worker_fault:{type(exc).__name__}",
+            "durable_budget_settled": False,
+        }
+    finally:
+        if job_id:
+            redis_client.set(
+                result_key,
+                json.dumps(result, default=str, separators=(",", ":")),
+                ex=_AGENT_TOOL_RESULT_TTL_SECONDS,
+            )
+            redis_client.hset(
+                f"job:{job_id}",
+                mapping={
+                    "status": str(result.get("status") or "failed"),
+                    "current_phase": "request_collection_replay_complete",
+                    "error": str(result.get("error") or ""),
+                },
+            )
+            redis_client.expire(f"job:{job_id}", _AGENT_TOOL_RESULT_TTL_SECONDS)
+            redis_client.delete(cancel_key)
+
+
 async def process_canonical_network_capability_job(job_data: dict[str, Any]) -> None:
     """Execute a canonical network adapter from declarative, independently verified input."""
     job_id = str(job_data.get("job_id") or "").strip()
@@ -13421,6 +13854,8 @@ async def process_job(job_data: dict):
         await process_discovery_job(job_data)
     elif job_type == 'agent_scanner_tool':
         await process_agent_scanner_tool_job(job_data)
+    elif job_type == 'request_collection_replay':
+        await process_request_collection_replay_job(job_data)
     elif job_type == 'canonical_network_capability':
         await process_canonical_network_capability_job(job_data)
     elif job_type == 'finding_retest':

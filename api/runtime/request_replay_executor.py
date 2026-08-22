@@ -268,6 +268,66 @@ def _actual_budget(plan: ReplayPlan, attempted: int) -> dict[str, int]:
     return actual
 
 
+def replay_reservation_budget(
+    plan: ReplayPlan, additional_budget: Mapping[str, int] | None = None,
+) -> dict[str, int]:
+    """Return the complete trusted reservation for one replay action.
+
+    The plan owns wire-request dimensions.  A production owner may add orthogonal
+    dimensions such as ``agent_actions`` and ``tool_wall_seconds``; overlapping a
+    plan-owned dimension is rejected so the control plane cannot weaken exact replay
+    accounting by replacing the request count.
+    """
+    requested = dict(plan.estimated_budget)
+    for raw_dimension, raw_amount in dict(additional_budget or {}).items():
+        dimension = str(raw_dimension or "").strip()
+        if dimension in requested:
+            raise ReplayExecutionError(
+                f"additional replay budget overlaps plan dimension: {dimension}"
+            )
+        if isinstance(raw_amount, bool):
+            raise ReplayExecutionError(
+                f"additional replay budget for {dimension} must be an integer"
+            )
+        try:
+            amount = int(raw_amount)
+        except (TypeError, ValueError) as exc:
+            raise ReplayExecutionError(
+                f"additional replay budget for {dimension} must be an integer"
+            ) from exc
+        if amount <= 0:
+            raise ReplayExecutionError(
+                f"additional replay budget for {dimension} must be positive"
+            )
+        requested[dimension] = amount
+    return requested
+
+
+def _settled_budget(
+    plan: ReplayPlan,
+    attempted: int,
+    *,
+    requested: Mapping[str, int],
+    started_at: datetime,
+    finished_at: datetime,
+) -> dict[str, int]:
+    actual = _actual_budget(plan, attempted)
+    plan_dimensions = set(plan.estimated_budget)
+    elapsed_seconds = max(
+        0,
+        math.ceil((finished_at - started_at).total_seconds()),
+    )
+    for dimension, amount in requested.items():
+        if dimension in plan_dimensions:
+            continue
+        actual[dimension] = (
+            min(int(amount), elapsed_seconds)
+            if dimension == "tool_wall_seconds"
+            else int(amount)
+        )
+    return actual
+
+
 def _receipt(
     *,
     plan: ReplayPlan,
@@ -364,6 +424,8 @@ async def execute_replay_plan(
     on_reservation: ReservationSink | None = None,
     on_settlement: SettlementSink | None = None,
     require_durable_persistence: bool = False,
+    additional_budget: Mapping[str, int] | None = None,
+    initial_reservation: DurableBudgetReservation | None = None,
 ) -> ReplayExecutionOutcome:
     """Execute one exact ReplayPlan with reserve-before-send accounting.
 
@@ -392,23 +454,44 @@ async def execute_replay_plan(
         timeout_seconds=float(timeout_seconds),
     )
 
-    now = _utc(clock)
-    requested = DurableBudgetReservation.request(
-        owner_kind=owner_kind,
-        owner_id=owner,
-        capability_name="collections.replay",
-        amounts=plan.estimated_budget,
-        now=now,
-        reservation_id=reservation_id,
-    )
-    await _invoke(on_reservation, requested, dict(consumed))
-    reserved, held_ledger = requested.reserve_against(
-        limits=limits,
-        consumed=consumed,
-        now=_utc(clock),
-        lease_seconds=effective_lease,
-    )
-    await _invoke(on_reservation, reserved, held_ledger)
+    requested_budget = replay_reservation_budget(plan, additional_budget)
+    if initial_reservation is None:
+        now = _utc(clock)
+        requested = DurableBudgetReservation.request(
+            owner_kind=owner_kind,
+            owner_id=owner,
+            capability_name="collections.replay",
+            amounts=requested_budget,
+            now=now,
+            reservation_id=reservation_id,
+        )
+        await _invoke(on_reservation, requested, dict(consumed))
+    else:
+        requested = initial_reservation
+        if (
+            requested.status not in {"requested", "reserved"}
+            or requested.owner_kind != owner_kind
+            or requested.owner_id != owner
+            or requested.capability_name != "collections.replay"
+            or dict(requested.requested) != requested_budget
+            or (reservation_id is not None and requested.reservation_id != reservation_id)
+        ):
+            raise ReplayExecutionError(
+                "pre-created replay reservation does not match the execution action"
+            )
+    if requested.status == "reserved":
+        # The owner row and reservation were atomically held before the worker was
+        # dispatched. ``consumed`` is therefore the ledger snapshot after that hold.
+        reserved = requested
+        held_ledger = dict(consumed)
+    else:
+        reserved, held_ledger = requested.reserve_against(
+            limits=limits,
+            consumed=consumed,
+            now=_utc(clock),
+            lease_seconds=effective_lease,
+        )
+        await _invoke(on_reservation, reserved, held_ledger)
     running = reserved.start(
         worker_id=worker,
         now=_utc(clock),
@@ -445,8 +528,11 @@ async def execute_replay_plan(
                 )
                 await _invoke(on_reservation, running, held_ledger)
     except asyncio.CancelledError:
-        actual = _actual_budget(plan, attempted)
         finished_at = _utc(clock)
+        actual = _settled_budget(
+            plan, attempted, requested=requested.requested,
+            started_at=started_at, finished_at=finished_at,
+        )
         receipt = _receipt(
             plan=plan, target=target, owner_kind=owner_kind, owner_id=owner,
             worker_id=worker, reservation=running, reservation_state="failed",
@@ -464,8 +550,11 @@ async def execute_replay_plan(
             await asyncio.shield(_invoke(on_settlement, failed, receipt, settled))
         raise
     except Exception as exc:
-        actual = _actual_budget(plan, attempted)
         finished_at = _utc(clock)
+        actual = _settled_budget(
+            plan, attempted, requested=requested.requested,
+            started_at=started_at, finished_at=finished_at,
+        )
         error_code = f"executor_{type(exc).__name__.lower()}"[:120]
         partial = attempted > 0
         receipt = _receipt(
@@ -484,9 +573,12 @@ async def execute_replay_plan(
         await _invoke(on_settlement, failed, receipt, settled)
         return ReplayExecutionOutcome(receipt.status, failed, receipt, settled)
 
-    actual = _actual_budget(plan, attempted)
-    partial = bool(errors)
     finished_at = _utc(clock)
+    actual = _settled_budget(
+        plan, attempted, requested=requested.requested,
+        started_at=started_at, finished_at=finished_at,
+    )
+    partial = bool(errors)
     receipt = _receipt(
         plan=plan, target=target, owner_kind=owner_kind, owner_id=owner,
         worker_id=worker, reservation=running, reservation_state="committed",

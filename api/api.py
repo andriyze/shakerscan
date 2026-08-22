@@ -34615,35 +34615,73 @@ async def _hunt_select_collection(run: Any, context: Mapping[str, Any], values: 
             "count": len(selected), "secret_values_visible": False}
 
 
-async def _hunt_replay_safe_collection(run: Any, context: Mapping[str, Any], values: Mapping[str, Any]) -> dict[str, Any]:
+async def _hunt_replay_safe_collection(
+    run: Any,
+    context: Mapping[str, Any],
+    values: Mapping[str, Any],
+    *,
+    action_id: uuid.UUID,
+) -> dict[str, Any]:
+    """Queue worker-only exact replay without exposing decrypted requests to the API."""
     selector = _hunt_collection_selector(values, hard_limit=25)
     async with db_pool.acquire() as conn:
         row = await _hunt_bound_collection(conn, run, context, values.get("collection_id"))
-    raw = str(decrypt_secret(row["encrypted_payload"]) or "")
-    if not raw or raw.startswith("enc:fernet:"):
-        raise HTTPException(status_code=503, detail="Bound request collection cannot be decrypted")
+    redis_client = get_redis()
+    job_id = str(uuid.uuid4())
+    reservation_id = str(uuid.uuid4())
+    result_key = f"agent_tool_result:{job_id}"
+    timeout_seconds = 60
+    payload = {
+        "job_id": job_id,
+        "type": "request_collection_replay",
+        "hunt_id": str(run["id"]),
+        "action_id": str(action_id),
+        "reservation_id": reservation_id,
+        "collection_id": str(row["id"]),
+        "expected_payload_sha256": str(row["payload_sha256"] or ""),
+        "selector": {
+            "request_ids": list(selector.request_ids),
+            "methods": list(selector.methods),
+            "path_regex": selector.path_regex,
+            "limit": selector.limit,
+        },
+        "tool_wall_seconds": timeout_seconds,
+        "submitted_at": utc_now_iso(),
+        "_base_queue_name": AGENT_TOOL_QUEUE_NAME,
+    }
+    redis_client.hset(f"job:{job_id}", mapping={
+        "status": "queued",
+        "current_phase": "request_collection_replay_queued",
+        "tool": "collections.replay_safe",
+    })
+    redis_client.expire(f"job:{job_id}", timeout_seconds + 300)
+    enqueue_job(redis_client, AGENT_TOOL_QUEUE_NAME, payload)
+    deadline = asyncio.get_running_loop().time() + timeout_seconds + 30
     try:
-        payload = json.loads(raw)
-        requests = select_request_collection_requests(payload, selector)
-    except (json.JSONDecodeError, RequestImportError, ValueError) as exc:
-        raise HTTPException(status_code=422, detail=f"Request collection replay is invalid: {exc}") from exc
-    observations: list[dict[str, Any]] = []
-    target_url = str(context.get("target", {}).get("url") or "")
-    for imported in requests:
-        parsed = urllib.parse.urlsplit(str(imported.get("url") or imported.get("url_template") or ""))
-        path = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
-        observation = await _agent_tool_http_request(
-            run["target_id"], target_url,
-            {"method": str(imported.get("method") or "GET"), "path": path},
-            created_by=f"hunt_v2:{run['id']}", allow_write=False,
-            approval_receipt_id=None,
-            authorized_addresses=list(context.get("authorized_target_addresses") or []),
-            trusted_collection_headers=imported.get("headers") if isinstance(imported.get("headers"), Mapping) else {},
-        )
-        observations.append(observation)
-    return {"ok": all(item.get("ok") for item in observations), "collection_id": str(row["id"]),
-            "replayed": len(observations), "observations": observations,
-            "safe_methods_only": True, "secret_values_visible": False}
+        while asyncio.get_running_loop().time() < deadline:
+            raw = redis_client.get(result_key)
+            if raw is not None:
+                redis_client.delete(result_key)
+                text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
+                parsed = json.loads(text)
+                if not isinstance(parsed, dict):
+                    raise RuntimeError("request replay worker returned a malformed result")
+                parsed.setdefault("collection_id", str(row["id"]))
+                return parsed
+            await asyncio.sleep(0.2)
+    except asyncio.CancelledError:
+        # The worker owns durable settlement and must finish even if the API caller
+        # disconnects after dispatch.
+        raise
+    return {
+        "status": "timeout",
+        "error": "worker_result_timeout",
+        "collection_id": str(row["id"]),
+        "reservation_id": reservation_id,
+        "durable_budget_settled": False,
+        "observations": [],
+        "budget_consumed": {},
+    }
 
 
 async def _hunt_tls_inspect(target_url: str, authorized_addresses: Sequence[str]) -> dict[str, Any]:
@@ -35042,23 +35080,27 @@ async def execute_hunt_capability(
             charges["agent_actions"] = 1
             if requires_call_approval:
                 charges["active_actions"] = 1
-            try:
-                reserved_used = reserve_budget_snapshot(
-                    limits, {key: int(used.get(key) or 0) for key in limits}, charges,
-                )
-            except BudgetExceeded as exc:
-                dimension = next(iter(exc.shortages), "unknown")
-                await conn.execute(
-                    "UPDATE hunt_runs SET status='budget_exhausted', stop_reason=$2, updated_at=NOW() WHERE id=$1",
-                    run["id"], f"budget_exhausted:{dimension}",
-                )
-                raise HTTPException(status_code=409, detail=f"Hunt budget exhausted: {dimension}")
-            used.update(reserved_used)
-            await conn.execute("UPDATE hunt_runs SET budget_used_json=$2, status='active', updated_at=NOW() WHERE id=$1", run["id"], json.dumps(used))
+            worker_managed_budget = name == "collections.replay_safe"
+            if not worker_managed_budget:
+                try:
+                    reserved_used = reserve_budget_snapshot(
+                        limits, {key: int(used.get(key) or 0) for key in limits}, charges,
+                    )
+                except BudgetExceeded as exc:
+                    dimension = next(iter(exc.shortages), "unknown")
+                    await conn.execute(
+                        "UPDATE hunt_runs SET status='budget_exhausted', stop_reason=$2, updated_at=NOW() WHERE id=$1",
+                        run["id"], f"budget_exhausted:{dimension}",
+                    )
+                    raise HTTPException(status_code=409, detail=f"Hunt budget exhausted: {dimension}")
+                used.update(reserved_used)
+                await conn.execute("UPDATE hunt_runs SET budget_used_json=$2, status='active', updated_at=NOW() WHERE id=$1", run["id"], json.dumps(used))
             await conn.execute(
                 """INSERT INTO hunt_actions (id, hunt_run_id, capability_name, status, input_summary)
-                   VALUES ($1,$2,$3,'running',$4)""",
-                action_id, run["id"], name, json.dumps(_redact_agent_payload(request.input)),
+                   VALUES ($1,$2,$3,$4,$5)""",
+                action_id, run["id"], name,
+                "running",
+                json.dumps(_redact_agent_payload(request.input)),
             )
 
     context = _hunt_json(run["context_pack"], {})
@@ -35070,7 +35112,9 @@ async def execute_hunt_capability(
         elif name == "collections.select":
             result = await _hunt_select_collection(run, context, request.input)
         elif name == "collections.replay_safe":
-            result = await _hunt_replay_safe_collection(run, context, request.input)
+            result = await _hunt_replay_safe_collection(
+                run, context, request.input, action_id=action_id,
+            )
         elif str(run["target_kind"]) == "device":
             assert device_adapter_name is not None and validated_device_input is not None
             device_state = context.get("device_state") if isinstance(context.get("device_state"), dict) else device_agent.seed_state(objective=str(run["objective"]), safety_profile=str(policy.get("device_fragility_profile") or "safe_remote"), max_turns=30)
@@ -35168,16 +35212,22 @@ async def execute_hunt_capability(
                 async with conn.transaction():
                     locked = await _hunt_run_or_404(conn, hunt_id, for_update=True)
                     current_used = _hunt_json(locked["budget_used_json"], {})
-                    current_ledger = {key: int(current_used.get(key) or 0) for key in limits}
-                    reconciled_ledger = reconcile_budget_snapshot(
-                        current_ledger, charges, actual_charges,
-                    )
-                    current_used.update(reconciled_ledger)
-                    await conn.execute(
-                        "UPDATE hunt_runs SET budget_used_json=$2, updated_at=NOW() WHERE id=$1",
-                        locked["id"], json.dumps(current_used),
-                    )
-                    reconciled_used = current_used
+                    if worker_managed_budget:
+                        # The worker already replaced its exact hold with measured usage
+                        # in the same transaction as the canonical receipt, or still owns
+                        # the live reservation after an API-side result timeout.
+                        reconciled_used = current_used
+                    else:
+                        current_ledger = {key: int(current_used.get(key) or 0) for key in limits}
+                        reconciled_ledger = reconcile_budget_snapshot(
+                            current_ledger, charges, actual_charges,
+                        )
+                        current_used.update(reconciled_ledger)
+                        await conn.execute(
+                            "UPDATE hunt_runs SET budget_used_json=$2, updated_at=NOW() WHERE id=$1",
+                            locked["id"], json.dumps(current_used),
+                        )
+                        reconciled_used = current_used
             except Exception:
                 logger.exception("Failed to reconcile Hunt capability budget", extra={"hunt_id": hunt_id, "action_id": str(action_id)})
             is_partial = bool(
@@ -35204,7 +35254,14 @@ async def execute_hunt_capability(
                     },
                     partial=is_partial,
                     hunt_id=str(run["id"]),
-                    metadata_json={"hunt_action_id": str(action_id), "result_status": status},
+                    metadata_json={
+                        "hunt_action_id": str(action_id),
+                        "result_status": status,
+                        "durable_budget_reservation_id": (
+                            receipt_payload.get("reservation_id")
+                            if isinstance(receipt_payload, dict) else None
+                        ),
+                    },
                     created_by=f"hunt_v2:{hunt_id}",
                 ))
                 receipt_id = receipt_result.get("tool_receipt", {}).get("id")
