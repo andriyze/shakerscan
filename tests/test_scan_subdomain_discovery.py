@@ -415,6 +415,27 @@ def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch)
                     "observed_minimum": 2,
                 },
             }
+        if tool == "ffuf":
+            return {
+                "status": "success",
+                "elapsed_seconds": 2,
+                "typed_output": {
+                    "parser": "ffuf-typed-v1",
+                    "records": [{
+                        "kind": "content_discovery",
+                        "url": "https://app.example.test/admin",
+                        "status": 403,
+                        "length": 120,
+                        "redirect_location": None,
+                    }],
+                    "errors": [],
+                },
+                "settlement": {
+                    "mode": "observed_lower_bound",
+                    "actual": None,
+                    "observed_minimum": 2,
+                },
+            }
         assert tool == "nuclei"
         return {
             "status": "success",
@@ -447,12 +468,12 @@ def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch)
         placement_seen.update(canonical_placed_capabilities or {})
         assert target == "https://app.example.test"
         assert canonical_runtime_budget == {
-            "http_requests": 94,
+            "http_requests": 92,
             "state_changing_requests": 0,
             "browser_actions": 20,
             "tcp_ports_attempted": 1,
             "hosts_attempted": 50,
-            "tool_wall_seconds": 55,
+            "tool_wall_seconds": 53,
         }
         return {
             "target": target,
@@ -492,12 +513,16 @@ def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch)
 
     assert ("httpx", "running") in events
     assert ("katana", "running") in events
+    assert ("ffuf", "running") in events
     assert ("nuclei", "running") in events
     assert ("baseline", "running") in events
     assert events.index(("httpx", "running")) < events.index(
         ("katana", "running")
     )
     assert events.index(("katana", "running")) < events.index(
+        ("ffuf", "running")
+    )
+    assert events.index(("ffuf", "running")) < events.index(
         ("nuclei", "running")
     )
     assert events.index(("nuclei", "running")) < events.index(
@@ -510,6 +535,10 @@ def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch)
     assert placement_seen["web.crawl"]["observations"][0]["url"] == (
         "https://app.example.test/api/orders"
     )
+    assert placement_seen["web.content_discover"]["status"] == "success"
+    assert placement_seen["web.content_discover"]["observations"][0][
+        "status"
+    ] == 403
     assert placement_seen["templates.scan"]["observations"][0][
         "proof_state"
     ] == "candidate"
@@ -813,6 +842,7 @@ def _stored_network_capability(
         "templates.scan": ("nuclei", "nuclei-typed-v1"),
         "web.probe": ("httpx", "httpx-typed-v1"),
         "web.crawl": ("katana", "katana-typed-v1"),
+        "web.content_discover": ("ffuf", "ffuf-typed-v1"),
     }[capability_name]
     terminal, receipt = terminalize_capability_reservation(
         running,
@@ -976,6 +1006,72 @@ def test_recon_stage_places_one_reserved_crawl_result(monkeypatch):
     assert summary["status"] == "success"
     assert summary["observations"][0]["kind"] == "discovered_route"
     assert summary["receipt"]["budget_reservation_state"] == "committed"
+
+
+def test_recon_stage_places_one_reserved_content_discovery_result(monkeypatch):
+    _plan, _target, options = _authority(enabled=False, network=True)
+    calls = []
+
+    async def execute_capability(**kwargs):
+        calls.append(kwargs)
+        return _stored_network_capability(
+            "web.content_discover",
+            observations=[{
+                "kind": "content_discovery",
+                "url": "https://app.example.test/admin",
+                "status": 403,
+                "length": 120,
+                "redirect_location": None,
+            }],
+            amounts={"http_requests": 2, "tool_wall_seconds": 2},
+        ), False
+
+    monkeypatch.setattr(
+        worker, "_execute_reserved_scan_capability", execute_capability,
+    )
+    summary = asyncio.run(worker._execute_scan_content_discovery_capability(
+        "https://app.example.test",
+        options,
+        scan_id="00000000-0000-0000-0000-000000000001",
+        job_id="job-1",
+    ))
+
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["capability_name"] == "web.content_discover"
+    assert call["action_id"] == "deterministic_recon.web.content_discover"
+    assert call["capability_args"] == {"wordlist": "common"}
+    assert call["reservation_limits"] == {
+        "http_requests": 10,
+        "tool_wall_seconds": 6,
+    }
+    assert call["scanner_process_payload"]["tool_name"] == "ffuf"
+    assert call["scanner_process_payload"]["scanner_options"] == {
+        "wordlist": "common"
+    }
+    assert summary["status"] == "success"
+    assert summary["observations"][0]["kind"] == "content_discovery"
+    assert summary["receipt"]["budget_reservation_state"] == "committed"
+
+
+def test_content_discovery_never_runs_without_active_permission(monkeypatch):
+    _plan, _target, options = _authority(enabled=True, network=False)
+
+    async def execute_capability(**_kwargs):
+        raise AssertionError("passive Scan launched FFUF")
+
+    monkeypatch.setattr(
+        worker, "_execute_reserved_scan_capability", execute_capability,
+    )
+    summary = asyncio.run(worker._execute_scan_content_discovery_capability(
+        "https://app.example.test",
+        options,
+        scan_id="00000000-0000-0000-0000-000000000001",
+        job_id="job-1",
+    ))
+
+    assert summary["status"] == "skipped"
+    assert summary["reason"] == "active_testing_not_authorized"
 
 
 def test_crawl_stage_never_runs_without_active_permission(monkeypatch):

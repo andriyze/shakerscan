@@ -1780,6 +1780,13 @@ async def enhanced_url_discovery(
             except json.JSONDecodeError:
                 pass
 
+    for observation in budget.get("canonical_ffuf_observations") or []:
+        if not isinstance(observation, dict):
+            continue
+        found_url = str(observation.get("url") or "").strip()
+        if found_url and found_url not in unique_urls:
+            unique_urls.append(found_url)
+
     # Recursive directory fuzzing for deeper discovery
     # Skip if scan_type is "smart" - smart_discovery does its own recursive phase
     if do_recursive_fuzzing and scan_type != "smart":

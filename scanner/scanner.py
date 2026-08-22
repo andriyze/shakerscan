@@ -5298,6 +5298,28 @@ async def build_report(target: str,
             effective_discovery_budget["canonical_katana_observations"] = (
                 _canonical_katana_observations(placed_crawl)
             )
+            placed_content = (
+                canonical_scan_placements.get("web.content_discover")
+                if isinstance(canonical_scan_placements, dict) else None
+            )
+            if not isinstance(placed_content, Mapping):
+                discovery_truncation_reasons.append(
+                    "canonical_content_discovery_placement_missing"
+                )
+            elif placed_content.get("status") == "partial":
+                discovery_truncation_reasons.append(
+                    "canonical_content_discovery_partial"
+                )
+            elif placed_content.get("status") not in {"success", "skipped"}:
+                discovery_truncation_reasons.append(
+                    "canonical_content_discovery_"
+                    + str(placed_content.get("status") or "failed")
+                )
+            effective_discovery_budget["disable_ffuf"] = True
+            effective_discovery_budget["disable_recursive_fuzzing"] = True
+            effective_discovery_budget["canonical_ffuf_observations"] = (
+                _canonical_ffuf_observations(placed_content)
+            )
         else:
             httpx_task = asyncio.create_task(pd_httpx_probe(host, port))
         if public_only and quick_mode:
@@ -14239,7 +14261,9 @@ def _load_canonical_scan_placements(
     capabilities = payload.get("capabilities")
     if not isinstance(capabilities, dict):
         raise SystemExit("canonical Scan placement capabilities are invalid")
-    unknown = set(capabilities) - {"web.probe", "web.crawl", "templates.scan"}
+    unknown = set(capabilities) - {
+        "web.probe", "web.crawl", "web.content_discover", "templates.scan",
+    }
     if unknown:
         raise SystemExit(
             "unsupported canonical Scan placement: "
@@ -14320,6 +14344,57 @@ def _load_canonical_scan_placements(
             if not re.fullmatch(r"[0-9a-f]{64}", receipt_hash):
                 raise SystemExit("canonical web.crawl receipt is missing")
         result["web.crawl"] = crawl
+    content = capabilities.get("web.content_discover")
+    if content is not None:
+        if not isinstance(content, dict) or set(content) != {
+            "schema_version", "capability_name", "enabled", "status", "reason",
+            "observations", "observation_count", "partial", "timed_out",
+            "errors", "budget_consumed", "receipt", "durable_budget_settled",
+            "idempotent_redelivery",
+        }:
+            raise SystemExit(
+                "canonical web.content_discover placement is malformed"
+            )
+        if (
+            content.get("schema_version")
+            != "canonical-scan-content-discovery-execution/v1"
+            or content.get("capability_name") != "web.content_discover"
+            or not isinstance(content.get("enabled"), bool)
+            or content.get("status") not in {
+                "success", "partial", "failed", "blocked", "cancelled", "skipped",
+            }
+        ):
+            raise SystemExit(
+                "canonical web.content_discover placement contract is invalid"
+            )
+        observations = content.get("observations")
+        if not isinstance(observations, list) or len(observations) > 200:
+            raise SystemExit(
+                "canonical web.content_discover observations are invalid"
+            )
+        if any(
+            not isinstance(item, dict)
+            or item.get("kind") != "content_discovery"
+            for item in observations
+        ):
+            raise SystemExit(
+                "canonical web.content_discover observation contract is invalid"
+            )
+        if content.get("observation_count") != len(observations):
+            raise SystemExit(
+                "canonical web.content_discover observation count is invalid"
+            )
+        if not isinstance(content.get("receipt"), dict):
+            raise SystemExit(
+                "canonical web.content_discover receipt reference is invalid"
+            )
+        if content.get("enabled") and content.get("status") != "skipped":
+            receipt_hash = str(content["receipt"].get("receipt_hash") or "")
+            if not re.fullmatch(r"[0-9a-f]{64}", receipt_hash):
+                raise SystemExit(
+                    "canonical web.content_discover receipt is missing"
+                )
+        result["web.content_discover"] = content
     template = capabilities.get("templates.scan")
     if template is None:
         return result
@@ -14395,6 +14470,24 @@ def _canonical_katana_observations(summary: Any) -> list[dict[str, Any]]:
         for item in summary.get("observations") or []
         if isinstance(item, Mapping)
         and item.get("kind") == "discovered_route"
+        and item.get("url")
+    ][:200]
+
+
+def _canonical_ffuf_observations(summary: Any) -> list[dict[str, Any]]:
+    """Return bounded typed content-discovery observations for ingestion."""
+    if not isinstance(summary, Mapping):
+        return []
+    return [
+        {
+            "url": item.get("url"),
+            "status": item.get("status"),
+            "length": item.get("length"),
+            "redirect_location": item.get("redirect_location"),
+        }
+        for item in summary.get("observations") or []
+        if isinstance(item, Mapping)
+        and item.get("kind") == "content_discovery"
         and item.get("url")
     ][:200]
 

@@ -23,6 +23,7 @@ from scan.capability_execution import (
     scan_external_execution_target,
     scan_network_capability_allocation,
     scan_template_capability_allocation,
+    scan_content_discovery_capability_allocation,
     scan_web_crawl_capability_allocation,
     scan_web_probe_capability_allocation,
     prepare_scan_external_capability,
@@ -199,6 +200,22 @@ def test_web_crawl_allocation_preserves_the_scan_backbone():
     }
     assert scan_web_crawl_capability_allocation(
         _budget(max_http_requests=3)
+    ) is None
+
+
+def test_content_discovery_allocation_preserves_the_scan_backbone():
+    assert scan_content_discovery_capability_allocation(_budget()) == {
+        "http_requests": 10,
+        "tool_wall_seconds": 6,
+    }
+    assert scan_content_discovery_capability_allocation(
+        _budget(max_http_requests=20_000, max_tool_wall_seconds=2_700)
+    ) == {
+        "http_requests": 220,
+        "tool_wall_seconds": 75,
+    }
+    assert scan_content_discovery_capability_allocation(
+        _budget(max_tool_wall_seconds=3)
     ) is None
 
 

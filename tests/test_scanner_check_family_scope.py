@@ -102,6 +102,60 @@ def _web_crawl_placement_summary():
     }
 
 
+def _content_discovery_placement_summary():
+    return {
+        "schema_version": "canonical-scan-content-discovery-execution/v1",
+        "capability_name": "web.content_discover",
+        "enabled": True,
+        "status": "success",
+        "reason": None,
+        "observations": [{
+            "kind": "content_discovery",
+            "url": "https://app.example.test/admin",
+            "status": 403,
+            "length": 120,
+            "redirect_location": None,
+        }],
+        "observation_count": 1,
+        "partial": False,
+        "timed_out": False,
+        "errors": [],
+        "budget_consumed": {"http_requests": 2, "tool_wall_seconds": 2},
+        "receipt": {"receipt_hash": "f" * 64},
+        "durable_budget_settled": True,
+        "idempotent_redelivery": False,
+    }
+
+
+def test_canonical_content_discovery_is_bound_and_adapted(monkeypatch):
+    execution = {
+        "execution_plan_digest": "a" * 64,
+        "target_binding_digest": "b" * 64,
+    }
+    monkeypatch.setenv(
+        "SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS",
+        json.dumps({
+            "schema_version": "canonical-scan-placements/v1",
+            **execution,
+            "capabilities": {
+                "web.content_discover": _content_discovery_placement_summary(),
+            },
+        }),
+    )
+
+    placements = scanner_mod._load_canonical_scan_placements(execution)
+    observations = scanner_mod._canonical_ffuf_observations(
+        placements["web.content_discover"]
+    )
+
+    assert observations == [{
+        "url": "https://app.example.test/admin",
+        "status": 403,
+        "length": 120,
+        "redirect_location": None,
+    }]
+
+
 def test_canonical_web_crawl_placement_is_bound_and_adapted(monkeypatch):
     execution = {
         "execution_plan_digest": "a" * 64,
