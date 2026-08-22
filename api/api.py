@@ -50,6 +50,8 @@ except ModuleNotFoundError:
     from scanner.release_identity import build_fingerprint as release_build_fingerprint
     from scanner.release_identity import published_scanner_version
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -3786,6 +3788,7 @@ async def lifespan(app: FastAPI):
         max_size=db_pool_max,
         init=_init_conn,
     )
+    app.state.db_pool = db_pool
     await ensure_verification_schema(db_pool)
 
     fleet_edge_mode = os.environ.get("FLEET_EDGE_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
@@ -3831,6 +3834,15 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+
+try:
+    from credential_api import router as credential_router
+    from credential_api import public_credential_validation_errors
+except ModuleNotFoundError:
+    from api.credential_api import router as credential_router
+    from api.credential_api import public_credential_validation_errors
+
+app.include_router(credential_router)
 
 # CORS for UI.
 #
@@ -3940,6 +3952,21 @@ app.add_middleware(
 
 
 app.add_middleware(LegacyHuntIsolationMiddleware)
+
+
+@app.exception_handler(RequestValidationError)
+async def _request_validation_error_handler(
+    request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    # FastAPI's default 422 body includes rejected input. That is useful for ordinary
+    # forms but unsafe for credential creation, where the rejected value may be a key,
+    # token, password, or private key. Preserve the standard handler everywhere else.
+    if request.url.path.startswith("/credential-profiles"):
+        return JSONResponse(
+            status_code=422,
+            content={"detail": public_credential_validation_errors(exc.errors())},
+        )
+    return await request_validation_exception_handler(request, exc)
 
 
 @app.exception_handler(ValueError)

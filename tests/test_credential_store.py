@@ -81,8 +81,15 @@ class MemoryCredentialConn:
             }
             return "INSERT 0 1"
         if normalized.startswith("UPDATE credential_profile_bindings"):
-            self.binding["is_active"] = False
-            self.binding["updated_at"] = args[0]
+            if "allowed_capabilities=COALESCE" in query:
+                capabilities, active, changed_at, _profile_id, _binding_id = args
+                if capabilities is not None:
+                    self.binding["allowed_capabilities"] = json.loads(capabilities)
+                self.binding["is_active"] = active
+                self.binding["updated_at"] = changed_at
+            else:
+                self.binding["is_active"] = False
+                self.binding["updated_at"] = args[0]
             return "UPDATE 1"
         raise AssertionError(query)
 
@@ -119,9 +126,20 @@ class MemoryCredentialConn:
                 "updated_at": created_at,
             }
             return dict(self.profile)
+        if normalized.startswith("SELECT p.*, b.allowed_capabilities"):
+            if not self.profile or self.profile["id"] != args[0]:
+                return None
+            return {
+                **self.profile,
+                "allowed_capabilities": (
+                    self.binding["allowed_capabilities"] if self.binding else []
+                ),
+            }
         if normalized.startswith("SELECT * FROM credential_profiles"):
             if not self.profile:
                 return None
+            if len(args) == 1:
+                return dict(self.profile) if self.profile["id"] == args[0] else None
             if (
                 self.profile["id"] != args[0]
                 or self.profile["target_kind"] != args[1]
@@ -142,6 +160,31 @@ class MemoryCredentialConn:
                 "expires_at": expires_at,
                 "is_active": True,
                 "rotated_at": changed_at,
+                "updated_at": changed_at,
+            })
+            return dict(self.profile)
+        if normalized.startswith("UPDATE credential_profiles") and "SET name=" in query:
+            (
+                name,
+                principal_label,
+                principal_slot,
+                expires_at,
+                active,
+                changed_at,
+                profile_id,
+                expected,
+            ) = args
+            if not self.profile or self.profile["id"] != profile_id:
+                return None
+            if self.profile["record_version"] != expected:
+                return None
+            self.profile.update({
+                "name": name,
+                "principal_label": principal_label,
+                "principal_slot": principal_slot,
+                "expires_at": expires_at,
+                "is_active": active,
+                "record_version": expected + 1,
                 "updated_at": changed_at,
             })
             return dict(self.profile)

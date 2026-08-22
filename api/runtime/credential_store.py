@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import re
-from typing import Any, Mapping, Protocol
+from typing import Any, Mapping, NoReturn, Protocol
 import uuid
 
 from .credentials import CREDENTIAL_KINDS, SSH_CREDENTIAL_KINDS
@@ -269,6 +269,12 @@ def _capabilities(value: Any) -> list[str]:
     return result
 
 
+def _raise_write_error(exc: Exception, *, conflict_message: str) -> NoReturn:
+    if str(getattr(exc, "sqlstate", "") or "") == "23505":
+        raise CredentialStoreConflict(conflict_message) from exc
+    raise CredentialStoreError("credential profile database write failed") from exc
+
+
 @dataclass(frozen=True)
 class CredentialProfileMetadata:
     profile_id: str
@@ -286,6 +292,7 @@ class CredentialProfileMetadata:
     rotated_at: datetime
     created_at: datetime
     updated_at: datetime
+    allowed_capabilities: tuple[str, ...] = ()
 
     @classmethod
     def from_row(cls, value: Any) -> "CredentialProfileMetadata":
@@ -297,6 +304,12 @@ class CredentialProfileMetadata:
             except json.JSONDecodeError as exc:
                 raise CredentialStoreError("stored configuration is invalid JSON") from exc
         kind = _auth_kind(item.get("auth_kind"))
+        raw_capabilities = item.get("allowed_capabilities") or []
+        if isinstance(raw_capabilities, str):
+            try:
+                raw_capabilities = json.loads(raw_capabilities)
+            except json.JSONDecodeError as exc:
+                raise CredentialStoreError("stored capability binding is invalid") from exc
         return cls(
             profile_id=str(_profile_id(item.get("id"))),
             target_kind=_target_kind(item.get("target_kind")),
@@ -317,6 +330,7 @@ class CredentialProfileMetadata:
             rotated_at=item["rotated_at"],
             created_at=item["created_at"],
             updated_at=item["updated_at"],
+            allowed_capabilities=tuple(_capabilities(raw_capabilities)),
         )
 
     def public_dict(self) -> dict[str, Any]:
@@ -336,6 +350,7 @@ class CredentialProfileMetadata:
             "rotated_at": self.rotated_at,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "allowed_capabilities": list(self.allowed_capabilities),
             "secret_configured": True,
             "secret_values_visible": False,
         }
@@ -407,8 +422,10 @@ class PostgresCredentialProfileStore:
                 _expiry(expires_at, now=timestamp),
                 timestamp,
             )
-        except Exception as exc:  # database uniqueness/type errors become stable contract errors
-            raise CredentialStoreConflict("credential profile identity already exists") from exc
+        except Exception as exc:
+            _raise_write_error(
+                exc, conflict_message="credential profile identity already exists"
+            )
         if not row:
             raise CredentialStoreError("credential profile insert returned no row")
         await conn.execute(
@@ -434,7 +451,7 @@ class PostgresCredentialProfileStore:
             json.dumps(capabilities, separators=(",", ":")),
             timestamp,
         )
-        return CredentialProfileMetadata.from_row(row)
+        return await self.get_profile(conn, profile_id=profile_uuid)
 
     async def list_profiles(
         self,
@@ -445,15 +462,118 @@ class PostgresCredentialProfileStore:
         include_inactive: bool = False,
     ) -> list[CredentialProfileMetadata]:
         rows = await conn.fetch(
-            """SELECT * FROM credential_profiles
-               WHERE target_kind=$1 AND target_id=$2
-                 AND ($3::boolean OR is_active=true)
-               ORDER BY is_active DESC, lower(name), id""",
+            """SELECT p.*, b.allowed_capabilities
+               FROM credential_profiles p
+               LEFT JOIN credential_profile_bindings b
+                 ON b.profile_id=p.id AND b.binding_kind='target'
+                AND b.binding_id=p.target_id::text
+               WHERE p.target_kind=$1 AND p.target_id=$2
+                 AND ($3::boolean OR p.is_active=true)
+               ORDER BY p.is_active DESC, lower(p.name), p.id""",
             _target_kind(target_kind),
             _target_id(target_id),
             bool(include_inactive),
         )
         return [CredentialProfileMetadata.from_row(item) for item in rows]
+
+    async def get_profile(
+        self,
+        conn: CredentialDatabase,
+        *,
+        profile_id: Any,
+    ) -> CredentialProfileMetadata:
+        row = await conn.fetchrow(
+            """SELECT p.*, b.allowed_capabilities
+               FROM credential_profiles p
+               LEFT JOIN credential_profile_bindings b
+                 ON b.profile_id=p.id AND b.binding_kind='target'
+                AND b.binding_id=p.target_id::text
+               WHERE p.id=$1""",
+            _profile_id(profile_id),
+        )
+        if not row:
+            raise CredentialStoreError("credential profile not found")
+        return CredentialProfileMetadata.from_row(row)
+
+    async def update_profile_metadata(
+        self,
+        conn: CredentialDatabase,
+        *,
+        profile_id: Any,
+        expected_record_version: int,
+        name: str,
+        principal_label: str | None,
+        principal_slot: str,
+        expires_at: datetime | None,
+        expires_at_changed: bool,
+        is_active: bool,
+        allowed_capabilities: list[str] | tuple[str, ...] | None,
+        now: datetime,
+    ) -> CredentialProfileMetadata:
+        timestamp = _now(now)
+        profile_uuid = _profile_id(profile_id)
+        row = await conn.fetchrow(
+            "SELECT * FROM credential_profiles WHERE id=$1 FOR UPDATE",
+            profile_uuid,
+        )
+        if not row:
+            raise CredentialStoreError("credential profile not found")
+        existing = CredentialProfileMetadata.from_row(row)
+        if existing.record_version != _positive_version(
+            expected_record_version, name="expected_record_version"
+        ):
+            raise CredentialStoreConflict("credential profile was modified concurrently")
+        slot = _principal_slot(principal_slot)
+        _validate_kind_placement(
+            auth_kind=existing.auth_kind,
+            target_kind=existing.target_kind,
+            principal_slot=slot,
+        )
+        normalized_expiry = (
+            _expiry(expires_at, now=timestamp)
+            if expires_at_changed
+            else existing.expires_at
+        )
+        capabilities_json = (
+            json.dumps(_capabilities(allowed_capabilities), separators=(",", ":"))
+            if allowed_capabilities is not None
+            else None
+        )
+        try:
+            updated = await conn.fetchrow(
+                """UPDATE credential_profiles
+                   SET name=$1, principal_label=$2, principal_slot=$3, expires_at=$4,
+                       is_active=$5, record_version=record_version+1, updated_at=$6
+                   WHERE id=$7 AND record_version=$8
+                   RETURNING *""",
+                _name(name),
+                _principal_label(principal_label),
+                slot,
+                normalized_expiry,
+                bool(is_active),
+                timestamp,
+                profile_uuid,
+                existing.record_version,
+            )
+        except Exception as exc:
+            _raise_write_error(
+                exc, conflict_message="credential profile identity already exists"
+            )
+        if not updated:
+            raise CredentialStoreConflict("credential profile was modified concurrently")
+        await conn.execute(
+            """UPDATE credential_profile_bindings
+               SET allowed_capabilities=COALESCE($1::jsonb, allowed_capabilities),
+                   is_active=$2, updated_at=$3
+               WHERE profile_id=$4 AND binding_kind='target'
+                 AND binding_id=$5""",
+            capabilities_json,
+            bool(is_active),
+            timestamp,
+            profile_uuid,
+            existing.target_id,
+        )
+        return await self.get_profile(conn, profile_id=profile_uuid)
 
     async def rotate_profile(
         self,
@@ -518,7 +638,7 @@ class PostgresCredentialProfileStore:
         )
         if not updated:
             raise CredentialStoreConflict("credential profile was modified concurrently")
-        return CredentialProfileMetadata.from_row(updated)
+        return await self.get_profile(conn, profile_id=profile_uuid)
 
     async def load_for_worker(
         self,
@@ -599,4 +719,4 @@ class PostgresCredentialProfileStore:
             timestamp,
             profile_uuid,
         )
-        return CredentialProfileMetadata.from_row(row)
+        return await self.get_profile(conn, profile_id=profile_uuid)
