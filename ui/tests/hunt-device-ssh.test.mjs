@@ -7,9 +7,13 @@ const root = path.resolve(import.meta.dirname, '..')
 const page = fs.readFileSync(path.join(root, 'src/app/hunt/page.tsx'), 'utf8')
 const api = fs.readFileSync(path.join(root, 'src/lib/api.ts'), 'utf8')
 
-test('unified Hunt binds SSH credentials without treating proposal as execution', () => {
-  assert.match(page, /Bound SSH credential \(optional\)/)
+test('unified Hunt binds generic principal profiles without treating SSH proposal as execution', () => {
+  assert.match(page, /listCredentialProfiles/)
+  assert.match(page, /primary_credential_profile_id:/)
+  assert.match(page, /secondary_credential_profile_id:/)
+  assert.match(page, /service_credential_profile_id:/)
   assert.match(page, /ssh_credential_profile_id:/)
+  assert.match(page, /ssh: 'SSH identity'/)
   assert.match(page, /No SSH command runs until you separately confirm/)
   assert.match(api, /ssh_credential_profile_id\?: string/)
 })

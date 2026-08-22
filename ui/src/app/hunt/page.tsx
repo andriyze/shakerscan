@@ -2,16 +2,18 @@
 
 import { Suspense, useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'next/navigation'
+import Link from 'next/link'
 import { Compass, ShieldCheck } from 'lucide-react'
 import {
   cancelHuntV2,
   confirmHuntShellPlan,
-  getDeviceCredentials,
   getDevices,
   getHuntV2,
   getTargets,
+  listCredentialProfiles,
+  type CredentialPrincipalSlot,
+  type CredentialProfile,
   type DeviceAgentShellPlan,
-  type DeviceCredentialProfile,
   type DeviceTarget,
   type HuntV2,
   type Target,
@@ -28,6 +30,13 @@ type TargetChoice = {
   sourceKind: 'web' | 'device'
   label: string
   detail: string
+}
+
+const CREDENTIAL_SLOT_LABELS: Record<CredentialPrincipalSlot, string> = {
+  primary: 'Primary identity',
+  secondary: 'Secondary identity',
+  service: 'Service identity',
+  ssh: 'SSH identity',
 }
 
 function splitIds(value: string): string[] {
@@ -61,8 +70,15 @@ function HuntContent() {
   const [approvalReceipt, setApprovalReceipt] = useState('')
   const [capabilityIds, setCapabilityIds] = useState('')
   const [requestCollectionIds, setRequestCollectionIds] = useState('')
-  const [deviceCredentials, setDeviceCredentials] = useState<DeviceCredentialProfile[]>([])
-  const [sshCredentialId, setSshCredentialId] = useState('')
+  const [credentialProfiles, setCredentialProfiles] = useState<CredentialProfile[]>([])
+  const [credentialIds, setCredentialIds] = useState<Record<CredentialPrincipalSlot, string>>({
+    primary: '',
+    secondary: '',
+    service: '',
+    ssh: '',
+  })
+  const [credentialsLoading, setCredentialsLoading] = useState(false)
+  const [credentialError, setCredentialError] = useState<string | null>(null)
   const [hunt, setHunt] = useState<HuntV2 | null>(null)
   const [loading, setLoading] = useState(true)
   const [starting, setStarting] = useState(false)
@@ -115,20 +131,31 @@ function HuntContent() {
 
   useEffect(() => {
     let cancelled = false
-    setSshCredentialId('')
-    setDeviceCredentials([])
-    if (selectedChoice?.sourceKind !== 'device') return () => { cancelled = true }
-    getDeviceCredentials(selectedChoice.id)
+    setCredentialIds({ primary: '', secondary: '', service: '', ssh: '' })
+    setCredentialProfiles([])
+    setCredentialError(null)
+    if (!selectedChoice) return () => { cancelled = true }
+    setCredentialsLoading(true)
+    listCredentialProfiles({
+      target_kind: targetKind,
+      target_id: selectedChoice.id,
+    })
       .then(({ profiles }) => {
         if (!cancelled) {
-          setDeviceCredentials(
-            profiles.filter((profile) => profile.auth_kind.startsWith('ssh_') && profile.execution_compatible),
+          setCredentialProfiles(
+            profiles.filter((profile) => profile.execution_compatible),
           )
         }
       })
-      .catch(() => { if (!cancelled) setDeviceCredentials([]) })
+      .catch((cause) => {
+        if (!cancelled) {
+          setCredentialProfiles([])
+          setCredentialError(cause instanceof Error ? cause.message : 'Failed to load credential profiles')
+        }
+      })
+      .finally(() => { if (!cancelled) setCredentialsLoading(false) })
     return () => { cancelled = true }
-  }, [selectedChoice?.id, selectedChoice?.sourceKind])
+  }, [selectedChoice?.id, targetKind])
 
   useEffect(() => {
     if (!hunt || !['active', 'awaiting_planner'].includes(hunt.status)) return
@@ -151,7 +178,13 @@ function HuntContent() {
       : []
   }, [hunt?.context_pack])
 
-  const privileged = activeTesting || networkDiscovery || allowStateChanging || Boolean(sshCredentialId)
+  const selectedCredentialCount = Object.values(credentialIds).filter(Boolean).length
+  const privileged = activeTesting || networkDiscovery || allowStateChanging || selectedCredentialCount > 0
+  const visibleCredentialSlots: CredentialPrincipalSlot[] = targetKind === 'network'
+    ? ['ssh']
+    : targetKind === 'device'
+      ? ['primary', 'secondary', 'service', 'ssh']
+      : ['primary', 'secondary', 'service']
 
   async function start() {
     if (!targetId || !selectedChoice) return
@@ -177,9 +210,20 @@ function HuntContent() {
         ...(duration ? { max_duration_seconds: duration } : {}),
         ...(requests ? { max_http_requests: requests } : {}),
       }
-      const credentialRefs: Record<string, string> = selectedChoice.sourceKind === 'device' && sshCredentialId
-        ? { ssh_credential_profile_id: sshCredentialId }
-        : {}
+      const credentialRefs: Record<string, string> = {
+        ...(credentialIds.primary
+          ? { primary_credential_profile_id: credentialIds.primary }
+          : {}),
+        ...(credentialIds.secondary
+          ? { secondary_credential_profile_id: credentialIds.secondary }
+          : {}),
+        ...(credentialIds.service
+          ? { service_credential_profile_id: credentialIds.service }
+          : {}),
+        ...(credentialIds.ssh
+          ? { ssh_credential_profile_id: credentialIds.ssh }
+          : {}),
+      }
       const created = await startHuntV2Native({
         targetId,
         targetKind,
@@ -385,23 +429,50 @@ function HuntContent() {
                 </label>
               </div>
 
-              {selectedChoice?.sourceKind === 'device' && (
-                <Field label="Bound SSH credential (optional)">
+              <div className="space-y-4 rounded-lg border border-gray-800 bg-gray-950 p-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>
-                    <Select value={sshCredentialId} onChange={(event) => setSshCredentialId(event.target.value)}>
-                      <option value="">No SSH command proposals</option>
-                      {deviceCredentials.map((profile) => (
-                        <option key={profile.id} value={profile.id}>
-                          {profile.name}{profile.port ? ` · port ${profile.port}` : ''}
-                        </option>
-                      ))}
-                    </Select>
+                    <h2 className="text-sm font-medium text-white">Bound credential profiles</h2>
                     <p className="mt-1 text-xs text-gray-500">
-                      Credentials stay server-side. No SSH command runs until you separately confirm the exact immutable plan.
+                      Select encrypted identities for this exact target. The planner receives only profile metadata.
                     </p>
                   </div>
-                </Field>
-              )}
+                  <Link href="/credentials" className="text-xs text-blue-300 hover:text-blue-200">
+                    Manage credentials
+                  </Link>
+                </div>
+                {credentialsLoading ? (
+                  <p className="text-xs text-gray-500">Loading credential profiles…</p>
+                ) : (
+                  <div className="grid gap-4 md:grid-cols-2">
+                    {visibleCredentialSlots.map((slot) => {
+                      const candidates = credentialProfiles.filter((profile) => profile.principal_slot === slot)
+                      return (
+                        <Field key={slot} label={`${CREDENTIAL_SLOT_LABELS[slot]} (optional)`}>
+                          <Select
+                            value={credentialIds[slot]}
+                            onChange={(event) => setCredentialIds((current) => ({
+                              ...current,
+                              [slot]: event.target.value,
+                            }))}
+                          >
+                            <option value="">{slot === 'ssh' ? 'No SSH command proposals' : `No ${slot} identity`}</option>
+                            {candidates.map((profile) => (
+                              <option key={profile.id} value={profile.id}>
+                                {profile.name} · {profile.auth_kind.replaceAll('_', ' ')} · v{profile.current_version}
+                              </option>
+                            ))}
+                          </Select>
+                        </Field>
+                      )
+                    })}
+                  </div>
+                )}
+                {credentialError && <p className="text-xs text-amber-300">{credentialError}</p>}
+                <p className="text-xs text-gray-500">
+                  Credential use requires a target-bound approval receipt. No SSH command runs until you separately confirm the exact immutable plan.
+                </p>
+              </div>
 
               <Field label="Bound request collection IDs (optional)">
                 <div>

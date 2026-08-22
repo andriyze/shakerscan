@@ -14,6 +14,7 @@ GENERIC_CREDENTIAL_REF_KEYS = frozenset({
     "ssh_credential_profile_id",
     "primary_credential_profile_id",
     "secondary_credential_profile_id",
+    "service_credential_profile_id",
     "authorization_header_credential_id",
     "cookie_credential_id",
     "oauth_credential_profile_id",
@@ -85,6 +86,8 @@ def _role_compatible(role: str, profile: CredentialProfileMetadata) -> bool:
         return profile.principal_slot == "primary" and profile.auth_kind in HTTP_CREDENTIAL_KINDS
     if role == "secondary_credential_profile_id":
         return profile.principal_slot == "secondary" and profile.auth_kind in HTTP_CREDENTIAL_KINDS
+    if role == "service_credential_profile_id":
+        return profile.principal_slot == "service" and profile.auth_kind in HTTP_CREDENTIAL_KINDS
     if role == "authorization_header_credential_id":
         return profile.auth_kind == "authorization_header"
     if role == "cookie_credential_id":

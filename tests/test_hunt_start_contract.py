@@ -101,14 +101,20 @@ def test_credential_references_require_explicit_authority_and_remain_opaque():
         ))
 
     contract = normalize_hunt_start_payload(_payload(
-        credential_refs={"ssh_credential_profile_id": "credential-1"},
+        credential_refs={
+            "ssh_credential_profile_id": "credential-1",
+            "service_credential_profile_id": "credential-2",
+        },
         target_kind="device",
         policy={
             "authorization_confirmed": True,
             "approval_receipt_id": "approval-1",
         },
     ))
-    assert contract.credential_refs == {"ssh_credential_profile_id": "credential-1"}
+    assert contract.credential_refs == {
+        "ssh_credential_profile_id": "credential-1",
+        "service_credential_profile_id": "credential-2",
+    }
     assert "password" not in repr(contract.public_dict()).lower()
 
     with pytest.raises(HuntStartContractError, match="distinct profile IDs"):

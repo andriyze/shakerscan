@@ -1282,7 +1282,7 @@ concurrency-limited with per-tool timeouts and a global deadline.
 | `/settings/policy-profiles` | Deployment policy profile lifecycle across DAST, AI Gate, and Model Intake |
 | `/exceptions` | Finding-exception queue, repair, expiry visibility, and lifecycle sweep |
 | `/settings/arsenal` | Command contracts, receipts, plans, actions, hypotheses (claim/signal/plan-campaign, from-plan/from-benchmark generators), refuters, tools, local agents, context packs, and traces |
-| `/hunt` | Launch and inspect the canonical target-kind-aware Hunt runtime through `/hunts/*` |
+| `/hunt` | Launch and inspect the canonical target-kind-aware Hunt runtime through `/hunts/*`, with exact-target generic primary, secondary, service, and SSH credential-profile selection |
 | `/deep-hunt` | Compatibility redirect to `/hunt` |
 | `/deep-hunt/experiment` | Create bounded HTTP-differential or managed-principal workflow experiments |
 | `/deep-hunt/runs/{id}` | Inspect a durable experiment run and its proof handoff |

@@ -65,18 +65,20 @@ def test_primary_and_secondary_profiles_resolve_to_content_free_rows():
     profiles = [
         _profile("profile-a", slot="primary"),
         _profile("profile-b", kind="cookie", slot="secondary"),
+        _profile("profile-c", kind="oauth_client_credentials", slot="service"),
     ]
     rows, missing = validate_generic_credential_references(
         {
             "primary_credential_profile_id": "profile-a",
             "secondary_credential_profile_id": "profile-b",
+            "service_credential_profile_id": "profile-c",
         },
         profiles,
         target_kind="api",
         now=NOW,
     )
     assert missing == {}
-    assert [row["principal_slot"] for row in rows] == ["primary", "secondary"]
+    assert [row["principal_slot"] for row in rows] == ["primary", "secondary", "service"]
     assert all(row["secret_values_visible"] is False for row in rows)
     assert "placeholder" not in repr(rows)
 
