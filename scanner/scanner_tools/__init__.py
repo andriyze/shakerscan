@@ -65,3 +65,10 @@ __all__ = [
     "tls_scanner",
     "vendor_risk",
 ]
+
+# Load narrow, idempotent request-replay hardening while older worker images remain supported.
+from .v2_request_replay_hardening import (
+    apply_request_replay_hardening as _apply_request_replay_hardening,
+)
+
+_apply_request_replay_hardening()
