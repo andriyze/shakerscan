@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import math
 import re
-from typing import Any, Mapping
+import time
+from typing import Any, Awaitable, Callable, Mapping
 import xml.etree.ElementTree as ET
 
+from hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
 from runtime.models import (
     ParsedCapabilityResult,
     PreparedCommand,
@@ -35,6 +38,145 @@ def network_capability_adapter(name: str) -> Any:
     except KeyError as exc:
         raise CapabilityInputError("unknown canonical network capability") from exc
     return factory()
+
+
+CommandRunner = Callable[..., Awaitable[Any]]
+
+
+class NetworkExecutionAdapter:
+    """Execute one prepared network capability through the shared Hunt boundary.
+
+    Preparation owns target binding and server-authored argv. This runtime adapter
+    owns only process execution, parsing, cancellation, heartbeat, and measured
+    consumption so the shared ``CapabilityExecutor`` can normalize failures and
+    enforce the registry identity contract for every network capability.
+    """
+
+    def __init__(
+        self,
+        *,
+        prepared: PreparedExecution,
+        parser: Any,
+        command_runner: CommandRunner,
+        max_stdout_bytes: int,
+        max_stderr_bytes: int,
+    ) -> None:
+        self.capability_name = prepared.capability_name
+        self.adapter_name = prepared.adapter_name
+        self.adapter_version = prepared.adapter_version
+        self._prepared = prepared
+        self._parser = parser
+        self._command_runner = command_runner
+        self._max_stdout_bytes = int(max_stdout_bytes)
+        self._max_stderr_bytes = int(max_stderr_bytes)
+
+    async def execute(
+        self,
+        *,
+        heartbeat: Heartbeat,
+        cancelled: Cancelled,
+    ) -> CapabilityAdapterResult:
+        prepared = self._prepared
+        observations: list[Mapping[str, Any]] = []
+        errors: list[str] = []
+        partial = False
+        timed_out = False
+        attempted_commands = 0
+        elapsed_seconds = 0
+        command_count = max(1, len(prepared.commands))
+        per_command_wall = max(
+            1,
+            int(prepared.estimated_budget.get("tool_wall_seconds") or 1)
+            // command_count,
+        )
+        status = "failed"
+
+        for command in prepared.commands:
+            if cancelled():
+                status = "cancelled"
+                errors.insert(0, "cancelled")
+                break
+            command_started = time.monotonic()
+            try:
+                attempted_commands += 1
+                streamed = await self._command_runner(
+                    [command.binary, *command.argv],
+                    soft_timeout=float(per_command_wall),
+                    flush_grace=0.0,
+                    hard_timeout=float(per_command_wall),
+                    cancel_check=cancelled,
+                    max_stdout_bytes=self._max_stdout_bytes,
+                    max_stderr_bytes=self._max_stderr_bytes,
+                )
+            except FileNotFoundError:
+                attempted_commands -= 1
+                errors.insert(0, "scanner_not_available")
+                status = "failed"
+                break
+            finally:
+                elapsed_seconds += max(
+                    0, math.ceil(time.monotonic() - command_started)
+                )
+
+            parse_kwargs: dict[str, Any] = {"timed_out": streamed.timed_out}
+            if prepared.capability_name == "subdomains.discover":
+                parse_kwargs["root_domain"] = str(
+                    prepared.redacted_execution["root_domain"]
+                )
+            parsed = self._parser.parse(streamed.stdout, **parse_kwargs)
+            observations.extend(dict(row) for row in parsed.observations)
+            errors.extend(str(item) for item in parsed.errors)
+            partial = bool(
+                partial
+                or parsed.partial
+                or streamed.partial
+                or streamed.stdout_truncated
+            )
+            timed_out = bool(
+                timed_out or parsed.timed_out or streamed.timed_out
+            )
+            await heartbeat()
+            if streamed.cancelled:
+                status = "cancelled"
+                errors.insert(0, "cancelled")
+                break
+            if streamed.returncode != 0 and not streamed.stdout.strip():
+                status = "failed"
+                errors.insert(
+                    0,
+                    f"{prepared.adapter_name}_exit_{streamed.returncode}",
+                )
+                break
+        else:
+            status = "partial" if partial else "success"
+
+        actual: dict[str, int] = {}
+        for dimension, reserved_amount in prepared.estimated_budget.items():
+            reserved_amount = int(reserved_amount)
+            if dimension == "tool_wall_seconds":
+                actual[dimension] = min(reserved_amount, elapsed_seconds)
+            elif dimension in {"hosts_attempted", "tcp_ports_attempted"}:
+                actual[dimension] = min(
+                    reserved_amount,
+                    (
+                        reserved_amount * attempted_commands
+                        + command_count
+                        - 1
+                    )
+                    // command_count,
+                )
+
+        return CapabilityAdapterResult(
+            status=status,
+            observations=tuple(observations),
+            errors=tuple(errors[:20]),
+            actual_budget=actual,
+            partial=partial,
+            timed_out=timed_out,
+            execution_started=attempted_commands > 0,
+            parser_version=prepared.parser_version,
+            redacted_execution=dict(prepared.redacted_execution),
+        )
 
 
 PORT_PROFILES: Mapping[str, tuple[int, ...] | str] = {

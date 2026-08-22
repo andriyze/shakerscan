@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -10,10 +12,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 
 from capabilities.network import (
     CapabilityInputError,
+    NetworkExecutionAdapter,
     PortsDiscoverAdapter,
     ServiceFingerprintAdapter,
     SubdomainsDiscoverAdapter,
 )
+from hunt.capability_executor import CapabilityExecutionContext, CapabilityExecutor
+from runtime.capability_registry import CAPABILITY_REGISTRY
 from runtime.models import ScanPolicy, TargetBinding
 
 
@@ -174,3 +179,107 @@ def test_subdomain_capability_is_root_bound_and_filters_output(target, active_po
 
     with pytest.raises(CapabilityInputError):
         adapter.prepare(target=target, args={"root_domain": "evil.test"}, policy=active_policy)
+
+
+def test_network_execution_uses_shared_executor_and_measures_bound_commands(
+    target, active_policy,
+):
+    parser = PortsDiscoverAdapter()
+    prepared = parser.prepare(
+        target=target,
+        args={"profile": "device_common"},
+        policy=active_policy,
+    )
+    calls: list[tuple[str, ...]] = []
+    heartbeats = 0
+
+    async def run_command(argv, **kwargs):
+        calls.append(tuple(argv))
+        address = argv[argv.index("-host") + 1]
+        return SimpleNamespace(
+            stdout=f'{{"ip":"{address}","port":443}}\n',
+            returncode=0,
+            timed_out=False,
+            partial=False,
+            stdout_truncated=False,
+            cancelled=False,
+        )
+
+    async def heartbeat():
+        nonlocal heartbeats
+        heartbeats += 1
+
+    requested = {
+        **prepared.estimated_budget,
+        "agent_actions": 1,
+        "active_actions": 1,
+    }
+    result = asyncio.run(CapabilityExecutor().execute(
+        CapabilityExecutionContext(
+            specification=CAPABILITY_REGISTRY.require("ports.discover"),
+            target=target,
+            requested_budget=requested,
+        ),
+        NetworkExecutionAdapter(
+            prepared=prepared,
+            parser=parser,
+            command_runner=run_command,
+            max_stdout_bytes=10_000,
+            max_stderr_bytes=1_000,
+        ),
+        heartbeat=heartbeat,
+        cancelled=lambda: False,
+    ))
+
+    assert result.status == "success"
+    assert heartbeats == 2
+    assert len(calls) == 2
+    assert {call[call.index("-host") + 1] for call in calls} == {
+        "192.0.2.10", "2001:db8::10",
+    }
+    assert result.actual_budget["tcp_ports_attempted"] == 46
+    assert result.actual_budget["hosts_attempted"] == 2
+    assert result.actual_budget["agent_actions"] == 1
+    assert result.actual_budget["active_actions"] == 1
+    assert result.parser_version == "naabu-jsonl/v1"
+    assert result.redacted_execution == prepared.redacted_execution
+
+
+def test_shared_executor_full_charges_uncertain_network_adapter_fault(
+    target, active_policy,
+):
+    parser = PortsDiscoverAdapter()
+    prepared = parser.prepare(
+        target=target,
+        args={"profile": "device_common"},
+        policy=active_policy,
+    )
+
+    async def run_command(_argv, **_kwargs):
+        raise RuntimeError("untrusted process detail")
+
+    requested = {
+        **prepared.estimated_budget,
+        "agent_actions": 1,
+        "active_actions": 1,
+    }
+    result = asyncio.run(CapabilityExecutor().execute(
+        CapabilityExecutionContext(
+            specification=CAPABILITY_REGISTRY.require("ports.discover"),
+            target=target,
+            requested_budget=requested,
+        ),
+        NetworkExecutionAdapter(
+            prepared=prepared,
+            parser=parser,
+            command_runner=run_command,
+            max_stdout_bytes=10_000,
+            max_stderr_bytes=1_000,
+        ),
+        heartbeat=lambda: asyncio.sleep(0),
+        cancelled=lambda: False,
+    ))
+
+    assert result.status == "failed"
+    assert result.errors == ("adapter_fault:RuntimeError",)
+    assert result.actual_budget == requested

@@ -138,8 +138,11 @@ def test_worker_rebuilds_authority_starts_heartbeats_and_settles_atomically():
     assert "hunt_capability_action_digest(" in handler
     assert "stored.action_digest != queued_action_digest" in handler
     assert "stored.record.start(" in handler
-    assert handler.index("stored.record.start(") < handler.index("run_streaming(")
+    assert handler.index("stored.record.start(") < handler.index("CapabilityExecutor().execute(")
     assert "heartbeat_reservation" in handler
+    assert "CapabilityExecutor().execute(" in handler
+    assert "NetworkExecutionAdapter(" in handler
+    assert "capability_input=execution.redacted_execution" in handler
     assert "terminalize_hunt_capability(" in handler
     assert "_record_hunt_network_tool_receipt(" in handler
     assert "persist_terminal(" in handler

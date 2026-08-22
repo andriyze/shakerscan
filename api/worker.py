@@ -59,7 +59,11 @@ import parallel_scan
 import asm_inventory
 import family_proof
 import agent_tools
-from capabilities.network import CapabilityInputError, network_capability_adapter
+from capabilities.network import (
+    CapabilityInputError,
+    NetworkExecutionAdapter,
+    network_capability_adapter,
+)
 from capabilities.browser import BrowserCapabilityInputError, browser_capability_adapter
 from hunt.capability_reservations import (
     DURABLE_BROWSER_HUNT_CAPABILITIES,
@@ -16491,103 +16495,40 @@ async def process_canonical_network_capability_job(job_data: dict[str, Any]) -> 
                     )
 
         started_at = persisted.record.started_at or datetime.now(timezone.utc)
-        status, error = "failed", None
-        observations: list[dict[str, Any]] = []
-        parser_errors: list[str] = []
-        partial = False
-        timed_out = False
-        attempted_commands = 0
-        elapsed_seconds = 0
-        execution_uncertain = False
-        per_command_wall = max(
-            1,
-            int(prepared.estimated_budget.get("tool_wall_seconds") or 1)
-            // max(1, len(prepared.commands)),
+        execution = await CapabilityExecutor().execute(
+            CapabilityExecutionContext(
+                specification=agent_tools.CAPABILITY_REGISTRY.require(
+                    capability_name
+                ),
+                target=target,
+                requested_budget=persisted.record.requested,
+            ),
+            NetworkExecutionAdapter(
+                prepared=prepared,
+                parser=adapter,
+                command_runner=run_streaming,
+                max_stdout_bytes=_AGENT_TOOL_OUTPUT_BYTES,
+                max_stderr_bytes=min(_AGENT_TOOL_OUTPUT_BYTES, 20_000),
+            ),
+            heartbeat=heartbeat_reservation,
+            cancelled=lambda: bool(redis_client.exists(cancel_key)),
         )
-        try:
-            for command in prepared.commands:
-                if redis_client.exists(cancel_key):
-                    status, error = "cancelled", "cancelled"
-                    break
-                command_started = time.monotonic()
-                try:
-                    attempted_commands += 1
-                    streamed = await run_streaming(
-                        [command.binary, *command.argv],
-                        soft_timeout=float(per_command_wall),
-                        flush_grace=0.0,
-                        hard_timeout=float(per_command_wall),
-                        cancel_check=lambda: bool(redis_client.exists(cancel_key)),
-                        max_stdout_bytes=_AGENT_TOOL_OUTPUT_BYTES,
-                        max_stderr_bytes=min(_AGENT_TOOL_OUTPUT_BYTES, 20_000),
-                    )
-                except FileNotFoundError:
-                    attempted_commands -= 1
-                    raise
-                finally:
-                    elapsed_seconds += max(
-                        0, int(time.monotonic() - command_started + 0.999)
-                    )
-                parse_kwargs: dict[str, Any] = {"timed_out": streamed.timed_out}
-                if prepared.capability_name == "subdomains.discover":
-                    parse_kwargs["root_domain"] = str(
-                        prepared.redacted_execution["root_domain"]
-                    )
-                parsed = adapter.parse(streamed.stdout, **parse_kwargs)
-                observations.extend(dict(row) for row in parsed.observations)
-                parser_errors.extend(str(item) for item in parsed.errors)
-                partial = bool(
-                    partial
-                    or parsed.partial
-                    or streamed.partial
-                    or streamed.stdout_truncated
-                )
-                timed_out = bool(timed_out or parsed.timed_out or streamed.timed_out)
-                await heartbeat_reservation()
-                if streamed.cancelled:
-                    status, error = "cancelled", "cancelled"
-                    break
-                if streamed.returncode != 0 and not streamed.stdout.strip():
-                    status = "failed"
-                    error = f"{prepared.adapter_name}_exit_{streamed.returncode}"
-                    break
-            else:
-                status = "partial" if partial else "success"
-        except FileNotFoundError:
-            status, error = "failed", "scanner_not_available"
-        except asyncio.CancelledError:
-            raise
-        except (ReservationConflict, ReservationStoreError):
-            raise
-        except Exception as exc:  # noqa: BLE001 - uncertain execution is fully charged
-            status = "failed"
-            error = f"worker_fault:{type(exc).__name__}"
-            execution_uncertain = attempted_commands > 0
-
-        command_count = max(1, len(prepared.commands))
-        actual: dict[str, int] = {"agent_actions": 1}
-        if "active_actions" in persisted.record.requested:
-            actual["active_actions"] = 1
-        if execution_uncertain:
-            actual = dict(persisted.record.requested)
-        else:
-            for dimension, reserved_amount in prepared.estimated_budget.items():
-                reserved_amount = int(reserved_amount)
-                if dimension == "tool_wall_seconds":
-                    actual[dimension] = min(reserved_amount, elapsed_seconds)
-                elif dimension in {"hosts_attempted", "tcp_ports_attempted"}:
-                    actual[dimension] = min(
-                        reserved_amount,
-                        (
-                            reserved_amount * attempted_commands
-                            + command_count - 1
-                        ) // command_count,
-                    )
-
+        status = execution.status
+        observations = [dict(item) for item in execution.observations]
+        parser_errors = [str(item) for item in execution.errors]
+        partial = execution.partial
+        timed_out = execution.timed_out
+        actual = dict(execution.actual_budget)
+        error = (
+            parser_errors[0]
+            if parser_errors and status in {"failed", "cancelled"}
+            else None
+        )
         finished_at = datetime.now(timezone.utc)
         action_status = (
             "completed" if status == "success"
             else "partial" if status == "partial"
+            else "cancelled" if status == "cancelled"
             else "failed"
         )
         receipt_id = uuid.uuid4()
@@ -16630,10 +16571,10 @@ async def process_canonical_network_capability_job(job_data: dict[str, Any]) -> 
                     capability_name=prepared.capability_name,
                     adapter_name=prepared.adapter_name,
                     adapter_version=prepared.adapter_version,
-                    parser_version=prepared.parser_version,
+                    parser_version=execution.parser_version,
                     target_id=target.target_id,
                     target_kind=target.target_kind,
-                    capability_input=capability_input,
+                    capability_input=execution.redacted_execution,
                     action_status=action_status,
                     actual_budget=actual,
                     worker_id=worker_id,
@@ -16714,7 +16655,7 @@ async def process_canonical_network_capability_job(job_data: dict[str, Any]) -> 
             "partial": action_status == "partial",
             "timed_out": timed_out,
             "typed_output": {
-                "parser": prepared.parser_version,
+                "parser": execution.parser_version,
                 "parser_status": (
                     "partial" if action_status == "partial"
                     else "parsed" if status == "success" else "failed"
@@ -16725,7 +16666,7 @@ async def process_canonical_network_capability_job(job_data: dict[str, Any]) -> 
             },
             "budget_consumed": dict(terminal.actual),
             "used_after_reconciliation": dict(reconciled),
-            "execution": dict(prepared.redacted_execution),
+            "execution": dict(execution.redacted_execution),
             "input_digest": prepared.input_digest,
             "reservation_id": reservation_id,
             "budget_reservation_id": reservation_id,
