@@ -2920,7 +2920,7 @@ async def run_schema_migrations(pool) -> None:
                     started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     completed_at TIMESTAMPTZ,
                     CONSTRAINT hunt_actions_status_check CHECK (
-                        status IN ('reserved','running','completed','blocked','failed','partial')
+                        status IN ('reserved','running','completed','blocked','cancelled','failed','partial')
                     )
                 )
             """)
@@ -2934,19 +2934,20 @@ async def run_schema_migrations(pool) -> None:
                     ) THEN
                         ALTER TABLE hunt_actions
                         ADD CONSTRAINT hunt_actions_status_check CHECK (
-                            status IN ('reserved','running','completed','blocked','failed','partial')
+                            status IN ('reserved','running','completed','blocked','cancelled','failed','partial')
                         );
                     ELSIF NOT EXISTS (
                         SELECT 1 FROM pg_constraint
                         WHERE conrelid = 'hunt_actions'::regclass
                           AND conname = 'hunt_actions_status_check'
                           AND pg_get_constraintdef(oid) LIKE '%reserved%'
+                          AND pg_get_constraintdef(oid) LIKE '%cancelled%'
                     ) THEN
                         ALTER TABLE hunt_actions
                         DROP CONSTRAINT hunt_actions_status_check;
                         ALTER TABLE hunt_actions
                         ADD CONSTRAINT hunt_actions_status_check CHECK (
-                            status IN ('reserved','running','completed','blocked','failed','partial')
+                            status IN ('reserved','running','completed','blocked','cancelled','failed','partial')
                         );
                     END IF;
                 END

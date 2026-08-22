@@ -260,6 +260,37 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "tls-observation/v1", ("tls_protocol_observation",),
         ),
         CapabilitySpec(
+            "browser.navigate",
+            "Open one target-bound page while blocking cross-origin and state-changing requests.",
+            "browser", "passive", _HTTP_TARGETS, "playwright", "1", None,
+            {
+                "browser_actions": 1,
+                "http_requests": 50,
+                "tool_wall_seconds": 30,
+            },
+            {
+                "network_reachability": True,
+                "browser_runtime": "playwright",
+                "agent_tool_worker": True,
+                "runtime_target_binding": True,
+            },
+            _schema({
+                "path": {"type": "string", "maxLength": 2000},
+                "wait_until": {
+                    "type": "string", "enum": ["domcontentloaded", "load"],
+                },
+                "timeout_ms": {
+                    "type": "integer", "minimum": 1000, "maximum": 30000,
+                },
+                "max_requests": {
+                    "type": "integer", "minimum": 1, "maximum": 50,
+                },
+            }),
+            "browser-navigation/v1",
+            ("browser_navigation_observation", "http_observation", "tool_receipt"),
+            default_timeout_ms=30_000,
+        ),
+        CapabilitySpec(
             "device.inspect", "Inspect the registered device, services, scans, and posture evidence.",
             "internal", "read_only", frozenset({"device"}), "device.inspect_device", "1",
             None, {"tool_wall_seconds": 5}, {"control_plane": True}, _schema(), "device-context/v1",

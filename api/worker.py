@@ -60,13 +60,16 @@ import asm_inventory
 import family_proof
 import agent_tools
 from capabilities.network import CapabilityInputError, network_capability_adapter
+from capabilities.browser import BrowserCapabilityInputError, BrowserNavigateAdapter
 from hunt.capability_reservations import (
+    DURABLE_BROWSER_HUNT_CAPABILITIES,
     DURABLE_SCANNER_HUNT_CAPABILITIES,
     DURABLE_WORKER_HUNT_CAPABILITIES,
     hunt_capability_action_digest,
     hunt_capability_lease_seconds,
     terminalize_hunt_capability,
 )
+from hunt.capability_executor import CapabilityExecutionContext, CapabilityExecutor
 from runtime.budget_reservations import DurableBudgetReservation
 from runtime.budgets import BudgetExceeded
 from runtime.credential_resolver import (
@@ -15036,9 +15039,12 @@ def _worker_terminal_network_result(
 ) -> dict[str, Any]:
     receipt = dict(stored.receipt or {})
     partial = bool(receipt.get("partial"))
+    receipt_status = str(receipt.get("status") or "").strip().lower()
     status = (
         "partial" if stored.record.status == "committed" and partial
         else "success" if stored.record.status == "committed"
+        else "cancelled" if receipt_status == "cancelled"
+        else "blocked" if receipt_status == "blocked"
         else "failed"
     )
     observations = [
@@ -15155,7 +15161,7 @@ async def _record_hunt_network_tool_receipt(
         started_at,
         finished_at,
         json.dumps([]),
-        "canonical Hunt network capability; target and arguments are server-owned and redacted",
+        "canonical Hunt capability; target and arguments are server-owned and redacted",
         json.dumps(_redact_receipt_value({
             "hunt_action_id": str(action_id),
             "durable_budget_reservation_id": reservation_id,
@@ -15748,6 +15754,506 @@ async def process_canonical_scanner_capability_job(
             redis_client.delete(cancel_key)
 
 
+async def process_canonical_browser_capability_job(job_data: dict[str, Any]) -> None:
+    """Execute one target-bound browser action under its durable Hunt hold."""
+    job_id = str(job_data.get("job_id") or "").strip()
+    result_key = f"agent_tool_result:{job_id}"
+    cancel_key = f"agent_tool_cancel:{job_id}"
+    redis_client = get_redis()
+    store = PostgresBudgetReservationStore()
+    result: dict[str, Any] = {
+        "job_id": job_id,
+        "status": "failed",
+        "error": "worker_fault",
+        "durable_budget_settled": False,
+    }
+    publish_result = True
+    persisted = None
+    prepared = None
+    try:
+        if not job_id:
+            raise BrowserCapabilityInputError(
+                "browser capability job requires an identity"
+            )
+        hunt_id = uuid.UUID(str(job_data.get("hunt_id") or ""))
+        action_id = uuid.UUID(str(job_data.get("action_id") or ""))
+        reservation_id = str(uuid.UUID(
+            str(job_data.get("budget_reservation_id") or "")
+        ))
+        queued_action_digest = str(
+            job_data.get("action_digest") or ""
+        ).lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", queued_action_digest):
+            raise BrowserCapabilityInputError(
+                "browser capability action digest is invalid"
+            )
+        capability_name = str(
+            job_data.get("capability_name") or ""
+        ).strip().lower()
+        if capability_name not in DURABLE_BROWSER_HUNT_CAPABILITIES:
+            raise BrowserCapabilityInputError(
+                "capability is not a durable browser action"
+            )
+        capability_input = dict(job_data.get("capability_input") or {})
+        worker_id = _worker_runtime_identity() or f"worker:{job_id[:8]}"
+
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                run = await conn.fetchrow(
+                    "SELECT * FROM hunt_runs WHERE id=$1 FOR UPDATE", hunt_id,
+                )
+                if not run:
+                    raise BrowserCapabilityInputError(
+                        "browser Hunt does not exist"
+                    )
+                action = await conn.fetchrow(
+                    """SELECT id, capability_name, status FROM hunt_actions
+                       WHERE id=$1 AND hunt_run_id=$2 FOR UPDATE""",
+                    action_id,
+                    hunt_id,
+                )
+                if (
+                    not action
+                    or str(action["capability_name"]) != capability_name
+                ):
+                    raise BrowserCapabilityInputError(
+                        "browser action identity is invalid"
+                    )
+                stored = await store.load(conn, reservation_id, for_update=True)
+                if (
+                    stored is None
+                    or stored.action_id != str(action_id)
+                    or stored.record.owner_kind != "hunt"
+                    or stored.record.owner_id != str(hunt_id)
+                    or stored.record.capability_name != capability_name
+                ):
+                    raise ReservationConflict(
+                        "browser reservation identity does not match the queued action"
+                    )
+                if stored.action_digest != queued_action_digest:
+                    raise ReservationConflict(
+                        "browser reservation action digest does not match the queue"
+                    )
+                if stored.record.terminal:
+                    result = _worker_terminal_network_result(
+                        stored,
+                        job_id=job_id,
+                        network_binding="playwright_host_resolver_and_route_guard",
+                    )
+                    return
+                if stored.record.status == "running":
+                    publish_result = False
+                    result = {
+                        "job_id": job_id,
+                        "status": "running",
+                        "error": "idempotent_redelivery_running",
+                        "budget_reservation_id": reservation_id,
+                        "durable_budget_settled": False,
+                        "idempotent_redelivery": True,
+                    }
+                    return
+                if (
+                    stored.record.status != "reserved"
+                    or str(action["status"]) != "reserved"
+                ):
+                    raise ReservationConflict(
+                        "browser action is not dispatchable"
+                    )
+                if str(run["status"]) not in {
+                    "active", "awaiting_planner", "budget_exhausted",
+                }:
+                    raise BrowserCapabilityInputError(
+                        "Hunt is no longer executable"
+                    )
+
+                context = _worker_json_object(run["context_pack"])
+                hunt_policy = _worker_json_object(run["policy_json"])
+                allowed = {
+                    str(item)
+                    for item in hunt_policy.get("allowed_capabilities") or []
+                }
+                if capability_name not in allowed:
+                    raise BrowserCapabilityInputError(
+                        "browser capability is outside the persisted Hunt allowlist"
+                    )
+                target_context = (
+                    dict(context.get("target") or {})
+                    if isinstance(context.get("target"), Mapping)
+                    else {}
+                )
+                target_url = str(target_context.get("url") or "")
+                parsed_target = urllib.parse.urlsplit(target_url)
+                root_domain = str(
+                    target_context.get("root_domain")
+                    or parsed_target.hostname
+                    or ""
+                ).lower().rstrip(".")
+                target = TargetBinding(
+                    target_id=str(run["target_id"]),
+                    target_kind=str(run["target_kind"]),
+                    canonical_host=parsed_target.hostname,
+                    allowed_origins=tuple(target_context.get("origins") or ()),
+                    allowed_addresses=tuple(
+                        str(item)
+                        for item in context.get(
+                            "authorized_target_addresses"
+                        ) or ()
+                        if str(item)
+                    ),
+                    allowed_root_domains=(root_domain,) if root_domain else (),
+                    environment=str(
+                        target_context.get("environment") or "unknown"
+                    ),
+                    scope_receipt_id=str(
+                        hunt_policy.get("scope_receipt_id") or ""
+                    ) or None,
+                )
+                policy = ScanPolicy(
+                    active_testing=bool(hunt_policy.get("active_testing")),
+                    allow_state_changing_http=False,
+                    scope_receipt_id=target.scope_receipt_id,
+                    approval_receipt_id=hunt_policy.get(
+                        "approval_receipt_id"
+                    ),
+                )
+                prepared = BrowserNavigateAdapter.prepare(
+                    target=target,
+                    base_url=target_url,
+                    args=capability_input,
+                )
+                expected_input_digest = str(
+                    job_data.get("expected_input_digest") or ""
+                ).lower()
+                if prepared.input_digest != expected_input_digest:
+                    raise BrowserCapabilityInputError(
+                        "control-plane and worker browser input digests differ"
+                    )
+                expected_budget = {
+                    str(key): int(value)
+                    for key, value in dict(
+                        job_data.get("expected_budget") or {}
+                    ).items()
+                }
+                if dict(prepared.estimated_budget) != expected_budget:
+                    raise BrowserCapabilityInputError(
+                        "control-plane and worker browser budget estimates differ"
+                    )
+                limits = _worker_hunt_ledger_limits(
+                    _worker_json_object(run["budget_json"])
+                )
+                requested_budget = {
+                    key: int(value)
+                    for key, value in prepared.estimated_budget.items()
+                    if key in limits
+                }
+                requested_budget["agent_actions"] = 1
+                spec = agent_tools.CAPABILITY_REGISTRY.require(capability_name)
+                if spec.requires_active_approval:
+                    requested_budget["active_actions"] = 1
+                recomputed_digest = hunt_capability_action_digest(
+                    hunt_id=hunt_id,
+                    action_id=action_id,
+                    capability_name=capability_name,
+                    target_kind=str(run["target_kind"]),
+                    target_id=run["target_id"],
+                    capability_input=capability_input,
+                    requested_budget=requested_budget,
+                    scope_receipt_id=target.scope_receipt_id,
+                    approval_receipt_id=policy.approval_receipt_id,
+                )
+                if (
+                    recomputed_digest != queued_action_digest
+                    or stored.action_digest != queued_action_digest
+                    or dict(stored.record.requested) != requested_budget
+                ):
+                    raise ReservationConflict(
+                        "browser queue payload does not match its durable action"
+                    )
+                lease_seconds = hunt_capability_lease_seconds(
+                    requested_budget
+                )
+                running = stored.record.start(
+                    worker_id=worker_id,
+                    lease_seconds=lease_seconds,
+                )
+                persisted = await store.persist_transition(
+                    conn,
+                    previous=stored,
+                    current=running,
+                )
+                updated = await conn.execute(
+                    """UPDATE hunt_actions SET status='running', started_at=NOW()
+                       WHERE id=$1 AND hunt_run_id=$2 AND status='reserved'""",
+                    action_id,
+                    hunt_id,
+                )
+                if not str(updated).endswith(" 1"):
+                    raise ReservationConflict(
+                        "browser action changed before worker dispatch"
+                    )
+
+        async def heartbeat_reservation() -> None:
+            nonlocal persisted
+            if persisted is None:
+                raise ReservationStoreError(
+                    "browser reservation persistence was not initialized"
+                )
+            async with db_pool.acquire() as heartbeat_conn:
+                async with heartbeat_conn.transaction():
+                    owner = await heartbeat_conn.fetchrow(
+                        "SELECT status FROM hunt_runs WHERE id=$1 FOR UPDATE",
+                        hunt_id,
+                    )
+                    if not owner or str(owner["status"]) not in {
+                        "active", "awaiting_planner", "budget_exhausted",
+                    }:
+                        raise ReservationStoreError(
+                            "Hunt stopped during browser execution"
+                        )
+                    latest = await store.load(
+                        heartbeat_conn,
+                        reservation_id,
+                        for_update=True,
+                    )
+                    if (
+                        latest is None
+                        or latest.record.state_digest
+                        != persisted.record.state_digest
+                        or latest.record.worker_id != worker_id
+                    ):
+                        raise ReservationConflict(
+                            "browser reservation changed before heartbeat"
+                        )
+                    heartbeat = latest.record.heartbeat(
+                        worker_id=worker_id,
+                        lease_seconds=lease_seconds,
+                    )
+                    persisted = await store.persist_transition(
+                        heartbeat_conn,
+                        previous=latest,
+                        current=heartbeat,
+                    )
+
+        executor = CapabilityExecutor()
+        execution = await executor.execute(
+            CapabilityExecutionContext(
+                specification=spec,
+                target=target,
+                requested_budget=persisted.record.requested,
+            ),
+            BrowserNavigateAdapter(prepared),
+            heartbeat=heartbeat_reservation,
+            cancelled=lambda: bool(redis_client.exists(cancel_key)),
+        )
+        started_at = persisted.record.started_at or datetime.now(timezone.utc)
+        finished_at = datetime.now(timezone.utc)
+        action_status = (
+            "completed" if execution.status == "success"
+            else "partial" if execution.status == "partial"
+            else "blocked" if execution.status == "blocked"
+            else "cancelled" if execution.status == "cancelled"
+            else "failed"
+        )
+        receipt_id = uuid.uuid4()
+        observations = [
+            dict(item) for item in execution.observations
+        ][:5000]
+        parser_errors = [str(item) for item in execution.errors][:20]
+        receipt_input = dict(execution.redacted_execution)
+        receipt_result = {
+            "ok": execution.status == "success",
+            "error": parser_errors[0] if parser_errors else None,
+            "timed_out": execution.timed_out,
+            "receipt_observations": observations,
+        }
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                locked = await conn.fetchrow(
+                    "SELECT * FROM hunt_runs WHERE id=$1 FOR UPDATE", hunt_id,
+                )
+                if not locked:
+                    raise ReservationStoreError(
+                        "browser Hunt disappeared during settlement"
+                    )
+                latest = await store.load(
+                    conn, reservation_id, for_update=True,
+                )
+                if (
+                    latest is None
+                    or persisted is None
+                    or latest.record.state_digest
+                    != persisted.record.state_digest
+                    or latest.record.status != "running"
+                    or latest.record.worker_id != worker_id
+                ):
+                    raise ReservationConflict(
+                        "browser reservation changed before settlement"
+                    )
+                current_used = _worker_json_object(
+                    locked["budget_used_json"]
+                )
+                current_ledger = {
+                    key: int(current_used.get(key) or 0)
+                    for key in _worker_hunt_ledger_limits(
+                        _worker_json_object(locked["budget_json"])
+                    )
+                }
+                terminal, capability_receipt = terminalize_hunt_capability(
+                    latest.record,
+                    action_digest=queued_action_digest,
+                    capability_name=prepared.capability_name,
+                    adapter_name=prepared.adapter_name,
+                    adapter_version=prepared.adapter_version,
+                    parser_version=execution.parser_version,
+                    target_id=target.target_id,
+                    target_kind=target.target_kind,
+                    capability_input=receipt_input,
+                    action_status=action_status,
+                    actual_budget=execution.actual_budget,
+                    worker_id=worker_id,
+                    started_at=started_at.isoformat(),
+                    finished_at=finished_at.isoformat(),
+                    receipt_id=str(receipt_id),
+                    scope_receipt_id=target.scope_receipt_id,
+                    approval_receipt_id=policy.approval_receipt_id,
+                    result=receipt_result,
+                )
+                reconciled = terminal.reconcile_consumed(current_ledger)
+                await _record_hunt_network_tool_receipt(
+                    conn,
+                    receipt_id=receipt_id,
+                    hunt_id=hunt_id,
+                    action_id=action_id,
+                    reservation_id=reservation_id,
+                    action_digest=queued_action_digest,
+                    target=target,
+                    policy=policy,
+                    prepared=prepared,
+                    status=execution.status,
+                    partial=execution.partial,
+                    timed_out=execution.timed_out,
+                    parser_errors=parser_errors,
+                    record_count=len(observations),
+                    reserved=latest.record.requested,
+                    actual=execution.actual_budget,
+                    used_after=reconciled,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                )
+                persisted = await store.persist_terminal(
+                    conn,
+                    previous=latest,
+                    terminal=terminal,
+                    ledger_after_settlement=reconciled,
+                    receipt=capability_receipt,
+                )
+                current_used.update(reconciled)
+                await conn.execute(
+                    "UPDATE hunt_runs SET budget_used_json=$2, updated_at=NOW() "
+                    "WHERE id=$1",
+                    hunt_id,
+                    json.dumps(current_used),
+                )
+                action_result = {
+                    "status": execution.status,
+                    "error": parser_errors[0] if parser_errors else None,
+                    "record_count": len(observations),
+                    "parser_errors": parser_errors,
+                    "budget_reservation_id": reservation_id,
+                    "budget_reservation_state": terminal.status,
+                    "receipt_id": str(receipt_id),
+                }
+                updated = await conn.execute(
+                    """UPDATE hunt_actions
+                       SET status=$2, result_summary=$3, receipt_id=$4,
+                           completed_at=NOW()
+                       WHERE id=$1 AND hunt_run_id=$5 AND status='running'""",
+                    action_id,
+                    action_status,
+                    json.dumps(action_result),
+                    receipt_id,
+                    hunt_id,
+                )
+                if not str(updated).endswith(" 1"):
+                    raise ReservationConflict(
+                        "browser action changed before settlement"
+                    )
+        result = {
+            "job_id": job_id,
+            "status": execution.status,
+            "ok": execution.status == "success",
+            "error": parser_errors[0] if parser_errors else None,
+            "started_at": started_at.isoformat(),
+            "finished_at": finished_at.isoformat(),
+            "partial": execution.partial,
+            "timed_out": execution.timed_out,
+            "typed_output": {
+                "parser": execution.parser_version,
+                "parser_status": (
+                    "partial" if execution.partial
+                    else "parsed" if execution.status == "success"
+                    else "failed"
+                ),
+                "records": observations,
+                "record_count": len(observations),
+                "errors": parser_errors,
+            },
+            "budget_consumed": dict(terminal.actual),
+            "used_after_reconciliation": dict(reconciled),
+            "execution": dict(execution.redacted_execution),
+            "input_digest": prepared.input_digest,
+            "reservation_id": reservation_id,
+            "budget_reservation_id": reservation_id,
+            "budget_reservation_state": terminal.status,
+            "receipt_id": str(receipt_id),
+            "receipt": capability_receipt.public_dict(),
+            "durable_budget_settled": True,
+            "network_binding": "playwright_host_resolver_and_route_guard",
+        }
+    except asyncio.CancelledError:
+        raise
+    except (
+        BrowserCapabilityInputError,
+        ReservationConflict,
+        ReservationStoreError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        result = {
+            "job_id": job_id,
+            "status": "failed",
+            "error": f"contract:{str(exc)[:240]}",
+            "durable_budget_settled": False,
+        }
+    except Exception as exc:  # noqa: BLE001 - stale running work recovers fail closed
+        result = {
+            "job_id": job_id,
+            "status": "failed",
+            "error": f"worker_fault:{type(exc).__name__}",
+            "durable_budget_settled": False,
+        }
+    finally:
+        if job_id and publish_result:
+            redis_client.set(
+                result_key,
+                json.dumps(result, default=str, separators=(",", ":")),
+                ex=_AGENT_TOOL_RESULT_TTL_SECONDS,
+            )
+            redis_client.hset(
+                f"job:{job_id}",
+                mapping={
+                    "status": str(result.get("status") or "failed"),
+                    "current_phase": "canonical_browser_capability_complete",
+                    "error": str(result.get("error") or ""),
+                },
+            )
+            redis_client.expire(
+                f"job:{job_id}", _AGENT_TOOL_RESULT_TTL_SECONDS,
+            )
+            redis_client.delete(cancel_key)
+
+
 async def process_canonical_network_capability_job(job_data: dict[str, Any]) -> None:
     """Execute one canonical network action under its durable Hunt reservation."""
     job_id = str(job_data.get("job_id") or "").strip()
@@ -16330,6 +16836,8 @@ async def process_job(job_data: dict):
         await process_canonical_scanner_capability_job(job_data)
     elif job_type == 'request_collection_replay':
         await process_request_collection_replay_job(job_data)
+    elif job_type == 'canonical_browser_capability':
+        await process_canonical_browser_capability_job(job_data)
     elif job_type == 'canonical_network_capability':
         await process_canonical_network_capability_job(job_data)
     elif job_type == 'finding_retest':

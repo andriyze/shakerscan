@@ -50,8 +50,8 @@ def test_registry_filters_target_kind_and_active_permission():
     all_device = {spec.name for spec in CAPABILITY_REGISTRY.list(target_kind="device")}
 
     assert safe_web == {
-        "web.probe", "http.request", "subdomains.discover", "tls.inspect", "collections.inspect",
-        "collections.select", "collections.replay_safe",
+        "web.probe", "http.request", "subdomains.discover", "tls.inspect", "browser.navigate",
+        "collections.inspect", "collections.select", "collections.replay_safe",
     }
     assert all_device == {
         "device.inspect", "device.capabilities.inspect", "device.http.probe",

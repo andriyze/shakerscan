@@ -454,6 +454,7 @@ try:
         DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES,
         DURABLE_DEVICE_QUEUE_HUNT_CAPABILITIES,
         DURABLE_DEVICE_SSH_PROPOSAL_HUNT_CAPABILITIES,
+        DURABLE_BROWSER_HUNT_CAPABILITIES,
         DURABLE_INLINE_HUNT_CAPABILITIES,
         DURABLE_SCANNER_HUNT_CAPABILITIES,
         DURABLE_WORKER_HUNT_CAPABILITIES,
@@ -469,6 +470,7 @@ except ModuleNotFoundError:
         DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES,
         DURABLE_DEVICE_QUEUE_HUNT_CAPABILITIES,
         DURABLE_DEVICE_SSH_PROPOSAL_HUNT_CAPABILITIES,
+        DURABLE_BROWSER_HUNT_CAPABILITIES,
         DURABLE_INLINE_HUNT_CAPABILITIES,
         DURABLE_SCANNER_HUNT_CAPABILITIES,
         DURABLE_WORKER_HUNT_CAPABILITIES,
@@ -509,6 +511,7 @@ try:
         admit_scan_credential_profiles,
     )
     from capabilities.network import CapabilityInputError, network_capability_adapter
+    from capabilities.browser import BrowserCapabilityInputError, BrowserNavigateAdapter
 except ModuleNotFoundError:
     from api.runtime.budget_reservations import DurableBudgetReservation
     from api.runtime.budgets import BudgetExceeded, reconcile_budget_snapshot, reserve_budget_snapshot
@@ -540,6 +543,7 @@ except ModuleNotFoundError:
         admit_scan_credential_profiles,
     )
     from api.capabilities.network import CapabilityInputError, network_capability_adapter
+    from api.capabilities.browser import BrowserCapabilityInputError, BrowserNavigateAdapter
 import device_agent
 import device_capabilities
 import investigation_candidates
@@ -34048,6 +34052,78 @@ async def _enqueue_canonical_network_capability(
     }
 
 
+async def _enqueue_canonical_browser_capability(
+    *, capability_name: str, capability_input: Mapping[str, Any],
+    expected_input_digest: str, expected_budget: Mapping[str, int],
+    timeout_ms: int, hunt_id: str, action_id: str, reservation_id: str,
+    action_digest: str,
+) -> dict[str, Any]:
+    """Queue browser work carrying identity and digests, never target authority."""
+    redis_client = get_redis()
+    job_id = str(uuid.uuid4())
+    result_key = f"agent_tool_result:{job_id}"
+    cancel_key = f"agent_tool_cancel:{job_id}"
+    payload = {
+        "job_id": job_id,
+        "type": "canonical_browser_capability",
+        "capability_name": capability_name,
+        "capability_input": dict(capability_input),
+        "expected_input_digest": expected_input_digest,
+        "expected_budget": {
+            str(key): int(value) for key, value in expected_budget.items()
+        },
+        "hunt_id": str(hunt_id),
+        "action_id": str(action_id),
+        "budget_reservation_id": str(reservation_id),
+        "action_digest": str(action_digest),
+        "submitted_at": utc_now_iso(),
+        "_base_queue_name": AGENT_TOOL_QUEUE_NAME,
+    }
+    redis_client.hset(
+        f"job:{job_id}",
+        mapping={
+            "status": "queued",
+            "current_phase": "canonical_browser_capability_queued",
+            "tool": capability_name,
+        },
+    )
+    redis_client.expire(
+        f"job:{job_id}", max(3600, math.ceil(timeout_ms / 1000) + 300),
+    )
+    enqueue_job(redis_client, AGENT_TOOL_QUEUE_NAME, payload)
+    deadline = asyncio.get_running_loop().time() + timeout_ms / 1000.0 + 30.0
+    try:
+        while asyncio.get_running_loop().time() < deadline:
+            raw = redis_client.get(result_key)
+            if raw is not None:
+                redis_client.delete(result_key)
+                value = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
+                parsed = json.loads(value)
+                if not isinstance(parsed, dict):
+                    raise RuntimeError(
+                        "canonical browser worker returned a malformed result"
+                    )
+                return parsed
+            await asyncio.sleep(0.2)
+    except asyncio.CancelledError:
+        redis_client.set(
+            cancel_key, "1", ex=max(60, math.ceil(timeout_ms / 1000) + 30),
+        )
+        raise
+    redis_client.set(
+        cancel_key, "1", ex=max(60, math.ceil(timeout_ms / 1000) + 30),
+    )
+    return {
+        "status": "timeout",
+        "error": "worker_result_timeout",
+        "partial": False,
+        "typed_output": {
+            "parser_status": "failed", "records": [], "record_count": 0,
+        },
+        "budget_consumed": {},
+    }
+
+
 async def _enqueue_canonical_scanner_capability(
     *, capability_name: str, capability_input: Mapping[str, Any],
     timeout_ms: int, hunt_id: str, action_id: str, reservation_id: str,
@@ -37023,9 +37099,12 @@ async def execute_hunt_capability(
 ):
     name = str(capability_name or "").strip().lower()
     network_capability_names = DURABLE_WORKER_HUNT_CAPABILITIES
+    browser_capability_names = DURABLE_BROWSER_HUNT_CAPABILITIES
     prepared_network = None
     network_target = None
     network_policy = None
+    prepared_browser = None
+    browser_target = None
     device_adapter_name = None
     validated_device_input = None
     call_approval_context = None
@@ -37134,6 +37213,45 @@ async def execute_hunt_capability(
                     key: int(value) for key, value in prepared_network.estimated_budget.items()
                     if key in limits
                 }
+            elif name in browser_capability_names:
+                authority_context = _hunt_json(run["context_pack"], {})
+                target_context = (
+                    authority_context.get("target")
+                    if isinstance(authority_context.get("target"), Mapping)
+                    else {}
+                )
+                target_url = str(target_context.get("url") or "")
+                parsed_target = urllib.parse.urlsplit(target_url)
+                root_domain = str(
+                    target_context.get("root_domain")
+                    or parsed_target.hostname
+                    or ""
+                ).lower().rstrip(".")
+                try:
+                    browser_target = TargetBinding(
+                        target_id=str(run["target_id"]),
+                        target_kind=str(run["target_kind"]),
+                        canonical_host=parsed_target.hostname,
+                        allowed_origins=tuple(target_context.get("origins") or ()),
+                        allowed_addresses=tuple(
+                            authority_context.get("authorized_target_addresses") or ()
+                        ),
+                        allowed_root_domains=(root_domain,) if root_domain else (),
+                        environment=str(target_context.get("environment") or "unknown"),
+                        scope_receipt_id=validated_scope_receipt_id,
+                    )
+                    prepared_browser = BrowserNavigateAdapter.prepare(
+                        target=browser_target,
+                        base_url=target_url,
+                        args=request.input,
+                    )
+                except (BrowserCapabilityInputError, ValueError) as exc:
+                    raise HTTPException(status_code=422, detail=str(exc)) from exc
+                charges = {
+                    key: int(value)
+                    for key, value in prepared_browser.estimated_budget.items()
+                    if key in limits
+                }
             else:
                 charges = {
                     key: int(value) for key, value in spec.budget_cost.items() if key in limits
@@ -37190,6 +37308,7 @@ async def execute_hunt_capability(
             worker_durable_budget = name in (
                 DURABLE_WORKER_HUNT_CAPABILITIES
                 | DURABLE_SCANNER_HUNT_CAPABILITIES
+                | DURABLE_BROWSER_HUNT_CAPABILITIES
             )
             api_managed_budget = name in (
                 DURABLE_INLINE_HUNT_CAPABILITIES
@@ -37480,6 +37599,34 @@ async def execute_hunt_capability(
                 authorized_addresses=context.get("authorized_target_addresses") or [],
                 record_receipt=False,
             )
+        elif name in browser_capability_names:
+            if (
+                durable_reservation is None
+                or durable_action_digest is None
+                or prepared_browser is None
+                or browser_target is None
+            ):
+                raise RuntimeError(
+                    "Browser capability reservation was not initialized"
+                )
+            result = await _enqueue_canonical_browser_capability(
+                capability_name=name,
+                capability_input=request.input,
+                expected_input_digest=prepared_browser.input_digest,
+                expected_budget=prepared_browser.estimated_budget,
+                timeout_ms=max(
+                    1_000,
+                    int(
+                        prepared_browser.estimated_budget.get(
+                            "tool_wall_seconds"
+                        ) or 1
+                    ) * 1_000,
+                ),
+                hunt_id=str(run["id"]),
+                action_id=str(action_id),
+                reservation_id=durable_reservation.record.reservation_id,
+                action_digest=durable_action_digest,
+            )
         elif name in network_capability_names:
             assert prepared_network is not None and network_target is not None and network_policy is not None
             if durable_reservation is None or durable_action_digest is None:
@@ -37526,7 +37673,9 @@ async def execute_hunt_capability(
             )
         else:
             raise HTTPException(status_code=422, detail="Capability adapter is not executable")
-        if result.get("partial") or result.get("status") == "partial":
+        if result.get("status") == "cancelled":
+            status = "cancelled"
+        elif result.get("partial") or result.get("status") == "partial":
             status = "partial"
         else:
             status = "completed" if result.get("ok") or result.get("status") in {"success", "queued"} else "failed"
@@ -38031,7 +38180,7 @@ async def execute_hunt_capability(
                             != str(receipt_id or "")
                             or action is None
                             or str(action["status"])
-                            not in {"completed", "partial", "failed"}
+                            not in {"completed", "partial", "blocked", "cancelled", "failed"}
                             or str(action["receipt_id"] or "")
                             != str(receipt_id or "")
                         ):

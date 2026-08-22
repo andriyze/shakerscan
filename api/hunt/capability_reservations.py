@@ -46,6 +46,10 @@ DURABLE_WORKER_HUNT_CAPABILITIES = frozenset({
     "subdomains.discover",
 })
 
+DURABLE_BROWSER_HUNT_CAPABILITIES = frozenset({
+    "browser.navigate",
+})
+
 DURABLE_SCANNER_HUNT_CAPABILITIES = frozenset({
     "sqli.verify",
     "templates.scan",
@@ -129,6 +133,7 @@ def terminalize_hunt_capability(
         "completed": "succeeded",
         "partial": "partial",
         "blocked": "blocked",
+        "cancelled": "cancelled",
     }.get(status, "failed")
     result_item = dict(result or {})
     error = str(result_item.get("error") or "").strip()
@@ -182,7 +187,11 @@ def terminalize_hunt_capability(
         )
     else:
         terminal = running.fail(
-            reason="capability_blocked" if status == "blocked" else "capability_failed",
+            reason=(
+                "capability_blocked" if status == "blocked"
+                else "capability_cancelled" if status == "cancelled"
+                else "capability_failed"
+            ),
             actual=actual_budget,
             execution_receipt_hash=receipt.receipt_hash,
             execution_may_have_started=True,

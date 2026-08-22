@@ -201,4 +201,4 @@ def test_real_hunt_route_uses_transactional_durable_inline_reservations():
     assert "1 + MAX_REDIRECT_HOPS" in handler
     assert "record_receipt=False" in handler
     assert "scope_receipt_id=validated_scope_receipt_id" in handler
-    assert "'reserved','running','completed','blocked','failed','partial'" in migrations
+    assert "'reserved','running','completed','blocked','cancelled','failed','partial'" in migrations
