@@ -9,6 +9,8 @@ from types import SimpleNamespace
 import sys
 import types
 
+import pytest
+
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 sys.modules.setdefault("asyncpg", types.SimpleNamespace(Pool=object))
@@ -549,6 +551,10 @@ def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch)
         options,
         scan_id="00000000-0000-0000-0000-000000000001",
         job_id="job-1",
+        network_discovery_summary={
+            "status": "success",
+            "actions": [],
+        },
     ))
 
     assert ("httpx", "running") in events
@@ -610,6 +616,47 @@ def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch)
     assert result["canonical_capabilities"]["sqli.verify"][
         "receipt"
     ]["budget_reservation_state"] == "committed"
+    stage_execution = result["canonical_stage_execution"]
+    assert [row["name"] for row in stage_execution["stages"]] == [
+        "bind_target",
+        "resolve_inputs",
+        "discover_surface",
+        "discover_network",
+        "deterministic_baseline",
+        "deterministic_active",
+        "verify_candidates",
+        "finalize_evidence",
+    ]
+    assert stage_execution["stages"][5]["reason"] == (
+        "delegated_to_composite_scanner_adapter"
+    )
+    assert stage_execution["stages"][7]["capability_names"] == [
+        "scan.execute"
+    ]
+
+
+def test_enabled_network_stage_requires_placement_before_surface_traffic(
+    monkeypatch,
+):
+    _plan, _target, options = _authority(enabled=False, network=True)
+
+    async def unexpected_surface_traffic(*_args, **_kwargs):
+        raise AssertionError("surface traffic ran before network placement check")
+
+    monkeypatch.setattr(
+        worker, "_execute_scan_web_probe_capability", unexpected_surface_traffic,
+    )
+
+    with pytest.raises(
+        worker.ScanCapabilityContractError,
+        match="discover_network stage requires",
+    ):
+        asyncio.run(worker._execute_reserved_deterministic_scan(
+            "https://app.example.test",
+            options,
+            scan_id="00000000-0000-0000-0000-000000000001",
+            job_id="job-1",
+        ))
 
 
 def test_scan_port_discovery_uses_same_reserve_before_traffic_boundary(

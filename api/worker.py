@@ -135,6 +135,12 @@ from scan.worker_dispatch import (
     prepare_worker_dispatch,
 )
 from scan.executor import build_native_scan_execution
+from scan.stages import (
+    ScanStageCancelled,
+    ScanStageContext,
+    ScanStageRunResult,
+    execute_scan_stage_graph,
+)
 from scan.jobs import (
     CanonicalScanJob,
     CanonicalScanJobError,
@@ -11227,124 +11233,295 @@ async def _execute_reserved_deterministic_scan(
     *,
     scan_id: str,
     job_id: str,
+    subdomain_discovery_summary: Mapping[str, Any] | None = None,
+    network_discovery_summary: Mapping[str, Any] | None = None,
+    collection_replay_summary: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Run canonical DAST only after its residual budget is durably held."""
+    """Run canonical DAST through the executable fixed-stage worker graph."""
     normalized, admission = prepare_worker_dispatch(options)
     if not admission.canonical or admission.plan is None:
         return await run_scan(
             target, dict(options), scan_id=scan_id, job_id=job_id,
         )
     execution = build_native_scan_execution(admission.plan, normalized)
-    web_probe_summary = await _execute_scan_web_probe_capability(
-        target,
-        normalized,
-        scan_id=scan_id,
-        job_id=job_id,
+    network_stage = next(
+        row for row in execution.stage_rows()
+        if row["name"] == "discover_network"
     )
-    web_crawl_summary = await _execute_scan_web_crawl_capability(
-        target,
-        normalized,
-        scan_id=scan_id,
-        job_id=job_id,
-    )
-    content_discovery_summary = await _execute_scan_content_discovery_capability(
-        target,
-        normalized,
-        scan_id=scan_id,
-        job_id=job_id,
-    )
-    template_summary = await _execute_scan_template_capability(
-        target,
-        normalized,
-        scan_id=scan_id,
-        job_id=job_id,
-    )
-    parameterized_candidates = scan_parameterized_execution_candidates(
-        target,
-        target=execution.target_binding,
+    if network_stage["enabled"] and not isinstance(
+        network_discovery_summary, Mapping,
+    ):
+        raise ScanCapabilityContractError(
+            "enabled discover_network stage requires its placed worker result"
+        )
+    context = ScanStageContext(
+        execution=execution,
+        target_url=target,
         options=normalized,
-        crawl_observations=web_crawl_summary.get("observations"),
-    )
-    xss_verification_summary = await _execute_scan_xss_verification_capability(
-        parameterized_candidates[0] if parameterized_candidates else None,
-        normalized,
         scan_id=scan_id,
         job_id=job_id,
     )
-    sqli_verification_summary = await _execute_scan_sqli_verification_capability(
-        parameterized_candidates[0] if parameterized_candidates else None,
-        normalized,
-        scan_id=scan_id,
-        job_id=job_id,
-    )
-    result_holder: dict[str, Any] = {}
 
-    async def scan_runner(runtime_budget: Mapping[str, int]) -> Mapping[str, Any]:
-        return await run_scan(
+    def stage_capabilities(
+        output: Mapping[str, Any],
+        *,
+        capability_names: tuple[str, ...],
+        adapter: str = "native_worker",
+    ) -> ScanStageRunResult:
+        summaries = [
+            value for value in output.values() if isinstance(value, Mapping)
+        ]
+        statuses = {
+            str(item.get("status") or "").strip().lower()
+            for item in summaries
+        }
+        if "cancelled" in statuses:
+            status, reason = "cancelled", "capability_cancelled"
+        elif statuses & {"failed", "blocked", "partial"}:
+            status, reason = "partial", "capability_partial_or_failed"
+        else:
+            status, reason = "completed", None
+        return ScanStageRunResult(
+            output=output,
+            status=status,
+            reason=reason,
+            adapter=adapter,
+            capability_names=capability_names,
+        )
+
+    async def bind_target_stage(_context: ScanStageContext) -> ScanStageRunResult:
+        return ScanStageRunResult(output={
+            "target_binding_digest": execution.target_binding.digest,
+            "scope_receipt_bound": bool(execution.target_binding.scope_receipt_id),
+            "origin_count": len(execution.target_binding.allowed_origins),
+            "address_count": len(execution.target_binding.allowed_addresses),
+        })
+
+    async def resolve_inputs_stage(_context: ScanStageContext) -> ScanStageRunResult:
+        def count_rows(name: str) -> int:
+            value = normalized.get(name)
+            return len(value) if isinstance(value, (list, tuple)) else 0
+
+        return ScanStageRunResult(output={
+            "credential_profile_reference_count": count_rows(
+                "credential_profile_refs"
+            ),
+            "request_collection_reference_count": count_rows(
+                "request_collections"
+            ),
+            "custom_endpoint_count": count_rows("custom_endpoints"),
+            "collection_replay_placed": isinstance(
+                collection_replay_summary, Mapping,
+            ),
+            "secret_values_exposed": False,
+        })
+
+    async def discover_surface_stage(
+        _context: ScanStageContext,
+    ) -> ScanStageRunResult:
+        probe = await _execute_scan_web_probe_capability(
+            target, normalized, scan_id=scan_id, job_id=job_id,
+        )
+        crawl = await _execute_scan_web_crawl_capability(
+            target, normalized, scan_id=scan_id, job_id=job_id,
+        )
+        content = await _execute_scan_content_discovery_capability(
+            target, normalized, scan_id=scan_id, job_id=job_id,
+        )
+        output: dict[str, Any] = {
+            "web.probe": probe,
+            "web.crawl": crawl,
+            "web.content_discover": content,
+        }
+        capability_names = [
+            "web.probe", "web.crawl", "web.content_discover",
+        ]
+        if isinstance(subdomain_discovery_summary, Mapping):
+            output["subdomains.discover"] = dict(subdomain_discovery_summary)
+            capability_names.append("subdomains.discover")
+        if isinstance(collection_replay_summary, Mapping):
+            output["collections.replay"] = dict(collection_replay_summary)
+            capability_names.append("collections.replay")
+        return stage_capabilities(
+            output, capability_names=tuple(capability_names),
+        )
+
+    async def discover_network_stage(
+        _context: ScanStageContext,
+    ) -> ScanStageRunResult:
+        if not isinstance(network_discovery_summary, Mapping):
+            raise ScanCapabilityContractError(
+                "enabled discover_network stage requires its placed worker result"
+            )
+        return stage_capabilities(
+            {"network.discovery": dict(network_discovery_summary)},
+            capability_names=("ports.discover", "service.fingerprint"),
+        )
+
+    async def deterministic_baseline_stage(
+        _context: ScanStageContext,
+    ) -> ScanStageRunResult:
+        template = await _execute_scan_template_capability(
+            target, normalized, scan_id=scan_id, job_id=job_id,
+        )
+        return stage_capabilities(
+            {"templates.scan": template},
+            capability_names=("templates.scan",),
+        )
+
+    async def deterministic_active_stage(
+        _context: ScanStageContext,
+    ) -> ScanStageRunResult:
+        # Active detector extraction is still in progress. Recording this
+        # delegation makes the remaining composite-adapter boundary explicit.
+        return ScanStageRunResult(
+            output={
+                "delegated_adapter": "scanner.dast",
+                "state_changing_http_allowed": bool(
+                    admission.plan.policy.allow_state_changing_http
+                ),
+            },
+            reason="delegated_to_composite_scanner_adapter",
+            adapter="scanner.dast.composite",
+        )
+
+    async def verify_candidates_stage(
+        stage_context: ScanStageContext,
+    ) -> ScanStageRunResult:
+        surface = stage_context.output("discover_surface")
+        crawl = surface.get("web.crawl")
+        candidates = scan_parameterized_execution_candidates(
             target,
-            dict(options),
+            target=execution.target_binding,
+            options=normalized,
+            crawl_observations=(
+                crawl.get("observations") if isinstance(crawl, Mapping) else None
+            ),
+        )
+        candidate = candidates[0] if candidates else None
+        xss = await _execute_scan_xss_verification_capability(
+            candidate, normalized, scan_id=scan_id, job_id=job_id,
+        )
+        sqli = await _execute_scan_sqli_verification_capability(
+            candidate, normalized, scan_id=scan_id, job_id=job_id,
+        )
+        return stage_capabilities(
+            {
+                "xss.verify": xss,
+                "sqli.verify": sqli,
+                "candidate_count": len(candidates),
+            },
+            capability_names=("xss.verify", "sqli.verify"),
+        )
+
+    async def finalize_evidence_stage(
+        stage_context: ScanStageContext,
+    ) -> ScanStageRunResult:
+        surface = stage_context.output("discover_surface")
+        baseline = stage_context.output("deterministic_baseline")
+        verification = stage_context.output("verify_candidates")
+        placed_capabilities = {
+            "web.probe": surface.get("web.probe")
+            or _skipped_scan_web_probe_summary("stage_disabled"),
+            "web.crawl": surface.get("web.crawl")
+            or _skipped_scan_web_crawl_summary("stage_disabled"),
+            "web.content_discover": surface.get("web.content_discover")
+            or _skipped_scan_content_discovery_summary("stage_disabled"),
+            "templates.scan": baseline.get("templates.scan")
+            or _skipped_scan_template_summary("stage_disabled"),
+            "xss.verify": verification["xss.verify"],
+            "sqli.verify": verification["sqli.verify"],
+        }
+        result_holder: dict[str, Any] = {}
+
+        async def scan_runner(
+            runtime_budget: Mapping[str, int],
+        ) -> Mapping[str, Any]:
+            return await run_scan(
+                target,
+                dict(options),
+                scan_id=scan_id,
+                job_id=job_id,
+                canonical_runtime_budget=runtime_budget,
+                canonical_placed_capabilities=placed_capabilities,
+            )
+
+        stored, idempotent_redelivery = await _execute_reserved_scan_capability(
+            admission=admission,
+            execution=execution,
             scan_id=scan_id,
             job_id=job_id,
-            canonical_runtime_budget=runtime_budget,
-            canonical_placed_capabilities={
-                "web.probe": web_probe_summary,
-                "web.crawl": web_crawl_summary,
-                "web.content_discover": content_discovery_summary,
-                "templates.scan": template_summary,
-                "xss.verify": xss_verification_summary,
-                "sqli.verify": sqli_verification_summary,
+            capability_name="scan.execute",
+            capability_args={},
+            action_id="deterministic_scan.execute",
+            scan_runner=scan_runner,
+            scan_result_holder=result_holder,
+        )
+        summary = _deterministic_scan_reservation_summary(
+            stored,
+            idempotent_redelivery=idempotent_redelivery,
+        )
+        if isinstance(result_holder.get("result"), Mapping):
+            result = dict(result_holder["result"])
+        elif idempotent_redelivery:
+            async with db_pool.acquire() as conn:
+                durable_result = await conn.fetchval(
+                    "SELECT result FROM scans WHERE id=$1",
+                    uuid.UUID(str(scan_id)),
+                )
+            result = _as_report_dict(durable_result) or {}
+            if not result:
+                result = _deterministic_scan_terminal_failure_result(
+                    target=target, stored=stored, summary=summary,
+                )
+        else:
+            result = _deterministic_scan_terminal_failure_result(
+                target=target, stored=stored, summary=summary,
+            )
+        status = "partial" if (
+            result.get("error") or summary.get("partial") or summary.get("timed_out")
+        ) else "completed"
+        return ScanStageRunResult(
+            output={
+                "report": result,
+                "reservation_summary": summary,
+                "placed_capabilities": placed_capabilities,
             },
+            status=status,
+            reason=("composite_scanner_partial" if status == "partial" else None),
+            adapter="scanner.dast.composite_finalize",
+            capability_names=("scan.execute",),
         )
 
-    stored, idempotent_redelivery = await _execute_reserved_scan_capability(
-        admission=admission,
-        execution=execution,
-        scan_id=scan_id,
-        job_id=job_id,
-        capability_name="scan.execute",
-        capability_args={},
-        action_id="deterministic_scan.execute",
-        scan_runner=scan_runner,
-        scan_result_holder=result_holder,
-    )
-    summary = _deterministic_scan_reservation_summary(
-        stored,
-        idempotent_redelivery=idempotent_redelivery,
-    )
-    if isinstance(result_holder.get("result"), Mapping):
-        result = dict(result_holder["result"])
-    elif idempotent_redelivery:
-        async with db_pool.acquire() as conn:
-            durable_result = await conn.fetchval(
-                "SELECT result FROM scans WHERE id=$1",
-                uuid.UUID(str(scan_id)),
-            )
-        result = _as_report_dict(durable_result) or {}
-        if not result:
-            result = _deterministic_scan_terminal_failure_result(
-                target=target,
-                stored=stored,
-                summary=summary,
-            )
-    else:
-        result = _deterministic_scan_terminal_failure_result(
-            target=target,
-            stored=stored,
-            summary=summary,
+    try:
+        stage_execution = await execute_scan_stage_graph(
+            context,
+            {
+                "bind_target": bind_target_stage,
+                "resolve_inputs": resolve_inputs_stage,
+                "discover_surface": discover_surface_stage,
+                "discover_network": discover_network_stage,
+                "deterministic_baseline": deterministic_baseline_stage,
+                "deterministic_active": deterministic_active_stage,
+                "verify_candidates": verify_candidates_stage,
+                "finalize_evidence": finalize_evidence_stage,
+            },
+            cancel_requested=lambda: _scan_cancel_requested(scan_id),
         )
+    except ScanStageCancelled as exc:
+        raise ValueError("Cancelled by user") from exc
+
+    final_output = context.output("finalize_evidence")
+    result = dict(final_output["report"])
+    summary = dict(final_output["reservation_summary"])
+    placed_capabilities = dict(final_output["placed_capabilities"])
     canonical_capabilities = result.setdefault(
         "canonical_capabilities", {}
     )
     if isinstance(canonical_capabilities, dict):
-        canonical_capabilities["web.probe"] = web_probe_summary
-        canonical_capabilities["web.crawl"] = web_crawl_summary
-        canonical_capabilities["web.content_discover"] = (
-            content_discovery_summary
-        )
-        canonical_capabilities["templates.scan"] = template_summary
-        canonical_capabilities["xss.verify"] = xss_verification_summary
-        canonical_capabilities["sqli.verify"] = sqli_verification_summary
+        canonical_capabilities.update(placed_capabilities)
     result["deterministic_scan_execution"] = summary
+    result["canonical_stage_execution"] = stage_execution
     return result
 
 
@@ -12815,7 +12992,13 @@ async def process_scan_job(job_data: dict):
                     options = await _hydrate_device_request_collections(options, scan_id)
                 if is_deterministic_dast(options):
                     result = await _execute_reserved_deterministic_scan(
-                        target, options, scan_id=scan_id, job_id=job_id,
+                        target,
+                        options,
+                        scan_id=scan_id,
+                        job_id=job_id,
+                        subdomain_discovery_summary=subdomain_discovery_summary,
+                        network_discovery_summary=network_discovery_summary,
+                        collection_replay_summary=collection_replay_summary,
                     )
                 else:
                     result = await run_scan(
@@ -15056,7 +15239,12 @@ async def process_scan_shard_job(job_data: dict):
                 options = await _hydrate_generic_scan_credentials(options, scan_id)
                 options = await _hydrate_managed_scan_credentials(options, scan_id)
                 result = await _execute_reserved_deterministic_scan(
-                    target, options, scan_id=scan_id, job_id=job_id,
+                    target,
+                    options,
+                    scan_id=scan_id,
+                    job_id=job_id,
+                    subdomain_discovery_summary=subdomain_discovery_summary,
+                    network_discovery_summary=network_discovery_summary,
                 )
         except Exception as e:
             result = {'target': target, 'error': str(e),
