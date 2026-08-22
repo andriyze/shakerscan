@@ -25,8 +25,10 @@ import urllib.parse
 
 try:
     from scanner_tools.request_replay import ReplayPlan, ReplayRequest
+    from scanner_tools.url_redaction import redact_url
 except ModuleNotFoundError:  # package import when scanner is installed as a package
     from scanner.scanner_tools.request_replay import ReplayPlan, ReplayRequest
+    from scanner.scanner_tools.url_redaction import redact_url
 
 from .budget_reservations import DurableBudgetReservation
 from .models import TargetBinding
@@ -35,6 +37,8 @@ from .receipts import CapabilityReceipt
 
 MAX_REPLAY_RESPONSE_BODY_BYTES = 2 * 1024 * 1024
 MAX_REPLAY_RESPONSE_HEADERS = 200
+MIN_REPLAY_LEASE_SECONDS = 30
+REPLAY_LEASE_SAFETY_SECONDS = 5
 _ERROR_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,119}$")
 _HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]{1,200}$")
 
@@ -71,15 +75,24 @@ def _origin(value: str) -> str:
 
 
 def _redacted_url(value: str) -> str:
-    parsed = urllib.parse.urlsplit(str(value or "").strip())
-    scheme, authority, _port = _canonical_authority(value)
-    query = urllib.parse.urlencode([
-        (str(name)[:200], "<redacted>")
-        for name, _item in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
-    ])
-    return urllib.parse.urlunsplit(
-        (scheme, authority, parsed.path or "/", query, "")
-    )[:2_000]
+    # Validate the authority first so redaction never turns malformed transport output into
+    # apparently valid evidence. The shared redactor then removes query values, userinfo, and
+    # likely credentials/signatures embedded in path segments.
+    _canonical_authority(value)
+    return redact_url(value)
+
+
+def _effective_lease_seconds(*, lease_seconds: int, timeout_seconds: float) -> int:
+    if isinstance(lease_seconds, bool):
+        raise ReplayExecutionError("lease_seconds must be a positive integer")
+    try:
+        requested = int(lease_seconds)
+    except (TypeError, ValueError) as exc:
+        raise ReplayExecutionError("lease_seconds must be a positive integer") from exc
+    if requested <= 0:
+        raise ReplayExecutionError("lease_seconds must be a positive integer")
+    one_wire_attempt = math.ceil(float(timeout_seconds) + 0.5) + REPLAY_LEASE_SAFETY_SECONDS
+    return max(requested, MIN_REPLAY_LEASE_SECONDS, one_wire_attempt)
 
 
 def _response_headers(value: Mapping[str, str]) -> dict[str, str]:
@@ -350,8 +363,15 @@ async def execute_replay_plan(
     clock: Clock = lambda: datetime.now(timezone.utc),
     on_reservation: ReservationSink | None = None,
     on_settlement: SettlementSink | None = None,
+    require_durable_persistence: bool = False,
 ) -> ReplayExecutionOutcome:
-    """Execute one exact ReplayPlan with reserve-before-send accounting."""
+    """Execute one exact ReplayPlan with reserve-before-send accounting.
+
+    Production call sites should set ``require_durable_persistence=True`` and provide callbacks
+    that persist each immutable reservation version and the terminal receipt/ledger update in the
+    owning datastore transaction. The false default is retained only for isolated adapter tests
+    until the production replay job handler is switched to the durable repository.
+    """
     if owner_kind not in {"scan", "hunt"}:
         raise ReplayExecutionError("owner_kind must be scan or hunt")
     owner = str(owner_id or "").strip()
@@ -360,7 +380,17 @@ async def execute_replay_plan(
         raise ReplayExecutionError("owner_id and worker_id are required")
     if isinstance(timeout_seconds, bool) or not 0.1 <= float(timeout_seconds) <= 300:
         raise ReplayExecutionError("timeout_seconds must be between 0.1 and 300")
+    if require_durable_persistence and (
+        on_reservation is None or on_settlement is None
+    ):
+        raise ReplayExecutionError(
+            "durable replay requires reservation and settlement persistence callbacks"
+        )
     _validate_runtime_binding(plan, target)
+    effective_lease = _effective_lease_seconds(
+        lease_seconds=lease_seconds,
+        timeout_seconds=float(timeout_seconds),
+    )
 
     now = _utc(clock)
     requested = DurableBudgetReservation.request(
@@ -376,13 +406,13 @@ async def execute_replay_plan(
         limits=limits,
         consumed=consumed,
         now=_utc(clock),
-        lease_seconds=lease_seconds,
+        lease_seconds=effective_lease,
     )
     await _invoke(on_reservation, reserved, held_ledger)
     running = reserved.start(
         worker_id=worker,
         now=_utc(clock),
-        lease_seconds=lease_seconds,
+        lease_seconds=effective_lease,
     )
     await _invoke(on_reservation, running, held_ledger)
 
@@ -392,7 +422,7 @@ async def execute_replay_plan(
     attempted = 0
     any_timeout = False
     try:
-        for request in plan.requests:
+        for index, request in enumerate(plan.requests):
             attempted += 1  # Charge conservatively before the target may receive bytes.
             result = await _send_with_worker_deadline(
                 transport,
@@ -407,6 +437,13 @@ async def execute_replay_plan(
             if result.error_code:
                 errors.append(f"{request.request_id}:{result.error_code}")
             any_timeout = any_timeout or result.timed_out
+            if index + 1 < len(plan.requests):
+                running = running.heartbeat(
+                    worker_id=worker,
+                    now=_utc(clock),
+                    lease_seconds=effective_lease,
+                )
+                await _invoke(on_reservation, running, held_ledger)
     except asyncio.CancelledError:
         actual = _actual_budget(plan, attempted)
         finished_at = _utc(clock)
@@ -458,7 +495,10 @@ async def execute_replay_plan(
         observations=observations, errors=errors, receipt_id=receipt_id,
     )
     committed = running.commit(
-        actual=actual, execution_receipt_hash=receipt.receipt_hash, now=finished_at,
+        actual=actual,
+        execution_receipt_hash=receipt.receipt_hash,
+        now=finished_at,
+        worker_id=worker,
     )
     settled = committed.reconcile_consumed(held_ledger)
     await _invoke(on_settlement, committed, receipt, settled)
