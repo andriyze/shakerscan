@@ -54,6 +54,7 @@ class CapabilityExecutionContext:
     specification: CapabilitySpec
     target: TargetBinding
     requested_budget: Mapping[str, int]
+    adapter_managed_cancellation: bool = False
 
 
 class CapabilityExecutor:
@@ -74,6 +75,12 @@ class CapabilityExecutor:
             raise ValueError("capability adapter implementation does not match the registry")
         if adapter.adapter_version != spec.adapter_version:
             raise ValueError("capability adapter version does not match the registry")
+        if context.adapter_managed_cancellation and not bool(
+            getattr(adapter, "manages_cancellation", False)
+        ):
+            raise ValueError(
+                "capability adapter does not implement managed cancellation"
+            )
         if context.target.target_kind not in spec.target_kinds:
             raise ValueError("capability does not support the bound target kind")
         requested = {
@@ -82,7 +89,7 @@ class CapabilityExecutor:
         }
         if any(not name or amount < 0 for name, amount in requested.items()):
             raise ValueError("requested capability budget is invalid")
-        if cancelled():
+        if cancelled() and not context.adapter_managed_cancellation:
             return self._normalize(
                 CapabilityAdapterResult(
                     status="cancelled",

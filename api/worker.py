@@ -66,6 +66,7 @@ from capabilities.network import (
 )
 from capabilities.browser import BrowserCapabilityInputError, browser_capability_adapter
 from capabilities.scanner import ScannerExecutionAdapter
+from capabilities.replay import ReplayExecutionAdapter
 from hunt.capability_reservations import (
     DURABLE_BROWSER_HUNT_CAPABILITIES,
     DURABLE_SCANNER_HUNT_CAPABILITIES,
@@ -110,7 +111,6 @@ from scan.collection_replay import (
 from runtime.pinned_http_replay import PinnedAiohttpReplayTransport
 from runtime.request_replay_executor import (
     ReplayExecutionError,
-    execute_replay_plan,
     replay_reservation_budget,
 )
 from runtime.reservation_recovery import recover_stale_reservations
@@ -10062,28 +10062,55 @@ async def _execute_scan_request_collections(
                         scan_uuid, json.dumps(current_used),
                     )
 
-        outcome = await execute_replay_plan(
-            plan,
-            target=target_binding,
-            owner_kind="scan",
-            owner_id=scan_id,
-            worker_id=worker_id,
-            limits=limits,
-            consumed=held_ledger,
-            transport=PinnedAiohttpReplayTransport(),
-            timeout_seconds=max(
-                0.1, min(30.0, float(wall_reservation) / len(plan.requests)),
+        replay_spec = agent_tools.CAPABILITY_REGISTRY.require(
+            "collections.replay_safe"
+        )
+        replay_adapter = ReplayExecutionAdapter(
+            specification=replay_spec,
+            execution_kwargs={
+                "plan": plan,
+                "target": target_binding,
+                "owner_kind": "scan",
+                "owner_id": scan_id,
+                "worker_id": worker_id,
+                "limits": limits,
+                "consumed": held_ledger,
+                "transport": PinnedAiohttpReplayTransport(),
+                "timeout_seconds": max(
+                    0.1,
+                    min(
+                        30.0,
+                        float(wall_reservation) / len(plan.requests),
+                    ),
+                ),
+                "reservation_id": persisted.record.reservation_id,
+                "lease_seconds": max(90, wall_reservation + 10),
+                "on_reservation": persist_runtime_transition,
+                "on_settlement": persist_runtime_settlement,
+                "require_durable_persistence": True,
+                "additional_budget": additional_budget,
+                "initial_reservation": persisted.record,
+                "receipt_context": receipt_context,
+            },
+        )
+        execution = await CapabilityExecutor().execute(
+            CapabilityExecutionContext(
+                specification=replay_spec,
+                target=target_binding,
+                requested_budget=persisted.record.requested,
+                adapter_managed_cancellation=True,
             ),
-            reservation_id=persisted.record.reservation_id,
-            lease_seconds=max(90, wall_reservation + 10),
-            on_reservation=persist_runtime_transition,
-            on_settlement=persist_runtime_settlement,
-            require_durable_persistence=True,
-            additional_budget=additional_budget,
-            initial_reservation=persisted.record,
-            receipt_context=receipt_context,
+            replay_adapter,
+            heartbeat=lambda: asyncio.sleep(0),
             cancelled=lambda: _scan_cancel_requested(scan_id),
         )
+        outcome = replay_adapter.outcome
+        if outcome is None:
+            raise ReplayExecutionError(
+                execution.errors[0]
+                if execution.errors
+                else "replay capability failed before durable settlement"
+            )
         public_receipt = outcome.receipt.public_dict()
         observations = list(public_receipt.get("observations") or [])
         item_status = (
@@ -14958,42 +14985,72 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                     )
 
         worker_id = _worker_runtime_identity() or f"worker:{job_id[:8]}"
-        outcome = await execute_replay_plan(
-            plan,
-            target=target,
-            owner_kind="hunt",
-            owner_id=hunt_id,
-            worker_id=worker_id,
-            limits=_worker_hunt_ledger_limits(_worker_json_object(run["budget_json"])),
-            consumed=held_ledger,
-            transport=PinnedAiohttpReplayTransport(),
-            timeout_seconds=max(
-                0.1,
-                min(
-                    30.0,
-                    float(additional_budget["tool_wall_seconds"]) / len(plan.requests),
+        replay_spec = agent_tools.CAPABILITY_REGISTRY.require(
+            "collections.replay_safe"
+        )
+        replay_adapter = ReplayExecutionAdapter(
+            specification=replay_spec,
+            execution_kwargs={
+                "plan": plan,
+                "target": target,
+                "owner_kind": "hunt",
+                "owner_id": hunt_id,
+                "worker_id": worker_id,
+                "limits": _worker_hunt_ledger_limits(
+                    _worker_json_object(run["budget_json"])
                 ),
+                "consumed": held_ledger,
+                "transport": PinnedAiohttpReplayTransport(),
+                "timeout_seconds": max(
+                    0.1,
+                    min(
+                        30.0,
+                        float(additional_budget["tool_wall_seconds"])
+                        / len(plan.requests),
+                    ),
+                ),
+                "reservation_id": reservation_id,
+                "lease_seconds": max(
+                    90, additional_budget["tool_wall_seconds"] + 10
+                ),
+                "on_reservation": persist_runtime_transition,
+                "on_settlement": persist_runtime_settlement,
+                "require_durable_persistence": True,
+                "additional_budget": additional_budget,
+                "initial_reservation": (
+                    persisted.record if persisted is not None else None
+                ),
+                "receipt_context": receipt_context,
+            },
+        )
+        execution = await CapabilityExecutor().execute(
+            CapabilityExecutionContext(
+                specification=replay_spec,
+                target=target,
+                requested_budget=persisted.record.requested,
+                adapter_managed_cancellation=True,
             ),
-            reservation_id=reservation_id,
-            lease_seconds=max(90, additional_budget["tool_wall_seconds"] + 10),
-            on_reservation=persist_runtime_transition,
-            on_settlement=persist_runtime_settlement,
-            require_durable_persistence=True,
-            additional_budget=additional_budget,
-            initial_reservation=persisted.record if persisted is not None else None,
-            receipt_context=receipt_context,
+            replay_adapter,
+            heartbeat=lambda: asyncio.sleep(0),
             cancelled=lambda: bool(redis_client.exists(cancel_key)),
         )
+        outcome = replay_adapter.outcome
+        if outcome is None:
+            raise ReplayExecutionError(
+                execution.errors[0]
+                if execution.errors
+                else "replay capability failed before durable settlement"
+            )
         public_receipt = outcome.receipt.public_dict()
         result = {
             "job_id": job_id,
-            "status": "success" if outcome.status == "succeeded" else outcome.status,
+            "status": execution.status,
             "error": None if outcome.reservation.status == "committed" else outcome.reservation.failure_reason,
-            "ok": outcome.status == "succeeded",
-            "partial": bool(outcome.receipt.partial),
+            "ok": execution.status == "success",
+            "partial": execution.partial,
             "replayed": int(outcome.reservation.actual.get("http_requests") or 0),
-            "observations": list(public_receipt.get("observations") or []),
-            "budget_consumed": dict(outcome.reservation.actual),
+            "observations": [dict(item) for item in execution.observations],
+            "budget_consumed": dict(execution.actual_budget),
             "used_after_reconciliation": settled_ledger,
             "reservation_id": reservation_id,
             "receipt": public_receipt,

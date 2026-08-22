@@ -102,6 +102,58 @@ def test_executor_cancellation_is_distinct_and_does_not_start_adapter():
     assert not adapter.called
 
 
+def test_executor_can_delegate_pre_execution_cancellation_to_adapter():
+    class CancellationAwareAdapter(_Adapter):
+        manages_cancellation = True
+
+        async def execute(self, *, heartbeat, cancelled):
+            self.called = True
+            assert cancelled() is True
+            return CapabilityAdapterResult(
+                status="cancelled",
+                errors=("execution_cancelled",),
+                actual_budget={"http_requests": 0},
+            )
+
+    adapter = CancellationAwareAdapter()
+    base = _context()
+    context = CapabilityExecutionContext(
+        specification=base.specification,
+        target=base.target,
+        requested_budget=base.requested_budget,
+        adapter_managed_cancellation=True,
+    )
+    result = asyncio.run(CapabilityExecutor().execute(
+        context,
+        adapter,
+        heartbeat=lambda: asyncio.sleep(0),
+        cancelled=lambda: True,
+    ))
+
+    assert adapter.called
+    assert result.status == "cancelled"
+    assert result.errors == ("execution_cancelled",)
+    assert result.actual_budget == {"http_requests": 0, "agent_actions": 1}
+
+
+def test_executor_rejects_false_managed_cancellation_claim():
+    base = _context()
+    context = CapabilityExecutionContext(
+        specification=base.specification,
+        target=base.target,
+        requested_budget=base.requested_budget,
+        adapter_managed_cancellation=True,
+    )
+
+    with pytest.raises(ValueError, match="managed cancellation"):
+        asyncio.run(CapabilityExecutor().execute(
+            context,
+            _Adapter(),
+            heartbeat=lambda: asyncio.sleep(0),
+            cancelled=lambda: True,
+        ))
+
+
 def test_executor_adapter_fault_charges_the_complete_uncertain_hold():
     class FaultingAdapter(_Adapter):
         async def execute(self, *, heartbeat, cancelled):

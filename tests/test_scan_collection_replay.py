@@ -298,11 +298,13 @@ def test_scan_worker_routes_collections_through_shared_durable_executor():
     assert "create_requested" in handler
     assert "persist_transition" in handler
     assert "persist_terminal" in handler
-    assert "execute_replay_plan" in handler
+    assert "ReplayExecutionAdapter(" in handler
+    assert "CapabilityExecutor().execute(" in handler
+    assert "adapter_managed_cancellation=True" in handler
     assert "cancelled=lambda: _scan_cancel_requested(scan_id)" in handler
     assert 'summary["cancelled"] = True' in handler
     assert "Pinn" in handler and "ReplayTransport" in handler
-    assert "require_durable_persistence=True" in handler
+    assert '"require_durable_persistence": True' in handler
     assert process.index("_execute_scan_request_collections") < process.index(
         "_hydrate_generic_scan_credentials"
     ) < process.index("run_scan(")
