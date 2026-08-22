@@ -15,6 +15,7 @@ from typing import Any
 
 REQUEST_METER_SCHEMA_V1 = "request_meter_v1"
 REQUEST_BUDGET_MODES = frozenset({"off", "compatibility", "enforce"})
+SAFE_HTTP_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 
 class RequestBudgetExceeded(RuntimeError):
@@ -60,6 +61,7 @@ class RequestMeter:
         mode: str,
         planned: int = 0,
         reserved: int = 0,
+        state_changing_limit: int | None = None,
         allowed_methods: Collection[str] | None = None,
         allowed_origins: Collection[str] | None = None,
         allowed_addresses: Collection[str] | None = None,
@@ -73,6 +75,11 @@ class RequestMeter:
         self.target_host = str(target_host or "").strip().lower()
         self.planned = max(0, int(planned or 0))
         self.reserved = max(0, int(reserved or 0))
+        self.state_changing_limit = (
+            None
+            if state_changing_limit is None
+            else max(0, int(state_changing_limit))
+        )
         self.allowed_methods = frozenset(
             str(method or "").strip().upper()
             for method in (allowed_methods or ())
@@ -99,6 +106,8 @@ class RequestMeter:
         self.retried = 0
         self.rejected = 0
         self.method_rejected = 0
+        self.state_changing_attempted = 0
+        self.state_changing_rejected = 0
         self.destination_rejected = 0
         self.successful = 0
         self.unmetered_tool_invocations = 0
@@ -160,6 +169,30 @@ class RequestMeter:
         if not self.applies_to(url):
             return False
         with self._lock:
+            state_changing = bool(
+                normalized_method and normalized_method not in SAFE_HTTP_METHODS
+            )
+            if (
+                self.enforcing
+                and state_changing
+                and self.state_changing_limit is not None
+                and self.state_changing_attempted >= self.state_changing_limit
+            ):
+                self.rejected += 1
+                self.state_changing_rejected += 1
+                self._increment_adapter(phase, "rejected")
+                self._event(
+                    "rejected_state_changing_budget",
+                    phase=phase,
+                    url=url,
+                    method=normalized_method,
+                    retry=retry,
+                )
+                raise RequestBudgetExceeded(
+                    "state-changing request budget exhausted before "
+                    f"{phase} ({self.state_changing_attempted}/"
+                    f"{self.state_changing_limit})"
+                )
             if self.enforcing and self.exhausted:
                 self.rejected += 1
                 self._increment_adapter(phase, "rejected")
@@ -168,6 +201,8 @@ class RequestMeter:
                     f"request budget exhausted before {phase} ({self.attempted}/{self.limit})"
                 )
             self.attempted += 1
+            if state_changing:
+                self.state_changing_attempted += 1
             self._increment_adapter(phase, "attempted")
             if retry:
                 self.retried += 1
@@ -283,8 +318,11 @@ class RequestMeter:
                 "destination_scope_required": self.require_destination_scope,
                 "planned_requests": self.planned,
                 "reserved_requests": self.reserved,
+                "state_changing_request_limit": self.state_changing_limit,
                 "request_limit": self.limit,
                 "attempted_requests": self.attempted,
+                "state_changing_attempted_requests": self.state_changing_attempted,
+                "state_changing_rejected_requests": self.state_changing_rejected,
                 "completed_requests": self.completed,
                 "retried_requests": self.retried,
                 "rejected_requests": self.rejected,

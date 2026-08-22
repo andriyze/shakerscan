@@ -74,6 +74,7 @@ class _Connection:
             "policy_json": canonical["policy"],
             "budget_json": canonical["budget"],
             "budget_used_json": {},
+            "result": None,
         }
 
     def transaction(self):
@@ -92,6 +93,11 @@ class _Connection:
         if "UPDATE scans SET budget_used_json" in query:
             self.row["budget_used_json"] = json.loads(_args[1])
             return "UPDATE 1"
+        raise AssertionError(query)
+
+    async def fetchval(self, query, *_args):
+        if "SELECT result FROM scans" in query:
+            return self.row["result"]
         raise AssertionError(query)
 
 
@@ -128,6 +134,16 @@ class _ReservationStore:
             action_digest=action_digest,
             record=record,
         )
+        return self.current
+
+    async def load_by_action(
+        self, _conn, *, owner_kind, owner_id, action_id, for_update=False,
+    ):
+        assert owner_kind == "scan"
+        assert for_update is True
+        if self.current is None or self.current.action_id != action_id:
+            return None
+        assert self.current.record.owner_id == owner_id
         return self.current
 
     async def load(self, _conn, _reservation_id, *, for_update=False):
@@ -239,6 +255,100 @@ def test_scan_subdomain_discovery_reserves_before_target_traffic_and_settles(
         "00000000-0000-0000-0000-000000000001"
     )
     assert connection.row["budget_used_json"]["hosts_attempted"] == 1
+
+
+def test_deterministic_scan_reserves_remaining_budget_before_process_and_redelivery(
+    monkeypatch,
+):
+    plan, _target, options = _authority(enabled=True)
+    connection = _Connection(plan)
+    connection.row["budget_used_json"] = {
+        "http_requests": 7,
+        "state_changing_requests": 0,
+        "browser_actions": 2,
+        "tcp_ports_attempted": 0,
+        "hosts_attempted": 1,
+        "tool_wall_seconds": 5,
+    }
+    events = []
+    store = _ReservationStore(events)
+    calls = 0
+
+    async def fake_run_scan(
+        target,
+        runtime_options,
+        scan_id=None,
+        job_id=None,
+        canonical_runtime_budget=None,
+        **_kwargs,
+    ):
+        nonlocal calls
+        calls += 1
+        events.append(("traffic", store.current.record.status))
+        assert target == "https://app.example.test"
+        assert runtime_options["scan_execution_plan_digest"] == plan.digest
+        assert canonical_runtime_budget == {
+            "http_requests": 93,
+            "state_changing_requests": 0,
+            "browser_actions": 18,
+            "tcp_ports_attempted": 0,
+            "hosts_attempted": 49,
+            "tool_wall_seconds": 55,
+        }
+        return {
+            "target": target,
+            "findings": [{"id": "finding-1"}],
+            "result": {"score": 90, "grade": "A"},
+            "coverage": {"status": "complete"},
+            "discovery": {"browser_crawl": {"pages_visited": 2}},
+            "request_budget": {
+                "schema_version": "request_meter_v1",
+                "mode": "enforce",
+                "fully_metered": True,
+                "attempted_requests": 3,
+                "state_changing_attempted_requests": 0,
+            },
+            "scan_metadata": {"schema_version": "scan-report/v2"},
+        }
+
+    monkeypatch.setattr(worker, "db_pool", _Pool(connection))
+    monkeypatch.setattr(worker, "PostgresBudgetReservationStore", lambda: store)
+    monkeypatch.setattr(worker, "run_scan", fake_run_scan)
+    monkeypatch.setattr(worker, "_worker_runtime_identity", lambda: "worker:test")
+    monkeypatch.setattr(worker, "_scan_cancel_requested", lambda _scan_id: False)
+
+    result = asyncio.run(worker._execute_reserved_deterministic_scan(
+        "https://app.example.test",
+        options,
+        scan_id="00000000-0000-0000-0000-000000000001",
+        job_id="job-1",
+    ))
+
+    assert events[:3] == [
+        ("create", "requested"),
+        ("transition", "reserved"),
+        ("transition", "running"),
+    ]
+    assert ("traffic", "running") in events
+    assert events[-1] == ("terminal", "committed")
+    assert calls == 1
+    assert store.current.record.actual["http_requests"] == 3
+    assert store.current.record.actual["browser_actions"] == 2
+    assert result["deterministic_scan_execution"]["receipt"][
+        "budget_reservation_state"
+    ] == "committed"
+
+    connection.row["result"] = result
+    redelivered = asyncio.run(worker._execute_reserved_deterministic_scan(
+        "https://app.example.test",
+        options,
+        scan_id="00000000-0000-0000-0000-000000000001",
+        job_id="job-1",
+    ))
+    assert calls == 1
+    assert redelivered["deterministic_scan_execution"][
+        "idempotent_redelivery"
+    ] is True
 
 
 def test_scan_port_discovery_uses_same_reserve_before_traffic_boundary(
@@ -591,13 +701,13 @@ def test_worker_wires_discovery_before_credentials_and_only_once_per_scan_role()
     assert "automatically_scanned_discovered_hosts" in source
     assert standalone.index("_execute_scan_subdomain_discovery(") < standalone.index(
         "_hydrate_generic_scan_credentials("
-    ) < standalone.index("run_scan(")
+    ) < standalone.index("_execute_reserved_deterministic_scan(")
     assert standalone.index("_execute_scan_network_discovery(") < standalone.index(
         "_hydrate_generic_scan_credentials("
     )
     assert "parallel_discovery" in shard
     assert shard.index("_execute_scan_subdomain_discovery(") < shard.index(
-        "result = await run_scan("
+        "result = await _execute_reserved_deterministic_scan("
     )
     assert "canonical_subdomain_discovery" in plan
     assert "canonical_network_discovery" in plan

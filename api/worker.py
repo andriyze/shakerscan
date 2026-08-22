@@ -67,6 +67,7 @@ from capabilities.network import (
 )
 from capabilities.browser import BrowserCapabilityInputError, browser_capability_adapter
 from capabilities.scanner import ScannerExecutionAdapter
+from capabilities.scan import DeterministicScanExecutionAdapter
 from capabilities.replay import ReplayExecutionAdapter
 from hunt.capability_reservations import (
     DURABLE_BROWSER_HUNT_CAPABILITIES,
@@ -90,7 +91,7 @@ from runtime.credential_refs import (
     CredentialReferenceError,
     select_hunt_principal_reference,
 )
-from runtime.models import ScanPolicy, TargetBinding
+from runtime.models import PreparedExecution, ScanPolicy, TargetBinding
 from runtime.request_collection_store import (
     RequestCollectionContractError,
     RequestCollectionSelection,
@@ -117,6 +118,7 @@ from scan.capability_execution import (
     scan_budget_ledger_limits,
     scan_capability_action_digest,
     scan_network_capability_allocation,
+    prepare_scan_process_capability,
 )
 from scan.worker_dispatch import (
     execution_result_metadata,
@@ -2707,6 +2709,7 @@ async def run_scan(
     job_id: str | None = None,
     progress_callback: Any = None,
     persist_checkpoint_artifacts: bool = True,
+    canonical_runtime_budget: Mapping[str, int] | None = None,
 ) -> dict:
     """Execute scanner and return results."""
     scan_admission = None
@@ -2724,6 +2727,10 @@ async def run_scan(
             native_scan_execution = build_native_scan_execution(
                 scan_admission.plan, options,
             )
+            if canonical_runtime_budget is not None:
+                native_scan_execution = native_scan_execution.with_runtime_budget(
+                    canonical_runtime_budget
+                )
             options = native_scan_execution.normalize_options(options)
             options["resolved_budget"] = resolve_scan_budget(
                 "standard",
@@ -2731,6 +2738,14 @@ async def run_scan(
                 options.get("custom_budget")
                 if isinstance(options.get("custom_budget"), dict) else None,
             )
+        elif canonical_runtime_budget is not None:
+            raise ValueError(
+                "canonical runtime budget requires canonical Scan authority"
+            )
+    elif canonical_runtime_budget is not None:
+        raise ValueError(
+            "canonical runtime budget is valid only for deterministic Scan"
+        )
 
     if options.get("run_kind") == "device_probe":
         if scan_id:
@@ -3239,26 +3254,27 @@ async def run_scan(
     timeout_reason: str | None = None
     cancel_reason: str | None = None
     if native_scan_execution is not None:
-        max_duration_minutes = max(
+        native_payload = native_scan_execution.payload()
+        max_duration_seconds = max(
             1,
-            (
-                int(native_scan_execution.payload()["execution_budget"]["max_duration_seconds"])
-                + 59
-            ) // 60,
+            min(
+                int(native_payload["execution_budget"]["max_duration_seconds"]),
+                int(native_payload["runtime_budget"]["tool_wall_seconds"]),
+            ),
         )
     else:
-        max_duration_minutes = DEFAULT_MAX_DURATION_MINUTES
+        max_duration_seconds = DEFAULT_MAX_DURATION_MINUTES * 60
     override_minutes = os.environ.get("SCAN_MAX_DURATION_MINUTES")
     if override_minutes:
         try:
-            configured_minutes = max(1, int(override_minutes))
-            max_duration_minutes = (
-                min(max_duration_minutes, configured_minutes)
-                if native_scan_execution is not None else configured_minutes
+            configured_seconds = max(60, int(override_minutes) * 60)
+            max_duration_seconds = (
+                min(max_duration_seconds, configured_seconds)
+                if native_scan_execution is not None else configured_seconds
             )
         except Exception:
             if native_scan_execution is None:
-                max_duration_minutes = DEFAULT_MAX_DURATION_MINUTES
+                max_duration_seconds = DEFAULT_MAX_DURATION_MINUTES * 60
     elif native_scan_execution is None:
         if scan_type:
             resolved_budget = options.get("resolved_budget")
@@ -3271,19 +3287,21 @@ async def run_scan(
                     effective_budget_profile,
                     options.get("custom_budget") if isinstance(options.get("custom_budget"), dict) else None,
                 )
-            max_duration_minutes = int(
+            max_duration_seconds = 60 * int(
                 resolved_budget.get("max_duration_minutes")
                 or MAX_SCAN_DURATION.get(scan_type, DEFAULT_MAX_DURATION_MINUTES)
             )
 
     async def _watchdog_timeout() -> None:
         nonlocal timeout_reason
-        if max_duration_minutes <= 0:
+        if max_duration_seconds <= 0:
             return
-        await asyncio.sleep(max_duration_minutes * 60)
+        await asyncio.sleep(max_duration_seconds)
         if proc.returncode is None:
             timeout_reason = (
-                f"Exceeded max duration ({max_duration_minutes} min for {scan_type or 'standard'} scan)"
+                "Exceeded max duration "
+                f"({max_duration_seconds}s for "
+                f"{'canonical' if native_scan_execution is not None else scan_type or 'standard'} scan)"
             )
             await _terminate_scanner_process(proc)
 
@@ -9776,6 +9794,8 @@ async def _execute_reserved_scan_capability(
     action_id: str,
     target_binding: TargetBinding | None = None,
     reservation_limits: Mapping[str, int] | None = None,
+    scan_runner: Callable[[Mapping[str, int]], Awaitable[Mapping[str, Any]]] | None = None,
+    scan_result_holder: dict[str, Any] | None = None,
 ) -> tuple[Any, bool]:
     """Reserve, execute, and reconcile one target-bound Scan capability."""
     try:
@@ -9807,12 +9827,21 @@ async def _execute_reserved_scan_capability(
             "Scan capability target must be an exact-address subset of its binding"
         )
     policy = admission.plan.policy
-    adapter = network_capability_adapter(capability_name)
-    prepared = adapter.prepare(
-        target=target,
-        args=dict(capability_args),
-        policy=policy,
-    )
+    deterministic_process = scan_runner is not None
+    if deterministic_process and capability_name != "scan.execute":
+        raise ScanCapabilityContractError(
+            "deterministic Scan runner requires scan.execute"
+        )
+    adapter = None
+    prepared: PreparedExecution | None = None
+    runtime_budget: dict[str, int] | None = None
+    if not deterministic_process:
+        adapter = network_capability_adapter(capability_name)
+        prepared = adapter.prepare(
+            target=target,
+            args=dict(capability_args),
+            policy=policy,
+        )
     effective_budget = execution.payload()["execution_budget"]
     limits = scan_budget_ledger_limits(
         effective_budget,
@@ -9832,31 +9861,14 @@ async def _execute_reserved_scan_capability(
                     f"Scan capability reservation limit must be positive: {name}"
                 )
             request_limits[name] = min(request_limits[name], amount)
-    prepared = fit_prepared_scan_capability(
-        prepared, ledger_limits=request_limits,
-    )
-    action_digest = scan_capability_action_digest(
-        scan_id=scan_id,
-        execution_plan_digest=admission.plan.digest,
-        target=target,
-        prepared=prepared,
-    )
+    if prepared is not None:
+        prepared = fit_prepared_scan_capability(
+            prepared, ledger_limits=request_limits,
+        )
     worker_id = _worker_runtime_identity() or f"worker:{job_id[:8]}"
-    requested_budget = dict(prepared.estimated_budget)
-    lease_seconds = max(
-        90,
-        min(
-            3_600,
-            int(requested_budget.get("tool_wall_seconds") or 1) + 30,
-        ),
-    )
-    requested = DurableBudgetReservation.request(
-        owner_kind="scan",
-        owner_id=scan_id,
-        capability_name=prepared.capability_name,
-        amounts=requested_budget,
-        reservation_id=str(uuid.uuid4()),
-    )
+    action_digest = ""
+    requested_budget: dict[str, int] = {}
+    lease_seconds = 90
     store = PostgresBudgetReservationStore()
     persisted = None
 
@@ -9881,6 +9893,87 @@ async def _execute_reserved_scan_capability(
                 raise ScanCapabilityContractError(
                     "persisted Scan authority changed before capability execution"
                 )
+            current_used = _worker_json_object(locked["budget_used_json"])
+            current_ledger = {
+                name: int(current_used.get(name) or 0) for name in limits
+            }
+            if deterministic_process:
+                existing = await store.load_by_action(
+                    conn,
+                    owner_kind="scan",
+                    owner_id=scan_id,
+                    action_id=action_id,
+                    for_update=True,
+                )
+                if existing is not None:
+                    if existing.record.terminal:
+                        existing_receipt = dict(existing.receipt or {})
+                        redacted = _worker_json_object(
+                            existing_receipt.get("redacted_execution")
+                        )
+                        receipt_input = _worker_json_object(
+                            redacted.get("input")
+                        )
+                        if (
+                            existing.record.capability_name != "scan.execute"
+                            or existing_receipt.get("capability_name")
+                            != "scan.execute"
+                            or str(existing_receipt.get("scan_id") or "")
+                            != str(scan_id)
+                            or str(existing_receipt.get("target_id") or "")
+                            != str(target.target_id)
+                            or receipt_input.get("execution_plan_digest")
+                            != admission.plan.digest
+                            or receipt_input.get("target_binding_digest")
+                            != target.digest
+                            or dict(existing_receipt.get("budget_reserved") or {})
+                            != dict(existing.record.requested)
+                            or str(existing_receipt.get("receipt_hash") or "")
+                            != str(existing.record.execution_receipt_hash or "")
+                        ):
+                            raise ReservationConflict(
+                                "deterministic Scan terminal receipt is not trustworthy"
+                            )
+                        return existing, True
+                    raise ReservationConflict(
+                        "deterministic Scan already has an active reservation"
+                    )
+                prepared, runtime_budget = prepare_scan_process_capability(
+                    execution_plan_digest=admission.plan.digest,
+                    target=target,
+                    stage_rows=execution.stage_rows(),
+                    ledger_limits=limits,
+                    consumed=current_ledger,
+                    allow_state_changing_http=bool(
+                        policy.active_testing
+                        and policy.allow_state_changing_http
+                    ),
+                )
+            if prepared is None:
+                raise ScanCapabilityContractError(
+                    "Scan capability preparation failed"
+                )
+            action_digest = scan_capability_action_digest(
+                scan_id=scan_id,
+                execution_plan_digest=admission.plan.digest,
+                target=target,
+                prepared=prepared,
+            )
+            requested_budget = dict(prepared.estimated_budget)
+            lease_seconds = max(
+                90,
+                min(
+                    3_600,
+                    int(requested_budget.get("tool_wall_seconds") or 1) + 30,
+                ),
+            )
+            requested = DurableBudgetReservation.request(
+                owner_kind="scan",
+                owner_id=scan_id,
+                capability_name=prepared.capability_name,
+                amounts=requested_budget,
+                reservation_id=str(uuid.uuid4()),
+            )
             stored = await store.create_requested(
                 conn,
                 action_id=action_id,
@@ -9893,10 +9986,6 @@ async def _execute_reserved_scan_capability(
                 raise ReservationConflict(
                     "Scan capability already has an active reservation"
                 )
-            current_used = _worker_json_object(locked["budget_used_json"])
-            current_ledger = {
-                name: int(current_used.get(name) or 0) for name in limits
-            }
             try:
                 reserved, held_ledger = stored.record.reserve_against(
                     limits=limits,
@@ -10016,6 +10105,39 @@ async def _execute_reserved_scan_capability(
                     conn, previous=latest, current=heartbeat,
                 )
 
+    if prepared is None:
+        raise ScanCapabilityContractError("Scan capability preparation was lost")
+    executable_adapter: Any
+    if deterministic_process:
+        if runtime_budget is None or scan_runner is None:
+            raise ScanCapabilityContractError(
+                "deterministic Scan runtime budget is unavailable"
+            )
+
+        async def execute_scan_process() -> Mapping[str, Any]:
+            return await scan_runner(runtime_budget)
+
+        executable_adapter = DeterministicScanExecutionAdapter(
+            specification=agent_tools.CAPABILITY_REGISTRY.require(
+                capability_name
+            ),
+            scan_runner=execute_scan_process,
+            requested_budget=persisted.record.requested,
+            redacted_execution=prepared.redacted_execution,
+        )
+    else:
+        if adapter is None:
+            raise ScanCapabilityContractError(
+                "network Scan capability adapter is unavailable"
+            )
+        executable_adapter = NetworkExecutionAdapter(
+            prepared=prepared,
+            parser=adapter,
+            command_runner=run_streaming,
+            max_stdout_bytes=_AGENT_TOOL_OUTPUT_BYTES,
+            max_stderr_bytes=min(_AGENT_TOOL_OUTPUT_BYTES, 20_000),
+        )
+
     started_at = persisted.record.started_at or datetime.now(timezone.utc)
     execution_result = await CapabilityExecutor().execute(
         CapabilityExecutionContext(
@@ -10024,17 +10146,18 @@ async def _execute_reserved_scan_capability(
             ),
             target=target,
             requested_budget=persisted.record.requested,
+            adapter_managed_cancellation=deterministic_process,
         ),
-        NetworkExecutionAdapter(
-            prepared=prepared,
-            parser=adapter,
-            command_runner=run_streaming,
-            max_stdout_bytes=_AGENT_TOOL_OUTPUT_BYTES,
-            max_stderr_bytes=min(_AGENT_TOOL_OUTPUT_BYTES, 20_000),
-        ),
+        executable_adapter,
         heartbeat=heartbeat_reservation,
         cancelled=lambda: _scan_cancel_requested(scan_id),
     )
+    if (
+        deterministic_process
+        and scan_result_holder is not None
+        and isinstance(executable_adapter.scan_result, Mapping)
+    ):
+        scan_result_holder["result"] = dict(executable_adapter.scan_result)
     action_status = (
         "completed" if execution_result.status == "success"
         else "partial" if execution_result.status == "partial"
@@ -10113,6 +10236,120 @@ async def _execute_reserved_scan_capability(
                 json.dumps(current_used),
             )
     return persisted, False
+
+
+def _deterministic_scan_reservation_summary(
+    stored: Any,
+    *,
+    idempotent_redelivery: bool,
+) -> dict[str, Any]:
+    receipt = dict(stored.receipt or {})
+    return {
+        "schema_version": "deterministic-scan-execution-receipt/v1",
+        "capability_name": "scan.execute",
+        "status": str(receipt.get("status") or "failed"),
+        "partial": bool(receipt.get("partial")),
+        "timed_out": bool(receipt.get("timed_out")),
+        "budget_consumed": dict(stored.record.actual),
+        "receipt": _scan_capability_receipt_reference(receipt),
+        "durable_budget_settled": bool(stored.record.terminal),
+        "idempotent_redelivery": bool(idempotent_redelivery),
+    }
+
+
+def _deterministic_scan_terminal_failure_result(
+    *,
+    target: str,
+    stored: Any,
+    summary: Mapping[str, Any],
+) -> dict[str, Any]:
+    receipt = dict(stored.receipt or {})
+    errors = [str(item) for item in receipt.get("errors") or [] if str(item)]
+    reason = (
+        errors[0]
+        if errors else stored.record.failure_reason
+        or "deterministic_scan_execution_not_recoverable"
+    )
+    return {
+        "target": target,
+        "error": str(reason)[:1000],
+        "result": {"score": None, "grade": None},
+        "findings": [],
+        "coverage": {
+            "status": "failed",
+            "reasons": ["deterministic_scan_execution_not_replayed"],
+        },
+        "scan_metadata": {
+            "status": "failed",
+            "deterministic_scan_redelivery_blocked": True,
+        },
+        "deterministic_scan_execution": dict(summary),
+    }
+
+
+async def _execute_reserved_deterministic_scan(
+    target: str,
+    options: Mapping[str, Any],
+    *,
+    scan_id: str,
+    job_id: str,
+) -> dict[str, Any]:
+    """Run canonical DAST only after its residual budget is durably held."""
+    normalized, admission = prepare_worker_dispatch(options)
+    if not admission.canonical or admission.plan is None:
+        return await run_scan(
+            target, dict(options), scan_id=scan_id, job_id=job_id,
+        )
+    execution = build_native_scan_execution(admission.plan, normalized)
+    result_holder: dict[str, Any] = {}
+
+    async def scan_runner(runtime_budget: Mapping[str, int]) -> Mapping[str, Any]:
+        return await run_scan(
+            target,
+            dict(options),
+            scan_id=scan_id,
+            job_id=job_id,
+            canonical_runtime_budget=runtime_budget,
+        )
+
+    stored, idempotent_redelivery = await _execute_reserved_scan_capability(
+        admission=admission,
+        execution=execution,
+        scan_id=scan_id,
+        job_id=job_id,
+        capability_name="scan.execute",
+        capability_args={},
+        action_id="deterministic_scan.execute",
+        scan_runner=scan_runner,
+        scan_result_holder=result_holder,
+    )
+    summary = _deterministic_scan_reservation_summary(
+        stored,
+        idempotent_redelivery=idempotent_redelivery,
+    )
+    if isinstance(result_holder.get("result"), Mapping):
+        result = dict(result_holder["result"])
+    elif idempotent_redelivery:
+        async with db_pool.acquire() as conn:
+            durable_result = await conn.fetchval(
+                "SELECT result FROM scans WHERE id=$1",
+                uuid.UUID(str(scan_id)),
+            )
+        result = _as_report_dict(durable_result) or {}
+        if not result:
+            return _deterministic_scan_terminal_failure_result(
+                target=target,
+                stored=stored,
+                summary=summary,
+            )
+    else:
+        return _deterministic_scan_terminal_failure_result(
+            target=target,
+            stored=stored,
+            summary=summary,
+        )
+    result["deterministic_scan_execution"] = summary
+    return result
 
 
 async def _execute_scan_subdomain_discovery(
@@ -11574,7 +11811,14 @@ async def process_scan_job(job_data: dict):
                 if device_target_id and (options or {}).get("run_kind") == "device_posture":
                     options = await _hydrate_device_scan_credentials(options, scan_id)
                     options = await _hydrate_device_request_collections(options, scan_id)
-                result = await run_scan(target, options, scan_id=scan_id, job_id=job_id)
+                if is_deterministic_dast(options):
+                    result = await _execute_reserved_deterministic_scan(
+                        target, options, scan_id=scan_id, job_id=job_id,
+                    )
+                else:
+                    result = await run_scan(
+                        target, options, scan_id=scan_id, job_id=job_id,
+                    )
                 if device_target_id and (options or {}).get("run_kind") == "device_posture":
                     posture_result = result.get("device_posture") if isinstance(result, dict) and isinstance(result.get("device_posture"), dict) else {}
                     _append_device_activity(
@@ -13809,7 +14053,9 @@ async def process_scan_shard_job(job_data: dict):
                         raise ValueError("Cancelled by user")
                 options = await _hydrate_generic_scan_credentials(options, scan_id)
                 options = await _hydrate_managed_scan_credentials(options, scan_id)
-                result = await run_scan(target, options, scan_id=scan_id, job_id=job_id)
+                result = await _execute_reserved_deterministic_scan(
+                    target, options, scan_id=scan_id, job_id=job_id,
+                )
         except Exception as e:
             result = {'target': target, 'error': str(e),
                       'result': {'score': None, 'grade': None}, 'findings': []}

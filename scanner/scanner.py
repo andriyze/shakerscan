@@ -3985,6 +3985,12 @@ async def build_report(target: str,
         mode=os.environ.get("SHAKERSCAN_REQUEST_BUDGET_MODE", "compatibility"),
         planned=int(scan_budget.get("request_max") or 0),
         reserved=request_reserved,
+        state_changing_limit=(
+            int(canonical_scan_execution["runtime_budget"][
+                "state_changing_requests"
+            ])
+            if canonical_scan_execution is not None else None
+        ),
         allowed_methods=passive_http_methods_for_scan(
             discovery_manifest_only=discovery_manifest_only,
             public_only=public_only,
@@ -13135,6 +13141,9 @@ async def build_report(target: str,
         "proof_contract": [
             "planned_requests", "reserved_requests", "attempted_requests",
             "completed_requests", "retried_requests", "rejected_requests",
+            "state_changing_request_limit",
+            "state_changing_attempted_requests",
+            "state_changing_rejected_requests",
         ],
         "telemetry": request_budget_telemetry,
     })
@@ -14040,6 +14049,7 @@ def _apply_canonical_scan_execution(args: Any, execution: Mapping[str, Any]) -> 
     plan = execution["execution_plan"]
     policy = plan["policy"]
     budget = execution["execution_budget"]
+    runtime_budget = execution["runtime_budget"]
     scope = execution["adapter_scope"]
     discovery_only = bool(scope["discovery_manifest_only"])
     active = bool(policy["active_testing"] and not discovery_only)
@@ -14077,31 +14087,34 @@ def _apply_canonical_scan_execution(args: Any, execution: Mapping[str, Any]) -> 
     args.discovery_manifest_only = discovery_only
     args.complete_tier = "safe"
     args.exploit_level = "safe"
-    args.max_active = int(budget["max_endpoints"])
-    args.max_ports = min(65_535, int(budget["max_tcp_ports"]))
-    args.no_browser = int(budget["max_browser_actions"]) == 0
+    args.max_active = int(runtime_budget["hosts_attempted"])
+    args.max_ports = min(65_535, int(runtime_budget["tcp_ports_attempted"]))
+    args.no_browser = int(runtime_budget["browser_actions"]) == 0
     args.budget_profile = str(plan["budget_profile"])
     args.budget_max_duration_minutes = max(
         1, (int(budget["max_duration_seconds"]) + 59) // 60,
     )
     args.budget_discovery_depth = None
-    args.budget_max_urls = int(budget["max_endpoints"])
+    args.budget_max_urls = int(runtime_budget["hosts_attempted"])
     args.budget_browser_max_pages = min(
-        int(budget["max_browser_actions"]), int(budget["max_endpoints"]),
+        int(runtime_budget["browser_actions"]),
+        int(runtime_budget["hosts_attempted"]),
     )
     args.budget_browser_max_depth = None
-    args.budget_api_probe_limit = int(budget["max_endpoints"])
+    args.budget_api_probe_limit = int(runtime_budget["hosts_attempted"])
     args.budget_param_discovery_url_limit = None
     args.budget_param_discovery_max_params = None
-    args.budget_phase4_max_seconds = int(budget["max_tool_wall_seconds"])
-    args.budget_nuclei_max_targets = int(budget["max_endpoints"])
+    args.budget_phase4_max_seconds = int(runtime_budget["tool_wall_seconds"])
+    args.budget_nuclei_max_targets = int(runtime_budget["hosts_attempted"])
     args.budget_active_max_seconds = (
-        int(budget["max_tool_wall_seconds"]) if active else None
+        int(runtime_budget["tool_wall_seconds"]) if active else None
     )
-    args.budget_active_max_endpoints = int(budget["max_endpoints"]) if active else None
+    args.budget_active_max_endpoints = (
+        int(runtime_budget["hosts_attempted"]) if active else None
+    )
     args.budget_active_params_per_endpoint = None
-    args.budget_active_worklist_max = int(budget["max_endpoints"])
-    args.budget_request_max = int(budget["max_http_requests"])
+    args.budget_active_worklist_max = int(runtime_budget["hosts_attempted"])
+    args.budget_request_max = int(runtime_budget["http_requests"])
     args.budget_max_findings_per_family = None
     args.budget_disable_nuclei_early_stop = False
     args.smart_bola_max_endpoints = None

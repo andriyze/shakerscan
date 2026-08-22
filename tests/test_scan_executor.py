@@ -153,6 +153,40 @@ def test_native_scan_execution_tampering_fails_closed():
     with pytest.raises(NativeScanExecutionError, match="digest"):
         validate_native_scan_execution_payload(changed)
 
+
+def test_native_scan_envelope_binds_reserved_runtime_budget():
+    execution = _build(_plan(active=True), {}).with_runtime_budget({
+        "http_requests": 80,
+        "state_changing_requests": 3,
+        "browser_actions": 4,
+        "tcp_ports_attempted": 0,
+        "hosts_attempted": 20,
+        "tool_wall_seconds": 45,
+    })
+    payload = execution.payload()
+    normalized = execution.normalize_options({})
+
+    assert payload["runtime_budget"]["http_requests"] == 80
+    assert normalized["custom_budget"]["request_max"] == 80
+    assert normalized["custom_budget"]["browser_max_pages"] == 4
+    assert normalized["custom_budget"]["max_urls"] == 20
+    assert normalized["custom_budget"]["phase4_max_seconds"] == 45
+    assert normalized["request_budget_reserved"] == 80
+    assert validate_native_scan_execution_payload(payload) == payload
+
+    with pytest.raises(NativeScanExecutionError, match="exceeds its authority"):
+        execution.with_runtime_budget({
+            **payload["runtime_budget"],
+            "http_requests": 5_001,
+        })
+
+    with pytest.raises(NativeScanExecutionError, match="exceeds HTTP"):
+        execution.with_runtime_budget({
+            **payload["runtime_budget"],
+            "http_requests": 2,
+            "state_changing_requests": 3,
+        })
+
     with pytest.raises(NativeScanExecutionError, match="target binding"):
         build_native_scan_execution(_plan(), {})
 

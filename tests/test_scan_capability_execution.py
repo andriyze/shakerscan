@@ -20,6 +20,7 @@ from scan.capability_execution import (
     scan_budget_ledger_limits,
     scan_capability_action_digest,
     scan_network_capability_allocation,
+    prepare_scan_process_capability,
 )
 
 
@@ -143,6 +144,58 @@ def test_network_allocation_degrades_to_port_only_when_budget_cannot_fingerprint
     assert allocation["address_count"] == 1
     assert allocation["ports"] == CANONICAL_SCAN_NETWORK_PORTS[:1]
     assert allocation["fingerprint_limits"] is None
+
+
+def test_scan_process_reserves_exact_remaining_multidimensional_budget():
+    prepared, runtime = prepare_scan_process_capability(
+        execution_plan_digest="a" * 64,
+        target=_target(),
+        stage_rows=({"name": "deterministic_baseline", "enabled": True},),
+        ledger_limits=scan_budget_ledger_limits(_budget()),
+        consumed={
+            "http_requests": 7,
+            "state_changing_requests": 2,
+            "browser_actions": 3,
+            "tcp_ports_attempted": 10,
+            "hosts_attempted": 4,
+            "tool_wall_seconds": 5,
+        },
+        allow_state_changing_http=True,
+    )
+
+    assert runtime == {
+        "http_requests": 93,
+        "state_changing_requests": 93,
+        "browser_actions": 17,
+        "tcp_ports_attempted": 0,
+        "hosts_attempted": 46,
+        "tool_wall_seconds": 55,
+    }
+    assert prepared.capability_name == "scan.execute"
+    assert prepared.adapter_name == "scanner.dast"
+    assert prepared.estimated_budget == {
+        "http_requests": 93,
+        "state_changing_requests": 93,
+        "browser_actions": 17,
+        "hosts_attempted": 46,
+        "tool_wall_seconds": 55,
+    }
+
+
+def test_scan_process_requests_missing_mandatory_capacity_to_fail_closed():
+    prepared, runtime = prepare_scan_process_capability(
+        execution_plan_digest="a" * 64,
+        target=_target(),
+        stage_rows=(),
+        ledger_limits=scan_budget_ledger_limits(_budget()),
+        consumed={"http_requests": 100, "tool_wall_seconds": 60},
+        allow_state_changing_http=False,
+    )
+
+    assert runtime["http_requests"] == 0
+    assert runtime["tool_wall_seconds"] == 0
+    assert prepared.estimated_budget["http_requests"] == 1
+    assert prepared.estimated_budget["tool_wall_seconds"] == 1
 
 
 def test_shared_terminalizer_binds_scan_receipt_and_partial_observations():

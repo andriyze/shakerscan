@@ -123,6 +123,73 @@ def scan_budget_ledger_limits(
     }
 
 
+def prepare_scan_process_capability(
+    *,
+    execution_plan_digest: str,
+    target: TargetBinding,
+    stage_rows: tuple[Mapping[str, Any], ...],
+    ledger_limits: Mapping[str, int],
+    consumed: Mapping[str, int],
+    allow_state_changing_http: bool,
+) -> tuple[PreparedExecution, dict[str, int]]:
+    """Bind the deterministic scanner to the exact remaining durable hold.
+
+    Missing mandatory HTTP/host/wall capacity is represented as a one-unit
+    request that the locked ledger will reject. This still yields a durable
+    blocked reservation and receipt without allowing the scanner to start.
+    """
+    limits = {str(name): max(0, int(amount)) for name, amount in ledger_limits.items()}
+    used = {str(name): max(0, int(amount)) for name, amount in consumed.items()}
+    remaining = {
+        name: max(0, amount - used.get(name, 0))
+        for name, amount in limits.items()
+    }
+    runtime_budget = {
+        "http_requests": remaining.get("http_requests", 0),
+        "state_changing_requests": (
+            min(
+                remaining.get("state_changing_requests", 0),
+                remaining.get("http_requests", 0),
+            )
+            if allow_state_changing_http else 0
+        ),
+        "browser_actions": remaining.get("browser_actions", 0),
+        # Network discovery is separately reserved. Scanner-owned external TCP
+        # tools remain blocked until TLS is moved behind its own capability.
+        "tcp_ports_attempted": 0,
+        "hosts_attempted": remaining.get("hosts_attempted", 0),
+        "tool_wall_seconds": remaining.get("tool_wall_seconds", 0),
+    }
+    requested = {
+        name: amount
+        for name, amount in runtime_budget.items()
+        if amount > 0 and name != "tcp_ports_attempted"
+    }
+    for mandatory in (
+        "http_requests", "hosts_attempted", "tool_wall_seconds",
+    ):
+        if runtime_budget[mandatory] <= 0:
+            requested[mandatory] = 1
+    input_payload = {
+        "schema_version": "deterministic-scan-capability/v1",
+        "execution_plan_digest": str(execution_plan_digest).lower(),
+        "target_binding_digest": target.digest,
+        "stages": [dict(item) for item in stage_rows],
+        "runtime_budget": runtime_budget,
+    }
+    prepared = PreparedExecution(
+        capability_name="scan.execute",
+        adapter_name="scanner.dast",
+        adapter_version="1",
+        commands=(),
+        estimated_budget=requested,
+        input_digest=PreparedExecution.digest_input(input_payload),
+        redacted_execution=input_payload,
+        parser_version="scan-report/v2",
+    )
+    return prepared, runtime_budget
+
+
 def fit_prepared_scan_capability(
     prepared: PreparedExecution,
     *,

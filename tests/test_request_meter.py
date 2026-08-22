@@ -57,6 +57,34 @@ def test_request_meter_tracks_attempt_completion_retry_and_rejection():
     }
 
 
+def test_request_meter_enforces_and_reports_state_changing_reservation():
+    meter = configure_request_meter(
+        limit=5,
+        target_host="app.test",
+        mode="enforce",
+        planned=5,
+        reserved=5,
+        state_changing_limit=1,
+    )
+
+    assert meter.before_request(
+        phase="active", url="https://app.test/items", method="POST",
+    ) is True
+    with pytest.raises(RequestBudgetExceeded, match="state-changing"):
+        meter.before_request(
+            phase="active", url="https://app.test/items/1", method="DELETE",
+        )
+    assert meter.before_request(
+        phase="probe", url="https://app.test/items", method="GET",
+    ) is True
+
+    snapshot = meter.snapshot()
+    assert snapshot["attempted_requests"] == 2
+    assert snapshot["state_changing_request_limit"] == 1
+    assert snapshot["state_changing_attempted_requests"] == 1
+    assert snapshot["state_changing_rejected_requests"] == 1
+
+
 def test_request_meter_ignores_other_hosts():
     meter = configure_request_meter(
         limit=1, target_host="app.test", mode="enforce", planned=1, reserved=1

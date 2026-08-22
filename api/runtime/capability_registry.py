@@ -152,6 +152,27 @@ def _schema(
 CAPABILITY_REGISTRY = CapabilityRegistry(
     (
         CapabilitySpec(
+            "scan.execute",
+            "Execute one immutable fixed-stage deterministic Scan plan.",
+            "internal", "passive", _HTTP_TARGETS, "scanner.dast", "1",
+            None,
+            {
+                "http_requests": 1,
+                "hosts_attempted": 1,
+                "tool_wall_seconds": 1,
+            },
+            {
+                "network_reachability": True,
+                "runtime_target_binding": True,
+                "fixed_stage_plan": True,
+                "durable_reservation": True,
+            },
+            _schema(),
+            "scan-report/v2",
+            ("scan_report", "coverage_summary", "tool_receipts"),
+            planner_visible=False,
+        ),
+        CapabilitySpec(
             "web.probe", "Passive HTTP fingerprint of a target-bound URL.",
             "external_tool", "read_only", _HTTP_TARGETS, "httpx", "1",
             None, {"http_requests": 4, "tool_wall_seconds": 30},

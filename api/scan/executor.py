@@ -7,7 +7,7 @@ fixed phase graph. Compatibility presets never cross this boundary.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 from typing import Any, Mapping
@@ -30,7 +30,7 @@ except ModuleNotFoundError:
     from ..runtime.models import ScanBudget, TargetBinding
 
 
-NATIVE_SCAN_EXECUTION_SCHEMA = "native-scan-execution/v2"
+NATIVE_SCAN_EXECUTION_SCHEMA = "native-scan-execution/v3"
 NATIVE_SCAN_STAGES = (
     "bind_target",
     "resolve_inputs",
@@ -53,6 +53,14 @@ _LEGACY_BEHAVIOR_KEYS = frozenset({
     "smart_bola_max_endpoints", "dom_xss_max_files", "sqli_extract_max",
     "oob_max_findings", "oob_max_payloads",
 })
+SCAN_RUNTIME_BUDGET_DIMENSIONS = (
+    "http_requests",
+    "state_changing_requests",
+    "browser_actions",
+    "tcp_ports_attempted",
+    "hosts_attempted",
+    "tool_wall_seconds",
+)
 
 
 class NativeScanExecutionError(ValueError):
@@ -123,6 +131,58 @@ def _budget_payload(budget: ScanBudget | ScanShardBudget) -> dict[str, int]:
     }
 
 
+def _runtime_budget_limits(
+    plan: ScanExecutionPlan,
+    budget: ScanBudget | ScanShardBudget,
+) -> dict[str, int]:
+    values = _budget_payload(budget)
+    state_changing = (
+        values["max_http_requests"]
+        if plan.policy.active_testing and plan.policy.allow_state_changing_http
+        else 0
+    )
+    return {
+        "http_requests": values["max_http_requests"],
+        "state_changing_requests": state_changing,
+        "browser_actions": values["max_browser_actions"],
+        # Canonical port discovery is a separately reserved worker capability.
+        # Scanner-owned unmetered TCP tools are blocked by the enforcing request
+        # meter until TLS is migrated to its own capability action.
+        "tcp_ports_attempted": 0,
+        "hosts_attempted": values["max_endpoints"],
+        "tool_wall_seconds": values["max_tool_wall_seconds"],
+    }
+
+
+def _normalize_runtime_budget(
+    value: Mapping[str, Any],
+    *,
+    limits: Mapping[str, int],
+) -> dict[str, int]:
+    if set(value) != set(SCAN_RUNTIME_BUDGET_DIMENSIONS):
+        raise NativeScanExecutionError(
+            "native Scan runtime budget dimensions are invalid"
+        )
+    normalized: dict[str, int] = {}
+    for name in SCAN_RUNTIME_BUDGET_DIMENSIONS:
+        raw = value.get(name)
+        if isinstance(raw, bool) or not isinstance(raw, int):
+            raise NativeScanExecutionError(
+                f"native Scan runtime budget {name} must be an integer"
+            )
+        amount = raw
+        if amount < 0 or amount > int(limits[name]):
+            raise NativeScanExecutionError(
+                f"native Scan runtime budget {name} exceeds its authority"
+            )
+        normalized[name] = amount
+    if normalized["state_changing_requests"] > normalized["http_requests"]:
+        raise NativeScanExecutionError(
+            "state-changing runtime budget exceeds HTTP runtime budget"
+        )
+    return normalized
+
+
 def _scanner_budget_options(
     budget: ScanBudget | ScanShardBudget,
     *, active_testing: bool,
@@ -159,6 +219,22 @@ class NativeScanExecution:
     focused_endpoints_only: bool = False
     zero_rediscovery: bool = False
     discovery_manifest_only: bool = False
+    runtime_budget: Mapping[str, int] | None = None
+
+    def __post_init__(self) -> None:
+        limits = _runtime_budget_limits(
+            self.execution_plan, self.execution_budget,
+        )
+        normalized = _normalize_runtime_budget(
+            limits if self.runtime_budget is None else self.runtime_budget,
+            limits=limits,
+        )
+        object.__setattr__(self, "runtime_budget", normalized)
+
+    def with_runtime_budget(
+        self, runtime_budget: Mapping[str, Any],
+    ) -> "NativeScanExecution":
+        return replace(self, runtime_budget=dict(runtime_budget))
 
     def stage_rows(self) -> tuple[dict[str, Any], ...]:
         policy = self.execution_plan.policy
@@ -202,6 +278,7 @@ class NativeScanExecution:
             "target_binding": self.target_binding.canonical_dict(),
             "target_binding_digest": self.target_binding.digest,
             "execution_budget": _budget_payload(self.execution_budget),
+            "runtime_budget": dict(self.runtime_budget or {}),
             "shard_authority": (
                 self.shard_authority.payload() if self.shard_authority is not None else None
             ),
@@ -236,6 +313,24 @@ class NativeScanExecution:
                 active_testing=policy.active_testing,
             ),
         })
+        runtime = dict(self.runtime_budget or {})
+        normalized["custom_budget"].update({
+            "request_max": runtime["http_requests"],
+            "max_urls": runtime["hosts_attempted"],
+            "browser_max_pages": min(
+                runtime["browser_actions"], runtime["hosts_attempted"],
+            ),
+            "api_probe_limit": runtime["hosts_attempted"],
+            "phase4_max_seconds": runtime["tool_wall_seconds"],
+            "nuclei_max_targets": runtime["hosts_attempted"],
+            "active_worklist_max": runtime["hosts_attempted"],
+        })
+        if policy.active_testing:
+            normalized["custom_budget"].update({
+                "active_max_seconds": runtime["tool_wall_seconds"],
+                "active_max_endpoints": runtime["hosts_attempted"],
+            })
+        normalized["request_budget_reserved"] = runtime["http_requests"]
         for key in _INTERNAL_FAMILY_KEYS:
             normalized.pop(key, None)
         if self.focused_family:
@@ -320,6 +415,7 @@ def validate_native_scan_execution_payload(value: Any) -> dict[str, Any]:
     expected = {
         "schema_version", "execution_plan", "execution_plan_digest", "stages",
         "target_binding", "target_binding_digest", "execution_budget",
+        "runtime_budget",
         "shard_authority", "focused_family", "adapter_scope", "execution_digest",
     }
     if set(raw) != expected:
@@ -384,6 +480,9 @@ def validate_native_scan_execution_payload(value: Any) -> dict[str, Any]:
         raise NativeScanExecutionError(
             "native Scan execution budget does not match its authority"
         )
+    runtime_budget = raw.get("runtime_budget")
+    if not isinstance(runtime_budget, Mapping):
+        raise NativeScanExecutionError("native Scan runtime budget is invalid")
     scope = raw.get("adapter_scope")
     if not isinstance(scope, Mapping) or set(scope) != {
         "skip_global_checks", "focused_endpoints_only", "zero_rediscovery",
@@ -398,7 +497,7 @@ def validate_native_scan_execution_payload(value: Any) -> dict[str, Any]:
         expected_options["asm_check_family"] = focused_family
     expected_execution = build_native_scan_execution(
         reconstructed_plan, expected_options,
-    )
+    ).with_runtime_budget(runtime_budget)
     if raw != expected_execution.payload():
         raise NativeScanExecutionError(
             "native Scan execution decisions do not match the canonical plan"
