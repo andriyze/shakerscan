@@ -11,9 +11,7 @@ import math
 from typing import Any, Mapping
 
 from .jobs import (
-    CanonicalScanJobError,
     ScanShardAuthority,
-    scan_job_options_digest,
 )
 from .worker_contract import WorkerScanAdmission, resolve_worker_scan_admission
 
@@ -51,10 +49,6 @@ def prepare_worker_dispatch(
     if raw_shard_authority is not None:
         shard_authority = ScanShardAuthority.from_payload(raw_shard_authority)
         shard_authority.validate_against_plan(admission.plan)
-        if scan_job_options_digest(options) != shard_authority.options_digest:
-            raise CanonicalScanJobError(
-                "persisted shard options do not match their canonical digest"
-            )
         budget = shard_authority.sub_budget
 
     # Never merge caller-supplied legacy tuning into a canonical plan. Every surviving scanner

@@ -107,6 +107,28 @@ def test_canonical_shard_dispatch_uses_its_sub_budget_not_the_parent_budget():
     assert prepared["_v2_worker_authority"]["parent_scan_id"] == "scan-parent"
 
 
+def test_canonical_shard_dispatch_allows_worker_only_credential_hydration_after_validation():
+    plan = _plan()
+    options = _options(plan)
+    authority = ScanShardAuthority(
+        parent_scan_id="scan-parent",
+        parent_execution_plan_digest=plan.digest,
+        options_digest=scan_job_options_digest(options),
+        shard_index=0,
+        shard_count=2,
+        shard_label="auth:authed",
+        sub_budget=ScanShardBudget(120, 120, 30, 4, 100, 50, 1),
+    )
+    options["canonical_shard_authority"] = authority.payload()
+    options["auth_header"] = "Bearer hydrated-only-in-worker-memory"
+
+    prepared, admission = prepare_worker_dispatch(options)
+
+    assert admission.canonical is True
+    assert prepared["auth_header"] == "Bearer hydrated-only-in-worker-memory"
+    assert prepared["max_workers"] == 1
+
+
 def test_passive_dispatch_uses_same_engine_with_passive_backing():
     prepared, admission = prepare_worker_dispatch(_options(_plan()))
     assert admission.plan.engine == "scan"
