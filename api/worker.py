@@ -11011,6 +11011,59 @@ def _skipped_scan_sqli_verification_summary(reason: str) -> dict[str, Any]:
     }
 
 
+def _canonical_candidate_verification_summary(
+    xss: Mapping[str, Any],
+    sqli: Mapping[str, Any],
+    *,
+    candidate_count: int,
+) -> dict[str, Any]:
+    """Evaluate canonical active observations without sending more traffic.
+
+    Dalfox's browser/alert proof may satisfy the deterministic XSS contract.
+    SQLMap output remains a suspected candidate until the separate payload and
+    control differential exists; a tool label alone can never promote it.
+    """
+    xss_observations = [
+        dict(item)
+        for item in xss.get("observations") or []
+        if isinstance(item, Mapping) and item.get("kind") == "xss_alert"
+    ]
+    sqli_observations = [
+        dict(item)
+        for item in sqli.get("observations") or []
+        if isinstance(item, Mapping)
+        and item.get("kind") in {"sqli_finding", "sqli_dbms_fingerprint"}
+    ]
+    verified_xss = sum(
+        1 for item in xss_observations
+        if str(item.get("proof_state") or "") == "verified"
+    )
+    suspected_sqli = sum(
+        1 for item in sqli_observations
+        if item.get("kind") == "sqli_finding"
+    )
+    return {
+        "schema_version": "canonical-candidate-verification/v1",
+        "candidate_count": max(0, int(candidate_count)),
+        "finding_promotion_authority": "deterministic_proof_contracts_only",
+        "xss": {
+            "contract": "browser_or_alert_execution_proof",
+            "observation_count": len(xss_observations),
+            "verified_count": verified_xss,
+            "candidate_count": max(0, len(xss_observations) - verified_xss),
+        },
+        "sqli": {
+            "contract": "payload_control_differential",
+            "observation_count": len(sqli_observations),
+            "verified_count": 0,
+            "suspected_count": suspected_sqli,
+            "promotion_blocked_reason": (
+                "deterministic_differential_missing" if suspected_sqli else None
+            ),
+        },
+    }
+
+
 def _scan_sqli_verification_summary_from_stored(
     stored: Any,
     *,
@@ -11371,22 +11424,6 @@ async def _execute_reserved_deterministic_scan(
         )
 
     async def deterministic_active_stage(
-        _context: ScanStageContext,
-    ) -> ScanStageRunResult:
-        # Active detector extraction is still in progress. Recording this
-        # delegation makes the remaining composite-adapter boundary explicit.
-        return ScanStageRunResult(
-            output={
-                "delegated_adapter": "scanner.dast",
-                "state_changing_http_allowed": bool(
-                    admission.plan.policy.allow_state_changing_http
-                ),
-            },
-            reason="delegated_to_composite_scanner_adapter",
-            adapter="scanner.dast.composite",
-        )
-
-    async def verify_candidates_stage(
         stage_context: ScanStageContext,
     ) -> ScanStageRunResult:
         surface = stage_context.output("discover_surface")
@@ -11415,11 +11452,48 @@ async def _execute_reserved_deterministic_scan(
             capability_names=("xss.verify", "sqli.verify"),
         )
 
+    async def verify_candidates_stage(
+        stage_context: ScanStageContext,
+    ) -> ScanStageRunResult:
+        active = stage_context.output("deterministic_active")
+        if not active:
+            return ScanStageRunResult(
+                output={
+                    "proof_contracts": _canonical_candidate_verification_summary(
+                        {}, {}, candidate_count=0,
+                    ),
+                },
+                status="skipped",
+                reason="active_stage_disabled",
+                adapter="native_worker.proof_contracts",
+            )
+        xss = (
+            dict(active.get("xss.verify") or {})
+            if isinstance(active.get("xss.verify"), Mapping)
+            else {}
+        )
+        sqli = (
+            dict(active.get("sqli.verify") or {})
+            if isinstance(active.get("sqli.verify"), Mapping)
+            else {}
+        )
+        return ScanStageRunResult(
+            output={
+                "proof_contracts": _canonical_candidate_verification_summary(
+                    xss,
+                    sqli,
+                    candidate_count=int(active.get("candidate_count") or 0),
+                ),
+            },
+            adapter="native_worker.proof_contracts",
+        )
+
     async def finalize_evidence_stage(
         stage_context: ScanStageContext,
     ) -> ScanStageRunResult:
         surface = stage_context.output("discover_surface")
         baseline = stage_context.output("deterministic_baseline")
+        active = stage_context.output("deterministic_active")
         verification = stage_context.output("verify_candidates")
         placed_capabilities = {
             "web.probe": surface.get("web.probe")
@@ -11430,8 +11504,10 @@ async def _execute_reserved_deterministic_scan(
             or _skipped_scan_content_discovery_summary("stage_disabled"),
             "templates.scan": baseline.get("templates.scan")
             or _skipped_scan_template_summary("stage_disabled"),
-            "xss.verify": verification["xss.verify"],
-            "sqli.verify": verification["sqli.verify"],
+            "xss.verify": active.get("xss.verify")
+            or _skipped_scan_xss_verification_summary("stage_disabled"),
+            "sqli.verify": active.get("sqli.verify")
+            or _skipped_scan_sqli_verification_summary("stage_disabled"),
         }
         result_holder: dict[str, Any] = {}
 
@@ -11479,6 +11555,9 @@ async def _execute_reserved_deterministic_scan(
             result = _deterministic_scan_terminal_failure_result(
                 target=target, stored=stored, summary=summary,
             )
+        result["canonical_candidate_verification"] = dict(
+            verification.get("proof_contracts") or {}
+        )
         status = "partial" if (
             result.get("error") or summary.get("partial") or summary.get("timed_out")
         ) else "completed"

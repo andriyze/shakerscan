@@ -630,12 +630,51 @@ def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch)
         "verify_candidates",
         "finalize_evidence",
     ]
-    assert stage_execution["stages"][5]["reason"] == (
-        "delegated_to_composite_scanner_adapter"
+    assert stage_execution["stages"][5]["adapter"] == "native_worker"
+    assert stage_execution["stages"][5]["capability_names"] == [
+        "xss.verify", "sqli.verify",
+    ]
+    assert stage_execution["stages"][6]["adapter"] == (
+        "native_worker.proof_contracts"
+    )
+    assert stage_execution["stages"][6]["capability_names"] == []
+    verification = result["canonical_candidate_verification"]
+    assert verification["xss"]["verified_count"] == 1
+    assert verification["sqli"]["verified_count"] == 0
+    assert verification["sqli"]["suspected_count"] == 1
+    assert verification["sqli"]["promotion_blocked_reason"] == (
+        "deterministic_differential_missing"
     )
     assert stage_execution["stages"][7]["capability_names"] == [
         "scan.execute"
     ]
+
+
+def test_candidate_verification_never_promotes_sqlmap_label_without_differential():
+    summary = worker._canonical_candidate_verification_summary(
+        {
+            "observations": [{
+                "kind": "xss_alert",
+                "proof_state": "verified",
+            }],
+        },
+        {
+            "observations": [{
+                "kind": "sqli_finding",
+                # Even a malformed or legacy adapter claim cannot override the
+                # deterministic payload/control proof contract.
+                "proof_state": "verified",
+            }],
+        },
+        candidate_count=1,
+    )
+
+    assert summary["xss"]["verified_count"] == 1
+    assert summary["sqli"]["verified_count"] == 0
+    assert summary["sqli"]["suspected_count"] == 1
+    assert summary["finding_promotion_authority"] == (
+        "deterministic_proof_contracts_only"
+    )
 
 
 def test_enabled_network_stage_requires_placement_before_surface_traffic(
