@@ -29,8 +29,11 @@ from .execution import (
 
 
 SCAN_JOB_SCHEMA = "scan-job/v2"
+SCAN_SHARD_AUTHORITY_SCHEMA = "scan-shard-authority/v1"
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$")
 _FAMILY_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,79}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_SHARD_LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:\[\]-]{0,119}$")
 _REPLAY_MODES = frozenset({"discovery_only", "safe_reads", "confirmed_active"})
 _FORBIDDEN_JOB_KEYS = frozenset({
     # Superseded Scan-mode selectors.
@@ -60,6 +63,12 @@ _TARGET_KEYS = frozenset({
 _COLLECTION_KEYS = frozenset({
     "collection_id", "binding_id", "selection_id", "replay_mode", "max_requests",
 })
+_SHARD_KEYS = frozenset({
+    "schema_version", "parent_scan_id", "parent_execution_plan_digest",
+    "options_digest", "shard_index", "shard_count", "shard_label",
+    "parallel_discovery", "sub_budget",
+})
+_SHARD_BUDGET_KEYS = _BUDGET_KEYS
 _JOB_KEYS = frozenset({
     "schema_version", "job_id", "scan_id", "created_at", "target",
     "execution_plan", "execution_plan_digest", "request_collections",
@@ -67,7 +76,7 @@ _JOB_KEYS = frozenset({
 })
 _QUEUE_TRANSPORT_KEYS = frozenset({
     "placement", "_base_queue_name", "type", "attempt", "plan_version",
-    "parallel_worker_count",
+    "parallel_worker_count", "plan_stage", "discovery_scan_id",
 })
 _PLACEMENT_SCALAR_KEYS = frozenset({
     "region", "egress_group", "network", "scan_tier", "tier",
@@ -82,6 +91,9 @@ _BUDGET_CEILINGS: Mapping[str, int] = {
     "max_tool_wall_seconds": 86_400,
     "max_workers": 128,
 }
+_OPTIONS_DIGEST_IGNORED_KEYS = frozenset({
+    "queue_handoff_confirmed", "canonical_shard_authority",
+})
 
 
 class CanonicalScanJobError(ValueError):
@@ -174,7 +186,7 @@ def _placement_payload(value: Any) -> dict[str, Any]:
 
 def scan_job_queue_transport(value: Mapping[str, Any]) -> dict[str, Any]:
     """Validate and return routing metadata that cannot alter Scan authority."""
-    unknown = sorted(set(value) - _JOB_KEYS - _QUEUE_TRANSPORT_KEYS)
+    unknown = sorted(set(value) - _JOB_KEYS - {"shard"} - _QUEUE_TRANSPORT_KEYS)
     if unknown:
         raise CanonicalScanJobError(
             f"scan job queue fields are invalid: unknown {', '.join(unknown)}"
@@ -192,7 +204,7 @@ def scan_job_queue_transport(value: Mapping[str, Any]) -> dict[str, Any]:
         transport["_base_queue_name"] = base
     if "type" in value:
         job_type = str(value.get("type") or "").strip()
-        if job_type != "scan_plan":
+        if job_type not in {"scan_plan", "scan_shard"}:
             raise CanonicalScanJobError("scan-job/v2 queue type is invalid")
         transport["type"] = job_type
     for key, minimum, maximum in (
@@ -206,6 +218,15 @@ def scan_job_queue_transport(value: Mapping[str, Any]) -> dict[str, Any]:
         if isinstance(item, bool) or not isinstance(item, int) or not minimum <= item <= maximum:
             raise CanonicalScanJobError(f"scan-job/v2 queue {key} is invalid")
         transport[key] = item
+    if "plan_stage" in value:
+        stage = str(value.get("plan_stage") or "").strip().lower()
+        if stage not in {"start", "fanout"}:
+            raise CanonicalScanJobError("scan-job/v2 queue plan_stage is invalid")
+        transport["plan_stage"] = stage
+    if "discovery_scan_id" in value:
+        transport["discovery_scan_id"] = _identifier(
+            value.get("discovery_scan_id"), name="discovery_scan_id"
+        )
     if transport.get("type") == "scan_plan":
         for required in ("placement", "attempt", "plan_version"):
             if required not in transport:
@@ -216,9 +237,30 @@ def scan_job_queue_transport(value: Mapping[str, Any]) -> dict[str, Any]:
             raise CanonicalScanJobError(
                 "scan-job/v2 scan_plan transport must remain local"
             )
-    elif any(key in transport for key in ("attempt", "plan_version", "parallel_worker_count")):
+        if transport.get("plan_stage") == "fanout" and "discovery_scan_id" not in transport:
+            raise CanonicalScanJobError(
+                "scan-job/v2 fanout transport requires discovery_scan_id"
+            )
+        if transport.get("plan_stage", "start") == "start" and "discovery_scan_id" in transport:
+            raise CanonicalScanJobError(
+                "scan-job/v2 discovery_scan_id requires fanout plan_stage"
+            )
+    elif transport.get("type") == "scan_shard":
+        for required in ("attempt", "plan_version"):
+            if required not in transport:
+                raise CanonicalScanJobError(
+                    f"scan-job/v2 scan_shard transport requires {required}"
+                )
+        if any(key in transport for key in ("plan_stage", "discovery_scan_id")):
+            raise CanonicalScanJobError(
+                "scan-job/v2 shard transport cannot carry planner continuation metadata"
+            )
+    elif any(key in transport for key in (
+        "attempt", "plan_version", "parallel_worker_count", "plan_stage",
+        "discovery_scan_id",
+    )):
         raise CanonicalScanJobError(
-            "scan-job/v2 orchestration metadata requires scan_plan type"
+            "scan-job/v2 orchestration metadata requires a typed queue job"
         )
     return transport
 
@@ -239,6 +281,78 @@ def _families(value: Any, *, name: str) -> tuple[str, ...]:
 
 def _optional_receipt(value: Any, *, name: str) -> str | None:
     return _identifier(value, name=name, required=False)
+
+
+def scan_job_options_digest(value: Mapping[str, Any]) -> str:
+    """Hash immutable execution inputs while excluding queue lifecycle markers."""
+    import hashlib
+
+    canonical = {
+        str(key): item
+        for key, item in value.items()
+        if str(key) not in _OPTIONS_DIGEST_IGNORED_KEYS
+    }
+    encoded = json.dumps(
+        canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def derive_scan_shard_budget(
+    options: Mapping[str, Any], parent_budget: ScanBudget,
+) -> ScanBudget:
+    """Derive a child ceiling without allowing compatibility options to expand its parent."""
+    custom = options.get("custom_budget")
+    custom = dict(custom) if isinstance(custom, Mapping) else {}
+    resolved = options.get("resolved_budget")
+    resolved = dict(resolved) if isinstance(resolved, Mapping) else {}
+
+    def bounded(parent_value: int, *values: Any, scale: int = 1) -> int:
+        parsed: list[int] = []
+        for raw in values:
+            try:
+                if isinstance(raw, bool) or raw is None:
+                    continue
+                amount = int(raw) * scale
+            except (TypeError, ValueError):
+                continue
+            if amount > 0:
+                parsed.append(amount)
+        return min(parent_value, max(parsed) if parsed else parent_value)
+
+    return ScanBudget(
+        max_duration_seconds=bounded(
+            parent_budget.max_duration_seconds,
+            custom.get("max_duration_minutes"), resolved.get("max_duration_minutes"),
+            scale=60,
+        ),
+        max_http_requests=bounded(
+            parent_budget.max_http_requests,
+            custom.get("request_max"), resolved.get("request_max"),
+        ),
+        max_endpoints=bounded(
+            parent_budget.max_endpoints,
+            custom.get("max_urls"), custom.get("api_probe_limit"),
+            custom.get("active_worklist_max"), custom.get("active_max_endpoints"),
+            custom.get("nuclei_max_targets"), resolved.get("max_urls"),
+            resolved.get("active_worklist_max"),
+            len(options.get("custom_endpoints") or ()) or None,
+        ),
+        max_browser_actions=bounded(
+            parent_budget.max_browser_actions,
+            custom.get("browser_max_pages"), resolved.get("browser_max_pages"),
+        ),
+        max_tcp_ports=bounded(
+            parent_budget.max_tcp_ports,
+            custom.get("max_tcp_ports"), resolved.get("max_tcp_ports"),
+        ),
+        max_tool_wall_seconds=bounded(
+            parent_budget.max_tool_wall_seconds,
+            custom.get("phase4_max_seconds"), custom.get("active_max_seconds"),
+            resolved.get("phase4_max_seconds"), resolved.get("active_max_seconds"),
+        ),
+        max_workers=1,
+    )
 
 
 def _plan_from_payload(value: Any, supplied_digest: Any) -> ScanExecutionPlan:
@@ -450,6 +564,104 @@ def admitted_credential_profile_ids(
 
 
 @dataclass(frozen=True)
+class ScanShardAuthority:
+    parent_scan_id: str
+    parent_execution_plan_digest: str
+    options_digest: str
+    shard_index: int
+    shard_count: int
+    shard_label: str
+    sub_budget: ScanBudget
+    parallel_discovery: bool = False
+    schema_version: str = SCAN_SHARD_AUTHORITY_SCHEMA
+
+    def __post_init__(self) -> None:
+        if self.schema_version != SCAN_SHARD_AUTHORITY_SCHEMA:
+            raise CanonicalScanJobError(
+                f"shard schema_version must be {SCAN_SHARD_AUTHORITY_SCHEMA}"
+            )
+        object.__setattr__(
+            self, "parent_scan_id",
+            _identifier(self.parent_scan_id, name="shard.parent_scan_id") or "",
+        )
+        plan_digest = str(self.parent_execution_plan_digest or "").strip().lower()
+        options_digest = str(self.options_digest or "").strip().lower()
+        if not _SHA256_RE.fullmatch(plan_digest):
+            raise CanonicalScanJobError("shard parent execution-plan digest is invalid")
+        if not _SHA256_RE.fullmatch(options_digest):
+            raise CanonicalScanJobError("shard options digest is invalid")
+        object.__setattr__(self, "parent_execution_plan_digest", plan_digest)
+        object.__setattr__(self, "options_digest", options_digest)
+        label = str(self.shard_label or "").strip()
+        if label != self.shard_label or not _SHARD_LABEL_RE.fullmatch(label):
+            raise CanonicalScanJobError("shard label is invalid")
+        object.__setattr__(self, "shard_label", label)
+        if not isinstance(self.parallel_discovery, bool):
+            raise CanonicalScanJobError("shard parallel_discovery must be a boolean")
+        for name in ("shard_index", "shard_count"):
+            if isinstance(getattr(self, name), bool) or not isinstance(getattr(self, name), int):
+                raise CanonicalScanJobError(f"shard {name} must be an integer")
+        if self.parallel_discovery:
+            if self.shard_index != -1 or self.shard_count != 0 or label != "discovery":
+                raise CanonicalScanJobError(
+                    "parallel discovery must use index -1, count 0, and discovery label"
+                )
+        elif self.shard_count < 2 or not 0 <= self.shard_index < self.shard_count:
+            raise CanonicalScanJobError("ordinary shard index/count are invalid")
+        budget = self.sub_budget
+        if isinstance(budget, Mapping):
+            raw_budget = dict(budget)
+            _exact_keys(raw_budget, _SHARD_BUDGET_KEYS, name="shard.sub_budget")
+            try:
+                budget = ScanBudget(**raw_budget)
+            except (TypeError, ValueError) as exc:
+                raise CanonicalScanJobError(f"shard sub-budget is invalid: {exc}") from exc
+        if not isinstance(budget, ScanBudget):
+            raise CanonicalScanJobError("shard sub_budget must be a Scan budget")
+        for name, ceiling in _BUDGET_CEILINGS.items():
+            if getattr(budget, name) > ceiling:
+                raise CanonicalScanJobError(f"shard.sub_budget.{name} exceeds its ceiling")
+        object.__setattr__(self, "sub_budget", budget)
+
+    def validate_against_plan(self, plan: ScanExecutionPlan) -> None:
+        if self.parent_execution_plan_digest != plan.digest:
+            raise CanonicalScanJobError(
+                "shard parent execution-plan digest does not match scan-job/v2"
+            )
+        for name in _BUDGET_KEYS:
+            if getattr(self.sub_budget, name) > getattr(plan.budget, name):
+                raise CanonicalScanJobError(
+                    f"shard sub-budget {name} exceeds the parent Scan budget"
+                )
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "parent_scan_id": self.parent_scan_id,
+            "parent_execution_plan_digest": self.parent_execution_plan_digest,
+            "options_digest": self.options_digest,
+            "shard_index": self.shard_index,
+            "shard_count": self.shard_count,
+            "shard_label": self.shard_label,
+            "parallel_discovery": self.parallel_discovery,
+            "sub_budget": {
+                name: getattr(self.sub_budget, name) for name in _BUDGET_KEYS
+            },
+        }
+
+    @classmethod
+    def from_payload(cls, value: Any) -> "ScanShardAuthority":
+        if not isinstance(value, Mapping):
+            raise CanonicalScanJobError("shard authority must be an object")
+        raw = dict(value)
+        _exact_keys(raw, _SHARD_KEYS, name="shard authority")
+        authority = cls(**raw)
+        if raw != authority.payload():
+            raise CanonicalScanJobError("shard authority is not canonical")
+        return authority
+
+
+@dataclass(frozen=True)
 class CanonicalScanJob:
     job_id: str
     scan_id: str
@@ -458,6 +670,7 @@ class CanonicalScanJob:
     request_collections: tuple[RequestCollectionJobRef, ...] = ()
     credential_profile_ids: tuple[str, ...] = ()
     endpoint_manifest_id: str | None = None
+    shard: ScanShardAuthority | None = None
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     schema_version: str = SCAN_JOB_SCHEMA
 
@@ -496,6 +709,11 @@ class CanonicalScanJob:
         endpoint_manifest_id = _identifier(
             self.endpoint_manifest_id, name="endpoint_manifest_id", required=False
         )
+        shard = self.shard
+        if shard is not None and not isinstance(shard, ScanShardAuthority):
+            shard = ScanShardAuthority.from_payload(shard)
+        if shard is not None:
+            shard.validate_against_plan(self.execution_plan)
         if (
             self.target.scope_receipt_id
             and self.execution_plan.policy.scope_receipt_id
@@ -505,6 +723,7 @@ class CanonicalScanJob:
         object.__setattr__(self, "request_collections", refs)
         object.__setattr__(self, "credential_profile_ids", credentials)
         object.__setattr__(self, "endpoint_manifest_id", endpoint_manifest_id)
+        object.__setattr__(self, "shard", shard)
 
     @classmethod
     def create(
@@ -517,6 +736,7 @@ class CanonicalScanJob:
         request_collections: Iterable[RequestCollectionJobRef] = (),
         credential_profile_ids: Iterable[str] = (),
         endpoint_manifest_id: str | None = None,
+        shard: ScanShardAuthority | None = None,
         created_at: str | None = None,
     ) -> "CanonicalScanJob":
         return cls(
@@ -527,6 +747,7 @@ class CanonicalScanJob:
             request_collections=tuple(request_collections),
             credential_profile_ids=tuple(credential_profile_ids),
             endpoint_manifest_id=endpoint_manifest_id,
+            shard=shard,
             created_at=created_at or datetime.now(timezone.utc).isoformat(),
         )
 
@@ -543,6 +764,8 @@ class CanonicalScanJob:
             "credential_profile_ids": list(self.credential_profile_ids),
             "endpoint_manifest_id": self.endpoint_manifest_id,
         }
+        if self.shard is not None:
+            payload["shard"] = self.shard.payload()
         _reject_forbidden_keys(payload)
         return payload
 
@@ -563,7 +786,8 @@ class CanonicalScanJob:
             raise CanonicalScanJobError("scan job must be an object")
         raw = dict(value)
         _reject_forbidden_keys(raw)
-        _exact_keys(raw, _JOB_KEYS, name="scan job")
+        expected = _JOB_KEYS | ({"shard"} if "shard" in raw else set())
+        _exact_keys(raw, frozenset(expected), name="scan job")
         if raw["schema_version"] != SCAN_JOB_SCHEMA:
             raise CanonicalScanJobError(f"schema_version must be {SCAN_JOB_SCHEMA}")
         if not isinstance(raw["request_collections"], list):
@@ -585,6 +809,10 @@ class CanonicalScanJob:
             ),
             credential_profile_ids=tuple(raw["credential_profile_ids"]),
             endpoint_manifest_id=raw["endpoint_manifest_id"],
+            shard=(
+                ScanShardAuthority.from_payload(raw["shard"])
+                if "shard" in raw else None
+            ),
         )
         if raw != job.payload():
             raise CanonicalScanJobError("scan job payload is not canonical")
@@ -597,7 +825,19 @@ class CanonicalScanJob:
         raw = dict(value)
         _reject_forbidden_keys(raw)
         transport = scan_job_queue_transport(raw)
-        job = cls.from_payload({key: raw[key] for key in _JOB_KEYS if key in raw})
+        core_keys = _JOB_KEYS | ({"shard"} if "shard" in raw else set())
+        job = cls.from_payload({key: raw[key] for key in core_keys if key in raw})
+        job_type = transport.get("type")
+        if job.shard is not None and job_type != "scan_shard":
+            raise CanonicalScanJobError(
+                "scan-job/v2 shard authority requires scan_shard queue type"
+            )
+        if job.shard is None and job_type == "scan_shard":
+            raise CanonicalScanJobError(
+                "scan-job/v2 scan_shard queue type requires shard authority"
+            )
+        if job.shard is not None and job_type == "scan_plan":
+            raise CanonicalScanJobError("scan_plan cannot carry shard authority")
         worker_count = transport.get("parallel_worker_count")
         if worker_count is not None and worker_count > job.execution_plan.budget.max_workers:
             raise CanonicalScanJobError(

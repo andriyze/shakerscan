@@ -15,8 +15,11 @@ from scan.jobs import (
     CanonicalScanJob,
     CanonicalScanJobError,
     RequestCollectionJobRef,
+    ScanShardAuthority,
     admitted_credential_profile_ids,
     admitted_request_collection_job_refs,
+    derive_scan_shard_budget,
+    scan_job_options_digest,
 )
 from scan.job_runtime import (
     CanonicalScanJobMaterializationError,
@@ -144,6 +147,95 @@ def test_parallel_parent_transport_is_local_bounded_and_mode_free():
     oversized["parallel_worker_count"] = 5
     with pytest.raises(CanonicalScanJobError, match="worker budget"):
         CanonicalScanJob.from_queue_payload(oversized)
+
+
+def _shard_job_and_row(*, discovery=False):
+    parent = _job()
+    row = _persisted_row(parent)
+    options = copy.deepcopy(row["options"])
+    authority = ScanShardAuthority(
+        parent_scan_id=parent.scan_id,
+        parent_execution_plan_digest=parent.execution_plan.digest,
+        options_digest=scan_job_options_digest(options),
+        shard_index=-1 if discovery else 1,
+        shard_count=0 if discovery else 3,
+        shard_label="discovery" if discovery else "coverage[1]",
+        parallel_discovery=discovery,
+        sub_budget=derive_scan_shard_budget(options, parent.execution_plan.budget),
+    )
+    options["canonical_shard_authority"] = authority.payload()
+    child = CanonicalScanJob.create(
+        job_id="job-child",
+        scan_id="scan-child",
+        target=parent.target,
+        execution_plan=parent.execution_plan,
+        request_collections=parent.request_collections,
+        credential_profile_ids=parent.credential_profile_ids,
+        endpoint_manifest_id=parent.endpoint_manifest_id,
+        shard=authority,
+        created_at="2026-08-20T12:01:00Z",
+    )
+    row.update({
+        "job_id": child.job_id,
+        "options": options,
+        "scan_job_payload": child.payload(),
+        "scan_job_digest": child.payload_digest,
+        "parent_scan_id": parent.scan_id,
+        "scan_role": "parallel_discovery" if discovery else "shard",
+        "shard_index": authority.shard_index,
+        "shard_count": None if discovery else authority.shard_count,
+    })
+    queued = child.payload()
+    queued.update({"type": "scan_shard", "attempt": 1, "plan_version": 1})
+    return child, row, queued
+
+
+def test_canonical_child_shard_round_trips_with_bounded_tamper_evident_authority():
+    child, _row, queued = _shard_job_and_row()
+    restored = CanonicalScanJob.from_queue_payload(queued)
+
+    assert restored == child
+    assert restored.shard.sub_budget.max_workers == 1
+    assert restored.shard.sub_budget.max_http_requests <= child.execution_plan.budget.max_http_requests
+    assert "options" not in queued
+
+    changed = copy.deepcopy(queued)
+    changed["shard"]["sub_budget"]["max_http_requests"] += 1
+    with pytest.raises(CanonicalScanJobError, match="canonical|digest|parent Scan budget"):
+        CanonicalScanJob.from_queue_payload(changed)
+
+    changed = copy.deepcopy(queued)
+    changed.pop("type")
+    with pytest.raises(CanonicalScanJobError, match="scan_shard|typed queue job"):
+        CanonicalScanJob.from_queue_payload(changed)
+
+
+def test_canonical_parallel_discovery_has_distinct_bounded_authority():
+    child, row, queued = _shard_job_and_row(discovery=True)
+    materialized = materialize_canonical_scan_job(
+        queued, row, resolved_addresses=("192.0.2.10",),
+    )
+    assert child.shard.parallel_discovery is True
+    assert materialized["parallel_discovery"] is True
+    assert materialized["shard_index"] == -1
+    assert materialized["parent_scan_id"] == "scan-1"
+
+
+def test_shard_materialization_rejects_durable_option_or_parent_drift():
+    _child, row, queued = _shard_job_and_row()
+    changed = copy.deepcopy(row)
+    changed["options"]["custom_endpoints"] = ["/not-authorized"]
+    with pytest.raises(CanonicalScanJobMaterializationError, match="shard options"):
+        materialize_canonical_scan_job(
+            queued, changed, resolved_addresses=("192.0.2.10",),
+        )
+
+    changed = copy.deepcopy(row)
+    changed["parent_scan_id"] = "scan-other"
+    with pytest.raises(CanonicalScanJobMaterializationError, match="parent or role"):
+        materialize_canonical_scan_job(
+            queued, changed, resolved_addresses=("192.0.2.10",),
+        )
 
 
 @pytest.mark.parametrize("legacy", ["quick", "standard", "deep", "full", "aggressive", "smart"])

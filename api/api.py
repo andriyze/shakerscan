@@ -9880,7 +9880,8 @@ async def _materialize_control_plane_scan_job_v2(
         row = await conn.fetchrow(
             """
             SELECT target_id, target_url, job_id, options, scan_generation,
-                   policy_json, budget_json, scan_job_payload, scan_job_digest
+                   policy_json, budget_json, scan_job_payload, scan_job_digest,
+                   parent_scan_id, scan_role, shard_index, shard_count
             FROM scans
             WHERE id=$1
             """,

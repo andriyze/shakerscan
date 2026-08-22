@@ -4,6 +4,7 @@ from pathlib import Path
 
 from runtime.models import ScanBudget, ScanPolicy
 from scan.execution import ScanExecutionPlan
+from scan.jobs import ScanShardAuthority, scan_job_options_digest
 from scan.worker_contract import WorkerScanAdmission
 from scan.worker_dispatch import (
     execution_result_metadata,
@@ -79,6 +80,31 @@ def test_caller_legacy_tuning_cannot_expand_canonical_budget():
     assert prepared["custom_budget"]["nuclei_max_targets"] == 2000
     assert prepared["custom_budget"]["active_max_endpoints"] == 2000
     assert prepared["parallel_worker_count"] == 4
+
+
+def test_canonical_shard_dispatch_uses_its_sub_budget_not_the_parent_budget():
+    plan = _plan(active=True)
+    options = _options(plan)
+    options["custom_budget"] = {"request_max": 120, "max_urls": 30}
+    authority = ScanShardAuthority(
+        parent_scan_id="scan-parent",
+        parent_execution_plan_digest=plan.digest,
+        options_digest=scan_job_options_digest(options),
+        shard_index=0,
+        shard_count=2,
+        shard_label="coverage[0]",
+        sub_budget=ScanBudget(120, 120, 30, 4, 100, 50, 1),
+    )
+    options["canonical_shard_authority"] = authority.payload()
+
+    prepared, admission = prepare_worker_dispatch(options)
+
+    assert admission.canonical is True
+    assert prepared["custom_budget"]["request_max"] == 120
+    assert prepared["custom_budget"]["max_urls"] == 30
+    assert prepared["custom_budget"]["browser_max_pages"] == 4
+    assert prepared["max_workers"] == 1
+    assert prepared["_v2_worker_authority"]["parent_scan_id"] == "scan-parent"
 
 
 def test_passive_dispatch_uses_same_engine_with_passive_backing():

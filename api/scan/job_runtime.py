@@ -23,6 +23,7 @@ from .jobs import (
     SCAN_JOB_SCHEMA,
     admitted_credential_profile_ids,
     admitted_request_collection_job_refs,
+    scan_job_options_digest,
     scan_job_queue_transport,
 )
 
@@ -188,6 +189,34 @@ def materialize_canonical_scan_job(
             "persisted credential profile references do not match scan-job/v2"
         )
 
+    shard = job.shard
+    if shard is not None:
+        parent_scan_id = str(_row_value(persisted_row, "parent_scan_id") or "")
+        scan_role = str(_row_value(persisted_row, "scan_role") or "")
+        shard_index = _row_value(persisted_row, "shard_index")
+        shard_count = _row_value(persisted_row, "shard_count")
+        expected_role = "parallel_discovery" if shard.parallel_discovery else "shard"
+        if parent_scan_id != shard.parent_scan_id or scan_role != expected_role:
+            raise CanonicalScanJobMaterializationError(
+                "persisted shard parent or role does not match scan-job/v2"
+            )
+        if shard_index != shard.shard_index:
+            raise CanonicalScanJobMaterializationError(
+                "persisted shard index does not match scan-job/v2"
+            )
+        if not shard.parallel_discovery and shard_count != shard.shard_count:
+            raise CanonicalScanJobMaterializationError(
+                "persisted shard count does not match scan-job/v2"
+            )
+        if options.get("canonical_shard_authority") != shard.payload():
+            raise CanonicalScanJobMaterializationError(
+                "persisted shard authority does not match scan-job/v2"
+            )
+        if scan_job_options_digest(options) != shard.options_digest:
+            raise CanonicalScanJobMaterializationError(
+                "persisted shard options do not match scan-job/v2"
+            )
+
     materialized = {
         "job_id": job.job_id,
         "scan_id": job.scan_id,
@@ -201,4 +230,13 @@ def materialize_canonical_scan_job(
         "_canonical_queue_schema": SCAN_JOB_SCHEMA,
     }
     materialized.update(transport)
+    if shard is not None:
+        materialized.update({
+            "parent_scan_id": shard.parent_scan_id,
+            "target_id": job.target.target_id,
+            "shard_label": shard.shard_label,
+            "shard_index": shard.shard_index,
+            "shard_count": shard.shard_count,
+            "parallel_discovery": shard.parallel_discovery,
+        })
     return materialized

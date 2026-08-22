@@ -10,6 +10,11 @@ from __future__ import annotations
 import math
 from typing import Any, Mapping
 
+from .jobs import (
+    CanonicalScanJobError,
+    ScanShardAuthority,
+    scan_job_options_digest,
+)
 from .worker_contract import WorkerScanAdmission, resolve_worker_scan_admission
 
 
@@ -39,7 +44,18 @@ def prepare_worker_dispatch(
         return dict(options), admission
 
     normalized = admission.normalize_options(options)
-    policy, budget = admission.plan.policy, admission.plan.budget
+    policy, parent_budget = admission.plan.policy, admission.plan.budget
+    budget = parent_budget
+    shard_authority = None
+    raw_shard_authority = options.get("canonical_shard_authority")
+    if raw_shard_authority is not None:
+        shard_authority = ScanShardAuthority.from_payload(raw_shard_authority)
+        shard_authority.validate_against_plan(admission.plan)
+        if scan_job_options_digest(options) != shard_authority.options_digest:
+            raise CanonicalScanJobError(
+                "persisted shard options do not match their canonical digest"
+            )
+        budget = shard_authority.sub_budget
 
     # Never merge caller-supplied legacy tuning into a canonical plan. Every surviving scanner
     # ceiling is derived from the immutable ScanBudget so stale UI fields cannot expand authority.
@@ -78,6 +94,16 @@ def prepare_worker_dispatch(
             "temporary_backing_adapter": True,
         },
     })
+    if shard_authority is not None:
+        normalized["_v2_worker_authority"].update({
+            "parent_scan_id": shard_authority.parent_scan_id,
+            "parent_plan_digest": shard_authority.parent_execution_plan_digest,
+            "shard_options_digest": shard_authority.options_digest,
+            "shard_label": shard_authority.shard_label,
+            "shard_index": shard_authority.shard_index,
+            "shard_count": shard_authority.shard_count,
+            "parallel_discovery": shard_authority.parallel_discovery,
+        })
     if "parallel_worker_count" in normalized:
         try:
             normalized["parallel_worker_count"] = min(
