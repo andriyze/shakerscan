@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from runtime.reservation_store import PostgresBudgetReservationStore
+
 RETEST_QUEUE_SCHEMA_VERSION = 1
 ASM_ENDPOINT_FINGERPRINT_MIGRATION = "asm_endpoint_fingerprint_v2"
 CAMPAIGN_SCAN_FINDING_LINKS_MIGRATION = "campaign_scan_finding_links_v1"
@@ -937,6 +939,12 @@ async def run_schema_migrations(pool) -> None:
                     applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
             """)
+
+            # Scan and Hunt capability budgets share one durable reservation store. Keep its
+            # schema under the same startup advisory lock as the rest of the authoritative
+            # control-plane schema so rolling API and worker starts cannot observe a half-created
+            # ledger.
+            await PostgresBudgetReservationStore().ensure_schema(conn)
 
             # Durable key/value store for settings that must survive a Redis
             # flush/restart. Redis remains a cache for non-security automation

@@ -34,6 +34,13 @@ async def _assert_common(conn) -> None:
         raise RuntimeError("canonical target trigger is missing or duplicated")
     if not await conn.fetchval("SELECT to_regclass('public.app_schema_migrations') IS NOT NULL"):
         raise RuntimeError("app_schema_migrations is missing after migration")
+    if not await conn.fetchval("SELECT to_regclass('public.budget_reservations') IS NOT NULL"):
+        raise RuntimeError("budget_reservations is missing after migration")
+    if not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM app_schema_migrations "
+        "WHERE name='v2_budget_reservations_v1')"
+    ):
+        raise RuntimeError("V2 budget reservation migration marker is missing")
     if not await conn.fetchval("SELECT to_regclass('public.model_intake_submission_events') IS NOT NULL"):
         raise RuntimeError("model_intake_submission_events is missing after migration")
 

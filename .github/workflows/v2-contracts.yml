@@ -10,6 +10,8 @@ on:
       - api/hunt/**
       - api/api_v2.py
       - api/worker_v2.py
+      - api/retest_contract.py
+      - scripts/upgrade_schema_smoke.py
       - db/repairs/2026-08-22_v2_budget_reservations.sql
       - scanner/manifests.py
       - scanner/scanner_tools/build_fingerprint.py
@@ -21,6 +23,7 @@ on:
       - tests/test_request_collections_v2.py
       - tests/test_budget_reservation_lifecycle.py
       - tests/test_reservation_store.py
+      - tests/test_retest_contract_migrations.py
       - tests/test_runtime_receipts.py
       - tests/test_v2_native_fingerprint.py
       - tests/test_v2_native_receipt_hardening.py
@@ -44,6 +47,8 @@ on:
       - api/hunt/**
       - api/api_v2.py
       - api/worker_v2.py
+      - api/retest_contract.py
+      - scripts/upgrade_schema_smoke.py
       - db/repairs/2026-08-22_v2_budget_reservations.sql
       - scanner/manifests.py
       - scanner/scanner_tools/build_fingerprint.py
@@ -55,6 +60,7 @@ on:
       - tests/test_request_collections_v2.py
       - tests/test_budget_reservation_lifecycle.py
       - tests/test_reservation_store.py
+      - tests/test_retest_contract_migrations.py
       - tests/test_runtime_receipts.py
       - tests/test_v2_native_fingerprint.py
       - tests/test_v2_native_receipt_hardening.py
@@ -69,7 +75,7 @@ on:
       - tests/test_scan_job_contract.py
       - tests/test_scan_v2_contract.py
       - tests/test_scan_worker_contract.py
-      - tests/test_63an_worker_dispatch.py
+      - tests/test_scan_worker_dispatch.py
       - .github/workflows/v2-contracts.yml
   workflow_dispatch:
 
@@ -119,6 +125,7 @@ jobs:
           python -m pytest -q -p no:cacheprovider \
             tests/test_budget_reservation_lifecycle.py \
             tests/test_reservation_store.py \
+            tests/test_retest_contract_migrations.py \
             tests/test_runtime_receipts.py \
             tests/test_v2_native_receipt_hardening.py
 
