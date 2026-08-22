@@ -1,7 +1,8 @@
-"""One-way compatibility adapters from legacy credential tables to V2 profiles.
+"""Compatibility adapters from legacy credential tables to V2 profiles.
 
-The adapters never return or log secret material. Existing Fernet ciphertext is copied
-into an immutable generic version and is parsed only after worker-side authorization.
+The adapters never return or log secret material. Legacy Web ciphertext can be copied
+unchanged; older device envelopes are canonicalized only in bounded migration memory.
+Normal execution still resolves and decrypts generic profiles only on authorized workers.
 """
 
 from __future__ import annotations
@@ -16,16 +17,23 @@ from .credential_store import (
     CredentialStoreError,
     PostgresCredentialProfileStore,
 )
-from .credentials import public_credential_configuration
+from .credentials import (
+    build_credential_secret,
+    parse_credential_secret,
+    public_credential_configuration,
+)
 
 try:
-    from secret_store import SecretStoreUnavailable, encrypt_secret
+    from secret_store import SecretStoreUnavailable, decrypt_secret, encrypt_secret
 except ModuleNotFoundError:
-    from api.secret_store import SecretStoreUnavailable, encrypt_secret
+    from api.secret_store import SecretStoreUnavailable, decrypt_secret, encrypt_secret
 
 
 LEGACY_WEB_MIGRATION = "v2_target_credentials_to_generic_v1"
+LEGACY_DEVICE_MIGRATION = "v2_device_credentials_to_generic_v1"
 LEGACY_WEB_CAPABILITIES = ("request.replay", "scan.execute")
+LEGACY_DEVICE_WEB_CAPABILITIES = ("request.replay", "device.http.probe")
+LEGACY_DEVICE_SSH_CAPABILITIES = ("device.ssh.propose",)
 _CIPHERTEXT_PREFIX = "enc:fernet:"
 
 
@@ -75,6 +83,75 @@ def _private_metadata(*, source_id: str) -> str:
         "legacy_source_id": source_id,
     }, sort_keys=True, separators=(",", ":"))
     return _encrypted(payload)
+
+
+def _device_private_metadata(legacy: Mapping[str, Any]) -> str:
+    payload = json.dumps({
+        "schema_version": "credential-private-metadata/v1",
+        "created_by": "migration:device_credential_profiles",
+        "legacy_source": "device_credential_profiles",
+        "legacy_source_id": str(legacy.get("id") or ""),
+        "legacy_port": legacy.get("port"),
+    }, sort_keys=True, separators=(",", ":"))
+    return _encrypted(payload)
+
+
+def _legacy_device_material(
+    legacy: Mapping[str, Any],
+) -> tuple[str, str, str, dict[str, Any], tuple[str, ...]]:
+    legacy_kind = str(legacy.get("auth_kind") or "").strip().lower()
+    try:
+        decrypted = decrypt_secret(legacy.get("secret_value"))
+    except SecretStoreUnavailable as exc:
+        raise LegacyCredentialMigrationError(
+            "legacy device credential cannot be decrypted for migration"
+        ) from exc
+    try:
+        secret_payload = json.loads(str(decrypted or ""))
+    except json.JSONDecodeError as exc:
+        raise LegacyCredentialMigrationError(
+            "legacy device credential envelope is invalid"
+        ) from exc
+    if not isinstance(secret_payload, Mapping):
+        raise LegacyCredentialMigrationError("legacy device credential envelope is invalid")
+    secret = str(secret_payload.get("secret") or "")
+    secondary = str(secret_payload.get("secondary_secret") or "") or None
+    username = str(legacy.get("username") or "").strip() or None
+    login_path = str(legacy.get("login_path") or "").strip() or None
+    if legacy_kind == "ssh_password":
+        generic_kind, slot = "ssh_password", "ssh"
+        capabilities = LEGACY_DEVICE_SSH_CAPABILITIES
+    elif legacy_kind == "ssh_private_key":
+        generic_kind = "ssh_private_key_with_passphrase" if secondary else "ssh_private_key"
+        slot = "ssh"
+        capabilities = LEGACY_DEVICE_SSH_CAPABILITIES
+    elif legacy_kind == "web_authorization_header":
+        generic_kind, slot = "authorization_header", "service"
+        capabilities = LEGACY_DEVICE_WEB_CAPABILITIES
+    elif legacy_kind == "web_cookie":
+        generic_kind, slot = "cookie", "service"
+        capabilities = LEGACY_DEVICE_WEB_CAPABILITIES
+    elif legacy_kind == "web_form":
+        generic_kind, slot = "form_login", "service"
+        capabilities = LEGACY_DEVICE_WEB_CAPABILITIES
+    else:
+        raise LegacyCredentialMigrationError("legacy device credential kind is unsupported")
+    try:
+        envelope = build_credential_secret(
+            generic_kind,
+            secret=secret,
+            username=username,
+            secondary_secret=secondary if legacy_kind == "ssh_private_key" else None,
+            endpoint_url=login_path,
+        )
+        configuration = public_credential_configuration(
+            parse_credential_secret(generic_kind, envelope)
+        )
+    except Exception as exc:
+        raise LegacyCredentialMigrationError(
+            "legacy device credential cannot satisfy the generic credential contract"
+        ) from exc
+    return generic_kind, slot, envelope, configuration, capabilities
 
 
 async def _legacy_web_slot(
@@ -179,6 +256,15 @@ async def sync_legacy_web_credential(
             now=created_at,
         )
 
+    if (
+        existing.target_kind != "web"
+        or existing.target_id != str(target_id)
+        or existing.auth_kind != kind
+    ):
+        raise LegacyCredentialMigrationError(
+            "legacy credential ID conflicts with a different generic profile"
+        )
+
     if not active:
         if existing.is_active:
             return await repository.deactivate_profile(
@@ -192,14 +278,6 @@ async def sync_legacy_web_credential(
     if created_new:
         return existing
 
-    if (
-        existing.target_kind != "web"
-        or existing.target_id != str(target_id)
-        or existing.auth_kind != kind
-    ):
-        raise LegacyCredentialMigrationError(
-            "legacy credential ID conflicts with a different generic profile"
-        )
     current = await conn.fetchrow(
         """SELECT encrypted_secret FROM credential_profile_versions
            WHERE profile_id=$1 AND version=$2 AND auth_kind=$3""",
@@ -303,5 +381,155 @@ async def migrate_legacy_web_credentials(
     await conn.execute(
         "INSERT INTO app_schema_migrations(name) VALUES ($1) ON CONFLICT DO NOTHING",
         LEGACY_WEB_MIGRATION,
+    )
+    return migrated
+
+
+async def sync_legacy_device_credential(
+    conn: Any,
+    profile_id: Any,
+    *,
+    store: PostgresCredentialProfileStore | None = None,
+    now: datetime | None = None,
+) -> CredentialProfileMetadata | None:
+    """Canonicalize one encrypted legacy device envelope into a generic profile."""
+    try:
+        legacy_id = uuid.UUID(str(profile_id))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise LegacyCredentialMigrationError("legacy device credential id is invalid") from exc
+    row_value = await conn.fetchrow(
+        "SELECT * FROM device_credential_profiles WHERE id=$1",
+        legacy_id,
+    )
+    if not row_value:
+        raise LegacyCredentialMigrationError("legacy device credential is unavailable")
+    legacy = _row(row_value)
+    try:
+        target_id = uuid.UUID(str(legacy.get("device_target_id") or ""))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise LegacyCredentialMigrationError(
+            "legacy device credential target is invalid"
+        ) from exc
+    name = str(legacy.get("name") or "").strip()
+    if not name:
+        raise LegacyCredentialMigrationError("legacy device credential name is invalid")
+    generic_kind, slot, envelope, configuration, capabilities = _legacy_device_material(legacy)
+    ciphertext = _encrypted(envelope)
+    repository = store or PostgresCredentialProfileStore()
+    raw_now = now or datetime.now(timezone.utc)
+    if raw_now.tzinfo is None:
+        raise LegacyCredentialMigrationError("legacy device migration time is invalid")
+    timestamp = raw_now.astimezone(timezone.utc)
+    expires_at = _utc(legacy.get("expires_at"))
+    active = bool(legacy.get("is_active", True)) and (
+        expires_at is None or expires_at > timestamp
+    )
+    existing = await _existing_profile(repository, conn, legacy_id)
+    created_new = existing is None
+    if existing is None:
+        created_at = min(_utc(legacy.get("created_at")) or timestamp, timestamp)
+        create_expiry = (
+            expires_at if expires_at is not None and expires_at > created_at else None
+        )
+        existing = await repository.create_profile(
+            conn,
+            profile_id=legacy_id,
+            target_kind="device",
+            target_id=target_id,
+            name=name,
+            auth_kind=generic_kind,
+            principal_slot=slot,
+            principal_label=None,
+            configuration=configuration,
+            encrypted_secret=ciphertext,
+            encrypted_metadata=_device_private_metadata(legacy),
+            expires_at=create_expiry,
+            allowed_capabilities=capabilities,
+            created_by="migration:device_credential_profiles",
+            now=created_at,
+        )
+    if (
+        existing.target_kind != "device"
+        or existing.target_id != str(target_id)
+        or existing.auth_kind != generic_kind
+    ):
+        raise LegacyCredentialMigrationError(
+            "legacy device credential ID or authentication kind conflicts with its generic profile"
+        )
+    if not active:
+        if existing.is_active:
+            return await repository.deactivate_profile(
+                conn,
+                profile_id=legacy_id,
+                target_kind="device",
+                target_id=target_id,
+                now=timestamp,
+            )
+        return existing
+    if created_new:
+        return existing
+    legacy_rotated_at = _utc(legacy.get("rotated_at"))
+    if legacy_rotated_at is None or legacy_rotated_at > existing.rotated_at.astimezone(timezone.utc):
+        existing = await repository.rotate_profile(
+            conn,
+            profile_id=legacy_id,
+            target_kind="device",
+            target_id=target_id,
+            expected_record_version=existing.record_version,
+            encrypted_secret=ciphertext,
+            encrypted_metadata=_device_private_metadata(legacy),
+            configuration=configuration,
+            expires_at=expires_at,
+            created_by="migration:device_credential_profiles",
+            now=timestamp,
+        )
+    metadata_changed = (
+        existing.name != name
+        or existing.principal_slot != slot
+        or existing.principal_label is not None
+        or not existing.is_active
+        or not _same_time(existing.expires_at, expires_at)
+        or tuple(existing.allowed_capabilities) != capabilities
+    )
+    if metadata_changed:
+        existing = await repository.update_profile_metadata(
+            conn,
+            profile_id=legacy_id,
+            expected_record_version=existing.record_version,
+            name=name,
+            principal_label=None,
+            principal_slot=slot,
+            expires_at=expires_at,
+            expires_at_changed=not _same_time(existing.expires_at, expires_at),
+            is_active=True,
+            allowed_capabilities=capabilities,
+            now=timestamp,
+        )
+    return existing
+
+
+async def migrate_legacy_device_credentials(
+    conn: Any,
+    *,
+    store: PostgresCredentialProfileStore | None = None,
+    now: datetime | None = None,
+) -> int:
+    marker = await conn.fetchval(
+        "SELECT 1 FROM app_schema_migrations WHERE name=$1",
+        LEGACY_DEVICE_MIGRATION,
+    )
+    if marker:
+        return 0
+    rows = await conn.fetch("SELECT id FROM device_credential_profiles ORDER BY created_at, id")
+    migrated = 0
+    for row in rows:
+        profile = await sync_legacy_device_credential(
+            conn, row["id"], store=store, now=now,
+        )
+        if profile is not None:
+            migrated += 1
+    await conn.execute(
+        "INSERT INTO app_schema_migrations(name) VALUES ($1) ON CONFLICT DO NOTHING",
+        LEGACY_DEVICE_MIGRATION,
     )
     return migrated

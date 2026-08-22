@@ -263,30 +263,129 @@ async def _sync_legacy_web_from_generic(
         secret_value = _encrypt(secret)
     timestamp = rotated_at or datetime.now(timezone.utc)
     legacy_name = str(legacy.get("name") or "")
-    await conn.execute(
-        """UPDATE target_credential_profiles
-           SET name=$2, expires_at=$3, is_active=$4,
-               secret_value=COALESCE($5, secret_value),
-               rotated_at=CASE WHEN $5 IS NULL THEN rotated_at ELSE $6 END,
-               updated_at=$6
-           WHERE id=$1""",
-        uuid.UUID(profile.profile_id),
-        profile.name,
-        profile.expires_at,
-        profile.is_active,
-        secret_value,
-        timestamp,
-    )
-    if legacy_name and legacy_name.lower() != profile.name.lower():
+    try:
         await conn.execute(
-            """UPDATE target_principals
-               SET credential_profile=$3, updated_at=$4
-               WHERE target_id=$1 AND lower(credential_profile)=lower($2)""",
-            uuid.UUID(profile.target_id),
-            legacy_name,
+            """UPDATE target_credential_profiles
+               SET name=$2, expires_at=$3, is_active=$4,
+                   secret_value=COALESCE($5, secret_value),
+                   rotated_at=CASE WHEN $5 IS NULL THEN rotated_at ELSE $6 END,
+                   updated_at=$6
+               WHERE id=$1""",
+            uuid.UUID(profile.profile_id),
             profile.name,
+            profile.expires_at,
+            profile.is_active,
+            secret_value,
             timestamp,
         )
+        if legacy_name and legacy_name.lower() != profile.name.lower():
+            await conn.execute(
+                """UPDATE target_principals
+                   SET credential_profile=$3, updated_at=$4
+                   WHERE target_id=$1 AND lower(credential_profile)=lower($2)""",
+                uuid.UUID(profile.target_id),
+                legacy_name,
+                profile.name,
+                timestamp,
+            )
+    except Exception as exc:
+        raise CredentialStoreError("legacy Web credential compatibility write failed") from exc
+
+
+_GENERIC_TO_LEGACY_DEVICE_KIND = {
+    "ssh_password": "ssh_password",
+    "ssh_private_key": "ssh_private_key",
+    "ssh_private_key_with_passphrase": "ssh_private_key",
+    "authorization_header": "web_authorization_header",
+    "cookie": "web_cookie",
+    "form_login": "web_form",
+}
+
+
+async def _legacy_device_profile(
+    conn: Any, profile: CredentialProfileMetadata,
+) -> dict[str, Any] | None:
+    if profile.target_kind != "device":
+        return None
+    row = await conn.fetchrow(
+        """SELECT id, device_target_id, auth_kind, name
+           FROM device_credential_profiles WHERE id=$1""",
+        uuid.UUID(profile.profile_id),
+    )
+    if not row:
+        return None
+    item = dict(row)
+    expected_kind = _GENERIC_TO_LEGACY_DEVICE_KIND.get(profile.auth_kind)
+    if (
+        str(item.get("device_target_id") or "") != profile.target_id
+        or str(item.get("auth_kind") or "") != expected_kind
+    ):
+        raise CredentialStoreError(
+            "migrated device credential identity no longer matches its generic profile"
+        )
+    return item
+
+
+async def _sync_legacy_device_from_generic(
+    conn: Any,
+    profile: CredentialProfileMetadata,
+    *,
+    material: Mapping[str, Any] | None = None,
+    rotated_at: datetime | None = None,
+) -> None:
+    legacy = await _legacy_device_profile(conn, profile)
+    if legacy is None:
+        return
+    secret_value = None
+    username = None
+    login_path = None
+    if material is not None:
+        secret = str(material.get("secret") or "")
+        if not secret:
+            raise CredentialStoreError("migrated device credential secret is invalid")
+        secret_value = _encrypt(json.dumps({
+            "secret": secret,
+            "secondary_secret": str(material.get("secondary_secret") or "") or None,
+        }, sort_keys=True, separators=(",", ":")))
+        username = str(material.get("username") or "").strip() or None
+        login_path = str(material.get("endpoint_url") or "").strip() or None
+    timestamp = rotated_at or datetime.now(timezone.utc)
+    try:
+        await conn.execute(
+            """UPDATE device_credential_profiles
+               SET name=$2, expires_at=$3, is_active=$4,
+                   secret_value=COALESCE($5, secret_value),
+                   username=CASE WHEN $5 IS NULL THEN username ELSE $6 END,
+                   login_path=CASE WHEN $5 IS NULL THEN login_path ELSE $7 END,
+                   rotated_at=CASE WHEN $5 IS NULL THEN rotated_at ELSE $8 END,
+                   updated_at=$8
+               WHERE id=$1""",
+            uuid.UUID(profile.profile_id),
+            profile.name,
+            profile.expires_at,
+            profile.is_active,
+            secret_value,
+            username,
+            login_path,
+            timestamp,
+        )
+    except Exception as exc:
+        raise CredentialStoreError("legacy device credential compatibility write failed") from exc
+
+
+async def _sync_legacy_from_generic(
+    conn: Any,
+    profile: CredentialProfileMetadata,
+    *,
+    material: Mapping[str, Any] | None = None,
+    rotated_at: datetime | None = None,
+) -> None:
+    await _sync_legacy_web_from_generic(
+        conn, profile, material=material, rotated_at=rotated_at,
+    )
+    await _sync_legacy_device_from_generic(
+        conn, profile, material=material, rotated_at=rotated_at,
+    )
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -395,7 +494,7 @@ async def patch_credential_profile(
                     allowed_capabilities=payload.allowed_capabilities,
                     now=datetime.now(timezone.utc),
                 )
-                await _sync_legacy_web_from_generic(conn, profile)
+                await _sync_legacy_from_generic(conn, profile)
     except CredentialStoreError as exc:
         raise _store_error(exc) from exc
     return {"profile": _public(profile)}
@@ -432,7 +531,7 @@ async def rotate_credential_profile(
                     created_by=payload.created_by,
                     now=timestamp,
                 )
-                await _sync_legacy_web_from_generic(
+                await _sync_legacy_from_generic(
                     conn,
                     profile,
                     material=parse_credential_secret(existing.auth_kind, envelope),
@@ -457,7 +556,7 @@ async def delete_credential_profile(request: Request, profile_id: uuid.UUID):
                     target_id=existing.target_id,
                     now=datetime.now(timezone.utc),
                 )
-                await _sync_legacy_web_from_generic(conn, profile)
+                await _sync_legacy_from_generic(conn, profile)
     except CredentialStoreError as exc:
         raise _store_error(exc) from exc
     return {"status": "deactivated", "profile": _public(profile)}

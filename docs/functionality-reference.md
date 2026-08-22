@@ -1126,6 +1126,12 @@ State-changing commands are not exposed. See [`docs/read-only-mcp.md`](read-only
 `POST /hunts/{hunt_id}/capabilities/{capability_name}` ·
 `GET|POST /device-policies` · `PATCH /device-policies/{id}`
 
+Legacy device SSH, header, cookie, and form profiles are backfilled to same-ID generic profiles.
+Their older encrypted JSON envelopes are canonicalized without returning or logging plaintext;
+new and compatibility mutations remain transactional in both stores until device execution stops
+reading the legacy table. SSH profiles receive only the SSH-plan capability, while device Web
+profiles receive bounded replay/probe capabilities.
+
 **Continuous ASM**: `GET /asm/check-families` · `GET /targets/{id}/asm/endpoints` ·
 `GET /targets/{id}/asm/coverage` · `POST /targets/{id}/asm/test` · `POST /targets/{id}/asm/recon` ·
 `POST /targets/{id}/asm/prune` · `POST /targets/{id}/asm/improve` · `GET|PUT /targets/{id}/asm/policy`

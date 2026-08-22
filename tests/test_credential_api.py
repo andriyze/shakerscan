@@ -22,6 +22,7 @@ class ApiCredentialConn(MemoryCredentialConn):
     def __init__(self):
         super().__init__()
         self.legacy_web = None
+        self.legacy_device = None
 
     def transaction(self):
         @asynccontextmanager
@@ -34,14 +35,31 @@ class ApiCredentialConn(MemoryCredentialConn):
         if query.lstrip().startswith("SELECT id FROM targets"):
             return {"id": args[0]} if args[0] == TARGET_ID else None
         if query.lstrip().startswith("SELECT id FROM device_targets"):
-            return None
+            return {"id": args[0]} if args[0] == TARGET_ID else None
         if "FROM target_credential_profiles WHERE id" in query:
             if self.legacy_web and self.legacy_web["id"] == args[0]:
                 return dict(self.legacy_web)
             return None
+        if "FROM device_credential_profiles WHERE id" in query:
+            if self.legacy_device and self.legacy_device["id"] == args[0]:
+                return dict(self.legacy_device)
+            return None
         return await super().fetchrow(query, *args)
 
     async def execute(self, query, *args):
+        if "UPDATE device_credential_profiles" in query:
+            assert self.legacy_device and self.legacy_device["id"] == args[0]
+            self.legacy_device.update({
+                "name": args[1],
+                "expires_at": args[2],
+                "is_active": args[3],
+                "secret_value": args[4] or self.legacy_device["secret_value"],
+                "username": args[5] if args[4] else self.legacy_device["username"],
+                "login_path": args[6] if args[4] else self.legacy_device["login_path"],
+                "rotated_at": args[7] if args[4] else self.legacy_device["rotated_at"],
+                "updated_at": args[7],
+            })
+            return "UPDATE 1"
         if "UPDATE target_principals" in query:
             assert self.legacy_web and self.legacy_web["target_id"] == args[0]
             self.legacy_web["principal_profile_name"] = args[2]
@@ -281,3 +299,49 @@ def test_migrated_web_profile_changes_stay_synchronized_with_legacy_execution(cl
     deleted = http.delete(f"/credential-profiles/{profile['id']}")
     assert deleted.status_code == 200, deleted.text
     assert pool.conn.legacy_web["is_active"] is False
+
+
+def test_migrated_device_profile_rotation_stays_synchronized_with_legacy_execution(client):
+    http, pool = client
+    created = http.post(
+        "/credential-profiles",
+        json=_create_payload(
+            target_kind="device",
+            name="Device SSH",
+            auth_kind="ssh_password",
+            principal_slot="ssh",
+            username="root",
+            secret="original-password",
+        ),
+    )
+    assert created.status_code == 201, created.text
+    profile = created.json()["profile"]
+    pool.conn.legacy_device = {
+        "id": uuid.UUID(profile["id"]),
+        "device_target_id": TARGET_ID,
+        "auth_kind": "ssh_password",
+        "name": "Device SSH",
+        "username": "root",
+        "login_path": None,
+        "secret_value": "enc:fernet:legacy-original",
+        "is_active": True,
+        "expires_at": None,
+        "rotated_at": datetime.now(timezone.utc),
+    }
+
+    rotated = http.post(
+        f"/credential-profiles/{profile['id']}/rotate",
+        json={
+            "expected_record_version": profile["record_version"],
+            "username": "root",
+            "secret": "canonical-password",
+            "clear_expiry": True,
+        },
+    )
+    assert rotated.status_code == 200, rotated.text
+    assert pool.conn.legacy_device["secret_value"] == "enc:fernet:opaque-ciphertext"
+    assert pool.conn.legacy_device["username"] == "root"
+
+    deleted = http.delete(f"/credential-profiles/{profile['id']}")
+    assert deleted.status_code == 200, deleted.text
+    assert pool.conn.legacy_device["is_active"] is False

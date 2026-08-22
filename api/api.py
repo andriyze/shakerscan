@@ -451,6 +451,7 @@ try:
     from runtime.credential_store import CredentialStoreError, PostgresCredentialProfileStore
     from runtime.credential_migration import (
         LegacyCredentialMigrationError,
+        sync_legacy_device_credential,
         sync_legacy_web_credential,
         sync_legacy_web_credential_by_name,
     )
@@ -469,6 +470,7 @@ except ModuleNotFoundError:
     from api.runtime.credential_store import CredentialStoreError, PostgresCredentialProfileStore
     from api.runtime.credential_migration import (
         LegacyCredentialMigrationError,
+        sync_legacy_device_credential,
         sync_legacy_web_credential,
         sync_legacy_web_credential_by_name,
     )
@@ -19064,6 +19066,10 @@ async def create_device_credential(device_id: str, request: DeviceCredentialProf
             )
         except asyncpg.UniqueViolationError as exc:
             raise HTTPException(status_code=409, detail="Device credential profile name already exists") from exc
+        try:
+            await sync_legacy_device_credential(conn, row["id"])
+        except (LegacyCredentialMigrationError, CredentialStoreError) as exc:
+            raise _legacy_credential_migration_http_error(exc) from exc
         operation = await _record_command_result(
             conn, command="device.credential.create", status="completed", risk_tier="active",
             approval_receipt_id=(approval_context or {}).get("approval_receipt_id"),
@@ -19114,6 +19120,10 @@ async def rotate_device_credential(
             request.clear_expiry,
             request.expires_at,
         )
+        try:
+            await sync_legacy_device_credential(conn, profile_uuid)
+        except (LegacyCredentialMigrationError, CredentialStoreError) as exc:
+            raise _legacy_credential_migration_http_error(exc) from exc
         await conn.execute("DELETE FROM device_credential_attempts WHERE device_target_id=$1 AND credential_profile_id=$2", device_uuid, profile_uuid)
         operation = await _record_command_result(
             conn, command="device.credential.rotate", status="completed", risk_tier="active",
@@ -19153,6 +19163,10 @@ async def deactivate_device_credential(
             profile_uuid,
             device_uuid,
         )
+        try:
+            await sync_legacy_device_credential(conn, profile_uuid)
+        except (LegacyCredentialMigrationError, CredentialStoreError) as exc:
+            raise _legacy_credential_migration_http_error(exc) from exc
         operation = await _record_command_result(
             conn, command="device.credential.deactivate", status="completed", risk_tier="active",
             approval_receipt_id=(approval_context or {}).get("approval_receipt_id"),
