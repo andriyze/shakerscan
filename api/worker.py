@@ -79,6 +79,8 @@ from hunt.capability_reservations import (
 from hunt.capability_executor import CapabilityExecutionContext, CapabilityExecutor
 from runtime.budget_reservations import DurableBudgetReservation
 from runtime.budgets import BudgetExceeded
+from runtime.capability_settlement import terminalize_capability_reservation
+from runtime.receipts import CapabilityReceipt
 from runtime.credential_resolver import (
     CredentialResolutionError,
     WorkerCredentialResolver,
@@ -108,6 +110,12 @@ from scan.collection_replay import (
     scan_replay_ledger_limits,
     scan_replay_runtime_http_ceiling,
     scan_replay_selector,
+)
+from scan.capability_execution import (
+    ScanCapabilityContractError,
+    fit_prepared_scan_capability,
+    scan_budget_ledger_limits,
+    scan_capability_action_digest,
 )
 from scan.worker_dispatch import (
     execution_result_metadata,
@@ -9585,6 +9593,547 @@ def _scan_replay_receipt_reference(receipt: Mapping[str, Any]) -> dict[str, Any]
     }
 
 
+def _scan_capability_receipt_reference(receipt: Mapping[str, Any]) -> dict[str, Any]:
+    """Expose one bounded pointer while the complete receipt stays durable."""
+    return {
+        "receipt_id": receipt.get("receipt_id"),
+        "receipt_hash": receipt.get("receipt_hash"),
+        "status": receipt.get("status"),
+        "partial": bool(receipt.get("partial")),
+        "timed_out": bool(receipt.get("timed_out")),
+        "input_digest": receipt.get("input_digest"),
+        "budget_reservation_id": receipt.get("budget_reservation_id"),
+        "budget_reservation_state": receipt.get("budget_reservation_state"),
+        "budget_reserved": dict(receipt.get("budget_reserved") or {}),
+        "budget_consumed": dict(receipt.get("budget_consumed") or {}),
+        "observation_count": len(receipt.get("observations") or []),
+        "errors": list(receipt.get("errors") or [])[:20],
+    }
+
+
+def _scan_subdomain_summary_from_stored(
+    stored: Any,
+    *,
+    root_domain: str,
+    idempotent_redelivery: bool = False,
+) -> dict[str, Any]:
+    receipt = dict(stored.receipt or {})
+    receipt_status = str(receipt.get("status") or "failed").strip().lower()
+    status = {
+        "succeeded": "success",
+        "success": "success",
+        "partial": "partial",
+        "blocked": "blocked",
+        "cancelled": "cancelled",
+    }.get(receipt_status, "failed")
+    observations = [
+        dict(item)
+        for item in receipt.get("observations") or []
+        if isinstance(item, Mapping) and item.get("kind") == "subdomain"
+    ]
+    return {
+        "schema_version": "canonical-scan-subdomain-discovery/v1",
+        "enabled": True,
+        "status": status,
+        "root_domain": root_domain,
+        "observations": observations[:5000],
+        "observation_count": len(observations),
+        "observations_truncated": len(observations) > 5000,
+        "partial": bool(receipt.get("partial")),
+        "timed_out": bool(receipt.get("timed_out")),
+        "errors": list(receipt.get("errors") or [])[:20],
+        "budget_consumed": dict(stored.record.actual),
+        "receipt": _scan_capability_receipt_reference(receipt),
+        "durable_budget_settled": stored.record.terminal,
+        "idempotent_redelivery": bool(idempotent_redelivery),
+        "network_binding": "root_domain_target_binding",
+        "automatically_scanned_discovered_hosts": False,
+    }
+
+
+def _skipped_scan_subdomain_summary(reason: str) -> dict[str, Any]:
+    return {
+        "schema_version": "canonical-scan-subdomain-discovery/v1",
+        "enabled": False,
+        "status": "skipped",
+        "reason": reason,
+        "observations": [],
+        "observation_count": 0,
+        "partial": False,
+        "timed_out": False,
+        "errors": [],
+        "budget_consumed": {},
+        "durable_budget_settled": True,
+        "network_binding": "root_domain_target_binding",
+        "automatically_scanned_discovered_hosts": False,
+    }
+
+
+async def _reuse_placed_scan_subdomain_discovery(
+    *,
+    parent_scan_id: str,
+    source_scan_id: str,
+    expected_summary: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Reuse a placed discovery receipt without repeating target traffic."""
+    try:
+        parent_uuid = uuid.UUID(str(parent_scan_id))
+        source_uuid = uuid.UUID(str(source_scan_id))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise ScanCapabilityContractError(
+            "placed subdomain discovery identity is invalid"
+        ) from exc
+    receipt_ref = (
+        dict(expected_summary.get("receipt") or {})
+        if isinstance(expected_summary.get("receipt"), Mapping) else {}
+    )
+    reservation_id = str(
+        receipt_ref.get("budget_reservation_id") or ""
+    ).strip()
+    receipt_hash = str(receipt_ref.get("receipt_hash") or "").strip().lower()
+    if not reservation_id or not re.fullmatch(r"[0-9a-f]{64}", receipt_hash):
+        raise ScanCapabilityContractError(
+            "placed subdomain discovery has no durable receipt"
+        )
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT status, result
+            FROM scans
+            WHERE id=$1 AND parent_scan_id=$2 AND scan_role=$3
+              AND status IN ('completed','failed')
+            """,
+            source_uuid,
+            parent_uuid,
+            parallel_scan.PARALLEL_DISCOVERY_ROLE,
+        )
+        if not row:
+            raise ScanCapabilityContractError(
+                "placed subdomain discovery is unavailable"
+            )
+        source_result = _as_report_dict(row.get("result")) or {}
+        durable_summary = source_result.get("subdomain_discovery")
+        if (
+            not isinstance(durable_summary, Mapping)
+            or dict(durable_summary) != dict(expected_summary)
+        ):
+            raise ScanCapabilityContractError(
+                "placed subdomain discovery summary changed before reuse"
+            )
+        stored = await PostgresBudgetReservationStore().load(
+            conn, reservation_id, for_update=False,
+        )
+    if (
+        stored is None
+        or stored.record.owner_kind != "scan"
+        or stored.record.owner_id != str(source_uuid)
+        or stored.record.capability_name != "subdomains.discover"
+        or not stored.record.terminal
+        or not stored.receipt
+        or str(stored.receipt.get("receipt_hash") or "").lower() != receipt_hash
+        or str(stored.receipt.get("receipt_id") or "")
+        != str(receipt_ref.get("receipt_id") or "")
+        or str(stored.receipt.get("budget_reservation_state") or "")
+        != stored.record.status
+    ):
+        raise ScanCapabilityContractError(
+            "placed subdomain discovery receipt is not trustworthy"
+        )
+    reused = dict(expected_summary)
+    reused["idempotent_redelivery"] = True
+    reused["reused_from_placed_discovery"] = True
+    reused["source_scan_id"] = str(source_uuid)
+    return reused
+
+
+async def _execute_scan_subdomain_discovery(
+    options: Mapping[str, Any],
+    scan_id: str,
+    *,
+    job_id: str,
+) -> dict[str, Any]:
+    """Run policy-enabled Scan subdomain discovery through the canonical executor."""
+    try:
+        scan_uuid = uuid.UUID(str(scan_id))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise ScanCapabilityContractError(
+            "Scan subdomain discovery owner ID is invalid"
+        ) from exc
+
+    _normalized, admission = prepare_worker_dispatch(options)
+    if not admission.canonical or admission.plan is None:
+        return _skipped_scan_subdomain_summary("legacy_scan")
+    execution = build_native_scan_execution(admission.plan, options)
+    policy = admission.plan.policy
+    if not policy.subdomain_discovery:
+        return _skipped_scan_subdomain_summary("policy_disabled")
+    if (
+        execution.shard_authority is not None
+        and not execution.shard_authority.parallel_discovery
+    ):
+        return _skipped_scan_subdomain_summary("assigned_endpoint_shard")
+    if execution.zero_rediscovery and not execution.discovery_manifest_only:
+        return _skipped_scan_subdomain_summary("rediscovery_disabled")
+    placed_summary = options.get("canonical_subdomain_discovery")
+    placed_source_scan_id = str(
+        options.get("canonical_subdomain_discovery_source_scan_id") or ""
+    ).strip()
+    if isinstance(placed_summary, Mapping) or placed_source_scan_id:
+        if not isinstance(placed_summary, Mapping) or not placed_source_scan_id:
+            raise ScanCapabilityContractError(
+                "placed subdomain discovery reference is incomplete"
+            )
+        return await _reuse_placed_scan_subdomain_discovery(
+            parent_scan_id=scan_id,
+            source_scan_id=placed_source_scan_id,
+            expected_summary=placed_summary,
+        )
+
+    target = execution.target_binding
+    root_domain = str(
+        target.allowed_root_domains[0]
+        if target.allowed_root_domains else target.canonical_host or ""
+    ).lower().rstrip(".")
+    adapter = network_capability_adapter("subdomains.discover")
+    prepared = adapter.prepare(
+        target=target,
+        args={"root_domain": root_domain},
+        policy=policy,
+    )
+    effective_budget = execution.payload()["execution_budget"]
+    limits = scan_budget_ledger_limits(
+        effective_budget,
+        allow_zero=execution.shard_authority is not None,
+    )
+    prepared = fit_prepared_scan_capability(
+        prepared, ledger_limits=limits,
+    )
+    action_digest = scan_capability_action_digest(
+        scan_id=scan_id,
+        execution_plan_digest=admission.plan.digest,
+        target=target,
+        prepared=prepared,
+    )
+    action_id = "discover_surface.subdomains"
+    worker_id = _worker_runtime_identity() or f"worker:{job_id[:8]}"
+    requested_budget = dict(prepared.estimated_budget)
+    lease_seconds = max(
+        90, min(3_600, int(requested_budget["tool_wall_seconds"]) + 30)
+    )
+    reservation_id = str(uuid.uuid4())
+    requested = DurableBudgetReservation.request(
+        owner_kind="scan",
+        owner_id=scan_id,
+        capability_name=prepared.capability_name,
+        amounts=requested_budget,
+        reservation_id=reservation_id,
+    )
+    store = PostgresBudgetReservationStore()
+    persisted = None
+
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            locked = await conn.fetchrow(
+                "SELECT status, policy_json, budget_json, budget_used_json "
+                "FROM scans WHERE id=$1 FOR UPDATE",
+                scan_uuid,
+            )
+            if not locked or str(locked["status"] or "") != "running":
+                raise ScanCapabilityContractError(
+                    "Scan stopped before subdomain discovery admission"
+                )
+            canonical_plan = admission.plan.canonical_dict()
+            if (
+                _worker_json_object(locked["policy_json"])
+                != canonical_plan["policy"]
+                or _worker_json_object(locked["budget_json"])
+                != canonical_plan["budget"]
+            ):
+                raise ScanCapabilityContractError(
+                    "persisted Scan authority changed before subdomain discovery"
+                )
+            stored = await store.create_requested(
+                conn,
+                action_id=action_id,
+                action_digest=action_digest,
+                record=requested,
+            )
+            if stored.record.terminal:
+                return _scan_subdomain_summary_from_stored(
+                    stored,
+                    root_domain=root_domain,
+                    idempotent_redelivery=True,
+                )
+            if stored.record.status != "requested":
+                raise ReservationConflict(
+                    "Scan subdomain discovery already has an active reservation"
+                )
+            current_used = _worker_json_object(locked["budget_used_json"])
+            current_ledger = {
+                name: int(current_used.get(name) or 0) for name in limits
+            }
+            try:
+                reserved, held_ledger = stored.record.reserve_against(
+                    limits=limits,
+                    consumed=current_ledger,
+                    lease_seconds=lease_seconds,
+                )
+            except BudgetExceeded as exc:
+                finished_at = datetime.now(timezone.utc)
+                zero_actual = {name: 0 for name in requested_budget}
+                blocked_receipt = CapabilityReceipt(
+                    receipt_id=str(uuid.uuid4()),
+                    capability_name=prepared.capability_name,
+                    adapter_name=prepared.adapter_name,
+                    adapter_version=prepared.adapter_version,
+                    target_id=target.target_id,
+                    scan_id=scan_id,
+                    worker_id=worker_id,
+                    scope_receipt_id=target.scope_receipt_id,
+                    approval_receipt_id=policy.approval_receipt_id,
+                    status="blocked",
+                    input_digest=action_digest,
+                    parser_version=prepared.parser_version,
+                    started_at=finished_at.isoformat(),
+                    finished_at=finished_at.isoformat(),
+                    redacted_execution=dict(prepared.redacted_execution),
+                    budget_reservation_id=stored.record.reservation_id,
+                    budget_reservation_state="failed",
+                    budget_reserved=requested_budget,
+                    budget_consumed=zero_actual,
+                    observations=(),
+                    errors=(
+                        "budget_exhausted:"
+                        + next(iter(exc.shortages), "unknown"),
+                    ),
+                )
+                failed = stored.record.fail(
+                    reason="budget_exhausted_before_execution",
+                    actual=zero_actual,
+                    execution_receipt_hash=blocked_receipt.receipt_hash,
+                    execution_may_have_started=False,
+                    now=finished_at,
+                )
+                persisted = await store.persist_terminal(
+                    conn,
+                    previous=stored,
+                    terminal=failed,
+                    ledger_after_settlement=current_ledger,
+                    receipt=blocked_receipt,
+                )
+                return _scan_subdomain_summary_from_stored(
+                    persisted, root_domain=root_domain,
+                )
+            persisted = await store.persist_transition(
+                conn,
+                previous=stored,
+                current=reserved,
+                ledger_after_hold=held_ledger,
+            )
+            current_used.update(held_ledger)
+            await conn.execute(
+                "UPDATE scans SET budget_used_json=$2 WHERE id=$1",
+                scan_uuid,
+                json.dumps(current_used),
+            )
+
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            owner = await conn.fetchrow(
+                "SELECT status FROM scans WHERE id=$1 FOR UPDATE", scan_uuid,
+            )
+            if not owner or str(owner["status"] or "") != "running":
+                raise ScanCapabilityContractError(
+                    "Scan stopped before subdomain discovery dispatch"
+                )
+            latest = await store.load(
+                conn, persisted.record.reservation_id, for_update=True,
+            )
+            if (
+                latest is None
+                or latest.record.state_digest != persisted.record.state_digest
+                or latest.action_digest != action_digest
+            ):
+                raise ReservationConflict(
+                    "Scan subdomain reservation changed before dispatch"
+                )
+            running = latest.record.start(
+                worker_id=worker_id, lease_seconds=lease_seconds,
+            )
+            persisted = await store.persist_transition(
+                conn, previous=latest, current=running,
+            )
+
+    async def heartbeat_reservation() -> None:
+        nonlocal persisted
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                owner = await conn.fetchrow(
+                    "SELECT status FROM scans WHERE id=$1 FOR UPDATE", scan_uuid,
+                )
+                if not owner or str(owner["status"] or "") != "running":
+                    raise ReservationStoreError(
+                        "Scan stopped during subdomain discovery"
+                    )
+                latest = await store.load(
+                    conn, persisted.record.reservation_id, for_update=True,
+                )
+                if (
+                    latest is None
+                    or latest.record.state_digest != persisted.record.state_digest
+                    or latest.record.worker_id != worker_id
+                ):
+                    raise ReservationConflict(
+                        "Scan subdomain reservation changed before heartbeat"
+                    )
+                heartbeat = latest.record.heartbeat(
+                    worker_id=worker_id, lease_seconds=lease_seconds,
+                )
+                persisted = await store.persist_transition(
+                    conn, previous=latest, current=heartbeat,
+                )
+
+    started_at = persisted.record.started_at or datetime.now(timezone.utc)
+    execution_result = await CapabilityExecutor().execute(
+        CapabilityExecutionContext(
+            specification=agent_tools.CAPABILITY_REGISTRY.require(
+                "subdomains.discover"
+            ),
+            target=target,
+            requested_budget=persisted.record.requested,
+        ),
+        NetworkExecutionAdapter(
+            prepared=prepared,
+            parser=adapter,
+            command_runner=run_streaming,
+            max_stdout_bytes=_AGENT_TOOL_OUTPUT_BYTES,
+            max_stderr_bytes=min(_AGENT_TOOL_OUTPUT_BYTES, 20_000),
+        ),
+        heartbeat=heartbeat_reservation,
+        cancelled=lambda: _scan_cancel_requested(scan_id),
+    )
+    action_status = (
+        "completed" if execution_result.status == "success"
+        else "partial" if execution_result.status == "partial"
+        else "cancelled" if execution_result.status == "cancelled"
+        else "blocked" if execution_result.status == "blocked"
+        else "failed"
+    )
+    observations = [dict(item) for item in execution_result.observations]
+    errors = [str(item) for item in execution_result.errors]
+    finished_at = datetime.now(timezone.utc)
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            locked = await conn.fetchrow(
+                "SELECT budget_used_json FROM scans WHERE id=$1 FOR UPDATE",
+                scan_uuid,
+            )
+            if not locked:
+                raise ReservationStoreError(
+                    "Scan disappeared during subdomain discovery settlement"
+                )
+            latest = await store.load(
+                conn, persisted.record.reservation_id, for_update=True,
+            )
+            if (
+                latest is None
+                or latest.record.state_digest != persisted.record.state_digest
+                or latest.record.status != "running"
+                or latest.record.worker_id != worker_id
+            ):
+                raise ReservationConflict(
+                    "Scan subdomain reservation changed before settlement"
+                )
+            terminal, receipt = terminalize_capability_reservation(
+                latest.record,
+                action_digest=action_digest,
+                capability_name=prepared.capability_name,
+                adapter_name=prepared.adapter_name,
+                adapter_version=prepared.adapter_version,
+                parser_version=execution_result.parser_version,
+                target_id=target.target_id,
+                target_kind=target.target_kind,
+                capability_input=execution_result.redacted_execution,
+                action_status=action_status,
+                actual_budget=execution_result.actual_budget,
+                worker_id=worker_id,
+                started_at=started_at.isoformat(),
+                finished_at=finished_at.isoformat(),
+                receipt_id=str(uuid.uuid4()),
+                scope_receipt_id=target.scope_receipt_id,
+                approval_receipt_id=policy.approval_receipt_id,
+                result={
+                    "ok": execution_result.status == "success",
+                    "error": errors[0] if errors else None,
+                    "receipt_errors": errors,
+                    "timed_out": execution_result.timed_out,
+                    "execution_started": execution_result.execution_started,
+                    "receipt_observations": observations[:5000],
+                },
+            )
+            current_used = _worker_json_object(locked["budget_used_json"])
+            current_ledger = {
+                name: int(current_used.get(name) or 0) for name in limits
+            }
+            reconciled = terminal.reconcile_consumed(current_ledger)
+            persisted = await store.persist_terminal(
+                conn,
+                previous=latest,
+                terminal=terminal,
+                ledger_after_settlement=reconciled,
+                receipt=receipt,
+            )
+            current_used.update(reconciled)
+            await conn.execute(
+                "UPDATE scans SET budget_used_json=$2 WHERE id=$1",
+                scan_uuid,
+                json.dumps(current_used),
+            )
+    return _scan_subdomain_summary_from_stored(
+        persisted, root_domain=root_domain,
+    )
+
+
+def _attach_scan_subdomain_summary(
+    result: dict[str, Any], summary: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    if not isinstance(summary, Mapping):
+        return result
+    public_summary = dict(summary)
+    result["subdomain_discovery"] = public_summary
+    metadata = result.setdefault("scan_metadata", {})
+    if isinstance(metadata, dict):
+        metadata["subdomain_discovery"] = {
+            "status": public_summary.get("status"),
+            "observation_count": int(
+                public_summary.get("observation_count") or 0
+            ),
+            "partial": bool(public_summary.get("partial")),
+            "timed_out": bool(public_summary.get("timed_out")),
+            "budget_consumed": dict(
+                public_summary.get("budget_consumed") or {}
+            ),
+            "durable_budget_settled": bool(
+                public_summary.get("durable_budget_settled")
+            ),
+        }
+    status = str(public_summary.get("status") or "").strip().lower()
+    if status in {"blocked", "failed", "partial"}:
+        coverage = (
+            dict(result.get("coverage") or {})
+            if isinstance(result.get("coverage"), Mapping) else {}
+        )
+        if str(coverage.get("status") or "") not in {"failed", "cancelled"}:
+            coverage["status"] = "partial"
+        reasons = [str(item) for item in coverage.get("reasons") or []]
+        reason = f"subdomain_discovery_{status}"
+        if reason not in reasons:
+            reasons.append(reason)
+        coverage["reasons"] = reasons
+        result["coverage"] = coverage
+    return result
+
+
 async def _bind_scan_replay_primary_credential(
     conn: Any,
     *,
@@ -10478,6 +11027,7 @@ async def process_scan_job(job_data: dict):
     heartbeat_thread.start()
 
     collection_replay_summary: dict[str, Any] | None = None
+    subdomain_discovery_summary: dict[str, Any] | None = None
     try:
         try:
             if job_data.get("_broker_result_id"):
@@ -10490,6 +11040,14 @@ async def process_scan_job(job_data: dict):
                     and not ai_target_id
                     and run_kind not in AI_GATE_RUN_KINDS | MODEL_INTAKE_RUN_KINDS
                 ):
+                    if isinstance(options.get("_canonical_target_binding"), Mapping):
+                        subdomain_discovery_summary = (
+                            await _execute_scan_subdomain_discovery(
+                                options, scan_id, job_id=job_id,
+                            )
+                        )
+                        if subdomain_discovery_summary.get("status") == "cancelled":
+                            raise ValueError("Cancelled by user")
                     collection_replay_summary = await _execute_scan_request_collections(
                         options,
                         scan_id,
@@ -10569,6 +11127,9 @@ async def process_scan_job(job_data: dict):
 
         if collection_replay_summary is not None:
             result["request_collection_replay"] = collection_replay_summary
+        result = _attach_scan_subdomain_summary(
+            result, subdomain_discovery_summary,
+        )
         result['job_id'] = job_id
         result['scan_id'] = scan_id
         result = _apply_runtime_scope_guard_to_result(result, options)
@@ -11848,15 +12409,27 @@ async def process_scan_plan_job(job_data: dict):
         options.get('shard_strategy') or 'auto',
     )
     plan_stage = str(job_data.get('plan_stage') or 'start')
+    canonical_subdomain_discovery = bool(
+        canonical_parent_job is not None
+        and canonical_parent_job.execution_plan.policy.subdomain_discovery
+    )
+    needs_placed_discovery = bool(
+        (
+            requested_strategy in {'coverage', 'coverage_family'}
+            and not options.get('custom_endpoints')
+        )
+        or canonical_subdomain_discovery
+    )
 
-    # Coverage discovery is executable target traffic, so it must honor the
-    # user's placement. Create one ordinary shard job first; broker nodes can run
-    # it without database access. Its durable result then wakes a local-only
-    # continuation that performs pure planning and fan-out.
+    # Discovery is executable target traffic, so it must honor the user's
+    # placement. Create one ordinary shard job first; its durable result then
+    # wakes a local-only continuation that performs pure planning and fan-out.
+    # Canonical subdomain discovery uses this stage even when endpoint planning
+    # already has a custom worklist, preventing every endpoint shard from running
+    # the same root-domain capability.
     if (
-        requested_strategy in {'coverage', 'coverage_family'}
+        needs_placed_discovery
         and plan_stage == 'start'
-        and not options.get('custom_endpoints')
     ):
         async with db_pool.acquire() as conn:
             existing_discovery = await conn.fetchrow(
@@ -12028,26 +12601,61 @@ async def process_scan_plan_job(job_data: dict):
     harvest_meta: dict[str, Any] | None = None
     discovery_degraded_reason: str | None = None
     precreated_campaign_id: str | None = None
+    discovery_scan_id = str(job_data.get('discovery_scan_id') or '').strip()
+    discovery = None
+    recon_result: dict[str, Any] = {}
+    placed_subdomain_summary: dict[str, Any] | None = None
+    if discovery_scan_id:
+        async with db_pool.acquire() as conn:
+            discovery = await conn.fetchrow(
+                """
+                SELECT id, status, result, error_message
+                FROM scans
+                WHERE id=$1 AND parent_scan_id=$2 AND scan_role=$3
+                """,
+                uuid.UUID(discovery_scan_id),
+                uuid.UUID(parent_id),
+                parallel_scan.PARALLEL_DISCOVERY_ROLE,
+            )
+        if not discovery or str(discovery.get('status') or '') not in {
+            'completed', 'failed'
+        }:
+            print(
+                f"[{parent_id[:8]}] discovery continuation arrived before terminal result",
+                flush=True,
+            )
+            return
+        recon_result = _as_report_dict(discovery.get('result')) or {}
+        raw_subdomain_summary = recon_result.get('subdomain_discovery')
+        if isinstance(raw_subdomain_summary, Mapping):
+            placed_subdomain_summary = dict(raw_subdomain_summary)
+        elif canonical_subdomain_discovery:
+            placed_subdomain_summary = {
+                "schema_version": "canonical-scan-subdomain-discovery/v1",
+                "enabled": True,
+                "status": "failed",
+                "root_domain": (
+                    canonical_parent_job.target.allowed_root_domains[0]
+                    if canonical_parent_job.target.allowed_root_domains else None
+                ),
+                "observations": [],
+                "observation_count": 0,
+                "partial": False,
+                "timed_out": False,
+                "errors": [str(
+                    discovery.get('error_message')
+                    or "placed discovery returned no canonical subdomain receipt"
+                )[:500]],
+                "budget_consumed": {},
+                "durable_budget_settled": False,
+                "network_binding": "root_domain_target_binding",
+                "automatically_scanned_discovered_hosts": False,
+            }
     if requested_strategy in {'coverage', 'coverage_family'}:
         # The placed discovery shard already executed target traffic. This
         # continuation only reads its durable result and plans self-contained
         # endpoint shards on the control plane.
-        discovery_scan_id = str(job_data.get('discovery_scan_id') or '').strip()
         if discovery_scan_id:
-            async with db_pool.acquire() as conn:
-                discovery = await conn.fetchrow(
-                    """
-                    SELECT id, status, result, error_message
-                    FROM scans
-                    WHERE id=$1 AND parent_scan_id=$2 AND scan_role=$3
-                    """,
-                    uuid.UUID(discovery_scan_id),
-                    uuid.UUID(parent_id),
-                    parallel_scan.PARALLEL_DISCOVERY_ROLE,
-                )
-            if not discovery or str(discovery.get('status') or '') not in {'completed', 'failed'}:
-                print(f"[{parent_id[:8]}] discovery continuation arrived before terminal result", flush=True)
-                return
             discovery_status = str(discovery.get('status') or '')
             if discovery_status == 'failed' and (
                 str(options.get('scan_generation') or 'legacy') != 'v2' or not target_url
@@ -12089,7 +12697,6 @@ async def process_scan_plan_job(job_data: dict):
                 r.expire(f"job:{parent_job_id}", 86400)
                 print(f"[{parent_id[:8]}] {parent_error}", flush=True)
                 return
-            recon_result = _as_report_dict(discovery.get('result')) or {}
             if discovery_status == 'failed':
                 # A failed producer may still have durable, trustworthy partial output. Harvest it
                 # and continue; coverage truth is reported separately from the parent run status.
@@ -12190,6 +12797,13 @@ async def process_scan_plan_job(job_data: dict):
             single_opts = _canonicalize_shard_options(
                 canonical_parent_job, single_opts,
             )
+        if placed_subdomain_summary is not None:
+            single_opts['canonical_subdomain_discovery'] = (
+                placed_subdomain_summary
+            )
+            single_opts['canonical_subdomain_discovery_source_scan_id'] = (
+                discovery_scan_id
+            )
         async with db_pool.acquire() as conn:
             await conn.execute(
                 "UPDATE scans SET scan_role = 'standalone', options = $1 WHERE id = $2",
@@ -12224,11 +12838,35 @@ async def process_scan_plan_job(job_data: dict):
     # resolved strategy on the parent options so the merge can report it.
     parent_options = dict(options)
     parent_options['parallel_strategy'] = plan.strategy
+    if placed_subdomain_summary is not None:
+        parent_options['canonical_subdomain_discovery'] = placed_subdomain_summary
+        parent_options['canonical_subdomain_discovery_source_scan_id'] = (
+            discovery_scan_id
+        )
+        if str(placed_subdomain_summary.get('status') or '') in {
+            'blocked', 'failed', 'partial'
+        }:
+            parent_options['coverage_status'] = 'partial'
+            coverage_reasons = [
+                str(item) for item in parent_options.get('coverage_reasons') or []
+            ]
+            subdomain_reason = (
+                "subdomain_discovery_"
+                + str(placed_subdomain_summary.get('status') or 'failed')
+            )
+            if subdomain_reason not in coverage_reasons:
+                coverage_reasons.append(subdomain_reason)
+            parent_options['coverage_reasons'] = coverage_reasons
     if plan.strategy in {'coverage', 'coverage_family'}:
         parent_options['coverage_allocation'] = coverage_allocation
         if discovery_degraded_reason:
             parent_options['coverage_status'] = 'partial'
-            parent_options['coverage_reasons'] = [discovery_degraded_reason]
+            coverage_reasons = [
+                str(item) for item in parent_options.get('coverage_reasons') or []
+            ]
+            if discovery_degraded_reason not in coverage_reasons:
+                coverage_reasons.append(discovery_degraded_reason)
+            parent_options['coverage_reasons'] = coverage_reasons
         if harvest_meta is not None:
             # Surface the worklist cap so "Full Coverage" never reports ~100% over a
             # silently truncated surface (endpoints beyond the cap were discovered
@@ -12577,11 +13215,23 @@ async def process_scan_shard_job(job_data: dict):
         name=f"heartbeat-{job_id[:8]}", daemon=True,
     )
     heartbeat_thread.start()
+    subdomain_discovery_summary: dict[str, Any] | None = None
     try:
         try:
             if job_data.get("_broker_result_id"):
                 result = await _load_broker_result(job_data, scan_id)
             else:
+                if (
+                    parallel_discovery
+                    and isinstance(options.get("_canonical_target_binding"), Mapping)
+                ):
+                    subdomain_discovery_summary = (
+                        await _execute_scan_subdomain_discovery(
+                            options, scan_id, job_id=job_id,
+                        )
+                    )
+                    if subdomain_discovery_summary.get("status") == "cancelled":
+                        raise ValueError("Cancelled by user")
                 options = await _hydrate_generic_scan_credentials(options, scan_id)
                 options = await _hydrate_managed_scan_credentials(options, scan_id)
                 result = await run_scan(target, options, scan_id=scan_id, job_id=job_id)
@@ -12593,6 +13243,9 @@ async def process_scan_shard_job(job_data: dict):
         result['job_id'] = job_id
         result['scan_id'] = scan_id
         result['shard_label'] = label
+        result = _attach_scan_subdomain_summary(
+            result, subdomain_discovery_summary,
+        )
         score = result.get('result', {}).get('score')
         grade = result.get('result', {}).get('grade')
         findings = result.get('findings', [])
@@ -13034,6 +13687,17 @@ async def process_scan_merge_job(job_data: dict):
         agg_cov['aggregated_from_shards'] = coverage_merge.get('aggregated_from_shards', 0)
         agg_cov['coverage_reports_from_shards'] = coverage_merge.get('coverage_reports_from_shards', 0)
         merged['smart_coverage'] = agg_cov  # top-level report section
+
+    merged_subdomain_discovery = parent_options.get(
+        'canonical_subdomain_discovery'
+    )
+    merged = _attach_scan_subdomain_summary(
+        merged,
+        (
+            merged_subdomain_discovery
+            if isinstance(merged_subdomain_discovery, Mapping) else None
+        ),
+    )
 
     if _mark_parallel_parent_degraded(
         merged,

@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime
 from typing import Any, Mapping
 
 try:
     from runtime.budget_reservations import DurableBudgetReservation
+    from runtime.capability_settlement import terminalize_capability_reservation
     from runtime.receipts import CapabilityReceipt
 except ModuleNotFoundError:  # package import in host-side tests
     from ..runtime.budget_reservations import DurableBudgetReservation
+    from ..runtime.capability_settlement import terminalize_capability_reservation
     from ..runtime.receipts import CapabilityReceipt
 
 
@@ -127,75 +128,26 @@ def terminalize_hunt_capability(
     result: Mapping[str, Any] | None = None,
 ) -> tuple[DurableBudgetReservation, CapabilityReceipt]:
     """Build one matching terminal reservation and content-addressed receipt."""
-    status = str(action_status or "failed").strip().lower()
-    successful = status in {"completed", "partial"}
-    reservation_state = "committed" if successful else "failed"
-    receipt_status = {
-        "completed": "succeeded",
-        "partial": "partial",
-        "blocked": "blocked",
-        "cancelled": "cancelled",
-    }.get(status, "failed")
-    result_item = dict(result or {})
-    error = str(result_item.get("error") or "").strip()
-    receipt_observations = result_item.get("receipt_observations")
-    if isinstance(receipt_observations, (list, tuple)):
-        observations = tuple(
-            dict(item) for item in receipt_observations if isinstance(item, Mapping)
-        )
-    else:
-        observations = ({
-            "kind": "hunt_capability_result",
-            "status": status,
-            "ok": bool(result_item.get("ok")),
-        },)
-    terminal_at = datetime.fromisoformat(str(finished_at).replace("Z", "+00:00"))
-    receipt = CapabilityReceipt(
-        receipt_id=str(receipt_id),
-        capability_name=str(capability_name),
-        adapter_name=str(adapter_name),
-        adapter_version=str(adapter_version),
-        target_id=str(target_id),
-        hunt_id=running.owner_id,
-        worker_id=str(worker_id),
-        scope_receipt_id=str(scope_receipt_id or "") or None,
-        approval_receipt_id=str(approval_receipt_id or "") or None,
-        status=receipt_status,
-        partial=status == "partial",
-        timed_out=bool(status == "partial" and result_item.get("timed_out")),
-        input_digest=str(action_digest),
-        parser_version=str(parser_version or adapter_version),
+    if running.owner_kind != "hunt":
+        raise ValueError("Hunt capability settlement requires a Hunt reservation")
+    return terminalize_capability_reservation(
+        running,
+        action_digest=action_digest,
+        capability_name=capability_name,
+        adapter_name=adapter_name,
+        adapter_version=adapter_version,
+        target_id=target_id,
+        target_kind=target_kind,
+        capability_input=capability_input,
+        action_status=action_status,
+        actual_budget=actual_budget,
+        worker_id=worker_id,
         started_at=started_at,
         finished_at=finished_at,
-        redacted_execution={
-            "target_kind": str(target_kind),
-            "capability": str(capability_name),
-            "input": dict(capability_input or {}),
-        },
-        budget_reservation_id=running.reservation_id,
-        budget_reservation_state=reservation_state,
-        budget_reserved=running.requested,
-        budget_consumed=dict(actual_budget or {}),
-        observations=observations,
-        errors=(error,) if error else (),
+        receipt_id=receipt_id,
+        parser_version=parser_version,
+        scope_receipt_id=scope_receipt_id,
+        approval_receipt_id=approval_receipt_id,
+        result=result,
+        fallback_observation_kind="hunt_capability_result",
     )
-    if successful:
-        terminal = running.commit(
-            actual=actual_budget,
-            execution_receipt_hash=receipt.receipt_hash,
-            now=terminal_at,
-            worker_id=worker_id,
-        )
-    else:
-        terminal = running.fail(
-            reason=(
-                "capability_blocked" if status == "blocked"
-                else "capability_cancelled" if status == "cancelled"
-                else "capability_failed"
-            ),
-            actual=actual_budget,
-            execution_receipt_hash=receipt.receipt_hash,
-            execution_may_have_started=True,
-            now=terminal_at,
-        )
-    return terminal, receipt

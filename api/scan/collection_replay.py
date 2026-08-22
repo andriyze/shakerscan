@@ -22,6 +22,8 @@ except ModuleNotFoundError:  # package import in host-side tests
     from scanner.scanner_tools.request_collections import RequestSelector
     from scanner.scanner_tools.request_replay import ReplayAuthorization
 
+from .capability_execution import scan_budget_ledger_limits
+
 
 EXECUTABLE_REPLAY_POLICIES = frozenset({"safe_reads", "confirmed_active"})
 
@@ -124,25 +126,7 @@ def scan_replay_selector(
 
 def scan_replay_ledger_limits(budget: Mapping[str, Any]) -> dict[str, int]:
     """Map the canonical Scan budget into shared reservation dimensions."""
-    http = _positive_integer(
-        budget.get("max_http_requests"), name="Scan max_http_requests"
-    )
-    return {
-        "http_requests": http,
-        # ScanBudget has no independent write count yet.  Permission is enforced by
-        # policy; this conservative ceiling still makes writes a separately settled
-        # reservation dimension without allowing them to exceed all HTTP requests.
-        "state_changing_requests": http,
-        "browser_actions": _positive_integer(
-            budget.get("max_browser_actions"), name="Scan max_browser_actions"
-        ),
-        "tcp_ports_attempted": _positive_integer(
-            budget.get("max_tcp_ports"), name="Scan max_tcp_ports"
-        ),
-        "tool_wall_seconds": _positive_integer(
-            budget.get("max_tool_wall_seconds"), name="Scan max_tool_wall_seconds"
-        ),
-    }
+    return scan_budget_ledger_limits(budget)
 
 
 def scan_replay_runtime_http_ceiling(
