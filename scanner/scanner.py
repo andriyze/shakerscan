@@ -3141,6 +3141,8 @@ def build_scanner_execution_plan(
     skip_global_checks: bool,
     focused_endpoints_only: bool,
     zero_rediscovery: bool,
+    include_families: tuple[str, ...] | list[str] = (),
+    exclude_families: tuple[str, ...] | list[str] = (),
 ) -> dict[str, Any]:
     """Build and validate the authoritative scanner-family execution plan."""
     if _check_registry is None or not callable(getattr(_check_registry, "scanner_execution_plan", None)):
@@ -3154,6 +3156,8 @@ def build_scanner_execution_plan(
         skip_global_checks=skip_global_checks,
         focused_endpoints_only=focused_endpoints_only,
         zero_rediscovery=zero_rediscovery,
+        include_families=include_families,
+        exclude_families=exclude_families,
     )
     return validate_scanner_execution_plan(plan)
 
@@ -4217,6 +4221,14 @@ async def build_report(target: str,
         skip_global_checks=skip_global_checks,
         focused_endpoints_only=bool(focused_endpoints_only or focused_manual_active_scope),
         zero_rediscovery=zero_rediscovery_scope,
+        include_families=(
+            canonical_scan_execution["execution_plan"]["policy"]["include_families"]
+            if canonical_scan_execution is not None else ()
+        ),
+        exclude_families=(
+            canonical_scan_execution["execution_plan"]["policy"]["exclude_families"]
+            if canonical_scan_execution is not None else ()
+        ),
     )
     active_dispatch_receipts: list[dict[str, Any]] = []
     discovery_budget = scan_budget

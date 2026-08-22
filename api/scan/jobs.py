@@ -16,6 +16,11 @@ from typing import Any, Iterable, Mapping, Sequence
 from uuid import uuid4
 
 try:
+    from check_registry import normalize_scan_policy_families
+except ModuleNotFoundError:
+    from ..check_registry import normalize_scan_policy_families
+
+try:
     from runtime.models import ScanBudget, ScanPolicy, TargetBinding
 except ModuleNotFoundError:  # package import through api.scan
     from ..runtime.models import ScanBudget, ScanPolicy, TargetBinding
@@ -279,7 +284,14 @@ def _families(value: Any, *, name: str) -> tuple[str, ...]:
         if item != raw or not _FAMILY_RE.fullmatch(item) or item in result:
             raise CanonicalScanJobError(f"{name} contains an invalid or duplicate family")
         result.append(item)
-    return tuple(result)
+    try:
+        return normalize_scan_policy_families(
+            result,
+            field=name,
+            require_canonical=True,
+        )
+    except ValueError as exc:
+        raise CanonicalScanJobError(str(exc)) from exc
 
 
 def _optional_receipt(value: Any, *, name: str) -> str | None:

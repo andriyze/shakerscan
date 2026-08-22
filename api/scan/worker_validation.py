@@ -7,6 +7,11 @@ import re
 from typing import Any, Mapping
 
 try:
+    from check_registry import normalize_scan_policy_families
+except ModuleNotFoundError:
+    from ..check_registry import normalize_scan_policy_families
+
+try:
     from runtime.models import ScanBudget, ScanPolicy
 except ModuleNotFoundError:
     from ..runtime.models import ScanBudget, ScanPolicy
@@ -92,7 +97,14 @@ def _families(value: Any, name: str) -> tuple[str, ...]:
         if item in result:
             raise WorkerScanContractError(f"{name} contains duplicate family identifiers")
         result.append(item)
-    return tuple(result)
+    try:
+        return normalize_scan_policy_families(
+            result,
+            field=name,
+            require_canonical=True,
+        )
+    except ValueError as exc:
+        raise WorkerScanContractError(str(exc)) from exc
 
 
 def _policy(value: Any) -> ScanPolicy:

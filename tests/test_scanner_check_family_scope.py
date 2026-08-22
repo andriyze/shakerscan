@@ -557,6 +557,33 @@ def test_scanner_execution_plan_is_registry_driven_for_focused_family():
     assert families["headers"]["enabled"] is True
 
 
+def test_scanner_execution_plan_applies_family_policy_to_real_dispatch_rows():
+    scope = scanner_mod.build_check_family_scope(
+        True,
+        active_xss=True,
+        active_sqli=True,
+    )
+    plan = scanner_mod.build_scanner_execution_plan(
+        scan_mode="canonical",
+        public_only=False,
+        quick_mode=False,
+        active_checks=True,
+        check_family_scope=scope,
+        skip_global_checks=False,
+        focused_endpoints_only=False,
+        zero_rediscovery=False,
+        include_families=("xss",),
+        exclude_families=("nuclei",),
+    )
+    families = {item["name"]: item for item in plan["families"]}
+
+    assert families["xss"]["enabled"] is True
+    assert families["sqli"]["enabled"] is False
+    assert families["sqli"]["reason"] == "policy_not_included"
+    assert families["nuclei"]["enabled"] is False
+    assert families["nuclei"]["reason"] == "policy_excluded"
+
+
 def test_scanner_execution_plan_records_zero_rediscovery_and_public_skips():
     scope = scanner_mod.build_check_family_scope(
         True,

@@ -150,6 +150,22 @@ def test_active_state_change_family_and_network_policy_fail_closed():
         resolve_scan_contract(policy={"active_testing": True, "network_discovery": True})
 
 
+def test_family_policy_uses_only_canonical_registry_names():
+    contract = resolve_scan_contract(policy={
+        "include_families": ["sql-injection", "XSS"],
+        "exclude_families": ["headers"],
+    })
+    assert contract.policy.include_families == ("sqli", "xss")
+    assert contract.policy.exclude_families == ("headers",)
+    assert resolve_scan_contract(
+        policy={"include_families": ["all"]},
+    ).policy.include_families == ()
+    with pytest.raises(ValueError, match="unknown family"):
+        resolve_scan_contract(policy={"include_families": ["legacy_magic"]})
+    with pytest.raises(ValueError, match="cannot contain all"):
+        resolve_scan_contract(policy={"exclude_families": ["all"]})
+
+
 def test_network_discovery_is_explicitly_authorized_and_exhaustive_is_compat_alias():
     network = resolve_scan_contract(
         policy={"active_testing": True, "network_discovery": True},

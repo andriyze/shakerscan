@@ -95,6 +95,13 @@ def test_canonical_scan_job_is_mode_free_and_round_trips():
     }
 
 
+def test_canonical_scan_job_rejects_non_registry_family_authority():
+    payload = _job().payload()
+    payload["execution_plan"]["policy"]["exclude_families"] = ["legacy_magic"]
+    with pytest.raises(CanonicalScanJobError, match="unknown family"):
+        CanonicalScanJob.from_payload(payload)
+
+
 def test_canonical_scan_job_queue_transport_allows_only_normalized_routing_metadata():
     job = _job()
     queued = job.queue_payload(placement={

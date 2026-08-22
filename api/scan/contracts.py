@@ -6,6 +6,11 @@ from dataclasses import asdict, dataclass, replace
 from typing import Any, Mapping
 
 try:
+    from check_registry import normalize_scan_policy_families
+except ModuleNotFoundError:
+    from ..check_registry import normalize_scan_policy_families
+
+try:
     from runtime.models import ScanBudget, ScanPolicy
 except ModuleNotFoundError:  # package import in host-side tests
     from ..runtime.models import ScanBudget, ScanPolicy
@@ -194,16 +199,18 @@ def resolve_scan_contract(
     active_testing = bool(
         active_testing if translation is not None else policy_data.get("active_testing", False)
     )
-    include = tuple(dict.fromkeys(
-        str(item).strip().lower() for item in (
-            policy_data.get("include_families") or (advanced or {}).get("include_families") or []
-        ) if str(item).strip()
-    ))
-    exclude = tuple(dict.fromkeys(
-        str(item).strip().lower() for item in (
-            policy_data.get("exclude_families") or (advanced or {}).get("exclude_families") or []
-        ) if str(item).strip()
-    ))
+    include = normalize_scan_policy_families(
+        policy_data.get("include_families")
+        or (advanced or {}).get("include_families")
+        or [],
+        field="include_families",
+    )
+    exclude = normalize_scan_policy_families(
+        policy_data.get("exclude_families")
+        or (advanced or {}).get("exclude_families")
+        or [],
+        field="exclude_families",
+    )
     if set(include) & set(exclude):
         raise ValueError("include_families and exclude_families must not overlap")
     resolved_policy = ScanPolicy(

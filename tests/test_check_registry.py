@@ -215,6 +215,28 @@ def test_scanner_execution_plan_honors_registry_policy_independently(monkeypatch
     assert jwt["blocked_by"] == ["registry_policy_disabled"]
 
 
+def test_scanner_execution_plan_enforces_canonical_family_policy_at_dispatch():
+    plan = r.scanner_execution_plan(
+        scan_mode="canonical",
+        active_checks=True,
+        check_family_scope={"families": ["sqli", "xss"], "focused_family": None},
+        include_families=("sqli",),
+        exclude_families=("headers",),
+    )
+    families = {item["name"]: item for item in plan["families"]}
+
+    assert families["sqli"]["enabled"] is True
+    assert families["xss"]["enabled"] is False
+    assert families["xss"]["reason"] == "policy_not_included"
+    assert families["xss"]["blocked_by"] == ["family_policy_not_included"]
+    assert families["headers"]["enabled"] is False
+    assert families["headers"]["reason"] == "policy_excluded"
+    assert plan["family_policy"] == {
+        "include_families": ["sqli"],
+        "exclude_families": ["headers"],
+    }
+
+
 def test_scanner_execution_plan_dispatches_registered_nuclei_only_when_profile_allows_it():
     standard = r.scanner_execution_plan(
         scan_mode="standard",

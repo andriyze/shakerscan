@@ -319,6 +319,7 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
 
 
 CHECK_REGISTRY_BY_NAME = {spec.name: spec for spec in CHECK_REGISTRY}
+SCAN_POLICY_FAMILY_NAMES = frozenset(CHECK_REGISTRY_BY_NAME)
 CHECK_FAMILY_ALIASES = {
     "all": "all",
     **{alias: spec.name for spec in CHECK_REGISTRY for alias in spec.aliases},
@@ -328,6 +329,44 @@ CHECK_FAMILY_ALIASES = {
     "command_injection": "rce",
     "command-injection": "rce",
 }
+
+
+def normalize_scan_policy_families(
+    values: Any,
+    *,
+    field: str,
+    require_canonical: bool = False,
+) -> tuple[str, ...]:
+    """Normalize the one registry-backed family policy vocabulary.
+
+    An empty include list means unrestricted. ``all`` is accepted only at the
+    public compatibility boundary and canonicalizes to that empty list; it is
+    never persisted as a second spelling of the same policy.
+    """
+    if field not in {"include_families", "exclude_families"}:
+        raise ValueError("family policy field is invalid")
+    if not isinstance(values, (list, tuple)) or len(values) > 100:
+        raise ValueError(f"{field} must be an array of at most 100 items")
+    result: list[str] = []
+    for raw in values:
+        if not isinstance(raw, str):
+            raise ValueError(f"{field} entries must be strings")
+        stripped = raw.strip().lower()
+        normalized = normalize_check_family(stripped, allow_all=True)
+        if normalized == "all":
+            if field == "exclude_families":
+                raise ValueError("exclude_families cannot contain all")
+            if require_canonical:
+                raise ValueError("include_families contains a non-canonical alias")
+            return ()
+        if normalized not in SCAN_POLICY_FAMILY_NAMES:
+            raise ValueError(f"{field} contains unknown family {stripped!r}")
+        if require_canonical and raw != normalized:
+            raise ValueError(f"{field} contains a non-canonical family identifier")
+        if normalized in result:
+            raise ValueError(f"{field} contains duplicate family {normalized!r}")
+        result.append(normalized)
+    return tuple(result)
 
 
 def scanner_active_family_contracts() -> list[dict[str, Any]]:
@@ -441,6 +480,8 @@ def scanner_execution_plan(
     skip_global_checks: bool = False,
     focused_endpoints_only: bool = False,
     zero_rediscovery: bool = False,
+    include_families: tuple[str, ...] | list[str] = (),
+    exclude_families: tuple[str, ...] | list[str] = (),
 ) -> dict[str, Any]:
     """Return the registry view of scanner-family execution for a scan.
 
@@ -454,6 +495,16 @@ def scanner_execution_plan(
     }
     if "all" in requested_families:
         requested_families.update(spec.name for spec in asm_focus_families())
+    policy_include = set(normalize_scan_policy_families(
+        include_families,
+        field="include_families",
+    ))
+    policy_exclude = set(normalize_scan_policy_families(
+        exclude_families,
+        field="exclude_families",
+    ))
+    if policy_include & policy_exclude:
+        raise ValueError("include_families and exclude_families must not overlap")
 
     families: list[dict[str, Any]] = []
     for spec in CHECK_REGISTRY:
@@ -508,6 +559,22 @@ def scanner_execution_plan(
             else:
                 reason = "registered_not_runnable"
 
+        policy_allowed = (
+            spec.name not in policy_exclude
+            and (not policy_include or spec.name in policy_include)
+        )
+        if not policy_allowed:
+            enabled = False
+            expected = False
+            if spec.name in policy_exclude:
+                reason = "policy_excluded"
+                policy_reason = "family_policy_excluded"
+            else:
+                reason = "policy_not_included"
+                policy_reason = "family_policy_not_included"
+            if requested:
+                blocked_by.append(policy_reason)
+
         dispatch_adapter = spec.dispatch_adapter or "none"
         if enabled and not spec.dispatch_adapter:
             dispatch_adapter = "adapter_pending"
@@ -530,6 +597,7 @@ def scanner_execution_plan(
                 "status": "enabled" if enabled else "skipped",
                 "reason": reason,
                 "requested": requested,
+                "policy_allowed": policy_allowed,
                 "blocked_by": blocked_by,
                 "dispatch_adapter": dispatch_adapter,
                 "requires_auth_states": spec.requires_auth_states,
@@ -577,6 +645,10 @@ def scanner_execution_plan(
         "registry_version": "check_family_v1",
         "scan_mode": scan_mode,
         "check_family_scope": dict(scope),
+        "family_policy": {
+            "include_families": sorted(policy_include),
+            "exclude_families": sorted(policy_exclude),
+        },
         "summary": {
             "family_count": len(families),
             "enabled_count": len(enabled_families),

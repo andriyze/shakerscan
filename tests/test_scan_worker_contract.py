@@ -91,6 +91,16 @@ def test_recomputed_oversized_plan_is_rejected_by_worker_ceiling():
         resolve_worker_scan_admission(changed)
 
 
+def test_worker_rejects_unknown_or_alias_family_in_persisted_plan():
+    options = _options()
+    for family in ("legacy_magic", "sql-injection"):
+        changed = copy.deepcopy(options)
+        changed["scan_execution_plan"]["policy"]["include_families"] = [family]
+        changed["scan_policy"]["include_families"] = [family]
+        with pytest.raises(WorkerScanContractError, match="family"):
+            resolve_worker_scan_admission(changed)
+
+
 def test_flattened_snapshots_and_compatibility_alias_must_match_plan():
     options = _options(active=True)
     changed = copy.deepcopy(options)
