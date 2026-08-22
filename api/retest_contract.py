@@ -17,6 +17,7 @@ from datetime import datetime
 from typing import Any
 
 from runtime.credential_store import PostgresCredentialProfileStore
+from runtime.credential_migration import migrate_legacy_web_credentials
 from runtime.reservation_store import PostgresBudgetReservationStore
 
 RETEST_QUEUE_SCHEMA_VERSION = 1
@@ -4348,6 +4349,11 @@ async def run_schema_migrations(pool) -> None:
                 END
                 $$
             """)
+
+            # Move legacy Web credential rows into the shared immutable profile store.
+            # The compatibility endpoints keep both representations synchronized until
+            # the old tables and callers are deleted later in the V2 migration.
+            await migrate_legacy_web_credentials(conn)
 
             # Canonical de-dupe prevention must be present before startup completes;
             # current ON CONFLICT insert paths rely on this unique index. Keep the

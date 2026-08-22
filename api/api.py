@@ -448,7 +448,12 @@ try:
         CredentialReferenceError,
         select_hunt_principal_reference,
     )
-    from runtime.credential_store import PostgresCredentialProfileStore
+    from runtime.credential_store import CredentialStoreError, PostgresCredentialProfileStore
+    from runtime.credential_migration import (
+        LegacyCredentialMigrationError,
+        sync_legacy_web_credential,
+        sync_legacy_web_credential_by_name,
+    )
     from runtime.models import ScanPolicy, TargetBinding
     from runtime.scan_credentials import (
         ScanCredentialError,
@@ -461,7 +466,12 @@ except ModuleNotFoundError:
         CredentialReferenceError,
         select_hunt_principal_reference,
     )
-    from api.runtime.credential_store import PostgresCredentialProfileStore
+    from api.runtime.credential_store import CredentialStoreError, PostgresCredentialProfileStore
+    from api.runtime.credential_migration import (
+        LegacyCredentialMigrationError,
+        sync_legacy_web_credential,
+        sync_legacy_web_credential_by_name,
+    )
     from api.runtime.models import ScanPolicy, TargetBinding
     from api.runtime.scan_credentials import (
         ScanCredentialError,
@@ -28526,6 +28536,19 @@ def _target_credential_profile_values(
     }
 
 
+def _legacy_credential_migration_http_error(
+    exc: Exception,
+) -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail={
+            "error": "legacy_credential_migration_failed",
+            "message": str(exc),
+            "next_action": "Manage this identity through /credentials before retrying",
+        },
+    )
+
+
 def _normalize_target_principal_role(value: Any) -> str:
     role = re.sub(r"[^a-z0-9_.-]+", "_", str(value or "user").strip().lower()).strip("_")
     return (role or "user")[:80]
@@ -28848,34 +28871,39 @@ async def create_target_credential_profile(target_id: str, request: TargetCreden
         metadata_json=request.metadata_json,
     )
     async with db_pool.acquire() as conn:
-        if not await conn.fetchrow("SELECT 1 FROM targets WHERE id = $1", target_uuid):
-            raise HTTPException(status_code=404, detail="Target not found")
-        row = await conn.fetchrow(
-            """
-            INSERT INTO target_credential_profiles (
-                target_id, name, auth_kind, secret_value, secret_preview,
-                expires_at, metadata_json, rotated_at
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,NOW())
-            ON CONFLICT (target_id, lower(name))
-            DO UPDATE SET
-                auth_kind = EXCLUDED.auth_kind,
-                secret_value = EXCLUDED.secret_value,
-                secret_preview = EXCLUDED.secret_preview,
-                expires_at = EXCLUDED.expires_at,
-                is_active = true,
-                metadata_json = target_credential_profiles.metadata_json || EXCLUDED.metadata_json,
-                rotated_at = NOW(),
-                updated_at = NOW()
-            RETURNING *
-            """,
-            target_uuid,
-            values["name"],
-            values["auth_kind"],
-            values["secret_value"],
-            values["secret_preview"],
-            values["expires_at"],
-            json.dumps(values["metadata_json"]),
-        )
+        try:
+            async with conn.transaction():
+                if not await conn.fetchrow("SELECT 1 FROM targets WHERE id = $1", target_uuid):
+                    raise HTTPException(status_code=404, detail="Target not found")
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO target_credential_profiles (
+                        target_id, name, auth_kind, secret_value, secret_preview,
+                        expires_at, metadata_json, rotated_at
+                    ) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,NOW())
+                    ON CONFLICT (target_id, lower(name))
+                    DO UPDATE SET
+                        auth_kind = EXCLUDED.auth_kind,
+                        secret_value = EXCLUDED.secret_value,
+                        secret_preview = EXCLUDED.secret_preview,
+                        expires_at = EXCLUDED.expires_at,
+                        is_active = true,
+                        metadata_json = target_credential_profiles.metadata_json || EXCLUDED.metadata_json,
+                        rotated_at = NOW(),
+                        updated_at = NOW()
+                    RETURNING *
+                    """,
+                    target_uuid,
+                    values["name"],
+                    values["auth_kind"],
+                    values["secret_value"],
+                    values["secret_preview"],
+                    values["expires_at"],
+                    json.dumps(values["metadata_json"]),
+                )
+                await sync_legacy_web_credential(conn, row["id"])
+        except (LegacyCredentialMigrationError, CredentialStoreError) as exc:
+            raise _legacy_credential_migration_http_error(exc) from exc
     return {"profile": _public_target_credential_profile_row(row)}
 
 
@@ -28889,54 +28917,62 @@ async def update_target_credential_profile(
     target_uuid = _uuid_or_400(target_id, "target id")
     profile_uuid = _uuid_or_400(profile_id, "credential profile id")
     async with db_pool.acquire() as conn:
-        existing_row = await conn.fetchrow(
-            "SELECT * FROM target_credential_profiles WHERE id = $1 AND target_id = $2",
-            profile_uuid,
-            target_uuid,
-        )
-        if not existing_row:
-            raise HTTPException(status_code=404, detail="Credential profile not found")
-        existing = row_to_dict(existing_row)
-        next_kind = request.auth_kind or existing.get("auth_kind")
-        if request.auth_kind and request.auth_kind != existing.get("auth_kind") and request.secret is None:
-            raise HTTPException(status_code=400, detail="secret is required when auth_kind changes")
-        secret = request.secret
-        rotated = secret is not None
-        secret_value = existing.get("secret_value")
-        secret_preview = existing.get("secret_preview")
-        if rotated:
-            normalized_secret = _normalize_target_credential_secret(secret)
-            secret_value = encrypt_secret(normalized_secret)
-            secret_preview = _mask_ai_target_secret(normalized_secret)
-        expires_at = existing.get("expires_at")
-        if request.clear_expiry:
-            expires_at = None
-        elif "expires_at" in request.model_fields_set:
-            expires_at = request.expires_at
-        metadata = _decode_json_value(existing.get("metadata_json")) or {}
-        if request.metadata_json is not None:
-            metadata.update(_redact_agent_payload(request.metadata_json))
-        row = await conn.fetchrow(
-            """
-            UPDATE target_credential_profiles SET
-                name = $1, auth_kind = $2, secret_value = $3, secret_preview = $4,
-                expires_at = $5, is_active = $6, metadata_json = $7::jsonb,
-                rotated_at = CASE WHEN $8::boolean THEN NOW() ELSE rotated_at END,
-                updated_at = NOW()
-            WHERE id = $9 AND target_id = $10
-            RETURNING *
-            """,
-            _normalize_target_credential_profile_name(request.name or existing.get("name")),
-            next_kind,
-            secret_value,
-            secret_preview,
-            expires_at,
-            bool(request.is_active) if request.is_active is not None else bool(existing.get("is_active", True)),
-            json.dumps(metadata),
-            rotated,
-            profile_uuid,
-            target_uuid,
-        )
+        try:
+            async with conn.transaction():
+                existing_row = await conn.fetchrow(
+                    "SELECT * FROM target_credential_profiles WHERE id = $1 AND target_id = $2",
+                    profile_uuid,
+                    target_uuid,
+                )
+                if not existing_row:
+                    raise HTTPException(status_code=404, detail="Credential profile not found")
+                existing = row_to_dict(existing_row)
+                next_kind = request.auth_kind or existing.get("auth_kind")
+                if request.auth_kind and request.auth_kind != existing.get("auth_kind"):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="A migrated credential cannot change auth_kind; create a new generic profile",
+                    )
+                secret = request.secret
+                rotated = secret is not None
+                secret_value = existing.get("secret_value")
+                secret_preview = existing.get("secret_preview")
+                if rotated:
+                    normalized_secret = _normalize_target_credential_secret(secret)
+                    secret_value = encrypt_secret(normalized_secret)
+                    secret_preview = _mask_ai_target_secret(normalized_secret)
+                expires_at = existing.get("expires_at")
+                if request.clear_expiry:
+                    expires_at = None
+                elif "expires_at" in request.model_fields_set:
+                    expires_at = request.expires_at
+                metadata = _decode_json_value(existing.get("metadata_json")) or {}
+                if request.metadata_json is not None:
+                    metadata.update(_redact_agent_payload(request.metadata_json))
+                row = await conn.fetchrow(
+                    """
+                    UPDATE target_credential_profiles SET
+                        name = $1, auth_kind = $2, secret_value = $3, secret_preview = $4,
+                        expires_at = $5, is_active = $6, metadata_json = $7::jsonb,
+                        rotated_at = CASE WHEN $8::boolean THEN NOW() ELSE rotated_at END,
+                        updated_at = NOW()
+                    WHERE id = $9 AND target_id = $10
+                    RETURNING *
+                    """,
+                    _normalize_target_credential_profile_name(request.name or existing.get("name")),
+                    next_kind,
+                    secret_value,
+                    secret_preview,
+                    expires_at,
+                    bool(request.is_active) if request.is_active is not None else bool(existing.get("is_active", True)),
+                    json.dumps(metadata),
+                    rotated,
+                    profile_uuid,
+                    target_uuid,
+                )
+                await sync_legacy_web_credential(conn, profile_uuid)
+        except (LegacyCredentialMigrationError, CredentialStoreError) as exc:
+            raise _legacy_credential_migration_http_error(exc) from exc
     return {"profile": _public_target_credential_profile_row(row)}
 
 
@@ -28965,16 +29001,22 @@ async def delete_target_credential_profile(target_id: str, profile_id: str):
     target_uuid = _uuid_or_400(target_id, "target id")
     profile_uuid = _uuid_or_400(profile_id, "credential profile id")
     async with db_pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            UPDATE target_credential_profiles
-            SET is_active = false, updated_at = NOW()
-            WHERE id = $1 AND target_id = $2
-            RETURNING *
-            """,
-            profile_uuid,
-            target_uuid,
-        )
+        try:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """
+                    UPDATE target_credential_profiles
+                    SET is_active = false, updated_at = NOW()
+                    WHERE id = $1 AND target_id = $2
+                    RETURNING *
+                    """,
+                    profile_uuid,
+                    target_uuid,
+                )
+                if row:
+                    await sync_legacy_web_credential(conn, profile_uuid)
+        except (LegacyCredentialMigrationError, CredentialStoreError) as exc:
+            raise _legacy_credential_migration_http_error(exc) from exc
     if not row:
         raise HTTPException(status_code=404, detail="Credential profile not found")
     return {"status": "deactivated", "profile": _public_target_credential_profile_row(row)}
@@ -29022,35 +29064,43 @@ async def create_target_principal(target_id: str, request: TargetPrincipalCreate
     auth_state = _normalize_target_auth_state(request.auth_state)
     metadata = _redact_agent_payload(request.metadata_json or {})
     async with db_pool.acquire() as conn:
-        if not await conn.fetchrow("SELECT 1 FROM targets WHERE id = $1", target_uuid):
-            raise HTTPException(status_code=404, detail="Target not found")
         try:
-            row = await conn.fetchrow(
-                """
-                INSERT INTO target_principals (
-                    target_id, label, role, tenant_id, auth_state, credential_profile,
-                    is_active, metadata_json
-                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb)
-                ON CONFLICT (target_id, lower(label), COALESCE(tenant_id, ''), COALESCE(auth_state, ''))
-                DO UPDATE SET
-                    role = EXCLUDED.role,
-                    credential_profile = EXCLUDED.credential_profile,
-                    is_active = EXCLUDED.is_active,
-                    metadata_json = target_principals.metadata_json || EXCLUDED.metadata_json,
-                    updated_at = NOW()
-                RETURNING *
-                """,
-                target_uuid,
-                label,
-                role,
-                request.tenant_id,
-                auth_state,
-                str(request.credential_profile or "").strip() or None,
-                bool(request.is_active),
-                json.dumps(metadata),
-            )
+            async with conn.transaction():
+                if not await conn.fetchrow("SELECT 1 FROM targets WHERE id = $1", target_uuid):
+                    raise HTTPException(status_code=404, detail="Target not found")
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO target_principals (
+                        target_id, label, role, tenant_id, auth_state, credential_profile,
+                        is_active, metadata_json
+                    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb)
+                    ON CONFLICT (target_id, lower(label), COALESCE(tenant_id, ''), COALESCE(auth_state, ''))
+                    DO UPDATE SET
+                        role = EXCLUDED.role,
+                        credential_profile = EXCLUDED.credential_profile,
+                        is_active = EXCLUDED.is_active,
+                        metadata_json = target_principals.metadata_json || EXCLUDED.metadata_json,
+                        updated_at = NOW()
+                    RETURNING *
+                    """,
+                    target_uuid,
+                    label,
+                    role,
+                    request.tenant_id,
+                    auth_state,
+                    str(request.credential_profile or "").strip() or None,
+                    bool(request.is_active),
+                    json.dumps(metadata),
+                )
+                await sync_legacy_web_credential_by_name(
+                    conn,
+                    target_id=target_uuid,
+                    profile_name=row["credential_profile"],
+                )
         except asyncpg.UniqueViolationError as exc:
             raise _principal_slot_conflict() from exc
+        except (LegacyCredentialMigrationError, CredentialStoreError) as exc:
+            raise _legacy_credential_migration_http_error(exc) from exc
         row = await conn.fetchrow(
             """
             SELECT p.*, EXISTS (
@@ -29307,6 +29357,12 @@ async def _auto_provision_principals(conn, target_uuid, target_url: str, config:
                 target_uuid, label, auth_state, profile_name,
                 json.dumps({"auto_provisioned": True, "principal_identity": variables["email"], "captured_refs": captured}),
             )
+            try:
+                await sync_legacy_web_credential_by_name(
+                    conn, target_id=target_uuid, profile_name=profile_name,
+                )
+            except (LegacyCredentialMigrationError, CredentialStoreError) as exc:
+                raise _legacy_credential_migration_http_error(exc) from exc
             await conn.execute(
                 """
                 UPDATE target_principal_provisioning_attempts
@@ -29500,17 +29556,38 @@ async def update_target_principal(target_id: str, principal_id: str, request: Ta
     values.extend([principal_uuid, target_uuid])
     async with db_pool.acquire() as conn:
         try:
-            row = await conn.fetchrow(
-                f"""
-                UPDATE target_principals
-                SET {', '.join(updates)}, updated_at = NOW()
-                WHERE id = ${len(values) - 1} AND target_id = ${len(values)}
-                RETURNING *
-                """,
-                *values,
-            )
+            async with conn.transaction():
+                previous = await conn.fetchrow(
+                    "SELECT credential_profile FROM target_principals WHERE id=$1 AND target_id=$2",
+                    principal_uuid,
+                    target_uuid,
+                )
+                row = await conn.fetchrow(
+                    f"""
+                    UPDATE target_principals
+                    SET {', '.join(updates)}, updated_at = NOW()
+                    WHERE id = ${len(values) - 1} AND target_id = ${len(values)}
+                    RETURNING *
+                    """,
+                    *values,
+                )
+                if row:
+                    names = {
+                        str(value or "").strip()
+                        for value in (
+                            previous["credential_profile"] if previous else None,
+                            row["credential_profile"],
+                        )
+                        if str(value or "").strip()
+                    }
+                    for name in names:
+                        await sync_legacy_web_credential_by_name(
+                            conn, target_id=target_uuid, profile_name=name,
+                        )
         except asyncpg.UniqueViolationError as exc:
             raise _principal_slot_conflict() from exc
+        except (LegacyCredentialMigrationError, CredentialStoreError) as exc:
+            raise _legacy_credential_migration_http_error(exc) from exc
         if not row:
             raise HTTPException(status_code=404, detail="Target principal not found")
         row = await conn.fetchrow(
@@ -29536,16 +29613,26 @@ async def delete_target_principal(target_id: str, principal_id: str):
     target_uuid = _uuid_or_400(target_id, "target id")
     principal_uuid = _uuid_or_400(principal_id, "principal id")
     async with db_pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            UPDATE target_principals
-            SET is_active = false, updated_at = NOW()
-            WHERE id = $1 AND target_id = $2
-            RETURNING *
-            """,
-            principal_uuid,
-            target_uuid,
-        )
+        try:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """
+                    UPDATE target_principals
+                    SET is_active = false, updated_at = NOW()
+                    WHERE id = $1 AND target_id = $2
+                    RETURNING *
+                    """,
+                    principal_uuid,
+                    target_uuid,
+                )
+                if row:
+                    await sync_legacy_web_credential_by_name(
+                        conn,
+                        target_id=target_uuid,
+                        profile_name=row["credential_profile"],
+                    )
+        except (LegacyCredentialMigrationError, CredentialStoreError) as exc:
+            raise _legacy_credential_migration_http_error(exc) from exc
     if not row:
         raise HTTPException(status_code=404, detail="Target principal not found")
     return {

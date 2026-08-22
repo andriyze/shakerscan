@@ -1163,15 +1163,22 @@ State-changing commands are not exposed. See [`docs/read-only-mcp.md`](read-only
 · `GET /session/{id}/screenshot.png` · `POST /session/{id}/action` · `POST /session/{id}/test-endpoint`
 · `POST /session/{id}/findings` · `DELETE /session/{id}` · `GET /sessions`
 
-**Target credentials and principals**: `GET|POST /targets/{id}/credential-profiles` ·
+**Generic credential profiles**: `GET|POST /credential-profiles` ·
+`GET|PATCH|DELETE /credential-profiles/{profile_id}` ·
+`POST /credential-profiles/{profile_id}/rotate`. These exact-target Web, API, network, and device
+profiles use immutable encrypted versions, metadata-only responses, capability bounds, expiry, and
+primary/secondary/service/SSH slots. Scan and Hunt queue only opaque IDs; workers revalidate the
+target-bound approval and decrypt the admitted version immediately before execution.
+
+**Legacy target credentials and principals**: `GET|POST /targets/{id}/credential-profiles` ·
 `PATCH|DELETE /targets/{id}/credential-profiles/{profile_id}` ·
 `POST /targets/{id}/credential-profiles/{profile_id}/rotate` · `GET|POST /targets/{id}/principals` ·
 `PATCH|DELETE /targets/{id}/principals/{principal_id}` · `GET|POST /targets/{id}/principal-matrix`.
-Credential profile responses expose only a masked preview, storage/expiry state, and metadata; secret
-material is write-only. Profiles support exact Authorization-header values and cookie strings,
-expiry warnings, explicit rotation, and soft deactivation. Active, unexpired profiles referenced by
-active `user1`/`user2` principals resolve server-side into normal and Continuous ASM scan jobs;
-explicit per-scan auth fields retain precedence, and undecryptable/expired profiles fail closed.
+This compatibility surface remains metadata-only and write-only for secrets. Existing rows are
+backfilled under the schema migration lock and every create, rotation, principal-slot change, and
+deactivation is transactionally mirrored to the generic immutable store. The ciphertext is never
+returned or logged. An ID/target/auth-kind collision fails closed instead of overwriting a generic
+identity. These routes will be removed after remaining legacy callers migrate.
 
 **Discovery & exposure**: `POST|GET /discovery` · `GET /discovery/{id}` · `GET /dashboard` ·
 `GET /exposure/graph` · `GET /exposure/nodes` · `GET /exposure/assets` · `GET /exposure/changes` ·
