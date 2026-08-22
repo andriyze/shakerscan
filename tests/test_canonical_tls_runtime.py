@@ -2,24 +2,20 @@ from __future__ import annotations
 
 import asyncio
 
+from api.capabilities.tls import inspect_tls_origin
+from api.runtime.models import TargetBinding
 from scanner import scanner as scanner_main
 
 
-def _execution(tcp_ports: int):
-    return {
-        "runtime_budget": {
-            "http_requests": 10,
-            "state_changing_requests": 0,
-            "browser_actions": 0,
-            "tcp_ports_attempted": tcp_ports,
-            "hosts_attempted": 1,
-            "tool_wall_seconds": 10,
-        },
-        "target_binding": {
-            "allowed_addresses": ["192.0.2.10"],
-        },
-        "target_binding_digest": "a" * 64,
-    }
+def _target(*, origin: str = "https://app.example.test") -> TargetBinding:
+    return TargetBinding(
+        target_id="target-1",
+        target_kind="web",
+        canonical_host="app.example.test",
+        allowed_origins=(origin,),
+        allowed_addresses=("192.0.2.10",),
+        allowed_root_domains=("example.test",),
+    )
 
 
 class _TlsObject:
@@ -50,7 +46,7 @@ class _Writer:
         return None
 
 
-def test_canonical_tls_uses_one_frozen_address_handshake(monkeypatch):
+def test_shared_tls_capability_uses_one_frozen_address_handshake(monkeypatch):
     calls = []
     writer = _Writer()
 
@@ -59,45 +55,94 @@ def test_canonical_tls_uses_one_frozen_address_handshake(monkeypatch):
         return object(), writer
 
     monkeypatch.setattr(asyncio, "open_connection", fake_open_connection)
-    result = asyncio.run(scanner_main._canonical_tls_runtime_probe(
-        _execution(1),
-        host="app.example.test",
-        port=443,
-        scheme="https",
+    result = asyncio.run(inspect_tls_origin(
+        "https://app.example.test",
+        target=_target(),
+        timeout_seconds=15,
     ))
 
     assert len(calls) == 1
     assert calls[0]["host"] == "192.0.2.10"
     assert calls[0]["server_hostname"] == "app.example.test"
-    assert result["runtime"] == {
-        "schema_version": "canonical-tls-runtime/v1",
-        "target_binding_digest": "a" * 64,
-        "server_hostname": "app.example.test",
-        "port": 443,
+    assert result["status"] == "success"
+    assert result["observation"]["protocol"] == "TLSv1.3"
+    assert result["observation"]["certificate_sha256"]
+    assert result["budget_consumed"] == {
         "tcp_ports_attempted": 1,
         "tool_wall_seconds": 1,
-        "status": "success",
-        "pinned_address": "192.0.2.10",
     }
+    assert writer.closed is True
+
+
+def test_shared_tls_capability_blocks_origin_outside_binding(monkeypatch):
+    async def unexpected_connection(**_kwargs):
+        raise AssertionError("TLS traffic started outside its frozen binding")
+
+    monkeypatch.setattr(asyncio, "open_connection", unexpected_connection)
+    result = asyncio.run(inspect_tls_origin(
+        "https://other.example.test",
+        target=_target(),
+    ))
+
+    assert result["status"] == "blocked"
+    assert result["budget_consumed"] == {
+        "tcp_ports_attempted": 0,
+        "tool_wall_seconds": 0,
+    }
+
+
+def test_scanner_adapts_placed_tls_without_network_execution(monkeypatch):
+    async def unexpected_connection(**_kwargs):
+        raise AssertionError("report assembly repeated TLS traffic")
+
+    monkeypatch.setattr(asyncio, "open_connection", unexpected_connection)
+    summary = {
+        "status": "success",
+        "observations": [{
+            "kind": "tls_protocol",
+            "origin": "https://app.example.test",
+            "server_hostname": "app.example.test",
+            "pinned_address": "192.0.2.10",
+            "port": 443,
+            "protocol": "TLSv1.3",
+            "cipher": "TLS_AES_256_GCM_SHA384",
+            "alpn_protocol": "h2",
+            "certificate_sha256": "a" * 64,
+            "certificate_bytes": 11,
+            "certificate_trust": "not_evaluated",
+        }],
+        "budget_consumed": {
+            "tcp_ports_attempted": 1,
+            "tool_wall_seconds": 1,
+        },
+        "receipt": {"receipt_hash": "b" * 64},
+    }
+    result = scanner_main._canonical_tls_placement_result(
+        summary,
+        {"target_binding_digest": "c" * 64},
+        host="app.example.test",
+        port=443,
+        scheme="https",
+    )
+
+    assert result["runtime"]["canonical_capability"] == "tls.inspect"
+    assert result["runtime"]["tcp_ports_attempted"] == 1
     assert result["tlsx"]["endpoints"][0]["tlsversion"] == "TLSv1.3"
     assert result["nmap"]["skipped"] is True
     assert result["testssl"]["skipped"] is True
     assert result["sslyze"]["skipped"] is True
-    assert writer.closed is True
 
 
-def test_canonical_tls_makes_no_connection_without_tcp_hold(monkeypatch):
-    async def unexpected_connection(**_kwargs):
-        raise AssertionError("TLS traffic started without a durable TCP hold")
-
-    monkeypatch.setattr(asyncio, "open_connection", unexpected_connection)
-    result = asyncio.run(scanner_main._canonical_tls_runtime_probe(
-        _execution(0),
+def test_scanner_never_falls_back_to_in_process_tls():
+    result = scanner_main._canonical_tls_placement_result(
+        None,
+        {"target_binding_digest": "d" * 64},
         host="app.example.test",
         port=443,
         scheme="https",
-    ))
+    )
 
     assert result["runtime"]["status"] == "blocked"
+    assert result["runtime"]["reason"] == "tls_capability_placement_missing"
     assert result["runtime"]["tcp_ports_attempted"] == 0
     assert result["tlsx"] == {"endpoints": [], "certificate": {}}

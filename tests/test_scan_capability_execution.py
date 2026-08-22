@@ -25,11 +25,13 @@ from scan.capability_execution import (
     scan_parameterized_execution_candidates,
     scan_sqli_verification_capability_allocation,
     scan_template_capability_allocation,
+    scan_tls_capability_allocation,
     scan_content_discovery_capability_allocation,
     scan_web_crawl_capability_allocation,
     scan_web_probe_capability_allocation,
     scan_xss_verification_capability_allocation,
     prepare_scan_external_capability,
+    prepare_scan_inline_capability,
     prepare_scan_process_capability,
 )
 
@@ -325,6 +327,43 @@ def test_scan_process_reserves_exact_remaining_multidimensional_budget():
         "hosts_attempted": 46,
         "tool_wall_seconds": 55,
     }
+
+
+def test_tls_capability_owns_tcp_budget_outside_report_process():
+    allocation = scan_tls_capability_allocation(_budget())
+    assert allocation == {
+        "tcp_ports_attempted": 1,
+        "tool_wall_seconds": 15,
+    }
+    prepared = prepare_scan_inline_capability(
+        specification=CAPABILITY_REGISTRY.require("tls.inspect"),
+        target=_target(),
+        args={"origin": "https://app.example.test"},
+        policy=ScanPolicy(scope_receipt_id="scope-1"),
+    )
+    prepared = fit_prepared_scan_capability(
+        prepared, ledger_limits=scan_budget_ledger_limits(_budget()),
+    )
+    assert prepared.estimated_budget == {
+        "tcp_ports_attempted": 1,
+        "tool_wall_seconds": 15,
+    }
+    assert prepared.redacted_execution == {
+        "schema_version": "scan-inline-capability/v1",
+        "capability_name": "tls.inspect",
+        "target_binding_digest": _target().digest,
+        "input": {"origin": "https://app.example.test"},
+    }
+
+    _report_prepared, runtime = prepare_scan_process_capability(
+        execution_plan_digest="a" * 64,
+        target=_target(),
+        stage_rows=(),
+        ledger_limits=scan_budget_ledger_limits(_budget()),
+        consumed={},
+        allow_state_changing_http=False,
+    )
+    assert runtime["tcp_ports_attempted"] == 0
 
 
 def test_scan_process_requests_missing_mandatory_capacity_to_fail_closed():

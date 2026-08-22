@@ -3790,34 +3790,55 @@ def _append_endpoint_attempt_telemetry(active_block: dict[str, Any], attempts: A
     active_block["endpoint_attempt_schema_version"] = ENDPOINT_ATTEMPT_SCHEMA_V1
 
 
-async def _canonical_tls_runtime_probe(
+def _canonical_tls_placement_result(
+    summary: Mapping[str, Any] | None,
     execution: Mapping[str, Any],
     *,
     host: str,
     port: int,
     scheme: str,
 ) -> dict[str, Any]:
-    """Run exactly one frozen-address TLS handshake for canonical Scan."""
-    runtime = execution.get("runtime_budget")
-    target_binding = execution.get("target_binding")
-    runtime = dict(runtime) if isinstance(runtime, Mapping) else {}
-    target_binding = (
-        dict(target_binding) if isinstance(target_binding, Mapping) else {}
+    """Adapt the already-executed TLS capability into the legacy report shape."""
+    placed = dict(summary) if isinstance(summary, Mapping) else {}
+    observations = [
+        dict(item)
+        for item in placed.get("observations") or []
+        if isinstance(item, Mapping) and item.get("kind") == "tls_protocol"
+    ][:1]
+    observation = observations[0] if observations else {}
+    consumed = (
+        dict(placed.get("budget_consumed") or {})
+        if isinstance(placed.get("budget_consumed"), Mapping) else {}
     )
-    tcp_limit = max(0, int(runtime.get("tcp_ports_attempted") or 0))
-    addresses = [
-        str(value)
-        for value in target_binding.get("allowed_addresses") or []
-        if str(value)
-    ]
+    status = str(placed.get("status") or "blocked").strip().lower()
+    if scheme.lower() != "https":
+        status = "not_applicable"
     base_runtime = {
         "schema_version": "canonical-tls-runtime/v1",
         "target_binding_digest": execution.get("target_binding_digest"),
         "server_hostname": host,
         "port": int(port),
-        "tcp_ports_attempted": 0,
-        "tool_wall_seconds": 0,
+        "tcp_ports_attempted": max(
+            0, int(consumed.get("tcp_ports_attempted") or 0),
+        ),
+        "tool_wall_seconds": max(
+            0, int(consumed.get("tool_wall_seconds") or 0),
+        ),
+        "status": status,
+        "canonical_capability": "tls.inspect",
+        "capability_receipt": dict(placed.get("receipt") or {}),
     }
+    if observation.get("pinned_address"):
+        base_runtime["pinned_address"] = observation["pinned_address"]
+    errors = [str(item) for item in placed.get("errors") or [] if str(item)]
+    reason = str(placed.get("reason") or "").strip()
+    if errors:
+        base_runtime["error"] = errors[0]
+    if reason:
+        base_runtime["reason"] = reason
+    elif status == "blocked" and not placed:
+        base_runtime["reason"] = "tls_capability_placement_missing"
+
     skipped = {
         "tlsx": {"endpoints": [], "certificate": {}},
         "ocsp": {
@@ -3828,84 +3849,31 @@ async def _canonical_tls_runtime_probe(
         "testssl": {**TESTSSL_SHAPE, "skipped": True},
         "sslyze": {**SSLYZE_SHAPE, "skipped": True},
     }
-    if scheme.lower() != "https":
-        base_runtime.update({"status": "not_applicable", "reason": "non_https"})
+    if status != "success" or not observation:
         return {**skipped, "runtime": base_runtime}
-    if tcp_limit < 1 or not addresses:
-        base_runtime.update({
-            "status": "blocked",
-            "reason": "tcp_budget_or_frozen_address_unavailable",
-        })
-        return {**skipped, "runtime": base_runtime}
-
-    pinned_address = addresses[0]
-    context = ssl.create_default_context()
-    context.check_hostname = False
-    context.verify_mode = ssl.CERT_NONE
-    context.set_alpn_protocols(["h2", "http/1.1"])
-    started = time.perf_counter()
-    writer: asyncio.StreamWriter | None = None
-    try:
-        _reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(
-                host=pinned_address,
-                port=int(port),
-                ssl=context,
-                server_hostname=host,
-            ),
-            timeout=min(
-                10,
-                max(1, int(runtime.get("tool_wall_seconds") or 1)),
-            ),
-        )
-        tls_object = writer.get_extra_info("ssl_object")
-        if tls_object is None:
-            raise ssl.SSLError("TLS handshake produced no SSL object")
-        certificate_der = tls_object.getpeercert(binary_form=True) or b""
-        cipher = tls_object.cipher()
-        endpoint = {
-            "ip": pinned_address,
-            "port": int(port),
-            "tlsversion": tls_object.version(),
-            "cipher": cipher[0] if cipher else None,
-            "alpn": tls_object.selected_alpn_protocol(),
-            "handshake_completed": True,
-        }
-        certificate = {
-            "fingerprints": {
-                "sha256": hashlib.sha256(certificate_der).hexdigest()
-            } if certificate_der else {},
-            "certificate_bytes": len(certificate_der),
-        }
-        elapsed = max(1, math.ceil(time.perf_counter() - started))
-        base_runtime.update({
-            "status": "success",
-            "pinned_address": pinned_address,
-            "tcp_ports_attempted": 1,
-            "tool_wall_seconds": elapsed,
-        })
-        return {
-            **skipped,
-            "tlsx": {"endpoints": [endpoint], "certificate": certificate},
-            "runtime": base_runtime,
-        }
-    except (OSError, ssl.SSLError, asyncio.TimeoutError) as exc:
-        elapsed = max(1, math.ceil(time.perf_counter() - started))
-        base_runtime.update({
-            "status": "failed",
-            "pinned_address": pinned_address,
-            "error": f"tls_handshake:{type(exc).__name__}",
-            "tcp_ports_attempted": 1,
-            "tool_wall_seconds": elapsed,
-        })
-        return {**skipped, "runtime": base_runtime}
-    finally:
-        if writer is not None:
-            writer.close()
-            try:
-                await writer.wait_closed()
-            except (OSError, ssl.SSLError):
-                pass
+    endpoint = {
+        "ip": observation.get("pinned_address"),
+        "port": int(observation.get("port") or port),
+        "tlsversion": observation.get("protocol"),
+        "cipher": observation.get("cipher"),
+        "alpn": observation.get("alpn_protocol"),
+        "handshake_completed": True,
+    }
+    certificate_sha256 = observation.get("certificate_sha256")
+    certificate = {
+        "fingerprints": (
+            {"sha256": certificate_sha256} if certificate_sha256 else {}
+        ),
+        "certificate_bytes": max(
+            0, int(observation.get("certificate_bytes") or 0),
+        ),
+        "trust": observation.get("certificate_trust") or "not_evaluated",
+    }
+    return {
+        **skipped,
+        "tlsx": {"endpoints": [endpoint], "certificate": certificate},
+        "runtime": base_runtime,
+    }
 
 
 async def build_report(target: str,
@@ -5008,12 +4976,16 @@ async def build_report(target: str,
     canonical_tls_task = None
     if canonical_scan_execution is not None:
         canonical_tls_task = asyncio.create_task(
-            _canonical_tls_runtime_probe(
+            _focused_async_value(_canonical_tls_placement_result(
+                (
+                    canonical_scan_placements.get("tls.inspect")
+                    if isinstance(canonical_scan_placements, dict) else None
+                ),
                 canonical_scan_execution,
                 host=host,
                 port=port,
                 scheme=scheme,
-            )
+            ))
         )
         tlsx_task = None
         ocsp_task = None
@@ -5033,7 +5005,7 @@ async def build_report(target: str,
         # Basic TLS info only - skip deep cipher analysis. This skip fires for
         # focused scans AND public+quick mode, so carry the specific reason.
         skip_reason = (
-            "canonical_frozen_tls_runtime"
+            "canonical_placed_tls_capability"
             if canonical_scan_execution is not None
             else "focused_manual_active_scope"
             if focused_manual_active_scope
@@ -14299,7 +14271,7 @@ def _load_canonical_scan_placements(
         raise SystemExit("canonical Scan placement capabilities are invalid")
     unknown = set(capabilities) - {
         "web.probe", "web.crawl", "web.content_discover", "templates.scan",
-        "xss.verify", "sqli.verify",
+        "tls.inspect", "xss.verify", "sqli.verify",
     }
     if unknown:
         raise SystemExit(
@@ -14432,6 +14404,58 @@ def _load_canonical_scan_placements(
                     "canonical web.content_discover receipt is missing"
                 )
         result["web.content_discover"] = content
+    tls_inspection = capabilities.get("tls.inspect")
+    if tls_inspection is not None:
+        if not isinstance(tls_inspection, dict) or set(tls_inspection) != {
+            "schema_version", "capability_name", "enabled", "status", "reason",
+            "observations", "observation_count", "partial", "timed_out",
+            "errors", "budget_consumed", "receipt", "durable_budget_settled",
+            "idempotent_redelivery",
+        }:
+            raise SystemExit("canonical tls.inspect placement is malformed")
+        if (
+            tls_inspection.get("schema_version")
+            != "canonical-scan-tls-inspection-execution/v1"
+            or tls_inspection.get("capability_name") != "tls.inspect"
+            or not isinstance(tls_inspection.get("enabled"), bool)
+            or tls_inspection.get("status") not in {
+                "success", "partial", "failed", "blocked", "cancelled", "skipped",
+            }
+        ):
+            raise SystemExit("canonical tls.inspect placement contract is invalid")
+        observations = tls_inspection.get("observations")
+        if not isinstance(observations, list) or len(observations) > 1:
+            raise SystemExit("canonical tls.inspect observations are invalid")
+        binding = execution.get("target_binding") or {}
+        allowed_origins = set(binding.get("allowed_origins") or [])
+        allowed_addresses = set(binding.get("allowed_addresses") or [])
+        canonical_host = str(binding.get("canonical_host") or "")
+        if any(
+            not isinstance(item, dict)
+            or item.get("kind") != "tls_protocol"
+            or item.get("origin") not in allowed_origins
+            or item.get("server_hostname") != canonical_host
+            or item.get("pinned_address") not in allowed_addresses
+            or not isinstance(item.get("port"), int)
+            or not 1 <= item.get("port") <= 65535
+            or (
+                item.get("certificate_sha256") is not None
+                and not re.fullmatch(
+                    r"[0-9a-f]{64}", str(item.get("certificate_sha256"))
+                )
+            )
+            for item in observations
+        ):
+            raise SystemExit("canonical tls.inspect observation contract is invalid")
+        if tls_inspection.get("observation_count") != len(observations):
+            raise SystemExit("canonical tls.inspect observation count is invalid")
+        if not isinstance(tls_inspection.get("receipt"), dict):
+            raise SystemExit("canonical tls.inspect receipt reference is invalid")
+        if tls_inspection.get("enabled") and tls_inspection.get("status") != "skipped":
+            receipt_hash = str(tls_inspection["receipt"].get("receipt_hash") or "")
+            if not re.fullmatch(r"[0-9a-f]{64}", receipt_hash):
+                raise SystemExit("canonical tls.inspect receipt is missing")
+        result["tls.inspect"] = tls_inspection
     xss_verification = capabilities.get("xss.verify")
     if xss_verification is not None:
         if not isinstance(xss_verification, dict) or set(xss_verification) != {

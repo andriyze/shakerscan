@@ -296,7 +296,7 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
             "http_requests": 93,
             "state_changing_requests": 0,
             "browser_actions": 18,
-            "tcp_ports_attempted": 1,
+            "tcp_ports_attempted": 0,
             "hosts_attempted": 49,
             "tool_wall_seconds": 55,
         }
@@ -325,6 +325,9 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
     async def skip_web_probe(*_args, **_kwargs):
         return worker._skipped_scan_web_probe_summary("test_isolation")
 
+    async def skip_tls(*_args, **_kwargs):
+        return worker._skipped_scan_tls_summary("test_isolation")
+
     monkeypatch.setattr(worker, "db_pool", _Pool(connection))
     monkeypatch.setattr(worker, "PostgresBudgetReservationStore", lambda: store)
     monkeypatch.setattr(worker, "run_scan", fake_run_scan)
@@ -333,6 +336,7 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
         "_execute_scan_web_probe_capability",
         skip_web_probe,
     )
+    monkeypatch.setattr(worker, "_execute_scan_tls_capability", skip_tls)
     monkeypatch.setattr(worker, "_worker_runtime_identity", lambda: "worker:test")
     monkeypatch.setattr(worker, "_scan_cancel_requested", lambda _scan_id: False)
 
@@ -516,7 +520,7 @@ def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch)
             "http_requests": 88,
             "state_changing_requests": 0,
             "browser_actions": 20,
-            "tcp_ports_attempted": 1,
+            "tcp_ports_attempted": 0,
             "hosts_attempted": 50,
             "tool_wall_seconds": 49,
         }
@@ -768,6 +772,72 @@ def test_scan_port_discovery_uses_same_reserve_before_traffic_boundary(
     assert redelivery is False
 
 
+def test_scan_tls_uses_same_reserve_before_handshake_boundary(monkeypatch):
+    plan, target, options = _authority(enabled=False, network=False)
+    connection = _Connection(plan)
+    events = []
+    store = _ReservationStore(events)
+    _normalized, admission = worker.prepare_worker_dispatch(options)
+    execution = worker.build_native_scan_execution(plan, options)
+
+    async def handshake():
+        events.append(("traffic", store.current.record.status))
+        return {
+            "ok": True,
+            "status": "success",
+            "observation": {
+                "kind": "tls_protocol",
+                "origin": "https://app.example.test",
+                "server_hostname": "app.example.test",
+                "pinned_address": "192.0.2.10",
+                "port": 443,
+                "protocol": "TLSv1.3",
+            },
+            "budget_consumed": {
+                "tcp_ports_attempted": 1,
+                "tool_wall_seconds": 1,
+            },
+        }
+
+    monkeypatch.setattr(worker, "db_pool", _Pool(connection))
+    monkeypatch.setattr(worker, "PostgresBudgetReservationStore", lambda: store)
+    monkeypatch.setattr(worker, "_worker_runtime_identity", lambda: "worker:test")
+    monkeypatch.setattr(worker, "_scan_cancel_requested", lambda _scan_id: False)
+
+    stored, redelivery = asyncio.run(
+        worker._execute_reserved_scan_capability(
+            admission=admission,
+            execution=execution,
+            scan_id="00000000-0000-0000-0000-000000000001",
+            job_id="job-1",
+            capability_name="tls.inspect",
+            capability_args={"origin": "https://app.example.test"},
+            action_id="deterministic_baseline.tls.inspect",
+            target_binding=target,
+            reservation_limits={
+                "tcp_ports_attempted": 1,
+                "tool_wall_seconds": 15,
+            },
+            inline_operation=handshake,
+        )
+    )
+
+    assert events[:3] == [
+        ("create", "requested"),
+        ("transition", "reserved"),
+        ("transition", "running"),
+    ]
+    assert ("traffic", "running") in events
+    assert events[-1] == ("terminal", "committed")
+    assert stored.record.capability_name == "tls.inspect"
+    assert stored.record.actual == {
+        "tcp_ports_attempted": 1,
+        "tool_wall_seconds": 1,
+    }
+    assert stored.receipt["observations"][0]["protocol"] == "TLSv1.3"
+    assert redelivery is False
+
+
 def test_external_scan_tool_reserves_before_process_and_settles_typed_output(
     monkeypatch,
 ):
@@ -997,6 +1067,7 @@ def _stored_network_capability(
         "web.probe": ("httpx", "httpx-typed-v1"),
         "web.crawl": ("katana", "katana-typed-v1"),
         "web.content_discover": ("ffuf", "ffuf-typed-v1"),
+        "tls.inspect": ("scanner.tls", "tls-observation/v1"),
         "xss.verify": ("dalfox", "dalfox-typed-v1"),
         "sqli.verify": ("sqlmap", "sqlmap-typed-v1"),
     }[capability_name]
@@ -1418,6 +1489,57 @@ def test_template_stage_never_runs_without_active_permission(monkeypatch):
 
     assert summary["status"] == "skipped"
     assert summary["reason"] == "active_testing_not_authorized"
+
+
+def test_tls_stage_uses_registered_inline_capability_with_exact_hold(monkeypatch):
+    _plan, target, options = _authority(enabled=True, network=False)
+    calls = []
+
+    async def execute_capability(**kwargs):
+        calls.append(kwargs)
+        return _stored_network_capability(
+            "tls.inspect",
+            observations=[{
+                "kind": "tls_protocol",
+                "origin": "https://app.example.test",
+                "server_hostname": "app.example.test",
+                "pinned_address": "192.0.2.10",
+                "port": 443,
+                "protocol": "TLSv1.3",
+            }],
+            amounts={
+                "tcp_ports_attempted": 1,
+                "tool_wall_seconds": 1,
+            },
+        ), False
+
+    monkeypatch.setattr(
+        worker, "_execute_reserved_scan_capability", execute_capability,
+    )
+    summary = asyncio.run(worker._execute_scan_tls_capability(
+        "https://app.example.test",
+        options,
+        scan_id="00000000-0000-0000-0000-000000000001",
+        job_id="job-1",
+    ))
+
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["capability_name"] == "tls.inspect"
+    assert call["capability_args"] == {
+        "origin": "https://app.example.test",
+    }
+    assert call["action_id"] == "deterministic_baseline.tls.inspect"
+    assert call["target_binding"] == target
+    assert call["reservation_limits"] == {
+        "tcp_ports_attempted": 1,
+        "tool_wall_seconds": 15,
+    }
+    assert callable(call["inline_operation"])
+    assert "scanner_process_payload" not in call
+    assert summary["status"] == "success"
+    assert summary["observations"][0]["kind"] == "tls_protocol"
+    assert summary["durable_budget_settled"] is True
 
 
 def test_network_policy_runs_two_registry_actions_with_partitioned_budget(

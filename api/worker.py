@@ -66,8 +66,10 @@ from capabilities.network import (
     network_capability_adapter,
 )
 from capabilities.browser import BrowserCapabilityInputError, browser_capability_adapter
+from capabilities.inline import TlsInspectionExecutionAdapter
 from capabilities.scanner import ScannerExecutionAdapter
 from capabilities.scan import DeterministicScanExecutionAdapter
+from capabilities.tls import inspect_tls_origin
 from capabilities.replay import ReplayExecutionAdapter
 from hunt.capability_reservations import (
     DURABLE_BROWSER_HUNT_CAPABILITIES,
@@ -116,6 +118,7 @@ from scan.capability_execution import (
     ScanCapabilityContractError,
     fit_prepared_scan_capability,
     prepare_scan_external_capability,
+    prepare_scan_inline_capability,
     scan_content_discovery_capability_allocation,
     scan_budget_ledger_limits,
     scan_capability_action_digest,
@@ -124,6 +127,7 @@ from scan.capability_execution import (
     scan_parameterized_execution_candidates,
     scan_sqli_verification_capability_allocation,
     scan_template_capability_allocation,
+    scan_tls_capability_allocation,
     scan_web_crawl_capability_allocation,
     scan_web_probe_capability_allocation,
     scan_xss_verification_capability_allocation,
@@ -9851,6 +9855,7 @@ async def _execute_reserved_scan_capability(
     scanner_process_payload: Mapping[str, Any] | None = None,
     scanner_process_runner: Callable[..., Awaitable[Mapping[str, Any]]] | None = None,
     scanner_result_holder: dict[str, Any] | None = None,
+    inline_operation: Callable[[], Awaitable[Mapping[str, Any]]] | None = None,
 ) -> tuple[Any, bool]:
     """Reserve, execute, and reconcile one target-bound Scan capability."""
     try:
@@ -9887,25 +9892,37 @@ async def _execute_reserved_scan_capability(
         scanner_process_payload is not None
         or scanner_process_runner is not None
     )
+    internal_inline = inline_operation is not None
     if external_process and (
         scanner_process_payload is None or scanner_process_runner is None
     ):
         raise ScanCapabilityContractError(
             "external Scan process requires payload and runner"
         )
-    if deterministic_process and external_process:
+    if sum((deterministic_process, external_process, internal_inline)) > 1:
         raise ScanCapabilityContractError(
-            "Scan capability cannot use two process adapters"
+            "Scan capability cannot use multiple execution adapters"
         )
     if deterministic_process and capability_name != "scan.execute":
         raise ScanCapabilityContractError(
             "deterministic Scan runner requires scan.execute"
         )
+    if internal_inline and capability_name != "tls.inspect":
+        raise ScanCapabilityContractError(
+            "unsupported inline Scan capability adapter"
+        )
     adapter = None
     prepared: PreparedExecution | None = None
     runtime_budget: dict[str, int] | None = None
     specification = agent_tools.CAPABILITY_REGISTRY.require(capability_name)
-    if external_process:
+    if internal_inline:
+        prepared = prepare_scan_inline_capability(
+            specification=specification,
+            target=target,
+            args=dict(capability_args),
+            policy=policy,
+        )
+    elif external_process:
         prepared = prepare_scan_external_capability(
             specification=specification,
             target=target,
@@ -10210,6 +10227,17 @@ async def _execute_reserved_scan_capability(
             requested_budget=persisted.record.requested,
             redacted_execution=prepared.redacted_execution,
         )
+    elif internal_inline:
+        if inline_operation is None:
+            raise ScanCapabilityContractError(
+                "inline Scan capability operation is unavailable"
+            )
+        executable_adapter = TlsInspectionExecutionAdapter(
+            specification=specification,
+            operation=inline_operation,
+            requested_budget=persisted.record.requested,
+            redacted_execution=prepared.redacted_execution,
+        )
     else:
         if adapter is None:
             raise ScanCapabilityContractError(
@@ -10399,6 +10427,118 @@ def _skipped_scan_template_summary(reason: str) -> dict[str, Any]:
         "durable_budget_settled": True,
         "idempotent_redelivery": False,
     }
+
+
+def _skipped_scan_tls_summary(reason: str) -> dict[str, Any]:
+    return {
+        "schema_version": "canonical-scan-tls-inspection-execution/v1",
+        "capability_name": "tls.inspect",
+        "enabled": False,
+        "status": "skipped",
+        "reason": str(reason)[:200],
+        "observations": [],
+        "observation_count": 0,
+        "partial": False,
+        "timed_out": False,
+        "errors": [],
+        "budget_consumed": {},
+        "receipt": {},
+        "durable_budget_settled": True,
+        "idempotent_redelivery": False,
+    }
+
+
+def _scan_tls_summary_from_stored(
+    stored: Any,
+    *,
+    idempotent_redelivery: bool,
+) -> dict[str, Any]:
+    receipt = dict(stored.receipt or {})
+    receipt_status = str(receipt.get("status") or "failed").strip().lower()
+    status = {
+        "succeeded": "success",
+        "success": "success",
+        "partial": "partial",
+        "blocked": "blocked",
+        "cancelled": "cancelled",
+    }.get(receipt_status, "failed")
+    observations = [
+        dict(item)
+        for item in receipt.get("observations") or []
+        if isinstance(item, Mapping)
+        and str(item.get("kind") or "") == "tls_protocol"
+    ][:1]
+    return {
+        "schema_version": "canonical-scan-tls-inspection-execution/v1",
+        "capability_name": "tls.inspect",
+        "enabled": True,
+        "status": status,
+        "reason": None,
+        "observations": observations,
+        "observation_count": len(observations),
+        "partial": bool(receipt.get("partial")),
+        "timed_out": bool(receipt.get("timed_out")),
+        "errors": list(receipt.get("errors") or [])[:20],
+        "budget_consumed": dict(stored.record.actual),
+        "receipt": _scan_capability_receipt_reference(receipt),
+        "durable_budget_settled": bool(stored.record.terminal),
+        "idempotent_redelivery": bool(idempotent_redelivery),
+    }
+
+
+async def _execute_scan_tls_capability(
+    target_url: str,
+    options: Mapping[str, Any],
+    *,
+    scan_id: str,
+    job_id: str,
+) -> dict[str, Any]:
+    """Run one canonical TLS handshake outside the report monolith."""
+    _normalized, admission = prepare_worker_dispatch(options)
+    if not admission.canonical or admission.plan is None:
+        return _skipped_scan_tls_summary("legacy_scan")
+    execution = build_native_scan_execution(admission.plan, options)
+    if execution.discovery_manifest_only:
+        return _skipped_scan_tls_summary("discovery_manifest_only")
+    if execution.skip_global_checks:
+        return _skipped_scan_tls_summary("global_checks_skipped")
+    if execution.focused_endpoints_only or execution.zero_rediscovery:
+        return _skipped_scan_tls_summary("assigned_endpoint_scope")
+    target = execution.target_binding
+    execution_target = scan_external_execution_target(
+        target_url, target=target,
+    )
+    parsed = urllib.parse.urlsplit(execution_target)
+    origin = urllib.parse.urlunsplit((
+        parsed.scheme, parsed.netloc, "", "", "",
+    ))
+    if parsed.scheme.lower() != "https":
+        return _skipped_scan_tls_summary("non_https")
+    allocation = scan_tls_capability_allocation(
+        execution.payload()["execution_budget"]
+    )
+    if allocation is None:
+        return _skipped_scan_tls_summary("insufficient_stage_budget")
+    stored, idempotent_redelivery = await _execute_reserved_scan_capability(
+        admission=admission,
+        execution=execution,
+        scan_id=scan_id,
+        job_id=job_id,
+        capability_name="tls.inspect",
+        capability_args={"origin": origin},
+        action_id="deterministic_baseline.tls.inspect",
+        target_binding=target,
+        reservation_limits=allocation,
+        inline_operation=lambda: inspect_tls_origin(
+            origin,
+            target=target,
+            timeout_seconds=int(allocation["tool_wall_seconds"]),
+        ),
+    )
+    return _scan_tls_summary_from_stored(
+        stored,
+        idempotent_redelivery=idempotent_redelivery,
+    )
 
 
 def _scan_template_summary_from_stored(
@@ -11415,12 +11555,15 @@ async def _execute_reserved_deterministic_scan(
     async def deterministic_baseline_stage(
         _context: ScanStageContext,
     ) -> ScanStageRunResult:
+        tls = await _execute_scan_tls_capability(
+            target, normalized, scan_id=scan_id, job_id=job_id,
+        )
         template = await _execute_scan_template_capability(
             target, normalized, scan_id=scan_id, job_id=job_id,
         )
         return stage_capabilities(
-            {"templates.scan": template},
-            capability_names=("templates.scan",),
+            {"tls.inspect": tls, "templates.scan": template},
+            capability_names=("tls.inspect", "templates.scan"),
         )
 
     async def deterministic_active_stage(
@@ -11502,6 +11645,8 @@ async def _execute_reserved_deterministic_scan(
             or _skipped_scan_web_crawl_summary("stage_disabled"),
             "web.content_discover": surface.get("web.content_discover")
             or _skipped_scan_content_discovery_summary("stage_disabled"),
+            "tls.inspect": baseline.get("tls.inspect")
+            or _skipped_scan_tls_summary("stage_disabled"),
             "templates.scan": baseline.get("templates.scan")
             or _skipped_scan_template_summary("stage_disabled"),
             "xss.verify": active.get("xss.verify")

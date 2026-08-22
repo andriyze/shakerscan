@@ -165,6 +165,20 @@ def scan_content_discovery_capability_allocation(
     }
 
 
+def scan_tls_capability_allocation(
+    budget: Mapping[str, Any],
+) -> dict[str, int] | None:
+    """Reserve the one frozen-address TLS handshake owned by baseline Scan."""
+    tcp_ports = _budget_integer(budget, "max_tcp_ports")
+    wall = _budget_integer(budget, "max_tool_wall_seconds")
+    if tcp_ports < 1 or wall < 1:
+        return None
+    return {
+        "tcp_ports_attempted": 1,
+        "tool_wall_seconds": min(15, wall),
+    }
+
+
 def scan_xss_verification_capability_allocation(
     budget: Mapping[str, Any],
 ) -> dict[str, int] | None:
@@ -364,16 +378,9 @@ def prepare_scan_process_capability(
             if allow_state_changing_http else 0
         ),
         "browser_actions": remaining.get("browser_actions", 0),
-        # Network discovery is separately reserved. The native scanner may use
-        # one residual port for a frozen-address TLS handshake and no other
-        # canonical TCP analyzer.
-        "tcp_ports_attempted": min(
-            remaining.get("tcp_ports_attempted", 0),
-            1 if any(
-                str(origin).lower().startswith("https://")
-                for origin in target.allowed_origins
-            ) else 0,
-        ),
+        # TCP actions execute as separately registered, durably reserved
+        # capabilities. The report-assembly subprocess receives no TCP grant.
+        "tcp_ports_attempted": 0,
         "hosts_attempted": remaining.get("hosts_attempted", 0),
         "tool_wall_seconds": remaining.get("tool_wall_seconds", 0),
     }
@@ -510,6 +517,56 @@ def prepare_scan_external_capability(
         )
     redacted = {
         "schema_version": "scan-external-capability/v1",
+        "capability_name": specification.name,
+        "target_binding_digest": target.digest,
+        "input": normalized,
+    }
+    return PreparedExecution(
+        capability_name=specification.name,
+        adapter_name=specification.adapter,
+        adapter_version=specification.adapter_version,
+        commands=(),
+        estimated_budget=estimated,
+        input_digest=PreparedExecution.digest_input(redacted),
+        redacted_execution=redacted,
+        parser_version=specification.output_schema,
+    )
+
+
+def prepare_scan_inline_capability(
+    *,
+    specification: CapabilitySpec,
+    target: TargetBinding,
+    args: Mapping[str, Any],
+    policy: ScanPolicy,
+) -> PreparedExecution:
+    """Prepare one registry-owned internal action under immutable Scan authority."""
+    if specification.execution_kind != "internal":
+        raise ScanCapabilityContractError(
+            f"{specification.name} is not an internal Scan capability"
+        )
+    if target.target_kind not in specification.target_kinds:
+        raise ScanCapabilityContractError(
+            f"{specification.name} does not support {target.target_kind} targets"
+        )
+    if specification.requires_active_approval and not (
+        policy.active_testing and policy.approval_receipt_id
+    ):
+        raise ScanCapabilityContractError(
+            f"{specification.name} requires active testing approval"
+        )
+    normalized = _normalize_external_capability_args(specification, args)
+    estimated = {
+        str(name): int(amount)
+        for name, amount in dict(specification.budget_cost).items()
+        if int(amount) > 0
+    }
+    if not estimated:
+        raise ScanCapabilityContractError(
+            f"{specification.name} has no reservable budget"
+        )
+    redacted = {
+        "schema_version": "scan-inline-capability/v1",
         "capability_name": specification.name,
         "target_binding_digest": target.digest,
         "input": normalized,

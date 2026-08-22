@@ -132,6 +132,38 @@ def _content_discovery_placement_summary():
     }
 
 
+def _tls_placement_summary():
+    return {
+        "schema_version": "canonical-scan-tls-inspection-execution/v1",
+        "capability_name": "tls.inspect",
+        "enabled": True,
+        "status": "success",
+        "reason": None,
+        "observations": [{
+            "kind": "tls_protocol",
+            "origin": "https://app.example.test",
+            "server_hostname": "app.example.test",
+            "pinned_address": "192.0.2.10",
+            "port": 443,
+            "protocol": "TLSv1.3",
+            "cipher": "TLS_AES_256_GCM_SHA384",
+            "certificate_sha256": "7" * 64,
+            "certificate_bytes": 11,
+        }],
+        "observation_count": 1,
+        "partial": False,
+        "timed_out": False,
+        "errors": [],
+        "budget_consumed": {
+            "tcp_ports_attempted": 1,
+            "tool_wall_seconds": 1,
+        },
+        "receipt": {"receipt_hash": "6" * 64},
+        "durable_budget_settled": True,
+        "idempotent_redelivery": False,
+    }
+
+
 def _xss_verification_placement_summary():
     return {
         "schema_version": "canonical-scan-xss-verification-execution/v1",
@@ -322,6 +354,46 @@ def test_canonical_content_discovery_is_bound_and_adapted(monkeypatch):
         "length": 120,
         "redirect_location": None,
     }]
+
+
+def test_canonical_tls_placement_is_bound_to_origin_and_address(monkeypatch):
+    execution = {
+        "execution_plan_digest": "a" * 64,
+        "target_binding_digest": "b" * 64,
+        "target_binding": {
+            "canonical_host": "app.example.test",
+            "allowed_origins": ["https://app.example.test"],
+            "allowed_addresses": ["192.0.2.10"],
+        },
+    }
+    monkeypatch.setenv(
+        "SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS",
+        json.dumps({
+            "schema_version": "canonical-scan-placements/v1",
+            "execution_plan_digest": execution["execution_plan_digest"],
+            "target_binding_digest": execution["target_binding_digest"],
+            "capabilities": {"tls.inspect": _tls_placement_summary()},
+        }),
+    )
+
+    placements = scanner_mod._load_canonical_scan_placements(execution)
+    assert placements["tls.inspect"]["observations"][0]["protocol"] == (
+        "TLSv1.3"
+    )
+
+    tampered = _tls_placement_summary()
+    tampered["observations"][0]["pinned_address"] = "192.0.2.99"
+    monkeypatch.setenv(
+        "SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS",
+        json.dumps({
+            "schema_version": "canonical-scan-placements/v1",
+            "execution_plan_digest": execution["execution_plan_digest"],
+            "target_binding_digest": execution["target_binding_digest"],
+            "capabilities": {"tls.inspect": tampered},
+        }),
+    )
+    with pytest.raises(SystemExit, match="observation contract"):
+        scanner_mod._load_canonical_scan_placements(execution)
 
 
 def test_canonical_web_crawl_placement_is_bound_and_adapted(monkeypatch):

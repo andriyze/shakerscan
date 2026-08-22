@@ -25,7 +25,6 @@ import secrets
 import shlex
 import shutil
 import socket
-import ssl
 import subprocess
 import threading
 import time
@@ -527,6 +526,7 @@ try:
         HttpRequestExecutionAdapter,
         TlsInspectionExecutionAdapter,
     )
+    from capabilities.tls import inspect_tls_origin
     from hunt.contracts import HuntBudget, capability_manifest, resolve_hunt_policy
     from hunt.start_contract import (
         HUNT_START_SCHEMA,
@@ -561,6 +561,7 @@ except ModuleNotFoundError:
         HttpRequestExecutionAdapter,
         TlsInspectionExecutionAdapter,
     )
+    from api.capabilities.tls import inspect_tls_origin
     from api.hunt.contracts import HuntBudget, capability_manifest, resolve_hunt_policy
     from api.hunt.start_contract import (
         HUNT_START_SCHEMA,
@@ -37576,89 +37577,6 @@ async def _hunt_replay_safe_collection(
     }
 
 
-async def _hunt_tls_inspect(target_url: str, authorized_addresses: Sequence[str]) -> dict[str, Any]:
-    """Perform one SNI-preserving TLS handshake against the frozen target address."""
-    parsed = urllib.parse.urlsplit(str(target_url or ""))
-    if parsed.scheme.lower() != "https" or not parsed.hostname:
-        return {
-            "ok": False,
-            "status": "not_applicable",
-            "error": "tls inspection requires an HTTPS target",
-            "budget_consumed": {"tcp_ports_attempted": 0, "tool_wall_seconds": 0},
-        }
-    frozen_addresses = list(authorized_addresses or [])[:16]
-    if not frozen_addresses:
-        return {"ok": False, "status": "blocked", "error": "hunt has no frozen target resolution set"}
-    try:
-        pinned_address = agent_tools.validate_pinned_scanner_address(
-            frozen_addresses[0], frozen_addresses,
-        )
-    except agent_tools.AgentToolError as exc:
-        return {"ok": False, "status": "blocked", "error": f"scope:{exc}"}
-
-    port = parsed.port or 443
-    tls_context = ssl.create_default_context()
-    tls_context.check_hostname = False
-    tls_context.verify_mode = ssl.CERT_NONE
-    tls_context.set_alpn_protocols(["h2", "http/1.1"])
-    started = time.perf_counter()
-    writer: asyncio.StreamWriter | None = None
-    try:
-        _reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(
-                host=pinned_address,
-                port=port,
-                ssl=tls_context,
-                server_hostname=parsed.hostname,
-            ),
-            timeout=10,
-        )
-        tls_object = writer.get_extra_info("ssl_object")
-        if tls_object is None:
-            raise ssl.SSLError("TLS handshake produced no SSL object")
-        certificate = tls_object.getpeercert(binary_form=True) or b""
-        cipher = tls_object.cipher()
-        elapsed = max(1, math.ceil(time.perf_counter() - started))
-        observation = {
-            "kind": "tls_protocol",
-            "origin": urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "", "", "")),
-            "server_hostname": parsed.hostname,
-            "pinned_address": pinned_address,
-            "port": port,
-            "protocol": tls_object.version(),
-            "cipher": cipher[0] if cipher else None,
-            "cipher_protocol": cipher[1] if cipher else None,
-            "cipher_bits": cipher[2] if cipher else None,
-            "alpn_protocol": tls_object.selected_alpn_protocol(),
-            "certificate_sha256": hashlib.sha256(certificate).hexdigest() if certificate else None,
-            "certificate_bytes": len(certificate),
-            "certificate_trust": "not_evaluated",
-        }
-        return {
-            "ok": True,
-            "status": "success",
-            "observation": observation,
-            "budget_consumed": {"tcp_ports_attempted": 1, "tool_wall_seconds": elapsed},
-        }
-    except (OSError, ssl.SSLError, asyncio.TimeoutError) as exc:
-        return {
-            "ok": False,
-            "status": "failed",
-            "error": f"tls_handshake:{type(exc).__name__}",
-            "budget_consumed": {
-                "tcp_ports_attempted": 1,
-                "tool_wall_seconds": max(1, math.ceil(time.perf_counter() - started)),
-            },
-        }
-    finally:
-        if writer is not None:
-            writer.close()
-            try:
-                await writer.wait_closed()
-            except (OSError, ssl.SSLError):
-                pass
-
-
 async def _validate_legacy_device_hunt_credentials(
     conn: Any,
     refs: Mapping[str, str],
@@ -38805,17 +38723,22 @@ async def execute_hunt_capability(
                 action_digest=durable_action_digest,
             )
         elif name == "tls.inspect":
+            tls_target = inline_web_target_binding()
+            tls_budget = (
+                durable_reservation.record.requested
+                if durable_reservation is not None
+                else charges
+            )
             tls_adapter = TlsInspectionExecutionAdapter(
                 specification=spec,
-                operation=lambda: _hunt_tls_inspect(
+                operation=lambda: inspect_tls_origin(
                     str(context["target"]["url"]),
-                    context.get("authorized_target_addresses") or [],
+                    target=tls_target,
+                    timeout_seconds=int(
+                        tls_budget.get("tool_wall_seconds") or 1
+                    ),
                 ),
-                requested_budget=(
-                    durable_reservation.record.requested
-                    if durable_reservation is not None
-                    else charges
-                ),
+                requested_budget=tls_budget,
                 redacted_execution=_hunt_redacted_capability_input(
                     name, request.input,
                 ),
@@ -38823,12 +38746,8 @@ async def execute_hunt_capability(
             capability_execution = await CapabilityExecutor().execute(
                 CapabilityExecutionContext(
                     specification=spec,
-                    target=inline_web_target_binding(),
-                    requested_budget=(
-                        durable_reservation.record.requested
-                        if durable_reservation is not None
-                        else charges
-                    ),
+                    target=tls_target,
+                    requested_budget=tls_budget,
                 ),
                 tls_adapter,
                 heartbeat=lambda: asyncio.sleep(0),

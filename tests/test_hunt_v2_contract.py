@@ -79,7 +79,8 @@ def test_hunt_actions_emit_capability_receipts_and_never_accept_raw_argv():
     assert "require_expiry=True" in api
     assert "require_target_binding=True" in api
     assert 'elif name == "http.request"' in api
-    assert "_hunt_tls_inspect" in api
+    assert "inspect_tls_origin" in api
+    assert "_hunt_tls_inspect" not in api
     assert "device_agent.validate_tool_call" in api
     assert "ADD COLUMN IF NOT EXISTS capability_name" in migration
     assert "ADD COLUMN IF NOT EXISTS hunt_id" in migration
