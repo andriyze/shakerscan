@@ -18,7 +18,7 @@ services:
     volumes:
       - ${FLEET_RUNTIME_DIR:-./.shakerscan-fleet}:/run/shakerscan-fleet:ro
       - ${FLEET_RESULTS_DIR:-./results}:/results
-    command: ["python3", "/app/broker_worker.py"]
+    command: ["python3", "/app/broker_worker_v2.py"]
     labels:
       com.shakerscan.node_id: ${FLEET_NODE_ID:?FLEET_NODE_ID is required}
       com.shakerscan.fleet_managed: "true"
