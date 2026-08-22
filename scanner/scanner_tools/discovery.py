@@ -1527,28 +1527,48 @@ async def enhanced_url_discovery(
         if "form" in row:
             forms.append(row["form"])
 
-    katana_cmd = "/opt/tools/katana" if os.path.exists("/opt/tools/katana") else "katana"
-    try:
-        streamed = await run_katana_stream(katana_cmd, url, depth, _consume_katana_line)
-    except (FileNotFoundError, OSError) as exc:
-        streamed = None
+    if budget.get("disable_katana"):
+        for observation in budget.get("canonical_katana_observations") or []:
+            if not isinstance(observation, dict):
+                continue
+            candidate = observation.get("url")
+            if not candidate:
+                continue
+            discovered_urls.append(str(candidate))
+            _accept_manifest_endpoint(
+                observation.get("method") or "GET", candidate, "katana",
+            )
+            if any(
+                pattern in str(candidate)
+                for pattern in ["/api/", "/v1/", "/v2/", "/graphql", "/rest/"]
+            ):
+                api_endpoints.append(str(candidate))
         endpoint_manifest.finish_producer(
-            "katana", status="failed", reason=f"spawn_{type(exc).__name__}",
-        )
-    if streamed is not None and streamed.cancelled:
-        endpoint_manifest.finish_producer("katana", status="cancelled", reason="user_cancelled")
-        endpoint_manifest.finalize(cancelled=True)
-        raise asyncio.CancelledError
-    if streamed is None:
-        pass
-    elif streamed.timed_out:
-        endpoint_manifest.finish_producer("katana", status="timed_out", reason="soft_deadline")
-    elif streamed.returncode != 0:
-        endpoint_manifest.finish_producer(
-            "katana", status="failed", reason=f"exit_{streamed.returncode}",
+            "katana", reason="canonical_capability_placement",
         )
     else:
-        endpoint_manifest.finish_producer("katana")
+        katana_cmd = "/opt/tools/katana" if os.path.exists("/opt/tools/katana") else "katana"
+        try:
+            streamed = await run_katana_stream(katana_cmd, url, depth, _consume_katana_line)
+        except (FileNotFoundError, OSError) as exc:
+            streamed = None
+            endpoint_manifest.finish_producer(
+                "katana", status="failed", reason=f"spawn_{type(exc).__name__}",
+            )
+        if streamed is not None and streamed.cancelled:
+            endpoint_manifest.finish_producer("katana", status="cancelled", reason="user_cancelled")
+            endpoint_manifest.finalize(cancelled=True)
+            raise asyncio.CancelledError
+        if streamed is None:
+            pass
+        elif streamed.timed_out:
+            endpoint_manifest.finish_producer("katana", status="timed_out", reason="soft_deadline")
+        elif streamed.returncode != 0:
+            endpoint_manifest.finish_producer(
+                "katana", status="failed", reason=f"exit_{streamed.returncode}",
+            )
+        else:
+            endpoint_manifest.finish_producer("katana")
     # Extract JS/CSS from HTML directly (for SPAs that katana misses)
     try:
         async with httpx.AsyncClient(timeout=10.0, follow_redirects=True, verify=False) as client:

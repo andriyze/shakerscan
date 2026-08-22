@@ -5254,6 +5254,7 @@ async def build_report(target: str,
         nonlocal httpx_meta, katana_result, browser_res, browser_fetch_error, browser_seed_urls
         nonlocal discovery_truncation_reasons
 
+        effective_discovery_budget = discovery_budget
         if canonical_scan_execution is not None:
             placed_probe = (
                 canonical_scan_placements.get("web.probe")
@@ -5275,6 +5276,28 @@ async def build_report(target: str,
             httpx_task = asyncio.create_task(_focused_async_value(
                 _canonical_httpx_rows(placed_probe)
             ))
+            placed_crawl = (
+                canonical_scan_placements.get("web.crawl")
+                if isinstance(canonical_scan_placements, dict) else None
+            )
+            if not isinstance(placed_crawl, Mapping):
+                discovery_truncation_reasons.append(
+                    "canonical_web_crawl_placement_missing"
+                )
+            elif placed_crawl.get("status") == "partial":
+                discovery_truncation_reasons.append(
+                    "canonical_web_crawl_partial"
+                )
+            elif placed_crawl.get("status") not in {"success", "skipped"}:
+                discovery_truncation_reasons.append(
+                    "canonical_web_crawl_"
+                    + str(placed_crawl.get("status") or "failed")
+                )
+            effective_discovery_budget = dict(discovery_budget)
+            effective_discovery_budget["disable_katana"] = True
+            effective_discovery_budget["canonical_katana_observations"] = (
+                _canonical_katana_observations(placed_crawl)
+            )
         else:
             httpx_task = asyncio.create_task(pd_httpx_probe(host, port))
         if public_only and quick_mode:
@@ -5305,7 +5328,7 @@ async def build_report(target: str,
                     base_url,
                     signals=None,
                     scan_type="smart",
-                    budget=discovery_budget,
+                    budget=effective_discovery_budget,
                 )
             )
         else:
@@ -5313,7 +5336,7 @@ async def build_report(target: str,
                 enhanced_url_discovery(
                     base_url,
                     scan_type=discovery_scan_type,
-                    budget=discovery_budget,
+                    budget=effective_discovery_budget,
                 )
             )
 
@@ -14216,7 +14239,7 @@ def _load_canonical_scan_placements(
     capabilities = payload.get("capabilities")
     if not isinstance(capabilities, dict):
         raise SystemExit("canonical Scan placement capabilities are invalid")
-    unknown = set(capabilities) - {"web.probe", "templates.scan"}
+    unknown = set(capabilities) - {"web.probe", "web.crawl", "templates.scan"}
     if unknown:
         raise SystemExit(
             "unsupported canonical Scan placement: "
@@ -14260,6 +14283,43 @@ def _load_canonical_scan_placements(
             if not re.fullmatch(r"[0-9a-f]{64}", receipt_hash):
                 raise SystemExit("canonical web.probe receipt is missing")
         result["web.probe"] = probe
+    crawl = capabilities.get("web.crawl")
+    if crawl is not None:
+        if not isinstance(crawl, dict) or set(crawl) != {
+            "schema_version", "capability_name", "enabled", "status", "reason",
+            "observations", "observation_count", "partial", "timed_out",
+            "errors", "budget_consumed", "receipt", "durable_budget_settled",
+            "idempotent_redelivery",
+        }:
+            raise SystemExit("canonical web.crawl placement is malformed")
+        if (
+            crawl.get("schema_version")
+            != "canonical-scan-web-crawl-execution/v1"
+            or crawl.get("capability_name") != "web.crawl"
+            or not isinstance(crawl.get("enabled"), bool)
+            or crawl.get("status") not in {
+                "success", "partial", "failed", "blocked", "cancelled", "skipped",
+            }
+        ):
+            raise SystemExit("canonical web.crawl placement contract is invalid")
+        observations = crawl.get("observations")
+        if not isinstance(observations, list) or len(observations) > 200:
+            raise SystemExit("canonical web.crawl observations are invalid")
+        if any(
+            not isinstance(item, dict)
+            or item.get("kind") != "discovered_route"
+            for item in observations
+        ):
+            raise SystemExit("canonical web.crawl observation contract is invalid")
+        if crawl.get("observation_count") != len(observations):
+            raise SystemExit("canonical web.crawl observation count is invalid")
+        if not isinstance(crawl.get("receipt"), dict):
+            raise SystemExit("canonical web.crawl receipt reference is invalid")
+        if crawl.get("enabled") and crawl.get("status") != "skipped":
+            receipt_hash = str(crawl["receipt"].get("receipt_hash") or "")
+            if not re.fullmatch(r"[0-9a-f]{64}", receipt_hash):
+                raise SystemExit("canonical web.crawl receipt is missing")
+        result["web.crawl"] = crawl
     template = capabilities.get("templates.scan")
     if template is None:
         return result
@@ -14320,6 +14380,23 @@ def _canonical_httpx_rows(summary: Any) -> list[dict[str, Any]]:
         and item.get("kind") == "http_fingerprint"
         and item.get("url")
     ][:50]
+
+
+def _canonical_katana_observations(summary: Any) -> list[dict[str, Any]]:
+    """Return bounded typed crawl observations for manifest ingestion."""
+    if not isinstance(summary, Mapping):
+        return []
+    return [
+        {
+            "url": item.get("url"),
+            "method": str(item.get("method") or "GET").upper()[:16],
+            "source": item.get("source"),
+        }
+        for item in summary.get("observations") or []
+        if isinstance(item, Mapping)
+        and item.get("kind") == "discovered_route"
+        and item.get("url")
+    ][:200]
 
 
 def _canonical_nuclei_result(summary: Mapping[str, Any]) -> dict[str, Any]:

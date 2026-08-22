@@ -132,6 +132,20 @@ def scan_web_probe_capability_allocation(
     }
 
 
+def scan_web_crawl_capability_allocation(
+    budget: Mapping[str, Any],
+) -> dict[str, int] | None:
+    """Reserve a bounded crawl slice while retaining the Scan backbone."""
+    http = _budget_integer(budget, "max_http_requests")
+    wall = _budget_integer(budget, "max_tool_wall_seconds")
+    if http < 4 or wall < 4:
+        return None
+    return {
+        "http_requests": min(150, max(1, http // 10)),
+        "tool_wall_seconds": min(75, max(1, wall // 10)),
+    }
+
+
 def scan_external_execution_target(
     target_url: str,
     *,

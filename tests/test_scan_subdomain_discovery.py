@@ -395,6 +395,26 @@ def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch)
                 },
                 "settlement": {"mode": "exact", "actual": 1},
             }
+        if tool == "katana":
+            return {
+                "status": "success",
+                "elapsed_seconds": 2,
+                "typed_output": {
+                    "parser": "katana-typed-v1",
+                    "records": [{
+                        "kind": "discovered_route",
+                        "url": "https://app.example.test/api/orders",
+                        "method": "GET",
+                        "source": "https://app.example.test/",
+                    }],
+                    "errors": [],
+                },
+                "settlement": {
+                    "mode": "observed_lower_bound",
+                    "actual": None,
+                    "observed_minimum": 2,
+                },
+            }
         assert tool == "nuclei"
         return {
             "status": "success",
@@ -427,12 +447,12 @@ def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch)
         placement_seen.update(canonical_placed_capabilities or {})
         assert target == "https://app.example.test"
         assert canonical_runtime_budget == {
-            "http_requests": 96,
+            "http_requests": 94,
             "state_changing_requests": 0,
             "browser_actions": 20,
             "tcp_ports_attempted": 1,
             "hosts_attempted": 50,
-            "tool_wall_seconds": 57,
+            "tool_wall_seconds": 55,
         }
         return {
             "target": target,
@@ -471,9 +491,13 @@ def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch)
     ))
 
     assert ("httpx", "running") in events
+    assert ("katana", "running") in events
     assert ("nuclei", "running") in events
     assert ("baseline", "running") in events
     assert events.index(("httpx", "running")) < events.index(
+        ("katana", "running")
+    )
+    assert events.index(("katana", "running")) < events.index(
         ("nuclei", "running")
     )
     assert events.index(("nuclei", "running")) < events.index(
@@ -482,6 +506,10 @@ def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch)
     assert placement_seen["templates.scan"]["status"] == "success"
     assert placement_seen["web.probe"]["status"] == "success"
     assert placement_seen["web.probe"]["observations"][0]["status"] == 200
+    assert placement_seen["web.crawl"]["status"] == "success"
+    assert placement_seen["web.crawl"]["observations"][0]["url"] == (
+        "https://app.example.test/api/orders"
+    )
     assert placement_seen["templates.scan"]["observations"][0][
         "proof_state"
     ] == "candidate"
@@ -784,6 +812,7 @@ def _stored_network_capability(
         "service.fingerprint": ("nmap", "nmap-xml/v1"),
         "templates.scan": ("nuclei", "nuclei-typed-v1"),
         "web.probe": ("httpx", "httpx-typed-v1"),
+        "web.crawl": ("katana", "katana-typed-v1"),
     }[capability_name]
     terminal, receipt = terminalize_capability_reservation(
         running,
@@ -905,6 +934,68 @@ def test_recon_stage_places_one_reserved_http_fingerprint(monkeypatch):
     assert summary["status"] == "success"
     assert summary["observations"][0]["kind"] == "http_fingerprint"
     assert summary["receipt"]["budget_reservation_state"] == "committed"
+
+
+def test_recon_stage_places_one_reserved_crawl_result(monkeypatch):
+    _plan, _target, options = _authority(enabled=False, network=True)
+    calls = []
+
+    async def execute_capability(**kwargs):
+        calls.append(kwargs)
+        return _stored_network_capability(
+            "web.crawl",
+            observations=[{
+                "kind": "discovered_route",
+                "url": "https://app.example.test/api/orders",
+                "method": "GET",
+                "source": "https://app.example.test/",
+            }],
+            amounts={"http_requests": 2, "tool_wall_seconds": 2},
+        ), False
+
+    monkeypatch.setattr(
+        worker, "_execute_reserved_scan_capability", execute_capability,
+    )
+    summary = asyncio.run(worker._execute_scan_web_crawl_capability(
+        "https://app.example.test",
+        options,
+        scan_id="00000000-0000-0000-0000-000000000001",
+        job_id="job-1",
+    ))
+
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["capability_name"] == "web.crawl"
+    assert call["action_id"] == "deterministic_recon.web.crawl"
+    assert call["reservation_limits"] == {
+        "http_requests": 10,
+        "tool_wall_seconds": 6,
+    }
+    assert call["scanner_process_payload"]["tool_name"] == "katana"
+    assert call["scanner_process_payload"]["pinned_address"] == "192.0.2.10"
+    assert summary["status"] == "success"
+    assert summary["observations"][0]["kind"] == "discovered_route"
+    assert summary["receipt"]["budget_reservation_state"] == "committed"
+
+
+def test_crawl_stage_never_runs_without_active_permission(monkeypatch):
+    _plan, _target, options = _authority(enabled=True, network=False)
+
+    async def execute_capability(**_kwargs):
+        raise AssertionError("passive Scan launched Katana")
+
+    monkeypatch.setattr(
+        worker, "_execute_reserved_scan_capability", execute_capability,
+    )
+    summary = asyncio.run(worker._execute_scan_web_crawl_capability(
+        "https://app.example.test",
+        options,
+        scan_id="00000000-0000-0000-0000-000000000001",
+        job_id="job-1",
+    ))
+
+    assert summary["status"] == "skipped"
+    assert summary["reason"] == "active_testing_not_authorized"
 
 
 def test_template_stage_never_runs_without_active_permission(monkeypatch):

@@ -78,6 +78,56 @@ def _web_probe_placement_summary():
     }
 
 
+def _web_crawl_placement_summary():
+    return {
+        "schema_version": "canonical-scan-web-crawl-execution/v1",
+        "capability_name": "web.crawl",
+        "enabled": True,
+        "status": "success",
+        "reason": None,
+        "observations": [{
+            "kind": "discovered_route",
+            "url": "https://app.example.test/api/orders",
+            "method": "GET",
+            "source": "https://app.example.test/",
+        }],
+        "observation_count": 1,
+        "partial": False,
+        "timed_out": False,
+        "errors": [],
+        "budget_consumed": {"http_requests": 2, "tool_wall_seconds": 2},
+        "receipt": {"receipt_hash": "e" * 64},
+        "durable_budget_settled": True,
+        "idempotent_redelivery": False,
+    }
+
+
+def test_canonical_web_crawl_placement_is_bound_and_adapted(monkeypatch):
+    execution = {
+        "execution_plan_digest": "a" * 64,
+        "target_binding_digest": "b" * 64,
+    }
+    monkeypatch.setenv(
+        "SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS",
+        json.dumps({
+            "schema_version": "canonical-scan-placements/v1",
+            **execution,
+            "capabilities": {"web.crawl": _web_crawl_placement_summary()},
+        }),
+    )
+
+    placements = scanner_mod._load_canonical_scan_placements(execution)
+    observations = scanner_mod._canonical_katana_observations(
+        placements["web.crawl"]
+    )
+
+    assert observations == [{
+        "url": "https://app.example.test/api/orders",
+        "method": "GET",
+        "source": "https://app.example.test/",
+    }]
+
+
 def test_canonical_web_probe_placement_is_bound_and_adapted(monkeypatch):
     execution = {
         "execution_plan_digest": "a" * 64,
