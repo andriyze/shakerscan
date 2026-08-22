@@ -76,6 +76,7 @@ from runtime.request_replay_executor import (
     execute_replay_plan,
     replay_reservation_budget,
 )
+from runtime.reservation_recovery import recover_stale_reservations
 from runtime.reservation_store import (
     PostgresBudgetReservationStore,
     ReservationConflict,
@@ -1224,6 +1225,15 @@ RETEST_STALE_BATCH_SIZE = max(1, int(os.environ.get("RETEST_STALE_BATCH_SIZE", "
 RETEST_STALE_REQUEUE_LIMIT = max(0, int(os.environ.get("RETEST_STALE_REQUEUE_LIMIT", "1")))
 RETEST_WATCHDOG_LOCK_KEY = os.environ.get("RETEST_WATCHDOG_LOCK_KEY", "retest:watchdog:lock")
 RETEST_WATCHDOG_LOCK_SECONDS = max(10, int(os.environ.get("RETEST_WATCHDOG_LOCK_SECONDS", "30")))
+_reservation_sweep_interval = int(
+    os.environ.get("BUDGET_RESERVATION_SWEEP_INTERVAL_SECONDS", "30")
+)
+BUDGET_RESERVATION_SWEEP_INTERVAL_SECONDS = (
+    0 if _reservation_sweep_interval <= 0 else max(10, _reservation_sweep_interval)
+)
+BUDGET_RESERVATION_SWEEP_BATCH_SIZE = max(
+    1, min(1000, int(os.environ.get("BUDGET_RESERVATION_SWEEP_BATCH_SIZE", "100")))
+)
 AI_SETTINGS_KEY = os.environ.get("AI_SETTINGS_KEY", "settings:ai")
 PARALLEL_SHARD_MAX_PER_PARENT = max(1, int(os.environ.get("PARALLEL_SHARD_MAX_PER_PARENT", "4")))
 PARALLEL_SHARD_CONCURRENCY_HARD_MAX = max(
@@ -14129,6 +14139,30 @@ async def _run_job_under_lease(redis_client: Any, lease: QueueLease, job_data: d
         _clear_fleet_busy_marker(marker)
 
 
+async def sweep_stale_budget_reservations() -> dict[str, int]:
+    """Recover expired durable holds without allowing uncertain traffic refunds."""
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            events = await recover_stale_reservations(
+                conn,
+                now=datetime.now(timezone.utc),
+                limit=BUDGET_RESERVATION_SWEEP_BATCH_SIZE,
+            )
+    summary = {
+        "recovered": len(events),
+        "released": sum(event.terminal_status == "released" for event in events),
+        "failed_uncertain": sum(event.execution_uncertain for event in events),
+    }
+    if events:
+        print(
+            "[watchdog] stale budget reservations recovered: "
+            f"released={summary['released']}, "
+            f"failed_uncertain={summary['failed_uncertain']}",
+            flush=True,
+        )
+    return summary
+
+
 async def async_main():
     """Async main worker loop - uses single event loop for database pool."""
     print("Initializing worker...", flush=True)
@@ -14157,6 +14191,7 @@ async def async_main():
 
     loop = asyncio.get_event_loop()
     last_stale_check_monotonic = 0.0
+    last_reservation_sweep_monotonic = 0.0
 
     try:
         while True:
@@ -14173,6 +14208,21 @@ async def async_main():
                         print(f"[watchdog] stale retest sweep error: {stale_err}", flush=True)
                     finally:
                         last_stale_check_monotonic = now_mono
+
+                if (
+                    BUDGET_RESERVATION_SWEEP_INTERVAL_SECONDS > 0
+                    and now_mono - last_reservation_sweep_monotonic
+                    >= BUDGET_RESERVATION_SWEEP_INTERVAL_SECONDS
+                ):
+                    try:
+                        await sweep_stale_budget_reservations()
+                    except Exception as reservation_err:
+                        print(
+                            f"[watchdog] stale budget reservation sweep error: {reservation_err}",
+                            flush=True,
+                        )
+                    finally:
+                        last_reservation_sweep_monotonic = now_mono
 
                 if not await _fleet_node_accepts_work():
                     await asyncio.sleep(min(5, WORKER_QUEUE_BLOCK_SECONDS))
