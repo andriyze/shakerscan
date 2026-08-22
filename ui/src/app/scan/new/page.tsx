@@ -13,6 +13,7 @@ import {
   type Target,
 } from '@/lib/api'
 import { Button, Card, useToast } from '@/components/ui'
+import { RequestCollectionPicker } from '@/components/RequestCollectionPicker'
 import { validateScanTarget } from '@/lib/targetValidation'
 
 type BudgetProfile = 'fast' | 'balanced' | 'thorough'
@@ -46,11 +47,13 @@ export default function NewScanPage() {
   const [authorized, setAuthorized] = useState(false)
   const [subdomainDiscovery, setSubdomainDiscovery] = useState(false)
   const [networkDiscovery, setNetworkDiscovery] = useState(false)
+  const [allowStateChanging, setAllowStateChanging] = useState(false)
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [approvalReceipt, setApprovalReceipt] = useState('')
   const [credentialProfiles, setCredentialProfiles] = useState<CredentialProfile[]>([])
   const [primaryCredentialId, setPrimaryCredentialId] = useState('')
   const [secondaryCredentialId, setSecondaryCredentialId] = useState('')
+  const [requestCollectionIds, setRequestCollectionIds] = useState<string[]>([])
   const [credentialsLoading, setCredentialsLoading] = useState(false)
   const [credentialError, setCredentialError] = useState<string | null>(null)
   const [customEndpoints, setCustomEndpoints] = useState('')
@@ -153,6 +156,14 @@ export default function NewScanPage() {
       setError('Credential use requires a target-bound approval receipt ID.')
       return
     }
+    if (requestCollectionIds.length && (batchMode || !selectedRegisteredTarget)) {
+      setError('Request collection selections are exact-target-bound and require one registered target.')
+      return
+    }
+    if (allowStateChanging && (!activeTesting || !approvalReceipt.trim())) {
+      setError('State-changing collection replay requires active testing and a target-bound approval receipt ID.')
+      return
+    }
 
     const advanced = Object.fromEntries(
       Object.entries(limits)
@@ -166,9 +177,11 @@ export default function NewScanPage() {
       budget_profile: budgetProfile,
       policy: {
         active_testing: activeTesting,
+        allow_state_changing_http: allowStateChanging,
         subdomain_discovery: subdomainDiscovery,
         network_discovery: networkDiscovery,
       },
+      request_collections: requestCollectionIds.map((id) => ({ id })),
       credential_profile_ids: selectedCredentialIds,
       advanced,
       approval_receipt_id: approvalReceipt.trim() || undefined,
@@ -219,6 +232,7 @@ export default function NewScanPage() {
                 if (event.target.checked) {
                   setPrimaryCredentialId('')
                   setSecondaryCredentialId('')
+                  setRequestCollectionIds([])
                 }
               }} />
               Multiple targets
@@ -270,7 +284,7 @@ export default function NewScanPage() {
             <p className="mt-1 text-xs text-gray-500">Passive checks are always included. Opt in to broader discovery or active proof.</p>
           </div>
           <label className="flex items-start gap-3 rounded-lg border border-gray-700 bg-gray-950 p-4">
-            <input className="mt-1" type="checkbox" checked={activeTesting} onChange={(event) => { setActiveTesting(event.target.checked); if (!event.target.checked) { if (!credentialUse) setAuthorized(false); setNetworkDiscovery(false) } }} />
+            <input className="mt-1" type="checkbox" checked={activeTesting} onChange={(event) => { setActiveTesting(event.target.checked); if (!event.target.checked) { if (!credentialUse) setAuthorized(false); setNetworkDiscovery(false); setAllowStateChanging(false); setRequestCollectionIds([]) } }} />
             <span>
               <span className="block text-sm font-medium text-white">Allow active testing</span>
               <span className="block text-xs text-gray-500">Permit bounded XSS, SQL injection, authorization, and other proof-oriented probes.</span>
@@ -285,6 +299,7 @@ export default function NewScanPage() {
           <div className="grid gap-3 md:grid-cols-2">
             <label className="flex items-center gap-3 text-sm text-gray-300"><input type="checkbox" checked={subdomainDiscovery} onChange={(event) => setSubdomainDiscovery(event.target.checked)} />Discover subdomains</label>
             <label className={`flex items-center gap-3 text-sm ${activeTesting ? 'text-gray-300' : 'text-gray-600'}`}><input type="checkbox" disabled={!activeTesting} checked={networkDiscovery} onChange={(event) => setNetworkDiscovery(event.target.checked)} />Discover network services (approval receipt required)</label>
+            <label className={`flex items-center gap-3 text-sm ${activeTesting ? 'text-gray-300' : 'text-gray-600'}`}><input type="checkbox" disabled={!activeTesting} checked={allowStateChanging} onChange={(event) => { setAllowStateChanging(event.target.checked); if (!event.target.checked) setRequestCollectionIds([]) }} />Allow explicitly selected state-changing HTTP requests</label>
           </div>
           {activeTesting && staleWorkers > 0 && (
             <p className="rounded-lg border border-amber-800/70 bg-amber-950/20 p-3 text-sm text-amber-200">{staleWorkers} worker{staleWorkers === 1 ? '' : 's'} are not on the current build. Active submission will fail closed until they are current.</p>
@@ -335,6 +350,14 @@ export default function NewScanPage() {
               )}
               {credentialError && <p className="text-xs text-amber-300">{credentialError}</p>}
               <p className="text-xs text-gray-500">Only opaque IDs enter the Scan request and queue. The worker revalidates approval and decrypts the selected version immediately before execution. <Link href="/credentials" className="text-blue-300 hover:text-blue-200">Manage credentials</Link></p>
+              <RequestCollectionPicker
+                targetId={batchMode ? undefined : selectedRegisteredTarget?.id}
+                targetKind={targetKind}
+                selectedIds={requestCollectionIds}
+                onChange={setRequestCollectionIds}
+                allowConfirmedActive={activeTesting && allowStateChanging}
+                disabled={batchMode}
+              />
               <label className="block text-sm text-gray-300">Known endpoints (one per line)<textarea value={customEndpoints} onChange={(event) => setCustomEndpoints(event.target.value)} rows={4} placeholder={'GET /api/users\nPOST /api/login username,password'} className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white" /></label>
               <label className="block text-sm text-gray-300">Approval receipt ID<input value={approvalReceipt} onChange={(event) => setApprovalReceipt(event.target.value)} className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white" /></label>
               <div>

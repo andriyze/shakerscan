@@ -24,6 +24,7 @@ import {
   type HuntTargetKind,
 } from '@/lib/huntV2'
 import { Button, Card, EmptyState, Field, Select, Textarea, useToast } from '@/components/ui'
+import { RequestCollectionPicker } from '@/components/RequestCollectionPicker'
 
 type TargetChoice = {
   id: string
@@ -69,7 +70,7 @@ function HuntContent() {
   const [scopeReceipt, setScopeReceipt] = useState('')
   const [approvalReceipt, setApprovalReceipt] = useState('')
   const [capabilityIds, setCapabilityIds] = useState('')
-  const [requestCollectionIds, setRequestCollectionIds] = useState('')
+  const [requestCollectionIds, setRequestCollectionIds] = useState<string[]>([])
   const [credentialProfiles, setCredentialProfiles] = useState<CredentialProfile[]>([])
   const [credentialIds, setCredentialIds] = useState<Record<CredentialPrincipalSlot, string>>({
     primary: '',
@@ -186,6 +187,10 @@ function HuntContent() {
       ? ['primary', 'secondary', 'service', 'ssh']
       : ['primary', 'secondary', 'service']
 
+  useEffect(() => {
+    if (targetKind === 'network') setRequestCollectionIds([])
+  }, [targetKind])
+
   async function start() {
     if (!targetId || !selectedChoice) return
     setStarting(true)
@@ -240,7 +245,7 @@ function HuntContent() {
         },
         credentialRefs,
         capabilities: splitIds(capabilityIds),
-        requestCollectionIds: splitIds(requestCollectionIds),
+        requestCollectionIds,
       })
       setHunt(created)
       toast.success('Hunt started through the V2 policy contract')
@@ -372,6 +377,7 @@ function HuntContent() {
                       if (!event.target.checked) {
                         setNetworkDiscovery(false)
                         setAllowStateChanging(false)
+                        setRequestCollectionIds([])
                       }
                     }}
                   />
@@ -393,7 +399,10 @@ function HuntContent() {
                     type="checkbox"
                     disabled={!activeTesting}
                     checked={allowStateChanging}
-                    onChange={(event) => setAllowStateChanging(event.target.checked)}
+                    onChange={(event) => {
+                      setAllowStateChanging(event.target.checked)
+                      if (!event.target.checked) setRequestCollectionIds([])
+                    }}
                   />
                   <span>Allow explicitly selected state-changing HTTP requests</span>
                 </label>
@@ -474,19 +483,15 @@ function HuntContent() {
                 </p>
               </div>
 
-              <Field label="Bound request collection IDs (optional)">
-                <div>
-                  <input
-                    value={requestCollectionIds}
-                    onChange={(event) => setRequestCollectionIds(event.target.value)}
-                    placeholder="UUIDs separated by commas"
-                    className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white"
-                  />
-                  <p className="mt-1 text-xs text-gray-500">
-                    Collections are fixed at creation; the planner sees only their redacted inventory.
-                  </p>
-                </div>
-              </Field>
+              {targetKind !== 'network' && (
+                <RequestCollectionPicker
+                  targetId={selectedChoice?.id}
+                  targetKind={targetKind}
+                  selectedIds={requestCollectionIds}
+                  onChange={setRequestCollectionIds}
+                  allowConfirmedActive={activeTesting && allowStateChanging}
+                />
+              )}
 
               <Field label="Capability allowlist (optional)">
                 <div>
