@@ -9583,6 +9583,7 @@ async def _execute_scan_request_collections(
         "collections": [],
         "replayed": 0,
         "observation_count": 0,
+        "cancelled": False,
         "observations": [],
         "budget_consumed": {},
         "partial": False,
@@ -10081,6 +10082,7 @@ async def _execute_scan_request_collections(
             additional_budget=additional_budget,
             initial_reservation=persisted.record,
             receipt_context=receipt_context,
+            cancelled=lambda: _scan_cancel_requested(scan_id),
         )
         public_receipt = outcome.receipt.public_dict()
         observations = list(public_receipt.get("observations") or [])
@@ -10093,7 +10095,7 @@ async def _execute_scan_request_collections(
             "selection_id": selection_id,
             "replay_policy": replay_policy,
             "status": item_status,
-            "partial": outcome.status == "partial",
+            "partial": bool(outcome.receipt.partial),
             "replayed": int(outcome.reservation.actual.get("http_requests") or 0),
             "safe_methods_only": runtime_selector.safe_methods_only,
             "runtime_limit": runtime_selector.limit,
@@ -10103,7 +10105,9 @@ async def _execute_scan_request_collections(
             "receipt": _scan_replay_receipt_reference(public_receipt),
             "secret_values_visible": False,
         })
-        summary["partial"] = bool(summary["partial"] or outcome.status == "partial")
+        summary["partial"] = bool(
+            summary["partial"] or outcome.receipt.partial
+        )
         summary["replayed"] += int(
             outcome.reservation.actual.get("http_requests") or 0
         )
@@ -10115,6 +10119,9 @@ async def _execute_scan_request_collections(
         summary["budget_consumed"] = merge_scan_budget_usage(
             summary["budget_consumed"], outcome.reservation.actual,
         )
+        if outcome.status == "cancelled":
+            summary["cancelled"] = True
+            return summary
         if outcome.reservation.status != "committed":
             raise ScanCollectionReplayContractError(
                 "Scan collection replay failed before producing a trusted terminal result: "
@@ -10346,6 +10353,8 @@ async def process_scan_job(job_data: dict):
                         job_id=job_id,
                         runtime_request_grant=runtime_request_grant,
                     )
+                    if collection_replay_summary.get("cancelled"):
+                        raise ValueError("Cancelled by user")
                     options = _apply_scan_collection_replay_remaining_budget(
                         options, collection_replay_summary,
                     )
@@ -14934,7 +14943,13 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                         """UPDATE hunt_actions SET status=$2, result_summary=$3,
                                   completed_at=NOW() WHERE id=$1""",
                         uuid.UUID(action_id),
-                        "completed" if terminal.status == "committed" else "failed",
+                        (
+                            "completed"
+                            if terminal.status == "committed"
+                            else "cancelled"
+                            if receipt.status == "cancelled"
+                            else "failed"
+                        ),
                         json.dumps({
                             "reservation_id": reservation_id,
                             "receipt_hash": receipt.receipt_hash,
@@ -14967,6 +14982,7 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
             additional_budget=additional_budget,
             initial_reservation=persisted.record if persisted is not None else None,
             receipt_context=receipt_context,
+            cancelled=lambda: bool(redis_client.exists(cancel_key)),
         )
         public_receipt = outcome.receipt.public_dict()
         result = {
@@ -14974,7 +14990,7 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
             "status": "success" if outcome.status == "succeeded" else outcome.status,
             "error": None if outcome.reservation.status == "committed" else outcome.reservation.failure_reason,
             "ok": outcome.status == "succeeded",
-            "partial": outcome.status == "partial",
+            "partial": bool(outcome.receipt.partial),
             "replayed": int(outcome.reservation.actual.get("http_requests") or 0),
             "observations": list(public_receipt.get("observations") or []),
             "budget_consumed": dict(outcome.reservation.actual),

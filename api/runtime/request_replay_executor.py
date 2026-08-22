@@ -47,6 +47,10 @@ class ReplayExecutionError(ValueError):
     """The replay cannot be executed inside the frozen target/runtime authority."""
 
 
+class ReplayCancellationRequested(Exception):
+    """An operator cancelled the replay before its next target request."""
+
+
 def _canonical_authority(value: str) -> tuple[str, str, int | None]:
     """Return scheme/authority/port while rejecting userinfo and malformed hosts."""
     try:
@@ -451,6 +455,7 @@ async def execute_replay_plan(
     additional_budget: Mapping[str, int] | None = None,
     initial_reservation: DurableBudgetReservation | None = None,
     receipt_context: Mapping[str, Any] | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> ReplayExecutionOutcome:
     """Execute one exact ReplayPlan with reserve-before-send accounting.
 
@@ -532,6 +537,8 @@ async def execute_replay_plan(
     any_timeout = False
     try:
         for index, request in enumerate(plan.requests):
+            if cancelled is not None and cancelled():
+                raise ReplayCancellationRequested
             attempted += 1  # Charge conservatively before the target may receive bytes.
             result = await _send_with_worker_deadline(
                 transport,
@@ -553,6 +560,28 @@ async def execute_replay_plan(
                     lease_seconds=effective_lease,
                 )
                 await _invoke(on_reservation, running, held_ledger)
+    except ReplayCancellationRequested:
+        finished_at = _utc(clock)
+        actual = _settled_budget(
+            plan, attempted, requested=requested.requested,
+            started_at=started_at, finished_at=finished_at,
+        )
+        receipt = _receipt(
+            plan=plan, target=target, owner_kind=owner_kind, owner_id=owner,
+            worker_id=worker, reservation=running, reservation_state="failed",
+            actual=actual, status="cancelled", partial=attempted > 0,
+            timed_out=False, started_at=started_at, finished_at=finished_at,
+            observations=observations, errors=(*errors, "execution_cancelled"),
+            receipt_id=receipt_id, receipt_context=receipt_context,
+        )
+        failed = running.fail(
+            reason="execution_cancelled", now=finished_at, actual=actual,
+            execution_receipt_hash=receipt.receipt_hash,
+            execution_may_have_started=attempted > 0,
+        )
+        settled = failed.reconcile_consumed(held_ledger)
+        await _invoke(on_settlement, failed, receipt, settled)
+        return ReplayExecutionOutcome("cancelled", failed, receipt, settled)
     except asyncio.CancelledError:
         finished_at = _utc(clock)
         actual = _settled_budget(

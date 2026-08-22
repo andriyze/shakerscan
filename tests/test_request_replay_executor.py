@@ -200,6 +200,69 @@ async def test_partial_timeout_is_measured_and_committed_without_refund_of_attem
 
 
 @pytest.mark.asyncio
+async def test_cancellation_before_first_request_settles_without_target_traffic():
+    transport = FakeTransport([_result()])
+    settlements = []
+
+    async def settle(record, receipt, ledger):
+        settlements.append((record, receipt, dict(ledger)))
+
+    outcome = await execute_replay_plan(
+        _plan(),
+        target=_target(),
+        owner_kind="hunt",
+        owner_id="hunt-1",
+        worker_id="worker-1",
+        limits={"http_requests": 10},
+        consumed={"http_requests": 0},
+        transport=transport,
+        clock=Clock(),
+        cancelled=lambda: True,
+        on_settlement=settle,
+    )
+
+    assert transport.calls == []
+    assert outcome.status == "cancelled"
+    assert outcome.reservation.status == "failed"
+    assert outcome.reservation.actual == {"http_requests": 0}
+    assert outcome.ledger_consumed == {"http_requests": 0}
+    assert outcome.receipt.status == "cancelled"
+    assert outcome.receipt.partial is False
+    assert outcome.receipt.errors == ("execution_cancelled",)
+    assert settlements[0][1].receipt_hash == outcome.receipt.receipt_hash
+
+
+@pytest.mark.asyncio
+async def test_cancellation_between_requests_never_sends_the_next_request():
+    plan = _plan([
+        _request(request_id="request-1"),
+        _request(request_id="request-2"),
+    ])
+    transport = FakeTransport([_result(), _result()])
+
+    outcome = await execute_replay_plan(
+        plan,
+        target=_target(),
+        owner_kind="hunt",
+        owner_id="hunt-1",
+        worker_id="worker-1",
+        limits={"http_requests": 10},
+        consumed={"http_requests": 0},
+        transport=transport,
+        clock=Clock(),
+        cancelled=lambda: len(transport.calls) >= 1,
+    )
+
+    assert len(transport.calls) == 1
+    assert outcome.status == "cancelled"
+    assert outcome.reservation.actual == {"http_requests": 1}
+    assert outcome.ledger_consumed == {"http_requests": 1}
+    assert outcome.receipt.status == "cancelled"
+    assert outcome.receipt.partial is True
+    assert len(outcome.receipt.observations) == 1
+
+
+@pytest.mark.asyncio
 async def test_preconnect_timeout_preserves_timeout_status_without_scope_false_positive():
     transport = FakeTransport([_result(
         status_code=None,

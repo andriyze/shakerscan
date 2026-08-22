@@ -206,3 +206,4 @@ def test_worker_replay_uses_durable_store_and_exact_plan():
     assert "WorkerCredentialResolver" in handler
     assert "bind_replay_credential_headers" in handler
     assert "receipt_context=receipt_context" in handler
+    assert "cancelled=lambda: bool(redis_client.exists(cancel_key))" in handler
