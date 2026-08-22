@@ -450,6 +450,7 @@ except ModuleNotFoundError:
     )
 try:
     from hunt.capability_reservations import (
+        DURABLE_DEVICE_CONTROL_HUNT_CAPABILITIES,
         DURABLE_INLINE_HUNT_CAPABILITIES,
         DURABLE_SCANNER_HUNT_CAPABILITIES,
         DURABLE_WORKER_HUNT_CAPABILITIES,
@@ -461,6 +462,7 @@ try:
     from hunt.legacy import LegacyHuntIsolationMiddleware
 except ModuleNotFoundError:
     from api.hunt.capability_reservations import (
+        DURABLE_DEVICE_CONTROL_HUNT_CAPABILITIES,
         DURABLE_INLINE_HUNT_CAPABILITIES,
         DURABLE_SCANNER_HUNT_CAPABILITIES,
         DURABLE_WORKER_HUNT_CAPABILITIES,
@@ -35887,6 +35889,71 @@ def _hunt_json(value: Any, default: Any) -> Any:
     return decoded if isinstance(decoded, type(default)) else default
 
 
+def _merge_hunt_device_control_context(
+    persisted_context: Mapping[str, Any],
+    execution_context_before: Mapping[str, Any],
+    execution_context_after: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Merge evidence added by one read-only device action without losing a peer action."""
+    merged = copy.deepcopy(dict(persisted_context or {}))
+    persisted_state = (
+        copy.deepcopy(dict(merged.get("device_state") or {}))
+        if isinstance(merged.get("device_state"), Mapping)
+        else {}
+    )
+    before_state = (
+        dict(execution_context_before.get("device_state") or {})
+        if isinstance(execution_context_before.get("device_state"), Mapping)
+        else {}
+    )
+    after_state = (
+        dict(execution_context_after.get("device_state") or {})
+        if isinstance(execution_context_after.get("device_state"), Mapping)
+        else {}
+    )
+    before_evidence = (
+        dict(before_state.get("evidence") or {})
+        if isinstance(before_state.get("evidence"), Mapping)
+        else {}
+    )
+    after_evidence = (
+        dict(after_state.get("evidence") or {})
+        if isinstance(after_state.get("evidence"), Mapping)
+        else {}
+    )
+    persisted_evidence = (
+        copy.deepcopy(dict(persisted_state.get("evidence") or {}))
+        if isinstance(persisted_state.get("evidence"), Mapping)
+        else {}
+    )
+    next_sequence = max(1, int(persisted_state.get("next_evidence_ref") or 1))
+    for reference in persisted_evidence:
+        match = re.fullmatch(r"devref_(\d+)", str(reference))
+        if match:
+            next_sequence = max(next_sequence, int(match.group(1)) + 1)
+
+    remapped: dict[str, str] = {}
+    for reference, payload in after_evidence.items():
+        if reference in before_evidence and before_evidence[reference] == payload:
+            continue
+        assigned = str(reference)
+        if assigned in persisted_evidence:
+            while f"devref_{next_sequence}" in persisted_evidence:
+                next_sequence += 1
+            assigned = f"devref_{next_sequence}"
+            next_sequence += 1
+        persisted_evidence[assigned] = copy.deepcopy(payload)
+        remapped[str(reference)] = assigned
+
+    persisted_state["evidence"] = persisted_evidence
+    persisted_state["next_evidence_ref"] = max(
+        next_sequence,
+        int(persisted_state.get("next_evidence_ref") or 1),
+    )
+    merged["device_state"] = persisted_state
+    return merged, remapped
+
+
 def _hunt_ledger_limits(budget: Mapping[str, Any]) -> dict[str, int]:
     return {
         "agent_actions": int(budget.get("max_capability_calls") or 0),
@@ -36622,7 +36689,10 @@ async def execute_hunt_capability(
                 DURABLE_WORKER_HUNT_CAPABILITIES
                 | DURABLE_SCANNER_HUNT_CAPABILITIES
             )
-            api_managed_budget = name in DURABLE_INLINE_HUNT_CAPABILITIES
+            api_managed_budget = name in (
+                DURABLE_INLINE_HUNT_CAPABILITIES
+                | DURABLE_DEVICE_CONTROL_HUNT_CAPABILITIES
+            )
             durable_budget = api_managed_budget or worker_durable_budget
             if durable_budget:
                 durable_action_digest = hunt_capability_action_digest(
@@ -36801,6 +36871,11 @@ async def execute_hunt_capability(
                     )
 
     context = _hunt_json(run["context_pack"], {})
+    device_context_before = (
+        copy.deepcopy(context)
+        if name in DURABLE_DEVICE_CONTROL_HUNT_CAPABILITIES
+        else {}
+    )
     execution_started = time.perf_counter()
     status, result = "failed", {}
     try:
@@ -36952,6 +37027,23 @@ async def execute_hunt_capability(
                 async with conn.transaction():
                     locked = await _hunt_run_or_404(conn, hunt_id, for_update=True)
                     current_used = _hunt_json(locked["budget_used_json"], {})
+                    merged_device_context = None
+                    if name in DURABLE_DEVICE_CONTROL_HUNT_CAPABILITIES:
+                        merged_device_context, evidence_ref_map = (
+                            _merge_hunt_device_control_context(
+                                _hunt_json(locked["context_pack"], {}),
+                                device_context_before,
+                                context,
+                            )
+                        )
+                        if (
+                            isinstance(receipt_payload, dict)
+                            and str(receipt_payload.get("evidence_ref") or "")
+                            in evidence_ref_map
+                        ):
+                            receipt_payload["evidence_ref"] = evidence_ref_map[
+                                str(receipt_payload["evidence_ref"])
+                            ]
                     latest_reservation = await durable_store.load(
                         conn,
                         durable_reservation.record.reservation_id,
@@ -37076,12 +37168,21 @@ async def execute_hunt_capability(
                     )
                     current_used.update(reconciled_ledger)
                     reconciled_used = current_used
-                    await conn.execute(
-                        "UPDATE hunt_runs SET budget_used_json=$2, updated_at=NOW() "
-                        "WHERE id=$1",
-                        locked["id"],
-                        json.dumps(current_used),
-                    )
+                    if merged_device_context is not None:
+                        await conn.execute(
+                            "UPDATE hunt_runs SET budget_used_json=$2, "
+                            "context_pack=$3, updated_at=NOW() WHERE id=$1",
+                            locked["id"],
+                            json.dumps(current_used),
+                            json.dumps(merged_device_context, default=str),
+                        )
+                    else:
+                        await conn.execute(
+                            "UPDATE hunt_runs SET budget_used_json=$2, "
+                            "updated_at=NOW() WHERE id=$1",
+                            locked["id"],
+                            json.dumps(current_used),
+                        )
                     if isinstance(receipt_payload, dict):
                         receipt_payload["receipt_id"] = str(receipt_id)
                         receipt_payload["budget_reservation_id"] = (

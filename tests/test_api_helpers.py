@@ -228,6 +228,36 @@ install_fastapi_exception_stubs()
 import api as api_module  # noqa: E402
 
 
+def test_device_control_context_merge_preserves_concurrent_evidence_and_remaps_refs():
+    before = {
+        "device_state": {
+            "next_evidence_ref": 1,
+            "evidence": {},
+            "traffic_frozen": False,
+        }
+    }
+    after = copy.deepcopy(before)
+    after["device_state"]["evidence"]["devref_1"] = {"kind": "inventory"}
+    after["device_state"]["next_evidence_ref"] = 2
+    persisted = copy.deepcopy(before)
+    persisted["device_state"]["evidence"]["devref_1"] = {"kind": "capabilities"}
+    persisted["device_state"]["next_evidence_ref"] = 2
+
+    merged, remapped = api_module._merge_hunt_device_control_context(
+        persisted,
+        before,
+        after,
+    )
+
+    assert remapped == {"devref_1": "devref_2"}
+    assert merged["device_state"]["evidence"] == {
+        "devref_1": {"kind": "capabilities"},
+        "devref_2": {"kind": "inventory"},
+    }
+    assert merged["device_state"]["next_evidence_ref"] == 3
+    assert merged["device_state"]["traffic_frozen"] is False
+
+
 def test_device_hunt_public_history_exposes_only_bounded_action_metadata():
     scan_id = str(uuid.uuid4())
     row = {

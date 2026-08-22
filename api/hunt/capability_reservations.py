@@ -22,6 +22,11 @@ DURABLE_INLINE_HUNT_CAPABILITIES = frozenset({
     "tls.inspect",
 })
 
+DURABLE_DEVICE_CONTROL_HUNT_CAPABILITIES = frozenset({
+    "device.capabilities.inspect",
+    "device.inspect",
+})
+
 DURABLE_WORKER_HUNT_CAPABILITIES = frozenset({
     "ports.discover",
     "service.fingerprint",
