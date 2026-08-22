@@ -6503,10 +6503,15 @@ async def _requeue_for_domain_rate(
     log_prefix: str,
     rate: dict[str, Any],
 ) -> None:
-    wait_cycles = int(job_data.get("domain_rate_wait_cycles") or 0) + 1
-    requeued = dict(job_data)
-    requeued["domain_rate_wait_cycles"] = wait_cycles
-    requeued["last_domain_rate_wait_at"] = utc_now_iso()
+    canonical_queue = isinstance(job_data.get("_canonical_queue_payload"), Mapping)
+    wait_cycles = int((
+        _redis_scalar_text(r.hget(f"job:{job_id}", "domain_rate_wait_cycles"))
+        if canonical_queue else job_data.get("domain_rate_wait_cycles") or 0
+    ) or 0) + 1
+    requeued = _safe_requeue_payload(job_data)
+    if not canonical_queue:
+        requeued["domain_rate_wait_cycles"] = wait_cycles
+        requeued["last_domain_rate_wait_at"] = utc_now_iso()
     enqueue_job(r, QUEUE_NAME, requeued)
     mapping = {
         "status": "queued",
@@ -12239,10 +12244,15 @@ async def process_scan_shard_job(job_data: dict):
             r, parent_id, options, slot_id=job_id
         )
     if not broker_ingest and not slot_acquired:
-        wait_cycles = int(job_data.get('shard_slot_wait_cycles') or 0) + 1
-        requeued = dict(job_data)
-        requeued['shard_slot_wait_cycles'] = wait_cycles
-        requeued['last_shard_slot_wait_at'] = utc_now_iso()
+        canonical_queue = isinstance(job_data.get("_canonical_queue_payload"), Mapping)
+        wait_cycles = int((
+            _redis_scalar_text(r.hget(f"job:{job_id}", "shard_slot_wait_cycles"))
+            if canonical_queue else job_data.get('shard_slot_wait_cycles') or 0
+        ) or 0) + 1
+        requeued = _safe_requeue_payload(job_data)
+        if not canonical_queue:
+            requeued['shard_slot_wait_cycles'] = wait_cycles
+            requeued['last_shard_slot_wait_at'] = utc_now_iso()
         enqueue_job(r, QUEUE_NAME, requeued)
         r.hset(f"job:{job_id}", mapping={
             'status': 'queued',
@@ -13173,10 +13183,15 @@ async def process_exploit_batch_job(job_data: dict):
             r, parent_id, options, slot_id=job_id
         )
         if not slot_acquired:
-            wait_cycles = int(job_data.get('shard_slot_wait_cycles') or 0) + 1
-            requeued = dict(job_data)
-            requeued['shard_slot_wait_cycles'] = wait_cycles
-            requeued['last_shard_slot_wait_at'] = utc_now_iso()
+            canonical_queue = isinstance(job_data.get("_canonical_queue_payload"), Mapping)
+            wait_cycles = int((
+                _redis_scalar_text(r.hget(f"job:{job_id}", "shard_slot_wait_cycles"))
+                if canonical_queue else job_data.get('shard_slot_wait_cycles') or 0
+            ) or 0) + 1
+            requeued = _safe_requeue_payload(job_data)
+            if not canonical_queue:
+                requeued['shard_slot_wait_cycles'] = wait_cycles
+                requeued['last_shard_slot_wait_at'] = utc_now_iso()
             enqueue_job(r, QUEUE_NAME, requeued)
             r.hset(f"job:{job_id}", mapping={
                 'status': 'queued',

@@ -139,6 +139,56 @@ def test_stale_worker_requeues_original_canonical_envelope_without_private_optio
     assert state["stale_requeue_attempts"] == 1
 
 
+def test_domain_rate_retry_requeues_original_canonical_envelope_without_private_options(monkeypatch):
+    pushed = []
+    state = {}
+
+    class _FakeRedis:
+        def rpush(self, queue, payload):
+            pushed.append((queue, json.loads(payload)))
+
+        def hget(self, _key, field):
+            return state.get(field)
+
+        def hset(self, _key, mapping):
+            state.update(mapping)
+
+        def expire(self, *_args):
+            return True
+
+    async def no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(worker.asyncio, "sleep", no_sleep)
+    canonical = {
+        "schema_version": "scan-job/v2",
+        "job_id": "j1",
+        "scan_id": "scan-1",
+        "target": {"canonical_host": "example.test"},
+    }
+    materialized = {
+        "job_id": "j1",
+        "scan_id": "scan-1",
+        "target": "https://example.test",
+        "options": {"auth_header": "Bearer worker-only-secret"},
+        "_canonical_queue_payload": canonical,
+    }
+    redis_client = _FakeRedis()
+
+    _run(worker._requeue_for_domain_rate(
+        redis_client,
+        materialized,
+        job_id="j1",
+        scan_id="scan-1",
+        log_prefix="j1",
+        rate={"root_domain": "example.test", "requested": 10, "granted": 0, "cap": 5},
+    ))
+
+    assert pushed == [(worker.QUEUE_NAME, canonical)]
+    assert "options" not in pushed[0][1]
+    assert state["domain_rate_wait_cycles"] == "1"
+
+
 def test_unknown_fingerprint_fails_closed(monkeypatch):
     # A worker that cannot fingerprint itself is NOT provably current -> must refuse
     # (this was a fail-OPEN bug: unknown was treated as safe-to-run).
