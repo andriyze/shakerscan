@@ -170,6 +170,10 @@ class HuntStartPolicy:
         return bool(self.authorization_confirmed and self.approval_receipt_id)
 
     def validate(self, *, credentials_requested: bool) -> None:
+        if self.scope_receipt_id and not self.approval_receipt_id:
+            raise HuntStartContractError(
+                "scope_receipt_id must come from a validated approval receipt"
+            )
         if self.allow_state_changing_http and not self.active_testing:
             raise HuntStartContractError("state-changing HTTP requires active_testing")
         if self.network_discovery and not self.active_testing:
@@ -198,6 +202,36 @@ class HuntStartPolicy:
             "approval_receipt_id": self.approval_receipt_id,
             "scope_receipt_id": self.scope_receipt_id,
         }
+
+
+def bind_validated_receipts(
+    policy: HuntStartPolicy,
+    approval_context: Mapping[str, Any] | None,
+) -> tuple[str | None, str | None]:
+    """Bind submitted receipt references to the server-validated approval result."""
+    if not policy.approval_receipt_id:
+        if approval_context:
+            raise HuntStartContractError(
+                "approval validation returned authority that was not requested"
+            )
+        return None, None
+    if not isinstance(approval_context, Mapping):
+        raise HuntStartContractError("approval receipt was not validated")
+    approval_id = str(approval_context.get("approval_receipt_id") or "").strip()
+    scope_id = str(approval_context.get("scope_receipt_id") or "").strip()
+    if not approval_id or approval_id != str(policy.approval_receipt_id):
+        raise HuntStartContractError(
+            "validated approval receipt does not match the Hunt contract"
+        )
+    if not scope_id:
+        raise HuntStartContractError(
+            "validated approval receipt has no target-bound scope receipt"
+        )
+    if policy.scope_receipt_id and scope_id != str(policy.scope_receipt_id):
+        raise HuntStartContractError(
+            "scope_receipt_id does not match the validated approval scope"
+        )
+    return approval_id, scope_id
 
 
 @dataclass(frozen=True)

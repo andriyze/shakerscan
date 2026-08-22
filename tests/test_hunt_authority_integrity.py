@@ -1,0 +1,69 @@
+from pathlib import Path
+
+import pytest
+
+from api.hunt.start_contract import (
+    HuntStartContractError,
+    HuntStartPolicy,
+    bind_validated_receipts,
+    normalize_hunt_start_payload,
+)
+
+
+def _passive_payload():
+    return {
+        "schema_version": "hunt-start/v2",
+        "target_id": "target-1",
+        "target_kind": "web",
+        "goal": "Inspect the target",
+        "policy": {
+            "active_testing": False,
+            "network_discovery": False,
+            "allow_state_changing_http": False,
+            "authorization_confirmed": False,
+        },
+    }
+
+
+def test_unvalidated_scope_reference_is_rejected_at_contract_boundary():
+    payload = _passive_payload()
+    payload["policy"]["scope_receipt_id"] = "scope-attacker"
+    with pytest.raises(HuntStartContractError, match="validated approval"):
+        normalize_hunt_start_payload(payload)
+
+
+def test_server_validated_scope_replaces_an_omitted_client_scope():
+    policy = HuntStartPolicy(approval_receipt_id="approval-1")
+    assert bind_validated_receipts(policy, {
+        "approval_receipt_id": "approval-1",
+        "scope_receipt_id": "scope-validated",
+    }) == ("approval-1", "scope-validated")
+
+
+def test_client_scope_must_match_the_scope_linked_to_the_approval():
+    policy = HuntStartPolicy(
+        approval_receipt_id="approval-1",
+        scope_receipt_id="scope-submitted",
+    )
+    with pytest.raises(HuntStartContractError, match="does not match"):
+        bind_validated_receipts(policy, {
+            "approval_receipt_id": "approval-1",
+            "scope_receipt_id": "scope-validated",
+        })
+
+
+def test_runtime_uses_validated_scope_and_independent_network_permission():
+    root = Path(__file__).resolve().parents[1]
+    native_api = (root / "api" / "api_v2.py").read_text()
+    legacy_api = (root / "api" / "api.py").read_text()
+    worker = (root / "api" / "worker.py").read_text()
+
+    assert "approval_context = await _legacy_api._validate_approval_receipt_for_action" in native_api
+    assert "validated_approval_id, validated_scope_id = bind_validated_receipts" in native_api
+    assert '"scope_receipt_id": validated_scope_id' in native_api
+    assert 'normalized_contract["policy"]["scope_receipt_id"] = validated_scope_id' in native_api
+    assert 'network_discovery=bool(policy.get("network_discovery"))' in legacy_api
+    assert 'network_discovery=bool(policy.get("active_testing"))' not in legacy_api
+    assert "scope_receipt_id=validated_scope_receipt_id" in legacy_api
+    assert 'scope_receipt_id=str(hunt_policy.get("scope_receipt_id") or "") or None' in worker
+

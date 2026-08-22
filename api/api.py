@@ -34981,6 +34981,7 @@ async def execute_hunt_capability(
     network_policy = None
     device_adapter_name = None
     validated_device_input = None
+    call_approval_context = None
     try:
         spec = agent_tools.CAPABILITY_REGISTRY.require(name)
     except KeyError as exc:
@@ -35013,13 +35014,27 @@ async def execute_hunt_capability(
                 authority_context = _hunt_json(run["context_pack"], {})
                 target_context = authority_context.get("target") if isinstance(authority_context.get("target"), Mapping) else {}
                 target_url = str(target_context.get("url") or target_context.get("locator") or "")
-                await _validate_approval_receipt_for_action(
+                call_approval_context = await _validate_approval_receipt_for_action(
                     conn, policy.get("approval_receipt_id"), target_url=target_url,
                     target_id=run["target_id"] or run["device_target_id"], action_name=f"hunt.capability:{name}",
                     command=name, risk_tier="credential" if principal_slot != "anonymous" else str(spec.risk_tier), always_require_receipt=True,
                     require_target_binding=True,
                     require_expiry=True, created_by=f"hunt_v2:{hunt_id}",
                 )
+            validated_scope_receipt_id = str(policy.get("scope_receipt_id") or "") or None
+            if call_approval_context:
+                current_scope_receipt_id = str(
+                    call_approval_context.get("scope_receipt_id") or ""
+                ) or None
+                if (
+                    validated_scope_receipt_id
+                    and current_scope_receipt_id != validated_scope_receipt_id
+                ):
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Hunt approval scope no longer matches its admitted policy",
+                    )
+                validated_scope_receipt_id = current_scope_receipt_id
             used = _hunt_json(run["budget_used_json"], {})
             budget = _hunt_json(run["budget_json"], {})
             limits = _hunt_ledger_limits(budget)
@@ -35037,11 +35052,13 @@ async def execute_hunt_capability(
                         allowed_addresses=tuple(authority_context.get("authorized_target_addresses") or ()),
                         allowed_root_domains=(root_domain,) if root_domain else (),
                         environment=str(target_context.get("environment") or "unknown"),
+                        scope_receipt_id=validated_scope_receipt_id,
                     )
                     network_policy = ScanPolicy(
                         active_testing=bool(policy.get("active_testing")),
-                        network_discovery=bool(policy.get("active_testing")),
-                        subdomain_discovery=True,
+                        network_discovery=bool(policy.get("network_discovery")),
+                        subdomain_discovery=name == "subdomains.discover",
+                        scope_receipt_id=validated_scope_receipt_id,
                         approval_receipt_id=policy.get("approval_receipt_id"),
                     )
                     prepared_network = network_capability_adapter(name).prepare(

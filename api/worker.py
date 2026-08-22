@@ -13347,6 +13347,7 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                 if str(collection["payload_sha256"] or "").lower() != expected_payload_sha256:
                     raise ReplayExecutionError("request collection changed after action admission")
                 context = _worker_json_object(run["context_pack"])
+                hunt_policy = _worker_json_object(run["policy_json"])
 
         raw_payload = str(decrypt_secret(collection["encrypted_payload"]) or "")
         if not raw_payload or raw_payload.startswith("enc:fernet:"):
@@ -13385,6 +13386,7 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                 .lower().rstrip("."),
             ),
             environment=str(target_context.get("environment") or "unknown"),
+            scope_receipt_id=str(hunt_policy.get("scope_receipt_id") or "") or None,
         )
         plan = build_selected_replay_plan(
             payload,

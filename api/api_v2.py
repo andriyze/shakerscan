@@ -24,6 +24,7 @@ from hunt.start_contract import (
     HUNT_START_SCHEMA,
     HuntStartContract,
     HuntStartContractError,
+    bind_validated_receipts,
     normalize_hunt_start_payload,
 )
 from runtime.capability_registry import CAPABILITY_REGISTRY, CapabilitySpec
@@ -167,6 +168,7 @@ def _reject_unmigrated_web_credentials(contract: HuntStartContract) -> None:
 async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
     target_uuid = _legacy_api._uuid_or_400(contract.target_id, "target id")
     approval_validated = False
+    approval_context: Mapping[str, Any] | None = None
     budget = HuntBudget(**contract.resolved_budget)
 
     async with _legacy_api.db_pool.acquire() as conn:
@@ -260,7 +262,7 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
             or credential_rows
         )
         if contract.policy.approval_receipt_id:
-            await _legacy_api._validate_approval_receipt_for_action(
+            approval_context = await _legacy_api._validate_approval_receipt_for_action(
                 conn,
                 contract.policy.approval_receipt_id,
                 target_url=target_url,
@@ -282,6 +284,10 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
                 risk_tier="passive",
                 created_by="hunt_v2_native",
             )
+
+        validated_approval_id, validated_scope_id = bind_validated_receipts(
+            contract.policy, approval_context,
+        )
 
         if privileged and not approval_validated:
             raise HTTPException(
@@ -309,8 +315,8 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
                 contract.policy.network_discovery and approval_validated
             ),
             "authorization_confirmed": contract.policy.authorization_confirmed,
-            "approval_receipt_id": contract.policy.approval_receipt_id,
-            "scope_receipt_id": contract.policy.scope_receipt_id,
+            "approval_receipt_id": validated_approval_id,
+            "scope_receipt_id": validated_scope_id,
             "device_fragility_profile": (
                 "authenticated_active"
                 if contract.target_kind == "device" and credential_access
@@ -320,7 +326,14 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
             "budget": asdict(budget),
             "allowed_capabilities": list(allowed_capabilities),
         }
-        context_pack["hunt_start_contract"] = contract.public_dict()
+        normalized_contract = contract.public_dict()
+        normalized_contract["policy"]["approval_receipt_id"] = validated_approval_id
+        normalized_contract["policy"]["scope_receipt_id"] = validated_scope_id
+        context_pack["hunt_start_contract"] = normalized_contract
+        if approval_context:
+            context_pack["runtime_scope_guard"] = dict(
+                approval_context.get("runtime_scope_guard") or {}
+            )
         context_pack["allowed_capabilities"] = list(allowed_capabilities)
 
         row = await conn.fetchrow(
@@ -343,8 +356,8 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
                 "verifications": 0,
             }),
             json.dumps(context_pack, default=str),
-            _legacy_api._optional_uuid(contract.policy.approval_receipt_id)
-            if contract.policy.approval_receipt_id
+            _legacy_api._optional_uuid(validated_approval_id)
+            if validated_approval_id
             else None,
         )
     return _hunt_public_v2(row)

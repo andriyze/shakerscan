@@ -31,6 +31,7 @@ on:
       - tests/test_v2_native_receipt_hardening.py
       - tests/test_discovery_recovery_checkpoint.py
       - tests/test_hunt_start_contract.py
+      - tests/test_hunt_authority_integrity.py
       - tests/test_request_replay.py
       - tests/test_request_replay_executor.py
       - tests/test_v2_native_replay_primitives.py
@@ -71,6 +72,7 @@ on:
       - tests/test_v2_native_receipt_hardening.py
       - tests/test_discovery_recovery_checkpoint.py
       - tests/test_hunt_start_contract.py
+      - tests/test_hunt_authority_integrity.py
       - tests/test_request_replay.py
       - tests/test_request_replay_executor.py
       - tests/test_v2_native_replay_primitives.py
@@ -122,7 +124,8 @@ jobs:
           PYTHONPATH: api
         run: |
           python -m pytest -q -p no:cacheprovider \
-            tests/test_hunt_start_contract.py
+            tests/test_hunt_start_contract.py \
+            tests/test_hunt_authority_integrity.py
 
       - name: Validate durable budget, persistence, and receipt contracts
         env:
