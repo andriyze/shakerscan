@@ -22,6 +22,12 @@ DURABLE_INLINE_HUNT_CAPABILITIES = frozenset({
     "tls.inspect",
 })
 
+DURABLE_WORKER_HUNT_CAPABILITIES = frozenset({
+    "ports.discover",
+    "service.fingerprint",
+    "subdomains.discover",
+})
+
 
 def hunt_capability_action_digest(
     *,
@@ -83,6 +89,7 @@ def terminalize_hunt_capability(
     started_at: str,
     finished_at: str,
     receipt_id: str,
+    parser_version: str | None = None,
     scope_receipt_id: Any = None,
     approval_receipt_id: Any = None,
     result: Mapping[str, Any] | None = None,
@@ -98,6 +105,17 @@ def terminalize_hunt_capability(
     }.get(status, "failed")
     result_item = dict(result or {})
     error = str(result_item.get("error") or "").strip()
+    receipt_observations = result_item.get("receipt_observations")
+    if isinstance(receipt_observations, (list, tuple)):
+        observations = tuple(
+            dict(item) for item in receipt_observations if isinstance(item, Mapping)
+        )
+    else:
+        observations = ({
+            "kind": "hunt_capability_result",
+            "status": status,
+            "ok": bool(result_item.get("ok")),
+        },)
     terminal_at = datetime.fromisoformat(str(finished_at).replace("Z", "+00:00"))
     receipt = CapabilityReceipt(
         receipt_id=str(receipt_id),
@@ -111,9 +129,9 @@ def terminalize_hunt_capability(
         approval_receipt_id=str(approval_receipt_id or "") or None,
         status=receipt_status,
         partial=status == "partial",
-        timed_out=False,
+        timed_out=bool(status == "partial" and result_item.get("timed_out")),
         input_digest=str(action_digest),
-        parser_version=str(adapter_version),
+        parser_version=str(parser_version or adapter_version),
         started_at=started_at,
         finished_at=finished_at,
         redacted_execution={
@@ -125,11 +143,7 @@ def terminalize_hunt_capability(
         budget_reservation_state=reservation_state,
         budget_reserved=running.requested,
         budget_consumed=dict(actual_budget or {}),
-        observations=({
-            "kind": "hunt_capability_result",
-            "status": status,
-            "ok": bool(result_item.get("ok")),
-        },),
+        observations=observations,
         errors=(error,) if error else (),
     )
     if successful:

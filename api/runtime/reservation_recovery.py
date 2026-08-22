@@ -13,6 +13,7 @@ import json
 from typing import Any, Mapping
 import uuid
 
+from .budgets import BUDGET_DIMENSIONS
 from .reservation_store import (
     PostgresBudgetReservationStore,
     ReservationStoreError,
@@ -149,7 +150,14 @@ async def recover_stale_reservations(
                 "stale reservation has neither an owner nor a held ledger snapshot"
             )
         terminal = stored.record.recover_stale(now=timestamp)
-        settled = terminal.reconcile_consumed(owner_ledger)
+        budget_ledger = {
+            key: int(value)
+            for key, value in owner_ledger.items()
+            if key in BUDGET_DIMENSIONS
+        }
+        settled_budget = terminal.reconcile_consumed(budget_ledger)
+        settled = dict(owner_ledger)
+        settled.update(settled_budget)
         try:
             await repository.persist_terminal(
                 conn,

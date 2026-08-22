@@ -451,6 +451,7 @@ except ModuleNotFoundError:
 try:
     from hunt.capability_reservations import (
         DURABLE_INLINE_HUNT_CAPABILITIES,
+        DURABLE_WORKER_HUNT_CAPABILITIES,
         hunt_capability_action_digest,
         hunt_capability_lease_seconds,
         terminalize_hunt_capability,
@@ -460,6 +461,7 @@ try:
 except ModuleNotFoundError:
     from api.hunt.capability_reservations import (
         DURABLE_INLINE_HUNT_CAPABILITIES,
+        DURABLE_WORKER_HUNT_CAPABILITIES,
         hunt_capability_action_digest,
         hunt_capability_lease_seconds,
         terminalize_hunt_capability,
@@ -33807,9 +33809,10 @@ async def _enqueue_agent_scanner_tool(
 
 
 async def _enqueue_canonical_network_capability(
-    *, capability_name: str, capability_input: Mapping[str, Any], target: TargetBinding,
-    policy: ScanPolicy, expected_input_digest: str, expected_budget: Mapping[str, int],
-    timeout_ms: int,
+    *, capability_name: str, capability_input: Mapping[str, Any],
+    expected_input_digest: str, expected_budget: Mapping[str, int],
+    timeout_ms: int, hunt_id: str, action_id: str, reservation_id: str,
+    action_digest: str,
 ) -> dict[str, Any]:
     """Queue declarative canonical work; the worker independently reconstructs its argv."""
     redis_client = get_redis()
@@ -33819,24 +33822,11 @@ async def _enqueue_canonical_network_capability(
     payload = {
         "job_id": job_id, "type": "canonical_network_capability",
         "capability_name": capability_name, "capability_input": dict(capability_input),
-        "target_binding": {
-            "target_id": target.target_id, "target_kind": target.target_kind,
-            "canonical_host": target.canonical_host,
-            "allowed_origins": list(target.allowed_origins),
-            "allowed_addresses": list(target.allowed_addresses),
-            "allowed_root_domains": list(target.allowed_root_domains),
-            "environment": target.environment, "scope_receipt_id": target.scope_receipt_id,
-        },
-        "scan_policy": {
-            "active_testing": policy.active_testing,
-            "allow_state_changing_http": policy.allow_state_changing_http,
-            "network_discovery": policy.network_discovery,
-            "subdomain_discovery": policy.subdomain_discovery,
-            "scope_receipt_id": policy.scope_receipt_id,
-            "approval_receipt_id": policy.approval_receipt_id,
-        },
         "expected_input_digest": expected_input_digest,
         "expected_budget": {str(k): int(v) for k, v in expected_budget.items()},
+        "hunt_id": str(hunt_id), "action_id": str(action_id),
+        "budget_reservation_id": str(reservation_id),
+        "action_digest": str(action_digest),
         "submitted_at": utc_now_iso(), "_base_queue_name": AGENT_TOOL_QUEUE_NAME,
     }
     redis_client.hset(f"job:{job_id}", mapping={
@@ -36408,7 +36398,7 @@ async def execute_hunt_capability(
     hunt_id: str, capability_name: str, request: HuntCapabilityRequest,
 ):
     name = str(capability_name or "").strip().lower()
-    network_capability_names = {"ports.discover", "service.fingerprint", "subdomains.discover"}
+    network_capability_names = DURABLE_WORKER_HUNT_CAPABILITIES
     prepared_network = None
     network_target = None
     network_policy = None
@@ -36420,6 +36410,9 @@ async def execute_hunt_capability(
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     action_id = uuid.uuid4()
+    admission_error: HTTPException | None = None
+    admission_action_status = "running"
+    admission_result_summary: dict[str, Any] = {}
     durable_store = PostgresBudgetReservationStore()
     durable_reservation = None
     durable_action_digest: str | None = None
@@ -36549,8 +36542,10 @@ async def execute_hunt_capability(
             if requires_call_approval:
                 charges["active_actions"] = 1
             worker_managed_budget = name == "collections.replay_safe"
+            worker_durable_budget = name in DURABLE_WORKER_HUNT_CAPABILITIES
             api_managed_budget = name in DURABLE_INLINE_HUNT_CAPABILITIES
-            if api_managed_budget:
+            durable_budget = api_managed_budget or worker_durable_budget
+            if durable_budget:
                 durable_action_digest = hunt_capability_action_digest(
                     hunt_id=run["id"],
                     action_id=action_id,
@@ -36611,23 +36606,31 @@ async def execute_hunt_capability(
                         run["id"],
                         f"budget_exhausted:{dimension}",
                     )
-                    raise HTTPException(
+                    admission_error = HTTPException(
                         status_code=409,
                         detail=f"Hunt budget exhausted: {dimension}",
-                    ) from exc
-                durable_reservation = await durable_store.persist_transition(
-                    conn,
-                    previous=stored_reservation,
-                    current=reserved_record,
-                    ledger_after_hold=reserved_used,
-                )
-                used.update(reserved_used)
-                await conn.execute(
-                    "UPDATE hunt_runs SET budget_used_json=$2, status='active', "
-                    "updated_at=NOW() WHERE id=$1",
-                    run["id"],
-                    json.dumps(used),
-                )
+                    )
+                    admission_action_status = "failed"
+                    admission_result_summary = {
+                        "error": f"budget_exhausted:{dimension}",
+                        "budget_reservation_id": released.reservation_id,
+                        "budget_reservation_state": released.status,
+                    }
+                else:
+                    durable_reservation = await durable_store.persist_transition(
+                        conn,
+                        previous=stored_reservation,
+                        current=reserved_record,
+                        ledger_after_hold=reserved_used,
+                    )
+                    used.update(reserved_used)
+                    await conn.execute(
+                        "UPDATE hunt_runs SET budget_used_json=$2, status='active', "
+                        "updated_at=NOW() WHERE id=$1",
+                        run["id"],
+                        json.dumps(used),
+                    )
+                    admission_action_status = "reserved"
             elif not worker_managed_budget:
                 try:
                     reserved_used = reserve_budget_snapshot(
@@ -36639,16 +36642,31 @@ async def execute_hunt_capability(
                         "UPDATE hunt_runs SET status='budget_exhausted', stop_reason=$2, updated_at=NOW() WHERE id=$1",
                         run["id"], f"budget_exhausted:{dimension}",
                     )
-                    raise HTTPException(status_code=409, detail=f"Hunt budget exhausted: {dimension}")
-                used.update(reserved_used)
-                await conn.execute("UPDATE hunt_runs SET budget_used_json=$2, status='active', updated_at=NOW() WHERE id=$1", run["id"], json.dumps(used))
+                    admission_error = HTTPException(
+                        status_code=409,
+                        detail=f"Hunt budget exhausted: {dimension}",
+                    )
+                    admission_action_status = "failed"
+                    admission_result_summary = {
+                        "error": f"budget_exhausted:{dimension}",
+                    }
+                else:
+                    used.update(reserved_used)
+                    await conn.execute("UPDATE hunt_runs SET budget_used_json=$2, status='active', updated_at=NOW() WHERE id=$1", run["id"], json.dumps(used))
             await conn.execute(
-                """INSERT INTO hunt_actions (id, hunt_run_id, capability_name, status, input_summary)
-                   VALUES ($1,$2,$3,$4,$5)""",
+                """INSERT INTO hunt_actions (
+                       id, hunt_run_id, capability_name, status, input_summary,
+                       result_summary, completed_at
+                   ) VALUES ($1,$2,$3,$4,$5,$6,
+                             CASE WHEN $4='failed' THEN NOW() ELSE NULL END)""",
                 action_id, run["id"], name,
-                "reserved" if api_managed_budget else "running",
+                admission_action_status,
                 json.dumps(_redact_agent_payload(request.input)),
+                json.dumps(admission_result_summary),
             )
+
+    if admission_error is not None:
+        raise admission_error
 
     if api_managed_budget:
         if durable_reservation is None or durable_action_digest is None:
@@ -36659,7 +36677,9 @@ async def execute_hunt_capability(
         async with db_pool.acquire() as conn:
             async with conn.transaction():
                 dispatch_run = await _hunt_run_or_404(conn, hunt_id, for_update=True)
-                if dispatch_run["status"] not in {"active", "awaiting_planner"}:
+                if dispatch_run["status"] not in {
+                    "active", "awaiting_planner", "budget_exhausted"
+                }:
                     raise HTTPException(
                         status_code=409,
                         detail=f"Hunt is {dispatch_run['status']}",
@@ -36703,6 +36723,7 @@ async def execute_hunt_capability(
 
     context = _hunt_json(run["context_pack"], {})
     execution_started = time.perf_counter()
+    status, result = "failed", {}
     try:
         if name == "collections.inspect":
             refs = [item for item in context.get("request_collections") or [] if isinstance(item, dict)]
@@ -36736,12 +36757,16 @@ async def execute_hunt_capability(
             )
         elif name in network_capability_names:
             assert prepared_network is not None and network_target is not None and network_policy is not None
+            if durable_reservation is None or durable_action_digest is None:
+                raise RuntimeError("Network capability reservation was not initialized")
             result = await _enqueue_canonical_network_capability(
                 capability_name=name, capability_input=request.input,
-                target=network_target, policy=network_policy,
                 expected_input_digest=prepared_network.input_digest,
                 expected_budget=prepared_network.estimated_budget,
                 timeout_ms=max(1_000, int(prepared_network.estimated_budget.get("tool_wall_seconds") or 1) * 1_000),
+                hunt_id=str(run["id"]), action_id=str(action_id),
+                reservation_id=durable_reservation.record.reservation_id,
+                action_digest=durable_action_digest,
             )
         elif spec.legacy_tool_name:
             path = str(request.input.get("path") or "").strip()
@@ -36993,6 +37018,55 @@ async def execute_hunt_capability(
                         raise RuntimeError(
                             "Hunt capability action changed before settlement"
                         )
+            elif worker_durable_budget:
+                if (
+                    isinstance(receipt_payload, dict)
+                    and receipt_payload.get("durable_budget_settled") is True
+                ):
+                    if durable_reservation is None or durable_action_digest is None:
+                        raise RuntimeError(
+                            "Network capability reservation disappeared after dispatch"
+                        )
+                    async with conn.transaction():
+                        stored = await durable_store.load(
+                            conn,
+                            durable_reservation.record.reservation_id,
+                            for_update=True,
+                        )
+                        action = await conn.fetchrow(
+                            """SELECT status, receipt_id FROM hunt_actions
+                               WHERE id=$1 AND hunt_run_id=$2 FOR UPDATE""",
+                            action_id,
+                            run["id"],
+                        )
+                        stored_receipt = (
+                            dict(stored.receipt or {}) if stored is not None else {}
+                        )
+                        receipt_id = str(
+                            receipt_payload.get("receipt_id") or ""
+                        ) or None
+                        if (
+                            stored is None
+                            or not stored.record.terminal
+                            or stored.action_digest != durable_action_digest
+                            or str(receipt_payload.get("budget_reservation_id") or "")
+                            != stored.record.reservation_id
+                            or str(receipt_payload.get("budget_reservation_state") or "")
+                            != stored.record.status
+                            or str(stored_receipt.get("receipt_id") or "")
+                            != str(receipt_id or "")
+                            or action is None
+                            or str(action["status"])
+                            not in {"completed", "partial", "failed"}
+                            or str(action["receipt_id"] or "")
+                            != str(receipt_id or "")
+                        ):
+                            raise RuntimeError(
+                                "Network capability settlement is not internally consistent"
+                            )
+                # The worker owns every durable transition and the atomic
+                # reservation/receipt/ledger/action settlement. An API timeout
+                # deliberately leaves the live lease for the worker or sweeper.
             else:
                 try:
                     async with conn.transaction():

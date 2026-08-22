@@ -87,8 +87,8 @@ def test_sweeper_refunds_reserved_and_fully_charges_uncertain_running_work():
     )
     store = Store([reserved, running])
     conn = Connection([
-        {"http_requests": 7, "agent_actions": 3},
-        {"http_requests": 7, "agent_actions": 3},
+        {"http_requests": 7, "agent_actions": 3, "candidates": 2, "verifications": 1},
+        {"http_requests": 7, "agent_actions": 3, "candidates": 2, "verifications": 1},
     ])
 
     events = asyncio.run(recover_stale_reservations(
@@ -105,12 +105,22 @@ def test_sweeper_refunds_reserved_and_fully_charges_uncertain_running_work():
     assert events[1].execution_uncertain is True
     settled = [call["ledger_after_settlement"] for call in store.persisted]
     assert settled == [
-        {"http_requests": 4, "agent_actions": 2},
-        {"http_requests": 7, "agent_actions": 3},
+        {"http_requests": 4, "agent_actions": 2, "candidates": 2, "verifications": 1},
+        {"http_requests": 7, "agent_actions": 3, "candidates": 2, "verifications": 1},
     ]
     owner_updates = [args for query, args in conn.execute_calls if "UPDATE hunt_runs" in query]
-    assert json.loads(owner_updates[0][1]) == {"http_requests": 4, "agent_actions": 2}
-    assert json.loads(owner_updates[1][1]) == {"http_requests": 7, "agent_actions": 3}
+    assert json.loads(owner_updates[0][1]) == {
+        "http_requests": 4,
+        "agent_actions": 2,
+        "candidates": 2,
+        "verifications": 1,
+    }
+    assert json.loads(owner_updates[1][1]) == {
+        "http_requests": 7,
+        "agent_actions": 3,
+        "candidates": 2,
+        "verifications": 1,
+    }
     action_updates = [args for query, args in conn.execute_calls if "UPDATE hunt_actions" in query]
     assert json.loads(action_updates[0][1])["execution_uncertain"] is False
     assert json.loads(action_updates[1][1])["execution_uncertain"] is True
