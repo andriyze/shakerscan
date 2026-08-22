@@ -47,6 +47,7 @@ DURABLE_WORKER_HUNT_CAPABILITIES = frozenset({
 })
 
 DURABLE_BROWSER_HUNT_CAPABILITIES = frozenset({
+    "browser.interact",
     "browser.navigate",
 })
 

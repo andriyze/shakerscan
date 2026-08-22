@@ -51,6 +51,7 @@ def test_registry_filters_target_kind_and_active_permission():
 
     assert safe_web == {
         "web.probe", "http.request", "subdomains.discover", "tls.inspect", "browser.navigate",
+        "browser.interact",
         "collections.inspect", "collections.select", "collections.replay_safe",
     }
     assert all_device == {

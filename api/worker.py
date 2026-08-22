@@ -60,7 +60,7 @@ import asm_inventory
 import family_proof
 import agent_tools
 from capabilities.network import CapabilityInputError, network_capability_adapter
-from capabilities.browser import BrowserCapabilityInputError, BrowserNavigateAdapter
+from capabilities.browser import BrowserCapabilityInputError, browser_capability_adapter
 from hunt.capability_reservations import (
     DURABLE_BROWSER_HUNT_CAPABILITIES,
     DURABLE_SCANNER_HUNT_CAPABILITIES,
@@ -15916,7 +15916,8 @@ async def process_canonical_browser_capability_job(job_data: dict[str, Any]) -> 
                         "approval_receipt_id"
                     ),
                 )
-                prepared = BrowserNavigateAdapter.prepare(
+                browser_adapter = browser_capability_adapter(capability_name)
+                prepared = browser_adapter.prepare(
                     target=target,
                     base_url=target_url,
                     args=capability_input,
@@ -16041,7 +16042,7 @@ async def process_canonical_browser_capability_job(job_data: dict[str, Any]) -> 
                 target=target,
                 requested_budget=persisted.record.requested,
             ),
-            BrowserNavigateAdapter(prepared),
+            browser_adapter(prepared),
             heartbeat=heartbeat_reservation,
             cancelled=lambda: bool(redis_client.exists(cancel_key)),
         )

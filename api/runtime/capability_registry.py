@@ -291,6 +291,41 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             default_timeout_ms=30_000,
         ),
         CapabilitySpec(
+            "browser.interact",
+            "Click one strictly read-only target-bound link, disclosure, or tab.",
+            "browser", "passive", _HTTP_TARGETS, "playwright", "1", None,
+            {
+                "browser_actions": 2,
+                "http_requests": 50,
+                "tool_wall_seconds": 30,
+            },
+            {
+                "network_reachability": True,
+                "browser_runtime": "playwright",
+                "agent_tool_worker": True,
+                "runtime_target_binding": True,
+            },
+            _schema({
+                "path": {"type": "string", "maxLength": 2000},
+                "selector": {"type": "string", "minLength": 1, "maxLength": 500},
+                "wait_until": {
+                    "type": "string", "enum": ["domcontentloaded", "load"],
+                },
+                "timeout_ms": {
+                    "type": "integer", "minimum": 1000, "maximum": 30000,
+                },
+                "max_requests": {
+                    "type": "integer", "minimum": 1, "maximum": 50,
+                },
+                "settle_ms": {
+                    "type": "integer", "minimum": 0, "maximum": 2000,
+                },
+            }, required=("selector",)),
+            "browser-interaction/v1",
+            ("browser_interaction_observation", "http_observation", "tool_receipt"),
+            default_timeout_ms=30_000,
+        ),
+        CapabilitySpec(
             "device.inspect", "Inspect the registered device, services, scans, and posture evidence.",
             "internal", "read_only", frozenset({"device"}), "device.inspect_device", "1",
             None, {"tool_wall_seconds": 5}, {"control_plane": True}, _schema(), "device-context/v1",

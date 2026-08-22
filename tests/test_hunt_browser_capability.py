@@ -10,7 +10,10 @@ import pytest
 
 from api.capabilities.browser import (
     BrowserCapabilityInputError,
+    BrowserInteractAdapter,
     BrowserNavigateAdapter,
+    _validate_read_only_interaction,
+    browser_capability_adapter,
 )
 from api.hunt.capability_reservations import (
     DURABLE_BROWSER_HUNT_CAPABILITIES,
@@ -40,7 +43,9 @@ def _target(
 
 
 def test_browser_registry_and_durable_set_are_explicit_and_bounded():
-    assert DURABLE_BROWSER_HUNT_CAPABILITIES == {"browser.navigate"}
+    assert DURABLE_BROWSER_HUNT_CAPABILITIES == {
+        "browser.interact", "browser.navigate",
+    }
     spec = CAPABILITY_REGISTRY.require("browser.navigate")
     assert spec.execution_kind == "browser"
     assert spec.risk_tier == "passive"
@@ -57,6 +62,19 @@ def test_browser_registry_and_durable_set_are_explicit_and_bounded():
         "http_requests": 50,
         "tool_wall_seconds": 30,
     }
+    interaction = CAPABILITY_REGISTRY.require("browser.interact")
+    assert interaction.execution_kind == "browser"
+    assert interaction.risk_tier == "passive"
+    assert interaction.adapter == "playwright"
+    assert interaction.requires_active_approval is False
+    assert interaction.placement_requirements == spec.placement_requirements
+    assert interaction.budget_cost == {
+        "browser_actions": 2,
+        "http_requests": 50,
+        "tool_wall_seconds": 30,
+    }
+    assert browser_capability_adapter("browser.navigate") is BrowserNavigateAdapter
+    assert browser_capability_adapter("browser.interact") is BrowserInteractAdapter
 
 
 def test_browser_prepare_freezes_origin_address_digest_and_budget():
@@ -143,6 +161,238 @@ def test_browser_prepare_rejects_raw_secrets_before_queue_admission(path):
         )
 
 
+def test_browser_interaction_prepare_is_deterministic_bounded_and_redacted():
+    args = {
+        "path": "/reports?view=summary",
+        "selector": "#report-tabs [role='tab']",
+        "timeout_ms": 6_100,
+        "max_requests": 8,
+        "settle_ms": 250,
+    }
+    prepared = BrowserInteractAdapter.prepare(
+        target=_target(), base_url="https://app.example.test", args=args,
+    )
+    repeated = BrowserInteractAdapter.prepare(
+        target=_target(), base_url="https://app.example.test", args=args,
+    )
+
+    assert prepared.input_digest == repeated.input_digest
+    assert prepared.estimated_budget == {
+        "browser_actions": 2,
+        "http_requests": 8,
+        "tool_wall_seconds": 7,
+    }
+    assert prepared.selector_digest == repeated.selector_digest
+    redacted = str(prepared.redacted_execution)
+    assert prepared.selector not in redacted
+    assert "summary" not in redacted
+    assert prepared.selector_digest in redacted
+
+
+@pytest.mark.parametrize("args", [
+    {},
+    {"selector": "text=Delete account"},
+    {"selector": "xpath=//button"},
+    {"selector": "button >> text=Open"},
+    {"selector": "[data-token='Bearer worker-only']"},
+    {"selector": "#tab", "settle_ms": True},
+    {"selector": "#tab", "settle_ms": 2001},
+])
+def test_browser_interaction_prepare_rejects_unbounded_or_secret_input(args):
+    with pytest.raises(BrowserCapabilityInputError):
+        BrowserInteractAdapter.prepare(
+            target=_target(), base_url="https://app.example.test", args=args,
+        )
+
+
+@pytest.mark.parametrize("element", [
+    {
+        "tag": "a", "href": "https://evil.example/report", "semantics": "Read",
+        "target": "", "download": False,
+    },
+    {
+        "tag": "a", "href": "https://app.example.test/logout", "semantics": "Log out",
+        "target": "", "download": False,
+    },
+    {
+        "tag": "button", "role": "", "type": "submit", "semantics": "Continue",
+        "target": "", "download": False,
+    },
+    {
+        "tag": "a", "href": "https://app.example.test/report?token=worker-only",
+        "semantics": "Read", "target": "", "download": False,
+    },
+    {
+        "tag": "a", "href": "https://app.example.test/report", "semantics": "Read",
+        "target": "_blank", "download": False,
+    },
+])
+def test_browser_interaction_rejects_cross_origin_mutating_or_secret_elements(element):
+    prepared = BrowserInteractAdapter.prepare(
+        target=_target(),
+        base_url="https://app.example.test",
+        args={"selector": "#safe"},
+    )
+    with pytest.raises(BrowserCapabilityInputError):
+        _validate_read_only_interaction(prepared, element)
+
+
+def test_browser_interaction_click_is_context_guarded_and_content_free(monkeypatch):
+    blocked_routes = []
+
+    class FakeRequest:
+        def __init__(self, method, url):
+            self.method = method
+            self.url = url
+
+    class FakeRoute:
+        def __init__(self, request):
+            self.request = request
+
+        async def abort(self, reason):
+            blocked_routes.append((self.request.method, self.request.url, reason))
+
+        async def continue_(self):
+            return None
+
+    class FakeResponse:
+        def __init__(self, method, url, status=200):
+            self.url = url
+            self.status = status
+            self.request = FakeRequest(method, url)
+            self.headers = {"content-type": "text/html"}
+
+    class FakeLocator:
+        async def count(self):
+            return 1
+
+        async def evaluate(self, _script):
+            return {
+                "tag": "a",
+                "role": "",
+                "type": "",
+                "href": "https://app.example.test/report?view=public",
+                "target": "",
+                "download": False,
+                "semantics": "Read report private-label",
+            }
+
+        async def click(self, **_kwargs):
+            attempts = [
+                FakeRequest("GET", "https://app.example.test/report?view=public"),
+                FakeRequest("POST", "https://app.example.test/mutate?csrf=hidden"),
+                FakeRequest("GET", "https://evil.example/track?secret=outside"),
+            ]
+            for request in attempts:
+                await page.route_handler(FakeRoute(request))
+                if request.method == "GET" and request.url.startswith(
+                    "https://app.example.test"
+                ):
+                    await page.response_handler(FakeResponse(request.method, request.url))
+            page.url = "https://app.example.test/report?view=public"
+
+    class FakePage:
+        def __init__(self):
+            self.url = "about:blank"
+            self.route_handler = None
+            self.response_handler = None
+
+        async def goto(self, url, **_kwargs):
+            request = FakeRequest("GET", url)
+            await self.route_handler(FakeRoute(request))
+            await self.response_handler(FakeResponse("GET", url))
+            self.url = url
+            return FakeResponse("GET", url)
+
+        def locator(self, selector):
+            assert selector == "#report-link"
+            return FakeLocator()
+
+    page = FakePage()
+
+    class FakeContext:
+        async def route(self, _pattern, handler):
+            page.route_handler = handler
+
+        def on(self, _event, handler):
+            page.response_handler = handler
+
+        async def add_init_script(self, _script):
+            return None
+
+        async def new_page(self):
+            return page
+
+        async def close(self):
+            return None
+
+    class FakeBrowser:
+        async def new_context(self, **_kwargs):
+            return FakeContext()
+
+        async def close(self):
+            return None
+
+    class FakeChromium:
+        async def launch(self, **_kwargs):
+            return FakeBrowser()
+
+    class FakePlaywright:
+        chromium = FakeChromium()
+
+        async def stop(self):
+            return None
+
+    class FakeStarter:
+        async def start(self):
+            return FakePlaywright()
+
+    async_api = types.ModuleType("playwright.async_api")
+    async_api.TimeoutError = type("FakePlaywrightTimeout", (Exception,), {})
+    async_api.async_playwright = lambda: FakeStarter()
+    package = types.ModuleType("playwright")
+    package.async_api = async_api
+    monkeypatch.setitem(sys.modules, "playwright", package)
+    monkeypatch.setitem(sys.modules, "playwright.async_api", async_api)
+
+    prepared = BrowserInteractAdapter.prepare(
+        target=_target(),
+        base_url="https://app.example.test",
+        args={
+            "path": "/start?view=summary",
+            "selector": "#report-link",
+            "max_requests": 10,
+            "settle_ms": 0,
+        },
+    )
+    heartbeats = []
+
+    async def heartbeat():
+        heartbeats.append(True)
+
+    result = asyncio.run(BrowserInteractAdapter(prepared).execute(
+        heartbeat=heartbeat, cancelled=lambda: False,
+    ))
+
+    assert result.status == "partial"
+    assert result.actual_budget["browser_actions"] == 2
+    assert result.actual_budget["http_requests"] == 2
+    assert heartbeats == [True]
+    assert {item[0] for item in blocked_routes} == {"GET", "POST"}
+    serialized = str(result.observations) + str(result.redacted_execution)
+    for content in (
+        "private-label", "view=summary", "view=public", "hidden", "outside",
+        "#report-link",
+    ):
+        assert content not in serialized
+    interaction = next(
+        item for item in result.observations
+        if item.get("kind") == "browser_interaction"
+    )
+    assert interaction["element_kind"] == "same_origin_link"
+    assert interaction["selector_sha256"] == prepared.selector_digest
+
+
 def test_browser_execution_blocks_cross_origin_and_writes_and_redacts_evidence(monkeypatch):
     blocked_routes = []
 
@@ -174,12 +424,6 @@ def test_browser_execution_blocks_cross_origin_and_writes_and_redacts_evidence(m
             self.route_handler = None
             self.response_handler = None
 
-        async def route(self, _pattern, handler):
-            self.route_handler = handler
-
-        def on(self, _event, handler):
-            self.response_handler = handler
-
         async def goto(self, url, **_kwargs):
             attempts = [
                 FakeRequest("GET", url),
@@ -199,6 +443,12 @@ def test_browser_execution_blocks_cross_origin_and_writes_and_redacts_evidence(m
     page = FakePage()
 
     class FakeContext:
+        async def route(self, _pattern, handler):
+            page.route_handler = handler
+
+        def on(self, _event, handler):
+            page.response_handler = handler
+
         async def add_init_script(self, _script):
             return None
 
@@ -354,7 +604,7 @@ def test_browser_queue_and_worker_rebuild_authority_and_settle_atomically():
     worker = worker_source[worker_start:worker_end]
     assert 'context = _worker_json_object(run["context_pack"])' in worker
     assert 'hunt_policy = _worker_json_object(run["policy_json"])' in worker
-    assert "BrowserNavigateAdapter.prepare(" in worker
+    assert "browser_capability_adapter(capability_name)" in worker
     assert "hunt_capability_action_digest(" in worker
     assert worker.index("stored.record.start(") < worker.index(
         "CapabilityExecutor()"

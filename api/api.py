@@ -511,7 +511,7 @@ try:
         admit_scan_credential_profiles,
     )
     from capabilities.network import CapabilityInputError, network_capability_adapter
-    from capabilities.browser import BrowserCapabilityInputError, BrowserNavigateAdapter
+    from capabilities.browser import BrowserCapabilityInputError, browser_capability_adapter
 except ModuleNotFoundError:
     from api.runtime.budget_reservations import DurableBudgetReservation
     from api.runtime.budgets import BudgetExceeded, reconcile_budget_snapshot, reserve_budget_snapshot
@@ -543,7 +543,7 @@ except ModuleNotFoundError:
         admit_scan_credential_profiles,
     )
     from api.capabilities.network import CapabilityInputError, network_capability_adapter
-    from api.capabilities.browser import BrowserCapabilityInputError, BrowserNavigateAdapter
+    from api.capabilities.browser import BrowserCapabilityInputError, browser_capability_adapter
 import device_agent
 import device_capabilities
 import investigation_candidates
@@ -37240,7 +37240,7 @@ async def execute_hunt_capability(
                         environment=str(target_context.get("environment") or "unknown"),
                         scope_receipt_id=validated_scope_receipt_id,
                     )
-                    prepared_browser = BrowserNavigateAdapter.prepare(
+                    prepared_browser = browser_capability_adapter(name).prepare(
                         target=browser_target,
                         base_url=target_url,
                         args=request.input,
