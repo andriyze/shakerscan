@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 
 from capabilities.network import SubdomainsDiscoverAdapter
 from runtime.budget_reservations import DurableBudgetReservation
+from runtime.capability_registry import CAPABILITY_REGISTRY
 from runtime.capability_settlement import terminalize_capability_reservation
 from runtime.models import ScanPolicy, TargetBinding
 from scan.capability_execution import (
@@ -20,6 +21,7 @@ from scan.capability_execution import (
     scan_budget_ledger_limits,
     scan_capability_action_digest,
     scan_network_capability_allocation,
+    prepare_scan_external_capability,
     prepare_scan_process_capability,
 )
 
@@ -196,6 +198,48 @@ def test_scan_process_requests_missing_mandatory_capacity_to_fail_closed():
     assert runtime["tool_wall_seconds"] == 0
     assert prepared.estimated_budget["http_requests"] == 1
     assert prepared.estimated_budget["tool_wall_seconds"] == 1
+
+
+def test_scan_external_capability_requires_frozen_binding_and_active_approval():
+    specification = CAPABILITY_REGISTRY.require("templates.scan")
+    policy = ScanPolicy(
+        active_testing=True,
+        approval_receipt_id="approval-1",
+        scope_receipt_id="scope-1",
+    )
+    prepared = prepare_scan_external_capability(
+        specification=specification,
+        target=_target(),
+        args={"severity": "high,critical", "tags": "cve,exposure"},
+        policy=policy,
+    )
+
+    assert prepared.capability_name == "templates.scan"
+    assert prepared.adapter_name == "nuclei"
+    assert prepared.estimated_budget == {
+        "http_requests": 4_000,
+        "tool_wall_seconds": 300,
+    }
+    assert prepared.redacted_execution["target_binding_digest"] == _target().digest
+    assert prepared.redacted_execution["input"] == {
+        "severity": "high,critical",
+        "tags": "cve,exposure",
+    }
+
+    with pytest.raises(ScanCapabilityContractError, match="active testing approval"):
+        prepare_scan_external_capability(
+            specification=specification,
+            target=_target(),
+            args={},
+            policy=ScanPolicy(active_testing=True),
+        )
+    with pytest.raises(ScanCapabilityContractError, match="unsupported"):
+        prepare_scan_external_capability(
+            specification=specification,
+            target=_target(),
+            args={"argv": ["-target", "attacker.test"]},
+            policy=policy,
+        )
 
 
 def test_shared_terminalizer_binds_scan_receipt_and_partial_observations():

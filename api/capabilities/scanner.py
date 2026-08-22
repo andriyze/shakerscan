@@ -14,6 +14,8 @@ ScannerProcessRunner = Callable[..., Awaitable[Mapping[str, Any]]]
 class ScannerExecutionAdapter:
     """Normalize a fixed-template scanner process into one capability result."""
 
+    manages_cancellation = True
+
     def __init__(
         self,
         *,
@@ -42,15 +44,27 @@ class ScannerExecutionAdapter:
         heartbeat: Heartbeat,
         cancelled: Cancelled,
     ) -> CapabilityAdapterResult:
+        if cancelled():
+            return CapabilityAdapterResult(
+                status="cancelled",
+                errors=("cancelled_before_execution",),
+                actual_budget={name: 0 for name in self._requested_budget},
+                execution_started=False,
+                parser_version=self._specification.output_schema,
+                redacted_execution=self._redacted_execution,
+            )
         # The shared executor checks cancellation immediately before this call.
         # The process runner uses the opaque job identity for in-flight Redis
         # cancellation and invokes the durable heartbeat supplied here.
-        process_result = dict(
-            await self._process_runner(
-                self._process_payload,
-                heartbeat=heartbeat,
-            )
-        )
+        process_payload = dict(self._process_payload)
+        # This callback never crosses a queue or receipt boundary. The worker's
+        # subprocess loop polls it so Scan cancellation remains distinct and
+        # stops the external child rather than waiting for its hard timeout.
+        process_payload["_cancelled"] = cancelled
+        process_result = dict(await self._process_runner(
+            process_payload,
+            heartbeat=heartbeat,
+        ))
         self.process_result = process_result
         typed_output = (
             dict(process_result.get("typed_output") or {})

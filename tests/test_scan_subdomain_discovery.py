@@ -424,6 +424,79 @@ def test_scan_port_discovery_uses_same_reserve_before_traffic_boundary(
     assert redelivery is False
 
 
+def test_external_scan_tool_reserves_before_process_and_settles_typed_output(
+    monkeypatch,
+):
+    plan, target, options = _authority(enabled=False, network=True)
+    connection = _Connection(plan)
+    events = []
+    store = _ReservationStore(events)
+    _normalized, admission = worker.prepare_worker_dispatch(options)
+    execution = worker.build_native_scan_execution(plan, options)
+    process_result = {}
+
+    async def process_runner(payload, *, heartbeat):
+        events.append(("traffic", store.current.record.status))
+        assert payload["tool_name"] == "nuclei"
+        assert payload["_cancelled"]() is False
+        await heartbeat()
+        return {
+            "status": "success",
+            "elapsed_seconds": 2,
+            "typed_output": {
+                "parser": "nuclei-typed-v1",
+                "records": [{
+                    "kind": "template_match",
+                    "template_id": "example-cve",
+                    "proof_state": "candidate",
+                }],
+                "errors": [],
+            },
+            "settlement": {"mode": "exact", "actual": 3},
+        }
+
+    monkeypatch.setattr(worker, "db_pool", _Pool(connection))
+    monkeypatch.setattr(worker, "PostgresBudgetReservationStore", lambda: store)
+    monkeypatch.setattr(worker, "_worker_runtime_identity", lambda: "worker:test")
+    monkeypatch.setattr(worker, "_scan_cancel_requested", lambda _scan_id: False)
+
+    stored, redelivery = asyncio.run(
+        worker._execute_reserved_scan_capability(
+            admission=admission,
+            execution=execution,
+            scan_id="00000000-0000-0000-0000-000000000001",
+            job_id="job-1",
+            capability_name="templates.scan",
+            capability_args={},
+            action_id="deterministic_baseline.templates",
+            target_binding=target,
+            reservation_limits={
+                "http_requests": 20,
+                "tool_wall_seconds": 10,
+            },
+            scanner_process_payload={"tool_name": "nuclei"},
+            scanner_process_runner=process_runner,
+            scanner_result_holder=process_result,
+        )
+    )
+
+    assert events[:3] == [
+        ("create", "requested"),
+        ("transition", "reserved"),
+        ("transition", "running"),
+    ]
+    assert ("traffic", "running") in events
+    assert events[-1] == ("terminal", "committed")
+    assert stored.record.capability_name == "templates.scan"
+    assert stored.record.actual == {
+        "http_requests": 3,
+        "tool_wall_seconds": 2,
+    }
+    assert stored.receipt["observations"][0]["template_id"] == "example-cve"
+    assert process_result["result"]["status"] == "success"
+    assert redelivery is False
+
+
 def test_parent_standalone_reuses_verified_placed_discovery_without_traffic(
     monkeypatch,
 ):

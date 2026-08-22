@@ -115,6 +115,7 @@ from scan.collection_replay import (
 from scan.capability_execution import (
     ScanCapabilityContractError,
     fit_prepared_scan_capability,
+    prepare_scan_external_capability,
     scan_budget_ledger_limits,
     scan_capability_action_digest,
     scan_network_capability_allocation,
@@ -9796,6 +9797,9 @@ async def _execute_reserved_scan_capability(
     reservation_limits: Mapping[str, int] | None = None,
     scan_runner: Callable[[Mapping[str, int]], Awaitable[Mapping[str, Any]]] | None = None,
     scan_result_holder: dict[str, Any] | None = None,
+    scanner_process_payload: Mapping[str, Any] | None = None,
+    scanner_process_runner: Callable[..., Awaitable[Mapping[str, Any]]] | None = None,
+    scanner_result_holder: dict[str, Any] | None = None,
 ) -> tuple[Any, bool]:
     """Reserve, execute, and reconcile one target-bound Scan capability."""
     try:
@@ -9828,6 +9832,20 @@ async def _execute_reserved_scan_capability(
         )
     policy = admission.plan.policy
     deterministic_process = scan_runner is not None
+    external_process = (
+        scanner_process_payload is not None
+        or scanner_process_runner is not None
+    )
+    if external_process and (
+        scanner_process_payload is None or scanner_process_runner is None
+    ):
+        raise ScanCapabilityContractError(
+            "external Scan process requires payload and runner"
+        )
+    if deterministic_process and external_process:
+        raise ScanCapabilityContractError(
+            "Scan capability cannot use two process adapters"
+        )
     if deterministic_process and capability_name != "scan.execute":
         raise ScanCapabilityContractError(
             "deterministic Scan runner requires scan.execute"
@@ -9835,7 +9853,15 @@ async def _execute_reserved_scan_capability(
     adapter = None
     prepared: PreparedExecution | None = None
     runtime_budget: dict[str, int] | None = None
-    if not deterministic_process:
+    specification = agent_tools.CAPABILITY_REGISTRY.require(capability_name)
+    if external_process:
+        prepared = prepare_scan_external_capability(
+            specification=specification,
+            target=target,
+            args=dict(capability_args),
+            policy=policy,
+        )
+    elif not deterministic_process:
         adapter = network_capability_adapter(capability_name)
         prepared = adapter.prepare(
             target=target,
@@ -10125,6 +10151,14 @@ async def _execute_reserved_scan_capability(
             requested_budget=persisted.record.requested,
             redacted_execution=prepared.redacted_execution,
         )
+    elif external_process:
+        executable_adapter = ScannerExecutionAdapter(
+            specification=specification,
+            process_payload=dict(scanner_process_payload or {}),
+            process_runner=scanner_process_runner,
+            requested_budget=persisted.record.requested,
+            redacted_execution=prepared.redacted_execution,
+        )
     else:
         if adapter is None:
             raise ScanCapabilityContractError(
@@ -10146,7 +10180,9 @@ async def _execute_reserved_scan_capability(
             ),
             target=target,
             requested_budget=persisted.record.requested,
-            adapter_managed_cancellation=deterministic_process,
+            adapter_managed_cancellation=(
+                deterministic_process or external_process
+            ),
         ),
         executable_adapter,
         heartbeat=heartbeat_reservation,
@@ -10158,6 +10194,14 @@ async def _execute_reserved_scan_capability(
         and isinstance(executable_adapter.scan_result, Mapping)
     ):
         scan_result_holder["result"] = dict(executable_adapter.scan_result)
+    if (
+        external_process
+        and scanner_result_holder is not None
+        and isinstance(executable_adapter.process_result, Mapping)
+    ):
+        scanner_result_holder["result"] = dict(
+            executable_adapter.process_result
+        )
     action_status = (
         "completed" if execution_result.status == "success"
         else "partial" if execution_result.status == "partial"
@@ -16203,6 +16247,10 @@ async def _execute_agent_scanner_process(
     name = str(job_data.get("tool_name") or "").strip().lower()
     execution_target = str(job_data.get("execution_target") or "")
     registered_target = str(job_data.get("registered_target") or "")
+    cancelled = (
+        job_data.get("_cancelled")
+        if callable(job_data.get("_cancelled")) else None
+    )
     try:
         if not job_id:
             raise agent_tools.AgentToolError("scanner job requires an identity")
@@ -16270,7 +16318,10 @@ async def _execute_agent_scanner_process(
         deadline = loop.time() + timeout_ms / 1000.0
         next_heartbeat = loop.time() + 15.0
         while not wait_process.done():
-            if redis_client.exists(cancel_key):
+            if (
+                (cancelled is not None and cancelled())
+                or redis_client.exists(cancel_key)
+            ):
                 status, error = "cancelled", "cancelled"
                 _terminate_agent_tool_process_group(proc)
                 break

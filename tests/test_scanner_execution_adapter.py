@@ -119,3 +119,42 @@ def test_scanner_timeout_is_a_partial_executor_outcome():
     assert result.partial is True
     assert result.timed_out is True
     assert result.actual_budget == requested
+
+
+def test_scanner_adapter_passes_live_cancellation_to_process_runner():
+    requested = {"http_requests": 10, "tool_wall_seconds": 5}
+    saw_cancelled = False
+    cancellation_checks = 0
+
+    def cancelled():
+        nonlocal cancellation_checks
+        cancellation_checks += 1
+        return cancellation_checks > 1
+
+    async def process_runner(payload, *, heartbeat):
+        nonlocal saw_cancelled
+        await heartbeat()
+        saw_cancelled = bool(payload["_cancelled"]())
+        return {
+            "status": "cancelled",
+            "error": "cancelled",
+            "elapsed_seconds": 0,
+            "typed_output": {"records": [], "errors": []},
+            "settlement": {"source": "not_executed"},
+        }
+
+    adapter = ScannerExecutionAdapter(
+        specification=CAPABILITY_REGISTRY.require("templates.scan"),
+        process_payload={},
+        process_runner=process_runner,
+        requested_budget=requested,
+        redacted_execution={"input": {}},
+    )
+    result = asyncio.run(adapter.execute(
+        heartbeat=lambda: asyncio.sleep(0),
+        cancelled=cancelled,
+    ))
+
+    assert saw_cancelled is True
+    assert result.status == "cancelled"
+    assert result.actual_budget == {"tool_wall_seconds": 0}

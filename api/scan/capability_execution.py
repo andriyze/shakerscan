@@ -8,9 +8,11 @@ import json
 from typing import Any, Mapping
 
 try:
-    from runtime.models import PreparedExecution, TargetBinding
+    from runtime.capability_registry import CapabilitySpec
+    from runtime.models import PreparedExecution, ScanPolicy, TargetBinding
 except ModuleNotFoundError:  # package imports in host-side tests
-    from ..runtime.models import PreparedExecution, TargetBinding
+    from ..runtime.capability_registry import CapabilitySpec
+    from ..runtime.models import PreparedExecution, ScanPolicy, TargetBinding
 
 
 class ScanCapabilityContractError(ValueError):
@@ -212,6 +214,125 @@ def prepare_scan_process_capability(
         parser_version="scan-report/v2",
     )
     return prepared, runtime_budget
+
+
+def _normalize_external_capability_args(
+    specification: CapabilitySpec,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate the small registry-owned option surface used by Scan tools."""
+    schema = dict(specification.input_schema or {})
+    properties = dict(schema.get("properties") or {})
+    unknown = set(args) - set(properties)
+    if unknown or schema.get("additionalProperties") is not False:
+        rendered = ", ".join(sorted(str(name) for name in unknown)) or "schema"
+        raise ScanCapabilityContractError(
+            f"unsupported {specification.name} input: {rendered}"
+        )
+    missing = [
+        str(name) for name in schema.get("required") or ()
+        if name not in args
+    ]
+    if missing:
+        raise ScanCapabilityContractError(
+            f"missing {specification.name} input: {', '.join(missing)}"
+        )
+    normalized: dict[str, Any] = {}
+    for raw_name, value in args.items():
+        name = str(raw_name)
+        field = dict(properties.get(name) or {})
+        expected = str(field.get("type") or "")
+        if expected == "string":
+            if not isinstance(value, str):
+                raise ScanCapabilityContractError(
+                    f"{specification.name} input {name} must be a string"
+                )
+            if len(value) > 2_000 or any(ord(ch) < 0x20 for ch in value):
+                raise ScanCapabilityContractError(
+                    f"{specification.name} input {name} is invalid"
+                )
+        elif expected == "integer":
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ScanCapabilityContractError(
+                    f"{specification.name} input {name} must be an integer"
+                )
+            if field.get("minimum") is not None and value < int(field["minimum"]):
+                raise ScanCapabilityContractError(
+                    f"{specification.name} input {name} is below its minimum"
+                )
+            if field.get("maximum") is not None and value > int(field["maximum"]):
+                raise ScanCapabilityContractError(
+                    f"{specification.name} input {name} exceeds its maximum"
+                )
+        elif expected == "boolean" and not isinstance(value, bool):
+            raise ScanCapabilityContractError(
+                f"{specification.name} input {name} must be a boolean"
+            )
+        allowed = field.get("enum")
+        if isinstance(allowed, list) and value not in allowed:
+            raise ScanCapabilityContractError(
+                f"{specification.name} input {name} is outside its enum"
+            )
+        normalized[name] = value
+    return normalized
+
+
+def prepare_scan_external_capability(
+    *,
+    specification: CapabilitySpec,
+    target: TargetBinding,
+    args: Mapping[str, Any],
+    policy: ScanPolicy,
+) -> PreparedExecution:
+    """Prepare one registry-owned external tool under immutable Scan authority."""
+    if specification.execution_kind != "external_tool":
+        raise ScanCapabilityContractError(
+            f"{specification.name} is not an external Scan capability"
+        )
+    if not specification.binary or not specification.legacy_tool_name:
+        raise ScanCapabilityContractError(
+            f"{specification.name} has no fixed-template adapter"
+        )
+    if target.target_kind not in specification.target_kinds:
+        raise ScanCapabilityContractError(
+            f"{specification.name} does not support {target.target_kind} targets"
+        )
+    if not target.allowed_origins or not target.allowed_addresses:
+        raise ScanCapabilityContractError(
+            f"{specification.name} requires a frozen web target binding"
+        )
+    if specification.requires_active_approval and not (
+        policy.active_testing and policy.approval_receipt_id
+    ):
+        raise ScanCapabilityContractError(
+            f"{specification.name} requires active testing approval"
+        )
+    normalized = _normalize_external_capability_args(specification, args)
+    estimated = {
+        str(name): int(amount)
+        for name, amount in dict(specification.budget_cost).items()
+        if int(amount) > 0
+    }
+    if not estimated:
+        raise ScanCapabilityContractError(
+            f"{specification.name} has no reservable budget"
+        )
+    redacted = {
+        "schema_version": "scan-external-capability/v1",
+        "capability_name": specification.name,
+        "target_binding_digest": target.digest,
+        "input": normalized,
+    }
+    return PreparedExecution(
+        capability_name=specification.name,
+        adapter_name=specification.adapter,
+        adapter_version=specification.adapter_version,
+        commands=(),
+        estimated_budget=estimated,
+        input_digest=PreparedExecution.digest_input(redacted),
+        redacted_execution=redacted,
+        parser_version=specification.output_schema,
+    )
 
 
 def fit_prepared_scan_capability(
