@@ -9,6 +9,7 @@ are admitted from their immutable execution plan before any scanner process star
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 
 import worker as _worker
@@ -20,6 +21,18 @@ from scan.worker_dispatch import (
 
 
 _original_run_scan = _worker.run_scan
+
+
+def _cleanup_completed_discovery_sidecar(scan_id: str | None) -> None:
+    """Remove the recovery manifest after its completed result is durably returned."""
+    if not scan_id:
+        return
+    sidecar = Path(_worker.RESULTS_DIR) / f"{scan_id}_checkpoint.json.endpoint-manifest.json"
+    try:
+        sidecar.unlink(missing_ok=True)
+    except OSError:
+        # Artifact cleanup must never replace an otherwise valid scan result.
+        pass
 
 
 async def run_scan_v2(
@@ -60,6 +73,8 @@ async def run_scan_v2(
     if metadata is not None and isinstance(result, dict):
         result = dict(result)
         result["scan_execution"] = metadata
+    if isinstance(result, dict):
+        _cleanup_completed_discovery_sidecar(scan_id)
     return result
 
 
