@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scanner"))
 from scanner_tools import common
 from scanner_tools.request_meter import (
     RequestBudgetExceeded,
+    RequestDestinationRejected,
     RequestMethodRejected,
     configure_request_meter,
     get_request_meter,
@@ -98,6 +99,37 @@ def test_passive_method_policy_does_not_apply_to_provider_host():
     assert meter.before_request(
         phase="provider", url="https://provider.test/token", method="POST",
     ) is False
+
+
+def test_frozen_target_binding_rejects_origin_and_dns_drift_before_request():
+    resolved = {"app.test": {"192.0.2.10"}}
+    meter = configure_request_meter(
+        limit=10,
+        target_host="app.test",
+        mode="enforce",
+        allowed_origins={"https://app.test"},
+        allowed_addresses={"192.0.2.10"},
+        require_destination_scope=True,
+        destination_resolver=lambda host: resolved.get(host, set()),
+        destination_cache_seconds=0,
+    )
+
+    assert meter.before_request(
+        phase="probe", url="https://app.test/read", method="GET",
+    ) is True
+    with pytest.raises(RequestDestinationRejected, match="origin_not_bound"):
+        meter.before_request(
+            phase="probe", url="http://app.test/read", method="GET",
+        )
+    resolved["app.test"] = {"192.0.2.99"}
+    with pytest.raises(RequestDestinationRejected, match="runtime_dns_out_of_scope"):
+        meter.before_request(
+            phase="probe", url="https://app.test/again", method="GET",
+        )
+
+    snapshot = meter.snapshot()
+    assert snapshot["attempted_requests"] == 1
+    assert snapshot["destination_rejected_requests"] == 2
 
 
 def test_request_meter_isolated_between_concurrent_scan_contexts():

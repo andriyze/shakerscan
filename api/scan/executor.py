@@ -13,7 +13,11 @@ import json
 from typing import Any, Mapping
 
 from .execution import ScanExecutionPlan
-from .jobs import ScanShardAuthority, ScanShardBudget
+from .jobs import (
+    ScanShardAuthority,
+    ScanShardBudget,
+    target_binding_from_payload,
+)
 from .worker_validation import (
     FAMILY_RE,
     WorkerScanContractError,
@@ -21,12 +25,12 @@ from .worker_validation import (
 )
 
 try:
-    from runtime.models import ScanBudget
+    from runtime.models import ScanBudget, TargetBinding
 except ModuleNotFoundError:
-    from ..runtime.models import ScanBudget
+    from ..runtime.models import ScanBudget, TargetBinding
 
 
-NATIVE_SCAN_EXECUTION_SCHEMA = "native-scan-execution/v1"
+NATIVE_SCAN_EXECUTION_SCHEMA = "native-scan-execution/v2"
 NATIVE_SCAN_STAGES = (
     "bind_target",
     "resolve_inputs",
@@ -147,6 +151,7 @@ def _scanner_budget_options(
 @dataclass(frozen=True)
 class NativeScanExecution:
     execution_plan: ScanExecutionPlan
+    target_binding: TargetBinding
     execution_budget: ScanBudget | ScanShardBudget
     shard_authority: ScanShardAuthority | None = None
     focused_family: str | None = None
@@ -190,6 +195,8 @@ class NativeScanExecution:
             "schema_version": NATIVE_SCAN_EXECUTION_SCHEMA,
             "execution_plan": self.execution_plan.canonical_dict(),
             "execution_plan_digest": self.execution_plan.digest,
+            "target_binding": self.target_binding.canonical_dict(),
+            "target_binding_digest": self.target_binding.digest,
             "execution_budget": _budget_payload(self.execution_budget),
             "shard_authority": (
                 self.shard_authority.payload() if self.shard_authority is not None else None
@@ -233,9 +240,35 @@ class NativeScanExecution:
 def build_native_scan_execution(
     plan: ScanExecutionPlan,
     options: Mapping[str, Any],
+    *,
+    target_binding: TargetBinding | Mapping[str, Any] | None = None,
 ) -> NativeScanExecution:
     if not isinstance(options, Mapping):
         raise NativeScanExecutionError("canonical Scan options must be an object")
+    raw_target_binding = (
+        target_binding
+        if target_binding is not None
+        else options.get("_canonical_target_binding")
+    )
+    try:
+        if isinstance(raw_target_binding, Mapping):
+            binding = target_binding_from_payload(raw_target_binding)
+        elif callable(getattr(raw_target_binding, "canonical_dict", None)):
+            binding = target_binding_from_payload(raw_target_binding.canonical_dict())
+        else:
+            binding = target_binding_from_payload(raw_target_binding)
+    except (TypeError, ValueError) as exc:
+        raise NativeScanExecutionError(
+            f"canonical target binding is invalid: {exc}"
+        ) from exc
+    if not binding.allowed_origins or not binding.allowed_addresses:
+        raise NativeScanExecutionError(
+            "canonical target binding requires frozen origins and addresses"
+        )
+    if binding.scope_receipt_id != plan.policy.scope_receipt_id:
+        raise NativeScanExecutionError(
+            "canonical target binding scope receipt does not match the Scan plan"
+        )
     shard_authority = None
     if options.get("canonical_shard_authority") is not None:
         try:
@@ -262,6 +295,7 @@ def build_native_scan_execution(
     )
     return NativeScanExecution(
         execution_plan=plan,
+        target_binding=binding,
         execution_budget=execution_budget,
         shard_authority=shard_authority,
         focused_family=_focused_family(plan, options),
@@ -279,8 +313,8 @@ def validate_native_scan_execution_payload(value: Any) -> dict[str, Any]:
     raw = dict(value)
     expected = {
         "schema_version", "execution_plan", "execution_plan_digest", "stages",
-        "execution_budget", "shard_authority", "focused_family", "adapter_scope",
-        "execution_digest",
+        "target_binding", "target_binding_digest", "execution_budget",
+        "shard_authority", "focused_family", "adapter_scope", "execution_digest",
     }
     if set(raw) != expected:
         raise NativeScanExecutionError("native Scan execution fields are invalid")
@@ -316,8 +350,17 @@ def validate_native_scan_execution_payload(value: Any) -> dict[str, Any]:
         })
     except (TypeError, ValueError, WorkerScanContractError) as exc:
         raise NativeScanExecutionError(f"native Scan plan is invalid: {exc}") from exc
+    try:
+        reconstructed_binding = target_binding_from_payload(raw.get("target_binding"))
+    except (TypeError, ValueError) as exc:
+        raise NativeScanExecutionError(
+            f"native Scan target binding is invalid: {exc}"
+        ) from exc
+    if raw.get("target_binding_digest") != reconstructed_binding.digest:
+        raise NativeScanExecutionError("native Scan target-binding digest mismatch")
     raw_shard = raw.get("shard_authority")
     expected_options: dict[str, Any] = {}
+    expected_options["_canonical_target_binding"] = reconstructed_binding.canonical_dict()
     if raw_shard is not None:
         expected_options["canonical_shard_authority"] = raw_shard
     execution_budget = raw.get("execution_budget")

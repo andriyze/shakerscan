@@ -217,6 +217,13 @@ def materialize_canonical_scan_job(
                 "persisted shard options do not match scan-job/v2"
             )
 
+    # This private worker-only value is injected only after every persisted and
+    # queued digest check. It lets the scanner subprocess revalidate the frozen
+    # target authority without placing another mutable scope representation in
+    # Redis or PostgreSQL.
+    options = dict(options)
+    options["_canonical_target_binding"] = job.target.canonical_dict()
+
     materialized = {
         "job_id": job.job_id,
         "scan_id": job.scan_id,

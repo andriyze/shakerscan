@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import contextvars
+import ipaddress
+import socket
 import threading
+import time
 import urllib.parse
 import urllib.request
 from collections.abc import Collection
@@ -22,6 +25,32 @@ class RequestMethodRejected(RequestBudgetExceeded):
     """Raised before a target-bound request violates its passive method policy."""
 
 
+class RequestDestinationRejected(RequestBudgetExceeded):
+    """Raised before a request exceeds its frozen runtime target binding."""
+
+
+def canonical_http_origin(value: Any) -> str | None:
+    try:
+        parsed = urllib.parse.urlsplit(str(value or "").strip())
+        scheme = parsed.scheme.lower()
+        host = str(parsed.hostname or "").strip().lower().rstrip(".")
+        if scheme not in {"http", "https"} or not host or parsed.username or parsed.password:
+            return None
+        port = parsed.port
+    except (TypeError, ValueError):
+        return None
+    display_host = f"[{host}]" if ":" in host else host
+    default_port = 443 if scheme == "https" else 80
+    return f"{scheme}://{display_host}{f':{port}' if port and port != default_port else ''}"
+
+
+def _resolve_host_addresses(host: str) -> frozenset[str]:
+    return frozenset(
+        str(ipaddress.ip_address(item[4][0]))
+        for item in socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    )
+
+
 class RequestMeter:
     def __init__(
         self,
@@ -32,6 +61,11 @@ class RequestMeter:
         planned: int = 0,
         reserved: int = 0,
         allowed_methods: Collection[str] | None = None,
+        allowed_origins: Collection[str] | None = None,
+        allowed_addresses: Collection[str] | None = None,
+        require_destination_scope: bool = False,
+        destination_resolver: Any = None,
+        destination_cache_seconds: float = 1.0,
     ) -> None:
         normalized_mode = str(mode or "compatibility").strip().lower()
         self.mode = normalized_mode if normalized_mode in REQUEST_BUDGET_MODES else "compatibility"
@@ -44,11 +78,28 @@ class RequestMeter:
             for method in (allowed_methods or ())
             if str(method or "").strip()
         )
+        self.allowed_origins = frozenset(
+            origin
+            for origin in (
+                canonical_http_origin(value) for value in (allowed_origins or ())
+            )
+            if origin
+        )
+        self.allowed_addresses = frozenset(
+            str(ipaddress.ip_address(str(value).strip()))
+            for value in (allowed_addresses or ())
+            if str(value).strip()
+        )
+        self.require_destination_scope = bool(require_destination_scope)
+        self._destination_resolver = destination_resolver or _resolve_host_addresses
+        self._destination_cache_seconds = max(0.0, float(destination_cache_seconds))
+        self._destination_cache: dict[str, tuple[float, frozenset[str]]] = {}
         self.attempted = 0
         self.completed = 0
         self.retried = 0
         self.rejected = 0
         self.method_rejected = 0
+        self.destination_rejected = 0
         self.successful = 0
         self.unmetered_tool_invocations = 0
         self.adapter_usage: dict[str, dict[str, int]] = {}
@@ -84,6 +135,8 @@ class RequestMeter:
         retry: bool = False,
     ) -> bool:
         normalized_method = str(method or "").strip().upper()
+        if self.require_destination_scope:
+            self._require_destination(phase=phase, url=url, method=normalized_method)
         if (
             normalized_method
             and self.allowed_methods
@@ -121,6 +174,55 @@ class RequestMeter:
                 self._increment_adapter(phase, "retried")
             self._event("attempted", phase=phase, url=url, retry=retry)
         return True
+
+    def _require_destination(self, *, phase: str, url: Any, method: str) -> None:
+        parsed = urllib.parse.urlsplit(str(url or "").strip())
+        origin = canonical_http_origin(url)
+        host = str(parsed.hostname or "").strip().lower().rstrip(".")
+        reason = None
+        observed: frozenset[str] = frozenset()
+        if not origin or origin not in self.allowed_origins:
+            reason = "origin_not_bound"
+        elif host != self.target_host:
+            reason = "host_not_bound"
+        elif not self.allowed_addresses:
+            reason = "address_binding_missing"
+        else:
+            now = time.monotonic()
+            cached = self._destination_cache.get(host)
+            if cached and now - cached[0] <= self._destination_cache_seconds:
+                observed = cached[1]
+            else:
+                try:
+                    observed = frozenset(
+                        str(ipaddress.ip_address(str(value).strip()))
+                        for value in self._destination_resolver(host)
+                        if str(value).strip()
+                    )
+                except Exception:
+                    observed = frozenset()
+                self._destination_cache[host] = (now, observed)
+            if not observed:
+                reason = "runtime_dns_empty"
+            elif not observed.issubset(self.allowed_addresses):
+                reason = "runtime_dns_out_of_scope"
+        if reason is None:
+            return
+        with self._lock:
+            self.rejected += 1
+            self.destination_rejected += 1
+            self._increment_adapter(phase, "rejected")
+            self._event(
+                "rejected_destination",
+                phase=phase,
+                url=url,
+                method=method,
+                reason=reason,
+                resolved_addresses=sorted(observed),
+            )
+        raise RequestDestinationRejected(
+            f"request destination is outside the frozen target binding ({reason})"
+        )
 
     def record_completion(self, *, phase: str, url: Any, status_code: int | None = None) -> None:
         if not self.applies_to(url):
@@ -176,6 +278,9 @@ class RequestMeter:
                 "mode": self.mode,
                 "target_host": self.target_host,
                 "allowed_http_methods": sorted(self.allowed_methods),
+                "allowed_origins": sorted(self.allowed_origins),
+                "allowed_addresses": sorted(self.allowed_addresses),
+                "destination_scope_required": self.require_destination_scope,
                 "planned_requests": self.planned,
                 "reserved_requests": self.reserved,
                 "request_limit": self.limit,
@@ -184,6 +289,7 @@ class RequestMeter:
                 "retried_requests": self.retried,
                 "rejected_requests": self.rejected,
                 "method_rejected_requests": self.method_rejected,
+                "destination_rejected_requests": self.destination_rejected,
                 "successful_requests": self.successful,
                 "remaining_requests": (
                     None if self.limit is None else max(0, self.limit - self.attempted)

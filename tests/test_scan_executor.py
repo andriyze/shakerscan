@@ -9,7 +9,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 
-from runtime.models import ScanBudget, ScanPolicy
+from runtime.models import ScanBudget, ScanPolicy, TargetBinding
 from scan.execution import ScanExecutionPlan
 from scan.executor import (
     NATIVE_SCAN_STAGES,
@@ -36,9 +36,25 @@ def _plan(*, active=False, network=False, include=(), exclude=()):
     )
 
 
+def _build(plan, options):
+    return build_native_scan_execution(
+        plan,
+        options,
+        target_binding=TargetBinding(
+            target_id="target-1",
+            target_kind="web",
+            canonical_host="example.test",
+            allowed_origins=("https://example.test",),
+            allowed_addresses=("192.0.2.10",),
+            allowed_root_domains=("example.test",),
+            scope_receipt_id=plan.policy.scope_receipt_id,
+        ),
+    )
+
+
 def test_native_scan_uses_one_fixed_stage_graph_for_passive_and_active_policy():
-    passive = build_native_scan_execution(_plan(), {})
-    active = build_native_scan_execution(_plan(active=True, network=True), {})
+    passive = _build(_plan(), {})
+    active = _build(_plan(active=True, network=True), {})
 
     assert [item["name"] for item in passive.stage_rows()] == list(NATIVE_SCAN_STAGES)
     assert [item["name"] for item in active.stage_rows()] == list(NATIVE_SCAN_STAGES)
@@ -48,7 +64,7 @@ def test_native_scan_uses_one_fixed_stage_graph_for_passive_and_active_policy():
     assert active.stage_rows()[5]["enabled"] is True
     assert validate_native_scan_execution_payload(active.payload()) == active.payload()
 
-    discovery = build_native_scan_execution(
+    discovery = _build(
         _plan(active=True, network=True), {"discovery_manifest_only": True},
     )
     assert discovery.stage_rows()[3] == {
@@ -59,7 +75,7 @@ def test_native_scan_uses_one_fixed_stage_graph_for_passive_and_active_policy():
 
 
 def test_native_scan_removes_legacy_behavior_selectors_after_admission():
-    execution = build_native_scan_execution(_plan(active=True), {
+    execution = _build(_plan(active=True), {
         "scan_type": "compatibility-value",
         "quick": True,
         "thorough": True,
@@ -91,12 +107,12 @@ def test_native_scan_removes_legacy_behavior_selectors_after_admission():
 
 def test_native_scan_rejects_internal_family_assignment_outside_policy():
     with pytest.raises(NativeScanExecutionError, match="exceeds canonical Scan policy"):
-        build_native_scan_execution(
+        _build(
             _plan(active=True, include=("sqli",)),
             {"asm_check_family": "xss"},
         )
 
-    allowed = build_native_scan_execution(
+    allowed = _build(
         _plan(active=True, include=("sqli",), exclude=("xss",)),
         {"asm_check_family": "sqli"},
     )
@@ -104,9 +120,18 @@ def test_native_scan_rejects_internal_family_assignment_outside_policy():
 
 
 def test_native_scan_execution_tampering_fails_closed():
-    payload = build_native_scan_execution(_plan(), {}).payload()
+    payload = _build(_plan(), {}).payload()
     changed = copy.deepcopy(payload)
     changed["stages"][2]["enabled"] = False
+    with pytest.raises(NativeScanExecutionError, match="digest"):
+        validate_native_scan_execution_payload(changed)
+
+    with pytest.raises(NativeScanExecutionError, match="target binding"):
+        build_native_scan_execution(_plan(), {})
+
+    changed = copy.deepcopy(payload)
+    changed["target_binding"]["allowed_origins"] = ["https://other.test"]
+    changed["execution_digest"] = payload["execution_digest"]
     with pytest.raises(NativeScanExecutionError, match="digest"):
         validate_native_scan_execution_payload(changed)
 
@@ -122,7 +147,7 @@ def test_native_scan_binds_shard_sub_budget_and_rejects_scope_coercion():
         shard_label="sqli:0",
         sub_budget=ScanShardBudget(300, 250, 100, 0, 0, 120, 1),
     )
-    execution = build_native_scan_execution(plan, {
+    execution = _build(plan, {
         "canonical_shard_authority": authority.payload(),
         "asm_check_family": "sqli",
         "skip_global_checks": True,
@@ -135,11 +160,11 @@ def test_native_scan_binds_shard_sub_budget_and_rejects_scope_coercion():
     assert validate_native_scan_execution_payload(execution.payload()) == execution.payload()
 
     with pytest.raises(NativeScanExecutionError, match="must be a boolean"):
-        build_native_scan_execution(plan, {"skip_global_checks": "false"})
+        _build(plan, {"skip_global_checks": "false"})
 
 
 def test_native_scan_envelope_reuses_plan_ceiling_validation():
-    payload = build_native_scan_execution(_plan(), {}).payload()
+    payload = _build(_plan(), {}).payload()
     changed = copy.deepcopy(payload)
     changed["execution_plan"]["budget"]["max_workers"] = 129
     changed["execution_plan_digest"] = "0" * 64

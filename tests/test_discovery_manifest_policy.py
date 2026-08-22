@@ -10,9 +10,10 @@ from scanner.scanner_tools.discovery_policy import (
 from scanner.scanner import (
     _apply_canonical_scan_execution,
     _reject_canonical_cli_behavior,
+    _validate_canonical_scan_target,
     build_check_family_scope,
 )
-from api.runtime.models import ScanBudget, ScanPolicy
+from api.runtime.models import ScanBudget, ScanPolicy, TargetBinding
 from api.scan.execution import ScanExecutionPlan
 from api.scan.executor import build_native_scan_execution
 
@@ -101,8 +102,22 @@ def test_scanner_applies_native_execution_without_a_legacy_preset():
         budget=ScanBudget(1200, 5000, 2000, 200, 5000, 900, 4),
     )
     execution = build_native_scan_execution(
-        plan, {"asm_check_family": "sqli"},
+        plan,
+        {"asm_check_family": "sqli"},
+        target_binding=TargetBinding(
+            target_id="target-1",
+            target_kind="web",
+            canonical_host="example.test",
+            allowed_origins=("https://example.test",),
+            allowed_addresses=("192.0.2.10",),
+            allowed_root_domains=("example.test",),
+        ),
     ).payload()
+    _validate_canonical_scan_target("https://example.test/path", execution)
+    with pytest.raises(SystemExit, match="host does not match"):
+        _validate_canonical_scan_target("https://other.test", execution)
+    with pytest.raises(SystemExit, match="origin does not match"):
+        _validate_canonical_scan_target("http://example.test", execution)
     args = Namespace(
         quick=False,
         standard=False,

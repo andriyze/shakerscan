@@ -89,6 +89,28 @@ class TargetBinding:
         if kind in {"web", "api", "device"} and not host:
             raise ValueError("web, API, and device bindings require a canonical host")
 
+    def canonical_dict(self) -> dict[str, Any]:
+        return {
+            "target_id": self.target_id,
+            "target_kind": self.target_kind,
+            "canonical_host": self.canonical_host,
+            "allowed_origins": list(self.allowed_origins),
+            "allowed_addresses": list(self.allowed_addresses),
+            "allowed_root_domains": list(self.allowed_root_domains),
+            "environment": self.environment,
+            "scope_receipt_id": self.scope_receipt_id,
+        }
+
+    @property
+    def digest(self) -> str:
+        encoded = json.dumps(
+            self.canonical_dict(),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
 
 @dataclass(frozen=True)
 class PreparedCommand:

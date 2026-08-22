@@ -87,6 +87,7 @@ from scanner_tools.attempt_telemetry import (
     normalize_registry_attempt_telemetry,
 )
 from scanner_tools.request_meter import (
+    canonical_http_origin,
     configure_request_meter,
     get_request_meter,
     install_async_client_metering,
@@ -3996,6 +3997,15 @@ async def build_report(target: str,
                 if canonical_scan_execution is not None else True
             ),
         ),
+        allowed_origins=(
+            canonical_scan_execution["target_binding"]["allowed_origins"]
+            if canonical_scan_execution is not None else ()
+        ),
+        allowed_addresses=(
+            canonical_scan_execution["target_binding"]["allowed_addresses"]
+            if canonical_scan_execution is not None else ()
+        ),
+        require_destination_scope=canonical_scan_execution is not None,
     )
     request_meter_hooks = install_async_client_metering()
     openapi_endpoint_cache: list[dict[str, Any]] = []
@@ -13932,6 +13942,42 @@ def _load_canonical_scan_execution(enabled: bool) -> dict[str, Any] | None:
         raise SystemExit(f"invalid native Scan execution envelope: {exc}") from exc
 
 
+def _validate_canonical_scan_target(
+    target: str | None,
+    execution: Mapping[str, Any],
+) -> None:
+    raw = str(target or "").strip()
+    binding = execution["target_binding"]
+    expected_host = str(binding["canonical_host"] or "").strip().lower().rstrip(".")
+    allowed_origins = {
+        canonical_http_origin(value)
+        for value in binding["allowed_origins"]
+    }
+    allowed_origins.discard(None)
+    try:
+        parsed = urllib.parse.urlsplit(raw if "://" in raw else f"//{raw}")
+        host = str(parsed.hostname or "").strip().lower().rstrip(".")
+        port = parsed.port
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(f"canonical Scan target is invalid: {exc}") from exc
+    if not host or host != expected_host:
+        raise SystemExit("canonical Scan target host does not match its frozen binding")
+    if parsed.username or parsed.password:
+        raise SystemExit("canonical Scan target cannot contain user information")
+    if parsed.scheme:
+        origin = canonical_http_origin(raw)
+        if origin not in allowed_origins:
+            raise SystemExit("canonical Scan target origin does not match its frozen binding")
+    elif port is not None:
+        bound_ports = {
+            urllib.parse.urlsplit(origin).port
+            or (443 if urllib.parse.urlsplit(origin).scheme == "https" else 80)
+            for origin in allowed_origins
+        }
+        if port not in bound_ports:
+            raise SystemExit("canonical Scan target port does not match its frozen binding")
+
+
 _CANONICAL_FORBIDDEN_BOOLEAN_ARGS = (
     "active", "xss", "sqli", "deep_domxss", "quick", "no_browser", "public",
     "subfinder", "nuclei", "complete", "deep_discovery", "csrf_testing",
@@ -14340,6 +14386,7 @@ async def cli_main():
     _apply_auth_config_file_args(args, args.auth_config_file)
     canonical_scan_execution = _load_canonical_scan_execution(args.canonical_scan)
     if canonical_scan_execution is not None:
+        _validate_canonical_scan_target(args.target, canonical_scan_execution)
         _reject_canonical_cli_behavior(args)
 
     # Handle deprecated --oob-max-payloads alias (only if new flag not explicitly set)

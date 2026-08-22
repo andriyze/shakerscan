@@ -3851,7 +3851,7 @@ def test_run_scan_maps_explicit_inventory_only_policy(monkeypatch):
 
 
 def test_run_scan_uses_native_fixed_stage_contract_for_canonical_plan(monkeypatch):
-    from runtime.models import ScanBudget, ScanPolicy
+    from runtime.models import ScanBudget, ScanPolicy, TargetBinding
     from scan.execution import ScanExecutionPlan
     from scan.executor import validate_native_scan_execution_payload
 
@@ -3884,6 +3884,14 @@ def test_run_scan_uses_native_fixed_stage_contract_for_canonical_plan(monkeypatc
         "network_discovery": False,
         "subfinder": False,
         "asm_check_family": "sqli",
+        "_canonical_target_binding": TargetBinding(
+            target_id="target-1",
+            target_kind="web",
+            canonical_host="example.com",
+            allowed_origins=("https://example.com",),
+            allowed_addresses=("93.184.216.34",),
+            allowed_root_domains=("example.com",),
+        ).canonical_dict(),
     })
     monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
     monkeypatch.setattr(worker, "_load_runtime_ai_settings", lambda: {})

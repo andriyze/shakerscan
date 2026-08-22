@@ -460,20 +460,11 @@ def _plan_from_payload(value: Any, supplied_digest: Any) -> ScanExecutionPlan:
     return plan
 
 
-def _target_payload(target: TargetBinding) -> dict[str, Any]:
-    return {
-        "target_id": target.target_id,
-        "target_kind": target.target_kind,
-        "canonical_host": target.canonical_host,
-        "allowed_origins": list(target.allowed_origins),
-        "allowed_addresses": list(target.allowed_addresses),
-        "allowed_root_domains": list(target.allowed_root_domains),
-        "environment": target.environment,
-        "scope_receipt_id": target.scope_receipt_id,
-    }
+def target_binding_payload(target: TargetBinding) -> dict[str, Any]:
+    return target.canonical_dict()
 
 
-def _target_from_payload(value: Any) -> TargetBinding:
+def target_binding_from_payload(value: Any) -> TargetBinding:
     if not isinstance(value, Mapping):
         raise CanonicalScanJobError("target must be an object")
     raw = dict(value)
@@ -496,7 +487,7 @@ def _target_from_payload(value: Any) -> TargetBinding:
         )
     except (TypeError, ValueError) as exc:
         raise CanonicalScanJobError(f"target binding is invalid: {exc}") from exc
-    if raw != _target_payload(target):
+    if raw != target_binding_payload(target):
         raise CanonicalScanJobError("target binding is not canonical")
     return target
 
@@ -759,11 +750,7 @@ class CanonicalScanJob:
             shard = ScanShardAuthority.from_payload(shard)
         if shard is not None:
             shard.validate_against_plan(self.execution_plan)
-        if (
-            self.target.scope_receipt_id
-            and self.execution_plan.policy.scope_receipt_id
-            and self.target.scope_receipt_id != self.execution_plan.policy.scope_receipt_id
-        ):
+        if self.target.scope_receipt_id != self.execution_plan.policy.scope_receipt_id:
             raise CanonicalScanJobError("target and execution plan scope receipts do not match")
         object.__setattr__(self, "request_collections", refs)
         object.__setattr__(self, "credential_profile_ids", credentials)
@@ -802,7 +789,7 @@ class CanonicalScanJob:
             "job_id": self.job_id,
             "scan_id": self.scan_id,
             "created_at": self.created_at,
-            "target": _target_payload(self.target),
+            "target": target_binding_payload(self.target),
             "execution_plan": self.execution_plan.canonical_dict(),
             "execution_plan_digest": self.execution_plan.digest,
             "request_collections": [item.payload() for item in self.request_collections],
@@ -844,7 +831,7 @@ class CanonicalScanJob:
             job_id=raw["job_id"],
             scan_id=raw["scan_id"],
             created_at=raw["created_at"],
-            target=_target_from_payload(raw["target"]),
+            target=target_binding_from_payload(raw["target"]),
             execution_plan=_plan_from_payload(
                 raw["execution_plan"], raw["execution_plan_digest"]
             ),

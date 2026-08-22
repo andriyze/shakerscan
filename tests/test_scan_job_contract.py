@@ -10,7 +10,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 
 from runtime.models import TargetBinding
-from scan.contracts import resolve_scan_contract
+from scan.contracts import bind_scan_scope_receipt, resolve_scan_contract
 from scan.jobs import (
     CanonicalScanJob,
     CanonicalScanJobError,
@@ -41,14 +41,14 @@ def _target():
 
 
 def _job(*, active=False, confirmed=False):
-    contract = resolve_scan_contract(
+    contract = bind_scan_scope_receipt(resolve_scan_contract(
         budget_profile="balanced",
         policy={
             "active_testing": active,
             "allow_state_changing_http": confirmed,
         },
         approval_receipt_id="approval-1" if confirmed else None,
-    )
+    ), "scope-1")
     mode = "confirmed_active" if confirmed else "safe_reads"
     return CanonicalScanJob.create(
         job_id="job-1",
@@ -266,7 +266,9 @@ def test_shard_materialization_rejects_durable_option_or_parent_drift():
 
 @pytest.mark.parametrize("legacy", ["quick", "standard", "deep", "full", "aggressive", "smart"])
 def test_legacy_alias_is_translated_before_queue_boundary(legacy):
-    contract = resolve_scan_contract(legacy_scan_type=legacy)
+    contract = bind_scan_scope_receipt(
+        resolve_scan_contract(legacy_scan_type=legacy), "scope-1",
+    )
     job = CanonicalScanJob.create(
         job_id=f"job-{legacy}",
         scan_id=f"scan-{legacy}",
@@ -423,6 +425,7 @@ def test_worker_materializes_only_after_persisted_authority_and_dns_match():
     assert "options" not in job.payload()
     assert materialized["_canonical_queue_payload"] == job.payload()
     assert materialized["_canonical_scan_job_digest"] == job.payload_digest
+    assert materialized["options"]["_canonical_target_binding"] == job.target.canonical_dict()
 
 
 def test_worker_preserves_only_validated_queue_placement_after_materialization():
