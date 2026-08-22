@@ -1150,6 +1150,10 @@ def test_asm_improve_queues_recon_when_inventory_is_empty(monkeypatch):
     assert queued["triggered_by"] == "improve"
     assert queued["campaign_id"] == str(conn.campaign_id)
     assert "custom_budget" in queued["options"]
+    assert queued["options"]["discovery_manifest_only"] is True
+    assert queued["options"]["active"] is False
+    assert queued["options"]["xss"] is False
+    assert queued["options"]["sqli"] is False
     assert any("INSERT INTO scans" in query for query, _args in conn.executes)
     assert any("asm_last_recon_at" in query for query, _args in conn.executes)
 

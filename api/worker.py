@@ -2854,7 +2854,7 @@ async def run_scan(
         cmd.append('--focused-endpoints-only')
     if options.get('zero_rediscovery'):
         cmd.append('--zero-rediscovery')
-    if options.get('parallel_discovery'):
+    if options.get('parallel_discovery') or options.get('discovery_manifest_only'):
         cmd.append('--discovery-manifest-only')
 
     # Smart scan tuning options

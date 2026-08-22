@@ -61272,6 +61272,10 @@ async def _enqueue_asm_recon(
     opts = dict(base_opts or {})
     opts["run_kind"] = "asm_recon"
     opts["scan_type"] = "smart"
+    opts["discovery_manifest_only"] = True
+    opts["active"] = False
+    opts["xss"] = False
+    opts["sqli"] = False
     opts.pop("parallel", None)  # recon is one lightweight standalone scan
     cb = dict(opts.get("custom_budget") or {})
     cb.update(parallel_scan.RECON_DISCOVERY_BUDGET)  # lean enumeration, active off

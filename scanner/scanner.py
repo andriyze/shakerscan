@@ -72,6 +72,7 @@ from scanner_tools.focused_scope import (
     FocusedScope,
     async_value as _focused_async_value,
 )
+from scanner_tools.discovery_policy import enforce_discovery_manifest_safety
 from scanner_tools.coverage_tracker import CoverageTracker
 from scanner_tools.completion_status import build_scan_completion_status
 from scanner_tools.cancellation import scanner_cancel_requested, wait_for_scanner_cancel
@@ -14896,6 +14897,7 @@ async def cli_main():
         args.deep_discovery = False
         args.grpc_discovery = False
         args.auto_auth = explicit_auto_auth
+    enforce_discovery_manifest_safety(args)
 
     # Public-only scans are passive: never carry an aggressive exploit level
     # into proof-of-exploit, even when passed explicitly alongside an allowed
@@ -14906,12 +14908,13 @@ async def cli_main():
     # Enforce active checks for smart/full/aggressive scan types
     # These scan types require active testing - public-only mode is incompatible
     active_enforced_scan_type = None
-    if args.smart:
-        active_enforced_scan_type = "smart"
-    elif args.aggressive:
-        active_enforced_scan_type = "aggressive"
-    elif args.full:
-        active_enforced_scan_type = "full"
+    if not args.discovery_manifest_only:
+        if args.smart:
+            active_enforced_scan_type = "smart"
+        elif args.aggressive:
+            active_enforced_scan_type = "aggressive"
+        elif args.full:
+            active_enforced_scan_type = "full"
 
     if active_enforced_scan_type:
         if args.public:
