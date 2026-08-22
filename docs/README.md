@@ -69,6 +69,7 @@ Code, database schemas, runtime receipts, and tests remain authoritative when a 
 |---|---|
 | [`ai-native-architecture-rfc.md`](ai-native-architecture-rfc.md) | Scan V2 and unified Hunt architecture, pinned baseline, migration boundary, and acceptance contract |
 | [`ai-native-refactor-audit.md`](ai-native-refactor-audit.md) | Baseline inventory and legacy-dependency checklist for the one-Scan/one-Hunt migration |
+| [`v2-re-audit-2026-08-20.md`](v2-re-audit-2026-08-20.md) | Point-in-time V2 implementation re-audit and remaining runtime acceptance gates |
 | [`dast-asm-architecture.md`](dast-asm-architecture.md) | Current one-shot DAST, local scatter/gather, and Continuous ASM execution model |
 | [`connected-device-security.md`](connected-device-security.md) | Connected-device inventory, safe service assessment, policy evaluation, isolated execution, and web-origin handoff |
 | [`deep-hunt-architecture.md`](deep-hunt-architecture.md) | Deep Hunt AI-investigator engine: ReAct loop, tool arsenal, provenance gate, two-tier SUSPECTED/VERIFIED bridge, and the §5 improvement backlog |

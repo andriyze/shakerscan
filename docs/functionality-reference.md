@@ -1377,8 +1377,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 355 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 298 | `api/api.py` |
+| Public REST operations | 361 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 304 | `api/api.py` |
 | Check families | 14 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -1387,13 +1387,13 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Scanner wrapper commands | 28 | `scanner.sh` |
 | Make targets | 14 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
-| Runtime environment keys | 347 | Python sources + Compose manifests |
-| Scanner modules | 113 | `scanner/scanner_tools/` |
-| UI pages | 37 | `ui/src/app/` |
+| Runtime environment keys | 355 | Python sources + Compose manifests |
+| Scanner modules | 117 | `scanner/scanner_tools/` |
+| UI pages | 39 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
 | Slash commands | 15 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
-| Durable tables | 83 | `db/init.sql` + migrations |
+| Durable tables | 89 | `db/init.sql` + migrations |
 
 ### Public REST Operations
 
@@ -1654,8 +1654,14 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `GET` | `/queue/stats` | `queue_stats` |
 | `GET` | `/request-collections` | `list_request_collections` |
 | `POST` | `/request-collections` | `create_request_collection` |
+| `GET` | `/request-collections/{collection_id}` | `get_request_collection` |
+| `POST` | `/request-collections/{collection_id}/bindings` | `upsert_request_collection_binding` |
+| `POST` | `/request-collections/{collection_id}/environments` | `upsert_request_collection_environment` |
+| `DELETE` | `/request-collections/{collection_id}/environments/{environment_id}` | `deactivate_request_collection_environment` |
 | `GET` | `/request-collections/{collection_id}/requests` | `list_request_collection_requests` |
 | `POST` | `/request-collections/{collection_id}/select` | `select_request_collection_index` |
+| `POST` | `/request-collections/{collection_id}/selections` | `upsert_request_collection_selection` |
+| `DELETE` | `/request-collections/{collection_id}/selections/{selection_id}` | `deactivate_request_collection_selection` |
 | `POST` | `/research/campaigns/launch` | `launch_research_campaign` |
 | `POST` | `/research/campaigns/{campaign_id}/control` | `control_research_campaign` |
 | `GET` | `/research/episodes` | `list_research_episodes` |
@@ -2128,6 +2134,8 @@ Only key names and declaring sources are documented; secret values are never rea
 | `AWS_SECRET_ACCESS_KEY` | `api/evidence_storage.py` |
 | `AWS_SESSION_TOKEN` | `api/evidence_storage.py` |
 | `BROKER_INGEST_QUEUE_NAME` | `api/api.py`, `api/worker.py` |
+| `BUDGET_RESERVATION_SWEEP_BATCH_SIZE` | `api/worker.py` |
+| `BUDGET_RESERVATION_SWEEP_INTERVAL_SECONDS` | `api/worker.py` |
 | `BUILD_FINGERPRINT` | `api/worker.py` |
 | `COMPOSE_PROJECT_NAME` | `api/api.py`, `scripts/fleet_cli.py` |
 | `COVERAGE_ALLOCATION_DEFAULT` | `api/parallel_scan.py` |
@@ -2305,7 +2313,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SCANNER_SUBPROCESS_RECEIPT_LIMIT` | `scanner/scanner_tools/common.py` |
 | `SCANNER_VERSION` | `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scanner/release_identity.py` |
 | `SCAN_CANCEL_POLL_SECONDS` | `api/worker.py` |
-| `SCAN_CHECKPOINT_FILE` | `scanner/scanner.py` |
+| `SCAN_CHECKPOINT_FILE` | `scanner/manifests.py`, `scanner/scanner.py` |
 | `SCAN_COOPERATIVE_CANCEL_GRACE_SECONDS` | `api/worker.py` |
 | `SCAN_FAULTHANDLER` | `scanner/scanner.py` |
 | `SCAN_FORCED_BROWSING_MAX_SECONDS` | `scanner/scanner.py` |
@@ -2324,7 +2332,9 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SCAN_VERIFICATION_MAX` | `scanner/scanner.py` |
 | `SHAKERSCAN_AGENT_TOOL_OUTPUT_BYTES` | `api/worker.py` |
 | `SHAKERSCAN_AGENT_TOOL_RESULT_TTL_SECONDS` | `api/worker.py` |
-| `SHAKERSCAN_API_PORT` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_ALLOW_LEGACY_HUNT_STARTS` | `api/api_v2.py` |
+| `SHAKERSCAN_API_HOST` | `api/api_v2.py` |
+| `SHAKERSCAN_API_PORT` | `api/api_v2.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_API_URL` | `api/model_intake_admission_webhook.py`, `scripts/shakerscan_mcp.py` |
 | `SHAKERSCAN_ASM_DISPATCH_INTERVAL` | `api/api.py` |
 | `SHAKERSCAN_BIND_HOST` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
@@ -2339,13 +2349,17 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_COMPOSE_PROJECT` | `api/api.py` |
 | `SHAKERSCAN_CORS_ALLOW_ORIGINS` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_CORS_ALLOW_ORIGIN_REGEX` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_CREDENTIAL_TMP_DIR` | `api/runtime/credential_resolver.py` |
 | `SHAKERSCAN_CUSTOM_WORDLIST` | `scanner/scanner_tools/discovery.py` |
 | `SHAKERSCAN_DATA_BIND_HOST` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_DEBUG_POST_INFER` | `scanner/scanner.py` |
 | `SHAKERSCAN_DEVICE_ALLOW_METADATA_TARGETS` | `scanner/scanner_tools/device_posture.py` |
 | `SHAKERSCAN_DEVICE_DENY_CIDRS` | `scanner/scanner_tools/device_posture.py` |
 | `SHAKERSCAN_DEVICE_QUEUE_VISIBILITY_TIMEOUT_SECONDS` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_DISABLE_DISCOVERY_RECOVERY` | `scanner/manifests.py` |
+| `SHAKERSCAN_DISABLE_LEGACY_SCAN_EXECUTION` | `api/worker_v2.py` |
 | `SHAKERSCAN_ENABLE_ADAPTIVE_THROTTLE` | `scanner/scanner.py` |
+| `SHAKERSCAN_ENDPOINT_MANIFEST_FILE` | `scanner/manifests.py` |
 | `SHAKERSCAN_ENFORCE_FLEET_LIMITS` | `api/worker.py` |
 | `SHAKERSCAN_FLEET_OPERATOR_TOKEN` | `scripts/fleet_acceptance.py` |
 | `SHAKERSCAN_HOST_PLATFORM` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
@@ -2408,6 +2422,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `/asm` | `ui/src/app/asm/page.tsx` |
 | `/campaigns/{id}` | `ui/src/app/campaigns/[id]/page.tsx` |
 | `/campaigns` | `ui/src/app/campaigns/page.tsx` |
+| `/credentials` | `ui/src/app/credentials/page.tsx` |
 | `/deep-hunt/experiment` | `ui/src/app/deep-hunt/experiment/page.tsx` |
 | `/deep-hunt/explorer` | `ui/src/app/deep-hunt/explorer/page.tsx` |
 | `/deep-hunt/leads` | `ui/src/app/deep-hunt/leads/page.tsx` |
@@ -2430,6 +2445,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `/interactive` | `ui/src/app/interactive/page.tsx` |
 | `/model-intake` | `ui/src/app/model-intake/page.tsx` |
 | `/` | `ui/src/app/page.tsx` |
+| `/request-collections` | `ui/src/app/request-collections/page.tsx` |
 | `/scan/new` | `ui/src/app/scan/new/page.tsx` |
 | `/scans/{id}` | `ui/src/app/scans/[id]/page.tsx` |
 | `/scans` | `ui/src/app/scans/page.tsx` |
@@ -2482,7 +2498,7 @@ Only key names and declaring sources are documented; secret values are never rea
 
 ### Scanner Module Inventory
 
-`access_control_checks.py`, `active_checks.py`, `active_enrichment_policy.py`, `active_prioritization.py`, `adaptive_throttle.py`, `ai_classifier.py`, `api_auth.py`, `api_security.py`, `approval_checks.py`, `asn_discovery.py`, `attack_chains.py`, `attempt_telemetry.py`, `auth_session.py`, `benchmark_summary.py`, `bola_comparison.py`, `bounded_exec.py`, `brand_protection.py`, `breach_check.py`, `build_fingerprint.py`, `cancellation.py`, `client_side.py`, `common.py`, `completion_status.py`, `compliance_mapper.py`, `coverage_tracker.py`, `credential_check.py`, `critical_checks.py`, `ct_monitor.py`, `data_exposure.py`, `deduplication_engine.py`, `deserialization_tests.py`, `device_advisories.py`, `device_application.py`, `device_control_plane.py`, `device_evidence.py`, `device_postman.py`, `device_posture.py`, `device_probe.py`, `device_protocols.py`, `device_reachability.py`, `device_request_formats.py`, `device_safety.py`, `device_shell.py`, `device_web.py`, `discovery.py`, `dns_enhanced.py`, `dom_xss_analyzer.py`, `domain_intel.py`, `exposure_markers.py`, `file_upload_tests.py`, `finding_correlator.py`, `finding_validator.py`, `focused_scope.py`, `form_login.py`, `github_recon.py`, `google_dorking.py`, `gopher_payloads.py`, `graphql_schema_recovery.py`, `grpc_discovery.py`, `gungnir.py`, `har_discovery.py`, `hash_routes.py`, `health_check.py`, `http_scanner.py`, `hunter_summary.py`, `infrastructure_checks.py`, `injection_extra_checks.py`, `ip_reputation.py`, `logging_checks.py`, `model_intake.py`, `model_intake_acquisition.py`, `model_intake_adapter_self_test.py`, `model_intake_admission.py`, `model_intake_archives.py`, `model_intake_attestation.py`, `model_intake_evaluation.py`, `model_intake_licenses.py`, `model_intake_providers.py`, `model_intake_registry.py`, `model_intake_retention.py`, `model_intake_runtime.py`, `model_intake_safetensors_runtime.py`, `model_intake_safetensors_selftest.py`, `model_intake_sandbox.py`, `model_intake_scanners.py`, `network_services.py`, `nmap.py`, `nuclei.py`, `oauth_auth.py`, `oauth_tests.py`, `phase4_checks.py`, `proof_of_exploit.py`, `race_condition_tests.py`, `remediation_kb.py`, `report_gating.py`, `request_collections.py`, `request_meter.py`, `resource_propagation.py`, `sarif_output.py`, `scan_delta.py`, `signal_types.py`, `smtp_scanner.py`, `ssh_scanner.py`, `subdomain_discovery.py`, `subfinder.py`, `tech_discovery.py`, `tls_scanner.py`, `vendor_risk.py`, `verification_engine.py`, `verification_phase.py`, `wayback_discovery.py`, `webhook_checks.py`, `websocket_security.py`
+`access_control_checks.py`, `active_checks.py`, `active_enrichment_policy.py`, `active_prioritization.py`, `adaptive_throttle.py`, `ai_classifier.py`, `api_auth.py`, `api_security.py`, `approval_checks.py`, `asn_discovery.py`, `attack_chains.py`, `attempt_telemetry.py`, `auth_session.py`, `benchmark_summary.py`, `bola_comparison.py`, `bounded_exec.py`, `brand_protection.py`, `breach_check.py`, `build_fingerprint.py`, `cancellation.py`, `client_side.py`, `common.py`, `completion_status.py`, `compliance_mapper.py`, `coverage_tracker.py`, `credential_check.py`, `critical_checks.py`, `ct_monitor.py`, `data_exposure.py`, `deduplication_engine.py`, `deserialization_tests.py`, `device_advisories.py`, `device_application.py`, `device_control_plane.py`, `device_evidence.py`, `device_postman.py`, `device_posture.py`, `device_probe.py`, `device_protocols.py`, `device_reachability.py`, `device_request_formats.py`, `device_safety.py`, `device_shell.py`, `device_web.py`, `discovery.py`, `dns_enhanced.py`, `dom_xss_analyzer.py`, `domain_intel.py`, `exposure_markers.py`, `file_upload_tests.py`, `finding_correlator.py`, `finding_validator.py`, `focused_scope.py`, `form_login.py`, `github_recon.py`, `google_dorking.py`, `gopher_payloads.py`, `graphql_schema_recovery.py`, `grpc_discovery.py`, `gungnir.py`, `har_discovery.py`, `hash_routes.py`, `health_check.py`, `http_scanner.py`, `hunter_summary.py`, `infrastructure_checks.py`, `injection_extra_checks.py`, `ip_reputation.py`, `logging_checks.py`, `model_intake.py`, `model_intake_acquisition.py`, `model_intake_adapter_self_test.py`, `model_intake_admission.py`, `model_intake_archives.py`, `model_intake_attestation.py`, `model_intake_evaluation.py`, `model_intake_licenses.py`, `model_intake_providers.py`, `model_intake_registry.py`, `model_intake_retention.py`, `model_intake_runtime.py`, `model_intake_safetensors_runtime.py`, `model_intake_safetensors_selftest.py`, `model_intake_sandbox.py`, `model_intake_scanners.py`, `network_services.py`, `nmap.py`, `nuclei.py`, `oauth_auth.py`, `oauth_tests.py`, `phase4_checks.py`, `proof_of_exploit.py`, `race_condition_tests.py`, `remediation_kb.py`, `report_gating.py`, `request_collections.py`, `request_meter.py`, `request_replay.py`, `resource_propagation.py`, `sarif_output.py`, `scan_delta.py`, `signal_types.py`, `smtp_scanner.py`, `ssh_scanner.py`, `subdomain_discovery.py`, `subfinder.py`, `tech_discovery.py`, `tls_scanner.py`, `url_redaction.py`, `v2_fingerprint_hardening.py`, `v2_request_replay_hardening.py`, `vendor_risk.py`, `verification_engine.py`, `verification_phase.py`, `wayback_discovery.py`, `webhook_checks.py`, `websocket_security.py`
 
 ### Durable Storage Inventory
 
@@ -2507,6 +2523,9 @@ Only key names and declaring sources are documented; secret values are never rea
 | `campaign_actions` | `api/retest_contract.py` |
 | `campaigns` | `api/retest_contract.py` |
 | `command_results` | `api/retest_contract.py` |
+| `credential_profile_bindings` | `db/init.sql` |
+| `credential_profile_versions` | `db/init.sql` |
+| `credential_profiles` | `db/init.sql` |
 | `device_agent_actions` | `db/init.sql` |
 | `device_agent_runs` | `db/init.sql` |
 | `device_credential_attempts` | `db/init.sql` |
@@ -2552,7 +2571,10 @@ Only key names and declaring sources are documented; secret values are never rea
 | `operation_plans` | `api/retest_contract.py` |
 | `policy_profiles` | `db/init.sql` |
 | `refuter_reviews` | `api/retest_contract.py` |
+| `request_collection_bindings` | `db/init.sql` |
+| `request_collection_environments` | `db/init.sql` |
 | `request_collection_requests` | `db/init.sql` |
+| `request_collection_selections` | `db/init.sql` |
 | `request_collections` | `db/init.sql` |
 | `research_decisions` | `api/retest_contract.py` |
 | `research_episodes` | `api/retest_contract.py` |
