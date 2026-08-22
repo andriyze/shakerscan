@@ -20,6 +20,8 @@ def test_device_http_probe_is_single_flight_and_durably_reserved_before_socket()
     handler = _handler_source()
 
     assert "DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES" in handler
+    assert "DeviceExecutionAdapter(" in handler
+    assert "CapabilityExecutor().execute(" in handler
     assert "pg_advisory_xact_lock" in handler
     assert "h.device_target_id=$1" in handler
     assert "A device HTTP probe is already in flight" in handler

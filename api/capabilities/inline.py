@@ -131,3 +131,121 @@ class TlsInspectionExecutionAdapter(_InlineAdapter):
             parser_version=self._specification.output_schema,
             redacted_execution=dict(self._redacted_execution),
         )
+
+
+class DeviceExecutionAdapter(_InlineAdapter):
+    """Normalize one canonical device control, HTTP, queue, or SSH action."""
+
+    def __init__(
+        self,
+        *,
+        specification: CapabilitySpec,
+        operation: InlineOperation,
+        requested_budget: Mapping[str, int],
+        redacted_execution: Mapping[str, Any],
+        state: Mapping[str, Any],
+        blocked_exceptions: tuple[type[BaseException], ...],
+    ) -> None:
+        super().__init__(
+            specification=specification,
+            operation=operation,
+            requested_budget=requested_budget,
+            redacted_execution=redacted_execution,
+        )
+        self._state = state
+        self._blocked_exceptions = blocked_exceptions
+        self._http_before = int(state.get("device_http_requests_used") or 0)
+        self._queues_before = int(state.get("scans_queued") or 0)
+        self.blocked_exception: BaseException | None = None
+
+    async def execute(
+        self,
+        *,
+        heartbeat: Heartbeat,
+        cancelled: Cancelled,
+    ) -> CapabilityAdapterResult:
+        del heartbeat, cancelled
+        started = time.perf_counter()
+        try:
+            result = dict(await self._operation())
+        except self._blocked_exceptions as exc:
+            self.blocked_exception = exc
+            result = {}
+        self.result = result
+        http_attempts = max(
+            0,
+            int(self._state.get("device_http_requests_used") or 0)
+            - self._http_before,
+        )
+        queues = max(
+            0,
+            int(self._state.get("scans_queued") or 0)
+            - self._queues_before,
+        )
+        execution_started = bool(http_attempts or queues or result.get("ok"))
+        actual = self._wall_budget(
+            started,
+            execution_started=execution_started,
+        )
+        measured = (
+            dict(result.get("budget_consumed") or {})
+            if isinstance(result.get("budget_consumed"), Mapping)
+            else {}
+        )
+        for dimension, amount in measured.items():
+            if dimension in self._requested_budget:
+                actual[str(dimension)] = int(amount)
+        if http_attempts:
+            for dimension in ("http_requests", "device_fragility_points"):
+                if dimension in self._requested_budget:
+                    actual[dimension] = min(
+                        int(self._requested_budget[dimension]), http_attempts,
+                    )
+        if queues:
+            for dimension in (
+                "tcp_ports_attempted",
+                "udp_ports_attempted",
+                "device_fragility_points",
+            ):
+                if dimension in self._requested_budget:
+                    actual[dimension] = int(self._requested_budget[dimension])
+
+        status = (
+            "blocked"
+            if self.blocked_exception is not None
+            else "success"
+            if result.get("ok")
+            else "blocked"
+            if result.get("blocked")
+            else "failed"
+        )
+        observation: dict[str, Any] = {
+            "kind": "device_capability",
+            "capability": self.capability_name,
+            "status": status,
+        }
+        if result.get("evidence_ref"):
+            observation["evidence_ref"] = str(result["evidence_ref"])
+        queued = result.get("queued")
+        if isinstance(queued, Mapping):
+            observation["queued"] = {
+                key: str(value) if value is not None else None
+                for key, value in dict(queued).items()
+                if key in {"scan_id", "job_id", "run_kind", "status"}
+            }
+        if result.get("requires_user_confirmation"):
+            observation["requires_user_confirmation"] = True
+        error = (
+            f"blocked:{type(self.blocked_exception).__name__}"
+            if self.blocked_exception is not None
+            else str(result.get("error") or "").strip()
+        )
+        return CapabilityAdapterResult(
+            status=status,
+            observations=(observation,),
+            errors=(error,) if error else (),
+            actual_budget=actual,
+            execution_started=execution_started,
+            parser_version=self._specification.output_schema,
+            redacted_execution=dict(self._redacted_execution),
+        )

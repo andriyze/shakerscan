@@ -467,6 +467,7 @@ try:
         CapabilityExecutor,
     )
     from capabilities.inline import (
+        DeviceExecutionAdapter,
         HttpRequestExecutionAdapter,
         TlsInspectionExecutionAdapter,
     )
@@ -491,6 +492,7 @@ except ModuleNotFoundError:
         CapabilityExecutor,
     )
     from api.capabilities.inline import (
+        DeviceExecutionAdapter,
         HttpRequestExecutionAdapter,
         TlsInspectionExecutionAdapter,
     )
@@ -37577,6 +37579,21 @@ async def execute_hunt_capability(
             scope_receipt_id=validated_scope_receipt_id,
         )
 
+    def inline_device_target_binding() -> TargetBinding:
+        target_context = (
+            dict(context.get("target") or {})
+            if isinstance(context.get("target"), Mapping)
+            else {}
+        )
+        locator = str(target_context.get("locator") or "").strip()
+        return TargetBinding(
+            target_id=str(run["device_target_id"]),
+            target_kind="device",
+            canonical_host=locator,
+            environment=str(target_context.get("environment") or "unknown"),
+            scope_receipt_id=validated_scope_receipt_id,
+        )
+
     device_context_before = (
         copy.deepcopy(context)
         if name in (
@@ -37620,12 +37637,48 @@ async def execute_hunt_capability(
                     "capability_name": name,
                 })
             try:
-                result = await _execute_device_agent_tool(
-                    run_id=run["id"], device_target_id=run["device_target_id"],
-                    safety_profile=str(policy.get("device_fragility_profile") or "safe_remote"),
-                    approval_receipt_id=policy.get("approval_receipt_id"), state=device_state,
-                    name=device_adapter_name, args=validated_device_input,
+                device_adapter = DeviceExecutionAdapter(
+                    specification=spec,
+                    operation=lambda: _execute_device_agent_tool(
+                        run_id=run["id"],
+                        device_target_id=run["device_target_id"],
+                        safety_profile=str(
+                            policy.get("device_fragility_profile")
+                            or "safe_remote"
+                        ),
+                        approval_receipt_id=policy.get("approval_receipt_id"),
+                        state=device_state,
+                        name=device_adapter_name,
+                        args=validated_device_input,
+                    ),
+                    requested_budget=(
+                        durable_reservation.record.requested
+                        if durable_reservation is not None
+                        else charges
+                    ),
+                    redacted_execution=_hunt_redacted_capability_input(
+                        name, validated_device_input,
+                    ),
+                    state=device_state,
+                    blocked_exceptions=(HTTPException,),
                 )
+                capability_execution = await CapabilityExecutor().execute(
+                    CapabilityExecutionContext(
+                        specification=spec,
+                        target=inline_device_target_binding(),
+                        requested_budget=(
+                            durable_reservation.record.requested
+                            if durable_reservation is not None
+                            else charges
+                        ),
+                    ),
+                    device_adapter,
+                    heartbeat=lambda: asyncio.sleep(0),
+                    cancelled=lambda: False,
+                )
+                result = device_adapter.result
+                if device_adapter.blocked_exception is not None:
+                    raise device_adapter.blocked_exception
             finally:
                 if queue_correlation_token is not None:
                     _HUNT_DEVICE_QUEUE_CORRELATION.reset(

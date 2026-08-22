@@ -8,6 +8,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 
 from capabilities.inline import (
+    DeviceExecutionAdapter,
     HttpRequestExecutionAdapter,
     TlsInspectionExecutionAdapter,
 )
@@ -25,12 +26,32 @@ TARGET = TargetBinding(
     scope_receipt_id="scope-1",
 )
 
+DEVICE_TARGET = TargetBinding(
+    target_id="device-1",
+    target_kind="device",
+    canonical_host="192.0.2.20",
+    scope_receipt_id="scope-1",
+)
+
 
 def _execute(specification, adapter, requested):
     return asyncio.run(CapabilityExecutor().execute(
         CapabilityExecutionContext(
             specification=specification,
             target=TARGET,
+            requested_budget=requested,
+        ),
+        adapter,
+        heartbeat=lambda: asyncio.sleep(0),
+        cancelled=lambda: False,
+    ))
+
+
+def _execute_device(specification, adapter, requested):
+    return asyncio.run(CapabilityExecutor().execute(
+        CapabilityExecutionContext(
+            specification=specification,
+            target=DEVICE_TARGET,
             requested_budget=requested,
         ),
         adapter,
@@ -182,3 +203,145 @@ def test_tls_not_applicable_has_zero_network_consumption():
         "agent_actions": 1,
     }
     assert result.observations == ()
+
+
+class ExpectedDeviceBlock(Exception):
+    pass
+
+
+def test_device_adapter_refunds_execution_dimensions_for_precondition_block():
+    specification = CAPABILITY_REGISTRY.require("device.scan")
+    requested = {
+        "agent_actions": 1,
+        "active_actions": 1,
+        "device_fragility_points": 22,
+        "tool_wall_seconds": 30,
+    }
+    state = {"scans_queued": 0, "device_http_requests_used": 0}
+
+    async def operation():
+        raise ExpectedDeviceBlock("traffic frozen")
+
+    adapter = DeviceExecutionAdapter(
+        specification=specification,
+        operation=operation,
+        requested_budget=requested,
+        redacted_execution={"coverage_profile": "posture"},
+        state=state,
+        blocked_exceptions=(ExpectedDeviceBlock,),
+    )
+    result = _execute_device(specification, adapter, requested)
+
+    assert result.status == "blocked"
+    assert result.actual_budget == {"agent_actions": 1}
+    assert adapter.blocked_exception is not None
+    assert result.observations[0]["kind"] == "device_capability"
+
+
+def test_device_adapter_charges_reserved_queue_envelope_after_acceptance():
+    specification = CAPABILITY_REGISTRY.require("device.service.verify")
+    requested = {
+        "agent_actions": 1,
+        "active_actions": 1,
+        "tcp_ports_attempted": 1,
+        "device_fragility_points": 6,
+        "tool_wall_seconds": 30,
+    }
+    state = {"scans_queued": 0, "device_http_requests_used": 0}
+
+    async def operation():
+        state["scans_queued"] = 1
+        return {
+            "ok": True,
+            "queued": {"scan_id": "scan-1", "status": "queued"},
+        }
+
+    result = _execute_device(
+        specification,
+        DeviceExecutionAdapter(
+            specification=specification,
+            operation=operation,
+            requested_budget=requested,
+            redacted_execution={"transport": "tcp", "port": 22},
+            state=state,
+            blocked_exceptions=(ExpectedDeviceBlock,),
+        ),
+        requested,
+    )
+
+    assert result.status == "success"
+    assert result.actual_budget == {
+        "agent_actions": 1,
+        "active_actions": 1,
+        "tcp_ports_attempted": 1,
+        "device_fragility_points": 6,
+        "tool_wall_seconds": 1,
+    }
+    assert result.observations[0]["queued"]["scan_id"] == "scan-1"
+
+
+def test_device_adapter_preserves_failed_http_attempt_consumption():
+    specification = CAPABILITY_REGISTRY.require("device.http.probe")
+    requested = {
+        "agent_actions": 1,
+        "http_requests": 1,
+        "device_fragility_points": 1,
+        "tool_wall_seconds": 10,
+    }
+    state = {"scans_queued": 0, "device_http_requests_used": 0}
+
+    async def operation():
+        state["device_http_requests_used"] = 1
+        raise ExpectedDeviceBlock("transport failed")
+
+    result = _execute_device(
+        specification,
+        DeviceExecutionAdapter(
+            specification=specification,
+            operation=operation,
+            requested_budget=requested,
+            redacted_execution={"method": "GET", "path": "/"},
+            state=state,
+            blocked_exceptions=(ExpectedDeviceBlock,),
+        ),
+        requested,
+    )
+
+    assert result.status == "blocked"
+    assert result.actual_budget == {
+        "agent_actions": 1,
+        "http_requests": 1,
+        "device_fragility_points": 1,
+        "tool_wall_seconds": 1,
+    }
+
+
+def test_device_adapter_fault_conservatively_charges_the_full_hold():
+    specification = CAPABILITY_REGISTRY.require("device.http.probe")
+    requested = {
+        "agent_actions": 1,
+        "http_requests": 1,
+        "device_fragility_points": 1,
+        "tool_wall_seconds": 10,
+    }
+    state = {"scans_queued": 0, "device_http_requests_used": 0}
+
+    async def operation():
+        raise RuntimeError("unknown execution state")
+
+    result = _execute_device(
+        specification,
+        DeviceExecutionAdapter(
+            specification=specification,
+            operation=operation,
+            requested_budget=requested,
+            redacted_execution={},
+            state=state,
+            blocked_exceptions=(ExpectedDeviceBlock,),
+        ),
+        requested,
+    )
+
+    assert result.status == "failed"
+    assert result.actual_budget == requested
+    assert result.errors == ("adapter_fault:RuntimeError",)

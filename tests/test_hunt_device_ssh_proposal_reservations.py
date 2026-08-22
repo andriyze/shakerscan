@@ -20,6 +20,8 @@ def test_ssh_proposal_reserves_and_starts_before_plan_construction():
     handler = _handler_source()
 
     assert "DURABLE_DEVICE_SSH_PROPOSAL_HUNT_CAPABILITIES" in handler
+    assert "DeviceExecutionAdapter(" in handler
+    assert "CapabilityExecutor().execute(" in handler
     assert handler.index("create_requested(") < handler.index(
         "_execute_device_agent_tool("
     )

@@ -26,6 +26,8 @@ def test_device_queue_actions_reserve_before_downstream_submission():
     handler = _handler_source()
 
     assert "DURABLE_DEVICE_QUEUE_HUNT_CAPABILITIES" in handler
+    assert "DeviceExecutionAdapter(" in handler
+    assert "CapabilityExecutor().execute(" in handler
     assert handler.index("create_requested(") < handler.index(
         "_execute_device_agent_tool("
     )
