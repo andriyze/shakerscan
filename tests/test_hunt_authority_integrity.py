@@ -75,4 +75,6 @@ def test_primary_api_owns_the_only_hunt_start_route():
     assert not (root / "api" / "api_v2.py").exists()
     assert primary_api.count('    "/hunts",\n    response_model=HuntStartV2Response') == 1
     assert "async def start_hunt(request: Request, response: Response):" in primary_api
+    assert "SHAKERSCAN_ALLOW_LEGACY_HUNT_STARTS" not in primary_api
+    assert "LegacyHuntStartRequest" not in primary_api
     assert "api_v2.py" not in entrypoint

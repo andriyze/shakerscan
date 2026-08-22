@@ -300,13 +300,17 @@ def test_primary_api_rejects_legacy_hunt_start_without_migration_flag(monkeypatc
     assert exc.value.detail["error"] == "explicit_v2_policy_required"
 
 
-def test_primary_api_allows_legacy_hunt_start_only_in_migration_mode(monkeypatch):
+def test_primary_api_rejects_legacy_hunt_start_even_with_old_override_env(monkeypatch):
     monkeypatch.setenv("SHAKERSCAN_ALLOW_LEGACY_HUNT_STARTS", "true")
     body = json.dumps({"target_id": "target-1"}).encode()
 
-    parsed = asyncio.run(api_module._parse_hunt_start_body(_BodyRequest(body)))
+    with pytest.raises(api_module.HTTPException) as exc:
+        asyncio.run(api_module._parse_hunt_start_body(_BodyRequest(body)))
 
-    assert isinstance(parsed, api_module.LegacyHuntStartRequest)
+    assert exc.value.status_code == 422
+    assert exc.value.detail["error"] == "explicit_v2_policy_required"
+    assert not hasattr(api_module, "LegacyHuntStartRequest")
+    assert not hasattr(api_module, "_start_legacy_hunt")
 
 
 def test_primary_api_rejects_oversized_hunt_body_before_json_parsing():

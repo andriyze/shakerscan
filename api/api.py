@@ -36679,16 +36679,6 @@ async def _run_agent_hunt_for_episode(episode_id: str) -> dict[str, Any]:
             "suspected": suspected, "net_new": net_new, "verified": verified, "stop_reason": stop_reason}
 
 
-class LegacyHuntStartRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    target_id: str
-    objective: str = Field(default="Find exploitable vulnerabilities", max_length=2000)
-    budget_profile: Literal["fast", "balanced", "thorough"] = "balanced"
-    approval_receipt_id: Optional[str] = None
-    request_collection_ids: list[str] = Field(default_factory=list, max_length=16)
-    ssh_credential_profile_id: Optional[str] = None
-
-
 class HuntStartV2PolicyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     active_testing: bool = False
@@ -37153,13 +37143,6 @@ _HUNT_NETWORK_CAPABILITIES = frozenset({"ports.discover", "service.fingerprint"}
 _HUNT_DEVICE_CREDENTIAL_KEYS = frozenset({
     "ssh_credential_profile_id", "web_credential_profile_id",
 })
-_TRUE_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
-
-
-def _legacy_hunt_starts_enabled() -> bool:
-    return str(
-        os.environ.get("SHAKERSCAN_ALLOW_LEGACY_HUNT_STARTS") or ""
-    ).strip().lower() in _TRUE_ENV_VALUES
 
 
 def _hunt_capability_public(spec: Any) -> dict[str, Any]:
@@ -37607,126 +37590,6 @@ async def _hunt_tls_inspect(target_url: str, authorized_addresses: Sequence[str]
                 pass
 
 
-async def _start_legacy_hunt(request: LegacyHuntStartRequest):
-    """Migration-only Hunt start, unavailable unless explicitly enabled."""
-    target_uuid = _uuid_or_400(request.target_id, "target id")
-    approval_validated = False
-    async with db_pool.acquire() as conn:
-        web = await conn.fetchrow(
-            "SELECT id, url, name, root_domain, metadata_json, is_active FROM targets WHERE id=$1", target_uuid,
-        )
-        device = None if web else await conn.fetchrow(
-            "SELECT id, name, primary_locator, device_class, is_active FROM device_targets WHERE id=$1",
-            target_uuid,
-        )
-        if web and web["is_active"]:
-            target_kind = "web"
-            target_url = str(web["url"])
-            db_target_id, device_target_id = target_uuid, None
-            credentials_available = bool(await conn.fetchval(
-                "SELECT EXISTS(SELECT 1 FROM target_principals WHERE target_id=$1 AND is_active=true)",
-                target_uuid,
-            ))
-            origins = await _target_web_origins(conn, target_uuid, target_url)
-            collection_refs, _collection_endpoints = await _generic_collection_refs(
-                conn, target_id=target_uuid, target_kind="web",
-                bindings=[{"id": value} for value in request.request_collection_ids],
-            )
-            context_pack = {
-                "schema_version": "hunt-context/v2",
-                "target": {
-                    "id": str(target_uuid), "kind": target_kind, "url": target_url,
-                    "origins": origins, "root_domain": web["root_domain"],
-                    "environment": str(_hunt_json(web["metadata_json"], {}).get("environment") or "unknown"),
-                },
-                "principal_refs_available": credentials_available,
-                "secret_values_visible_to_planner": False,
-                "request_collections": collection_refs,
-                "authorized_target_addresses": await _resolve_agent_target_addresses(target_url),
-            }
-        elif device and device["is_active"]:
-            target_kind = "device"
-            target_url = str(device["primary_locator"])
-            db_target_id, device_target_id = None, target_uuid
-            credential_refs = await _validate_device_credential_refs(
-                conn, target_uuid, ssh_profile_id=request.ssh_credential_profile_id,
-                web_profile_id=None,
-            )
-            credentials_available = bool(credential_refs)
-            collection_refs, _collection_endpoints = await _generic_collection_refs(
-                conn, device_target_id=target_uuid, target_kind="device",
-                bindings=[{"id": value} for value in request.request_collection_ids],
-            )
-            device_state = device_agent.seed_state(
-                objective=request.objective,
-                safety_profile="authenticated_active" if request.approval_receipt_id else "safe_remote",
-                max_turns=30,
-            )
-            device_state["device_request_collections"] = collection_refs
-            device_state["device_credential_profiles"] = credential_refs
-            context_pack = {
-                "schema_version": "hunt-context/v2",
-                "target": {
-                    "id": str(target_uuid), "kind": target_kind, "name": device["name"],
-                    "locator": target_url, "device_class": device["device_class"],
-                },
-                "principal_refs_available": credentials_available,
-                "secret_values_visible_to_planner": False,
-                "request_collections": collection_refs,
-                "device_state": device_state,
-            }
-        else:
-            raise HTTPException(status_code=404, detail="Active web or device target not found")
-
-        if request.approval_receipt_id:
-            await _validate_approval_receipt_for_action(
-                conn,
-                request.approval_receipt_id,
-                target_url=target_url,
-                target_id=target_uuid,
-                action_name="hunt.capability",
-                command="hunt.capability",
-                risk_tier="active",
-                always_require_receipt=True,
-                require_target_binding=True,
-                require_expiry=True,
-                created_by="hunt_v2",
-            )
-            approval_validated = True
-        else:
-            await _require_approval_receipt_if_policy_enabled(
-                conn, None, action_name="hunt.start", risk_tier="passive", created_by="hunt_v2",
-            )
-        try:
-            policy = resolve_hunt_policy(
-                target_kind=target_kind,
-                budget_profile=request.budget_profile,
-                approval_receipt_id=request.approval_receipt_id,
-                approval_validated=approval_validated,
-                credentials_available=credentials_available,
-                device_fragility_profile=("authenticated_active" if approval_validated else "safe_remote")
-                if target_kind == "device" else None,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        row = await conn.fetchrow(
-            """INSERT INTO hunt_runs (
-                   target_kind, target_id, device_target_id, objective, status, budget_profile,
-                   policy_json, budget_json, budget_used_json, context_pack,
-                   approval_receipt_id, created_by
-               ) VALUES ($1,$2,$3,$4,'active',$5,$6,$7,$8,$9,$10,'hunt_v2') RETURNING *""",
-            target_kind, db_target_id, device_target_id, request.objective,
-            request.budget_profile, json.dumps(policy.public()), json.dumps(policy.public()["budget"]),
-            json.dumps({
-                **{key: 0 for key in policy.budget.ledger_limits()},
-                "candidates": 0, "verifications": 0,
-            }),
-            json.dumps(context_pack, default=str),
-            _optional_uuid(request.approval_receipt_id) if request.approval_receipt_id else None,
-        )
-    return _hunt_public(row)
-
-
 async def _validate_legacy_device_hunt_credentials(
     conn: Any,
     refs: Mapping[str, str],
@@ -37998,7 +37861,7 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
 
 async def _parse_hunt_start_body(
     request: Request,
-) -> HuntStartV2Request | LegacyHuntStartRequest:
+) -> HuntStartV2Request:
     raw_body = await request.body()
     if len(raw_body) > MAX_HUNT_BODY_BYTES:
         raise HTTPException(status_code=413, detail="Hunt request body is too large")
@@ -38011,18 +37874,16 @@ async def _parse_hunt_start_body(
         ) from exc
     if not isinstance(decoded, Mapping):
         raise HTTPException(status_code=422, detail="Hunt request body must be an object")
+    if "policy" not in decoded:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "explicit_v2_policy_required",
+                "message": "Hunt starts must include the hunt-start/v2 policy object",
+                "schema_version": HUNT_START_SCHEMA,
+            },
+        )
     try:
-        if "policy" not in decoded and _legacy_hunt_starts_enabled():
-            return LegacyHuntStartRequest.model_validate(decoded)
-        if "policy" not in decoded:
-            raise HTTPException(
-                status_code=422,
-                detail={
-                    "error": "explicit_v2_policy_required",
-                    "message": "Hunt starts must include the hunt-start/v2 policy object",
-                    "schema_version": HUNT_START_SCHEMA,
-                },
-            )
         return HuntStartV2Request.model_validate(decoded)
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=exc.errors()) from exc
@@ -38046,10 +37907,6 @@ async def _parse_hunt_start_body(
 async def start_hunt(request: Request, response: Response):
     """Create one target-kind-aware Hunt through the native V2 authority boundary."""
     parsed = await _parse_hunt_start_body(request)
-    if isinstance(parsed, LegacyHuntStartRequest):
-        result = await _start_legacy_hunt(parsed)
-        response.headers["x-shakerscan-hunt-contract"] = "legacy-compatible"
-        return result
     try:
         contract = normalize_hunt_start_payload(
             parsed.model_dump(mode="python", exclude_none=True)
