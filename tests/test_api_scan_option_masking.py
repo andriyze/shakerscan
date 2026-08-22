@@ -1785,7 +1785,8 @@ def test_canonical_submit_clears_legacy_mode_selectors_before_worker_admission()
     assert "request.options.thorough = False" in submit
     assert "CanonicalScanJob.create(" in submit
     assert "scan_job_payload, scan_job_digest" in submit
-    assert "job_data = canonical_job_payload if canonical_queue else" in submit
+    assert "job_data = canonical_job.queue_payload(" in submit
+    assert "placement=normalize_placement(options_payload.get(\"placement\") or {})" in submit
     assert "'queue_schema': canonical_job.schema_version" in submit
 
 

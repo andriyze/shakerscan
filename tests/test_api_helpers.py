@@ -988,6 +988,43 @@ def test_broker_result_ingest_drops_remote_execution_placement():
     assert original["options"]["placement"] == {"node_id": "remote-node"}
 
 
+def test_broker_execution_projection_keeps_worker_inputs_but_drops_queue_transport():
+    materialized = {
+        "job_id": "job-1",
+        "scan_id": str(uuid.uuid4()),
+        "target": "https://example.test",
+        "options": {"authentication": {"auth_header": "worker-only"}},
+        "placement": {"node_scope": "remote"},
+        "_base_queue_name": "scan_jobs",
+        "_canonical_queue_payload": {"schema_version": "scan-job/v2"},
+        "_canonical_scan_job_digest": "a" * 64,
+    }
+
+    projected = api_module._broker_execution_projection(materialized)
+
+    assert projected == {
+        "job_id": "job-1",
+        "scan_id": materialized["scan_id"],
+        "target": "https://example.test",
+        "options": {"authentication": {"auth_header": "worker-only"}},
+    }
+
+
+def test_broker_canonical_queue_retries_never_serialize_materialized_options():
+    lease_source = inspect.getsource(api_module.lease_broker_job)
+    result_source = inspect.getsource(api_module.submit_broker_job_result)
+
+    assert "queued_payload = copy.deepcopy(payload)" in lease_source
+    assert "canonical_materialized = await _materialize_control_plane_scan_job_v2(payload)" in lease_source
+    assert "payload = _broker_execution_projection(canonical_materialized)" in lease_source
+    assert lease_source.count("queued_payload,") >= 2
+    assert "materialized = await _materialize_control_plane_scan_job_v2(" in result_source
+    assert "job_payload, revalidate_dns=False" in result_source
+    assert result_source.index("_broker_execution_projection(materialized)") < result_source.index(
+        'job_payload["_broker_result_id"]'
+    )
+
+
 def test_json_object_decodes_jsonb_strings_for_execution_context():
     context = {"transport": "broker", "node_id": str(uuid.uuid4())}
 

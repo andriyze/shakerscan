@@ -92,6 +92,34 @@ def test_canonical_scan_job_is_mode_free_and_round_trips():
     }
 
 
+def test_canonical_scan_job_queue_transport_allows_only_normalized_routing_metadata():
+    job = _job()
+    queued = job.queue_payload(placement={
+        "node_scope": "remote",
+        "region": "us-central",
+        "requires": ["nuclei", "playwright"],
+    })
+    queued["_base_queue_name"] = "scan_jobs"
+
+    assert CanonicalScanJob.from_queue_payload(queued) == job
+    assert queued["placement"] == {
+        "node_scope": "remote",
+        "region": "us-central",
+        "requires": ["nuclei", "playwright"],
+    }
+    assert job.payload_digest == CanonicalScanJob.from_queue_payload(queued).payload_digest
+
+    changed = copy.deepcopy(queued)
+    changed["placement"]["region"] = "US-CENTRAL"
+    with pytest.raises(CanonicalScanJobError, match="not canonical"):
+        CanonicalScanJob.from_queue_payload(changed)
+
+    changed = copy.deepcopy(queued)
+    changed["broker_secret"] = "forbidden"
+    with pytest.raises(CanonicalScanJobError, match="forbidden|unknown"):
+        CanonicalScanJob.from_queue_payload(changed)
+
+
 @pytest.mark.parametrize("legacy", ["quick", "standard", "deep", "full", "aggressive", "smart"])
 def test_legacy_alias_is_translated_before_queue_boundary(legacy):
     contract = resolve_scan_contract(legacy_scan_type=legacy)
@@ -251,6 +279,20 @@ def test_worker_materializes_only_after_persisted_authority_and_dns_match():
     assert "options" not in job.payload()
     assert materialized["_canonical_queue_payload"] == job.payload()
     assert materialized["_canonical_scan_job_digest"] == job.payload_digest
+
+
+def test_worker_preserves_only_validated_queue_placement_after_materialization():
+    job = _job()
+    queued = job.queue_payload(placement={"node_scope": "remote", "region": "us-central"})
+    queued["_base_queue_name"] = "scan_jobs"
+    materialized = materialize_canonical_scan_job(
+        queued, _persisted_row(job), resolved_addresses=("192.0.2.10",),
+    )
+    assert materialized["placement"] == {
+        "node_scope": "remote", "region": "us-central",
+    }
+    assert materialized["_base_queue_name"] == "scan_jobs"
+    assert materialized["_canonical_queue_payload"] == queued
 
 
 def test_worker_reconstructs_scheme_inferred_target_without_expanding_dns():

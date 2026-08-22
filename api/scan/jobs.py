@@ -65,6 +65,11 @@ _JOB_KEYS = frozenset({
     "execution_plan", "execution_plan_digest", "request_collections",
     "credential_profile_ids", "endpoint_manifest_id",
 })
+_QUEUE_TRANSPORT_KEYS = frozenset({"placement", "_base_queue_name"})
+_PLACEMENT_SCALAR_KEYS = frozenset({
+    "region", "egress_group", "network", "scan_tier", "tier",
+    "data_residency", "node_id", "node_scope",
+})
 _BUDGET_CEILINGS: Mapping[str, int] = {
     "max_duration_seconds": 172_800,
     "max_http_requests": 1_000_000,
@@ -126,6 +131,63 @@ def _reject_forbidden_keys(value: Any, *, path: str = "job") -> None:
     elif isinstance(value, (list, tuple)):
         for index, item in enumerate(value):
             _reject_forbidden_keys(item, path=f"{path}[{index}]")
+
+
+def _placement_payload(value: Any) -> dict[str, Any]:
+    if value in (None, {}):
+        return {}
+    if not isinstance(value, Mapping):
+        raise CanonicalScanJobError("queue placement must be an object")
+    raw = dict(value)
+    unknown = sorted(set(raw) - _PLACEMENT_SCALAR_KEYS - {"requires"})
+    if unknown:
+        raise CanonicalScanJobError(
+            f"queue placement has unknown fields: {', '.join(unknown)}"
+        )
+    normalized: dict[str, Any] = {}
+    for key in sorted(_PLACEMENT_SCALAR_KEYS):
+        item = raw.get(key)
+        if item is None:
+            continue
+        text = str(item).strip().lower()
+        if text:
+            normalized[key] = text[:128]
+    requires = raw.get("requires")
+    if isinstance(requires, str):
+        requires = [requires]
+    if requires is not None and not isinstance(requires, list):
+        raise CanonicalScanJobError("queue placement requires must be an array")
+    if isinstance(requires, list):
+        clean = sorted({
+            str(item).strip().lower()[:64]
+            for item in requires if str(item).strip()
+        })
+        if clean:
+            normalized["requires"] = clean[:32]
+    if raw != normalized:
+        raise CanonicalScanJobError("queue placement is not canonical")
+    return normalized
+
+
+def scan_job_queue_transport(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate and return routing metadata that cannot alter Scan authority."""
+    unknown = sorted(set(value) - _JOB_KEYS - _QUEUE_TRANSPORT_KEYS)
+    if unknown:
+        raise CanonicalScanJobError(
+            f"scan job queue fields are invalid: unknown {', '.join(unknown)}"
+        )
+    transport: dict[str, Any] = {}
+    if "placement" in value:
+        placement = _placement_payload(value.get("placement"))
+        if not placement:
+            raise CanonicalScanJobError("queue placement must not be empty")
+        transport["placement"] = placement
+    if "_base_queue_name" in value:
+        base = _identifier(
+            value.get("_base_queue_name"), name="_base_queue_name"
+        )
+        transport["_base_queue_name"] = base
+    return transport
 
 
 def _families(value: Any, *, name: str) -> tuple[str, ...]:
@@ -451,6 +513,17 @@ class CanonicalScanJob:
         _reject_forbidden_keys(payload)
         return payload
 
+    def queue_payload(
+        self, *, placement: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Return the canonical job plus optional non-authority routing metadata."""
+        payload = self.payload()
+        normalized_placement = _placement_payload(placement)
+        if normalized_placement:
+            payload["placement"] = normalized_placement
+        _reject_forbidden_keys(payload)
+        return payload
+
     @classmethod
     def from_payload(cls, value: Any) -> "CanonicalScanJob":
         if not isinstance(value, Mapping):
@@ -483,6 +556,15 @@ class CanonicalScanJob:
         if raw != job.payload():
             raise CanonicalScanJobError("scan job payload is not canonical")
         return job
+
+    @classmethod
+    def from_queue_payload(cls, value: Any) -> "CanonicalScanJob":
+        if not isinstance(value, Mapping):
+            raise CanonicalScanJobError("scan job queue payload must be an object")
+        raw = dict(value)
+        _reject_forbidden_keys(raw)
+        scan_job_queue_transport(raw)
+        return cls.from_payload({key: raw[key] for key in _JOB_KEYS if key in raw})
 
     @property
     def payload_digest(self) -> str:

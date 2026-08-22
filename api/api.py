@@ -438,8 +438,14 @@ try:
     )
     from scan.jobs import (
         CanonicalScanJob,
+        CanonicalScanJobError,
+        SCAN_JOB_SCHEMA,
         admitted_credential_profile_ids,
         admitted_request_collection_job_refs,
+    )
+    from scan.job_runtime import (
+        CanonicalScanJobMaterializationError,
+        materialize_canonical_scan_job,
     )
 except ModuleNotFoundError:
     from api.scan.contracts import (
@@ -455,8 +461,14 @@ except ModuleNotFoundError:
     )
     from api.scan.jobs import (
         CanonicalScanJob,
+        CanonicalScanJobError,
+        SCAN_JOB_SCHEMA,
         admitted_credential_profile_ids,
         admitted_request_collection_job_refs,
+    )
+    from api.scan.job_runtime import (
+        CanonicalScanJobMaterializationError,
+        materialize_canonical_scan_job,
     )
 try:
     from hunt.capability_reservations import (
@@ -9843,6 +9855,64 @@ def _broker_target_key(value: Any) -> str:
     )
 
 
+def _broker_target_authority(value: Any, *, default_scheme: str = "https") -> tuple[str, int] | None:
+    raw = str(value or "").strip()
+    parsed = urllib.parse.urlsplit(raw if "://" in raw else f"{default_scheme}://{raw}")
+    try:
+        host = str(parsed.hostname or "").lower().rstrip(".")
+        port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+    except ValueError:
+        return None
+    return (host, int(port)) if host else None
+
+
+async def _materialize_control_plane_scan_job_v2(
+    queue_payload: Mapping[str, Any],
+    *,
+    revalidate_dns: bool = True,
+) -> dict[str, Any]:
+    """Project a canonical Redis job for a trusted DB-less broker worker."""
+    try:
+        scan_id = uuid.UUID(str(queue_payload.get("scan_id") or ""))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail="scan-job/v2 has an invalid Scan id") from exc
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT target_id, target_url, job_id, options, scan_generation,
+                   policy_json, budget_json, scan_job_payload, scan_job_digest
+            FROM scans
+            WHERE id=$1
+            """,
+            scan_id,
+        )
+    if not row:
+        raise HTTPException(status_code=409, detail="scan-job/v2 has no durable Scan row")
+    try:
+        addresses = (
+            await _resolve_runtime_target_addresses(
+                str(row["target_url"] or ""), subject="broker Scan target",
+            )
+            if revalidate_dns
+            else list(CanonicalScanJob.from_queue_payload(queue_payload).target.allowed_addresses)
+        )
+        return materialize_canonical_scan_job(
+            queue_payload, row, resolved_addresses=addresses,
+        )
+    except (CanonicalScanJobError, CanonicalScanJobMaterializationError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+def _broker_execution_projection(materialized: Mapping[str, Any]) -> dict[str, Any]:
+    """Remove control-plane-only canonical transport metadata from a broker lease."""
+    return {
+        str(key): copy.deepcopy(value)
+        for key, value in materialized.items()
+        if not str(key).startswith("_canonical_")
+        and key not in {"placement", "_base_queue_name"}
+    }
+
+
 async def _hydrate_broker_job_options(conn: Any, payload: dict[str, Any]) -> dict[str, Any]:
     """Resolve managed credential references for one authenticated job lease only."""
     options = dict(payload.get("options") or {})
@@ -10191,6 +10261,8 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
     if not isinstance(payload, dict):
         await asyncio.to_thread(acknowledge_lease, redis_client, lease)
         raise HTTPException(status_code=500, detail="broker encountered malformed queued work")
+    queued_payload = copy.deepcopy(payload)
+    canonical_materialized: dict[str, Any] | None = None
     job_type = str(payload.get("type") or "scan")
     if job_type not in {"scan", parallel_scan.SHARD_JOB_TYPE}:
         requeued_payload = dict(payload)
@@ -10245,7 +10317,39 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
         if not state or str(state["status"]) in {"completed", "failed", "cancelled"} or str(state.get("parent_status") or "") == "cancelled":
             await asyncio.to_thread(acknowledge_lease, redis_client, lease)
             return Response(status_code=204)
-        if _broker_target_key(payload.get("target")) != _broker_target_key(state.get("target_url")):
+        if payload.get("schema_version") == SCAN_JOB_SCHEMA:
+            try:
+                canonical_materialized = await _materialize_control_plane_scan_job_v2(payload)
+            except HTTPException as exc:
+                async with db_pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        UPDATE scans
+                        SET status='failed', progress=100, current_phase='scope_revalidation_failed',
+                            error_message=$2, completed_at=NOW()
+                        WHERE id=$1 AND status NOT IN ('completed','failed','cancelled')
+                        """,
+                        candidate_scan_id,
+                        str(exc.detail)[:500],
+                    )
+                await asyncio.to_thread(acknowledge_lease, redis_client, lease)
+                return Response(status_code=204)
+        execution_target = (
+            canonical_materialized.get("target")
+            if canonical_materialized is not None else payload.get("target")
+        )
+        target_matches = _broker_target_key(execution_target) == _broker_target_key(
+            state.get("target_url")
+        )
+        if canonical_materialized is not None:
+            materialized_options = canonical_materialized.get("options")
+            target_matches = target_matches or bool(
+                isinstance(materialized_options, Mapping)
+                and materialized_options.get("target_scheme_inferred")
+                and _broker_target_authority(execution_target)
+                == _broker_target_authority(state.get("target_url"))
+            )
+        if not target_matches:
             async with db_pool.acquire() as conn:
                 await conn.execute(
                     """
@@ -10262,7 +10366,11 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
     slot_id = _broker_slot_id(str(lease.stream_key), str(lease.message_id))
     broker_cap = await _broker_active_scan_cap()
     if not _broker_take_or_refresh_slot(redis_client, slot_id, cap=broker_cap):
-        enqueue_job(redis_client, str(payload.get("_base_queue_name") or QUEUE_NAME), payload)
+        enqueue_job(
+            redis_client,
+            str(queued_payload.get("_base_queue_name") or QUEUE_NAME),
+            queued_payload,
+        )
         await asyncio.to_thread(acknowledge_lease, redis_client, lease)
         return Response(status_code=204)
 
@@ -10276,6 +10384,8 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
     expires_at = utc_now() + timedelta(seconds=BROKER_LEASE_SECONDS)
     budget_reservation: dict[str, Any] | None = None
     row = None
+    if canonical_materialized is not None:
+        payload = _broker_execution_projection(canonical_materialized)
     async with db_pool.acquire() as conn:
         payload = await _hydrate_broker_job_options(conn, payload)
         budget_reservation = await _broker_reserve_request_budget(conn, redis_client, payload)
@@ -10373,7 +10483,11 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
             )
     if budget_reservation is None:
         _broker_release_slot(redis_client, slot_id)
-        enqueue_job(redis_client, str(payload.get("_base_queue_name") or QUEUE_NAME), payload)
+        enqueue_job(
+            redis_client,
+            str(queued_payload.get("_base_queue_name") or QUEUE_NAME),
+            queued_payload,
+        )
         await asyncio.to_thread(acknowledge_lease, redis_client, lease)
         return Response(status_code=204)
     if not row:
@@ -10609,6 +10723,11 @@ async def submit_broker_job_result(
         job_payload = json.loads(raw_payload)
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=500, detail="broker queue payload cannot be recovered") from exc
+    if isinstance(job_payload, Mapping) and job_payload.get("schema_version") == SCAN_JOB_SCHEMA:
+        materialized = await _materialize_control_plane_scan_job_v2(
+            job_payload, revalidate_dns=False,
+        )
+        job_payload = _broker_execution_projection(materialized)
     job_payload["_broker_result_id"] = str(result_row["id"])
     job_payload["_broker_lease_id"] = lease_id
     job_payload = _control_plane_broker_ingest_payload(job_payload)
@@ -27976,10 +28095,10 @@ async def submit_scan(request: ScanRequest):
         )
 
     # Queue the job
-    canonical_queue = bool(
-        not parallel_enabled and not normalize_placement(options_payload.get("placement") or {})
-    )
-    job_data = canonical_job_payload if canonical_queue else {
+    canonical_queue = not parallel_enabled
+    job_data = canonical_job.queue_payload(
+        placement=normalize_placement(options_payload.get("placement") or {}),
+    ) if canonical_queue else {
         'job_id': job_id,
         'scan_id': scan_id,
         'target': scan_target,

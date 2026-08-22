@@ -23,6 +23,7 @@ from .jobs import (
     SCAN_JOB_SCHEMA,
     admitted_credential_profile_ids,
     admitted_request_collection_job_refs,
+    scan_job_queue_transport,
 )
 
 
@@ -71,7 +72,8 @@ def materialize_canonical_scan_job(
 ) -> dict[str, Any]:
     """Validate a queue envelope and return the existing worker's private input shape."""
     try:
-        job = CanonicalScanJob.from_payload(queue_payload)
+        job = CanonicalScanJob.from_queue_payload(queue_payload)
+        transport = scan_job_queue_transport(queue_payload)
         stored_payload = _json_object(
             _row_value(persisted_row, "scan_job_payload"), name="scan_job_payload"
         )
@@ -186,7 +188,7 @@ def materialize_canonical_scan_job(
             "persisted credential profile references do not match scan-job/v2"
         )
 
-    return {
+    materialized = {
         "job_id": job.job_id,
         "scan_id": job.scan_id,
         "target": _runtime_target(
@@ -194,7 +196,9 @@ def materialize_canonical_scan_job(
         ),
         "options": options,
         "submitted_at": job.created_at,
-        "_canonical_queue_payload": job.payload(),
+        "_canonical_queue_payload": dict(queue_payload),
         "_canonical_scan_job_digest": job.payload_digest,
         "_canonical_queue_schema": SCAN_JOB_SCHEMA,
     }
+    materialized.update(transport)
+    return materialized
