@@ -72,3 +72,4 @@ def test_discovery_manifest_cannot_claim_active_check_families():
     assert scope["mode"] == "inactive"
     assert scope["families"] == []
     assert scope["requested_family"] is None
+    assert scope["legacy_flags"] == {"xss": False, "sqli": False}

@@ -215,6 +215,20 @@ def test_check_family_scope_marks_inactive_scan():
     assert scope["families"] == []
 
 
+def test_discovery_manifest_clears_legacy_active_family_metadata():
+    scope = scanner_mod.build_check_family_scope(
+        True,
+        active_xss=True,
+        active_sqli=True,
+        requested_family="all",
+        discovery_manifest_only=True,
+    )
+
+    assert scope["mode"] == "inactive"
+    assert scope["families"] == []
+    assert scope["legacy_flags"] == {"xss": False, "sqli": False}
+
+
 def test_nuclei_dispatch_uses_registry_profile_gate():
     standard_plan = scanner_mod.build_scanner_execution_plan(
         scan_mode="standard",

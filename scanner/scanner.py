@@ -3065,6 +3065,8 @@ def build_check_family_scope(
 ) -> dict[str, Any]:
     if discovery_manifest_only:
         active_checks = False
+        active_xss = False
+        active_sqli = False
         mass_assignment = False
         jwt = False
         bola = False
