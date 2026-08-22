@@ -19558,6 +19558,73 @@ def test_parallel_recovery_requeues_terminal_discovery_continuation(monkeypatch)
     }
 
 
+def test_parallel_recovery_requeues_canonical_continuation_without_private_options(monkeypatch):
+    from runtime.models import TargetBinding
+    from scan.contracts import resolve_scan_contract
+    from scan.jobs import CanonicalScanJob
+
+    parent_id = uuid.UUID("12111111-1111-4111-8111-111111111111")
+    discovery_id = uuid.UUID("23222222-2222-4222-8222-222222222222")
+    contract = resolve_scan_contract(budget_profile="balanced")
+    parent_job = CanonicalScanJob.create(
+        job_id="parent-job-v2",
+        scan_id=str(parent_id),
+        target=TargetBinding(
+            target_id="target-v2",
+            target_kind="web",
+            canonical_host="example.test",
+            allowed_origins=("https://example.test",),
+            allowed_addresses=("192.0.2.10",),
+            allowed_root_domains=("example.test",),
+        ),
+        execution_plan=contract.execution_plan,
+    )
+
+    class Conn:
+        async def fetch(self, query, *args):
+            if "JOIN LATERAL" in query:
+                return [{
+                    "id": parent_id,
+                    "job_id": parent_job.job_id,
+                    "target_url": "https://example.test",
+                    "options": {
+                        "worker_fleet_size_at_submit": 3,
+                        "auth_header": "Bearer private",
+                    },
+                    "scan_generation": "v2",
+                    "scan_job_payload": parent_job.payload(),
+                    "discovery_id": discovery_id,
+                    "discovery_status": "completed",
+                }]
+            return []
+
+    class Redis:
+        def set(self, *_args, **_kwargs):
+            return True
+
+        def delete(self, *_args):
+            return None
+
+    queued = []
+    monkeypatch.setattr(api_module, "get_redis", lambda: Redis())
+    monkeypatch.setattr(
+        api_module,
+        "enqueue_job",
+        lambda _redis, _queue, payload: queued.append(payload),
+    )
+
+    repaired = asyncio.run(api_module.recover_parallel_orchestration(_FakePool(Conn())))
+
+    assert repaired == 1
+    assert len(queued) == 1
+    assert CanonicalScanJob.from_queue_payload(queued[0]) == parent_job
+    assert queued[0]["plan_stage"] == "fanout"
+    assert queued[0]["discovery_scan_id"] == str(discovery_id)
+    assert queued[0]["parallel_worker_count"] == 3
+    assert "options" not in queued[0]
+    assert "private" not in json.dumps(queued[0])
+
+
 def test_parallel_recovery_opens_complete_fanout_after_marking_unconfirmed_handoff(monkeypatch):
     parent_id = uuid.UUID("33333333-3333-4333-8333-333333333333")
     stale_started = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()

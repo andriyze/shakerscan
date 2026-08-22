@@ -114,7 +114,16 @@ from scan.worker_dispatch import (
     is_deterministic_dast,
     prepare_worker_dispatch,
 )
-from scan.jobs import CanonicalScanJob, CanonicalScanJobError, SCAN_JOB_SCHEMA
+from scan.jobs import (
+    CanonicalScanJob,
+    CanonicalScanJobError,
+    SCAN_JOB_SCHEMA,
+    ScanShardAuthority,
+    admitted_credential_profile_ids,
+    admitted_request_collection_job_refs,
+    derive_scan_shard_budget,
+    scan_job_options_digest,
+)
 from scan.job_runtime import (
     CanonicalScanJobMaterializationError,
     materialize_canonical_scan_job,
@@ -11577,6 +11586,107 @@ async def _create_full_coverage_campaign(
     )
 
 
+def _canonical_parent_scan_job(value: Any) -> CanonicalScanJob | None:
+    if not isinstance(value, Mapping):
+        return None
+    try:
+        return (
+            CanonicalScanJob.from_queue_payload(value)
+            if any(key in value for key in ("type", "placement", "attempt", "plan_version"))
+            else CanonicalScanJob.from_payload(value)
+        )
+    except CanonicalScanJobError as exc:
+        raise ExecutionScopeError(
+            f"parallel orchestration lost canonical Scan authority: {exc}"
+        ) from exc
+
+
+def _canonicalize_shard_options(
+    parent_job: CanonicalScanJob, options: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Keep planner specialization while restoring immutable parent authority fields."""
+    child_options = dict(options)
+    child_options.update(parent_job.execution_plan.option_metadata())
+    active = parent_job.execution_plan.policy.active_testing
+    backing_scan_type = "full" if active else "deep"
+    child_options.update({
+        "scan_compatibility": {
+            "legacy_executor_alias": backing_scan_type,
+            "temporary": True,
+        },
+        "scan_type": backing_scan_type,
+        "active": active,
+        "network_discovery": parent_job.execution_plan.policy.network_discovery,
+        "subfinder": parent_job.execution_plan.policy.subdomain_discovery,
+    })
+    return child_options
+
+
+def _canonical_shard_job(
+    parent_job: CanonicalScanJob,
+    *,
+    child_id: str,
+    child_job_id: str,
+    child_options: Mapping[str, Any],
+    shard_label: str,
+    shard_index: int,
+    shard_count: int,
+    parallel_discovery: bool = False,
+    parallel_worker_count: int = 0,
+) -> tuple[CanonicalScanJob, dict[str, Any], dict[str, Any]]:
+    """Freeze one private child row and its secret-free canonical queue envelope."""
+    options = _canonicalize_shard_options(parent_job, child_options)
+    options["queue_handoff_confirmed"] = False
+    authority = ScanShardAuthority(
+        parent_scan_id=parent_job.scan_id,
+        parent_execution_plan_digest=parent_job.execution_plan.digest,
+        options_digest=scan_job_options_digest(options),
+        shard_index=shard_index,
+        shard_count=shard_count,
+        shard_label=shard_label,
+        parallel_discovery=parallel_discovery,
+        sub_budget=derive_scan_shard_budget(options, parent_job.execution_plan.budget),
+    )
+    options["canonical_shard_authority"] = authority.payload()
+    collections = options.get("request_collections")
+    credentials = options.get("credential_profile_refs")
+    child_job = CanonicalScanJob.create(
+        job_id=child_job_id,
+        scan_id=child_id,
+        target=parent_job.target,
+        execution_plan=parent_job.execution_plan,
+        request_collections=admitted_request_collection_job_refs(
+            [dict(item) for item in collections if isinstance(item, Mapping)]
+            if isinstance(collections, list) else []
+        ),
+        credential_profile_ids=admitted_credential_profile_ids(
+            [dict(item) for item in credentials if isinstance(item, Mapping)]
+            if isinstance(credentials, list) else []
+        ),
+        endpoint_manifest_id=(
+            str(options.get("endpoint_manifest_id") or "")
+            or parent_job.endpoint_manifest_id
+        ),
+        shard=authority,
+    )
+    placement = options.get("placement")
+    queue_payload = child_job.queue_payload(
+        placement=placement if isinstance(placement, Mapping) else None,
+    )
+    queue_payload.update({
+        "type": parallel_scan.SHARD_JOB_TYPE,
+        "attempt": 1,
+        "plan_version": parallel_scan.PLAN_VERSION,
+    })
+    if parallel_worker_count:
+        queue_payload["parallel_worker_count"] = min(
+            max(1, int(parallel_worker_count)),
+            parent_job.execution_plan.budget.max_workers,
+        )
+    CanonicalScanJob.from_queue_payload(queue_payload)
+    return child_job, options, queue_payload
+
+
 def _enqueue_parallel_discovery_continuation(
     redis_client,
     *,
@@ -11586,26 +11696,44 @@ def _enqueue_parallel_discovery_continuation(
     target: str,
     options: dict[str, Any],
     parallel_worker_count: int = 0,
+    parent_queue_payload: Mapping[str, Any] | None = None,
 ) -> bool:
     """Wake the local planner exactly once after placed discovery is durable."""
     guard = parallel_scan.discovery_continue_guard_key(parent_id)
     claimed = redis_client.set(guard, "1", nx=True, ex=86400)
     if not claimed:
         return False
-    payload = {
-        'type': parallel_scan.PLAN_JOB_TYPE,
-        'job_id': parent_job_id,
-        'scan_id': parent_id,
-        'target': target,
-        'options': options,
-        'plan_stage': 'fanout',
-        'discovery_scan_id': discovery_scan_id,
-        'parallel_worker_count': int(parallel_worker_count or 0),
-        'placement': {'node_scope': 'local'},
-        'attempt': 1,
-        'plan_version': parallel_scan.PLAN_VERSION,
-        'submitted_at': utc_now_iso(),
-    }
+    parent_job = _canonical_parent_scan_job(parent_queue_payload)
+    if parent_job is not None:
+        payload = parent_job.payload()
+        payload.update({
+            'type': parallel_scan.PLAN_JOB_TYPE,
+            'plan_stage': 'fanout',
+            'discovery_scan_id': discovery_scan_id,
+            'parallel_worker_count': min(
+                max(0, int(parallel_worker_count or 0)),
+                parent_job.execution_plan.budget.max_workers,
+            ),
+            'placement': {'node_scope': 'local'},
+            'attempt': 1,
+            'plan_version': parallel_scan.PLAN_VERSION,
+        })
+        CanonicalScanJob.from_queue_payload(payload)
+    else:
+        payload = {
+            'type': parallel_scan.PLAN_JOB_TYPE,
+            'job_id': parent_job_id,
+            'scan_id': parent_id,
+            'target': target,
+            'options': options,
+            'plan_stage': 'fanout',
+            'discovery_scan_id': discovery_scan_id,
+            'parallel_worker_count': int(parallel_worker_count or 0),
+            'placement': {'node_scope': 'local'},
+            'attempt': 1,
+            'plan_version': parallel_scan.PLAN_VERSION,
+            'submitted_at': utc_now_iso(),
+        }
     try:
         enqueue_job(redis_client, QUEUE_NAME, payload)
     except Exception:
@@ -11622,6 +11750,9 @@ async def process_scan_plan_job(job_data: dict):
     target = job_data.get('target')
     options = job_data.get('options', {}) or {}
     scan_type = (options.get('scan_type') or 'standard').strip().lower() or 'standard'
+    canonical_parent_job = _canonical_parent_scan_job(
+        job_data.get("_canonical_queue_payload")
+    )
 
     r = get_redis()
     now = utc_now()
@@ -11696,6 +11827,7 @@ async def process_scan_plan_job(job_data: dict):
                     target=target_url,
                     options=options,
                     parallel_worker_count=int(job_data.get('parallel_worker_count') or 0),
+                    parent_queue_payload=job_data.get("_canonical_queue_payload"),
                 )
             print(
                 f"[{parent_id[:8]}] discovery stage already {existing_status or 'present'}; duplicate plan skipped",
@@ -11705,7 +11837,6 @@ async def process_scan_plan_job(job_data: dict):
         discovery_id = str(uuid.uuid4())
         discovery_job_id = str(uuid.uuid4())
         discovery_opts = parallel_scan._base_child_options(options)
-        discovery_opts['scan_type'] = 'smart'
         discovery_opts['parallel_discovery'] = True
         discovery_opts['parallel_stage'] = 'discovery'
         discovery_opts['skip_global_checks'] = True
@@ -11718,7 +11849,50 @@ async def process_scan_plan_job(job_data: dict):
         parallel_scan._merge_custom_budget(
             discovery_opts, dict(parallel_scan.RECON_DISCOVERY_BUDGET)
         )
-        discovery_opts['queue_handoff_confirmed'] = False
+        if canonical_parent_job is not None:
+            discovery_job, discovery_opts, discovery_payload = _canonical_shard_job(
+                canonical_parent_job,
+                child_id=discovery_id,
+                child_job_id=discovery_job_id,
+                child_options=discovery_opts,
+                shard_label='discovery',
+                shard_index=-1,
+                shard_count=0,
+                parallel_discovery=True,
+                parallel_worker_count=int(job_data.get('parallel_worker_count') or 0),
+            )
+            discovery_generation = 'v2'
+            discovery_policy = canonical_parent_job.execution_plan.canonical_dict()['policy']
+            discovery_budget = canonical_parent_job.execution_plan.canonical_dict()['budget']
+            discovery_job_payload = discovery_job.payload()
+            discovery_job_digest = discovery_job.payload_digest
+        else:
+            discovery_opts['scan_type'] = 'smart'
+            discovery_opts['queue_handoff_confirmed'] = False
+            discovery_payload = {
+                'type': parallel_scan.SHARD_JOB_TYPE,
+                'job_id': discovery_job_id,
+                'scan_id': discovery_id,
+                'parent_scan_id': parent_id,
+                'target_id': target_id,
+                'target': target_url,
+                'options': discovery_opts,
+                'parallel_discovery': True,
+                'parent_job_id': parent_job_id,
+                'parent_options': options,
+                'parallel_worker_count': int(job_data.get('parallel_worker_count') or 0),
+                'shard_label': 'discovery',
+                'shard_index': -1,
+                'shard_count': 0,
+                'attempt': 1,
+                'plan_version': parallel_scan.PLAN_VERSION,
+                'submitted_at': utc_now_iso(),
+            }
+            discovery_generation = 'legacy'
+            discovery_policy = {}
+            discovery_budget = {}
+            discovery_job_payload = {}
+            discovery_job_digest = None
         parent_options = dict(options)
         parent_options['parallel_strategy'] = requested_strategy
         parent_options['parallel_stage'] = 'discovery'
@@ -11741,8 +11915,9 @@ async def process_scan_plan_job(job_data: dict):
                     """
                     INSERT INTO scans (
                         id, target_id, target_url, job_id, status, options, scan_type,
-                        parent_scan_id, scan_role, shard_index
-                    ) VALUES ($1,$2,$3,$4,'pending',$5,$6,$7,$8,-1)
+                        parent_scan_id, scan_role, shard_index, scan_generation,
+                        policy_json, budget_json, scan_job_payload, scan_job_digest
+                    ) VALUES ($1,$2,$3,$4,'pending',$5,$6,$7,$8,-1,$9,$10,$11,$12,$13)
                     """,
                     uuid.UUID(discovery_id),
                     uuid.UUID(target_id) if target_id else None,
@@ -11752,26 +11927,12 @@ async def process_scan_plan_job(job_data: dict):
                     scan_type,
                     uuid.UUID(parent_id),
                     parallel_scan.PARALLEL_DISCOVERY_ROLE,
+                    discovery_generation,
+                    json.dumps(discovery_policy),
+                    json.dumps(discovery_budget),
+                    json.dumps(discovery_job_payload),
+                    discovery_job_digest,
                 )
-        discovery_payload = {
-            'type': parallel_scan.SHARD_JOB_TYPE,
-            'job_id': discovery_job_id,
-            'scan_id': discovery_id,
-            'parent_scan_id': parent_id,
-            'target_id': target_id,
-            'target': target_url,
-            'options': discovery_opts,
-            'parallel_discovery': True,
-            'parent_job_id': parent_job_id,
-            'parent_options': options,
-            'parallel_worker_count': int(job_data.get('parallel_worker_count') or 0),
-            'shard_label': 'discovery',
-            'shard_index': -1,
-            'shard_count': 0,
-            'attempt': 1,
-            'plan_version': parallel_scan.PLAN_VERSION,
-            'submitted_at': utc_now_iso(),
-        }
         try:
             enqueue_job(r, QUEUE_NAME, discovery_payload)
         except Exception as exc:
@@ -11974,6 +12135,10 @@ async def process_scan_plan_job(job_data: dict):
             plan.shards[0].options if plan.shards
             else parallel_scan._base_child_options(options)
         )
+        if canonical_parent_job is not None:
+            single_opts = _canonicalize_shard_options(
+                canonical_parent_job, single_opts,
+            )
         async with db_pool.acquire() as conn:
             await conn.execute(
                 "UPDATE scans SET scan_role = 'standalone', options = $1 WHERE id = $2",
@@ -12053,29 +12218,46 @@ async def process_scan_plan_job(job_data: dict):
             backbone_request_budget += request_budget
     parent_options['parallel_planned_request_budget'] = planned_request_budget
     parent_options['parallel_backbone_request_budget'] = backbone_request_budget
-    child_jobs: list[tuple[str, str, dict[str, Any], dict[str, Any]]] = []
+    child_jobs: list[
+        tuple[str, str, dict[str, Any], dict[str, Any], CanonicalScanJob | None, int]
+    ] = []
     for shard in plan.shards:
         child_id = str(uuid.uuid4())
         child_job_id = str(uuid.uuid4())
         child_options = dict(shard.options)
-        child_options['queue_handoff_confirmed'] = False
-        payload = {
-            'type': parallel_scan.SHARD_JOB_TYPE,
-            'job_id': child_job_id,
-            'scan_id': child_id,
-            'parent_scan_id': parent_id,
-            'campaign_id': None,
-            'target_id': target_id,
-            'target': target_url,
-            'options': child_options,
-            'shard_label': shard.label,
-            'shard_index': shard.index,
-            'shard_count': plan.shard_count,
-            'attempt': 1,
-            'plan_version': parallel_scan.PLAN_VERSION,
-            'submitted_at': utc_now_iso(),
-        }
-        child_jobs.append((child_id, child_job_id, child_options, payload))
+        if canonical_parent_job is not None:
+            child_job, child_options, payload = _canonical_shard_job(
+                canonical_parent_job,
+                child_id=child_id,
+                child_job_id=child_job_id,
+                child_options=child_options,
+                shard_label=shard.label,
+                shard_index=shard.index,
+                shard_count=plan.shard_count,
+                parallel_worker_count=int(job_data.get('parallel_worker_count') or 0),
+            )
+        else:
+            child_job = None
+            child_options['queue_handoff_confirmed'] = False
+            payload = {
+                'type': parallel_scan.SHARD_JOB_TYPE,
+                'job_id': child_job_id,
+                'scan_id': child_id,
+                'parent_scan_id': parent_id,
+                'campaign_id': None,
+                'target_id': target_id,
+                'target': target_url,
+                'options': child_options,
+                'shard_label': shard.label,
+                'shard_index': shard.index,
+                'shard_count': plan.shard_count,
+                'attempt': 1,
+                'plan_version': parallel_scan.PLAN_VERSION,
+                'submitted_at': utc_now_iso(),
+            }
+        child_jobs.append((
+            child_id, child_job_id, child_options, payload, child_job, shard.index,
+        ))
 
     # Publish barrier part 1: make the complete expected child set durable in one
     # transaction before any worker can observe a queue message.
@@ -12096,19 +12278,27 @@ async def process_scan_plan_job(job_data: dict):
                 )
                 r.expire(f"job:{parent_job_id}", 86400)
                 return
-            for child_id, child_job_id, child_options, payload in child_jobs:
+            for child_id, child_job_id, child_options, payload, child_job, shard_index in child_jobs:
+                child_plan = child_job.execution_plan.canonical_dict() if child_job else None
                 await conn.execute("""
                     INSERT INTO scans (id, target_id, target_url, job_id, status, options,
-                                       scan_type, parent_scan_id, scan_role, shard_index, shard_count)
-                    VALUES ($1,$2,$3,$4,'pending',$5,$6,$7,'shard',$8,$9)
+                                       scan_type, parent_scan_id, scan_role, shard_index, shard_count,
+                                       scan_generation, policy_json, budget_json,
+                                       scan_job_payload, scan_job_digest)
+                    VALUES ($1,$2,$3,$4,'pending',$5,$6,$7,'shard',$8,$9,$10,$11,$12,$13,$14)
                 """, uuid.UUID(child_id),
                      uuid.UUID(target_id) if target_id else None,
                      target_url, child_job_id, json.dumps(child_options), scan_type,
-                     uuid.UUID(parent_id), payload['shard_index'], plan.shard_count)
+                     uuid.UUID(parent_id), shard_index, plan.shard_count,
+                     'v2' if child_job else 'legacy',
+                     json.dumps(child_plan['policy'] if child_plan else {}),
+                     json.dumps(child_plan['budget'] if child_plan else {}),
+                     json.dumps(child_job.payload() if child_job else {}),
+                     child_job.payload_digest if child_job else None)
 
     r.set(parallel_scan.shards_remaining_key(parent_id), plan.shard_count, ex=86400)
     enqueue_failures = 0
-    for child_id, child_job_id, child_options, payload in child_jobs:
+    for child_id, child_job_id, child_options, payload, _child_job, _shard_index in child_jobs:
         try:
             enqueue_job(r, QUEUE_NAME, payload)
             async with db_pool.acquire() as conn:
@@ -12416,14 +12606,42 @@ async def process_scan_shard_job(job_data: dict):
         # all-terminal barrier. Both paths are idempotent under redelivery.
         if parallel_discovery and parent_id:
             try:
+                parent_queue_payload = None
+                continuation_parent_job_id = str(
+                    job_data.get('parent_job_id') or parent_id
+                )
+                continuation_target = target
+                continuation_options = dict(job_data.get('parent_options') or {})
+                if isinstance(job_data.get("_canonical_queue_payload"), Mapping):
+                    async with db_pool.acquire() as conn:
+                        parent_row = await conn.fetchrow(
+                            """
+                            SELECT job_id, target_url, options, scan_job_payload
+                            FROM scans WHERE id=$1
+                            """,
+                            uuid.UUID(parent_id),
+                        )
+                    if not parent_row:
+                        raise ExecutionScopeError(
+                            "canonical discovery parent disappeared before continuation"
+                        )
+                    parent_queue_payload = _as_report_dict(
+                        parent_row.get('scan_job_payload')
+                    )
+                    continuation_parent_job_id = str(
+                        parent_row.get('job_id') or parent_id
+                    )
+                    continuation_target = str(parent_row.get('target_url') or target)
+                    continuation_options = _as_report_dict(parent_row.get('options')) or {}
                 continued = _enqueue_parallel_discovery_continuation(
                     r,
                     parent_id=parent_id,
-                    parent_job_id=str(job_data.get('parent_job_id') or parent_id),
+                    parent_job_id=continuation_parent_job_id,
                     discovery_scan_id=scan_id,
-                    target=target,
-                    options=dict(job_data.get('parent_options') or {}),
+                    target=continuation_target,
+                    options=continuation_options,
                     parallel_worker_count=int(job_data.get('parallel_worker_count') or 0),
+                    parent_queue_payload=parent_queue_payload,
                 )
                 if continued:
                     print(

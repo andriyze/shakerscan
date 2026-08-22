@@ -3149,7 +3149,8 @@ async def recover_parallel_orchestration(pool: asyncpg.Pool) -> int:
     async with pool.acquire() as conn:
         discoveries = await conn.fetch(
             """
-            SELECT p.id, p.job_id, p.target_url, p.options,
+            SELECT p.id, p.job_id, p.target_url, p.options, p.scan_generation,
+                   p.scan_job_payload,
                    d.id AS discovery_id, d.status AS discovery_status
             FROM scans p
             JOIN LATERAL (
@@ -3169,20 +3170,47 @@ async def recover_parallel_orchestration(pool: asyncpg.Pool) -> int:
             if not r.set(guard, '1', nx=True, ex=86400):
                 continue
             options = parse_json_field(row.get('options')) or {}
-            payload = {
-                'type': parallel_scan.PLAN_JOB_TYPE,
-                'job_id': str(row.get('job_id') or parent_id),
-                'scan_id': parent_id,
-                'target': str(row.get('target_url') or ''),
-                'options': options,
-                'plan_stage': 'fanout',
-                'discovery_scan_id': str(row['discovery_id']),
-                'parallel_worker_count': int(options.get('worker_fleet_size_at_submit') or 0),
-                'placement': {'node_scope': 'local'},
-                'attempt': 1,
-                'plan_version': parallel_scan.PLAN_VERSION,
-                'submitted_at': utc_now_iso(),
-            }
+            if str(row.get('scan_generation') or '') == 'v2':
+                try:
+                    parent_job = CanonicalScanJob.from_payload(
+                        parse_json_field(row.get('scan_job_payload')) or {}
+                    )
+                    payload = parent_job.payload()
+                    payload.update({
+                        'type': parallel_scan.PLAN_JOB_TYPE,
+                        'plan_stage': 'fanout',
+                        'discovery_scan_id': str(row['discovery_id']),
+                        'parallel_worker_count': min(
+                            max(0, int(options.get('worker_fleet_size_at_submit') or 0)),
+                            parent_job.execution_plan.budget.max_workers,
+                        ),
+                        'placement': {'node_scope': 'local'},
+                        'attempt': 1,
+                        'plan_version': parallel_scan.PLAN_VERSION,
+                    })
+                    CanonicalScanJob.from_queue_payload(payload)
+                except CanonicalScanJobError:
+                    r.delete(guard)
+                    logger.exception(
+                        "Refused invalid V2 parallel discovery continuation for %s",
+                        parent_id,
+                    )
+                    continue
+            else:
+                payload = {
+                    'type': parallel_scan.PLAN_JOB_TYPE,
+                    'job_id': str(row.get('job_id') or parent_id),
+                    'scan_id': parent_id,
+                    'target': str(row.get('target_url') or ''),
+                    'options': options,
+                    'plan_stage': 'fanout',
+                    'discovery_scan_id': str(row['discovery_id']),
+                    'parallel_worker_count': int(options.get('worker_fleet_size_at_submit') or 0),
+                    'placement': {'node_scope': 'local'},
+                    'attempt': 1,
+                    'plan_version': parallel_scan.PLAN_VERSION,
+                    'submitted_at': utc_now_iso(),
+                }
             try:
                 enqueue_job(r, QUEUE_NAME, payload)
                 repaired += 1

@@ -2098,9 +2098,135 @@ def test_scan_plan_queues_placed_discovery_without_running_target_traffic_locall
     assert budget["phase4_max_seconds"] == 0
     assert budget["browser_max_pages"] == 0
     assert any(
-        args[-1] == worker.parallel_scan.PARALLEL_DISCOVERY_ROLE
+        worker.parallel_scan.PARALLEL_DISCOVERY_ROLE in args
         for query, args in conn.executions if "INSERT INTO scans" in query
     )
+
+
+def test_canonical_shard_builder_emits_secret_free_v2_queue_authority():
+    from runtime.models import TargetBinding
+    from scan.contracts import resolve_scan_contract
+    from scan.jobs import CanonicalScanJob
+
+    contract = resolve_scan_contract(budget_profile="balanced")
+    parent = CanonicalScanJob.create(
+        job_id="parent-job",
+        scan_id="parent-scan",
+        target=TargetBinding(
+            target_id="target-1",
+            target_kind="web",
+            canonical_host="example.test",
+            allowed_origins=("https://example.test",),
+            allowed_addresses=("192.0.2.10",),
+            allowed_root_domains=("example.test",),
+        ),
+        execution_plan=contract.execution_plan,
+    )
+    options = contract.option_metadata()
+    options.update({
+        "scan_type": "smart",
+        "auth_header": "Bearer must-not-enter-queue",
+        "skip_global_checks": True,
+        "custom_endpoints": ["GET /v1/items"],
+        "custom_budget": {
+            "request_max": 50,
+            "max_urls": 20,
+            "browser_max_pages": 0,
+            "phase4_max_seconds": 0,
+        },
+    })
+
+    child, persisted, queued = worker._canonical_shard_job(
+        parent,
+        child_id="child-scan",
+        child_job_id="child-job",
+        child_options=options,
+        shard_label="coverage[0]",
+        shard_index=0,
+        shard_count=2,
+    )
+
+    assert CanonicalScanJob.from_queue_payload(queued) == child
+    assert queued["type"] == worker.parallel_scan.SHARD_JOB_TYPE
+    assert "options" not in queued
+    assert "must-not-enter-queue" not in json.dumps(queued)
+    assert persisted["scan_type"] == "deep"
+    assert persisted["canonical_shard_authority"]["sub_budget"]["max_browser_actions"] == 0
+    assert persisted["canonical_shard_authority"]["sub_budget"]["max_tcp_ports"] == 0
+
+
+def test_canonical_scan_plan_persists_and_queues_only_v2_child_jobs(monkeypatch):
+    from runtime.models import TargetBinding
+    from scan.contracts import resolve_scan_contract
+    from scan.jobs import CanonicalScanJob
+
+    parent_id = "51515151-5151-4151-8151-515151515151"
+    target_id = uuid.UUID("31313131-3131-4131-8131-313131313131")
+    contract = resolve_scan_contract(budget_profile="balanced")
+    target = TargetBinding(
+        target_id=str(target_id),
+        target_kind="web",
+        canonical_host="example.test",
+        allowed_origins=("https://example.test",),
+        allowed_addresses=("192.0.2.10",),
+        allowed_root_domains=("example.test",),
+    )
+    parent_job = CanonicalScanJob.create(
+        job_id="parent-v2-job",
+        scan_id=parent_id,
+        target=target,
+        execution_plan=contract.execution_plan,
+    )
+    parent_queue = parent_job.payload()
+    parent_queue.update({
+        "type": worker.parallel_scan.PLAN_JOB_TYPE,
+        "placement": {"node_scope": "local"},
+        "attempt": 1,
+        "plan_version": worker.parallel_scan.PLAN_VERSION,
+        "parallel_worker_count": 2,
+    })
+    options = contract.option_metadata()
+    options.update({
+        "scan_type": "deep",
+        "active": False,
+        "network_discovery": False,
+        "subfinder": contract.policy.subdomain_discovery,
+        "parallel": True,
+        "shard_strategy": "scope",
+        "shards": 2,
+        "custom_endpoints": [
+            "GET /v1/a", "GET /v1/b", "GET /v1/c", "GET /v1/d",
+        ],
+        "runtime_scope_guard": {
+            **parent_job.payload()["target"],
+            "requires_runtime_destination_check": True,
+            "requires_runtime_dns_check": True,
+            "address_binding_source": "submission_dns_snapshot",
+        },
+    })
+    conn = _FakePlanConn(parent_id, target_id, uuid.uuid4())
+    redis = _FakeJobRedis()
+    monkeypatch.setattr(worker, "db_pool", _FakePlanPool(conn))
+    monkeypatch.setattr(worker, "get_redis", lambda: redis)
+
+    asyncio.run(worker.process_scan_plan_job({
+        "job_id": parent_job.job_id,
+        "scan_id": parent_id,
+        "target": "https://example.test",
+        "options": options,
+        "parallel_worker_count": 2,
+        "_canonical_queue_payload": parent_queue,
+    }))
+
+    queued = [json.loads(payload) for _, payload in redis.pushed]
+    assert len(queued) == 2
+    assert all(CanonicalScanJob.from_queue_payload(item).shard for item in queued)
+    assert all("options" not in item for item in queued)
+    assert all(item["type"] == worker.parallel_scan.SHARD_JOB_TYPE for item in queued)
+    assert len(conn.inserted_children) == 2
+    assert all(args[9] == "v2" for args in conn.inserted_children)
+    assert all(json.loads(args[12])["schema_version"] == "scan-job/v2" for args in conn.inserted_children)
+    assert all(len(args[13]) == 64 for args in conn.inserted_children)
 
 
 def test_scan_plan_continuation_fans_out_from_durable_discovery_result(monkeypatch):
