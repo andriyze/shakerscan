@@ -20,6 +20,11 @@ import time
 from typing import Any
 import urllib.parse
 
+try:
+    from scanner_tools.url_redaction import redact_path, redact_url
+except ModuleNotFoundError:  # package import through scanner.manifests
+    from .scanner_tools.url_redaction import redact_path, redact_url
+
 
 _UUID_SEGMENT = re.compile(r"^[0-9a-f]{8}-[0-9a-f-]{20,}$", re.I)
 _INTEGER_SEGMENT = re.compile(r"^\d+$")
@@ -65,8 +70,15 @@ class EndpointRecord:
         ))
 
     @property
+    def has_sensitive_path_material(self) -> bool:
+        return redact_path(self.concrete_path) != self.concrete_path
+
+    @property
     def safe_for_recovery_fanout(self) -> bool:
-        return self.method in _SAFE_RECOVERY_METHODS
+        # Recovery checkpoints are deliberately secret-free. An endpoint whose concrete path
+        # appears to contain a token/signature cannot be faithfully replayed after redaction, so
+        # exclude it instead of testing a fabricated ``<redacted>`` path.
+        return self.method in _SAFE_RECOVERY_METHODS and not self.has_sensitive_path_material
 
     @property
     def redacted_query(self) -> str:
@@ -75,7 +87,7 @@ class EndpointRecord:
     @property
     def work_item(self) -> str:
         suffix = f"?{self.redacted_query}" if self.redacted_query else ""
-        return f"{self.method} {self.concrete_path}{suffix}"
+        return f"{self.method} {redact_path(self.concrete_path)}{suffix}"
 
     @property
     def redacted_url(self) -> str:
@@ -83,7 +95,21 @@ class EndpointRecord:
         default_port = 443 if self.scheme == "https" else 80
         authority = host if self.port == default_port else f"{host}:{self.port}"
         suffix = f"?{self.redacted_query}" if self.redacted_query else ""
-        return f"{self.scheme}://{authority}{self.concrete_path}{suffix}"
+        return redact_url(f"{self.scheme}://{authority}{self.concrete_path}{suffix}")
+
+    def public_dict(self) -> dict[str, Any]:
+        return {
+            "method": self.method,
+            "scheme": self.scheme,
+            "host": self.host,
+            "port": self.port,
+            "normalized_path": redact_path(self.normalized_path),
+            "concrete_path": redact_path(self.concrete_path),
+            "query_keys": list(self.query_keys),
+            "content_fingerprint": self.content_fingerprint,
+            "source": self.source,
+            "sensitive_path_redacted": self.has_sensitive_path_material,
+        }
 
 
 def normalize_endpoint(
@@ -96,14 +122,19 @@ def normalize_endpoint(
     parsed = urllib.parse.urlsplit(str(url or "").strip())
     scheme = parsed.scheme.lower()
     host = (parsed.hostname or "").lower().rstrip(".")
-    if scheme not in {"http", "https"} or not host or parsed.username:
+    if (
+        scheme not in {"http", "https"}
+        or not host
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
         raise ValueError("endpoint URL must be an absolute HTTP(S) URL without userinfo")
     try:
         port = parsed.port or (443 if scheme == "https" else 80)
     except ValueError as exc:
         raise ValueError("endpoint URL contains an invalid port") from exc
     concrete = parsed.path or "/"
-    normalized_segments = []
+    normalized_segments: list[str] = []
     for segment in concrete.split("/"):
         decoded = urllib.parse.unquote(segment)
         if _INTEGER_SEGMENT.fullmatch(decoded):
@@ -250,8 +281,18 @@ class DiscoveryRecoverySink:
         fanout = [] if cancelled else [
             item for item in endpoints if item.safe_for_recovery_fanout
         ]
-        excluded_unsafe = 0 if cancelled else len(endpoints) - len(fanout)
-        target = (fanout[0].redacted_url if fanout else endpoints[0].redacted_url) if endpoints else None
+        excluded_unsafe = 0 if cancelled else sum(
+            item.method not in _SAFE_RECOVERY_METHODS for item in endpoints
+        )
+        excluded_sensitive = 0 if cancelled else sum(
+            item.method in _SAFE_RECOVERY_METHODS and item.has_sensitive_path_material
+            for item in endpoints
+        )
+        target = (
+            fanout[0].redacted_url
+            if fanout
+            else endpoints[0].redacted_url if endpoints else None
+        )
         timed_out = any(state.timed_out for state in manifest.producers.values())
         report = {
             "target": target,
@@ -260,7 +301,7 @@ class DiscoveryRecoverySink:
             "active_checks": {"active_worklist": [item.work_item for item in fanout]},
             "discovery": {
                 "endpoint_manifest": payload,
-                "katana_sample": [item.redacted_url for item in fanout[:500]],
+                "katana_sample": [] if cancelled else [item.redacted_url for item in endpoints[:500]],
             },
             "scan_metadata": {
                 "status": "cancelled" if cancelled else "partial",
@@ -269,6 +310,7 @@ class DiscoveryRecoverySink:
                 "coverage_status": payload["status"],
                 "recovery_source": _RECOVERY_CHECKPOINT_KIND,
                 "unsafe_methods_excluded_from_fanout": excluded_unsafe,
+                "sensitive_paths_excluded_from_fanout": excluded_sensitive,
             },
         }
         return {
@@ -379,7 +421,7 @@ class EndpointManifest:
             "status": self.status,
             "reason": self.reason,
             "endpoint_count": len(self._endpoints),
-            "endpoints": [asdict(item) for item in self._endpoints.values()],
+            "endpoints": [item.public_dict() for item in self._endpoints.values()],
             "producers": {name: asdict(state) for name, state in self.producers.items()},
             "persistence_errors": list(self.persistence_errors),
         }

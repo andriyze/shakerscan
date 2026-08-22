@@ -13,6 +13,9 @@ on:
       - scanner/manifests.py
       - scanner/scanner_tools/request_collections.py
       - scanner/scanner_tools/request_replay.py
+      - scanner/scanner_tools/url_redaction.py
+      - scanner/scanner_tools/v2_request_replay_hardening.py
+      - scanner/scanner_tools/v2_fingerprint_hardening.py
       - tests/test_request_collections_v2.py
       - tests/test_budget_reservation_lifecycle.py
       - tests/test_runtime_receipts.py
@@ -20,6 +23,7 @@ on:
       - tests/test_hunt_start_contract.py
       - tests/test_request_replay.py
       - tests/test_request_replay_executor.py
+      - tests/test_v2_public_url_redaction.py
       - tests/test_scan_execution_plan.py
       - tests/test_scan_job_contract.py
       - tests/test_scan_v2_contract.py
@@ -36,6 +40,9 @@ on:
       - scanner/manifests.py
       - scanner/scanner_tools/request_collections.py
       - scanner/scanner_tools/request_replay.py
+      - scanner/scanner_tools/url_redaction.py
+      - scanner/scanner_tools/v2_request_replay_hardening.py
+      - scanner/scanner_tools/v2_fingerprint_hardening.py
       - tests/test_request_collections_v2.py
       - tests/test_budget_reservation_lifecycle.py
       - tests/test_runtime_receipts.py
@@ -43,6 +50,7 @@ on:
       - tests/test_hunt_start_contract.py
       - tests/test_request_replay.py
       - tests/test_request_replay_executor.py
+      - tests/test_v2_public_url_redaction.py
       - tests/test_scan_execution_plan.py
       - tests/test_scan_job_contract.py
       - tests/test_scan_v2_contract.py
@@ -106,12 +114,13 @@ jobs:
             tests/test_request_replay.py \
             tests/test_request_replay_executor.py
 
-      - name: Validate discovery recovery contracts
+      - name: Validate discovery recovery and public redaction contracts
         env:
-          PYTHONPATH: .
+          PYTHONPATH: .:scanner
         run: |
           python -m pytest -q -p no:cacheprovider \
-            tests/test_discovery_recovery_checkpoint.py
+            tests/test_discovery_recovery_checkpoint.py \
+            tests/test_v2_public_url_redaction.py
 
       - name: Compile V2 runtime modules
         run: |
@@ -122,4 +131,7 @@ jobs:
             api/api_v2.py \
             api/worker_v2.py \
             scanner/manifests.py \
-            scanner/scanner_tools/request_replay.py
+            scanner/scanner_tools/request_replay.py \
+            scanner/scanner_tools/url_redaction.py \
+            scanner/scanner_tools/v2_request_replay_hardening.py \
+            scanner/scanner_tools/v2_fingerprint_hardening.py
