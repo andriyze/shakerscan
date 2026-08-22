@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import re
 import sys
 import uuid
@@ -26,7 +27,12 @@ def validate_runtime() -> tuple[str, str]:
 
 def main() -> int:
     validate_runtime()
-    os.execv(sys.executable, [sys.executable, "/app/worker.py"])
+    worker_entrypoint = Path("/app/worker_v2.py")
+    if not worker_entrypoint.is_file():
+        raise RuntimeError(
+            "owned-fleet worker image is missing /app/worker_v2.py; refusing legacy Scan execution"
+        )
+    os.execv(sys.executable, [sys.executable, str(worker_entrypoint)])
     return 0
 
 
