@@ -71,6 +71,10 @@ def admit_scan_credential_profiles(
             raise ScanCredentialError("Scan credential profile target binding does not match")
         if profile.auth_kind not in HTTP_CREDENTIAL_KINDS:
             raise ScanCredentialError("Scan credentials must use an HTTP authentication kind")
+        if profile.auth_kind == "query_parameter":
+            raise ScanCredentialError(
+                "query-parameter credentials require the target-bound request replay executor"
+            )
         slot = profile.principal_slot
         if slot in _PRIMARY_SLOTS:
             lane = "primary"

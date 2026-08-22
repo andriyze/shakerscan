@@ -78,6 +78,7 @@ class CredentialProfileCreate(BaseModel):
     client_id: SecretStr | None = None
     scopes: list[str] = Field(default_factory=list, max_length=32)
     custom_headers: dict[str, SecretStr] | None = None
+    parameter_name: str | None = Field(default=None, max_length=200)
     expires_at: datetime | None = None
     allowed_capabilities: list[str] = Field(default_factory=list, max_length=128)
     created_by: str = Field(default="api", max_length=120)
@@ -108,6 +109,7 @@ class CredentialProfileRotate(BaseModel):
     client_id: SecretStr | None = None
     scopes: list[str] = Field(default_factory=list, max_length=32)
     custom_headers: dict[str, SecretStr] | None = None
+    parameter_name: str | None = Field(default=None, max_length=200)
     expires_at: datetime | None = None
     clear_expiry: bool = False
     created_by: str = Field(default="api", max_length=120)
@@ -138,6 +140,7 @@ def _material(auth_kind: str, value: Any) -> tuple[str, dict[str, Any]]:
             client_id=_secret(value.client_id),
             scopes=value.scopes,
             custom_headers=_custom_headers(value.custom_headers),
+            parameter_name=value.parameter_name,
         )
         configuration = public_credential_configuration(
             parse_credential_secret(kind, envelope)

@@ -42,6 +42,7 @@ const HTTP_KINDS: { value: CredentialAuthKind; label: string }[] = [
   { value: 'oauth_client_credentials', label: 'OAuth client credentials' },
   { value: 'oauth_password', label: 'OAuth password flow' },
   { value: 'custom_headers', label: 'Custom headers' },
+  { value: 'query_parameter', label: 'Query parameter' },
 ]
 const SSH_KINDS: { value: CredentialAuthKind; label: string }[] = [
   { value: 'ssh_password', label: 'SSH password' },
@@ -119,6 +120,7 @@ function secretPayload(draft: Draft): CredentialSecretPayload {
   if (needsUsername(kind)) payload.username = draft.username
   if (kind === 'ssh_private_key_with_passphrase') payload.secondary_secret = draft.secondarySecret
   if (kind === 'api_key_header') payload.header_name = draft.headerName
+  if (kind === 'query_parameter') payload.parameter_name = draft.headerName
   if (needsEndpoint(kind)) payload.endpoint_url = draft.endpointUrl
   if ((kind === 'oauth_client_credentials' || kind === 'oauth_password') && draft.clientId.trim()) {
     payload.client_id = draft.clientId
@@ -231,7 +233,7 @@ export default function CredentialsPage() {
       authKind: profile.auth_kind,
       principalLabel: profile.principal_label || '',
       principalSlot: profile.principal_slot,
-      headerName: profile.configuration.header_name || 'X-API-Key',
+      headerName: profile.configuration.parameter_name || profile.configuration.header_name || 'X-API-Key',
       capabilities: profile.allowed_capabilities.join(', '),
     })
     setEditorOpen(true)
@@ -386,7 +388,12 @@ export default function CredentialsPage() {
               disabled={Boolean(rotating)}
               onChange={(event) => {
                 const kind = event.target.value as CredentialAuthKind
-                setDraft({ ...draft, authKind: kind, principalSlot: isSsh(kind) ? 'ssh' : draft.principalSlot === 'ssh' ? 'primary' : draft.principalSlot })
+                setDraft({
+                  ...draft,
+                  authKind: kind,
+                  principalSlot: isSsh(kind) ? 'ssh' : draft.principalSlot === 'ssh' ? 'primary' : draft.principalSlot,
+                  capabilities: kind === 'query_parameter' ? 'request.replay' : draft.capabilities,
+                })
               }}
             >
               {availableKinds.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
@@ -395,7 +402,7 @@ export default function CredentialsPage() {
           {!rotating && <Field label="Principal slot"><Select value={draft.principalSlot} disabled={isSsh(draft.authKind)} onChange={(event) => setDraft({ ...draft, principalSlot: event.target.value as CredentialPrincipalSlot })}><option value="primary">Primary</option><option value="secondary">Secondary</option><option value="service">Service</option>{isSsh(draft.authKind) && <option value="ssh">SSH</option>}</Select></Field>}
           {!rotating && <Field label="Principal label"><Input value={draft.principalLabel} onChange={(event) => setDraft({ ...draft, principalLabel: event.target.value })} placeholder="Optional human-readable identity" /></Field>}
           {needsUsername(draft.authKind) && <Field label="Username" required><Input autoComplete="off" value={draft.username} onChange={(event) => setDraft({ ...draft, username: event.target.value })} /></Field>}
-          {draft.authKind === 'api_key_header' && <Field label="Header name" required><Input value={draft.headerName} onChange={(event) => setDraft({ ...draft, headerName: event.target.value })} /></Field>}
+          {(draft.authKind === 'api_key_header' || draft.authKind === 'query_parameter') && <Field label={draft.authKind === 'query_parameter' ? 'Parameter name' : 'Header name'} required><Input value={draft.headerName} onChange={(event) => setDraft({ ...draft, headerName: event.target.value })} /></Field>}
           {needsEndpoint(draft.authKind) && <Field label="Login / token endpoint" required><Input value={draft.endpointUrl} onChange={(event) => setDraft({ ...draft, endpointUrl: event.target.value })} placeholder="/login or https://target/token" /></Field>}
           {(draft.authKind === 'oauth_client_credentials' || draft.authKind === 'oauth_password') && <Field label={draft.authKind === 'oauth_client_credentials' ? 'Client ID' : 'Client ID (required for Scan)'} required={draft.authKind === 'oauth_client_credentials'}><Input autoComplete="off" value={draft.clientId} onChange={(event) => setDraft({ ...draft, clientId: event.target.value })} /></Field>}
           {(draft.authKind === 'oauth_client_credentials' || draft.authKind === 'oauth_password') && <Field label="OAuth scopes"><Input value={draft.scopes} onChange={(event) => setDraft({ ...draft, scopes: event.target.value })} placeholder="openid profile" /></Field>}

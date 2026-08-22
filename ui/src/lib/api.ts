@@ -7775,6 +7775,7 @@ export type CredentialAuthKind =
   | 'oauth_client_credentials'
   | 'oauth_password'
   | 'custom_headers'
+  | 'query_parameter'
   | 'ssh_password'
   | 'ssh_private_key'
   | 'ssh_private_key_with_passphrase'
@@ -7797,6 +7798,7 @@ export interface CredentialProfile {
     client_id_configured: boolean
     scope_count: number
     custom_header_names: string[]
+    parameter_name?: string | null
     interactive_exchange_required: boolean
     secret_values_visible: false
   }
@@ -7826,6 +7828,7 @@ export interface CredentialSecretPayload {
   client_id?: string
   scopes?: string[]
   custom_headers?: Record<string, string>
+  parameter_name?: string
   expires_at?: string
   clear_expiry?: boolean
 }

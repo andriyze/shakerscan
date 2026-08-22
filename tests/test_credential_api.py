@@ -238,6 +238,22 @@ def test_request_and_response_models_do_not_serialize_secret_values(client):
     assert response.json()["profile"]["configuration"]["username_configured"] is True
 
 
+def test_query_parameter_profile_exposes_name_but_never_value(client):
+    http, _pool = client
+    response = http.post(
+        "/credential-profiles",
+        json=_create_payload(
+            auth_kind="query_parameter",
+            parameter_name="access_key",
+            secret="private-query-value",
+        ),
+    )
+    assert response.status_code == 201, response.text
+    profile = response.json()["profile"]
+    assert profile["configuration"]["parameter_name"] == "access_key"
+    assert "private-query-value" not in response.text
+
+
 def test_unknown_fields_are_rejected_before_secret_storage(client):
     http, pool = client
     response = http.post(

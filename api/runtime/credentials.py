@@ -26,6 +26,7 @@ HTTP_CREDENTIAL_KINDS = frozenset({
     "oauth_client_credentials",
     "oauth_password",
     "custom_headers",
+    "query_parameter",
 })
 SSH_CREDENTIAL_KINDS = frozenset({
     "ssh_password",
@@ -73,12 +74,14 @@ def _text(
     return normalized
 
 
-def _header_name(value: Any, *, required: bool) -> str | None:
-    name = _text(value, name="header_name", required=required, maximum=200)
+def _header_name(
+    value: Any, *, required: bool, field_name: str = "header_name"
+) -> str | None:
+    name = _text(value, name=field_name, required=required, maximum=200)
     if name is None:
         return None
     if not _HEADER_NAME_RE.fullmatch(name) or name.lower() in _FORBIDDEN_HEADERS:
-        raise CredentialContractError("header_name is not allowed")
+        raise CredentialContractError(f"{field_name} is not allowed")
     return name
 
 
@@ -143,6 +146,7 @@ def build_credential_secret(
     client_id: Any = None,
     scopes: Any = None,
     custom_headers: Any = None,
+    parameter_name: Any = None,
 ) -> str:
     """Validate and serialize one plaintext envelope for immediate encryption."""
     kind = str(auth_kind or "").strip().lower()
@@ -183,6 +187,15 @@ def build_credential_secret(
     resolved_header = _header_name(header_name, required=kind == "api_key_header")
     if resolved_header and kind != "api_key_header":
         raise CredentialContractError("header_name is valid only for api_key_header")
+    resolved_parameter = _header_name(
+        parameter_name,
+        required=kind == "query_parameter",
+        field_name="parameter_name",
+    )
+    if resolved_parameter and kind != "query_parameter":
+        raise CredentialContractError(
+            "parameter_name is valid only for query_parameter"
+        )
     endpoint = _endpoint(
         endpoint_url,
         name="endpoint_url",
@@ -211,6 +224,7 @@ def build_credential_secret(
         "client_id": client,
         "scopes": resolved_scopes,
         "custom_headers": headers,
+        "parameter_name": resolved_parameter,
     }
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
@@ -243,6 +257,9 @@ def parse_credential_secret(auth_kind: Any, decrypted_value: Any) -> dict[str, A
         scopes=value.get("scopes"),
         custom_headers=(
             value.get("custom_headers") if kind == "custom_headers" else None
+        ),
+        parameter_name=(
+            value.get("parameter_name") if kind == "query_parameter" else None
         ),
     )
     return json.loads(encoded)
@@ -285,6 +302,7 @@ def public_credential_configuration(material: Mapping[str, Any]) -> dict[str, An
         "client_id_configured": bool(material.get("client_id")),
         "scope_count": len(material.get("scopes") or ()),
         "custom_header_names": sorted(dict(material.get("custom_headers") or {})),
+        "parameter_name": material.get("parameter_name"),
         "interactive_exchange_required": kind in {
             "form_login", "oauth_client_credentials", "oauth_password",
         },

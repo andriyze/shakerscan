@@ -165,6 +165,15 @@ class SecretHTTPHeaders:
 
 
 @dataclass(frozen=True, repr=False)
+class SecretQueryParameter:
+    name: str
+    value: str = field(repr=False)
+
+    def __repr__(self) -> str:
+        return f"SecretQueryParameter(name={self.name!r}, value_visible=False)"
+
+
+@dataclass(frozen=True, repr=False)
 class InteractiveHTTPCredential:
     auth_kind: str
     username: str | None = field(repr=False)
@@ -248,6 +257,20 @@ class ResolvedCredential:
             client_id=str(self._material.get("client_id") or "") or None,
             scopes=tuple(str(item) for item in self._material.get("scopes") or ()),
         )
+
+    def query_parameter(self) -> SecretQueryParameter:
+        self._require_open()
+        if self.profile.auth_kind != "query_parameter":
+            raise CredentialResolutionError(
+                "credential is not a query-parameter profile"
+            )
+        name = str(self._material.get("parameter_name") or "")
+        value = str(self._material.get("secret") or "")
+        if not name or not value:
+            raise CredentialResolutionError(
+                "query-parameter credential material is incomplete"
+            )
+        return SecretQueryParameter(name=name, value=value)
 
     def ssh_password(self) -> SSHPasswordCredential:
         self._require_open()

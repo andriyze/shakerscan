@@ -210,7 +210,7 @@ CREATE TABLE credential_profiles (
     name TEXT NOT NULL,
     auth_kind TEXT NOT NULL CHECK (auth_kind IN (
         'authorization_header','bearer_token','api_key_header','cookie','basic_auth',
-        'form_login','oauth_client_credentials','oauth_password','custom_headers',
+        'form_login','oauth_client_credentials','oauth_password','custom_headers','query_parameter',
         'ssh_password','ssh_private_key','ssh_private_key_with_passphrase'
     )),
     principal_label TEXT,
@@ -269,6 +269,10 @@ CREATE INDEX idx_credential_profile_bindings_consumer
 
 INSERT INTO app_schema_migrations(name)
 VALUES ('v2_credential_profiles_v1')
+ON CONFLICT (name) DO NOTHING;
+
+INSERT INTO app_schema_migrations(name)
+VALUES ('v2_credential_query_parameter_v1')
 ON CONFLICT (name) DO NOTHING;
 
 ALTER TABLE scans

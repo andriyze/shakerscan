@@ -46,6 +46,10 @@ from api.runtime.credentials import (
             "custom_headers",
             {"custom_headers": {"X-Tenant": "opaque-a", "X-Token": "opaque-b"}},
         ),
+        (
+            "query_parameter",
+            {"secret": "opaque-query-token", "parameter_name": "api_key"},
+        ),
         ("ssh_password", {"username": "operator", "secret": "opaque"}),
         (
             "ssh_private_key",
@@ -110,6 +114,23 @@ def test_public_configuration_never_contains_secret_values():
     assert "opaque-key" not in serialized
     assert "opaque-passphrase" not in serialized
     assert "operator" not in serialized
+
+
+def test_query_parameter_configuration_exposes_only_the_parameter_name():
+    encoded = build_credential_secret(
+        "query_parameter", secret="opaque-query-token", parameter_name="api_key"
+    )
+    public = public_credential_configuration(
+        parse_credential_secret("query_parameter", encoded)
+    )
+
+    assert public["parameter_name"] == "api_key"
+    assert "opaque-query-token" not in json.dumps(public)
+
+
+def test_query_parameter_requires_a_bounded_name():
+    with pytest.raises(CredentialContractError, match="parameter_name is required"):
+        build_credential_secret("query_parameter", secret="opaque-query-token")
 
 
 @pytest.mark.parametrize("header_name", ["Host", "Content-Length", "Proxy-Authorization"])

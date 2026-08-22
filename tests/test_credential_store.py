@@ -260,6 +260,7 @@ def test_schema_installs_all_three_tables_and_migration_marker():
     assert "CREATE TABLE IF NOT EXISTS credential_profile_versions" in CREDENTIAL_PROFILE_SCHEMA_SQL
     assert "CREATE TABLE IF NOT EXISTS credential_profile_bindings" in CREDENTIAL_PROFILE_SCHEMA_SQL
     assert "v2_credential_profiles_v1" in CREDENTIAL_PROFILE_SCHEMA_SQL
+    assert "v2_credential_query_parameter_v1" in CREDENTIAL_PROFILE_SCHEMA_SQL
 
 
 def test_runtime_schema_and_repair_schema_do_not_drift():

@@ -65,6 +65,8 @@ def _metadata(kind, target_kind="api", principal_slot="primary"):
         kwargs["username"] = "operator"
     if kind == "form_login":
         kwargs.update({"username": "operator", "endpoint_url": "/login"})
+    if kind == "query_parameter":
+        kwargs["parameter_name"] = "access_key"
     if kind == "ssh_private_key_with_passphrase":
         kwargs["secondary_secret"] = "placeholder-passphrase"
     configuration = public_credential_configuration(
@@ -227,6 +229,30 @@ def test_interactive_http_material_hides_values_in_repr():
             assert "private-password" not in repr(material)
 
     asyncio.run(exercise())
+
+
+def test_query_parameter_material_hides_value_in_repr_and_is_scrubbed():
+    envelope = build_credential_secret(
+        "query_parameter", secret="top-secret-query", parameter_name="access_key"
+    )
+    store = FakeStore(metadata=_metadata("query_parameter"))
+    resolver = WorkerCredentialResolver(store=store, decryptor=_decryptor(envelope))
+    retained = None
+
+    async def exercise():
+        nonlocal retained
+        async with resolver.resolve(
+            object(), profile_id=PROFILE_ID, target=_target(),
+            capability="request.replay", authority=_authority(),
+        ) as credential:
+            retained = credential
+            material = credential.query_parameter()
+            assert material.name == "access_key"
+            assert material.value == "top-secret-query"
+            assert "top-secret-query" not in repr(material)
+
+    asyncio.run(exercise())
+    assert retained is not None and retained._material == {}
 
 
 def test_private_key_file_is_mode_0600_then_zeroed_and_deleted(tmp_path, monkeypatch):

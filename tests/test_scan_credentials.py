@@ -80,6 +80,11 @@ def test_scan_admission_freezes_distinct_target_bound_principals_without_secrets
         ([_profile("a", slot="primary", capabilities=("request.replay",))], ["a"], "does not allow"),
         ([_profile("a", slot="primary", kind="oauth_password")], ["a"], "client ID"),
         (
+            [_profile("a", slot="primary", kind="query_parameter")],
+            ["a"],
+            "request replay executor",
+        ),
+        (
             [_profile("a", slot="primary"), _profile("b", slot="service")],
             ["a", "b"],
             "more than one primary",
