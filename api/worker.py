@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -112,6 +113,11 @@ from scan.worker_dispatch import (
     execution_result_metadata,
     is_deterministic_dast,
     prepare_worker_dispatch,
+)
+from scan.jobs import SCAN_JOB_SCHEMA
+from scan.job_runtime import (
+    CanonicalScanJobMaterializationError,
+    materialize_canonical_scan_job,
 )
 from runtime.pinned_http_replay import PinnedAiohttpReplayTransport
 from runtime.request_replay_executor import (
@@ -13883,6 +13889,86 @@ class ExecutionScopeError(RuntimeError):
     """Queued work no longer matches the control plane's durable scan scope."""
 
 
+def _safe_requeue_payload(job_data: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the original secret-free canonical envelope after materialization."""
+    canonical = job_data.get("_canonical_queue_payload")
+    if isinstance(canonical, Mapping):
+        return dict(canonical)
+    return dict(job_data)
+
+
+def _redis_scalar_text(value: Any) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value or "")
+
+
+async def _resolve_scan_job_target_addresses(target_url: str) -> tuple[str, ...]:
+    parsed = urllib.parse.urlsplit(str(target_url or ""))
+    hostname = str(parsed.hostname or "").strip().rstrip(".")
+    if parsed.scheme.lower() not in {"http", "https"} or not hostname:
+        raise CanonicalScanJobMaterializationError(
+            "persisted Scan target URL has no resolvable HTTP(S) host"
+        )
+    try:
+        return (str(ipaddress.ip_address(hostname)),)
+    except ValueError:
+        pass
+    port = int(parsed.port or (443 if parsed.scheme.lower() == "https" else 80))
+    try:
+        records = await asyncio.get_running_loop().getaddrinfo(
+            hostname, port, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP,
+        )
+    except OSError as exc:
+        raise CanonicalScanJobMaterializationError(
+            "runtime DNS resolution failed for scan-job/v2"
+        ) from exc
+    addresses: list[str] = []
+    for record in records:
+        try:
+            address = str(ipaddress.ip_address(str(record[4][0]).split("%", 1)[0]))
+        except (IndexError, ValueError):
+            continue
+        if address not in addresses:
+            addresses.append(address)
+        if len(addresses) >= 16:
+            break
+    if not addresses:
+        raise CanonicalScanJobMaterializationError(
+            "runtime DNS returned no usable address for scan-job/v2"
+        )
+    return tuple(addresses)
+
+
+async def _materialize_scan_job_v2(queue_payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Load private Scan inputs only after proving the canonical Redis envelope."""
+    scan_id = str(queue_payload.get("scan_id") or "").strip()
+    try:
+        scan_uuid = uuid.UUID(scan_id)
+    except ValueError as exc:
+        raise CanonicalScanJobMaterializationError(
+            "queued scan-job/v2 has an invalid Scan identity"
+        ) from exc
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT target_id, target_url, job_id, options, scan_generation,
+                   policy_json, budget_json, scan_job_payload, scan_job_digest
+            FROM scans
+            WHERE id=$1
+            """,
+            scan_uuid,
+        )
+    if not row:
+        raise CanonicalScanJobMaterializationError(
+            "queued scan-job/v2 has no durable Scan record"
+        )
+    addresses = await _resolve_scan_job_target_addresses(str(row["target_url"] or ""))
+    return materialize_canonical_scan_job(
+        queue_payload, row, resolved_addresses=addresses,
+    )
+
+
 def _execution_target_key(value: Any) -> str:
     raw = str(value or "").strip()
     try:
@@ -13902,6 +13988,17 @@ def _execution_target_key(value: Any) -> str:
     authority = host_authority if port in {None, default_port} else f"{host_authority}:{port}"
     path = parsed.path or "/"
     return urllib.parse.urlunsplit((parsed.scheme.lower(), authority, path, parsed.query, ""))
+
+
+def _execution_target_authority(value: Any, *, default_scheme: str = "https") -> tuple[str, int] | None:
+    raw = str(value or "").strip()
+    parsed = urllib.parse.urlsplit(raw if "://" in raw else f"{default_scheme}://{raw}")
+    try:
+        host = str(parsed.hostname or "").lower().rstrip(".")
+        port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+    except ValueError:
+        return None
+    return (host, int(port)) if host else None
 
 
 async def _revalidate_job_execution_scope(job_data: dict[str, Any]) -> bool:
@@ -13939,7 +14036,14 @@ async def _revalidate_job_execution_scope(job_data: dict[str, Any]) -> bool:
     if durable_target and not queued_target:
         raise ExecutionScopeError("queued work is missing its durable scan target")
     if queued_target and _execution_target_key(queued_target) != _execution_target_key(durable_target):
-        raise ExecutionScopeError("queued target does not match the durable scan target")
+        options = job_data.get("options") if isinstance(job_data.get("options"), Mapping) else {}
+        inferred_match = bool(
+            options.get("target_scheme_inferred")
+            and _execution_target_authority(queued_target)
+            == _execution_target_authority(durable_target)
+        )
+        if not inferred_match:
+            raise ExecutionScopeError("queued target does not match the durable scan target")
     return True
 
 
@@ -14005,12 +14109,31 @@ async def _refuse_stale_job_if_needed(job_data: dict) -> bool:
     # half-finished deploy) do we fail closed. A bounce count alone would false-fail
     # a job that merely got picked up by stale workers a few times.
     now = time.time()
-    first_stale = float(job_data.get('first_stale_requeue_at') or 0) or now
-    attempts = int(job_data.get('stale_requeue_attempts') or 0) + 1
+    canonical_queue = isinstance(job_data.get("_canonical_queue_payload"), Mapping)
+    if canonical_queue:
+        redis_client = get_redis()
+        first_stale = float(_redis_scalar_text(
+            redis_client.hget(f"job:{job_id}", "first_stale_requeue_at")
+        ) or 0) or now
+        attempts = int(_redis_scalar_text(
+            redis_client.hget(f"job:{job_id}", "stale_requeue_attempts")
+        ) or 0) + 1
+    else:
+        first_stale = float(job_data.get('first_stale_requeue_at') or 0) or now
+        attempts = int(job_data.get('stale_requeue_attempts') or 0) + 1
     if (now - first_stale) < STALE_REQUEUE_FAIL_AFTER_SECONDS and attempts <= STALE_JOB_MAX_REQUEUE_HARD_CAP:
-        job_data['first_stale_requeue_at'] = first_stale
-        job_data['stale_requeue_attempts'] = attempts
-        enqueue_job(get_redis(), source_queue, job_data)
+        if canonical_queue:
+            get_redis().hset(
+                f"job:{job_id}",
+                mapping={
+                    "first_stale_requeue_at": first_stale,
+                    "stale_requeue_attempts": attempts,
+                },
+            )
+        else:
+            job_data['first_stale_requeue_at'] = first_stale
+            job_data['stale_requeue_attempts'] = attempts
+        enqueue_job(get_redis(), source_queue, _safe_requeue_payload(job_data))
         print(f"[{job_id[:8]}] REFUSED stale build (worker {worker_fp} != submit {expected_fp}); "
               f"requeued for a current worker (attempt {attempts}, {now - first_stale:.0f}s waiting)", flush=True)
         await asyncio.sleep(2)
@@ -16840,6 +16963,14 @@ async def process_canonical_network_capability_job(job_data: dict[str, Any]) -> 
 
 async def process_job(job_data: dict):
     """Route job to appropriate handler."""
+    if job_data.get("schema_version") == SCAN_JOB_SCHEMA:
+        canonical_payload = dict(job_data)
+        try:
+            job_data = await _materialize_scan_job_v2(canonical_payload)
+        except CanonicalScanJobMaterializationError as exc:
+            await _fail_execution_scope(canonical_payload, str(exc))
+            print(f"[scan-job/v2] refused queued work: {exc}", flush=True)
+            return
     if str(os.environ.get("SHAKERSCAN_NODE_ID") or "").strip():
         try:
             if not await _revalidate_job_execution_scope(job_data):
@@ -16854,7 +16985,7 @@ async def process_job(job_data: dict):
             job_data.get("_base_queue_name")
             or (RETEST_QUEUE_NAME if job_data.get('type') == 'finding_retest' else QUEUE_NAME)
         )
-        enqueue_job(get_redis(), source_queue, job_data)
+        enqueue_job(get_redis(), source_queue, _safe_requeue_payload(job_data))
         print("[fleet] node is draining or unavailable; requeued leased work", flush=True)
         await asyncio.sleep(1)
         return
@@ -16864,7 +16995,7 @@ async def process_job(job_data: dict):
             job_data.get("_base_queue_name")
             or (RETEST_QUEUE_NAME if job_data.get('type') == 'finding_retest' else QUEUE_NAME)
         )
-        enqueue_job(get_redis(), source_queue, job_data)
+        enqueue_job(get_redis(), source_queue, _safe_requeue_payload(job_data))
         print(
             f"[fleet] placement changed after lease; requeued for {placement}",
             flush=True,
@@ -16884,7 +17015,7 @@ async def process_job(job_data: dict):
             job_data.get("_base_queue_name")
             or (RETEST_QUEUE_NAME if job_data.get('type') == 'finding_retest' else QUEUE_NAME)
         )
-        enqueue_job(get_redis(), source_queue, job_data)
+        enqueue_job(get_redis(), source_queue, _safe_requeue_payload(job_data))
         print(f"[fleet] refused job on this node and requeued it: {exc}", flush=True)
         await asyncio.sleep(2)
         return

@@ -1783,6 +1783,33 @@ def test_canonical_submit_clears_legacy_mode_selectors_before_worker_admission()
 
     assert "request.options.quick = False" in submit
     assert "request.options.thorough = False" in submit
+    assert "CanonicalScanJob.create(" in submit
+    assert "scan_job_payload, scan_job_digest" in submit
+    assert "job_data = canonical_job_payload if canonical_queue else" in submit
+    assert "'queue_schema': canonical_job.schema_version" in submit
+
+
+def test_canonical_scan_target_binding_freezes_dns_and_both_inferred_origins(monkeypatch):
+    async def resolve(_url, *, subject):
+        assert subject == "Scan target"
+        return ["192.0.2.10"]
+
+    monkeypatch.setattr(api_module, "_resolve_runtime_target_addresses", resolve)
+    guard = asyncio.run(api_module._freeze_scan_target_binding(
+        target_id="00000000-0000-4000-8000-000000000001",
+        target_kind="web",
+        target_url="https://api.example.test:8443",
+        scope_receipt_id="scope-1",
+        scheme_inferred=True,
+    ))
+
+    assert guard["canonical_host"] == "api.example.test"
+    assert guard["allowed_origins"] == [
+        "http://api.example.test:8443",
+        "https://api.example.test:8443",
+    ]
+    assert guard["allowed_addresses"] == ["192.0.2.10"]
+    assert guard["scope_receipt_id"] == "scope-1"
 
 
 def test_scan_options_reject_crlf_in_auth_header():

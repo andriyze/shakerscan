@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
 import re
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 from uuid import uuid4
 
 try:
@@ -311,6 +311,47 @@ class RequestCollectionJobRef:
         raw = dict(value)
         _exact_keys(raw, _COLLECTION_KEYS, name="request collection reference")
         return cls(**raw)
+
+
+def admitted_request_collection_job_refs(
+    refs: Sequence[Mapping[str, Any]],
+) -> tuple[RequestCollectionJobRef, ...]:
+    """Reduce admitted collection metadata to opaque durable queue references.
+
+    A collection attached only by its collection identity has no durable selection
+    identity yet and remains discovery input in the persisted Scan options. Only a
+    saved target-bound selection may authorize worker replay through the canonical
+    queue contract.
+    """
+    result: list[RequestCollectionJobRef] = []
+    for raw in refs:
+        selection_id = str(raw.get("selection_id") or "").strip()
+        replay_mode = str(raw.get("replay_policy") or "").strip().lower()
+        if not selection_id or replay_mode not in _REPLAY_MODES:
+            continue
+        selector = raw.get("selector") if isinstance(raw.get("selector"), Mapping) else {}
+        raw_limit = selector.get("max_requests", selector.get("limit", 500))
+        try:
+            max_requests = int(raw_limit)
+        except (TypeError, ValueError) as exc:
+            raise CanonicalScanJobError(
+                "request collection selector max_requests is invalid"
+            ) from exc
+        result.append(RequestCollectionJobRef(
+            collection_id=str(raw.get("collection_id") or ""),
+            binding_id=str(raw.get("binding_id") or ""),
+            selection_id=selection_id,
+            replay_mode=replay_mode,
+            max_requests=max_requests,
+        ))
+    return tuple(result)
+
+
+def admitted_credential_profile_ids(
+    refs: Sequence[Mapping[str, Any]],
+) -> tuple[str, ...]:
+    """Return only immutable generic profile identities for a Scan queue job."""
+    return tuple(str(ref.get("profile_id") or "").strip() for ref in refs)
 
 
 @dataclass(frozen=True)

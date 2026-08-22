@@ -98,6 +98,8 @@ CREATE TABLE scans (
     worker_id TEXT,
     executing_node_id UUID,
     execution_context JSONB NOT NULL DEFAULT '{}'::jsonb,
+    scan_job_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    scan_job_digest TEXT,
 
     -- Status
     status TEXT NOT NULL DEFAULT 'pending',  -- pending, running, completed, failed

@@ -1057,7 +1057,9 @@ async def run_schema_migrations(pool) -> None:
                 ADD COLUMN IF NOT EXISTS budget_json JSONB NOT NULL DEFAULT '{}'::jsonb,
                 ADD COLUMN IF NOT EXISTS budget_used_json JSONB NOT NULL DEFAULT '{}'::jsonb,
                 ADD COLUMN IF NOT EXISTS coverage_status TEXT,
-                ADD COLUMN IF NOT EXISTS coverage_json JSONB NOT NULL DEFAULT '{}'::jsonb
+                ADD COLUMN IF NOT EXISTS coverage_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                ADD COLUMN IF NOT EXISTS scan_job_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+                ADD COLUMN IF NOT EXISTS scan_job_digest TEXT
             """)
             await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_scans_parent

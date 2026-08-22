@@ -436,6 +436,11 @@ try:
         ScanCollectionReplayContractError,
         scan_replay_authorization,
     )
+    from scan.jobs import (
+        CanonicalScanJob,
+        admitted_credential_profile_ids,
+        admitted_request_collection_job_refs,
+    )
 except ModuleNotFoundError:
     from api.scan.contracts import (
         SCAN_AUTHENTICATION_KEYS,
@@ -447,6 +452,11 @@ except ModuleNotFoundError:
         EXECUTABLE_REPLAY_POLICIES,
         ScanCollectionReplayContractError,
         scan_replay_authorization,
+    )
+    from api.scan.jobs import (
+        CanonicalScanJob,
+        admitted_credential_profile_ids,
+        admitted_request_collection_job_refs,
     )
 try:
     from hunt.capability_reservations import (
@@ -26944,17 +26954,60 @@ async def _freeze_scan_collection_target_binding(
             status_code=422,
             detail="request collection replay requires an exact origin binding",
         )
-    allowed_addresses = await _resolve_runtime_target_addresses(
-        target_url, subject="Scan request collection target",
-    )
     guard = dict(existing_guard or {})
+    guard["allowed_origins"] = allowed_origins
+    return await _freeze_scan_target_binding(
+        target_id=target_id,
+        target_kind=target_kind,
+        target_url=target_url,
+        scope_receipt_id=str(guard.get("scope_receipt_id") or "") or None,
+        scheme_inferred=False,
+        existing_guard=guard,
+        subject="Scan request collection target",
+    )
+
+
+async def _freeze_scan_target_binding(
+    *,
+    target_id: Any,
+    target_kind: str,
+    target_url: str,
+    scope_receipt_id: str | None,
+    scheme_inferred: bool,
+    existing_guard: Mapping[str, Any] | None = None,
+    subject: str = "Scan target",
+) -> dict[str, Any]:
+    """Freeze the target authority used by every canonical Scan queue job."""
+    parsed = urllib.parse.urlsplit(str(target_url or ""))
+    canonical_host = str(parsed.hostname or "").strip().lower().rstrip(".")
+    if parsed.scheme.lower() not in {"http", "https"} or not canonical_host:
+        raise HTTPException(status_code=422, detail=f"{subject} is not a valid HTTP(S) origin")
+    guard = dict(existing_guard or {})
+    allowed_origins: list[str] = []
+    for raw_origin in guard.get("allowed_origins") or ():
+        try:
+            origin = canonical_collection_origin(raw_origin)
+        except RequestCollectionContractError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if urllib.parse.urlsplit(origin).hostname != canonical_host:
+            raise HTTPException(
+                status_code=422, detail=f"{subject} binding contains another host"
+            )
+        if origin not in allowed_origins:
+            allowed_origins.append(origin)
+    schemes = ("http", "https") if scheme_inferred else (parsed.scheme.lower(),)
+    for scheme in schemes:
+        origin = canonical_collection_origin(f"{scheme}://{parsed.netloc}")
+        if origin not in allowed_origins:
+            allowed_origins.append(origin)
     roots = [
         str(item).strip().lower().rstrip(".")
         for item in guard.get("allowed_root_domains") or ()
         if str(item).strip()
-    ]
-    if not roots:
-        roots = [extract_root_domain(target_url) or canonical_host]
+    ] or [extract_root_domain(target_url) or canonical_host]
+    allowed_addresses = await _resolve_runtime_target_addresses(
+        target_url, subject=subject,
+    )
     guard.update({
         "target_id": str(target_id),
         "target_kind": str(target_kind or "web").strip().lower(),
@@ -26963,6 +27016,7 @@ async def _freeze_scan_collection_target_binding(
         "allowed_addresses": allowed_addresses,
         "allowed_root_domains": roots,
         "environment": str(guard.get("environment") or "unknown"),
+        "scope_receipt_id": scope_receipt_id,
         "requires_runtime_destination_check": True,
         "requires_runtime_dns_check": True,
         "address_binding_source": "submission_dns_snapshot",
@@ -27846,6 +27900,39 @@ async def submit_scan(request: ScanRequest):
                 "request_collection_exact_replay_requires_single_scan_owner"
             )
 
+        # Every V2 Scan persists one immutable target-bound job envelope even
+        # while parallel/fleet transport is migrated in the next bounded step.
+        options_payload["runtime_scope_guard"] = await _freeze_scan_target_binding(
+            target_id=target_id,
+            target_kind=request.target_kind,
+            target_url=normalized_target,
+            scope_receipt_id=scan_contract.policy.scope_receipt_id,
+            scheme_inferred=scheme_inferred,
+            existing_guard=options_payload.get("runtime_scope_guard"),
+        )
+        target_guard = options_payload["runtime_scope_guard"]
+        canonical_job = CanonicalScanJob.create(
+            job_id=job_id,
+            scan_id=scan_id,
+            target=TargetBinding(
+                target_id=str(target_id),
+                target_kind=request.target_kind,
+                canonical_host=target_guard.get("canonical_host"),
+                allowed_origins=tuple(target_guard.get("allowed_origins") or ()),
+                allowed_addresses=tuple(target_guard.get("allowed_addresses") or ()),
+                allowed_root_domains=tuple(target_guard.get("allowed_root_domains") or ()),
+                environment=str(target_guard.get("environment") or "unknown"),
+                scope_receipt_id=scan_contract.policy.scope_receipt_id,
+            ),
+            execution_plan=scan_contract.execution_plan,
+            request_collections=admitted_request_collection_job_refs(collection_refs),
+            credential_profile_ids=admitted_credential_profile_ids(credential_refs),
+        )
+        canonical_job_payload = canonical_job.payload()
+        persisted_options = _attach_target_note(
+            options_payload, request.target, target_note, scheme_inferred,
+        )
+
         # Parallel scans become a parent row; the scan_plan job fans out shards.
         scan_role = 'parent' if parallel_enabled else 'standalone'
 
@@ -27853,13 +27940,16 @@ async def submit_scan(request: ScanRequest):
         await conn.execute("""
             INSERT INTO scans (
                 id, target_id, target_url, job_id, status, options, scan_type, scan_role,
-                scan_generation, policy_json, budget_json, coverage_status, coverage_json
-            ) VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, 'v2', $8, $9, 'pending', $10)
+                scan_generation, policy_json, budget_json, coverage_status, coverage_json,
+                scan_job_payload, scan_job_digest
+            ) VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, 'v2', $8, $9, 'pending', $10,
+                      $11, $12)
         """, uuid.UUID(scan_id), target_id, normalized_target, job_id,
-             json.dumps(_attach_target_note(options_payload, request.target, target_note, scheme_inferred)),
+             json.dumps(persisted_options),
              public_scan_type, scan_role, json.dumps(options_payload.get("scan_policy") or {}),
              json.dumps(options_payload.get("resolved_scan_budget") or {}),
-             json.dumps({"status": "pending", "reasons": []}))
+             json.dumps({"status": "pending", "reasons": []}),
+             json.dumps(canonical_job_payload), canonical_job.payload_digest)
         command_result = await _record_command_result(
             conn,
             command="scan.submit",
@@ -27886,11 +27976,14 @@ async def submit_scan(request: ScanRequest):
         )
 
     # Queue the job
-    job_data = {
+    canonical_queue = bool(
+        not parallel_enabled and not normalize_placement(options_payload.get("placement") or {})
+    )
+    job_data = canonical_job_payload if canonical_queue else {
         'job_id': job_id,
         'scan_id': scan_id,
         'target': scan_target,
-        'options': _attach_target_note(options_payload, request.target, target_note, scheme_inferred),
+        'options': persisted_options,
         'submitted_at': utc_now_iso()
     }
     # Parallel scans are routed to the plan stage, which decomposes the parent
@@ -27929,6 +28022,7 @@ async def submit_scan(request: ScanRequest):
         'target': normalized_target,
         'scan_type': public_scan_type,
         'scan_generation': 'v2',
+        'queue_schema': canonical_job.schema_version if canonical_queue else 'legacy-transport',
         'policy': options_payload.get('scan_policy'),
         'budget': options_payload.get('resolved_scan_budget'),
         'budget_profile': scan_contract.budget_profile,

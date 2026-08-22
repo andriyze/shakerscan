@@ -117,3 +117,17 @@ def test_primary_worker_owns_v2_admission_without_a_monkeypatch_wrapper():
     assert not (root / "api" / "worker_v2.py").exists()
     entrypoint = (root / "scanner" / "entrypoint.sh").read_text()
     assert "/app/worker_v2.py" not in entrypoint
+
+
+def test_primary_worker_materializes_scan_job_v2_before_scope_and_freshness_checks():
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "api" / "worker.py").read_text()
+    start = source.index("async def process_job(")
+    end = source.index("\n\ndef _mark_worker_processing_lease", start)
+    handler = source[start:end]
+
+    materialize = handler.index("_materialize_scan_job_v2")
+    scope = handler.index("_revalidate_job_execution_scope")
+    freshness = handler.index("_refuse_stale_job_if_needed")
+    assert materialize < scope < freshness
+    assert handler.count("_safe_requeue_payload(job_data)") == 3

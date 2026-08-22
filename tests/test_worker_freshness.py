@@ -104,6 +104,41 @@ def test_stale_worker_refuses_and_requeues(monkeypatch):
     assert job["stale_requeue_attempts"] == 1
 
 
+def test_stale_worker_requeues_original_canonical_envelope_without_private_options(monkeypatch):
+    monkeypatch.setattr(worker, "_worker_build_fingerprint", lambda: "STALE_DIFFERENT")
+    pushed = []
+    state = {}
+
+    class _FakeRedis:
+        def rpush(self, queue, payload):
+            pushed.append((queue, json.loads(payload)))
+
+        def hget(self, _key, field):
+            return state.get(field)
+
+        def hset(self, _key, mapping):
+            state.update(mapping)
+
+    canonical = {
+        "schema_version": "scan-job/v2",
+        "job_id": "j1",
+        "scan_id": "scan-1",
+        "target": {"canonical_host": "example.test"},
+    }
+    job = _job(
+        CURRENT_FP,
+        _canonical_queue_payload=canonical,
+        authentication={"auth_header": "Bearer worker-only-secret"},
+    )
+    job["options"]["authentication"] = job.pop("authentication")
+    monkeypatch.setattr(worker, "get_redis", lambda: _FakeRedis())
+
+    assert _run(worker._refuse_stale_job_if_needed(job)) is True
+    assert pushed == [(worker.QUEUE_NAME, canonical)]
+    assert "options" not in pushed[0][1]
+    assert state["stale_requeue_attempts"] == 1
+
+
 def test_unknown_fingerprint_fails_closed(monkeypatch):
     # A worker that cannot fingerprint itself is NOT provably current -> must refuse
     # (this was a fail-OPEN bug: unknown was treated as safe-to-run).
