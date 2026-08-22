@@ -22,6 +22,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,114 @@ class BrokerHTTPError(BrokerWorkerError):
     def __init__(self, status_code: int, detail: str = "") -> None:
         self.status_code = int(status_code)
         super().__init__(f"broker returned HTTP {self.status_code}: {detail[:300]}")
+
+
+_SCAN_RUNTIME_BUDGET_DIMENSIONS = frozenset({
+    "http_requests",
+    "state_changing_requests",
+    "browser_actions",
+    "tcp_ports_attempted",
+    "hosts_attempted",
+    "tool_wall_seconds",
+})
+
+
+def _broker_scan_runtime_budget(
+    job: dict[str, Any], lease: dict[str, Any],
+) -> dict[str, int] | None:
+    """Validate the control-plane hold before a canonical broker Scan starts."""
+    options = job.get("options") if isinstance(job.get("options"), dict) else {}
+    plan_digest = str(options.get("scan_execution_plan_digest") or "").lower()
+    raw = lease.get("scan_execution")
+    if not plan_digest:
+        if raw is not None:
+            raise BrokerWorkerError(
+                "non-canonical broker job carried Scan execution authority"
+            )
+        return None
+    if not isinstance(raw, dict):
+        raise BrokerWorkerError(
+            "canonical broker Scan is missing durable execution authority"
+        )
+    if (
+        raw.get("schema_version")
+        != "broker-scan-execution-reservation/v1"
+        or raw.get("action_id") != "deterministic_scan.execute"
+        or str(raw.get("execution_plan_digest") or "").lower() != plan_digest
+    ):
+        raise BrokerWorkerError("broker Scan execution authority is invalid")
+    for name in ("reservation_id",):
+        try:
+            uuid.UUID(str(raw.get(name) or ""))
+        except ValueError as exc:
+            raise BrokerWorkerError(
+                f"broker Scan execution {name} is invalid"
+            ) from exc
+    for name in ("action_digest", "target_binding_digest"):
+        value = str(raw.get(name) or "").lower()
+        if len(value) != 64 or any(ch not in "0123456789abcdef" for ch in value):
+            raise BrokerWorkerError(
+                f"broker Scan execution {name} is invalid"
+            )
+    target_binding = options.get("_canonical_target_binding")
+    if not isinstance(target_binding, dict):
+        raise BrokerWorkerError(
+            "canonical broker Scan target binding is unavailable"
+        )
+    target_digest = hashlib.sha256(json.dumps(
+        target_binding,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")).hexdigest()
+    if target_digest != str(raw.get("target_binding_digest") or "").lower():
+        raise BrokerWorkerError(
+            "broker Scan execution target binding does not match the job"
+        )
+    runtime = raw.get("runtime_budget")
+    requested = raw.get("requested_budget")
+    if (
+        not isinstance(runtime, dict)
+        or set(runtime) != _SCAN_RUNTIME_BUDGET_DIMENSIONS
+        or not isinstance(requested, dict)
+        or not set(requested).issubset(_SCAN_RUNTIME_BUDGET_DIMENSIONS)
+    ):
+        raise BrokerWorkerError("broker Scan execution budget is invalid")
+    normalized: dict[str, int] = {}
+    normalized_requested: dict[str, int] = {}
+    for name, amount in runtime.items():
+        if isinstance(amount, bool) or not isinstance(amount, int) or amount < 0:
+            raise BrokerWorkerError(
+                f"broker Scan runtime budget {name} is invalid"
+            )
+        normalized[name] = amount
+    for name, amount in requested.items():
+        if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
+            raise BrokerWorkerError(
+                f"broker Scan requested budget {name} is invalid"
+            )
+        normalized_requested[name] = amount
+    expected_requested = {
+        name: amount
+        for name, amount in normalized.items()
+        if amount > 0 and name != "tcp_ports_attempted"
+    }
+    if normalized_requested != expected_requested:
+        raise BrokerWorkerError(
+            "broker Scan runtime budget does not match its durable hold"
+        )
+    if any(
+        normalized[name] <= 0
+        for name in ("http_requests", "hosts_attempted", "tool_wall_seconds")
+    ):
+        raise BrokerWorkerError(
+            "broker Scan durable hold lacks mandatory execution capacity"
+        )
+    if normalized["state_changing_requests"] > normalized["http_requests"]:
+        raise BrokerWorkerError(
+            "broker Scan mutation budget exceeds HTTP authority"
+        )
+    return normalized
 
 
 def _heartbeat_failure_is_terminal(exc: Exception) -> bool:
@@ -304,6 +413,7 @@ async def execute_lease(state: dict[str, Any], lease: dict[str, Any]) -> None:
     job_id = str(job.get("job_id") or "").strip()
     if not target or not scan_id or not job_id:
         raise BrokerWorkerError("broker lease is missing executable scan fields")
+    canonical_runtime_budget = _broker_scan_runtime_budget(job, lease)
     node_id = str(state["node_id"])
     lease_id = str(lease.get("lease_id") or "")
     lease_token = str(lease.get("lease_token") or "")
@@ -355,6 +465,7 @@ async def execute_lease(state: dict[str, Any], lease: dict[str, Any]) -> None:
                 scan_id=scan_id,
                 job_id=job_id,
                 progress_callback=progress_callback,
+                canonical_runtime_budget=canonical_runtime_budget,
                 # Broker workers have no PostgreSQL connection by design.
                 # scanner.py still writes the local checkpoint, and this
                 # runtime uploads it through the lease-scoped HTTPS endpoint

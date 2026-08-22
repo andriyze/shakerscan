@@ -131,6 +131,7 @@ def prepare_scan_process_capability(
     ledger_limits: Mapping[str, int],
     consumed: Mapping[str, int],
     allow_state_changing_http: bool,
+    allocation_limits: Mapping[str, int] | None = None,
 ) -> tuple[PreparedExecution, dict[str, int]]:
     """Bind the deterministic scanner to the exact remaining durable hold.
 
@@ -144,6 +145,18 @@ def prepare_scan_process_capability(
         name: max(0, amount - used.get(name, 0))
         for name, amount in limits.items()
     }
+    for raw_name, raw_amount in dict(allocation_limits or {}).items():
+        name = str(raw_name or "").strip()
+        if name not in remaining:
+            raise ScanCapabilityContractError(
+                f"unknown Scan process allocation dimension: {name}"
+            )
+        amount = int(raw_amount)
+        if amount < 0:
+            raise ScanCapabilityContractError(
+                f"Scan process allocation must be non-negative: {name}"
+            )
+        remaining[name] = min(remaining[name], amount)
     runtime_budget = {
         "http_requests": remaining.get("http_requests", 0),
         "state_changing_requests": (

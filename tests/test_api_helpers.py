@@ -1012,6 +1012,7 @@ def test_broker_execution_projection_keeps_worker_inputs_but_drops_queue_transpo
 
 def test_broker_canonical_queue_retries_never_serialize_materialized_options():
     lease_source = inspect.getsource(api_module.lease_broker_job)
+    heartbeat_source = inspect.getsource(api_module.heartbeat_broker_job)
     result_source = inspect.getsource(api_module.submit_broker_job_result)
 
     assert "queued_payload = copy.deepcopy(payload)" in lease_source
@@ -1022,6 +1023,13 @@ def test_broker_canonical_queue_retries_never_serialize_materialized_options():
     assert "job_payload, revalidate_dns=False" in result_source
     assert result_source.index("_broker_execution_projection(materialized)") < result_source.index(
         'job_payload["_broker_result_id"]'
+    )
+    assert lease_source.index("await reserve_broker_scan_execution(") < lease_source.index(
+        "return JSONResponse("
+    )
+    assert "await heartbeat_broker_scan_execution(" in heartbeat_source
+    assert result_source.index("await settle_broker_scan_execution(") < result_source.index(
+        "INSERT INTO broker_job_results"
     )
 
 

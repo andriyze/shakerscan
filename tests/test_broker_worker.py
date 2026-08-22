@@ -21,6 +21,73 @@ sys.path.pop(0)
 NODE_ID = "11111111-1111-4111-8111-111111111111"
 
 
+def _canonical_broker_scan_lease():
+    target_binding = {
+        "target_id": "target-1",
+        "target_kind": "web",
+        "canonical_host": "app.example.test",
+        "allowed_origins": ["https://app.example.test"],
+        "allowed_addresses": ["192.0.2.10"],
+        "allowed_root_domains": ["example.test"],
+        "environment": "unknown",
+        "scope_receipt_id": "scope-1",
+    }
+    target_digest = broker_worker.hashlib.sha256(json.dumps(
+        target_binding, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ).encode()).hexdigest()
+    runtime = {
+        "http_requests": 20,
+        "state_changing_requests": 0,
+        "browser_actions": 4,
+        "tcp_ports_attempted": 0,
+        "hosts_attempted": 10,
+        "tool_wall_seconds": 30,
+    }
+    job = {
+        "options": {
+            "scan_execution_plan_digest": "a" * 64,
+            "_canonical_target_binding": target_binding,
+        },
+    }
+    lease = {
+        "scan_execution": {
+            "schema_version": "broker-scan-execution-reservation/v1",
+            "reservation_id": "22222222-2222-4222-8222-222222222222",
+            "action_id": "deterministic_scan.execute",
+            "action_digest": "b" * 64,
+            "execution_plan_digest": "a" * 64,
+            "target_binding_digest": target_digest,
+            "runtime_budget": runtime,
+            "requested_budget": {
+                name: amount
+                for name, amount in runtime.items()
+                if amount > 0 and name != "tcp_ports_attempted"
+            },
+        },
+    }
+    return job, lease, runtime
+
+
+def test_broker_scan_requires_and_validates_durable_runtime_hold():
+    job, lease, runtime = _canonical_broker_scan_lease()
+
+    assert broker_worker._broker_scan_runtime_budget(job, lease) == runtime
+
+    with pytest.raises(broker_worker.BrokerWorkerError, match="missing durable"):
+        broker_worker._broker_scan_runtime_budget(job, {})
+
+    changed = json.loads(json.dumps(lease))
+    changed["scan_execution"]["runtime_budget"]["http_requests"] = 21
+    with pytest.raises(broker_worker.BrokerWorkerError, match="does not match"):
+        broker_worker._broker_scan_runtime_budget(job, changed)
+
+
+def test_noncanonical_broker_job_rejects_injected_scan_authority():
+    _job, lease, _runtime = _canonical_broker_scan_lease()
+    with pytest.raises(broker_worker.BrokerWorkerError, match="non-canonical"):
+        broker_worker._broker_scan_runtime_budget({"options": {}}, lease)
+
+
 def test_broker_state_requires_owner_only_https_but_not_data_store_credentials(tmp_path):
     state_path = tmp_path / "state.json"
     state_path.write_text(json.dumps({

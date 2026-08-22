@@ -447,6 +447,17 @@ try:
         CanonicalScanJobMaterializationError,
         materialize_canonical_scan_job,
     )
+    from scan.worker_dispatch import (
+        is_deterministic_dast,
+        prepare_worker_dispatch,
+    )
+    from scan.executor import build_native_scan_execution
+    from scan.broker_execution import (
+        BrokerScanExecutionError,
+        heartbeat_broker_scan_execution,
+        reserve_broker_scan_execution,
+        settle_broker_scan_execution,
+    )
 except ModuleNotFoundError:
     from api.scan.contracts import (
         SCAN_AUTHENTICATION_KEYS,
@@ -469,6 +480,17 @@ except ModuleNotFoundError:
     from api.scan.job_runtime import (
         CanonicalScanJobMaterializationError,
         materialize_canonical_scan_job,
+    )
+    from api.scan.worker_dispatch import (
+        is_deterministic_dast,
+        prepare_worker_dispatch,
+    )
+    from api.scan.executor import build_native_scan_execution
+    from api.scan.broker_execution import (
+        BrokerScanExecutionError,
+        heartbeat_broker_scan_execution,
+        reserve_broker_scan_execution,
+        settle_broker_scan_execution,
     )
 try:
     from hunt.capability_reservations import (
@@ -10412,14 +10434,58 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
         pass
     expires_at = utc_now() + timedelta(seconds=BROKER_LEASE_SECONDS)
     budget_reservation: dict[str, Any] | None = None
+    durable_scan_execution: dict[str, Any] | None = None
+    durable_scan_terminal = None
     row = None
     if canonical_materialized is not None:
         payload = _broker_execution_projection(canonical_materialized)
-    async with db_pool.acquire() as conn:
+    async with db_pool.acquire() as conn, conn.transaction():
         payload = await _hydrate_broker_job_options(conn, payload)
         budget_reservation = await _broker_reserve_request_budget(conn, redis_client, payload)
         if budget_reservation is None:
             await _mark_broker_budget_wait(conn, payload)
+        if (
+            budget_reservation is not None
+            and canonical_materialized is not None
+            and is_deterministic_dast(payload.get("options"))
+        ):
+            normalized_options, scan_admission = prepare_worker_dispatch(
+                payload.get("options") or {}
+            )
+            if not scan_admission.canonical or scan_admission.plan is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="broker Scan lost canonical execution authority",
+                )
+            native_execution = build_native_scan_execution(
+                scan_admission.plan, normalized_options,
+            )
+            granted_requests = max(
+                0, int(budget_reservation.get("granted") or 0),
+            )
+            try:
+                durable_admission = await reserve_broker_scan_execution(
+                    conn,
+                    scan_id=str(payload.get("scan_id") or ""),
+                    plan=scan_admission.plan,
+                    execution=native_execution,
+                    worker_id=f"broker:{body.worker_id}",
+                    lease_seconds=BROKER_LEASE_SECONDS,
+                    allocation_limits={
+                        "http_requests": granted_requests,
+                        "state_changing_requests": granted_requests,
+                    },
+                )
+            except BrokerScanExecutionError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            if durable_admission.lease is None:
+                durable_scan_terminal = durable_admission.stored
+                budget_reservation = None
+            else:
+                durable_scan_execution = durable_admission.lease.remote_payload()
+                budget_reservation["durable_scan_execution"] = (
+                    durable_admission.lease.storage_payload()
+                )
         if budget_reservation is not None:
             await conn.execute(
                 """
@@ -10512,6 +10578,83 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
             )
     if budget_reservation is None:
         _broker_release_slot(redis_client, slot_id)
+        if durable_scan_terminal is not None:
+            if durable_scan_terminal.record.status == "committed" and scan_id:
+                async with db_pool.acquire() as conn:
+                    prior_result = await conn.fetchrow(
+                        """
+                        SELECT l.id AS lease_id, l.budget_reservation,
+                               r.id AS result_id
+                        FROM broker_job_leases l
+                        JOIN broker_job_results r ON r.lease_id=l.id
+                        WHERE l.scan_id=$1
+                          AND l.status IN ('submitted','ingesting','completed','failed')
+                        ORDER BY r.submitted_at DESC
+                        LIMIT 1
+                        """,
+                        scan_id,
+                    )
+                if prior_result:
+                    ingest_payload = copy.deepcopy(queued_payload)
+                    if ingest_payload.get("schema_version") == SCAN_JOB_SCHEMA:
+                        materialized = await _materialize_control_plane_scan_job_v2(
+                            ingest_payload, revalidate_dns=False,
+                        )
+                        ingest_payload = _broker_execution_projection(materialized)
+                    ingest_payload["_broker_result_id"] = str(prior_result["result_id"])
+                    ingest_payload["_broker_lease_id"] = str(prior_result["lease_id"])
+                    ingest_payload = _control_plane_broker_ingest_payload(
+                        ingest_payload
+                    )
+                    prior_rate = parse_json_field(
+                        prior_result.get("budget_reservation")
+                    ) or {}
+                    if isinstance(prior_rate, dict) and prior_rate:
+                        ingest_options = dict(ingest_payload.get("options") or {})
+                        ingest_options["request_budget_mode"] = str(
+                            prior_rate.get("request_budget_mode") or "enforce"
+                        )
+                        ingest_options["custom_budget"] = dict(
+                            prior_rate.get("custom_budget") or {}
+                        )
+                        ingest_options["request_budget_reserved"] = max(
+                            0, int(prior_rate.get("granted") or 0),
+                        )
+                        if prior_rate.get("root_domain"):
+                            ingest_options["request_budget_domain"] = str(
+                                prior_rate["root_domain"]
+                            )
+                        ingest_payload["options"] = ingest_options
+                        ingest_payload["domain_rate_reserved"] = max(
+                            0, int(prior_rate.get("granted") or 0),
+                        )
+                    enqueue_job(
+                        redis_client, BROKER_INGEST_QUEUE_NAME, ingest_payload,
+                    )
+                    async with db_pool.acquire() as conn:
+                        await conn.execute(
+                            "UPDATE broker_job_leases "
+                            "SET ingest_enqueued_at=COALESCE(ingest_enqueued_at, NOW()) "
+                            "WHERE id=$1",
+                            prior_result["lease_id"],
+                        )
+            if durable_scan_terminal.record.status != "committed" and scan_id:
+                async with db_pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        UPDATE scans
+                        SET status='failed', progress=100,
+                            current_phase='budget_reservation_failed',
+                            error_message='deterministic Scan budget reservation failed',
+                            completed_at=NOW()
+                        WHERE id=$1 AND status IN ('pending','queued','running')
+                        """,
+                        scan_id,
+                    )
+            await asyncio.to_thread(
+                acknowledge_lease, redis_client, lease,
+            )
+            return Response(status_code=204)
         enqueue_job(
             redis_client,
             str(queued_payload.get("_base_queue_name") or QUEUE_NAME),
@@ -10543,6 +10686,7 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
             "lease_expires_at": expires_at.isoformat(),
             "heartbeat_interval_seconds": max(10, BROKER_LEASE_SECONDS // 3),
             "job": payload,
+            "scan_execution": durable_scan_execution,
         },
         headers={"Cache-Control": "no-store"},
     )
@@ -10610,7 +10754,28 @@ async def heartbeat_broker_job(
             )
         raise HTTPException(status_code=409, detail="broker queue lease ownership was lost")
     expires_at = utc_now() + timedelta(seconds=BROKER_LEASE_SECONDS)
-    async with db_pool.acquire() as conn:
+    async with db_pool.acquire() as conn, conn.transaction():
+        row = await _broker_lease_row(
+            conn,
+            node_id=node_id,
+            lease_id=lease_id,
+            lease_token=body.lease_token,
+            for_update=True,
+        )
+        reservation = parse_json_field(row.get("budget_reservation")) or {}
+        durable_execution = (
+            reservation.get("durable_scan_execution")
+            if isinstance(reservation, dict) else None
+        )
+        if isinstance(durable_execution, Mapping):
+            try:
+                await heartbeat_broker_scan_execution(
+                    conn,
+                    metadata=durable_execution,
+                    lease_seconds=BROKER_LEASE_SECONDS,
+                )
+            except BrokerScanExecutionError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
         scan_status = None
         if row.get("scan_id"):
             scan_status = await conn.fetchval("SELECT status FROM scans WHERE id=$1", row["scan_id"])
@@ -10682,10 +10847,7 @@ async def submit_broker_job_result(
     request: Request,
 ):
     await _broker_authenticated_node(node_id, request)
-    encoded = json.dumps(body.result, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    if len(encoded) > BROKER_MAX_RESULT_BYTES:
-        raise HTTPException(status_code=413, detail="broker result exceeds configured size limit")
-    result_hash = hashlib.sha256(encoded).hexdigest()
+    result_payload = copy.deepcopy(body.result)
     async with db_pool.acquire() as conn:
         async with conn.transaction():
             row = await _broker_lease_row(
@@ -10697,6 +10859,54 @@ async def submit_broker_job_result(
             )
             if str(row["status"]) not in {"leased", "submitted", "ingesting", "completed", "failed", "cancelled"}:
                 raise HTTPException(status_code=409, detail=f"broker lease is {row['status']}")
+            if (
+                str(row["status"]) == "leased"
+                and row.get("lease_expires_at") is not None
+                and row["lease_expires_at"] < utc_now()
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="broker lease expired before result submission",
+                )
+            if row.get("scan_id") and str(result_payload.get("scan_id") or "") != str(row["scan_id"]):
+                raise HTTPException(
+                    status_code=409,
+                    detail="broker result does not match its Scan lease",
+                )
+            if row.get("job_id") and str(result_payload.get("job_id") or "") != str(row["job_id"]):
+                raise HTTPException(
+                    status_code=409,
+                    detail="broker result does not match its job lease",
+                )
+            reservation = parse_json_field(row.get("budget_reservation")) or {}
+            durable_execution = (
+                reservation.get("durable_scan_execution")
+                if isinstance(reservation, dict) else None
+            )
+            if isinstance(durable_execution, Mapping):
+                try:
+                    _settled, execution_summary = (
+                        await settle_broker_scan_execution(
+                            conn,
+                            metadata=durable_execution,
+                            result=result_payload,
+                        )
+                    )
+                except BrokerScanExecutionError as exc:
+                    raise HTTPException(status_code=409, detail=str(exc)) from exc
+                # This field is part of the immutable result hash. Keep it
+                # stable when the same result is submitted again.
+                execution_summary["idempotent_redelivery"] = False
+                result_payload["deterministic_scan_execution"] = execution_summary
+            encoded = json.dumps(
+                result_payload, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+            if len(encoded) > BROKER_MAX_RESULT_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail="broker result exceeds configured size limit",
+                )
+            result_hash = hashlib.sha256(encoded).hexdigest()
             result_row = await conn.fetchrow(
                 """
                 INSERT INTO broker_job_results (lease_id, result_sha256, result)
