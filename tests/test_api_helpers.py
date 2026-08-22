@@ -228,6 +228,175 @@ install_fastapi_exception_stubs()
 import api as api_module  # noqa: E402
 
 
+class _BodyRequest:
+    def __init__(self, payload: bytes):
+        self._payload = payload
+
+    async def body(self):
+        return self._payload
+
+
+def _hunt_v2_payload():
+    return {
+        "schema_version": "hunt-start/v2",
+        "target_id": "target-1",
+        "target_kind": "web",
+        "goal": "Inspect the target",
+        "policy": {
+            "active_testing": False,
+            "network_discovery": False,
+            "allow_state_changing_http": False,
+            "authorization_confirmed": False,
+        },
+    }
+
+
+def test_primary_api_parses_typed_native_hunt_start(monkeypatch):
+    monkeypatch.delenv("SHAKERSCAN_ALLOW_LEGACY_HUNT_STARTS", raising=False)
+
+    parsed = asyncio.run(api_module._parse_hunt_start_body(
+        _BodyRequest(json.dumps(_hunt_v2_payload()).encode())
+    ))
+
+    assert isinstance(parsed, api_module.HuntStartV2Request)
+    contract = api_module.normalize_hunt_start_payload(
+        parsed.model_dump(mode="python", exclude_none=True)
+    )
+    assert contract.schema_version == "hunt-start/v2"
+    assert contract.target_kind == "web"
+
+
+def test_primary_api_preserves_policy_profile_alias_when_budget_profile_is_omitted():
+    payload = _hunt_v2_payload()
+    payload["policy_profile"] = "thorough"
+
+    parsed = asyncio.run(api_module._parse_hunt_start_body(
+        _BodyRequest(json.dumps(payload).encode())
+    ))
+    contract = api_module.normalize_hunt_start_payload(
+        parsed.model_dump(mode="python", exclude_none=True)
+    )
+
+    assert contract.budget_profile == "thorough"
+
+
+def test_primary_api_documents_the_native_hunt_request_and_response_models():
+    source = (Path(__file__).resolve().parents[1] / "api" / "api.py").read_text()
+    decorator = source[source.index('@app.post(\n    "/hunts",'):]
+    decorator = decorator[:decorator.index("\nasync def start_hunt(")]
+
+    assert "response_model=HuntStartV2Response" in decorator
+    assert '"schema": HuntStartV2Request.model_json_schema()' in decorator
+
+
+def test_primary_api_rejects_legacy_hunt_start_without_migration_flag(monkeypatch):
+    monkeypatch.delenv("SHAKERSCAN_ALLOW_LEGACY_HUNT_STARTS", raising=False)
+    body = json.dumps({"target_id": "target-1"}).encode()
+
+    with pytest.raises(api_module.HTTPException) as exc:
+        asyncio.run(api_module._parse_hunt_start_body(_BodyRequest(body)))
+
+    assert exc.value.status_code == 422
+    assert exc.value.detail["error"] == "explicit_v2_policy_required"
+
+
+def test_primary_api_allows_legacy_hunt_start_only_in_migration_mode(monkeypatch):
+    monkeypatch.setenv("SHAKERSCAN_ALLOW_LEGACY_HUNT_STARTS", "true")
+    body = json.dumps({"target_id": "target-1"}).encode()
+
+    parsed = asyncio.run(api_module._parse_hunt_start_body(_BodyRequest(body)))
+
+    assert isinstance(parsed, api_module.LegacyHuntStartRequest)
+
+
+def test_primary_api_rejects_oversized_hunt_body_before_json_parsing():
+    with pytest.raises(api_module.HTTPException) as exc:
+        asyncio.run(api_module._parse_hunt_start_body(
+            _BodyRequest(b"x" * (api_module.MAX_HUNT_BODY_BYTES + 1))
+        ))
+
+    assert exc.value.status_code == 413
+
+
+def test_native_hunt_start_persists_exact_contract_and_capability_allowlist(monkeypatch):
+    captured: dict[str, object] = {}
+    target_id = uuid.uuid4()
+
+    class Connection:
+        async def fetchrow(self, query, *args):
+            if "FROM targets" in query:
+                return {
+                    "id": target_id,
+                    "url": "https://example.test",
+                    "name": "Example",
+                    "root_domain": "example.test",
+                    "metadata_json": {"environment": "test"},
+                    "is_active": True,
+                }
+            if "FROM device_targets" in query:
+                return None
+            assert "INSERT INTO hunt_runs" in query
+            captured["args"] = args
+            return {
+                "id": uuid.uuid4(),
+                "target_kind": args[0],
+                "target_id": args[1],
+                "device_target_id": args[2],
+                "objective": args[3],
+                "status": "active",
+                "budget_profile": args[4],
+                "policy_json": args[5],
+                "budget_json": args[6],
+                "budget_used_json": args[7],
+                "context_pack": args[8],
+            }
+
+    connection = Connection()
+
+    class Acquire:
+        async def __aenter__(self):
+            return connection
+
+        async def __aexit__(self, *_args):
+            return False
+
+    async def no_approval_required(*_args, **_kwargs):
+        return None
+
+    async def origins(*_args, **_kwargs):
+        return ["https://example.test"]
+
+    async def collections(*_args, **_kwargs):
+        return [], []
+
+    async def addresses(*_args, **_kwargs):
+        return ["192.0.2.10"]
+
+    monkeypatch.setattr(api_module, "db_pool", types.SimpleNamespace(acquire=lambda: Acquire()))
+    monkeypatch.setattr(
+        api_module, "_require_approval_receipt_if_policy_enabled", no_approval_required,
+    )
+    monkeypatch.setattr(api_module, "_target_web_origins", origins)
+    monkeypatch.setattr(api_module, "_generic_collection_refs", collections)
+    monkeypatch.setattr(api_module, "_resolve_agent_target_addresses", addresses)
+
+    payload = _hunt_v2_payload()
+    payload["target_id"] = str(target_id)
+    payload["capabilities"] = ["web.probe"]
+    contract = api_module.normalize_hunt_start_payload(payload)
+
+    result = asyncio.run(api_module._start_hunt_v2(contract))
+
+    insert_args = captured["args"]
+    policy = json.loads(insert_args[5])
+    context = json.loads(insert_args[8])
+    assert policy["allowed_capabilities"] == ["web.probe"]
+    assert context["allowed_capabilities"] == ["web.probe"]
+    assert context["hunt_start_contract"] == contract.public_dict()
+    assert [item["name"] for item in result["capabilities"]] == ["web.probe"]
+    assert result["context_pack"]["secret_values_visible_to_planner"] is False
+
+
 def test_device_control_context_merge_preserves_concurrent_evidence_and_remaps_refs():
     before = {
         "device_state": {

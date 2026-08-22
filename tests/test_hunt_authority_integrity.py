@@ -54,16 +54,25 @@ def test_client_scope_must_match_the_scope_linked_to_the_approval():
 
 def test_runtime_uses_validated_scope_and_independent_network_permission():
     root = Path(__file__).resolve().parents[1]
-    native_api = (root / "api" / "api_v2.py").read_text()
-    legacy_api = (root / "api" / "api.py").read_text()
+    native_api = (root / "api" / "api.py").read_text()
     worker = (root / "api" / "worker.py").read_text()
 
-    assert "approval_context = await _legacy_api._validate_approval_receipt_for_action" in native_api
+    assert "approval_context = await _validate_approval_receipt_for_action" in native_api
     assert "validated_approval_id, validated_scope_id = bind_validated_receipts" in native_api
     assert '"scope_receipt_id": validated_scope_id' in native_api
     assert 'normalized_contract["policy"]["scope_receipt_id"] = validated_scope_id' in native_api
-    assert 'network_discovery=bool(policy.get("network_discovery"))' in legacy_api
-    assert 'network_discovery=bool(policy.get("active_testing"))' not in legacy_api
-    assert "scope_receipt_id=validated_scope_receipt_id" in legacy_api
+    assert 'network_discovery=bool(policy.get("network_discovery"))' in native_api
+    assert 'network_discovery=bool(policy.get("active_testing"))' not in native_api
+    assert "scope_receipt_id=validated_scope_receipt_id" in native_api
     assert 'scope_receipt_id=str(hunt_policy.get("scope_receipt_id") or "") or None' in worker
 
+
+def test_primary_api_owns_the_only_hunt_start_route():
+    root = Path(__file__).resolve().parents[1]
+    primary_api = (root / "api" / "api.py").read_text()
+    entrypoint = (root / "scanner" / "entrypoint.sh").read_text()
+
+    assert not (root / "api" / "api_v2.py").exists()
+    assert primary_api.count('    "/hunts",\n    response_model=HuntStartV2Response') == 1
+    assert "async def start_hunt(request: Request, response: Response):" in primary_api
+    assert "api_v2.py" not in entrypoint

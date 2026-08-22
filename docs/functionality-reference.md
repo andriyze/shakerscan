@@ -1387,7 +1387,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Scanner wrapper commands | 28 | `scanner.sh` |
 | Make targets | 14 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
-| Runtime environment keys | 357 | Python sources + Compose manifests |
+| Runtime environment keys | 356 | Python sources + Compose manifests |
 | Scanner modules | 118 | `scanner/scanner_tools/` |
 | UI pages | 39 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
@@ -2333,9 +2333,8 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SCAN_VERIFICATION_MAX` | `scanner/scanner.py` |
 | `SHAKERSCAN_AGENT_TOOL_OUTPUT_BYTES` | `api/worker.py` |
 | `SHAKERSCAN_AGENT_TOOL_RESULT_TTL_SECONDS` | `api/worker.py` |
-| `SHAKERSCAN_ALLOW_LEGACY_HUNT_STARTS` | `api/api_v2.py` |
-| `SHAKERSCAN_API_HOST` | `api/api_v2.py` |
-| `SHAKERSCAN_API_PORT` | `api/api_v2.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_ALLOW_LEGACY_HUNT_STARTS` | `api/api.py` |
+| `SHAKERSCAN_API_PORT` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_API_URL` | `api/model_intake_admission_webhook.py`, `scripts/shakerscan_mcp.py` |
 | `SHAKERSCAN_ASM_DISPATCH_INTERVAL` | `api/api.py` |
 | `SHAKERSCAN_BIND_HOST` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |

@@ -12,7 +12,6 @@ on:
       - api/agent_tools.py
       - api/hunt/capability_executor.py
       - api/parallel_scan.py
-      - api/api_v2.py
       - api/api.py
       - api/worker.py
       - api/retest_contract.py
@@ -70,7 +69,6 @@ on:
       - api/agent_tools.py
       - api/hunt/capability_executor.py
       - api/parallel_scan.py
-      - api/api_v2.py
       - api/api.py
       - api/worker.py
       - api/retest_contract.py
@@ -191,12 +189,18 @@ jobs:
             tests/test_hunt_device_ssh_proposal_reservations.py
 
       - name: Validate canonical Hunt start contract
-        env:
-          PYTHONPATH: api
         run: |
-          python -m pytest -q -p no:cacheprovider \
+          PYTHONPATH=. python -m pytest -q -p no:cacheprovider \
             tests/test_hunt_start_contract.py \
             tests/test_hunt_authority_integrity.py
+          PYTHONPATH=api:scanner python -m pytest -q -p no:cacheprovider \
+            tests/test_api_helpers.py::test_primary_api_parses_typed_native_hunt_start \
+            tests/test_api_helpers.py::test_primary_api_preserves_policy_profile_alias_when_budget_profile_is_omitted \
+            tests/test_api_helpers.py::test_primary_api_documents_the_native_hunt_request_and_response_models \
+            tests/test_api_helpers.py::test_primary_api_rejects_legacy_hunt_start_without_migration_flag \
+            tests/test_api_helpers.py::test_primary_api_allows_legacy_hunt_start_only_in_migration_mode \
+            tests/test_api_helpers.py::test_primary_api_rejects_oversized_hunt_body_before_json_parsing \
+            tests/test_api_helpers.py::test_native_hunt_start_persists_exact_contract_and_capability_allowlist
 
       - name: Validate durable budget, persistence, and receipt contracts
         env:
@@ -249,7 +253,6 @@ jobs:
             api/scan \
             api/hunt \
             api/api.py \
-            api/api_v2.py \
             api/worker.py \
             api/agent_tools.py \
             api/hunt/capability_executor.py \

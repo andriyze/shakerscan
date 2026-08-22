@@ -91,12 +91,5 @@ sync_dev_sources() {
 }
 sync_dev_sources
 
-# Route the API through the V2 Hunt-start contract while the compatibility
-# application continues to own persistence, queues, fleet operations, and routes.
-if [ "${1:-}" = "python3" ] && [ "${2:-}" = "/app/api.py" ] && [ -f /app/api_v2.py ]; then
-    shift 2
-    set -- python3 /app/api_v2.py "$@"
-fi
-
 # Execute command passed to container
 exec "$@"

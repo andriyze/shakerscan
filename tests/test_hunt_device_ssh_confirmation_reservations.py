@@ -46,9 +46,9 @@ def test_confirmed_ssh_is_registry_owned_but_never_planner_callable():
 
 
 def test_native_v2_allowlist_honors_confirmation_only_visibility():
-    source = (ROOT / "api" / "api_v2.py").read_text()
-    allowed = source[source.index("def _capability_is_allowed("):]
-    allowed = allowed[:allowed.index("\n\ndef _resolve_allowed_capabilities")]
+    source = _api_source()
+    allowed = source[source.index("def _hunt_capability_is_allowed("):]
+    allowed = allowed[:allowed.index("\n\ndef _resolve_hunt_allowed_capabilities")]
 
     assert "if not spec.planner_visible:" in allowed
     assert "return False" in allowed

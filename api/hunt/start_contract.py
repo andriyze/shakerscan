@@ -279,7 +279,7 @@ class HuntStartContract:
 
         This method exists for emergency downgrade tooling. It deliberately refuses contracts whose
         authority cannot be represented by the old request model; normal V2 traffic must use the
-        native V2 handler in ``api_v2.py``.
+        native V2 handler in the primary API.
         """
         unsupported_credentials = set(self.credential_refs) - {"ssh_credential_profile_id"}
         if (
