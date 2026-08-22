@@ -23,6 +23,7 @@ on:
       - tests/test_hunt_start_contract.py
       - tests/test_request_replay.py
       - tests/test_request_replay_executor.py
+      - tests/test_v2_native_replay_primitives.py
       - tests/test_v2_public_url_redaction.py
       - tests/test_scan_execution_plan.py
       - tests/test_scan_job_contract.py
@@ -50,6 +51,7 @@ on:
       - tests/test_hunt_start_contract.py
       - tests/test_request_replay.py
       - tests/test_request_replay_executor.py
+      - tests/test_v2_native_replay_primitives.py
       - tests/test_v2_public_url_redaction.py
       - tests/test_scan_execution_plan.py
       - tests/test_scan_job_contract.py
@@ -112,7 +114,8 @@ jobs:
         run: |
           python -m pytest -q -p no:cacheprovider \
             tests/test_request_replay.py \
-            tests/test_request_replay_executor.py
+            tests/test_request_replay_executor.py \
+            tests/test_v2_native_replay_primitives.py
 
       - name: Validate discovery recovery and public redaction contracts
         env:

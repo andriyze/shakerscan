@@ -15,6 +15,11 @@ from typing import Any, Iterable, Mapping
 import urllib.parse
 
 try:
+    from .url_redaction import redact_url
+except ImportError:  # direct host-side import in focused tests
+    from url_redaction import redact_url
+
+try:
     from .device_postman import (
         MAX_BODY_BYTES,
         SAFE_METHODS,
@@ -112,12 +117,8 @@ def _resolve_url(value: Any, *, allowed_origins: tuple[str, ...], default_origin
 
 
 def _redacted_url(value: str) -> str:
-    parsed = urllib.parse.urlsplit(value)
-    pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
-    redacted_query = urllib.parse.urlencode([(name[:200], "<redacted>") for name, _ in pairs])
-    return urllib.parse.urlunsplit(
-        (parsed.scheme, parsed.netloc, parsed.path or "/", redacted_query, "")
-    )[:2_000]
+    """Return a secret-free URL for public receipts and recovery artifacts."""
+    return redact_url(value)
 
 
 def _wire_headers(value: Any) -> tuple[tuple[str, str], ...]:
@@ -263,6 +264,17 @@ class ReplayPlan:
             raise RequestReplayError(
                 f"replay plan exceeds the {REQUEST_REPLAY_HARD_MAX}-request hard limit"
             )
+
+    @property
+    def estimated_budget(self) -> dict[str, int]:
+        """Typed reserve-before-send cost for the exact selected requests."""
+        state_changing = sum(
+            request.method in STATE_CHANGING_METHODS for request in self.requests
+        )
+        budget = {"http_requests": len(self.requests)}
+        if state_changing:
+            budget["state_changing_requests"] = int(state_changing)
+        return budget
 
     @property
     def input_digest(self) -> str:

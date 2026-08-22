@@ -16,7 +16,12 @@ import re
 from typing import Any, Literal, Mapping
 from uuid import uuid4
 
-from .budgets import BUDGET_DIMENSIONS, BudgetError, reconcile_budget_snapshot
+from .budgets import (
+    BUDGET_DIMENSIONS,
+    BudgetError,
+    reconcile_budget_snapshot,
+    reserve_budget_snapshot,
+)
 
 
 ReservationStatus = Literal[
@@ -234,6 +239,19 @@ class DurableBudgetReservation:
             lease_expires_at=timestamp + timedelta(seconds=int(lease_seconds)),
         )
 
+    def reserve_against(
+        self,
+        *,
+        limits: Mapping[str, int],
+        consumed: Mapping[str, int],
+        now: datetime | None = None,
+        lease_seconds: int = 120,
+    ) -> tuple["DurableBudgetReservation", dict[str, int]]:
+        """Atomically-computable hold transition for a datastore row lock."""
+        self._require_status("requested")
+        held_ledger = reserve_budget_snapshot(limits, consumed, self.requested)
+        return self.reserve(now=now, lease_seconds=lease_seconds), held_ledger
+
     def start(
         self, *, worker_id: str, now: datetime | None = None, lease_seconds: int = 120
     ) -> "DurableBudgetReservation":
@@ -276,10 +294,19 @@ class DurableBudgetReservation:
         actual: Mapping[str, int],
         execution_receipt_hash: str,
         now: datetime | None = None,
+        worker_id: str | None = None,
     ) -> "DurableBudgetReservation":
         self._require_status("running")
-        measured = _amounts(actual, allow_zero=True)
         timestamp = _utc(now)
+        if self.lease_expires_at and timestamp > self.lease_expires_at:
+            raise ReservationTransitionError(
+                "running reservation lease expired before commit"
+            )
+        if worker_id is not None and str(worker_id or "").strip() != self.worker_id:
+            raise ReservationTransitionError(
+                "only the owning worker may commit the reservation"
+            )
+        measured = _amounts(actual, allow_zero=True)
         return self._next(
             timestamp,
             status="committed",
