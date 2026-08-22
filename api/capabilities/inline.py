@@ -133,6 +133,77 @@ class TlsInspectionExecutionAdapter(_InlineAdapter):
         )
 
 
+class ControlPlaneExecutionAdapter(_InlineAdapter):
+    """Normalize one bounded, target-owned control-plane capability."""
+
+    def __init__(
+        self,
+        *,
+        specification: CapabilitySpec,
+        operation: InlineOperation,
+        requested_budget: Mapping[str, int],
+        redacted_execution: Mapping[str, Any],
+        blocked_exceptions: tuple[type[BaseException], ...],
+    ) -> None:
+        super().__init__(
+            specification=specification,
+            operation=operation,
+            requested_budget=requested_budget,
+            redacted_execution=redacted_execution,
+        )
+        self._blocked_exceptions = blocked_exceptions
+        self.blocked_exception: BaseException | None = None
+
+    async def execute(
+        self,
+        *,
+        heartbeat: Heartbeat,
+        cancelled: Cancelled,
+    ) -> CapabilityAdapterResult:
+        del heartbeat, cancelled
+        started = time.perf_counter()
+        try:
+            result = dict(await self._operation())
+        except self._blocked_exceptions as exc:
+            self.blocked_exception = exc
+            result = {}
+        self.result = result
+        succeeded = bool(
+            result.get("ok")
+            or str(result.get("status") or "").strip().lower() == "success"
+        )
+        actual = self._wall_budget(started, execution_started=succeeded)
+        status = (
+            "blocked"
+            if self.blocked_exception is not None
+            else "success"
+            if succeeded
+            else "failed"
+        )
+        observation: dict[str, Any] = {
+            "kind": "request_collection_observation",
+            "capability": self.capability_name,
+            "status": status,
+        }
+        for key in ("collection_id", "selection_id", "count"):
+            if result.get(key) is not None:
+                observation[key] = result[key]
+        error = (
+            f"blocked:{type(self.blocked_exception).__name__}"
+            if self.blocked_exception is not None
+            else str(result.get("error") or "").strip()
+        )
+        return CapabilityAdapterResult(
+            status=status,
+            observations=(observation,),
+            errors=(error,) if error else (),
+            actual_budget=actual,
+            execution_started=succeeded,
+            parser_version=self._specification.output_schema,
+            redacted_execution=dict(self._redacted_execution),
+        )
+
+
 class DeviceExecutionAdapter(_InlineAdapter):
     """Normalize one canonical device control, HTTP, queue, or SSH action."""
 

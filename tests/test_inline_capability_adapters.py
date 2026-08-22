@@ -8,6 +8,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 
 from capabilities.inline import (
+    ControlPlaneExecutionAdapter,
     DeviceExecutionAdapter,
     HttpRequestExecutionAdapter,
     TlsInspectionExecutionAdapter,
@@ -203,6 +204,71 @@ def test_tls_not_applicable_has_zero_network_consumption():
         "agent_actions": 1,
     }
     assert result.observations == ()
+
+
+class ExpectedControlBlock(Exception):
+    pass
+
+
+def test_collection_control_adapter_returns_a_content_free_observation():
+    specification = CAPABILITY_REGISTRY.require("collections.select")
+    requested = {"agent_actions": 1, "tool_wall_seconds": 5}
+
+    async def operation():
+        return {
+            "ok": True,
+            "collection_id": "collection-1",
+            "selection_id": "selection-1",
+            "count": 3,
+            "requests": [{"path": "/private"}],
+        }
+
+    result = _execute(
+        specification,
+        ControlPlaneExecutionAdapter(
+            specification=specification,
+            operation=operation,
+            requested_budget=requested,
+            redacted_execution={"limit": 3},
+            blocked_exceptions=(ExpectedControlBlock,),
+        ),
+        requested,
+    )
+
+    assert result.status == "success"
+    assert result.actual_budget == {
+        "agent_actions": 1,
+        "tool_wall_seconds": 1,
+    }
+    assert result.observations == ({
+        "kind": "request_collection_observation",
+        "capability": "collections.select",
+        "status": "success",
+        "collection_id": "collection-1",
+        "selection_id": "selection-1",
+        "count": 3,
+    },)
+
+
+def test_collection_control_adapter_refunds_wall_time_for_a_guard_block():
+    specification = CAPABILITY_REGISTRY.require("collections.select")
+    requested = {"agent_actions": 1, "tool_wall_seconds": 5}
+
+    async def operation():
+        raise ExpectedControlBlock("collection changed")
+
+    adapter = ControlPlaneExecutionAdapter(
+        specification=specification,
+        operation=operation,
+        requested_budget=requested,
+        redacted_execution={},
+        blocked_exceptions=(ExpectedControlBlock,),
+    )
+    result = _execute(specification, adapter, requested)
+
+    assert result.status == "blocked"
+    assert result.actual_budget == {"agent_actions": 1}
+    assert isinstance(adapter.blocked_exception, ExpectedControlBlock)
 
 
 class ExpectedDeviceBlock(Exception):

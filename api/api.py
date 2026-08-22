@@ -467,6 +467,7 @@ try:
         CapabilityExecutor,
     )
     from capabilities.inline import (
+        ControlPlaneExecutionAdapter,
         DeviceExecutionAdapter,
         HttpRequestExecutionAdapter,
         TlsInspectionExecutionAdapter,
@@ -492,6 +493,7 @@ except ModuleNotFoundError:
         CapabilityExecutor,
     )
     from api.capabilities.inline import (
+        ControlPlaneExecutionAdapter,
         DeviceExecutionAdapter,
         HttpRequestExecutionAdapter,
         TlsInspectionExecutionAdapter,
@@ -37594,6 +37596,26 @@ async def execute_hunt_capability(
             scope_receipt_id=validated_scope_receipt_id,
         )
 
+    def inline_hunt_target_binding() -> TargetBinding:
+        return (
+            inline_device_target_binding()
+            if str(run["target_kind"]) == "device"
+            else inline_web_target_binding()
+        )
+
+    async def inspect_bound_collections() -> dict[str, Any]:
+        refs = [
+            dict(item)
+            for item in context.get("request_collections") or []
+            if isinstance(item, Mapping)
+        ]
+        return {
+            "ok": True,
+            "collections": refs[:200],
+            "count": len(refs),
+            "secret_values_visible": False,
+        }
+
     device_context_before = (
         copy.deepcopy(context)
         if name in (
@@ -37609,10 +37631,49 @@ async def execute_hunt_capability(
     capability_execution = None
     try:
         if name == "collections.inspect":
-            refs = [item for item in context.get("request_collections") or [] if isinstance(item, dict)]
-            result = {"ok": True, "collections": refs[:200], "count": len(refs), "secret_values_visible": False}
+            collection_adapter = ControlPlaneExecutionAdapter(
+                specification=spec,
+                operation=inspect_bound_collections,
+                requested_budget=durable_reservation.record.requested,
+                redacted_execution={},
+                blocked_exceptions=(HTTPException,),
+            )
+            capability_execution = await CapabilityExecutor().execute(
+                CapabilityExecutionContext(
+                    specification=spec,
+                    target=inline_hunt_target_binding(),
+                    requested_budget=durable_reservation.record.requested,
+                ),
+                collection_adapter,
+                heartbeat=lambda: asyncio.sleep(0),
+                cancelled=lambda: False,
+            )
+            result = collection_adapter.result
         elif name == "collections.select":
-            result = await _hunt_select_collection(run, context, request.input)
+            collection_adapter = ControlPlaneExecutionAdapter(
+                specification=spec,
+                operation=lambda: _hunt_select_collection(
+                    run, context, request.input,
+                ),
+                requested_budget=durable_reservation.record.requested,
+                redacted_execution=_hunt_redacted_capability_input(
+                    name, request.input,
+                ),
+                blocked_exceptions=(HTTPException,),
+            )
+            capability_execution = await CapabilityExecutor().execute(
+                CapabilityExecutionContext(
+                    specification=spec,
+                    target=inline_hunt_target_binding(),
+                    requested_budget=durable_reservation.record.requested,
+                ),
+                collection_adapter,
+                heartbeat=lambda: asyncio.sleep(0),
+                cancelled=lambda: False,
+            )
+            result = collection_adapter.result
+            if collection_adapter.blocked_exception is not None:
+                raise collection_adapter.blocked_exception
         elif name == "collections.replay_safe":
             result = await _hunt_replay_safe_collection(
                 run, context, request.input, action_id=action_id,
@@ -37783,18 +37844,6 @@ async def execute_hunt_capability(
                 action_id=str(action_id),
                 reservation_id=durable_reservation.record.reservation_id,
                 action_digest=durable_action_digest,
-            )
-        elif spec.legacy_tool_name:
-            path = str(request.input.get("path") or "").strip()
-            execution_target = str(context["target"]["url"])
-            if path:
-                execution_target = _provision_same_origin_url(execution_target, path)
-            result = await _agent_tool_run_tool(
-                run["target_id"], str(context["target"]["url"]),
-                {"name": spec.legacy_tool_name, "target": execution_target, "options": request.input},
-                created_by=f"hunt_v2:{hunt_id}", allow_active=bool(policy.get("active_testing")),
-                approval_receipt_id=policy.get("approval_receipt_id"),
-                authorized_addresses=context.get("authorized_target_addresses") or [],
             )
         elif name == "tls.inspect":
             tls_adapter = TlsInspectionExecutionAdapter(
@@ -38042,12 +38091,6 @@ async def execute_hunt_capability(
                 actual_charges["http_requests"] = min(
                     int(charges.get("http_requests") or 0), max(0, int(receipt_payload.get("replayed") or 0)),
                 )
-                actual_charges["tool_wall_seconds"] = min(int(charges.get("tool_wall_seconds") or 0), elapsed_wall)
-            elif spec.legacy_tool_name and isinstance(receipt_payload, dict):
-                if receipt_payload.get("wire_request_accounting") == "exact":
-                    actual_charges["http_requests"] = min(
-                        int(charges.get("http_requests") or 0), max(0, int(receipt_payload.get("wire_requests_actual") or 0)),
-                    )
                 actual_charges["tool_wall_seconds"] = min(int(charges.get("tool_wall_seconds") or 0), elapsed_wall)
             reconciled_used = dict(used)
             is_partial = bool(
