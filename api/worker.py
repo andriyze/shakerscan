@@ -65,6 +65,7 @@ from capabilities.network import (
     network_capability_adapter,
 )
 from capabilities.browser import BrowserCapabilityInputError, browser_capability_adapter
+from capabilities.scanner import ScannerExecutionAdapter
 from hunt.capability_reservations import (
     DURABLE_BROWSER_HUNT_CAPABILITIES,
     DURABLE_SCANNER_HUNT_CAPABILITIES,
@@ -15489,8 +15490,22 @@ async def process_canonical_scanner_capability_job(
         oob_server, oob_token = agent_tools.resolve_hunt_interactsh_config(
             allow_active=bool(policy.active_testing),
         )
-        process_result = await _execute_agent_scanner_process(
-            {
+        receipt_properties = dict(
+            spec.input_schema.get("properties") or {}
+        )
+        receipt_input = {
+            key: value
+            for key, value in capability_input.items()
+            if key in receipt_properties
+        }
+        if receipt_input.get("path"):
+            receipt_input["path"] = str(
+                receipt_input["path"]
+            ).split("?", 1)[0]
+        safe_path = urllib.parse.urlsplit(execution_target).path or "/"
+        scanner_adapter = ScannerExecutionAdapter(
+            specification=spec,
+            process_payload={
                 "job_id": job_id,
                 "tool_name": spec.legacy_tool_name,
                 "execution_target": execution_target,
@@ -15502,56 +15517,49 @@ async def process_canonical_scanner_capability_job(
                 "oob_interactsh_server": oob_server,
                 "oob_interactsh_token": oob_token,
             },
-            heartbeat=heartbeat_reservation,
+            process_runner=_execute_agent_scanner_process,
+            requested_budget=persisted.record.requested,
+            redacted_execution={
+                **receipt_input,
+                "path": safe_path,
+            },
         )
+        execution = await CapabilityExecutor().execute(
+            CapabilityExecutionContext(
+                specification=spec,
+                target=target,
+                requested_budget=persisted.record.requested,
+            ),
+            scanner_adapter,
+            heartbeat=heartbeat_reservation,
+            cancelled=lambda: bool(redis_client.exists(cancel_key)),
+        )
+        process_result = scanner_adapter.process_result
         typed_output = (
             dict(process_result.get("typed_output") or {})
             if isinstance(process_result.get("typed_output"), Mapping)
             else {}
         )
-        observations = [
-            dict(item)
-            for item in typed_output.get("records") or []
-            if isinstance(item, Mapping)
-        ][:5000]
+        observations = [dict(item) for item in execution.observations]
         parser_errors = [
-            str(item) for item in typed_output.get("errors") or []
+            str(item) for item in typed_output.get("errors") or ()
         ][:20]
-        settlement = (
-            dict(process_result.get("settlement") or {})
-            if isinstance(process_result.get("settlement"), Mapping)
-            else {}
+        status = execution.status
+        is_partial = execution.partial
+        error = (
+            str(process_result.get("error") or "").strip()
+            or (execution.errors[0] if execution.errors else None)
         )
-        status = str(process_result.get("status") or "failed")
-        is_partial = bool(process_result.get("partial"))
         action_status = (
             "completed"
             if status == "success"
             else "partial"
             if is_partial
+            else "cancelled"
+            if status == "cancelled"
             else "failed"
         )
-        actual: dict[str, int] = {"agent_actions": 1}
-        if "active_actions" in persisted.record.requested:
-            actual["active_actions"] = 1
-        if process_result.get("execution_uncertain"):
-            actual = dict(persisted.record.requested)
-        else:
-            if "tool_wall_seconds" in persisted.record.requested:
-                actual["tool_wall_seconds"] = min(
-                    int(persisted.record.requested["tool_wall_seconds"]),
-                    max(0, int(process_result.get("elapsed_seconds") or 0)),
-                )
-            if "http_requests" in persisted.record.requested:
-                if str(settlement.get("mode") or "") == "exact":
-                    actual["http_requests"] = min(
-                        int(persisted.record.requested["http_requests"]),
-                        max(0, int(settlement.get("actual") or 0)),
-                    )
-                else:
-                    actual["http_requests"] = int(
-                        persisted.record.requested["http_requests"]
-                    )
+        actual = dict(execution.actual_budget)
 
         started_at = str(
             process_result.get("started_at")
@@ -15562,17 +15570,11 @@ async def process_canonical_scanner_capability_job(
             or datetime.now(timezone.utc).isoformat()
         )
         receipt_id = uuid.uuid4()
-        receipt_input = dict(capability_input)
-        if receipt_input.get("path"):
-            receipt_input["path"] = str(
-                receipt_input["path"]
-            ).split("?", 1)[0]
-        safe_path = urllib.parse.urlsplit(execution_target).path or "/"
         prepared_receipt = SimpleNamespace(
             capability_name=capability_name,
             adapter_name=str(spec.adapter),
             adapter_version=str(spec.adapter_version),
-            redacted_execution={"path": safe_path},
+            redacted_execution=dict(execution.redacted_execution),
         )
         async with db_pool.acquire() as conn:
             async with conn.transaction():
@@ -15615,12 +15617,10 @@ async def process_canonical_scanner_capability_job(
                     capability_name=capability_name,
                     adapter_name=str(spec.adapter),
                     adapter_version=str(spec.adapter_version),
-                    parser_version=str(
-                        typed_output.get("parser") or spec.output_schema
-                    ),
+                    parser_version=execution.parser_version,
                     target_id=target.target_id,
                     target_kind=target.target_kind,
-                    capability_input=receipt_input,
+                    capability_input=execution.redacted_execution,
                     action_status=action_status,
                     actual_budget=actual,
                     worker_id=worker_id,
@@ -15631,8 +15631,8 @@ async def process_canonical_scanner_capability_job(
                     approval_receipt_id=policy.approval_receipt_id,
                     result={
                         "ok": status == "success",
-                        "error": process_result.get("error"),
-                        "timed_out": bool(process_result.get("timed_out")),
+                        "error": error,
+                        "timed_out": execution.timed_out,
                         "receipt_observations": observations,
                     },
                 )
@@ -15677,7 +15677,7 @@ async def process_canonical_scanner_capability_job(
                 )
                 action_result = {
                     "status": status,
-                    "error": process_result.get("error"),
+                    "error": error,
                     "record_count": len(observations),
                     "parser_errors": parser_errors,
                     "budget_reservation_id": reservation_id,
@@ -15701,6 +15701,8 @@ async def process_canonical_scanner_capability_job(
                     )
         result = {
             **process_result,
+            "status": status,
+            "error": error,
             "ok": status == "success",
             "partial": is_partial,
             "typed_output": typed_output,
