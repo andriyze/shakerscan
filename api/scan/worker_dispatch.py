@@ -40,14 +40,29 @@ def prepare_worker_dispatch(
 
     normalized = admission.normalize_options(options)
     policy, budget = admission.plan.policy, admission.plan.budget
-    custom_budget = dict(normalized.get("custom_budget") or {})
-    custom_budget.update({
+
+    # Never merge caller-supplied legacy tuning into a canonical plan. Every surviving scanner
+    # ceiling is derived from the immutable ScanBudget so stale UI fields cannot expand authority.
+    custom_budget = {
         "max_duration_minutes": max(1, math.ceil(budget.max_duration_seconds / 60)),
         "request_max": budget.max_http_requests,
         "max_urls": budget.max_endpoints,
-    })
+        "browser_max_pages": min(budget.max_browser_actions, budget.max_endpoints),
+        "api_probe_limit": budget.max_endpoints,
+        "phase4_max_seconds": budget.max_tool_wall_seconds,
+        "nuclei_max_targets": budget.max_endpoints,
+        "active_worklist_max": budget.max_endpoints,
+    }
+    if policy.active_testing:
+        custom_budget.update({
+            "active_max_seconds": budget.max_tool_wall_seconds,
+            "active_max_endpoints": budget.max_endpoints,
+        })
+
     normalized.update({
         "custom_budget": custom_budget,
+        "max_workers": budget.max_workers,
+        "allow_state_changing_http": policy.allow_state_changing_http,
         "include_families": list(policy.include_families),
         "exclude_families": list(policy.exclude_families),
         "scan_generation": admission.plan.generation,
@@ -57,10 +72,20 @@ def prepare_worker_dispatch(
             "plan_digest": admission.plan.digest,
             "engine": admission.plan.engine,
             "generation": admission.plan.generation,
+            "allow_state_changing_http": policy.allow_state_changing_http,
+            "max_workers": budget.max_workers,
             "backing_scan_type": admission.backing_scan_type,
             "temporary_backing_adapter": True,
         },
     })
+    if "parallel_worker_count" in normalized:
+        try:
+            normalized["parallel_worker_count"] = min(
+                max(1, int(normalized["parallel_worker_count"])),
+                budget.max_workers,
+            )
+        except (TypeError, ValueError):
+            normalized["parallel_worker_count"] = budget.max_workers
     return normalized, admission
 
 
