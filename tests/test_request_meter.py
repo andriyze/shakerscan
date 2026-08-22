@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scanner"))
 from scanner_tools import common
 from scanner_tools.request_meter import (
     RequestBudgetExceeded,
+    RequestMethodRejected,
     configure_request_meter,
     get_request_meter,
     install_async_client_metering,
@@ -64,6 +65,41 @@ def test_request_meter_ignores_other_hosts():
     assert meter.snapshot()["attempted_requests"] == 0
 
 
+def test_passive_method_policy_cannot_be_disabled_with_budget_mode_off():
+    meter = configure_request_meter(
+        limit=None,
+        target_host="app.test",
+        mode="off",
+        allowed_methods={"GET", "HEAD", "OPTIONS"},
+    )
+
+    assert meter.before_request(
+        phase="probe", url="https://app.test/read", method="GET",
+    ) is False
+    with pytest.raises(RequestMethodRejected):
+        meter.before_request(
+            phase="probe", url="https://app.test/mutate", method="POST",
+        )
+
+    snapshot = meter.snapshot()
+    assert snapshot["attempted_requests"] == 0
+    assert snapshot["rejected_requests"] == 1
+    assert snapshot["method_rejected_requests"] == 1
+    assert snapshot["allowed_http_methods"] == ["GET", "HEAD", "OPTIONS"]
+
+
+def test_passive_method_policy_does_not_apply_to_provider_host():
+    meter = configure_request_meter(
+        limit=None,
+        target_host="app.test",
+        mode="off",
+        allowed_methods={"GET", "HEAD", "OPTIONS"},
+    )
+    assert meter.before_request(
+        phase="provider", url="https://provider.test/token", method="POST",
+    ) is False
+
+
 def test_request_meter_isolated_between_concurrent_scan_contexts():
     async def scan(host):
         meter = configure_request_meter(
@@ -102,6 +138,39 @@ def test_httpx_hook_enforces_target_budget():
     assert meter.snapshot()["attempted_requests"] == 1
     assert meter.snapshot()["completed_requests"] == 1
     assert meter.snapshot()["rejected_requests"] == 1
+
+
+def test_httpx_hook_rejects_passive_post_before_transport():
+    meter = configure_request_meter(
+        limit=10,
+        target_host="app.test",
+        mode="compatibility",
+        allowed_methods={"GET", "HEAD", "OPTIONS"},
+    )
+    install_async_client_metering()
+    calls = 0
+
+    def transport(request):
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, request=request)
+
+    async def run_request():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+            with pytest.raises(RequestMethodRejected):
+                await client.post("https://app.test/mutate")
+
+    asyncio.run(run_request())
+    assert calls == 0
+    assert meter.snapshot()["method_rejected_requests"] == 1
+
+
+def test_curl_method_inference_covers_implicit_and_explicit_mutations():
+    assert common._curl_http_method(["curl", "https://app.test"]) == "GET"
+    assert common._curl_http_method(["curl", "-I", "https://app.test"]) == "HEAD"
+    assert common._curl_http_method(["curl", "-d", "a=1", "https://app.test"]) == "POST"
+    assert common._curl_http_method(["curl", "--upload-file", "body", "https://app.test"]) == "PUT"
+    assert common._curl_http_method(["curl", "-X", "DELETE", "https://app.test"]) == "DELETE"
 
 
 def test_unmetered_network_tool_fails_closed_only_in_enforce_mode():

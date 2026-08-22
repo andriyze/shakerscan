@@ -127,6 +127,31 @@ def _redacted_argv(cmd: list[str]) -> list[str]:
     return redacted
 
 
+def _curl_http_method(cmd: list[str]) -> str:
+    """Resolve curl's effective method without inspecting request content."""
+    explicit: str | None = None
+    inferred = "GET"
+    index = 1
+    while index < len(cmd):
+        value = str(cmd[index])
+        if value in {"-X", "--request"} and index + 1 < len(cmd):
+            explicit = str(cmd[index + 1]).strip().upper()
+            index += 2
+            continue
+        if value.startswith("--request="):
+            explicit = value.split("=", 1)[1].strip().upper()
+        elif value in {"-I", "--head"}:
+            inferred = "HEAD"
+        elif value in {"-T", "--upload-file"} or value.startswith("--upload-file="):
+            inferred = "PUT"
+        elif value in {"-d", "--data", "--data-raw", "--data-binary", "--data-urlencode", "-F", "--form", "--json"}:
+            inferred = "POST"
+        elif value.startswith(("--data=", "--data-raw=", "--data-binary=", "--data-urlencode=", "--form=", "--json=")):
+            inferred = "POST"
+        index += 1
+    return explicit or inferred
+
+
 def _redact_output_text(value: Any) -> str:
     text = str(value if value is not None else "")
     replacements = (
@@ -311,6 +336,7 @@ async def run(
                     metered_request = meter.before_request(
                         phase="curl",
                         url=request_url,
+                        method=_curl_http_method(cmd),
                         retry=attempt > 0,
                     )
                 except RequestBudgetExceeded:

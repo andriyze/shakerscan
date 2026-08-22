@@ -72,7 +72,10 @@ from scanner_tools.focused_scope import (
     FocusedScope,
     async_value as _focused_async_value,
 )
-from scanner_tools.discovery_policy import enforce_discovery_manifest_safety
+from scanner_tools.discovery_policy import (
+    enforce_discovery_manifest_safety,
+    passive_http_methods_for_scan,
+)
 from scanner_tools.coverage_tracker import CoverageTracker
 from scanner_tools.completion_status import build_scan_completion_status
 from scanner_tools.cancellation import scanner_cancel_requested, wait_for_scanner_cancel
@@ -3058,7 +3061,14 @@ def build_check_family_scope(
     mass_assignment: bool = False,
     jwt: bool = False,
     bola: bool = False,
+    discovery_manifest_only: bool = False,
 ) -> dict[str, Any]:
+    if discovery_manifest_only:
+        active_checks = False
+        mass_assignment = False
+        jwt = False
+        bola = False
+        requested_family = None
     families: list[str] = []
     if active_checks and active_xss:
         families.append("xss")
@@ -3945,6 +3955,10 @@ async def build_report(target: str,
         mode=os.environ.get("SHAKERSCAN_REQUEST_BUDGET_MODE", "compatibility"),
         planned=int(scan_budget.get("request_max") or 0),
         reserved=request_reserved,
+        allowed_methods=passive_http_methods_for_scan(
+            discovery_manifest_only=discovery_manifest_only,
+            public_only=public_only,
+        ),
     )
     request_meter_hooks = install_async_client_metering()
     openapi_endpoint_cache: list[dict[str, Any]] = []
@@ -3959,6 +3973,7 @@ async def build_report(target: str,
         (smart_mode or (complete_mode and complete_tier in ("full", "aggressive")))
         and not focused_active_family
         and not zero_rediscovery
+        and not discovery_manifest_only
     )
     check_family_scope = build_check_family_scope(
         active_checks,
@@ -3968,6 +3983,7 @@ async def build_report(target: str,
         mass_assignment=mass_assignment_testing,
         jwt=registry_jwt_testing,
         bola=bool(bola_testing or (smart_mode and not focused_active_family)),
+        discovery_manifest_only=discovery_manifest_only,
     )
     if smart_mode and focused_active_family:
         print(f"[smart] Focused active mode enabled for {focused_active_family_name}; disabling unrelated active modules", file=sys.stderr)
@@ -5338,7 +5354,12 @@ async def build_report(target: str,
         rate_limit_task = asyncio.create_task(dummy_rate_limit())
 
     # Enhanced security checks (will be run after headers are available)
-    if not public_only and not focused_manual_active_scope and not skip_global_checks:
+    if (
+        not public_only
+        and not focused_manual_active_scope
+        and not skip_global_checks
+        and not discovery_manifest_only
+    ):
         api_sec_task = asyncio.create_task(api_security_test(base_url))
         subdomain_takeover_task = asyncio.create_task(subdomain_takeover_check(host))
         xxe_task = asyncio.create_task(xxe_injection_test(base_url))
@@ -5359,6 +5380,9 @@ async def build_report(target: str,
             api_sec_empty.update({"skipped": True, "reason": "parallel_child_skip_global_checks"})
             subdomain_empty.update({"skipped": True, "reason": "parallel_child_skip_global_checks"})
             xxe_empty.update({"skipped": True, "reason": "parallel_child_skip_global_checks"})
+        elif discovery_manifest_only:
+            for value in (api_sec_empty, subdomain_empty, xxe_empty):
+                value.update({"skipped": True, "reason": "discovery_manifest_only"})
         api_sec_task = asyncio.create_task(_focused_async_value(api_sec_empty))
         subdomain_takeover_task = asyncio.create_task(_focused_async_value(subdomain_empty))
         xxe_task = asyncio.create_task(_focused_async_value(xxe_empty))
