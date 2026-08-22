@@ -2855,6 +2855,8 @@ def test_agent_scanner_tool_job_rebuilds_argv_and_publishes_settlement(monkeypat
 
     assert captured["cmd"][0] == "httpx"
     assert "-json" in captured["cmd"] and "-silent" in captured["cmd"]
+    assert "-no-stdin" in captured["cmd"]
+    assert captured["kwargs"]["stdin"] is asyncio.subprocess.DEVNULL
     assert captured["kwargs"]["start_new_session"] is True
     assert "https://example.test/admin?token=secret" in captured["cmd"]
     assert "socks5://127.0.0.1:45678" in captured["cmd"]

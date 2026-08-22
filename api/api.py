@@ -451,6 +451,7 @@ except ModuleNotFoundError:
 try:
     from hunt.capability_reservations import (
         DURABLE_INLINE_HUNT_CAPABILITIES,
+        DURABLE_SCANNER_HUNT_CAPABILITIES,
         DURABLE_WORKER_HUNT_CAPABILITIES,
         hunt_capability_action_digest,
         hunt_capability_lease_seconds,
@@ -461,6 +462,7 @@ try:
 except ModuleNotFoundError:
     from api.hunt.capability_reservations import (
         DURABLE_INLINE_HUNT_CAPABILITIES,
+        DURABLE_SCANNER_HUNT_CAPABILITIES,
         DURABLE_WORKER_HUNT_CAPABILITIES,
         hunt_capability_action_digest,
         hunt_capability_lease_seconds,
@@ -33858,6 +33860,80 @@ async def _enqueue_canonical_network_capability(
     }
 
 
+async def _enqueue_canonical_scanner_capability(
+    *, capability_name: str, capability_input: Mapping[str, Any],
+    timeout_ms: int, hunt_id: str, action_id: str, reservation_id: str,
+    action_digest: str,
+) -> dict[str, Any]:
+    """Queue a canonical external scanner without queue-carried target authority."""
+    redis_client = get_redis()
+    job_id = str(uuid.uuid4())
+    result_key = f"agent_tool_result:{job_id}"
+    cancel_key = f"agent_tool_cancel:{job_id}"
+    payload = {
+        "job_id": job_id,
+        "type": "canonical_scanner_capability",
+        "capability_name": capability_name,
+        "capability_input": dict(capability_input),
+        "hunt_id": str(hunt_id),
+        "action_id": str(action_id),
+        "budget_reservation_id": str(reservation_id),
+        "action_digest": str(action_digest),
+        "submitted_at": utc_now_iso(),
+        "_base_queue_name": AGENT_TOOL_QUEUE_NAME,
+    }
+    redis_client.hset(
+        f"job:{job_id}",
+        mapping={
+            "status": "queued",
+            "current_phase": "canonical_scanner_capability_queued",
+            "tool": capability_name,
+        },
+    )
+    redis_client.expire(
+        f"job:{job_id}",
+        max(3600, math.ceil(timeout_ms / 1000) + 300),
+    )
+    enqueue_job(redis_client, AGENT_TOOL_QUEUE_NAME, payload)
+    deadline = asyncio.get_running_loop().time() + timeout_ms / 1000.0 + 30.0
+    try:
+        while asyncio.get_running_loop().time() < deadline:
+            raw = redis_client.get(result_key)
+            if raw is not None:
+                redis_client.delete(result_key)
+                value = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
+                parsed = json.loads(value)
+                if not isinstance(parsed, dict):
+                    raise RuntimeError(
+                        "canonical scanner capability worker returned a malformed result"
+                    )
+                return parsed
+            await asyncio.sleep(0.2)
+    except asyncio.CancelledError:
+        redis_client.set(
+            cancel_key,
+            "1",
+            ex=max(60, math.ceil(timeout_ms / 1000) + 30),
+        )
+        raise
+    redis_client.set(
+        cancel_key,
+        "1",
+        ex=max(60, math.ceil(timeout_ms / 1000) + 30),
+    )
+    return {
+        "status": "timeout",
+        "error": "worker_result_timeout",
+        "partial": False,
+        "typed_output": {
+            "parser_status": "failed",
+            "records": [],
+            "record_count": 0,
+        },
+        "budget_consumed": {},
+    }
+
+
 async def _agent_tool_run_tool(
     target_uuid: uuid.UUID,
     target_url: str,
@@ -36542,7 +36618,10 @@ async def execute_hunt_capability(
             if requires_call_approval:
                 charges["active_actions"] = 1
             worker_managed_budget = name == "collections.replay_safe"
-            worker_durable_budget = name in DURABLE_WORKER_HUNT_CAPABILITIES
+            worker_durable_budget = name in (
+                DURABLE_WORKER_HUNT_CAPABILITIES
+                | DURABLE_SCANNER_HUNT_CAPABILITIES
+            )
             api_managed_budget = name in DURABLE_INLINE_HUNT_CAPABILITIES
             durable_budget = api_managed_budget or worker_durable_budget
             if durable_budget:
@@ -36765,6 +36844,20 @@ async def execute_hunt_capability(
                 expected_budget=prepared_network.estimated_budget,
                 timeout_ms=max(1_000, int(prepared_network.estimated_budget.get("tool_wall_seconds") or 1) * 1_000),
                 hunt_id=str(run["id"]), action_id=str(action_id),
+                reservation_id=durable_reservation.record.reservation_id,
+                action_digest=durable_action_digest,
+            )
+        elif name in DURABLE_SCANNER_HUNT_CAPABILITIES:
+            if durable_reservation is None or durable_action_digest is None:
+                raise RuntimeError(
+                    "Scanner capability reservation was not initialized"
+                )
+            result = await _enqueue_canonical_scanner_capability(
+                capability_name=name,
+                capability_input=request.input,
+                timeout_ms=int(spec.default_timeout_ms),
+                hunt_id=str(run["id"]),
+                action_id=str(action_id),
                 reservation_id=durable_reservation.record.reservation_id,
                 action_digest=durable_action_digest,
             )

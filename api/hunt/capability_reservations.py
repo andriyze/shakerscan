@@ -28,6 +28,15 @@ DURABLE_WORKER_HUNT_CAPABILITIES = frozenset({
     "subdomains.discover",
 })
 
+DURABLE_SCANNER_HUNT_CAPABILITIES = frozenset({
+    "sqli.verify",
+    "templates.scan",
+    "web.content_discover",
+    "web.crawl",
+    "web.probe",
+    "xss.verify",
+})
+
 
 def hunt_capability_action_digest(
     *,

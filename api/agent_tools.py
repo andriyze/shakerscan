@@ -174,7 +174,8 @@ _NUCLEI_FOCUSED_TAGS = "exposure,misconfig,auth-bypass,default-login"
 def _tmpl_httpx(url: str, opts: dict[str, Any]) -> list[str]:
     # Passive fingerprint: status, title, tech, redirect chain. No tunables.
     return ["-u", url, "-status-code", "-title", "-tech-detect", "-web-server",
-            "-json", "-silent", "-timeout", "10", "-no-color"]
+            "-json", "-silent", "-timeout", "10", "-no-color", "-no-stdin",
+            "-rate-limit", "2", "-threads", "1", "-no-fallback-scheme"]
 
 
 def _tmpl_nuclei(url: str, opts: dict[str, Any]) -> list[str]:

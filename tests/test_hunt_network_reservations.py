@@ -104,7 +104,8 @@ def test_api_admits_network_hold_before_queue_and_never_double_settles():
         '"action_digest"',
     ):
         assert field in enqueue
-    assert "worker_durable_budget = name in DURABLE_WORKER_HUNT_CAPABILITIES" in handler
+    assert "DURABLE_WORKER_HUNT_CAPABILITIES" in handler
+    assert "DURABLE_SCANNER_HUNT_CAPABILITIES" in handler
     assert "durable_budget = api_managed_budget or worker_durable_budget" in handler
     assert 'admission_action_status = "reserved"' in handler
     assert handler.index("create_requested") < handler.index(

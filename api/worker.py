@@ -24,7 +24,8 @@ import uuid
 from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from types import SimpleNamespace
+from typing import Any, Awaitable, Callable, Mapping
 
 import asyncpg
 import redis
@@ -60,6 +61,7 @@ import family_proof
 import agent_tools
 from capabilities.network import CapabilityInputError, network_capability_adapter
 from hunt.capability_reservations import (
+    DURABLE_SCANNER_HUNT_CAPABILITIES,
     DURABLE_WORKER_HUNT_CAPABILITIES,
     hunt_capability_action_digest,
     hunt_capability_lease_seconds,
@@ -14157,18 +14159,17 @@ def _agent_scanner_request_settlement(
     return agent_tools.scanner_request_settlement(normalized, settlement_input)
 
 
-async def process_agent_scanner_tool_job(job_data: dict[str, Any]) -> None:
-    """Execute one fixed-template Deep Hunt scanner outside the API process.
-
-    Queue payloads contain declarative tool/options/target data only.  This worker independently
-    validates scope and rebuilds argv from :mod:`agent_tools`; no binary, argv, shell text, or
-    credential supplied by the control plane is executable here.
-    """
+async def _execute_agent_scanner_process(
+    job_data: Mapping[str, Any],
+    *,
+    heartbeat: Callable[[], Awaitable[None]] | None = None,
+) -> dict[str, Any]:
+    """Run one fixed-template scanner and return a bounded typed result."""
     job_id = str(job_data.get("job_id") or "").strip()
-    result_key = f"agent_tool_result:{job_id}"
     cancel_key = f"agent_tool_cancel:{job_id}"
     redis_client = get_redis()
-    started_at = utc_now_iso()
+    started_at = datetime.now(timezone.utc)
+    monotonic_started = time.monotonic()
     proc: asyncio.subprocess.Process | None = None
     status = "failed"
     error: str | None = None
@@ -14177,20 +14178,27 @@ async def process_agent_scanner_tool_job(job_data: dict[str, Any]) -> None:
     returncode: int | None = None
     scratch_dir: str | None = None
     pinned_proxy: PinnedSocksProxy | None = None
+    read_streams: asyncio.Task[tuple[bytes, bytes]] | None = None
+    process_started = False
+    execution_uncertain = False
+    name = str(job_data.get("tool_name") or "").strip().lower()
+    execution_target = str(job_data.get("execution_target") or "")
+    registered_target = str(job_data.get("registered_target") or "")
     try:
         if not job_id:
             raise agent_tools.AgentToolError("scanner job requires an identity")
         name, _ignored, options = agent_tools.coerce_run_tool({
             "name": job_data.get("tool_name"),
-            "target": job_data.get("execution_target"),
+            "target": execution_target,
             "options": job_data.get("scanner_options"),
         })
         execution_target = agent_tools.validate_scanner_execution_target(
-            str(job_data.get("registered_target") or ""),
-            str(job_data.get("execution_target") or ""),
+            registered_target,
+            execution_target,
         )
         pinned_address = agent_tools.validate_pinned_scanner_address(
-            job_data.get("pinned_address"), job_data.get("authorized_addresses"),
+            job_data.get("pinned_address"),
+            job_data.get("authorized_addresses"),
         )
         parsed_execution = urllib.parse.urlsplit(execution_target)
         target_port = parsed_execution.port or (
@@ -14201,35 +14209,47 @@ async def process_agent_scanner_tool_job(job_data: dict[str, Any]) -> None:
             pinned_address=pinned_address,
             port=target_port,
         ).start()
-        # OOB (interactsh) config is server-trusted: it comes only from the control-plane
-        # job_data (set solely for a gated hunt against an operator-configured private server),
-        # never from the model-supplied scanner options.
         binary, argv, template_timeout_ms = agent_tools.build_scanner_argv(
-            name, execution_target, options, pinned_address=pinned_address,
+            name,
+            execution_target,
+            options,
+            pinned_address=pinned_address,
             pinned_proxy_url=pinned_proxy.proxy_url,
             oob_interactsh_server=job_data.get("oob_interactsh_server"),
             oob_interactsh_token=job_data.get("oob_interactsh_token"),
         )
         if name == "sqlmap":
-            scratch_dir = tempfile.mkdtemp(prefix=f"shakerscan-sqlmap-{job_id[:8]}-")
+            scratch_dir = tempfile.mkdtemp(
+                prefix=f"shakerscan-sqlmap-{job_id[:8]}-"
+            )
         argv = agent_tools.bind_scanner_runtime_paths(
-            name, argv, scratch_dir=scratch_dir,
+            name,
+            argv,
+            scratch_dir=scratch_dir,
         )
         requested_timeout = int(job_data.get("timeout_ms") or template_timeout_ms)
         timeout_ms = max(1_000, min(template_timeout_ms, requested_timeout))
         proc = await asyncio.create_subprocess_exec(
             binary,
             *argv,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
         )
+        process_started = True
         overflow = asyncio.Event()
         read_streams = asyncio.create_task(
-            _read_agent_tool_streams(proc, max_bytes=_AGENT_TOOL_OUTPUT_BYTES, overflow=overflow)
+            _read_agent_tool_streams(
+                proc,
+                max_bytes=_AGENT_TOOL_OUTPUT_BYTES,
+                overflow=overflow,
+            )
         )
         wait_process = asyncio.create_task(proc.wait())
-        deadline = asyncio.get_running_loop().time() + timeout_ms / 1000.0
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_ms / 1000.0
+        next_heartbeat = loop.time() + 15.0
         while not wait_process.done():
             if redis_client.exists(cancel_key):
                 status, error = "cancelled", "cancelled"
@@ -14239,20 +14259,28 @@ async def process_agent_scanner_tool_job(job_data: dict[str, Any]) -> None:
                 status, error = "failed", "output_limit_exceeded"
                 _terminate_agent_tool_process_group(proc)
                 break
-            if asyncio.get_running_loop().time() >= deadline:
+            if loop.time() >= deadline:
                 status, error = "timeout", "timeout"
                 _terminate_agent_tool_process_group(proc)
                 break
+            if heartbeat is not None and loop.time() >= next_heartbeat:
+                await heartbeat()
+                next_heartbeat = loop.time() + 15.0
             await asyncio.sleep(0.05)
         await wait_process
         out, err = await read_streams
         returncode = proc.returncode
         stdout = (out or b"").decode("utf-8", "replace")
         pinned_url, _pinned_host, _pinned_header = agent_tools._pinned_scanner_url(
-            execution_target, pinned_address,
+            execution_target,
+            pinned_address,
         )
-        original_origin = urllib.parse.urlunsplit((*urllib.parse.urlsplit(execution_target)[:2], "", "", ""))
-        pinned_origin = urllib.parse.urlunsplit((*urllib.parse.urlsplit(pinned_url)[:2], "", "", ""))
+        original_origin = urllib.parse.urlunsplit(
+            (*urllib.parse.urlsplit(execution_target)[:2], "", "", "")
+        )
+        pinned_origin = urllib.parse.urlunsplit(
+            (*urllib.parse.urlsplit(pinned_url)[:2], "", "", "")
+        )
         stdout = stdout.replace(pinned_origin, original_origin)
         if overflow.is_set() and status not in {"cancelled", "timeout"}:
             status, error = "failed", "output_limit_exceeded"
@@ -14261,7 +14289,10 @@ async def process_agent_scanner_tool_job(job_data: dict[str, Any]) -> None:
                 status = "failed"
             elif returncode not in (0, None) and not stdout.strip():
                 status = "failed"
-                error = redact_text((err or b"").decode("utf-8", "replace")[:300]) or f"exit_{returncode}"
+                error = (
+                    redact_text((err or b"").decode("utf-8", "replace")[:300])
+                    or f"exit_{returncode}"
+                )
             else:
                 status = "success"
     except FileNotFoundError:
@@ -14272,58 +14303,81 @@ async def process_agent_scanner_tool_job(job_data: dict[str, Any]) -> None:
         if proc is not None and proc.returncode is None:
             _terminate_agent_tool_process_group(proc)
             await proc.wait()
+        if read_streams is not None:
+            await asyncio.gather(read_streams, return_exceptions=True)
+        raise
+    except (ReservationConflict, ReservationStoreError):
+        if proc is not None and proc.returncode is None:
+            _terminate_agent_tool_process_group(proc)
+            await proc.wait()
+        if read_streams is not None:
+            await asyncio.gather(read_streams, return_exceptions=True)
+        raise
+    except Exception as exc:  # noqa: BLE001 - caller charges uncertain execution fully
+        if proc is not None and proc.returncode is None:
+            _terminate_agent_tool_process_group(proc)
+            await proc.wait()
+        if read_streams is not None:
+            await asyncio.gather(read_streams, return_exceptions=True)
+        error = f"worker_fault:{type(exc).__name__}"
+        execution_uncertain = process_started
+    finally:
         if pinned_proxy is not None:
             await pinned_proxy.close()
         if scratch_dir:
             shutil.rmtree(scratch_dir, ignore_errors=True)
-        raise
-    except Exception as exc:  # noqa: BLE001 - publish a bounded operational result
-        error = f"worker_fault:{type(exc).__name__}"
 
-    if pinned_proxy is not None:
-        await pinned_proxy.close()
-    if scratch_dir:
-        shutil.rmtree(scratch_dir, ignore_errors=True)
-
-    scanner_name = str(job_data.get("tool_name") or "").strip().lower()
-    registered_host = urllib.parse.urlsplit(str(job_data.get("registered_target") or "")).hostname
     typed_output = agent_tools.parse_scanner_output(
-        scanner_name,
+        name,
         stdout,
-        allowed_host=registered_host if scanner_name == "katana" else None,
+        allowed_host=(
+            urllib.parse.urlsplit(registered_target).hostname
+            if name == "katana"
+            else None
+        ),
     )
-    # Nuclei emits cumulative JSON counters on stderr while reserving stdout
-    # for matches. Feed those counters only into accounting; planner-visible
-    # evidence remains the typed/redacted stdout match stream.
-    settlement = _agent_scanner_request_settlement(
-        str(job_data.get("tool_name") or ""), stdout, err,
-    )
+    settlement = _agent_scanner_request_settlement(name, stdout, err)
     if status in {"failed", "cancelled"} and not stdout.strip():
-        # No scanner output is not proof that DNS/TCP emitted no traffic, so only the known
-        # pre-spawn contract failures above can safely settle at zero.
         if error == "scanner_not_available" or str(error or "").startswith("contract:"):
-            settlement = {"mode": "exact", "actual": 0, "observed_minimum": 0,
-                          "source": "not_executed"}
-    # Planner-visible scanner output is always the compact typed projection. This prevents
-    # raw crawler bodies, Nuclei progress records, and query values from entering the hunt.
+            settlement = {
+                "mode": "exact",
+                "actual": 0,
+                "observed_minimum": 0,
+                "source": "not_executed",
+            }
     safe_lines = [
         json.dumps(record, sort_keys=True, separators=(",", ":"))[:1200]
         for record in list(typed_output.get("records") or [])[:60]
         if isinstance(record, dict)
     ]
-    result = {
+    record_count = int(typed_output.get("record_count") or 0)
+    finished_at = datetime.now(timezone.utc)
+    return {
         "job_id": job_id,
         "status": status,
         "error": error,
         "returncode": returncode,
-        "started_at": started_at,
-        "finished_at": utc_now_iso(),
+        "started_at": started_at.isoformat(),
+        "finished_at": finished_at.isoformat(),
+        "elapsed_seconds": max(0, int(time.monotonic() - monotonic_started + 0.999)),
+        "partial": status == "timeout" and record_count > 0,
+        "timed_out": status == "timeout",
         "output_lines": safe_lines,
-        "line_count": int(typed_output.get("record_count") or 0),
+        "line_count": record_count,
         "typed_output": typed_output,
         "settlement": settlement,
+        "execution_uncertain": execution_uncertain,
         "network_binding": "hostname_preserving_pinned_socks5",
     }
+
+
+async def process_agent_scanner_tool_job(job_data: dict[str, Any]) -> None:
+    """Execute a legacy fixed-template scanner job outside the API process."""
+    job_id = str(job_data.get("job_id") or "").strip()
+    result_key = f"agent_tool_result:{job_id}"
+    cancel_key = f"agent_tool_cancel:{job_id}"
+    redis_client = get_redis()
+    result = await _execute_agent_scanner_process(job_data)
     if job_id:
         redis_client.set(
             result_key,
@@ -14332,7 +14386,11 @@ async def process_agent_scanner_tool_job(job_data: dict[str, Any]) -> None:
         )
         redis_client.hset(
             f"job:{job_id}",
-            mapping={"status": status, "current_phase": "agent_tool_complete", "error": error or ""},
+            mapping={
+                "status": str(result.get("status") or "failed"),
+                "current_phase": "agent_tool_complete",
+                "error": str(result.get("error") or ""),
+            },
         )
         redis_client.expire(f"job:{job_id}", _AGENT_TOOL_RESULT_TTL_SECONDS)
         redis_client.delete(cancel_key)
@@ -14970,7 +15028,12 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
             redis_client.delete(cancel_key)
 
 
-def _worker_terminal_network_result(stored: Any, *, job_id: str) -> dict[str, Any]:
+def _worker_terminal_network_result(
+    stored: Any,
+    *,
+    job_id: str,
+    network_binding: str = "runtime_target_binding",
+) -> dict[str, Any]:
     receipt = dict(stored.receipt or {})
     partial = bool(receipt.get("partial"))
     status = (
@@ -15005,7 +15068,7 @@ def _worker_terminal_network_result(stored: Any, *, job_id: str) -> dict[str, An
         "receipt": receipt,
         "durable_budget_settled": True,
         "idempotent_redelivery": True,
-        "network_binding": "runtime_target_binding",
+        "network_binding": network_binding,
     }
 
 
@@ -15051,8 +15114,9 @@ async def _record_hunt_network_tool_receipt(
         "target_scope": target_scope,
     })
     tool_status = (
-        "success" if status in {"success", "partial"}
-        else "timeout" if timed_out else "failed"
+        "timeout" if timed_out
+        else "success" if status in {"success", "partial"}
+        else "failed"
     )
     parser_status = "partial" if partial else "parsed" if status == "success" else "failed"
     await conn.execute(
@@ -15110,6 +15174,578 @@ async def _record_hunt_network_tool_receipt(
         partial,
         hunt_id,
     )
+
+
+def _worker_scanner_execution_target(
+    registered_target: str,
+    capability_input: Mapping[str, Any],
+) -> str:
+    path = str(capability_input.get("path") or "").strip()
+    if not path:
+        candidate = registered_target
+    else:
+        if not path.startswith("/") or path.startswith("//"):
+            raise agent_tools.AgentToolError(
+                "scanner path must be an absolute same-origin path starting with /"
+            )
+        candidate = urllib.parse.urljoin(registered_target, path)
+        if (
+            urllib.parse.urlsplit(candidate)[:2]
+            != urllib.parse.urlsplit(registered_target)[:2]
+        ):
+            raise agent_tools.AgentToolError(
+                "scanner path escapes the persisted Hunt target origin"
+            )
+    return agent_tools.validate_scanner_execution_target(
+        registered_target,
+        candidate,
+    )
+
+
+async def process_canonical_scanner_capability_job(
+    job_data: dict[str, Any],
+) -> None:
+    """Execute a canonical external Hunt scanner under its durable reservation."""
+    job_id = str(job_data.get("job_id") or "").strip()
+    result_key = f"agent_tool_result:{job_id}"
+    cancel_key = f"agent_tool_cancel:{job_id}"
+    redis_client = get_redis()
+    store = PostgresBudgetReservationStore()
+    result: dict[str, Any] = {
+        "job_id": job_id,
+        "status": "failed",
+        "error": "worker_fault",
+        "durable_budget_settled": False,
+    }
+    publish_result = True
+    persisted = None
+    try:
+        if not job_id:
+            raise agent_tools.AgentToolError("scanner capability job requires an identity")
+        hunt_id = uuid.UUID(str(job_data.get("hunt_id") or ""))
+        action_id = uuid.UUID(str(job_data.get("action_id") or ""))
+        reservation_id = str(
+            uuid.UUID(str(job_data.get("budget_reservation_id") or ""))
+        )
+        queued_action_digest = str(job_data.get("action_digest") or "").lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", queued_action_digest):
+            raise agent_tools.AgentToolError(
+                "scanner capability action digest is invalid"
+            )
+        capability_name = str(
+            job_data.get("capability_name") or ""
+        ).strip().lower()
+        if capability_name not in DURABLE_SCANNER_HUNT_CAPABILITIES:
+            raise agent_tools.AgentToolError(
+                "capability is not a durable external scanner action"
+            )
+        capability_input = dict(job_data.get("capability_input") or {})
+        spec = agent_tools.CAPABILITY_REGISTRY.require(capability_name)
+        if not spec.legacy_tool_name or not spec.binary:
+            raise agent_tools.AgentToolError(
+                "canonical scanner capability has no fixed-template adapter"
+            )
+        worker_id = _worker_runtime_identity() or f"worker:{job_id[:8]}"
+
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                run = await conn.fetchrow(
+                    "SELECT * FROM hunt_runs WHERE id=$1 FOR UPDATE",
+                    hunt_id,
+                )
+                if not run:
+                    raise agent_tools.AgentToolError("scanner Hunt does not exist")
+                action = await conn.fetchrow(
+                    """SELECT id, capability_name, status FROM hunt_actions
+                       WHERE id=$1 AND hunt_run_id=$2 FOR UPDATE""",
+                    action_id,
+                    hunt_id,
+                )
+                if (
+                    not action
+                    or str(action["capability_name"]) != capability_name
+                ):
+                    raise agent_tools.AgentToolError(
+                        "scanner action identity is invalid"
+                    )
+                stored = await store.load(conn, reservation_id, for_update=True)
+                if (
+                    stored is None
+                    or stored.action_id != str(action_id)
+                    or stored.record.owner_kind != "hunt"
+                    or stored.record.owner_id != str(hunt_id)
+                    or stored.record.capability_name != capability_name
+                ):
+                    raise ReservationConflict(
+                        "scanner reservation identity does not match the queued action"
+                    )
+                if stored.action_digest != queued_action_digest:
+                    raise ReservationConflict(
+                        "scanner reservation action digest does not match the queue"
+                    )
+                if stored.record.terminal:
+                    result = _worker_terminal_network_result(
+                        stored,
+                        job_id=job_id,
+                        network_binding="hostname_preserving_pinned_socks5",
+                    )
+                    return
+                if stored.record.status == "running":
+                    publish_result = False
+                    result = {
+                        "job_id": job_id,
+                        "status": "running",
+                        "error": "idempotent_redelivery_running",
+                        "budget_reservation_id": reservation_id,
+                        "durable_budget_settled": False,
+                        "idempotent_redelivery": True,
+                    }
+                    return
+                if (
+                    stored.record.status != "reserved"
+                    or str(action["status"]) != "reserved"
+                ):
+                    raise ReservationConflict(
+                        "scanner action is not dispatchable"
+                    )
+                if str(run["status"]) not in {
+                    "active",
+                    "awaiting_planner",
+                    "budget_exhausted",
+                }:
+                    raise agent_tools.AgentToolError(
+                        "Hunt is no longer executable"
+                    )
+
+                context = _worker_json_object(run["context_pack"])
+                hunt_policy = _worker_json_object(run["policy_json"])
+                allowed = {
+                    str(item)
+                    for item in hunt_policy.get("allowed_capabilities") or []
+                }
+                if capability_name not in allowed:
+                    raise agent_tools.AgentToolError(
+                        "scanner capability is outside the persisted Hunt allowlist"
+                    )
+                if spec.requires_active_approval and not (
+                    hunt_policy.get("active_testing")
+                    and hunt_policy.get("approval_receipt_id")
+                ):
+                    raise agent_tools.AgentToolError(
+                        "scanner capability no longer has active approval"
+                    )
+                target_context = (
+                    dict(context.get("target") or {})
+                    if isinstance(context.get("target"), Mapping)
+                    else {}
+                )
+                registered_target = str(target_context.get("url") or "")
+                execution_target = _worker_scanner_execution_target(
+                    registered_target,
+                    capability_input,
+                )
+                authorized_addresses = [
+                    str(item)
+                    for item in context.get("authorized_target_addresses") or []
+                    if str(item)
+                ][:16]
+                if not authorized_addresses:
+                    raise agent_tools.AgentToolError(
+                        "Hunt has no frozen target resolution set"
+                    )
+                pinned_address = agent_tools.validate_pinned_scanner_address(
+                    authorized_addresses[0],
+                    authorized_addresses,
+                )
+                target = TargetBinding(
+                    target_id=str(run["target_id"]),
+                    target_kind=str(run["target_kind"]),
+                    canonical_host=urllib.parse.urlsplit(
+                        registered_target
+                    ).hostname,
+                    allowed_origins=tuple(target_context.get("origins") or ()),
+                    allowed_addresses=tuple(authorized_addresses),
+                    environment=str(
+                        target_context.get("environment") or "unknown"
+                    ),
+                    scope_receipt_id=str(
+                        hunt_policy.get("scope_receipt_id") or ""
+                    ) or None,
+                )
+                policy = ScanPolicy(
+                    active_testing=bool(hunt_policy.get("active_testing")),
+                    scope_receipt_id=target.scope_receipt_id,
+                    approval_receipt_id=hunt_policy.get(
+                        "approval_receipt_id"
+                    ),
+                )
+                limits = _worker_hunt_ledger_limits(
+                    _worker_json_object(run["budget_json"])
+                )
+                requested_budget = {
+                    key: int(value)
+                    for key, value in spec.budget_cost.items()
+                    if key in limits
+                }
+                requested_budget["agent_actions"] = 1
+                if spec.requires_active_approval:
+                    requested_budget["active_actions"] = 1
+                recomputed_digest = hunt_capability_action_digest(
+                    hunt_id=hunt_id,
+                    action_id=action_id,
+                    capability_name=capability_name,
+                    target_kind=str(run["target_kind"]),
+                    target_id=run["target_id"],
+                    capability_input=capability_input,
+                    requested_budget=requested_budget,
+                    scope_receipt_id=target.scope_receipt_id,
+                    approval_receipt_id=policy.approval_receipt_id,
+                )
+                if (
+                    recomputed_digest != queued_action_digest
+                    or stored.action_digest != queued_action_digest
+                    or dict(stored.record.requested) != requested_budget
+                ):
+                    raise ReservationConflict(
+                        "scanner queue payload does not match its durable action"
+                    )
+                lease_seconds = hunt_capability_lease_seconds(
+                    requested_budget
+                )
+                running = stored.record.start(
+                    worker_id=worker_id,
+                    lease_seconds=lease_seconds,
+                )
+                persisted = await store.persist_transition(
+                    conn,
+                    previous=stored,
+                    current=running,
+                )
+                updated = await conn.execute(
+                    """UPDATE hunt_actions SET status='running', started_at=NOW()
+                       WHERE id=$1 AND hunt_run_id=$2 AND status='reserved'""",
+                    action_id,
+                    hunt_id,
+                )
+                if not str(updated).endswith(" 1"):
+                    raise ReservationConflict(
+                        "scanner action changed before worker dispatch"
+                    )
+
+        async def heartbeat_reservation() -> None:
+            nonlocal persisted
+            if persisted is None:
+                raise ReservationStoreError(
+                    "scanner reservation persistence was not initialized"
+                )
+            async with db_pool.acquire() as heartbeat_conn:
+                async with heartbeat_conn.transaction():
+                    owner = await heartbeat_conn.fetchrow(
+                        "SELECT status FROM hunt_runs WHERE id=$1 FOR UPDATE",
+                        hunt_id,
+                    )
+                    if not owner or str(owner["status"]) not in {
+                        "active",
+                        "awaiting_planner",
+                        "budget_exhausted",
+                    }:
+                        raise ReservationStoreError(
+                            "Hunt stopped during scanner execution"
+                        )
+                    latest = await store.load(
+                        heartbeat_conn,
+                        reservation_id,
+                        for_update=True,
+                    )
+                    if (
+                        latest is None
+                        or latest.record.state_digest
+                        != persisted.record.state_digest
+                        or latest.record.worker_id != worker_id
+                    ):
+                        raise ReservationConflict(
+                            "scanner reservation changed before heartbeat"
+                        )
+                    heartbeat_record = latest.record.heartbeat(
+                        worker_id=worker_id,
+                        lease_seconds=lease_seconds,
+                    )
+                    persisted = await store.persist_transition(
+                        heartbeat_conn,
+                        previous=latest,
+                        current=heartbeat_record,
+                    )
+
+        oob_server, oob_token = agent_tools.resolve_hunt_interactsh_config(
+            allow_active=bool(policy.active_testing),
+        )
+        process_result = await _execute_agent_scanner_process(
+            {
+                "job_id": job_id,
+                "tool_name": spec.legacy_tool_name,
+                "execution_target": execution_target,
+                "registered_target": registered_target,
+                "scanner_options": capability_input,
+                "timeout_ms": int(spec.default_timeout_ms),
+                "pinned_address": pinned_address,
+                "authorized_addresses": authorized_addresses,
+                "oob_interactsh_server": oob_server,
+                "oob_interactsh_token": oob_token,
+            },
+            heartbeat=heartbeat_reservation,
+        )
+        typed_output = (
+            dict(process_result.get("typed_output") or {})
+            if isinstance(process_result.get("typed_output"), Mapping)
+            else {}
+        )
+        observations = [
+            dict(item)
+            for item in typed_output.get("records") or []
+            if isinstance(item, Mapping)
+        ][:5000]
+        parser_errors = [
+            str(item) for item in typed_output.get("errors") or []
+        ][:20]
+        settlement = (
+            dict(process_result.get("settlement") or {})
+            if isinstance(process_result.get("settlement"), Mapping)
+            else {}
+        )
+        status = str(process_result.get("status") or "failed")
+        is_partial = bool(process_result.get("partial"))
+        action_status = (
+            "completed"
+            if status == "success"
+            else "partial"
+            if is_partial
+            else "failed"
+        )
+        actual: dict[str, int] = {"agent_actions": 1}
+        if "active_actions" in persisted.record.requested:
+            actual["active_actions"] = 1
+        if process_result.get("execution_uncertain"):
+            actual = dict(persisted.record.requested)
+        else:
+            if "tool_wall_seconds" in persisted.record.requested:
+                actual["tool_wall_seconds"] = min(
+                    int(persisted.record.requested["tool_wall_seconds"]),
+                    max(0, int(process_result.get("elapsed_seconds") or 0)),
+                )
+            if "http_requests" in persisted.record.requested:
+                if str(settlement.get("mode") or "") == "exact":
+                    actual["http_requests"] = min(
+                        int(persisted.record.requested["http_requests"]),
+                        max(0, int(settlement.get("actual") or 0)),
+                    )
+                else:
+                    actual["http_requests"] = int(
+                        persisted.record.requested["http_requests"]
+                    )
+
+        started_at = str(
+            process_result.get("started_at")
+            or persisted.record.started_at.isoformat()
+        )
+        finished_at = str(
+            process_result.get("finished_at")
+            or datetime.now(timezone.utc).isoformat()
+        )
+        receipt_id = uuid.uuid4()
+        receipt_input = dict(capability_input)
+        if receipt_input.get("path"):
+            receipt_input["path"] = str(
+                receipt_input["path"]
+            ).split("?", 1)[0]
+        safe_path = urllib.parse.urlsplit(execution_target).path or "/"
+        prepared_receipt = SimpleNamespace(
+            capability_name=capability_name,
+            adapter_name=str(spec.adapter),
+            adapter_version=str(spec.adapter_version),
+            redacted_execution={"path": safe_path},
+        )
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                locked = await conn.fetchrow(
+                    "SELECT * FROM hunt_runs WHERE id=$1 FOR UPDATE",
+                    hunt_id,
+                )
+                if not locked:
+                    raise ReservationStoreError(
+                        "scanner Hunt disappeared during settlement"
+                    )
+                latest = await store.load(
+                    conn,
+                    reservation_id,
+                    for_update=True,
+                )
+                if (
+                    latest is None
+                    or persisted is None
+                    or latest.record.state_digest
+                    != persisted.record.state_digest
+                    or latest.record.status != "running"
+                    or latest.record.worker_id != worker_id
+                ):
+                    raise ReservationConflict(
+                        "scanner reservation changed before settlement"
+                    )
+                current_used = _worker_json_object(
+                    locked["budget_used_json"]
+                )
+                current_ledger = {
+                    key: int(current_used.get(key) or 0)
+                    for key in _worker_hunt_ledger_limits(
+                        _worker_json_object(locked["budget_json"])
+                    )
+                }
+                terminal, capability_receipt = terminalize_hunt_capability(
+                    latest.record,
+                    action_digest=queued_action_digest,
+                    capability_name=capability_name,
+                    adapter_name=str(spec.adapter),
+                    adapter_version=str(spec.adapter_version),
+                    parser_version=str(
+                        typed_output.get("parser") or spec.output_schema
+                    ),
+                    target_id=target.target_id,
+                    target_kind=target.target_kind,
+                    capability_input=receipt_input,
+                    action_status=action_status,
+                    actual_budget=actual,
+                    worker_id=worker_id,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    receipt_id=str(receipt_id),
+                    scope_receipt_id=target.scope_receipt_id,
+                    approval_receipt_id=policy.approval_receipt_id,
+                    result={
+                        "ok": status == "success",
+                        "error": process_result.get("error"),
+                        "timed_out": bool(process_result.get("timed_out")),
+                        "receipt_observations": observations,
+                    },
+                )
+                reconciled = terminal.reconcile_consumed(current_ledger)
+                await _record_hunt_network_tool_receipt(
+                    conn,
+                    receipt_id=receipt_id,
+                    hunt_id=hunt_id,
+                    action_id=action_id,
+                    reservation_id=reservation_id,
+                    action_digest=queued_action_digest,
+                    target=target,
+                    policy=policy,
+                    prepared=prepared_receipt,
+                    status=("partial" if is_partial else status),
+                    partial=is_partial,
+                    timed_out=bool(process_result.get("timed_out")),
+                    parser_errors=parser_errors,
+                    record_count=len(observations),
+                    reserved=latest.record.requested,
+                    actual=actual,
+                    used_after=reconciled,
+                    started_at=datetime.fromisoformat(
+                        started_at.replace("Z", "+00:00")
+                    ),
+                    finished_at=datetime.fromisoformat(
+                        finished_at.replace("Z", "+00:00")
+                    ),
+                )
+                persisted = await store.persist_terminal(
+                    conn,
+                    previous=latest,
+                    terminal=terminal,
+                    ledger_after_settlement=reconciled,
+                    receipt=capability_receipt,
+                )
+                current_used.update(reconciled)
+                await conn.execute(
+                    "UPDATE hunt_runs SET budget_used_json=$2, updated_at=NOW() WHERE id=$1",
+                    hunt_id,
+                    json.dumps(current_used),
+                )
+                action_result = {
+                    "status": status,
+                    "error": process_result.get("error"),
+                    "record_count": len(observations),
+                    "parser_errors": parser_errors,
+                    "budget_reservation_id": reservation_id,
+                    "budget_reservation_state": terminal.status,
+                    "receipt_id": str(receipt_id),
+                }
+                updated = await conn.execute(
+                    """UPDATE hunt_actions
+                       SET status=$2, result_summary=$3, receipt_id=$4,
+                           completed_at=NOW()
+                       WHERE id=$1 AND hunt_run_id=$5 AND status='running'""",
+                    action_id,
+                    action_status,
+                    json.dumps(action_result),
+                    receipt_id,
+                    hunt_id,
+                )
+                if not str(updated).endswith(" 1"):
+                    raise ReservationConflict(
+                        "scanner action changed before settlement"
+                    )
+        result = {
+            **process_result,
+            "ok": status == "success",
+            "partial": is_partial,
+            "typed_output": typed_output,
+            "budget_consumed": dict(terminal.actual),
+            "used_after_reconciliation": dict(reconciled),
+            "reservation_id": reservation_id,
+            "budget_reservation_id": reservation_id,
+            "budget_reservation_state": terminal.status,
+            "receipt_id": str(receipt_id),
+            "receipt": capability_receipt.public_dict(),
+            "durable_budget_settled": True,
+        }
+    except asyncio.CancelledError:
+        raise
+    except (
+        agent_tools.AgentToolError,
+        ReservationConflict,
+        ReservationStoreError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        result = {
+            "job_id": job_id,
+            "status": "failed",
+            "error": f"contract:{str(exc)[:240]}",
+            "durable_budget_settled": False,
+        }
+    except Exception as exc:  # noqa: BLE001 - stale running work is recovered fail closed
+        result = {
+            "job_id": job_id,
+            "status": "failed",
+            "error": f"worker_fault:{type(exc).__name__}",
+            "durable_budget_settled": False,
+        }
+    finally:
+        if job_id and publish_result:
+            redis_client.set(
+                result_key,
+                json.dumps(result, default=str, separators=(",", ":")),
+                ex=_AGENT_TOOL_RESULT_TTL_SECONDS,
+            )
+            redis_client.hset(
+                f"job:{job_id}",
+                mapping={
+                    "status": str(result.get("status") or "failed"),
+                    "current_phase": "canonical_scanner_capability_complete",
+                    "error": str(result.get("error") or ""),
+                },
+            )
+            redis_client.expire(
+                f"job:{job_id}",
+                _AGENT_TOOL_RESULT_TTL_SECONDS,
+            )
+            redis_client.delete(cancel_key)
 
 
 async def process_canonical_network_capability_job(job_data: dict[str, Any]) -> None:
@@ -15690,6 +16326,8 @@ async def process_job(job_data: dict):
         await process_discovery_job(job_data)
     elif job_type == 'agent_scanner_tool':
         await process_agent_scanner_tool_job(job_data)
+    elif job_type == 'canonical_scanner_capability':
+        await process_canonical_scanner_capability_job(job_data)
     elif job_type == 'request_collection_replay':
         await process_request_collection_replay_job(job_data)
     elif job_type == 'canonical_network_capability':
