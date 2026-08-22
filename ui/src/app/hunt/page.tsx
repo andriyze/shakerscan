@@ -10,16 +10,35 @@ import {
   getDevices,
   getHuntV2,
   getTargets,
-  startHuntV2,
   type DeviceAgentShellPlan,
   type DeviceCredentialProfile,
   type DeviceTarget,
   type HuntV2,
   type Target,
 } from '@/lib/api'
+import {
+  startHuntV2Native,
+  type HuntBudgetProfile,
+  type HuntTargetKind,
+} from '@/lib/huntV2'
 import { Button, Card, EmptyState, Field, Select, Textarea, useToast } from '@/components/ui'
 
-type TargetChoice = { id: string; kind: 'web' | 'device'; label: string; detail: string }
+type TargetChoice = {
+  id: string
+  sourceKind: 'web' | 'device'
+  label: string
+  detail: string
+}
+
+function splitIds(value: string): string[] {
+  return Array.from(new Set(value.split(/[\s,]+/).map((item) => item.trim()).filter(Boolean)))
+}
+
+function positiveInteger(value: string): number | undefined {
+  if (!value.trim()) return undefined
+  const parsed = Number.parseInt(value, 10)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined
+}
 
 function HuntContent() {
   const searchParams = useSearchParams()
@@ -27,9 +46,20 @@ function HuntContent() {
   const [webTargets, setWebTargets] = useState<Target[]>([])
   const [devices, setDevices] = useState<DeviceTarget[]>([])
   const [targetId, setTargetId] = useState('')
-  const [objective, setObjective] = useState('Find exploitable vulnerabilities and record evidence-backed candidates.')
-  const [budget, setBudget] = useState<'fast' | 'balanced' | 'thorough'>('balanced')
+  const [webTargetKind, setWebTargetKind] = useState<Exclude<HuntTargetKind, 'device'>>('web')
+  const [objective, setObjective] = useState(
+    'Find exploitable vulnerabilities and record evidence-backed candidates.',
+  )
+  const [budget, setBudget] = useState<HuntBudgetProfile>('balanced')
+  const [maxDurationSeconds, setMaxDurationSeconds] = useState('')
+  const [maxHttpRequests, setMaxHttpRequests] = useState('')
+  const [activeTesting, setActiveTesting] = useState(false)
+  const [networkDiscovery, setNetworkDiscovery] = useState(false)
+  const [allowStateChanging, setAllowStateChanging] = useState(false)
+  const [authorizationConfirmed, setAuthorizationConfirmed] = useState(false)
+  const [scopeReceipt, setScopeReceipt] = useState('')
   const [approvalReceipt, setApprovalReceipt] = useState('')
+  const [capabilityIds, setCapabilityIds] = useState('')
   const [requestCollectionIds, setRequestCollectionIds] = useState('')
   const [deviceCredentials, setDeviceCredentials] = useState<DeviceCredentialProfile[]>([])
   const [sshCredentialId, setSshCredentialId] = useState('')
@@ -41,10 +71,17 @@ function HuntContent() {
 
   useEffect(() => {
     let cancelled = false
-    Promise.all([getTargets(), getDevices({ limit: 200 }).catch(() => ({ devices: [] as DeviceTarget[] }))])
+    Promise.all([
+      getTargets(),
+      getDevices({ limit: 200 }).catch(() => ({ devices: [] as DeviceTarget[] })),
+    ])
       .then(([targetRows, deviceRows]) => {
         if (cancelled) return
-        const targets = Array.isArray(targetRows?.targets) ? targetRows.targets : Array.isArray(targetRows) ? targetRows : []
+        const targets = Array.isArray(targetRows?.targets)
+          ? targetRows.targets
+          : Array.isArray(targetRows)
+            ? targetRows
+            : []
         setWebTargets(targets)
         setDevices(deviceRows.devices || [])
         const requested = searchParams.get('target') || searchParams.get('target_id')
@@ -58,23 +95,40 @@ function HuntContent() {
   }, [searchParams])
 
   const choices = useMemo<TargetChoice[]>(() => [
-    ...webTargets.map((target) => ({ id: target.id, kind: 'web' as const, label: target.name || target.url, detail: target.url })),
-    ...devices.filter((device) => device.is_active).map((device) => ({ id: device.id, kind: 'device' as const, label: device.name, detail: device.primary_locator })),
+    ...webTargets.map((target) => ({
+      id: target.id,
+      sourceKind: 'web' as const,
+      label: target.name || target.url,
+      detail: target.url,
+    })),
+    ...devices.filter((device) => device.is_active).map((device) => ({
+      id: device.id,
+      sourceKind: 'device' as const,
+      label: device.name,
+      detail: device.primary_locator,
+    })),
   ], [webTargets, devices])
   const selectedChoice = choices.find((choice) => choice.id === targetId)
+  const targetKind: HuntTargetKind = selectedChoice?.sourceKind === 'device'
+    ? 'device'
+    : webTargetKind
 
   useEffect(() => {
     let cancelled = false
     setSshCredentialId('')
     setDeviceCredentials([])
-    if (selectedChoice?.kind !== 'device') return () => { cancelled = true }
+    if (selectedChoice?.sourceKind !== 'device') return () => { cancelled = true }
     getDeviceCredentials(selectedChoice.id)
       .then(({ profiles }) => {
-        if (!cancelled) setDeviceCredentials(profiles.filter((profile) => profile.auth_kind.startsWith('ssh_') && profile.execution_compatible))
+        if (!cancelled) {
+          setDeviceCredentials(
+            profiles.filter((profile) => profile.auth_kind.startsWith('ssh_') && profile.execution_compatible),
+          )
+        }
       })
       .catch(() => { if (!cancelled) setDeviceCredentials([]) })
     return () => { cancelled = true }
-  }, [selectedChoice?.id, selectedChoice?.kind])
+  }, [selectedChoice?.id, selectedChoice?.sourceKind])
 
   useEffect(() => {
     if (!hunt || !['active', 'awaiting_planner'].includes(hunt.status)) return
@@ -90,24 +144,62 @@ function HuntContent() {
     const deviceState = hunt?.context_pack?.device_state
     if (!deviceState || typeof deviceState !== 'object' || Array.isArray(deviceState)) return []
     const plans = (deviceState as { shell_plans?: unknown }).shell_plans
-    return Array.isArray(plans) ? plans.filter((plan): plan is DeviceAgentShellPlan => Boolean(plan && typeof plan === 'object' && 'plan_id' in plan)) : []
+    return Array.isArray(plans)
+      ? plans.filter((plan): plan is DeviceAgentShellPlan => Boolean(
+          plan && typeof plan === 'object' && 'plan_id' in plan,
+        ))
+      : []
   }, [hunt?.context_pack])
 
+  const privileged = activeTesting || networkDiscovery || allowStateChanging || Boolean(sshCredentialId)
+
   async function start() {
-    if (!targetId) return
+    if (!targetId || !selectedChoice) return
     setStarting(true)
     setError(null)
     try {
-      const created = await startHuntV2({
-        target_id: targetId,
-        objective: objective.trim(),
-        budget_profile: budget,
-        approval_receipt_id: approvalReceipt.trim() || undefined,
-        request_collection_ids: requestCollectionIds.split(/[\s,]+/).map((value) => value.trim()).filter(Boolean),
-        ssh_credential_profile_id: selectedChoice?.kind === 'device' ? sshCredentialId || undefined : undefined,
+      if (networkDiscovery && !activeTesting) {
+        throw new Error('Network discovery requires active testing.')
+      }
+      if (allowStateChanging && !activeTesting) {
+        throw new Error('State-changing HTTP requires active testing.')
+      }
+      if (privileged && !authorizationConfirmed) {
+        throw new Error('Confirm that you own or are authorized to test this target.')
+      }
+      if (privileged && !approvalReceipt.trim()) {
+        throw new Error('Privileged Hunt capabilities require a target-bound approval receipt.')
+      }
+
+      const duration = positiveInteger(maxDurationSeconds)
+      const requests = positiveInteger(maxHttpRequests)
+      const budgets = {
+        ...(duration ? { max_duration_seconds: duration } : {}),
+        ...(requests ? { max_http_requests: requests } : {}),
+      }
+      const credentialRefs = selectedChoice.sourceKind === 'device' && sshCredentialId
+        ? { ssh_credential_profile_id: sshCredentialId }
+        : {}
+      const created = await startHuntV2Native({
+        targetId,
+        targetKind,
+        goal: objective.trim(),
+        budgetProfile: budget,
+        budgets,
+        policy: {
+          activeTesting,
+          allowStateChangingHttp: allowStateChanging,
+          networkDiscovery,
+          authorizationConfirmed,
+          approvalReceiptId: approvalReceipt.trim() || undefined,
+          scopeReceiptId: scopeReceipt.trim() || undefined,
+        },
+        credentialRefs,
+        capabilities: splitIds(capabilityIds),
+        requestCollectionIds: splitIds(requestCollectionIds),
       })
       setHunt(created)
-      toast.success('Hunt started')
+      toast.success('Hunt started through the V2 policy contract')
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : 'Failed to start Hunt'
       setError(message)
@@ -143,15 +235,19 @@ function HuntContent() {
   return (
     <div className="mx-auto max-w-6xl space-y-6">
       <div className="flex items-start gap-3">
-        <div className="rounded-lg bg-violet-500/10 p-2 text-violet-300"><Compass className="h-6 w-6" /></div>
+        <div className="rounded-lg bg-violet-500/10 p-2 text-violet-300">
+          <Compass className="h-6 w-6" />
+        </div>
         <div>
           <h1 className="text-2xl font-semibold text-white">Hunt</h1>
-          <p className="mt-1 text-sm text-gray-400">One evidence-driven investigation for web, API, network, and connected-device targets.</p>
+          <p className="mt-1 text-sm text-gray-400">
+            One evidence-driven investigation for web, API, network, and connected-device targets.
+          </p>
         </div>
       </div>
 
       {!hunt ? (
-        <Card className="p-5 space-y-5">
+        <Card className="space-y-5 p-5">
           {loading ? <p className="text-sm text-gray-400">Loading targets…</p> : choices.length === 0 ? (
             <EmptyState message="No targets available" hint="Add a web or connected-device target first." />
           ) : (
@@ -159,85 +255,274 @@ function HuntContent() {
               <Field label="Target">
                 <Select value={targetId} onChange={(event) => setTargetId(event.target.value)}>
                   <option value="">Choose a target</option>
-                  {choices.map((choice) => <option key={`${choice.kind}:${choice.id}`} value={choice.id}>{choice.kind === 'device' ? 'Device' : 'Web'} · {choice.label} · {choice.detail}</option>)}
+                  {choices.map((choice) => (
+                    <option key={`${choice.sourceKind}:${choice.id}`} value={choice.id}>
+                      {choice.sourceKind === 'device' ? 'Device' : 'Web asset'} · {choice.label} · {choice.detail}
+                    </option>
+                  ))}
                 </Select>
               </Field>
+
+              {selectedChoice?.sourceKind === 'web' && (
+                <Field label="Hunt target kind">
+                  <Select
+                    value={webTargetKind}
+                    onChange={(event) => setWebTargetKind(event.target.value as typeof webTargetKind)}
+                  >
+                    <option value="web">Web application</option>
+                    <option value="api">API</option>
+                    <option value="network">Network scope</option>
+                  </Select>
+                </Field>
+              )}
+
               <Field label="Objective">
                 <Textarea rows={4} value={objective} onChange={(event) => setObjective(event.target.value)} />
               </Field>
-              <Field label="Budget">
-                <Select value={budget} onChange={(event) => setBudget(event.target.value as typeof budget)}>
+
+              <Field label="Budget profile">
+                <Select value={budget} onChange={(event) => setBudget(event.target.value as HuntBudgetProfile)}>
                   <option value="fast">Fast</option>
                   <option value="balanced">Balanced</option>
                   <option value="thorough">Thorough</option>
                 </Select>
               </Field>
-              <Field label="Approval receipt ID (optional)">
+
+              <div className="grid gap-4 md:grid-cols-2">
+                <label className="text-sm text-gray-300">
+                  Optional maximum duration (seconds)
+                  <input
+                    type="number"
+                    min="1"
+                    value={maxDurationSeconds}
+                    onChange={(event) => setMaxDurationSeconds(event.target.value)}
+                    className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white"
+                  />
+                </label>
+                <label className="text-sm text-gray-300">
+                  Optional maximum HTTP requests
+                  <input
+                    type="number"
+                    min="1"
+                    value={maxHttpRequests}
+                    onChange={(event) => setMaxHttpRequests(event.target.value)}
+                    className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white"
+                  />
+                </label>
+              </div>
+
+              <div className="space-y-3 rounded-lg border border-gray-800 bg-gray-950 p-4">
                 <div>
-                  <input value={approvalReceipt} onChange={(event) => setApprovalReceipt(event.target.value)} className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white" />
-                  <p className="mt-1 text-xs text-gray-500">Without a valid target-bound receipt, Hunt exposes passive capabilities only.</p>
+                  <h2 className="text-sm font-medium text-white">Runtime authority</h2>
+                  <p className="mt-1 text-xs text-gray-500">
+                    These controls are persisted and enforced independently of the AI planner.
+                  </p>
                 </div>
-              </Field>
-              {selectedChoice?.kind === 'device' && (
+                <label className="flex items-start gap-3 text-sm text-gray-300">
+                  <input
+                    className="mt-1"
+                    type="checkbox"
+                    checked={activeTesting}
+                    onChange={(event) => {
+                      setActiveTesting(event.target.checked)
+                      if (!event.target.checked) {
+                        setNetworkDiscovery(false)
+                        setAllowStateChanging(false)
+                      }
+                    }}
+                  />
+                  <span>Allow bounded active testing</span>
+                </label>
+                <label className={`flex items-start gap-3 text-sm ${activeTesting ? 'text-gray-300' : 'text-gray-600'}`}>
+                  <input
+                    className="mt-1"
+                    type="checkbox"
+                    disabled={!activeTesting}
+                    checked={networkDiscovery}
+                    onChange={(event) => setNetworkDiscovery(event.target.checked)}
+                  />
+                  <span>Allow TCP service discovery and fingerprinting</span>
+                </label>
+                <label className={`flex items-start gap-3 text-sm ${activeTesting ? 'text-gray-300' : 'text-gray-600'}`}>
+                  <input
+                    className="mt-1"
+                    type="checkbox"
+                    disabled={!activeTesting}
+                    checked={allowStateChanging}
+                    onChange={(event) => setAllowStateChanging(event.target.checked)}
+                  />
+                  <span>Allow explicitly selected state-changing HTTP requests</span>
+                </label>
+                {privileged && (
+                  <label className="flex items-start gap-3 rounded-lg border border-amber-800/70 bg-amber-950/20 p-3 text-sm text-amber-100">
+                    <input
+                      className="mt-1"
+                      type="checkbox"
+                      checked={authorizationConfirmed}
+                      onChange={(event) => setAuthorizationConfirmed(event.target.checked)}
+                    />
+                    <span>I own or have explicit authorization to test this target with the selected capabilities.</span>
+                  </label>
+                )}
+              </div>
+
+              <div className="grid gap-4 md:grid-cols-2">
+                <label className="text-sm text-gray-300">
+                  Scope receipt ID (optional)
+                  <input
+                    value={scopeReceipt}
+                    onChange={(event) => setScopeReceipt(event.target.value)}
+                    className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white"
+                  />
+                </label>
+                <label className="text-sm text-gray-300">
+                  Approval receipt ID {privileged ? '(required)' : '(optional)'}
+                  <input
+                    value={approvalReceipt}
+                    onChange={(event) => setApprovalReceipt(event.target.value)}
+                    className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white"
+                  />
+                </label>
+              </div>
+
+              {selectedChoice?.sourceKind === 'device' && (
                 <Field label="Bound SSH credential (optional)">
                   <div>
                     <Select value={sshCredentialId} onChange={(event) => setSshCredentialId(event.target.value)}>
                       <option value="">No SSH command proposals</option>
-                      {deviceCredentials.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}{profile.port ? ` · port ${profile.port}` : ''}</option>)}
+                      {deviceCredentials.map((profile) => (
+                        <option key={profile.id} value={profile.id}>
+                          {profile.name}{profile.port ? ` · port ${profile.port}` : ''}
+                        </option>
+                      ))}
                     </Select>
-                    <p className="mt-1 text-xs text-gray-500">A credential and target-bound approval receipt expose proposal only. No SSH command runs until you separately confirm its exact immutable plan here.</p>
+                    <p className="mt-1 text-xs text-gray-500">
+                      Credentials stay server-side. Remote commands still require a separate immutable-plan confirmation.
+                    </p>
                   </div>
                 </Field>
               )}
+
               <Field label="Bound request collection IDs (optional)">
                 <div>
-                  <input value={requestCollectionIds} onChange={(event) => setRequestCollectionIds(event.target.value)} placeholder="UUIDs separated by commas" className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white" />
-                  <p className="mt-1 text-xs text-gray-500">Collections are fixed at creation; the agent receives only their redacted index.</p>
+                  <input
+                    value={requestCollectionIds}
+                    onChange={(event) => setRequestCollectionIds(event.target.value)}
+                    placeholder="UUIDs separated by commas"
+                    className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white"
+                  />
+                  <p className="mt-1 text-xs text-gray-500">
+                    Collections are fixed at creation; the planner sees only their redacted inventory.
+                  </p>
                 </div>
               </Field>
-              {error && <p className="rounded-lg border border-red-800 bg-red-950/30 p-3 text-sm text-red-300">{error}</p>}
-              <div className="flex justify-end"><Button onClick={start} loading={starting} disabled={!targetId || !objective.trim()}>Start Hunt</Button></div>
+
+              <Field label="Capability allowlist (optional)">
+                <div>
+                  <input
+                    value={capabilityIds}
+                    onChange={(event) => setCapabilityIds(event.target.value)}
+                    placeholder="web.probe, web.crawl, templates.scan"
+                    className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white"
+                  />
+                  <p className="mt-1 text-xs text-gray-500">
+                    Leave empty for the server-defined capabilities allowed by this target and policy.
+                  </p>
+                </div>
+              </Field>
+
+              {error && (
+                <p className="rounded-lg border border-red-800 bg-red-950/30 p-3 text-sm text-red-300">
+                  {error}
+                </p>
+              )}
+              <div className="flex justify-end">
+                <Button onClick={start} loading={starting} disabled={!targetId || !objective.trim()}>
+                  Start Hunt
+                </Button>
+              </div>
             </>
           )}
         </Card>
       ) : (
         <div className="grid gap-5 lg:grid-cols-[1fr_1.4fr]">
           <div className="space-y-5">
-          <Card className="p-5 space-y-4">
-            <div className="flex items-center justify-between gap-3">
-              <div><p className="text-xs uppercase tracking-wide text-gray-500">{hunt.target_kind} Hunt</p><h2 className="mt-1 font-medium text-white">{hunt.objective}</h2></div>
-              <span className="rounded bg-blue-500/10 px-2 py-1 text-xs text-blue-300">{hunt.status}</span>
-            </div>
-            <div className="grid grid-cols-2 gap-3 text-sm">
-              <div className="rounded bg-gray-950 p-3"><span className="block text-xs text-gray-500">Budget</span><span className="text-white">{hunt.budget_profile}</span></div>
-              <div className="rounded bg-gray-950 p-3"><span className="block text-xs text-gray-500">Capability calls</span><span className="text-white">{hunt.budget_used.agent_actions || 0} / {hunt.budget.max_capability_calls || 0}</span></div>
-            </div>
-            <div className="flex items-start gap-2 rounded-lg border border-gray-800 bg-gray-950 p-3 text-xs text-gray-400"><ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />The runtime binds every capability to this target. Candidates require evidence and cannot become verified findings directly.</div>
-            {['active', 'awaiting_planner'].includes(hunt.status) && <Button variant="danger" onClick={cancel}>Cancel Hunt</Button>}
-          </Card>
-          {hunt.target_kind === 'device' && shellPlans.length > 0 && (
-            <Card className="p-5 space-y-4">
-              <div><h2 className="font-medium text-white">SSH command plans</h2><p className="mt-1 text-xs text-gray-500">Review every command. Plans are immutable, host-key pinned, and expire after 30 minutes.</p></div>
-              {shellPlans.map((plan) => (
-                <div key={plan.plan_id} className="space-y-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-4">
-                  <div className="flex items-center justify-between gap-3"><span className="text-sm font-medium text-amber-100">Port {plan.ssh_port} · {plan.status}</span><span className="text-xs text-gray-500">Expires {new Date(plan.expires_at).toLocaleString()}</span></div>
-                  <p className="text-xs text-gray-300">{plan.purpose}</p>
-                  <pre className="overflow-x-auto whitespace-pre-wrap rounded bg-gray-950 p-3 text-xs text-blue-200">{plan.commands.join('\n')}</pre>
-                  <div className="space-y-1 text-xs text-gray-400"><p><span className="text-gray-500">Risk:</span> {plan.risk_summary}</p><p className="break-all"><span className="text-gray-500">Pinned host key:</span> {plan.expected_host_key_fingerprint}</p><p className="break-all"><span className="text-gray-500">Plan digest:</span> {plan.plan_digest}</p></div>
-                  {plan.status === 'proposed' && <Button onClick={() => confirmShellPlan(plan)} loading={confirmingPlanId === plan.plan_id}>Confirm and queue these exact remote commands</Button>}
-                  {plan.scan_id && <p className="text-xs text-emerald-300">Queued scan: {plan.scan_id}</p>}
+            <Card className="space-y-4 p-5">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-xs uppercase tracking-wide text-gray-500">{hunt.target_kind} Hunt</p>
+                  <h2 className="mt-1 font-medium text-white">{hunt.objective}</h2>
                 </div>
-              ))}
+                <span className="rounded bg-blue-500/10 px-2 py-1 text-xs text-blue-300">{hunt.status}</span>
+              </div>
+              <div className="grid grid-cols-2 gap-3 text-sm">
+                <div className="rounded bg-gray-950 p-3">
+                  <span className="block text-xs text-gray-500">Budget</span>
+                  <span className="text-white">{hunt.budget_profile}</span>
+                </div>
+                <div className="rounded bg-gray-950 p-3">
+                  <span className="block text-xs text-gray-500">Capability calls</span>
+                  <span className="text-white">
+                    {hunt.budget_used.agent_actions || 0} / {hunt.budget.max_capability_calls || 0}
+                  </span>
+                </div>
+              </div>
+              <div className="flex items-start gap-2 rounded-lg border border-gray-800 bg-gray-950 p-3 text-xs text-gray-400">
+                <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />
+                The runtime binds every capability to this target and the persisted V2 policy. Candidates cannot self-promote into verified findings.
+              </div>
+              {['active', 'awaiting_planner'].includes(hunt.status) && (
+                <Button variant="danger" onClick={cancel}>Cancel Hunt</Button>
+              )}
             </Card>
-          )}
+
+            {hunt.target_kind === 'device' && shellPlans.length > 0 && (
+              <Card className="space-y-4 p-5">
+                <div>
+                  <h2 className="font-medium text-white">SSH command plans</h2>
+                  <p className="mt-1 text-xs text-gray-500">
+                    Review every command. Plans are immutable, host-key pinned, and expire after 30 minutes.
+                  </p>
+                </div>
+                {shellPlans.map((plan) => (
+                  <div key={plan.plan_id} className="space-y-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-4">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-sm font-medium text-amber-100">Port {plan.ssh_port} · {plan.status}</span>
+                      <span className="text-xs text-gray-500">Expires {new Date(plan.expires_at).toLocaleString()}</span>
+                    </div>
+                    <p className="text-xs text-gray-300">{plan.purpose}</p>
+                    <pre className="overflow-x-auto whitespace-pre-wrap rounded bg-gray-950 p-3 text-xs text-blue-200">
+                      {plan.commands.join('\n')}
+                    </pre>
+                    <div className="space-y-1 text-xs text-gray-400">
+                      <p><span className="text-gray-500">Risk:</span> {plan.risk_summary}</p>
+                      <p className="break-all"><span className="text-gray-500">Pinned host key:</span> {plan.expected_host_key_fingerprint}</p>
+                      <p className="break-all"><span className="text-gray-500">Plan digest:</span> {plan.plan_digest}</p>
+                    </div>
+                    {plan.status === 'proposed' && (
+                      <Button onClick={() => confirmShellPlan(plan)} loading={confirmingPlanId === plan.plan_id}>
+                        Confirm and queue these exact remote commands
+                      </Button>
+                    )}
+                    {plan.scan_id && <p className="text-xs text-emerald-300">Queued scan: {plan.scan_id}</p>}
+                  </div>
+                ))}
+              </Card>
+            )}
           </div>
+
           <Card className="p-5">
             <h2 className="font-medium text-white">Available capabilities</h2>
-            <p className="mt-1 text-xs text-gray-500">Your coding agent can query context and call these through the Hunt API.</p>
+            <p className="mt-1 text-xs text-gray-500">
+              Your coding agent can query context and call only this persisted allowlist.
+            </p>
             <div className="mt-4 space-y-2">
               {hunt.capabilities.map((capability) => (
                 <div key={capability.name} className="rounded-lg border border-gray-800 bg-gray-950 p-3">
-                  <div className="flex items-center justify-between gap-3"><code className="text-sm text-blue-300">{capability.name}</code><span className="text-xs text-gray-500">{capability.risk_tier}</span></div>
+                  <div className="flex items-center justify-between gap-3">
+                    <code className="text-sm text-blue-300">{capability.name}</code>
+                    <span className="text-xs text-gray-500">{capability.risk_tier}</span>
+                  </div>
                   <p className="mt-1 text-xs text-gray-400">{capability.description}</p>
                 </div>
               ))}
@@ -250,5 +535,9 @@ function HuntContent() {
 }
 
 export default function HuntPage() {
-  return <Suspense fallback={<p className="text-sm text-gray-400">Loading Hunt…</p>}><HuntContent /></Suspense>
+  return (
+    <Suspense fallback={<p className="text-sm text-gray-400">Loading Hunt…</p>}>
+      <HuntContent />
+    </Suspense>
+  )
 }
