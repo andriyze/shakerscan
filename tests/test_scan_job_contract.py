@@ -221,6 +221,25 @@ def test_canonical_parallel_discovery_has_distinct_bounded_authority():
     assert materialized["parent_scan_id"] == "scan-1"
 
 
+def test_endpoint_only_shard_preserves_zero_browser_network_and_tool_authority():
+    parent = _job()
+    options = {
+        "skip_global_checks": True,
+        "custom_endpoints": ["GET /v1/items"],
+        "custom_budget": {
+            "request_max": 50,
+            "max_urls": 20,
+            "browser_max_pages": 0,
+            "phase4_max_seconds": 0,
+        },
+    }
+    budget = derive_scan_shard_budget(options, parent.execution_plan.budget)
+    assert budget.max_browser_actions == 0
+    assert budget.max_tcp_ports == 0
+    assert budget.max_tool_wall_seconds == 0
+    assert budget.max_http_requests == 50
+
+
 def test_shard_materialization_rejects_durable_option_or_parent_drift():
     _child, row, queued = _shard_job_and_row()
     changed = copy.deepcopy(row)

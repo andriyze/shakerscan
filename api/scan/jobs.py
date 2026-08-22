@@ -94,6 +94,9 @@ _BUDGET_CEILINGS: Mapping[str, int] = {
 _OPTIONS_DIGEST_IGNORED_KEYS = frozenset({
     "queue_handoff_confirmed", "canonical_shard_authority",
 })
+_SHARD_ZERO_ALLOWED_BUDGET_KEYS = frozenset({
+    "max_browser_actions", "max_tcp_ports", "max_tool_wall_seconds",
+})
 
 
 class CanonicalScanJobError(ValueError):
@@ -300,14 +303,16 @@ def scan_job_options_digest(value: Mapping[str, Any]) -> str:
 
 def derive_scan_shard_budget(
     options: Mapping[str, Any], parent_budget: ScanBudget,
-) -> ScanBudget:
+) -> "ScanShardBudget":
     """Derive a child ceiling without allowing compatibility options to expand its parent."""
     custom = options.get("custom_budget")
     custom = dict(custom) if isinstance(custom, Mapping) else {}
     resolved = options.get("resolved_budget")
     resolved = dict(resolved) if isinstance(resolved, Mapping) else {}
 
-    def bounded(parent_value: int, *values: Any, scale: int = 1) -> int:
+    def bounded(
+        parent_value: int, *values: Any, scale: int = 1, allow_zero: bool = False,
+    ) -> int:
         parsed: list[int] = []
         for raw in values:
             try:
@@ -316,11 +321,11 @@ def derive_scan_shard_budget(
                 amount = int(raw) * scale
             except (TypeError, ValueError):
                 continue
-            if amount > 0:
+            if amount > 0 or (allow_zero and amount == 0):
                 parsed.append(amount)
         return min(parent_value, max(parsed) if parsed else parent_value)
 
-    return ScanBudget(
+    return ScanShardBudget(
         max_duration_seconds=bounded(
             parent_budget.max_duration_seconds,
             custom.get("max_duration_minutes"), resolved.get("max_duration_minutes"),
@@ -341,15 +346,21 @@ def derive_scan_shard_budget(
         max_browser_actions=bounded(
             parent_budget.max_browser_actions,
             custom.get("browser_max_pages"), resolved.get("browser_max_pages"),
+            allow_zero=True,
         ),
-        max_tcp_ports=bounded(
-            parent_budget.max_tcp_ports,
-            custom.get("max_tcp_ports"), resolved.get("max_tcp_ports"),
+        max_tcp_ports=(
+            0 if options.get("skip_global_checks")
+            else bounded(
+                parent_budget.max_tcp_ports,
+                custom.get("max_tcp_ports"), resolved.get("max_tcp_ports"),
+                allow_zero=True,
+            )
         ),
         max_tool_wall_seconds=bounded(
             parent_budget.max_tool_wall_seconds,
             custom.get("phase4_max_seconds"), custom.get("active_max_seconds"),
             resolved.get("phase4_max_seconds"), resolved.get("active_max_seconds"),
+            allow_zero=True,
         ),
         max_workers=1,
     )
@@ -564,6 +575,30 @@ def admitted_credential_profile_ids(
 
 
 @dataclass(frozen=True)
+class ScanShardBudget:
+    max_duration_seconds: int
+    max_http_requests: int
+    max_endpoints: int
+    max_browser_actions: int
+    max_tcp_ports: int
+    max_tool_wall_seconds: int
+    max_workers: int
+
+    def __post_init__(self) -> None:
+        for name in _BUDGET_KEYS:
+            value = getattr(self, name)
+            minimum = 0 if name in _SHARD_ZERO_ALLOWED_BUDGET_KEYS else 1
+            if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+                qualifier = "non-negative" if minimum == 0 else "positive"
+                raise CanonicalScanJobError(
+                    f"shard.sub_budget.{name} must be a {qualifier} integer"
+                )
+
+    def payload(self) -> dict[str, int]:
+        return {name: getattr(self, name) for name in _BUDGET_KEYS}
+
+
+@dataclass(frozen=True)
 class ScanShardAuthority:
     parent_scan_id: str
     parent_execution_plan_digest: str
@@ -571,7 +606,7 @@ class ScanShardAuthority:
     shard_index: int
     shard_count: int
     shard_label: str
-    sub_budget: ScanBudget
+    sub_budget: ScanShardBudget
     parallel_discovery: bool = False
     schema_version: str = SCAN_SHARD_AUTHORITY_SCHEMA
 
@@ -613,10 +648,10 @@ class ScanShardAuthority:
             raw_budget = dict(budget)
             _exact_keys(raw_budget, _SHARD_BUDGET_KEYS, name="shard.sub_budget")
             try:
-                budget = ScanBudget(**raw_budget)
-            except (TypeError, ValueError) as exc:
+                budget = ScanShardBudget(**raw_budget)
+            except (TypeError, ValueError, CanonicalScanJobError) as exc:
                 raise CanonicalScanJobError(f"shard sub-budget is invalid: {exc}") from exc
-        if not isinstance(budget, ScanBudget):
+        if not isinstance(budget, ScanShardBudget):
             raise CanonicalScanJobError("shard sub_budget must be a Scan budget")
         for name, ceiling in _BUDGET_CEILINGS.items():
             if getattr(budget, name) > ceiling:
@@ -644,9 +679,7 @@ class ScanShardAuthority:
             "shard_count": self.shard_count,
             "shard_label": self.shard_label,
             "parallel_discovery": self.parallel_discovery,
-            "sub_budget": {
-                name: getattr(self.sub_budget, name) for name in _BUDGET_KEYS
-            },
+            "sub_budget": self.sub_budget.payload(),
         }
 
     @classmethod

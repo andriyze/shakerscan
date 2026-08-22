@@ -4,7 +4,7 @@ from pathlib import Path
 
 from runtime.models import ScanBudget, ScanPolicy
 from scan.execution import ScanExecutionPlan
-from scan.jobs import ScanShardAuthority, scan_job_options_digest
+from scan.jobs import ScanShardAuthority, ScanShardBudget, scan_job_options_digest
 from scan.worker_contract import WorkerScanAdmission
 from scan.worker_dispatch import (
     execution_result_metadata,
@@ -93,7 +93,7 @@ def test_canonical_shard_dispatch_uses_its_sub_budget_not_the_parent_budget():
         shard_index=0,
         shard_count=2,
         shard_label="coverage[0]",
-        sub_budget=ScanBudget(120, 120, 30, 4, 100, 50, 1),
+        sub_budget=ScanShardBudget(120, 120, 30, 4, 100, 50, 1),
     )
     options["canonical_shard_authority"] = authority.payload()
 
