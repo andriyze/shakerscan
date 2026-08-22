@@ -36,6 +36,21 @@ def test_common_run_records_redacted_subprocess_receipt():
     assert len(receipt["command_hash"]) == 64
 
 
+def test_subprocess_receipt_redacts_csrf_bearing_argv():
+    common.reset_subprocess_receipts()
+
+    out, err, rc = asyncio.run(common.run([
+        sys.executable,
+        "-c",
+        "print('ok')",
+        "https://app.test/action?csrf=opaque-value",
+    ], timeout=5))
+
+    assert (out, err, rc) == ("ok", "", 0)
+    receipt = common.snapshot_subprocess_receipts()[0]
+    assert "opaque-value" not in repr(receipt["redacted_argv"])
+
+
 def test_common_run_records_timeout_receipt():
     common.reset_subprocess_receipts()
 
@@ -76,5 +91,30 @@ def test_common_run_records_bounded_redacted_long_output_artifact(monkeypatch):
     assert artifact["truncated"] is True
     assert artifact["captured_length"] <= 900
     assert "secret-token-value" not in artifact["content"]
-    assert "token=[REDACTED]" in artifact["content"]
+    assert "token=***" in artifact["content"]
     assert len(artifact["content_sha256"]) == 64
+
+
+def test_subprocess_receipt_scrubs_csrf_values_from_html_and_artifact(monkeypatch):
+    common.reset_subprocess_receipts()
+    monkeypatch.setattr(common, "_SUBPROCESS_ARTIFACT_MAX_BYTES", 1200)
+
+    marker = "wire-secret-value"
+    html = (
+        f"<script>fetch('/mutate?csrf={marker}');"
+        f"fetch('/track?xsrf_token={marker}');</script>" + "x" * 700
+    )
+    out, err, rc = asyncio.run(common.run([
+        sys.executable,
+        "-c",
+        f"print({html!r})",
+    ], timeout=5))
+
+    assert rc == 0
+    assert err == ""
+    assert marker in out
+    receipt = common.snapshot_subprocess_receipts()[0]
+    assert marker not in receipt["stdout_preview"]
+    assert marker not in receipt["stdout_artifact"]["content"]
+    assert "csrf=***" in receipt["stdout_preview"]
+    assert "xsrf_token=***" in receipt["stdout_preview"]

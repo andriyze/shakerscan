@@ -24,6 +24,8 @@ def test_unified_keyset_covers_both_historical_sources():
     # Previously model-intake-only gap: API auth keys were missing from its set.
     for key in ("auth_header", "auth_cookies", "user2_header", "ai_api_key", "login_password"):
         assert is_sensitive_key(key), key
+    for key in ("csrf", "csrf_token", "xsrf", "xsrf_token"):
+        assert is_sensitive_key(key), key
 
 
 def test_key_matching_normalizes_dashes_and_fragments():
@@ -85,6 +87,9 @@ def test_redact_text_scrubs_known_patterns():
     assert redact_text("Authorization: Bearer abc.def-123") == "Authorization: Bearer ***"
     assert redact_text("api_key=SECRET&x=1") == "api_key=***&x=1"
     assert redact_text(None) is None
+    assert "wire-secret" not in redact_text(
+        "fetch('/mutate?csrf=wire-secret'); fetch('/track?xsrf=wire-secret')"
+    )
 
 
 def test_scrub_text_composes_url_and_text_redaction_for_transcripts():

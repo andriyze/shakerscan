@@ -46,6 +46,8 @@ SENSITIVE_KEYS: frozenset[str] = frozenset(
         "client_secret",
         "credential",
         "credentials",
+        "csrf",
+        "csrf_token",
         "gcp_credentials",
         "hf_token",
         "huggingface_token",
@@ -60,6 +62,8 @@ SENSITIVE_KEYS: frozenset[str] = frozenset(
         "token",
         "user2_cookies",
         "user2_header",
+        "xsrf",
+        "xsrf_token",
     }
 )
 
@@ -82,6 +86,8 @@ SENSITIVE_QUERY_KEYS: frozenset[str] = frozenset(
         "api_key",
         "api-key",
         "awsaccesskeyid",
+        "csrf",
+        "csrf-token",
         "expires",
         "x-amz-credential",
         "x-amz-security-token",
@@ -89,6 +95,8 @@ SENSITIVE_QUERY_KEYS: frozenset[str] = frozenset(
         "signature",
         "sig",
         "token",
+        "xsrf",
+        "xsrf-token",
     }
 )
 
@@ -100,7 +108,7 @@ SENSITIVE_QUERY_KEYS: frozenset[str] = frozenset(
 _SENSITIVE_TEXT_KEY = (
     r"[a-z0-9_-]*(?:api[_-]?key|secret|token|password|passwd|pwd|authorization|"
     r"access[_-]?key|private[_-]?key|client[_-]?secret|credential|session[_-]?token|"
-    r"refresh[_-]?token|bearer)[a-z0-9_-]*"
+    r"refresh[_-]?token|csrf|xsrf|signature|bearer)[a-z0-9_-]*"
 )
 # Same key set for the bare `key: value` (YAML/config) shape, minus authorization/
 # bearer — those are owned by the dedicated Authorization header rule below, and
@@ -108,7 +116,7 @@ _SENSITIVE_TEXT_KEY = (
 _SENSITIVE_COLON_KEY = (
     r"[a-z0-9_-]*(?:api[_-]?key|secret|token|password|passwd|pwd|"
     r"access[_-]?key|private[_-]?key|client[_-]?secret|credential|session[_-]?token|"
-    r"refresh[_-]?token)[a-z0-9_-]*"
+    r"refresh[_-]?token|csrf|xsrf|signature)[a-z0-9_-]*"
 )
 _TEXT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # Authorization: Bearer/Basic/Digest <token>  (\S+ so base64 +/= is covered)

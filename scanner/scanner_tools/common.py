@@ -18,6 +18,11 @@ try:
 except ImportError:  # pragma: no cover - flat-module fallback
     from request_meter import RequestBudgetExceeded, get_request_meter
 
+try:
+    from ..redaction import redact_text as _shared_redact_text
+except ImportError:  # pragma: no cover - flat-module fallback
+    from redaction import redact_text as _shared_redact_text
+
 try:  # sibling module; tolerate flat (/app) execution
     from .adaptive_throttle import get_throttle as _get_active_throttle
 except ImportError:  # pragma: no cover - flat-module fallback
@@ -96,7 +101,7 @@ _subprocess_receipts: list[dict[str, Any]] = []
 
 _SENSITIVE_ARG_MARKERS = (
     "token", "secret", "password", "passwd", "authorization", "cookie",
-    "apikey", "api_key", "key=", "jwt",
+    "apikey", "api_key", "key=", "jwt", "csrf", "xsrf", "signature",
 )
 
 
@@ -153,15 +158,8 @@ def _curl_http_method(cmd: list[str]) -> str:
 
 
 def _redact_output_text(value: Any) -> str:
-    text = str(value if value is not None else "")
-    replacements = (
-        (r"(?i)(authorization:\s*bearer\s+)[^\s,;]+", r"\1[REDACTED]"),
-        (r"(?i)(bearer|token|secret|password|signature|api[_-]?key)=([^&\s]+)", r"\1=[REDACTED]"),
-        (r"(?i)(\"(?:token|secret|password|api[_-]?key|authorization)\"\s*:\s*\")[^\"]+(\")", r"\1[REDACTED]\2"),
-        (r"(?i)\b(?:sk|pk)_[a-z0-9_=-]{12,}\b", "[REDACTED]"),
-    )
-    for pattern, replacement in replacements:
-        text = re.sub(pattern, replacement, text)
+    text = str(_shared_redact_text(str(value if value is not None else "")))
+    text = re.sub(r"(?i)\b(?:sk|pk)_[a-z0-9_=-]{12,}\b", "[REDACTED]", text)
     # Strip NUL bytes: they are valid UTF-8 and survive decoding, but Postgres rejects
     #  in jsonb, so an unstripped NUL makes the receipt/artifact INSERT raise and the
     # record is silently dropped (binary tool output would leave no receipt at all).
