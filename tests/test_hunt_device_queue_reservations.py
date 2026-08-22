@@ -59,7 +59,7 @@ def test_blocked_device_queue_refunds_everything_except_planner_action():
 
     refund = handler[handler.index("and not device_queue_enqueued"):]
     refund = refund[:refund.index("elif name in DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES")]
-    assert 'actual_charges = {"agent_actions": 1}' in refund
+    assert "actual_charges = _hunt_nonexecuting_actual(charges)" in refund
 
 
 def test_service_verification_reserves_only_the_selected_transport():

@@ -7,6 +7,7 @@ from api.hunt.capability_reservations import (
     DURABLE_DEVICE_CONTROL_HUNT_CAPABILITIES,
     DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES,
     DURABLE_DEVICE_QUEUE_HUNT_CAPABILITIES,
+    DURABLE_DEVICE_SSH_PROPOSAL_HUNT_CAPABILITIES,
     DURABLE_INLINE_HUNT_CAPABILITIES,
     hunt_capability_action_digest,
     hunt_capability_lease_seconds,
@@ -74,6 +75,12 @@ def test_device_queue_capability_set_is_explicit():
     assert DURABLE_DEVICE_QUEUE_HUNT_CAPABILITIES == {
         "device.scan",
         "device.service.verify",
+    }
+
+
+def test_device_ssh_proposal_capability_set_is_explicit():
+    assert DURABLE_DEVICE_SSH_PROPOSAL_HUNT_CAPABILITIES == {
+        "device.ssh.propose",
     }
 
 

@@ -328,7 +328,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         CapabilitySpec(
             "device.ssh.propose", "Propose an immutable command plan for a bound, host-key-pinned SSH service; this does not execute it.",
             "internal", "credential", frozenset({"device"}), "device.propose_ssh_shell", "1",
-            "active_testing", {"tool_wall_seconds": 5}, {"control_plane": True, "credential_binding": "ssh"},
+            "active_testing", {"active_actions": 1, "tool_wall_seconds": 5}, {"control_plane": True, "credential_binding": "ssh"},
             _schema({
                 "port": {"type": "integer", "minimum": 1, "maximum": 65535},
                 "commands": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 4096}, "minItems": 1, "maxItems": 8},

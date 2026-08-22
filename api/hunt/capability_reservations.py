@@ -36,6 +36,10 @@ DURABLE_DEVICE_QUEUE_HUNT_CAPABILITIES = frozenset({
     "device.service.verify",
 })
 
+DURABLE_DEVICE_SSH_PROPOSAL_HUNT_CAPABILITIES = frozenset({
+    "device.ssh.propose",
+})
+
 DURABLE_WORKER_HUNT_CAPABILITIES = frozenset({
     "ports.discover",
     "service.fingerprint",

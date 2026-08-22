@@ -308,6 +308,180 @@ def test_device_queue_context_merge_adds_only_the_execution_delta():
     assert merged["device_state"]["scans_queued"] == 3
 
 
+def test_device_ssh_proposal_context_merge_appends_plan_without_losing_peer_state():
+    existing = {
+        "plan_id": "plan-existing",
+        "proposal_signature": "sig-existing",
+        "status": "proposed",
+    }
+    proposed = {
+        "plan_id": "plan-proposed",
+        "proposal_signature": "sig-proposed",
+        "status": "proposed",
+    }
+    concurrent = {
+        "plan_id": "plan-concurrent",
+        "proposal_signature": "sig-concurrent",
+        "status": "proposed",
+    }
+    before = {
+        "device_state": {
+            "shell_plans": [existing],
+            "next_evidence_ref": 1,
+            "evidence": {},
+        }
+    }
+    after = copy.deepcopy(before)
+    after["device_state"]["shell_plans"].append(proposed)
+    persisted = copy.deepcopy(before)
+    persisted["device_state"]["shell_plans"].append(concurrent)
+
+    merged, remapped = api_module._merge_hunt_device_ssh_proposal_context(
+        persisted,
+        before,
+        after,
+    )
+
+    assert remapped == {}
+    assert [
+        item["plan_id"] for item in merged["device_state"]["shell_plans"]
+    ] == ["plan-existing", "plan-concurrent", "plan-proposed"]
+
+
+def test_device_ssh_proposal_context_merge_rejects_equivalent_peer_plan():
+    before = {"device_state": {"shell_plans": [], "evidence": {}}}
+    after = {"device_state": {"shell_plans": [{
+        "plan_id": "plan-new",
+        "proposal_signature": "same-signature",
+        "status": "proposed",
+    }], "evidence": {}}}
+    persisted = {"device_state": {"shell_plans": [{
+        "plan_id": "plan-peer",
+        "proposal_signature": "same-signature",
+        "status": "proposed",
+    }], "evidence": {}}}
+
+    with pytest.raises(ValueError, match="Equivalent SSH proposal"):
+        api_module._merge_hunt_device_ssh_proposal_context(
+            persisted,
+            before,
+            after,
+        )
+
+
+def _test_hunt_ssh_proposal(*, hunt_id: str, device_target_id: str) -> dict:
+    plan = api_module.device_shell.build_shell_plan(
+        plan_id=str(uuid.uuid4()),
+        run_id=hunt_id,
+        device_target_id=device_target_id,
+        target_locator="ssh-proposal-fixture.test",
+        locator_generation=1,
+        credential_profile_id=str(uuid.uuid4()),
+        ssh_port=2222,
+        expected_host_key_fingerprint="SHA256:fixture-host-key",
+        commands=["id"],
+        timeout_seconds=10,
+        purpose="Verify the bound device identity",
+        risk_summary="Read-only identity command",
+        created_at="2026-08-22T00:00:00+00:00",
+        expires_at="2026-08-22T00:30:00+00:00",
+    )
+    plan["proposal_signature"] = hashlib.sha256(b"fixture").hexdigest()
+    return plan
+
+
+def test_device_ssh_proposal_delta_binds_validated_context_and_result():
+    hunt_id = str(uuid.uuid4())
+    device_target_id = str(uuid.uuid4())
+    plan = _test_hunt_ssh_proposal(
+        hunt_id=hunt_id,
+        device_target_id=device_target_id,
+    )
+    before = {"device_state": {"shell_plans": []}}
+    after = {"device_state": {"shell_plans": [plan]}}
+
+    proposed = api_module._hunt_device_ssh_proposal_delta(
+        before,
+        after,
+        {
+            "ok": True,
+            "requires_user_confirmation": True,
+            "plan": plan,
+        },
+        hunt_id=hunt_id,
+        device_target_id=device_target_id,
+    )
+
+    assert proposed == plan
+
+
+def test_device_ssh_proposal_delta_rejects_unbound_result():
+    hunt_id = str(uuid.uuid4())
+    device_target_id = str(uuid.uuid4())
+    plan = _test_hunt_ssh_proposal(
+        hunt_id=hunt_id,
+        device_target_id=device_target_id,
+    )
+
+    with pytest.raises(ValueError, match="result does not match"):
+        api_module._hunt_device_ssh_proposal_delta(
+            {"device_state": {"shell_plans": []}},
+            {"device_state": {"shell_plans": [plan]}},
+            {
+                "ok": True,
+                "requires_user_confirmation": True,
+                "plan": {**plan, "plan_digest": "0" * 64},
+            },
+            hunt_id=hunt_id,
+            device_target_id=device_target_id,
+        )
+
+
+def test_device_credential_reference_accepts_legacy_and_v2_roles():
+    generic = {
+        "profile_id": "profile-v2",
+        "role": "ssh_credential_profile_id",
+        "principal_slot": "ssh",
+        "source": "credential_profiles",
+    }
+    legacy = {
+        "profile_id": "profile-legacy",
+        "role": "web",
+        "source": "legacy_device_credential_profiles",
+    }
+    state = {"device_credential_profiles": [generic, legacy]}
+
+    assert api_module._device_agent_credential_reference(
+        state, "ssh"
+    ) == generic
+    assert api_module._device_agent_credential_reference(
+        state, "web"
+    ) == legacy
+
+
+def test_nonexecuting_hunt_actual_explicitly_releases_execution_holds():
+    requested = {
+        "agent_actions": 1,
+        "active_actions": 1,
+        "tool_wall_seconds": 5,
+        "device_fragility_points": 3,
+    }
+
+    actual = api_module._hunt_nonexecuting_actual(requested)
+
+    assert actual == {
+        "agent_actions": 1,
+        "active_actions": 0,
+        "tool_wall_seconds": 0,
+        "device_fragility_points": 0,
+    }
+    assert api_module.reconcile_budget_snapshot(
+        requested,
+        requested,
+        actual,
+    ) == actual
+
+
 def test_device_queue_metadata_exposes_only_server_owned_correlation():
     token = api_module._HUNT_DEVICE_QUEUE_CORRELATION.set({
         "schema_version": "hunt-device-dispatch/v1",

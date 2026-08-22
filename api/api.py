@@ -453,6 +453,7 @@ try:
         DURABLE_DEVICE_CONTROL_HUNT_CAPABILITIES,
         DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES,
         DURABLE_DEVICE_QUEUE_HUNT_CAPABILITIES,
+        DURABLE_DEVICE_SSH_PROPOSAL_HUNT_CAPABILITIES,
         DURABLE_INLINE_HUNT_CAPABILITIES,
         DURABLE_SCANNER_HUNT_CAPABILITIES,
         DURABLE_WORKER_HUNT_CAPABILITIES,
@@ -467,6 +468,7 @@ except ModuleNotFoundError:
         DURABLE_DEVICE_CONTROL_HUNT_CAPABILITIES,
         DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES,
         DURABLE_DEVICE_QUEUE_HUNT_CAPABILITIES,
+        DURABLE_DEVICE_SSH_PROPOSAL_HUNT_CAPABILITIES,
         DURABLE_INLINE_HUNT_CAPABILITIES,
         DURABLE_SCANNER_HUNT_CAPABILITIES,
         DURABLE_WORKER_HUNT_CAPABILITIES,
@@ -21061,6 +21063,25 @@ async def _verify_device_firmware_candidate(
     }
 
 
+def _device_agent_credential_reference(
+    state: Mapping[str, Any],
+    role: Literal["ssh", "web"],
+) -> dict[str, Any] | None:
+    """Resolve one content-free device credential across legacy and V2 refs."""
+    accepted_roles = {role, f"{role}_credential_profile_id"}
+    for raw in state.get("device_credential_profiles") or []:
+        if not isinstance(raw, Mapping) or not raw.get("profile_id"):
+            continue
+        item = dict(raw)
+        item_role = str(item.get("role") or "").strip().lower()
+        principal_slot = str(item.get("principal_slot") or "").strip().lower()
+        if item_role in accepted_roles or (
+            role == "ssh" and principal_slot == "ssh"
+        ):
+            return item
+    return None
+
+
 async def _execute_device_agent_tool(
     *,
     run_id: uuid.UUID,
@@ -21074,10 +21095,7 @@ async def _execute_device_agent_tool(
     if name == "propose_ssh_shell":
         if safety_profile != "authenticated_active":
             raise HTTPException(status_code=409, detail="Remote SSH shell proposals require an authenticated_active session")
-        ssh_ref = next((
-            ref for ref in state.get("device_credential_profiles", [])
-            if isinstance(ref, dict) and ref.get("role") == "ssh"
-        ), None)
+        ssh_ref = _device_agent_credential_reference(state, "ssh")
         if not ssh_ref:
             raise HTTPException(status_code=409, detail="Bind an SSH credential profile to this investigation before proposing shell commands")
         port = int(args["port"])
@@ -21302,6 +21320,8 @@ async def _execute_device_agent_tool(
             raise HTTPException(status_code=409, detail="No request collection was bound and confirmed for this Device Hunt")
         if use_imported and not include_web_dast:
             raise HTTPException(status_code=422, detail="Imported requests require include_web_dast=true")
+        ssh_ref = _device_agent_credential_reference(state, "ssh")
+        web_ref = _device_agent_credential_reference(state, "web")
         queued = await scan_device(str(device_target_id), DeviceScanRequest(
             profile=args["coverage_profile"],
             safety_profile=safety_profile,
@@ -21309,14 +21329,12 @@ async def _execute_device_agent_tool(
             include_web_dast=include_web_dast,
             web_scan_type=args.get("web_scan_type") or "standard",
             max_web_origins=8,
-            ssh_credential_profile_id=next((
-                str(ref.get("profile_id")) for ref in state.get("device_credential_profiles", [])
-                if isinstance(ref, dict) and ref.get("role") == "ssh"
-            ), None),
-            web_credential_profile_id=next((
-                str(ref.get("profile_id")) for ref in state.get("device_credential_profiles", [])
-                if isinstance(ref, dict) and ref.get("role") == "web"
-            ), None),
+            ssh_credential_profile_id=(
+                str(ssh_ref["profile_id"]) if ssh_ref else None
+            ),
+            web_credential_profile_id=(
+                str(web_ref["profile_id"]) if web_ref else None
+            ),
             request_collection_ids=[str(ref.get("collection_id")) for ref in collection_refs],
             confirm_request_replay=use_imported,
             allow_state_changing_requests=bool(state.get("allow_state_changing_requests")) if use_imported else False,
@@ -21546,6 +21564,16 @@ async def _device_verify_candidate_tool(
             ]
             if not collection_refs:
                 raise HTTPException(status_code=409, detail="The auth-bypass candidate's request collection is not bound to this Device Hunt")
+        ssh_ref = (
+            _device_agent_credential_reference(state, "ssh")
+            if safety_profile == "authenticated_active"
+            else None
+        )
+        web_ref = (
+            _device_agent_credential_reference(state, "web")
+            if safety_profile == "authenticated_active"
+            else None
+        )
         queued = await scan_device(str(device_target_id), DeviceScanRequest(
             profile="inventory",
             safety_profile=safety_profile,
@@ -21554,14 +21582,12 @@ async def _device_verify_candidate_tool(
             web_scan_type="standard",
             max_web_origins=8 if include_web else 0,
             port_hints=[port] if 1 <= port <= 65535 else [],
-            ssh_credential_profile_id=next((
-                str(ref.get("profile_id")) for ref in state.get("device_credential_profiles", [])
-                if isinstance(ref, dict) and ref.get("role") == "ssh"
-            ), None) if safety_profile == "authenticated_active" else None,
-            web_credential_profile_id=next((
-                str(ref.get("profile_id")) for ref in state.get("device_credential_profiles", [])
-                if isinstance(ref, dict) and ref.get("role") == "web"
-            ), None) if safety_profile == "authenticated_active" else None,
+            ssh_credential_profile_id=(
+                str(ssh_ref["profile_id"]) if ssh_ref else None
+            ),
+            web_credential_profile_id=(
+                str(web_ref["profile_id"]) if web_ref else None
+            ),
             request_collection_ids=[str(ref.get("collection_id")) for ref in collection_refs] if include_web else [],
             confirm_request_replay=contract_id == "device.auth_bypass",
             allow_state_changing_requests=False,
@@ -36048,6 +36074,117 @@ def _merge_hunt_device_queue_context(
     return merged, remapped
 
 
+def _merge_hunt_device_ssh_proposal_context(
+    persisted_context: Mapping[str, Any],
+    execution_context_before: Mapping[str, Any],
+    execution_context_after: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Append one immutable SSH proposal while preserving concurrent device state."""
+    merged, remapped = _merge_hunt_device_control_context(
+        persisted_context,
+        execution_context_before,
+        execution_context_after,
+    )
+    persisted_state = dict(merged.get("device_state") or {})
+    before_state = dict(execution_context_before.get("device_state") or {})
+    after_state = dict(execution_context_after.get("device_state") or {})
+    before_plan_ids = {
+        str(item.get("plan_id") or "")
+        for item in before_state.get("shell_plans") or []
+        if isinstance(item, Mapping) and item.get("plan_id")
+    }
+    appended = [
+        copy.deepcopy(dict(item))
+        for item in after_state.get("shell_plans") or []
+        if isinstance(item, Mapping)
+        and str(item.get("plan_id") or "") not in before_plan_ids
+    ]
+    persisted_plans = [
+        copy.deepcopy(dict(item))
+        for item in persisted_state.get("shell_plans") or []
+        if isinstance(item, Mapping)
+    ]
+    persisted_by_id = {
+        str(item.get("plan_id") or ""): item
+        for item in persisted_plans
+        if item.get("plan_id")
+    }
+    active_signatures = {
+        str(item.get("proposal_signature") or "")
+        for item in persisted_plans
+        if item.get("status") in {"proposed", "queueing", "queued"}
+        and item.get("proposal_signature")
+    }
+    for plan in appended:
+        plan_id = str(plan.get("plan_id") or "")
+        signature = str(plan.get("proposal_signature") or "")
+        if not plan_id or not signature:
+            raise ValueError("SSH proposal is missing its immutable identity")
+        existing = persisted_by_id.get(plan_id)
+        if existing is not None:
+            if existing != plan:
+                raise ValueError("SSH proposal identity collided during settlement")
+            continue
+        if signature in active_signatures:
+            raise ValueError("Equivalent SSH proposal appeared during settlement")
+        persisted_plans.append(plan)
+        persisted_by_id[plan_id] = plan
+        active_signatures.add(signature)
+    persisted_state["shell_plans"] = persisted_plans[-10:]
+    merged["device_state"] = persisted_state
+    return merged, remapped
+
+
+def _hunt_device_ssh_proposal_delta(
+    execution_context_before: Mapping[str, Any],
+    execution_context_after: Mapping[str, Any],
+    result: Mapping[str, Any],
+    *,
+    hunt_id: Any,
+    device_target_id: Any,
+) -> dict[str, Any] | None:
+    """Return the one validated plan appended by an inert SSH proposal."""
+    before_state = dict(execution_context_before.get("device_state") or {})
+    after_state = dict(execution_context_after.get("device_state") or {})
+    before_plan_ids = {
+        str(item.get("plan_id") or "")
+        for item in before_state.get("shell_plans") or []
+        if isinstance(item, Mapping) and item.get("plan_id")
+    }
+    appended = [
+        dict(item)
+        for item in after_state.get("shell_plans") or []
+        if isinstance(item, Mapping)
+        and str(item.get("plan_id") or "") not in before_plan_ids
+    ]
+    if not appended:
+        return None
+    if len(appended) != 1:
+        raise ValueError("SSH proposal appended more than one immutable plan")
+    plan = device_shell.validate_shell_plan(appended[0])
+    if not str(plan.get("proposal_signature") or ""):
+        raise ValueError("SSH proposal is missing its immutable identity")
+    if (
+        str(plan.get("run_id") or "") != str(hunt_id)
+        or str(plan.get("device_target_id") or "") != str(device_target_id)
+        or str(plan.get("status") or "") != "proposed"
+    ):
+        raise ValueError("SSH proposal scope or state does not match the Hunt")
+    if (
+        result.get("ok") is not True
+        or result.get("requires_user_confirmation") is not True
+    ):
+        raise ValueError("SSH proposal result is not confirmation-gated")
+    returned_plan = result.get("plan")
+    if not isinstance(returned_plan, Mapping) or (
+        str(returned_plan.get("plan_id") or "") != str(plan["plan_id"])
+        or str(returned_plan.get("plan_digest") or "")
+        != str(plan["plan_digest"])
+    ):
+        raise ValueError("SSH proposal result does not match the appended plan")
+    return plan
+
+
 def _redact_hunt_path_query(value: Any) -> str:
     """Preserve a capability path and parameter names without persisting values."""
     text = str(value or "").strip()
@@ -36113,6 +36250,19 @@ def _hunt_ledger_limits(budget: Mapping[str, Any]) -> dict[str, int]:
         "udp_ports_attempted": int(budget.get("max_udp_ports") or 0),
         "oob_interactions": int(budget.get("max_oob_interactions") or 0),
     }
+
+
+def _hunt_nonexecuting_actual(
+    requested: Mapping[str, int],
+) -> dict[str, int]:
+    """Charge admission while explicitly releasing every execution hold."""
+    actual = {str(dimension): 0 for dimension in requested}
+    if "agent_actions" in actual:
+        actual["agent_actions"] = min(
+            1,
+            max(0, int(requested.get("agent_actions") or 0)),
+        )
+    return actual
 
 
 def _hunt_public(row: Any, *, include_context: bool = True) -> dict[str, Any]:
@@ -36807,8 +36957,15 @@ async def execute_hunt_capability(
                     # first request. The planner cannot expand this fixed server limit.
                     charges["http_requests"] = 1 + MAX_REDIRECT_HOPS
                 if validated_device_input is not None and device_adapter_name is not None:
-                    fragility_cost = device_agent.tool_fragility_cost(
-                        device_adapter_name, validated_device_input,
+                    # An SSH proposal is control-plane-only. The exact user-
+                    # confirmed execution owns device fragility; proposing an
+                    # immutable plan must not consume or block on it.
+                    fragility_cost = (
+                        0
+                        if name in DURABLE_DEVICE_SSH_PROPOSAL_HUNT_CAPABILITIES
+                        else device_agent.tool_fragility_cost(
+                            device_adapter_name, validated_device_input,
+                        )
                     )
                     if fragility_cost:
                         charges["device_fragility_points"] = fragility_cost
@@ -36853,6 +37010,7 @@ async def execute_hunt_capability(
                 | DURABLE_DEVICE_CONTROL_HUNT_CAPABILITIES
                 | DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES
                 | DURABLE_DEVICE_QUEUE_HUNT_CAPABILITIES
+                | DURABLE_DEVICE_SSH_PROPOSAL_HUNT_CAPABILITIES
             )
             durable_budget = api_managed_budget or worker_durable_budget
             if name in DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES:
@@ -36876,6 +37034,21 @@ async def execute_hunt_capability(
                     raise HTTPException(
                         status_code=409,
                         detail="A device HTTP probe is already in flight for this Hunt",
+                    )
+            if name in DURABLE_DEVICE_SSH_PROPOSAL_HUNT_CAPABILITIES:
+                ssh_proposal_in_flight = await conn.fetchval(
+                    """SELECT EXISTS(
+                           SELECT 1 FROM budget_reservations
+                           WHERE owner_kind='hunt' AND owner_id=$1
+                             AND capability_name='device.ssh.propose'
+                             AND status IN ('reserved','running')
+                       )""",
+                    str(run["id"]),
+                )
+                if ssh_proposal_in_flight:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="An SSH proposal is already in flight for this Hunt",
                     )
             if durable_budget:
                 durable_action_digest = hunt_capability_action_digest(
@@ -37060,6 +37233,7 @@ async def execute_hunt_capability(
             DURABLE_DEVICE_CONTROL_HUNT_CAPABILITIES
             | DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES
             | DURABLE_DEVICE_QUEUE_HUNT_CAPABILITIES
+            | DURABLE_DEVICE_SSH_PROPOSAL_HUNT_CAPABILITIES
         )
         else {}
     )
@@ -37246,6 +37420,28 @@ async def execute_hunt_capability(
                     }
                     receipt_payload = result
                     status = "partial"
+            proposed_ssh_plan: dict[str, Any] | None = None
+            if name in DURABLE_DEVICE_SSH_PROPOSAL_HUNT_CAPABILITIES:
+                try:
+                    proposed_ssh_plan = _hunt_device_ssh_proposal_delta(
+                        device_context_before,
+                        context,
+                        receipt_payload if isinstance(receipt_payload, Mapping) else {},
+                        hunt_id=run["id"],
+                        device_target_id=run["device_target_id"],
+                    )
+                except (TypeError, ValueError):
+                    logger.exception(
+                        "SSH proposal did not produce one receipt-bound immutable plan",
+                        extra={"hunt_id": hunt_id, "action_id": str(action_id)},
+                    )
+                    status = "failed"
+                    result = {
+                        "ok": False,
+                        "error": "ssh_proposal_receipt_mismatch",
+                    }
+                    receipt_payload = result
+            device_ssh_plan_proposed = proposed_ssh_plan is not None
             device_http_attempted = bool(
                 name in DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES
                 and int(
@@ -37312,7 +37508,17 @@ async def execute_hunt_capability(
                 name in DURABLE_DEVICE_QUEUE_HUNT_CAPABILITIES
                 and not device_queue_enqueued
             ):
-                actual_charges = {"agent_actions": 1}
+                actual_charges = _hunt_nonexecuting_actual(charges)
+            elif (
+                name in DURABLE_DEVICE_SSH_PROPOSAL_HUNT_CAPABILITIES
+                and not device_ssh_plan_proposed
+            ):
+                actual_charges = _hunt_nonexecuting_actual(charges)
+            elif name in DURABLE_DEVICE_SSH_PROPOSAL_HUNT_CAPABILITIES:
+                actual_charges["tool_wall_seconds"] = min(
+                    int(charges.get("tool_wall_seconds") or 0),
+                    max(1, elapsed_wall),
+                )
             elif name in DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES:
                 actual_charges["http_requests"] = min(
                     1 if device_http_attempted else 0,
@@ -37379,6 +37585,21 @@ async def execute_hunt_capability(
                         "status": "queued",
                         **downstream_receipt,
                     }]
+            ssh_plan_receipt: dict[str, Any] = {}
+            if (
+                name in DURABLE_DEVICE_SSH_PROPOSAL_HUNT_CAPABILITIES
+                and proposed_ssh_plan is not None
+            ):
+                ssh_plan_receipt = {
+                    "plan_id": str(proposed_ssh_plan["plan_id"]),
+                    "plan_digest": str(proposed_ssh_plan["plan_digest"]),
+                    "requires_user_confirmation": True,
+                }
+                receipt_contract_payload["receipt_observations"] = [{
+                    "kind": "immutable_shell_plan",
+                    "status": "proposed",
+                    **ssh_plan_receipt,
+                }]
             if api_managed_budget:
                 if durable_reservation is None or durable_action_digest is None:
                     raise RuntimeError(
@@ -37392,9 +37613,15 @@ async def execute_hunt_capability(
                         DURABLE_DEVICE_CONTROL_HUNT_CAPABILITIES
                         | DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES
                         | DURABLE_DEVICE_QUEUE_HUNT_CAPABILITIES
+                        | DURABLE_DEVICE_SSH_PROPOSAL_HUNT_CAPABILITIES
                     ):
                         merge_device_context = (
-                            _merge_hunt_device_queue_context
+                            _merge_hunt_device_ssh_proposal_context
+                            if (
+                                name in DURABLE_DEVICE_SSH_PROPOSAL_HUNT_CAPABILITIES
+                                and proposed_ssh_plan is not None
+                            )
+                            else _merge_hunt_device_queue_context
                             if name in DURABLE_DEVICE_QUEUE_HUNT_CAPABILITIES
                             else _merge_hunt_device_http_context
                             if name in DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES
@@ -37482,6 +37709,7 @@ async def execute_hunt_capability(
                                     latest_reservation.record.reservation_id
                                 ),
                                 "downstream": downstream_receipt or None,
+                                "ssh_plan": ssh_plan_receipt or None,
                             },
                             created_by=f"hunt_v2:{hunt_id}",
                         ),
@@ -37765,11 +37993,12 @@ async def confirm_hunt_shell_plan(
                     run["id"], json.dumps(context, default=str),
                 )
                 raise HTTPException(status_code=409, detail="SSH shell plan expired; ask the agent to propose it again")
-            bound_ssh_profiles = {
-                str(ref.get("profile_id")) for ref in state.get("device_credential_profiles", [])
-                if isinstance(ref, dict) and ref.get("role") == "ssh"
-            }
-            if str(plan.get("credential_profile_id")) not in bound_ssh_profiles:
+            bound_ssh_ref = _device_agent_credential_reference(state, "ssh")
+            if (
+                bound_ssh_ref is None
+                or str(plan.get("credential_profile_id"))
+                != str(bound_ssh_ref.get("profile_id"))
+            ):
                 raise HTTPException(status_code=409, detail="SSH shell plan credential is no longer bound to this Hunt")
             device = await conn.fetchrow(
                 "SELECT id, primary_locator, locator_generation, is_active FROM device_targets WHERE id=$1",

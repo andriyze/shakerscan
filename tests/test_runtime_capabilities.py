@@ -62,6 +62,20 @@ def test_registry_filters_target_kind_and_active_permission():
     assert CAPABILITY_REGISTRY.require("ports.discover").requires_active_approval
 
 
+def test_ssh_proposal_registry_budget_is_control_plane_only():
+    proposal = CAPABILITY_REGISTRY.require("device.ssh.propose")
+
+    assert proposal.budget_cost == {
+        "active_actions": 1,
+        "tool_wall_seconds": 5,
+    }
+    assert "device_fragility_points" not in proposal.budget_cost
+    assert proposal.placement_requirements == {
+        "control_plane": True,
+        "credential_binding": "ssh",
+    }
+
+
 def test_every_capability_declares_runtime_contract():
     for spec in CAPABILITY_REGISTRY.list():
         assert spec.adapter
