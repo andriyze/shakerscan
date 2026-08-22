@@ -451,6 +451,7 @@ except ModuleNotFoundError:
 try:
     from hunt.capability_reservations import (
         DURABLE_DEVICE_CONTROL_HUNT_CAPABILITIES,
+        DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES,
         DURABLE_INLINE_HUNT_CAPABILITIES,
         DURABLE_SCANNER_HUNT_CAPABILITIES,
         DURABLE_WORKER_HUNT_CAPABILITIES,
@@ -463,6 +464,7 @@ try:
 except ModuleNotFoundError:
     from api.hunt.capability_reservations import (
         DURABLE_DEVICE_CONTROL_HUNT_CAPABILITIES,
+        DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES,
         DURABLE_INLINE_HUNT_CAPABILITIES,
         DURABLE_SCANNER_HUNT_CAPABILITIES,
         DURABLE_WORKER_HUNT_CAPABILITIES,
@@ -21353,7 +21355,7 @@ async def _execute_device_agent_tool(
         payload = {
             "schema_version": "device-agent-http/v1",
             "method": args["method"],
-            "path": args["path"],
+            "path": _redact_hunt_path_query(args["path"]),
             "origin": origin["origin"],
             "pinned_address": origin["connect_address"],
             "status": int(response.get("status") or 0),
@@ -21362,7 +21364,10 @@ async def _execute_device_agent_tool(
             "body_sha256": hashlib.sha256(body).hexdigest(),
             "body_bytes": len(raw_body),
             "body_truncated": len(raw_body) > len(body) or bool(response.get("truncated")),
-            "body_preview": body[:device_agent.DEVICE_HTTP_REQUEST_BODY_PREVIEW_BYTES].decode("utf-8", "replace"),
+            "body_preview": _redact_device_http_body_preview(
+                args["path"],
+                body.decode("utf-8", "replace"),
+            ),
             "redirects_followed": False,
             "elapsed_ms": response.get("elapsed_ms"),
             "tls": response.get("tls"),
@@ -35954,6 +35959,87 @@ def _merge_hunt_device_control_context(
     return merged, remapped
 
 
+def _merge_hunt_device_http_context(
+    persisted_context: Mapping[str, Any],
+    execution_context_before: Mapping[str, Any],
+    execution_context_after: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Merge one serialized device HTTP attempt plus any captured evidence."""
+    merged, remapped = _merge_hunt_device_control_context(
+        persisted_context,
+        execution_context_before,
+        execution_context_after,
+    )
+    persisted_state = dict(merged.get("device_state") or {})
+    before_state = dict(execution_context_before.get("device_state") or {})
+    after_state = dict(execution_context_after.get("device_state") or {})
+    attempted = max(
+        0,
+        int(after_state.get("device_http_requests_used") or 0)
+        - int(before_state.get("device_http_requests_used") or 0),
+    )
+    persisted_state["device_http_requests_used"] = (
+        int(persisted_state.get("device_http_requests_used") or 0) + attempted
+    )
+    persisted_state["last_device_http_request_monotonic"] = max(
+        float(persisted_state.get("last_device_http_request_monotonic") or 0.0),
+        float(after_state.get("last_device_http_request_monotonic") or 0.0),
+    )
+    merged["device_state"] = persisted_state
+    return merged, remapped
+
+
+def _redact_hunt_path_query(value: Any) -> str:
+    """Preserve a capability path and parameter names without persisting values."""
+    text = str(value or "").strip()
+    if not text:
+        return text
+    try:
+        parsed = urllib.parse.urlsplit(text)
+    except ValueError:
+        return text.split("?", 1)[0][:2_000]
+    query_names = [
+        str(name)[:100]
+        for name, _ in urllib.parse.parse_qsl(
+            parsed.query,
+            keep_blank_values=True,
+        )[:50]
+    ]
+    safe_query = urllib.parse.urlencode(
+        [(name, "<redacted>") for name in query_names]
+    )
+    return urllib.parse.urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path, safe_query, "")
+    )[:2_000]
+
+
+def _hunt_redacted_capability_input(
+    capability_name: str,
+    capability_input: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return the bounded planner/audit projection of one capability input."""
+    redacted = _redact_agent_payload(dict(capability_input or {}))
+    if isinstance(redacted, dict) and redacted.get("path"):
+        redacted["path"] = _redact_hunt_path_query(redacted["path"])
+    return redacted if isinstance(redacted, dict) else {}
+
+
+def _redact_device_http_body_preview(path: str, preview: str) -> str:
+    """Remove request query values reflected by a device from its body preview."""
+    try:
+        query_pairs = urllib.parse.parse_qsl(
+            urllib.parse.urlsplit(str(path or "")).query,
+            keep_blank_values=True,
+        )[:50]
+    except ValueError:
+        query_pairs = []
+    safe = str(preview or "")
+    for _, value in sorted(query_pairs, key=lambda item: len(item[1]), reverse=True):
+        if value:
+            safe = safe.replace(value, "<redacted>")
+    return redact_text(safe)[:device_agent.DEVICE_HTTP_REQUEST_BODY_PREVIEW_BYTES]
+
+
 def _hunt_ledger_limits(budget: Mapping[str, Any]) -> dict[str, int]:
     return {
         "agent_actions": int(budget.get("max_capability_calls") or 0),
@@ -36692,8 +36778,31 @@ async def execute_hunt_capability(
             api_managed_budget = name in (
                 DURABLE_INLINE_HUNT_CAPABILITIES
                 | DURABLE_DEVICE_CONTROL_HUNT_CAPABILITIES
+                | DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES
             )
             durable_budget = api_managed_budget or worker_durable_budget
+            if name in DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES:
+                await conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                    f"device-http:{run['device_target_id']}",
+                )
+                device_http_in_flight = await conn.fetchval(
+                    """SELECT EXISTS(
+                           SELECT 1
+                           FROM budget_reservations r
+                           JOIN hunt_runs h
+                             ON r.owner_kind='hunt' AND r.owner_id=h.id::text
+                           WHERE h.device_target_id=$1
+                             AND r.capability_name='device.http.probe'
+                             AND r.status IN ('reserved','running')
+                       )""",
+                    run["device_target_id"],
+                )
+                if device_http_in_flight:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="A device HTTP probe is already in flight for this Hunt",
+                    )
             if durable_budget:
                 durable_action_digest = hunt_capability_action_digest(
                     hunt_id=run["id"],
@@ -36810,7 +36919,7 @@ async def execute_hunt_capability(
                              CASE WHEN $4='failed' THEN NOW() ELSE NULL END)""",
                 action_id, run["id"], name,
                 admission_action_status,
-                json.dumps(_redact_agent_payload(request.input)),
+                json.dumps(_hunt_redacted_capability_input(name, request.input)),
                 json.dumps(admission_result_summary),
             )
 
@@ -36873,7 +36982,10 @@ async def execute_hunt_capability(
     context = _hunt_json(run["context_pack"], {})
     device_context_before = (
         copy.deepcopy(context)
-        if name in DURABLE_DEVICE_CONTROL_HUNT_CAPABILITIES
+        if name in (
+            DURABLE_DEVICE_CONTROL_HUNT_CAPABILITIES
+            | DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES
+        )
         else {}
     )
     execution_started = time.perf_counter()
@@ -36891,13 +37003,17 @@ async def execute_hunt_capability(
         elif str(run["target_kind"]) == "device":
             assert device_adapter_name is not None and validated_device_input is not None
             device_state = context.get("device_state") if isinstance(context.get("device_state"), dict) else device_agent.seed_state(objective=str(run["objective"]), safety_profile=str(policy.get("device_fragility_profile") or "safe_remote"), max_turns=30)
-            result = await _execute_device_agent_tool(
-                run_id=run["id"], device_target_id=run["device_target_id"],
-                safety_profile=str(policy.get("device_fragility_profile") or "safe_remote"),
-                approval_receipt_id=policy.get("approval_receipt_id"), state=device_state,
-                name=device_adapter_name, args=validated_device_input,
-            )
-            context["device_state"] = device_state
+            try:
+                result = await _execute_device_agent_tool(
+                    run_id=run["id"], device_target_id=run["device_target_id"],
+                    safety_profile=str(policy.get("device_fragility_profile") or "safe_remote"),
+                    approval_receipt_id=policy.get("approval_receipt_id"), state=device_state,
+                    name=device_adapter_name, args=validated_device_input,
+                )
+            finally:
+                # The attempt counter is charged before a device HTTP socket is
+                # opened, so it must survive a timeout or transport exception.
+                context["device_state"] = device_state
         elif name == "http.request":
             http_input = dict(request.input)
             http_input.setdefault("method", "GET")
@@ -36969,6 +37085,21 @@ async def execute_hunt_capability(
         async with db_pool.acquire() as conn:
             receipt_id = None
             receipt_payload = locals().get("result", {})
+            device_http_attempted = bool(
+                name in DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES
+                and int(
+                    (context.get("device_state") or {}).get(
+                        "device_http_requests_used"
+                    )
+                    or 0
+                )
+                > int(
+                    (device_context_before.get("device_state") or {}).get(
+                        "device_http_requests_used"
+                    )
+                    or 0
+                )
+            )
             actual_charges: dict[str, int] = {"agent_actions": 1}
             if requires_call_approval:
                 actual_charges["active_actions"] = 1
@@ -36981,7 +37112,11 @@ async def execute_hunt_capability(
                 if dimension in charges:
                     actual_charges[dimension] = min(int(charges[dimension]), max(0, int(amount)))
             elapsed_wall = max(0, math.ceil(time.perf_counter() - execution_started))
-            if api_managed_budget and status != "blocked" and "tool_wall_seconds" in charges:
+            if (
+                api_managed_budget
+                and (status != "blocked" or device_http_attempted)
+                and "tool_wall_seconds" in charges
+            ):
                 actual_charges["tool_wall_seconds"] = min(
                     int(charges["tool_wall_seconds"]), max(1, elapsed_wall),
                 )
@@ -36989,6 +37124,27 @@ async def execute_hunt_capability(
                 for dimension in charges:
                     if dimension not in {"agent_actions", "active_actions"}:
                         actual_charges[dimension] = 0
+                if device_http_attempted:
+                    actual_charges["http_requests"] = min(
+                        1, int(charges.get("http_requests") or 0)
+                    )
+                    actual_charges["device_fragility_points"] = min(
+                        1,
+                        int(charges.get("device_fragility_points") or 0),
+                    )
+                    actual_charges["tool_wall_seconds"] = min(
+                        int(charges.get("tool_wall_seconds") or 0),
+                        max(1, elapsed_wall),
+                    )
+            elif name in DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES:
+                actual_charges["http_requests"] = min(
+                    1 if device_http_attempted else 0,
+                    int(charges.get("http_requests") or 0),
+                )
+                actual_charges["device_fragility_points"] = min(
+                    1 if device_http_attempted else 0,
+                    int(charges.get("device_fragility_points") or 0),
+                )
             elif name == "http.request":
                 followed = max(
                     0,
@@ -37019,6 +37175,10 @@ async def execute_hunt_capability(
                 isinstance(receipt_payload, dict)
                 and (receipt_payload.get("partial") or receipt_payload.get("status") == "partial")
             )
+            receipt_capability_input = _hunt_redacted_capability_input(
+                name,
+                request.input,
+            )
             if api_managed_budget:
                 if durable_reservation is None or durable_action_digest is None:
                     raise RuntimeError(
@@ -37028,9 +37188,17 @@ async def execute_hunt_capability(
                     locked = await _hunt_run_or_404(conn, hunt_id, for_update=True)
                     current_used = _hunt_json(locked["budget_used_json"], {})
                     merged_device_context = None
-                    if name in DURABLE_DEVICE_CONTROL_HUNT_CAPABILITIES:
+                    if name in (
+                        DURABLE_DEVICE_CONTROL_HUNT_CAPABILITIES
+                        | DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES
+                    ):
+                        merge_device_context = (
+                            _merge_hunt_device_http_context
+                            if name in DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES
+                            else _merge_hunt_device_control_context
+                        )
                         merged_device_context, evidence_ref_map = (
-                            _merge_hunt_device_control_context(
+                            merge_device_context(
                                 _hunt_json(locked["context_pack"], {}),
                                 device_context_before,
                                 context,
@@ -37076,7 +37244,7 @@ async def execute_hunt_capability(
                             capability_name=name,
                             adapter_name=str(spec.adapter),
                             adapter_version=str(spec.adapter_version),
-                            redacted_argv=[request.input],
+                            redacted_argv=[receipt_capability_input],
                             target_scope={
                                 "target_kind": str(run["target_kind"]),
                                 "target_id": str(
@@ -37130,7 +37298,7 @@ async def execute_hunt_capability(
                                 run["device_target_id"] or run["target_id"]
                             ),
                             target_kind=str(run["target_kind"]),
-                            capability_input=request.input,
+                            capability_input=receipt_capability_input,
                             action_status=status,
                             actual_budget=actual_charges,
                             worker_id=durable_worker_id,

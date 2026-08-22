@@ -258,6 +258,47 @@ def test_device_control_context_merge_preserves_concurrent_evidence_and_remaps_r
     assert merged["device_state"]["traffic_frozen"] is False
 
 
+def test_device_http_context_merge_persists_failed_transport_attempt_without_lost_state():
+    before = {
+        "device_state": {
+            "device_http_requests_used": 2,
+            "last_device_http_request_monotonic": 10.0,
+            "next_evidence_ref": 1,
+            "evidence": {},
+        }
+    }
+    after = copy.deepcopy(before)
+    after["device_state"]["device_http_requests_used"] = 3
+    after["device_state"]["last_device_http_request_monotonic"] = 20.0
+    persisted = copy.deepcopy(before)
+    persisted["device_state"]["device_http_requests_used"] = 4
+    persisted["device_state"]["last_device_http_request_monotonic"] = 15.0
+
+    merged, remapped = api_module._merge_hunt_device_http_context(
+        persisted,
+        before,
+        after,
+    )
+
+    assert remapped == {}
+    assert merged["device_state"]["device_http_requests_used"] == 5
+    assert merged["device_state"]["last_device_http_request_monotonic"] == 20.0
+
+
+def test_device_http_observation_redacts_query_values_from_path_and_reflection():
+    path = "/status?token=must-not-persist&mode=full"
+    safe_path = api_module._redact_hunt_path_query(path)
+    safe_body = api_module._redact_device_http_body_preview(
+        path,
+        "requested token=must-not-persist mode=full",
+    )
+
+    assert safe_path == "/status?token=%3Credacted%3E&mode=%3Credacted%3E"
+    assert "must-not-persist" not in safe_path
+    assert "must-not-persist" not in safe_body
+    assert "mode=full" not in safe_body
+
+
 def test_device_hunt_public_history_exposes_only_bounded_action_metadata():
     scan_id = str(uuid.uuid4())
     row = {
