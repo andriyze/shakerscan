@@ -285,6 +285,49 @@ def test_device_http_context_merge_persists_failed_transport_attempt_without_los
     assert merged["device_state"]["last_device_http_request_monotonic"] == 20.0
 
 
+def test_device_queue_context_merge_adds_only_the_execution_delta():
+    before = {
+        "device_state": {
+            "scans_queued": 1,
+            "next_evidence_ref": 1,
+            "evidence": {},
+        }
+    }
+    after = copy.deepcopy(before)
+    after["device_state"]["scans_queued"] = 2
+    persisted = copy.deepcopy(before)
+    persisted["device_state"]["scans_queued"] = 2
+
+    merged, remapped = api_module._merge_hunt_device_queue_context(
+        persisted,
+        before,
+        after,
+    )
+
+    assert remapped == {}
+    assert merged["device_state"]["scans_queued"] == 3
+
+
+def test_device_queue_metadata_exposes_only_server_owned_correlation():
+    token = api_module._HUNT_DEVICE_QUEUE_CORRELATION.set({
+        "schema_version": "hunt-device-dispatch/v1",
+        "hunt_id": "hunt-1",
+        "hunt_action_id": "action-1",
+        "budget_reservation_id": "reservation-1",
+        "action_digest": "a" * 64,
+        "capability_name": "device.scan",
+        "planner_field": "must-not-survive",
+    })
+    try:
+        metadata = api_module._hunt_device_queue_metadata()
+    finally:
+        api_module._HUNT_DEVICE_QUEUE_CORRELATION.reset(token)
+
+    assert metadata["hunt_action_id"] == "action-1"
+    assert metadata["budget_reservation_id"] == "reservation-1"
+    assert "planner_field" not in metadata
+
+
 def test_device_http_observation_redacts_query_values_from_path_and_reflection():
     path = "/status?token=must-not-persist&mode=full"
     safe_path = api_module._redact_hunt_path_query(path)
@@ -6857,6 +6900,7 @@ def test_tool_receipt_redacts_hashes_and_is_non_executing():
         tool_name="nuclei",
         redacted_argv=["nuclei", "-H", "Authorization: Bearer secret-token"],
         target_scope={"authorization": "Bearer secret-token"},
+        scope_receipt_id="ca043f329eb5751cf88f9b78a7edfe04",
         status="parser_error",
         parser_status="failed",
         metadata_json={"cookie": "session=secret-token"},
@@ -6868,6 +6912,7 @@ def test_tool_receipt_redacts_hashes_and_is_non_executing():
     assert receipt["findings_created"] == 0
     assert receipt["verified_findings_created"] == 0
     assert len(receipt["command_hash"]) == 64
+    assert captured["args"][8] == "ca043f329eb5751cf88f9b78a7edfe04"
     assert "secret-token" not in json.dumps(receipt, default=str)
 
 

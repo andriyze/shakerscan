@@ -31,6 +31,11 @@ DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES = frozenset({
     "device.http.probe",
 })
 
+DURABLE_DEVICE_QUEUE_HUNT_CAPABILITIES = frozenset({
+    "device.scan",
+    "device.service.verify",
+})
+
 DURABLE_WORKER_HUNT_CAPABILITIES = frozenset({
     "ports.discover",
     "service.fingerprint",

@@ -452,6 +452,7 @@ try:
     from hunt.capability_reservations import (
         DURABLE_DEVICE_CONTROL_HUNT_CAPABILITIES,
         DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES,
+        DURABLE_DEVICE_QUEUE_HUNT_CAPABILITIES,
         DURABLE_INLINE_HUNT_CAPABILITIES,
         DURABLE_SCANNER_HUNT_CAPABILITIES,
         DURABLE_WORKER_HUNT_CAPABILITIES,
@@ -465,6 +466,7 @@ except ModuleNotFoundError:
     from api.hunt.capability_reservations import (
         DURABLE_DEVICE_CONTROL_HUNT_CAPABILITIES,
         DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES,
+        DURABLE_DEVICE_QUEUE_HUNT_CAPABILITIES,
         DURABLE_INLINE_HUNT_CAPABILITIES,
         DURABLE_SCANNER_HUNT_CAPABILITIES,
         DURABLE_WORKER_HUNT_CAPABILITIES,
@@ -18632,6 +18634,31 @@ _DEVICE_AGENT_APPROVED_SHELL_PLAN: contextvars.ContextVar[dict[str, Any] | None]
     "device_agent_approved_shell_plan",
     default=None,
 )
+_HUNT_DEVICE_QUEUE_CORRELATION: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar(
+    "hunt_device_queue_correlation",
+    default=None,
+)
+
+
+def _hunt_device_queue_metadata() -> dict[str, str]:
+    """Return server-owned Hunt correlation for one downstream device job."""
+    value = _HUNT_DEVICE_QUEUE_CORRELATION.get()
+    if not isinstance(value, Mapping):
+        return {}
+    allowed = {
+        "schema_version",
+        "hunt_id",
+        "hunt_action_id",
+        "budget_reservation_id",
+        "action_digest",
+        "capability_name",
+    }
+    return {
+        str(key): str(item)
+        for key, item in value.items()
+        if key in allowed and str(item or "")
+    }
+
 
 def _device_posture_enabled() -> bool:
     return str(os.environ.get("DEVICE_POSTURE_ENABLED", "true")).strip().lower() not in {"0", "false", "no", "off"}
@@ -20097,6 +20124,9 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
                 "max_duration_minutes": DEVICE_SCAN_MAX_DURATION_MINUTES[request.profile],
             },
         }
+        hunt_dispatch = _hunt_device_queue_metadata()
+        if hunt_dispatch:
+            options["hunt_dispatch"] = hunt_dispatch
         if approval_context:
             options.update(approval_context)
         try:
@@ -20254,6 +20284,9 @@ async def verify_device_service(device_id: str, request: DeviceServiceVerifyRequ
                 "max_duration_minutes": 5,
             },
         }
+        hunt_dispatch = _hunt_device_queue_metadata()
+        if hunt_dispatch:
+            options["hunt_dispatch"] = hunt_dispatch
         if approval_context:
             options.update(approval_context)
         try:
@@ -35989,6 +36022,32 @@ def _merge_hunt_device_http_context(
     return merged, remapped
 
 
+def _merge_hunt_device_queue_context(
+    persisted_context: Mapping[str, Any],
+    execution_context_before: Mapping[str, Any],
+    execution_context_after: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Merge one successfully queued downstream device job without losing peers."""
+    merged, remapped = _merge_hunt_device_control_context(
+        persisted_context,
+        execution_context_before,
+        execution_context_after,
+    )
+    persisted_state = dict(merged.get("device_state") or {})
+    before_state = dict(execution_context_before.get("device_state") or {})
+    after_state = dict(execution_context_after.get("device_state") or {})
+    queued = max(
+        0,
+        int(after_state.get("scans_queued") or 0)
+        - int(before_state.get("scans_queued") or 0),
+    )
+    persisted_state["scans_queued"] = (
+        int(persisted_state.get("scans_queued") or 0) + queued
+    )
+    merged["device_state"] = persisted_state
+    return merged, remapped
+
+
 def _redact_hunt_path_query(value: Any) -> str:
     """Preserve a capability path and parameter names without persisting values."""
     text = str(value or "").strip()
@@ -36753,6 +36812,20 @@ async def execute_hunt_capability(
                     )
                     if fragility_cost:
                         charges["device_fragility_points"] = fragility_cost
+                    if name == "device.service.verify":
+                        transport_dimension = (
+                            "udp_ports_attempted"
+                            if validated_device_input.get("transport") == "udp"
+                            else "tcp_ports_attempted"
+                        )
+                        charges.pop(
+                            "tcp_ports_attempted"
+                            if transport_dimension == "udp_ports_attempted"
+                            else "udp_ports_attempted",
+                            None,
+                        )
+                        charges[transport_dimension] = 1
+                    if fragility_cost:
                         legacy_daily = int(await conn.fetchval(
                             """SELECT COALESCE(SUM(fragility_cost),0) FROM device_agent_actions
                                WHERE device_target_id=$1 AND outcome <> 'blocked'
@@ -36779,6 +36852,7 @@ async def execute_hunt_capability(
                 DURABLE_INLINE_HUNT_CAPABILITIES
                 | DURABLE_DEVICE_CONTROL_HUNT_CAPABILITIES
                 | DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES
+                | DURABLE_DEVICE_QUEUE_HUNT_CAPABILITIES
             )
             durable_budget = api_managed_budget or worker_durable_budget
             if name in DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES:
@@ -36985,6 +37059,7 @@ async def execute_hunt_capability(
         if name in (
             DURABLE_DEVICE_CONTROL_HUNT_CAPABILITIES
             | DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES
+            | DURABLE_DEVICE_QUEUE_HUNT_CAPABILITIES
         )
         else {}
     )
@@ -37003,6 +37078,22 @@ async def execute_hunt_capability(
         elif str(run["target_kind"]) == "device":
             assert device_adapter_name is not None and validated_device_input is not None
             device_state = context.get("device_state") if isinstance(context.get("device_state"), dict) else device_agent.seed_state(objective=str(run["objective"]), safety_profile=str(policy.get("device_fragility_profile") or "safe_remote"), max_turns=30)
+            queue_correlation_token = None
+            if name in DURABLE_DEVICE_QUEUE_HUNT_CAPABILITIES:
+                if durable_reservation is None or durable_action_digest is None:
+                    raise RuntimeError(
+                        "Device queue reservation disappeared before dispatch"
+                    )
+                queue_correlation_token = _HUNT_DEVICE_QUEUE_CORRELATION.set({
+                    "schema_version": "hunt-device-dispatch/v1",
+                    "hunt_id": str(run["id"]),
+                    "hunt_action_id": str(action_id),
+                    "budget_reservation_id": (
+                        durable_reservation.record.reservation_id
+                    ),
+                    "action_digest": durable_action_digest,
+                    "capability_name": name,
+                })
             try:
                 result = await _execute_device_agent_tool(
                     run_id=run["id"], device_target_id=run["device_target_id"],
@@ -37011,8 +37102,12 @@ async def execute_hunt_capability(
                     name=device_adapter_name, args=validated_device_input,
                 )
             finally:
-                # The attempt counter is charged before a device HTTP socket is
-                # opened, so it must survive a timeout or transport exception.
+                if queue_correlation_token is not None:
+                    _HUNT_DEVICE_QUEUE_CORRELATION.reset(
+                        queue_correlation_token
+                    )
+                # Device counters can advance before a socket or downstream
+                # queue raises, so settlement must retain the execution state.
                 context["device_state"] = device_state
         elif name == "http.request":
             http_input = dict(request.input)
@@ -37085,6 +37180,72 @@ async def execute_hunt_capability(
         async with db_pool.acquire() as conn:
             receipt_id = None
             receipt_payload = locals().get("result", {})
+            device_queue_state_advanced = bool(
+                name in DURABLE_DEVICE_QUEUE_HUNT_CAPABILITIES
+                and int(
+                    (context.get("device_state") or {}).get("scans_queued") or 0
+                )
+                > int(
+                    (device_context_before.get("device_state") or {}).get(
+                        "scans_queued"
+                    )
+                    or 0
+                )
+            )
+            device_queue_enqueued = device_queue_state_advanced
+            if name in DURABLE_DEVICE_QUEUE_HUNT_CAPABILITIES:
+                correlated_scans = await conn.fetch(
+                    """SELECT id, job_id, status, run_kind, error_message
+                       FROM scans
+                       WHERE device_target_id=$1
+                         AND options->'hunt_dispatch'->>'hunt_action_id'=$2
+                         AND options->'hunt_dispatch'->>'capability_name'=$3
+                       ORDER BY created_at DESC LIMIT 2""",
+                    run["device_target_id"],
+                    str(action_id),
+                    name,
+                )
+                if len(correlated_scans) > 1:
+                    raise RuntimeError(
+                        "Device queue action created more than one downstream scan"
+                    )
+                correlated_scan = correlated_scans[0] if correlated_scans else None
+                enqueue_failed = bool(
+                    correlated_scan
+                    and str(correlated_scan["status"]) == "failed"
+                    and "enqueue failed" in str(
+                        correlated_scan["error_message"] or ""
+                    ).lower()
+                )
+                device_queue_enqueued = bool(correlated_scan and not enqueue_failed)
+                if device_queue_state_advanced and not device_queue_enqueued:
+                    raise RuntimeError(
+                        "Device queue reported success without a downstream scan"
+                    )
+                if device_queue_enqueued and not device_queue_state_advanced:
+                    device_state = dict(context.get("device_state") or {})
+                    device_state["scans_queued"] = (
+                        int(device_state.get("scans_queued") or 0) + 1
+                    )
+                    context["device_state"] = device_state
+                    recovered_queue = {
+                        "scan_id": str(correlated_scan["id"]),
+                        "job_id": str(correlated_scan["job_id"]),
+                        "status": "queued",
+                        "run_kind": str(correlated_scan["run_kind"]),
+                        "device_target_id": str(run["device_target_id"]),
+                    }
+                    result = {
+                        "ok": True,
+                        "queued": recovered_queue,
+                        "partial": True,
+                        "audit_warning": (
+                            "Downstream device job was queued before response "
+                            "finalization failed"
+                        ),
+                    }
+                    receipt_payload = result
+                    status = "partial"
             device_http_attempted = bool(
                 name in DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES
                 and int(
@@ -37120,6 +37281,17 @@ async def execute_hunt_capability(
                 actual_charges["tool_wall_seconds"] = min(
                     int(charges["tool_wall_seconds"]), max(1, elapsed_wall),
                 )
+            if (
+                name in DURABLE_DEVICE_QUEUE_HUNT_CAPABILITIES
+                and device_queue_enqueued
+            ):
+                for dimension in (
+                    "tcp_ports_attempted",
+                    "udp_ports_attempted",
+                    "device_fragility_points",
+                ):
+                    if dimension in charges:
+                        actual_charges[dimension] = int(charges[dimension])
             if status == "blocked":
                 for dimension in charges:
                     if dimension not in {"agent_actions", "active_actions"}:
@@ -37136,6 +37308,11 @@ async def execute_hunt_capability(
                         int(charges.get("tool_wall_seconds") or 0),
                         max(1, elapsed_wall),
                     )
+            if (
+                name in DURABLE_DEVICE_QUEUE_HUNT_CAPABILITIES
+                and not device_queue_enqueued
+            ):
+                actual_charges = {"agent_actions": 1}
             elif name in DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES:
                 actual_charges["http_requests"] = min(
                     1 if device_http_attempted else 0,
@@ -37179,6 +37356,29 @@ async def execute_hunt_capability(
                 name,
                 request.input,
             )
+            receipt_contract_payload = (
+                dict(receipt_payload)
+                if isinstance(receipt_payload, Mapping)
+                else {}
+            )
+            downstream_receipt: dict[str, Any] = {}
+            if name in DURABLE_DEVICE_QUEUE_HUNT_CAPABILITIES:
+                queued_result = (
+                    dict(receipt_contract_payload.get("queued") or {})
+                    if isinstance(receipt_contract_payload.get("queued"), Mapping)
+                    else {}
+                )
+                if device_queue_enqueued and queued_result.get("scan_id"):
+                    downstream_receipt = {
+                        "scan_id": str(queued_result["scan_id"]),
+                        "job_id": str(queued_result.get("job_id") or "") or None,
+                        "run_kind": str(queued_result.get("run_kind") or "") or None,
+                    }
+                    receipt_contract_payload["receipt_observations"] = [{
+                        "kind": "scan_receipt",
+                        "status": "queued",
+                        **downstream_receipt,
+                    }]
             if api_managed_budget:
                 if durable_reservation is None or durable_action_digest is None:
                     raise RuntimeError(
@@ -37191,9 +37391,12 @@ async def execute_hunt_capability(
                     if name in (
                         DURABLE_DEVICE_CONTROL_HUNT_CAPABILITIES
                         | DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES
+                        | DURABLE_DEVICE_QUEUE_HUNT_CAPABILITIES
                     ):
                         merge_device_context = (
-                            _merge_hunt_device_http_context
+                            _merge_hunt_device_queue_context
+                            if name in DURABLE_DEVICE_QUEUE_HUNT_CAPABILITIES
+                            else _merge_hunt_device_http_context
                             if name in DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES
                             else _merge_hunt_device_control_context
                         )
@@ -37278,6 +37481,7 @@ async def execute_hunt_capability(
                                 "durable_budget_reservation_id": (
                                     latest_reservation.record.reservation_id
                                 ),
+                                "downstream": downstream_receipt or None,
                             },
                             created_by=f"hunt_v2:{hunt_id}",
                         ),
@@ -37314,9 +37518,7 @@ async def execute_hunt_capability(
                                 "approval_receipt_id"
                             ),
                             result=(
-                                receipt_payload
-                                if isinstance(receipt_payload, Mapping)
-                                else {}
+                                receipt_contract_payload
                             ),
                         )
                     )
@@ -41737,7 +41939,6 @@ def _canonical_tool_receipt(req: ToolReceiptRequest) -> dict[str, Any]:
 async def _record_tool_receipt(conn, req: ToolReceiptRequest) -> dict[str, Any]:
     payload = _canonical_tool_receipt(req)
     try:
-        scope_uuid = _optional_uuid(payload.get("scope_receipt_id"))
         approval_uuid = _optional_uuid(payload.get("approval_receipt_id"))
         policy_uuid = _optional_uuid(payload.get("policy_profile_id"))
         stdout_uuid = _optional_uuid(payload.get("stdout_evidence_object_id"))
@@ -41775,7 +41976,7 @@ async def _record_tool_receipt(conn, req: ToolReceiptRequest) -> dict[str, Any]:
         payload.get("worker_build"),
         payload.get("container_image"),
         json.dumps(payload.get("target_scope") or {}),
-        scope_uuid,
+        payload.get("scope_receipt_id"),
         approval_uuid,
         policy_uuid,
         payload["status"],

@@ -300,14 +300,14 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         CapabilitySpec(
             "device.http.probe", "Send one target-pinned read-only request to a confirmed device web origin.",
             "http", "passive", frozenset({"device"}), "device.device_http_request", "1",
-            None, {"http_requests": 1, "tool_wall_seconds": 10}, {"network_reachability": True},
+            None, {"http_requests": 1, "tool_wall_seconds": 10, "device_fragility_points": 1}, {"network_reachability": True},
             _schema({"path": {"type": "string"}, "method": {"type": "string", "enum": ["GET", "HEAD"]}, "origin_port": {"type": "integer"}}),
             "device-http-observation/v1", ("http_observation",),
         ),
         CapabilitySpec(
             "device.scan", "Queue one bounded device posture scan through the canonical scanner pipeline.",
             "internal", "active", frozenset({"device"}), "device.queue_device_scan", "1",
-            "active_testing", {"active_actions": 1, "tool_wall_seconds": 30}, {"device_worker": True},
+            "active_testing", {"active_actions": 1, "tool_wall_seconds": 30, "device_fragility_points": 22}, {"device_worker": True},
             _schema({
                 "coverage_profile": {"type": "string", "enum": ["inventory", "posture", "thorough"]},
                 "include_web_dast": {"type": "boolean"},
@@ -321,7 +321,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         CapabilitySpec(
             "device.service.verify", "Queue a typed, fixed-port service-state verifier.",
             "internal", "active", frozenset({"device"}), "device.verify_service_state", "1",
-            "active_testing", {"active_actions": 1, "tcp_ports_attempted": 1, "tool_wall_seconds": 30}, {"device_worker": True},
+            "active_testing", {"active_actions": 1, "tcp_ports_attempted": 1, "udp_ports_attempted": 1, "tool_wall_seconds": 30, "device_fragility_points": 6}, {"device_worker": True},
             _schema({"transport": {"type": "string", "enum": ["tcp", "udp"]}, "port": {"type": "integer"}, "expected_state": {"type": "string"}, "reason": {"type": "string"}}),
             "device-service-verification/v1", ("service_state_observation",),
         ),

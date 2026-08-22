@@ -6,6 +6,7 @@ from pathlib import Path
 from api.hunt.capability_reservations import (
     DURABLE_DEVICE_CONTROL_HUNT_CAPABILITIES,
     DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES,
+    DURABLE_DEVICE_QUEUE_HUNT_CAPABILITIES,
     DURABLE_INLINE_HUNT_CAPABILITIES,
     hunt_capability_action_digest,
     hunt_capability_lease_seconds,
@@ -67,6 +68,13 @@ def test_read_only_device_control_capability_set_is_explicit():
 
 def test_device_http_capability_set_is_explicit():
     assert DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES == {"device.http.probe"}
+
+
+def test_device_queue_capability_set_is_explicit():
+    assert DURABLE_DEVICE_QUEUE_HUNT_CAPABILITIES == {
+        "device.scan",
+        "device.service.verify",
+    }
 
 
 def test_hunt_action_digest_binds_target_input_budget_and_authority():
