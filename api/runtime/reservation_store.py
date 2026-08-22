@@ -259,6 +259,8 @@ UPDATE budget_reservations SET
     ledger_after_settlement_json=$21::jsonb,
     receipt_json=$22::jsonb, updated_at=$24
 WHERE id=$1 AND version=$25 AND state_digest=$26
+  AND owner_kind=$2 AND owner_id=$3 AND action_id=$4
+  AND capability_name=$5 AND created_at=$23
 RETURNING *
 """
 

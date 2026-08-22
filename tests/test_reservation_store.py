@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import json
 import os
+import re
 import sys
 
 import pytest
@@ -17,9 +18,16 @@ from runtime.reservation_store import (
     ReservationConflict,
     ReservationStoreError,
     StoredBudgetReservation,
+    _UPDATE_SQL,
 )
 
 NOW = datetime(2026, 8, 22, 12, 0, tzinfo=timezone.utc)
+
+
+def test_update_statement_uses_every_positional_parameter_contiguously():
+    """asyncpg cannot infer types for skipped PostgreSQL bind positions."""
+    positions = sorted({int(value) for value in re.findall(r"\$(\d+)", _UPDATE_SQL)})
+    assert positions == list(range(1, max(positions) + 1))
 
 
 def _row(record, *, action_id="action-1", held=None, settled=None, receipt=None):
