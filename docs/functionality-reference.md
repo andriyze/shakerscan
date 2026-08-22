@@ -1256,7 +1256,7 @@ concurrency-limited with per-tool timeouts and a global deadline.
 |---|---|
 | `/` | Security posture, prioritized action center, recent activity, and a compact operations header for queue state, emergency clear, worker scaling/freshness, and Gungnir CT |
 | `/docs` | Safe in-app rendering of the installed README, including GitHub-flavored tables and code blocks |
-| `/scan/new` | Scan type, parallel strategy, coverage budget, active options, auth, custom budget, and bounded batch submission with partial-failure receipts |
+| `/scan/new` | One deterministic Scan with budget and policy controls, exact-target opaque primary/secondary credential-profile references, known endpoints, custom ceilings, and bounded batch submission with partial-failure receipts |
 | `/scans` | Filter, inspect, cancel, and rescan logical scans without exposing internal rows by default |
 | `/scans/{id}` | Live progress/logs, durable Model Intake activity, report, proof/coverage, deployment decision, AI/Model Intake panels, replay, history, and PDF |
 | `/targets` | Hierarchical target inventory, search/filter/sort, scanning, discovery, duplicate merge, and schedule entry points |

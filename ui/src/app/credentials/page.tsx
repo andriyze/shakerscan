@@ -80,7 +80,7 @@ const EMPTY_DRAFT: Draft = {
   scopes: '',
   customHeaders: '',
   expiresAt: '',
-  capabilities: 'request.replay',
+  capabilities: 'request.replay, scan.execute',
 }
 
 function splitValues(value: string): string[] {
@@ -120,7 +120,9 @@ function secretPayload(draft: Draft): CredentialSecretPayload {
   if (kind === 'ssh_private_key_with_passphrase') payload.secondary_secret = draft.secondarySecret
   if (kind === 'api_key_header') payload.header_name = draft.headerName
   if (needsEndpoint(kind)) payload.endpoint_url = draft.endpointUrl
-  if (kind === 'oauth_client_credentials') payload.client_id = draft.clientId
+  if ((kind === 'oauth_client_credentials' || kind === 'oauth_password') && draft.clientId.trim()) {
+    payload.client_id = draft.clientId
+  }
   if (kind === 'oauth_client_credentials' || kind === 'oauth_password') {
     payload.scopes = splitValues(draft.scopes)
   }
@@ -395,7 +397,7 @@ export default function CredentialsPage() {
           {needsUsername(draft.authKind) && <Field label="Username" required><Input autoComplete="off" value={draft.username} onChange={(event) => setDraft({ ...draft, username: event.target.value })} /></Field>}
           {draft.authKind === 'api_key_header' && <Field label="Header name" required><Input value={draft.headerName} onChange={(event) => setDraft({ ...draft, headerName: event.target.value })} /></Field>}
           {needsEndpoint(draft.authKind) && <Field label="Login / token endpoint" required><Input value={draft.endpointUrl} onChange={(event) => setDraft({ ...draft, endpointUrl: event.target.value })} placeholder="/login or https://target/token" /></Field>}
-          {draft.authKind === 'oauth_client_credentials' && <Field label="Client ID" required><Input autoComplete="off" value={draft.clientId} onChange={(event) => setDraft({ ...draft, clientId: event.target.value })} /></Field>}
+          {(draft.authKind === 'oauth_client_credentials' || draft.authKind === 'oauth_password') && <Field label={draft.authKind === 'oauth_client_credentials' ? 'Client ID' : 'Client ID (required for Scan)'} required={draft.authKind === 'oauth_client_credentials'}><Input autoComplete="off" value={draft.clientId} onChange={(event) => setDraft({ ...draft, clientId: event.target.value })} /></Field>}
           {(draft.authKind === 'oauth_client_credentials' || draft.authKind === 'oauth_password') && <Field label="OAuth scopes"><Input value={draft.scopes} onChange={(event) => setDraft({ ...draft, scopes: event.target.value })} placeholder="openid profile" /></Field>}
           {draft.authKind !== 'custom_headers' && (draft.authKind === 'ssh_private_key' || draft.authKind === 'ssh_private_key_with_passphrase' ? (
             <Field className="sm:col-span-2" label="Private key" required><Textarea rows={7} value={draft.secret} onChange={(event) => setDraft({ ...draft, secret: event.target.value })} /></Field>

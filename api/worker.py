@@ -70,6 +70,11 @@ from runtime.credential_refs import (
     select_hunt_principal_reference,
 )
 from runtime.models import ScanPolicy, TargetBinding
+from runtime.scan_credentials import (
+    SCAN_CREDENTIAL_CAPABILITY,
+    ScanCredentialError,
+    bind_resolved_scan_credential,
+)
 from runtime.pinned_http_replay import PinnedAiohttpReplayTransport
 from runtime.request_replay_executor import (
     ReplayExecutionError,
@@ -1681,6 +1686,123 @@ async def _hydrate_managed_scan_credentials(options: dict[str, Any], scan_id: st
             hydrated[expected_key] = secret
         resolved.append({"auth_state": auth_state, "profile_id": profile_id, "option_key": expected_key})
     hydrated["resolved_credential_profiles"] = resolved
+    return hydrated
+
+
+async def _hydrate_generic_scan_credentials(
+    options: dict[str, Any], scan_id: str,
+) -> dict[str, Any]:
+    """Resolve admitted generic profiles after worker-side target/approval validation."""
+    hydrated = dict(options or {})
+    raw_refs = hydrated.pop("credential_profile_refs", None)
+    if not isinstance(raw_refs, list) or not raw_refs:
+        return hydrated
+    if (
+        hydrated.get("managed_credential_profiles") not in (None, "", [], {})
+        or hydrated.get("authentication") not in (None, "", [], {})
+        or any(hydrated.get(key) not in (None, "", [], {}) for key in SCANNER_AUTH_CONFIG_KEYS)
+    ):
+        raise ScanCredentialError(
+            "generic Scan credential references cannot be combined with another authentication path"
+        )
+    refs = [dict(item) for item in raw_refs if isinstance(item, Mapping)]
+    if len(refs) != len(raw_refs) or not 1 <= len(refs) <= 2:
+        raise ScanCredentialError("generic Scan credential references are invalid")
+    profile_ids = [str(item.get("profile_id") or "") for item in refs]
+    lanes = [str(item.get("scan_lane") or "") for item in refs]
+    if len(profile_ids) != len(set(profile_ids)) or len(lanes) != len(set(lanes)):
+        raise ScanCredentialError("generic Scan credential references are ambiguous")
+    if any(lane not in {"primary", "secondary"} for lane in lanes):
+        raise ScanCredentialError("generic Scan credential lane is invalid")
+    try:
+        scan_uuid = uuid.UUID(str(scan_id))
+        for profile_id in profile_ids:
+            uuid.UUID(profile_id)
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise ScanCredentialError("generic Scan credential reference UUID is invalid") from exc
+
+    target_kind = str(hydrated.pop("credential_target_kind", "") or "").strip().lower()
+    action_name = str(hydrated.pop("credential_action_name", "") or "").strip()
+    if target_kind not in {"web", "api"} or not action_name:
+        raise ScanCredentialError("generic Scan credential authority is incomplete")
+
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """SELECT s.target_id, s.target_url, t.root_domain
+               FROM scans s JOIN targets t ON t.id=s.target_id
+               WHERE s.id=$1""",
+            scan_uuid,
+        )
+        if not row:
+            raise ScanCredentialError("generic Scan credential target is unavailable")
+        target_url = str(row["target_url"] or "")
+        parsed = urllib.parse.urlsplit(target_url)
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+            raise ScanCredentialError("generic Scan credential target URL is invalid")
+        origin = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+        guard = (
+            dict(hydrated.get("runtime_scope_guard") or {})
+            if isinstance(hydrated.get("runtime_scope_guard"), Mapping) else {}
+        )
+        roots = tuple(
+            str(item).strip().lower().rstrip(".")
+            for item in guard.get("allowed_root_domains") or ()
+            if str(item).strip()
+        ) or (str(row["root_domain"] or parsed.hostname).lower().rstrip("."),)
+        target = TargetBinding(
+            target_id=str(row["target_id"]),
+            target_kind=target_kind,
+            canonical_host=parsed.hostname,
+            allowed_origins=(origin,),
+            allowed_root_domains=roots,
+            environment=str(guard.get("environment") or "unknown"),
+            scope_receipt_id=str(hydrated.get("scope_receipt_id") or "") or None,
+        )
+        authority = await validate_worker_credential_authority(
+            conn,
+            owner_kind="scan",
+            owner_id=scan_id,
+            target=target,
+            approval_receipt_id=hydrated.get("approval_receipt_id"),
+            scope_receipt_id=hydrated.get("scope_receipt_id"),
+            action_name=action_name,
+        )
+        resolver = WorkerCredentialResolver()
+        resolved_refs: list[dict[str, Any]] = []
+        for ref in refs:
+            try:
+                expected_version = int(ref.get("profile_version") or 0)
+            except (TypeError, ValueError) as exc:
+                raise ScanCredentialError(
+                    "generic Scan credential profile version is invalid"
+                ) from exc
+            if expected_version < 1:
+                raise ScanCredentialError("generic Scan credential profile version is invalid")
+            async with resolver.resolve(
+                conn,
+                profile_id=ref["profile_id"],
+                target=target,
+                capability=SCAN_CREDENTIAL_CAPABILITY,
+                authority=authority,
+            ) as resolved:
+                profile = resolved.profile
+                if (
+                    profile.current_version != expected_version
+                    or profile.auth_kind != str(ref.get("auth_kind") or "")
+                    or profile.principal_slot != str(ref.get("principal_slot") or "")
+                    or profile.target_kind != target_kind
+                ):
+                    raise ScanCredentialError(
+                        "generic Scan credential changed after admission"
+                    )
+                hydrated = bind_resolved_scan_credential(
+                    hydrated, resolved, scan_lane=str(ref["scan_lane"]),
+                )
+                resolved_refs.append({
+                    **resolved.receipt_metadata(),
+                    "scan_lane": str(ref["scan_lane"]),
+                })
+    hydrated["resolved_credential_profiles"] = resolved_refs
     return hydrated
 
 
@@ -9301,6 +9423,7 @@ async def process_scan_job(job_data: dict):
             if job_data.get("_broker_result_id"):
                 result = await _load_broker_result(job_data, scan_id)
             else:
+                options = await _hydrate_generic_scan_credentials(options, scan_id)
                 options = await _hydrate_managed_scan_credentials(options, scan_id)
                 if device_target_id and (options or {}).get("run_kind") == "device_posture":
                     options = await _hydrate_device_scan_credentials(options, scan_id)
@@ -11161,6 +11284,7 @@ async def process_scan_shard_job(job_data: dict):
             if job_data.get("_broker_result_id"):
                 result = await _load_broker_result(job_data, scan_id)
             else:
+                options = await _hydrate_generic_scan_credentials(options, scan_id)
                 options = await _hydrate_managed_scan_credentials(options, scan_id)
                 result = await run_scan(target, options, scan_id=scan_id, job_id=job_id)
         except Exception as e:
@@ -12456,6 +12580,7 @@ async def process_exploit_batch_job(job_data: dict):
     error = None
     try:
         try:
+            scan_opts = await _hydrate_generic_scan_credentials(scan_opts, scan_id)
             scan_opts = await _hydrate_managed_scan_credentials(scan_opts, scan_id)
             result = await run_scan(target, scan_opts, scan_id=scan_id, job_id=job_id)
         except Exception as e:

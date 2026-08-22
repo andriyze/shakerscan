@@ -4407,6 +4407,7 @@ export async function submitScan(target: string, options: Record<string, unknown
 export interface ScanV2Request {
   target: string
   name?: string
+  target_kind?: 'web' | 'api'
   budget_profile?: 'fast' | 'balanced' | 'thorough' | 'exhaustive'
   policy?: {
     active_testing?: boolean
@@ -4417,6 +4418,7 @@ export interface ScanV2Request {
   }
   authentication?: Record<string, unknown>
   request_collections?: Array<Record<string, unknown>>
+  credential_profile_ids?: string[]
   advanced?: Record<string, unknown>
   approval_receipt_id?: string
   options?: Record<string, unknown>

@@ -2,7 +2,16 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { getTargets, getWorkers, submitBatchV2, submitScanV2, type Target } from '@/lib/api'
+import Link from 'next/link'
+import {
+  getTargets,
+  getWorkers,
+  listCredentialProfiles,
+  submitBatchV2,
+  submitScanV2,
+  type CredentialProfile,
+  type Target,
+} from '@/lib/api'
 import { Button, Card, useToast } from '@/components/ui'
 import { validateScanTarget } from '@/lib/targetValidation'
 
@@ -31,6 +40,7 @@ export default function NewScanPage() {
   const [batchMode, setBatchMode] = useState(false)
   const [batchTargets, setBatchTargets] = useState('')
   const [existingTargets, setExistingTargets] = useState<Target[]>([])
+  const [targetKind, setTargetKind] = useState<'web' | 'api'>('web')
   const [budgetProfile, setBudgetProfile] = useState<BudgetProfile>('balanced')
   const [activeTesting, setActiveTesting] = useState(false)
   const [authorized, setAuthorized] = useState(false)
@@ -38,10 +48,11 @@ export default function NewScanPage() {
   const [networkDiscovery, setNetworkDiscovery] = useState(false)
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [approvalReceipt, setApprovalReceipt] = useState('')
-  const [authHeader, setAuthHeader] = useState('')
-  const [authCookies, setAuthCookies] = useState('')
-  const [user2Header, setUser2Header] = useState('')
-  const [user2Cookies, setUser2Cookies] = useState('')
+  const [credentialProfiles, setCredentialProfiles] = useState<CredentialProfile[]>([])
+  const [primaryCredentialId, setPrimaryCredentialId] = useState('')
+  const [secondaryCredentialId, setSecondaryCredentialId] = useState('')
+  const [credentialsLoading, setCredentialsLoading] = useState(false)
+  const [credentialError, setCredentialError] = useState<string | null>(null)
   const [customEndpoints, setCustomEndpoints] = useState('')
   const [limits, setLimits] = useState<Record<string, string>>({})
   const [workerStats, setWorkerStats] = useState<Awaited<ReturnType<typeof getWorkers>> | null>(null)
@@ -70,7 +81,44 @@ export default function NewScanPage() {
     () => Array.from(new Set(batchTargets.split(/\r?\n/).map((value) => value.trim()).filter(Boolean))),
     [batchTargets],
   )
+  const selectedRegisteredTarget = useMemo(
+    () => existingTargets.find((item) => item.url === target.trim()),
+    [existingTargets, target],
+  )
+  const selectedCredentialIds = [primaryCredentialId, secondaryCredentialId].filter(Boolean)
+  const credentialUse = selectedCredentialIds.length > 0
   const active_worker_count = workerStats?.execution_capacity?.total_available ?? workerStats?.current_count ?? workerStats?.count ?? 0
+
+  useEffect(() => {
+    let cancelled = false
+    setPrimaryCredentialId('')
+    setSecondaryCredentialId('')
+    setCredentialProfiles([])
+    setCredentialError(null)
+    setCredentialsLoading(false)
+    if (batchMode || !selectedRegisteredTarget) return () => { cancelled = true }
+    setCredentialsLoading(true)
+    listCredentialProfiles({
+      target_kind: targetKind,
+      target_id: selectedRegisteredTarget.id,
+    })
+      .then(({ profiles }) => {
+        if (!cancelled) {
+          setCredentialProfiles(profiles.filter((profile) => (
+            profile.execution_compatible
+            && (!profile.allowed_capabilities.length || profile.allowed_capabilities.includes('scan.execute'))
+            && (profile.auth_kind !== 'oauth_password' || profile.configuration.client_id_configured)
+          )))
+        }
+      })
+      .catch((cause) => {
+        if (!cancelled) {
+          setCredentialError(cause instanceof Error ? cause.message : 'Failed to load credential profiles')
+        }
+      })
+      .finally(() => { if (!cancelled) setCredentialsLoading(false) })
+    return () => { cancelled = true }
+  }, [batchMode, selectedRegisteredTarget?.id, targetKind])
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault()
@@ -89,12 +137,20 @@ export default function NewScanPage() {
       setError(invalid)
       return
     }
-    if (activeTesting && !authorized) {
-      setError('Confirm that you own or are authorized to actively test every target.')
+    if ((activeTesting || credentialUse) && !authorized) {
+      setError('Confirm that you own or are authorized to test every target with the selected permissions and identities.')
       return
     }
     if (networkDiscovery && (!activeTesting || !approvalReceipt.trim())) {
       setError('Network discovery requires active testing, authorization confirmation, and a target-bound approval receipt ID.')
+      return
+    }
+    if (credentialUse && batchMode) {
+      setError('Credential profiles are exact-target-bound and cannot be shared across a batch.')
+      return
+    }
+    if (credentialUse && !approvalReceipt.trim()) {
+      setError('Credential use requires a target-bound approval receipt ID.')
       return
     }
 
@@ -105,27 +161,18 @@ export default function NewScanPage() {
         .filter(([, value]) => Number.isFinite(value as number) && Number(value) > 0),
     )
     const endpointList = customEndpoints.split(/\r?\n/).map((value) => value.trim()).filter(Boolean)
-    const authentication = {
-      ...(authHeader.trim() ? { auth_header: authHeader.trim() } : {}),
-      ...(authCookies.trim() ? { auth_cookies: authCookies.trim() } : {}),
-      ...(user2Header.trim() ? { user2_header: user2Header.trim() } : {}),
-      ...(user2Cookies.trim() ? { user2_cookies: user2Cookies.trim() } : {}),
-    }
     const common = {
+      target_kind: targetKind,
       budget_profile: budgetProfile,
       policy: {
         active_testing: activeTesting,
         subdomain_discovery: subdomainDiscovery,
         network_discovery: networkDiscovery,
       },
-      authentication,
+      credential_profile_ids: selectedCredentialIds,
       advanced,
       approval_receipt_id: approvalReceipt.trim() || undefined,
       options: {
-        ...(authHeader.trim() ? { auth_header: authHeader.trim() } : {}),
-        ...(authCookies.trim() ? { auth_cookies: authCookies.trim() } : {}),
-        ...(user2Header.trim() ? { user2_header: user2Header.trim() } : {}),
-        ...(user2Cookies.trim() ? { user2_cookies: user2Cookies.trim() } : {}),
         ...(endpointList.length ? { custom_endpoints: endpointList } : {}),
         require_current_workers: activeTesting,
       },
@@ -167,7 +214,13 @@ export default function NewScanPage() {
               <p className="text-xs text-gray-500">Web URL or hostname in your authorized scope.</p>
             </div>
             <label className="flex items-center gap-2 text-sm text-gray-300">
-              <input type="checkbox" checked={batchMode} onChange={(event) => setBatchMode(event.target.checked)} />
+              <input type="checkbox" checked={batchMode} onChange={(event) => {
+                setBatchMode(event.target.checked)
+                if (event.target.checked) {
+                  setPrimaryCredentialId('')
+                  setSecondaryCredentialId('')
+                }
+              }} />
               Multiple targets
             </label>
           </div>
@@ -175,10 +228,21 @@ export default function NewScanPage() {
             <textarea value={batchTargets} onChange={(event) => setBatchTargets(event.target.value)} rows={6} placeholder={'https://app.example.com\nhttps://api.example.com'} className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white placeholder:text-gray-600" />
           ) : (
             <>
-              <input value={target} onChange={(event) => setTarget(event.target.value)} list="known-targets" placeholder="https://example.com" className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white placeholder:text-gray-600" />
+              <input value={target} onChange={(event) => {
+                setTarget(event.target.value)
+                setPrimaryCredentialId('')
+                setSecondaryCredentialId('')
+              }} list="known-targets" placeholder="https://example.com" className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white placeholder:text-gray-600" />
               <datalist id="known-targets">{existingTargets.map((item) => <option key={item.id} value={item.url} />)}</datalist>
             </>
           )}
+          <label className="block text-sm text-gray-300">
+            Target kind
+            <select value={targetKind} onChange={(event) => setTargetKind(event.target.value as 'web' | 'api')} className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white">
+              <option value="web">Web application</option>
+              <option value="api">API</option>
+            </select>
+          </label>
         </Card>
 
         <Card className="p-5">
@@ -206,16 +270,16 @@ export default function NewScanPage() {
             <p className="mt-1 text-xs text-gray-500">Passive checks are always included. Opt in to broader discovery or active proof.</p>
           </div>
           <label className="flex items-start gap-3 rounded-lg border border-gray-700 bg-gray-950 p-4">
-            <input className="mt-1" type="checkbox" checked={activeTesting} onChange={(event) => { setActiveTesting(event.target.checked); if (!event.target.checked) { setAuthorized(false); setNetworkDiscovery(false) } }} />
+            <input className="mt-1" type="checkbox" checked={activeTesting} onChange={(event) => { setActiveTesting(event.target.checked); if (!event.target.checked) { if (!credentialUse) setAuthorized(false); setNetworkDiscovery(false) } }} />
             <span>
               <span className="block text-sm font-medium text-white">Allow active testing</span>
               <span className="block text-xs text-gray-500">Permit bounded XSS, SQL injection, authorization, and other proof-oriented probes.</span>
             </span>
           </label>
-          {activeTesting && (
+          {(activeTesting || credentialUse) && (
             <label className="flex items-start gap-3 rounded-lg border border-amber-800/70 bg-amber-950/20 p-4 text-sm text-amber-100">
               <input className="mt-1" type="checkbox" checked={authorized} onChange={(event) => setAuthorized(event.target.checked)} />
-              <span>I own or have explicit authorization to actively test every submitted target.</span>
+              <span>I own or have explicit authorization to test every submitted target with the selected permissions and identities.</span>
             </label>
           )}
           <div className="grid gap-3 md:grid-cols-2">
@@ -236,14 +300,41 @@ export default function NewScanPage() {
             <div className="space-y-5 border-t border-gray-800 p-5">
               <div>
                 <h3 className="text-sm font-medium text-gray-300">Authenticated principals</h3>
-                <p className="mt-1 text-xs text-gray-500">Add a distinct second user to enable cross-user BOLA/IDOR comparisons.</p>
+                <p className="mt-1 text-xs text-gray-500">Select encrypted profiles bound to this exact registered target. Add a distinct second user to enable cross-user BOLA/IDOR comparisons.</p>
               </div>
-              <div className="grid gap-4 md:grid-cols-2">
-                <label className="text-sm text-gray-300">User 1 authorization header<input value={authHeader} onChange={(event) => setAuthHeader(event.target.value)} placeholder="Bearer …" className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white" /></label>
-                <label className="text-sm text-gray-300">User 1 cookies<input value={authCookies} onChange={(event) => setAuthCookies(event.target.value)} placeholder="session=…" className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white" /></label>
-                <label className="text-sm text-gray-300">User 2 authorization header<input value={user2Header} onChange={(event) => setUser2Header(event.target.value)} placeholder="Bearer …" className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white" /></label>
-                <label className="text-sm text-gray-300">User 2 cookies<input value={user2Cookies} onChange={(event) => setUser2Cookies(event.target.value)} placeholder="session=…" className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white" /></label>
-              </div>
+              {batchMode ? (
+                <p className="rounded-lg border border-gray-800 bg-gray-950 p-3 text-xs text-gray-500">Exact-target credentials are unavailable for multi-target batches.</p>
+              ) : !selectedRegisteredTarget ? (
+                <p className="rounded-lg border border-gray-800 bg-gray-950 p-3 text-xs text-gray-500">Choose an existing target URL exactly as registered before attaching credentials.</p>
+              ) : credentialsLoading ? (
+                <p className="text-xs text-gray-500">Loading credential profiles…</p>
+              ) : (
+                <div className="grid gap-4 md:grid-cols-2">
+                  <label className="text-sm text-gray-300">
+                    Primary identity
+                    <select value={primaryCredentialId} onChange={(event) => setPrimaryCredentialId(event.target.value)} className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white">
+                      <option value="">Anonymous</option>
+                      {credentialProfiles.filter((profile) => ['primary', 'service'].includes(profile.principal_slot)).map((profile) => (
+                        <option key={profile.id} value={profile.id}>{profile.name} · {profile.auth_kind.replaceAll('_', ' ')} · v{profile.current_version}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="text-sm text-gray-300">
+                    Secondary identity
+                    <select value={secondaryCredentialId} onChange={(event) => setSecondaryCredentialId(event.target.value)} className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white">
+                      <option value="">No comparator</option>
+                      {credentialProfiles.filter((profile) => (
+                        profile.principal_slot === 'secondary'
+                        && ['authorization_header', 'bearer_token', 'cookie', 'basic_auth', 'form_login'].includes(profile.auth_kind)
+                      )).map((profile) => (
+                        <option key={profile.id} value={profile.id}>{profile.name} · {profile.auth_kind.replaceAll('_', ' ')} · v{profile.current_version}</option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+              )}
+              {credentialError && <p className="text-xs text-amber-300">{credentialError}</p>}
+              <p className="text-xs text-gray-500">Only opaque IDs enter the Scan request and queue. The worker revalidates approval and decrypts the selected version immediately before execution. <Link href="/credentials" className="text-blue-300 hover:text-blue-200">Manage credentials</Link></p>
               <label className="block text-sm text-gray-300">Known endpoints (one per line)<textarea value={customEndpoints} onChange={(event) => setCustomEndpoints(event.target.value)} rows={4} placeholder={'GET /api/users\nPOST /api/login username,password'} className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white" /></label>
               <label className="block text-sm text-gray-300">Approval receipt ID<input value={approvalReceipt} onChange={(event) => setApprovalReceipt(event.target.value)} className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white" /></label>
               <div>

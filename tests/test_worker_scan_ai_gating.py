@@ -3,6 +3,7 @@ Tests for scan-time AI command/env gating in worker.run_scan.
 """
 
 import asyncio
+from contextlib import asynccontextmanager
 import json
 import os
 import sys
@@ -36,6 +37,33 @@ class _ManagedCredentialConn:
 class _ManagedCredentialPool:
     def __init__(self, rows):
         self.conn = _ManagedCredentialConn(rows)
+
+    def acquire(self):
+        return self
+
+    async def __aenter__(self):
+        return self.conn
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _GenericCredentialConn:
+    def __init__(self, target_id):
+        self.target_id = target_id
+
+    async def fetchrow(self, query, *_args):
+        assert "FROM scans s JOIN targets t" in query
+        return {
+            "target_id": self.target_id,
+            "target_url": "https://app.example.com",
+            "root_domain": "example.com",
+        }
+
+
+class _GenericCredentialPool:
+    def __init__(self, target_id):
+        self.conn = _GenericCredentialConn(target_id)
 
     def acquire(self):
         return self
@@ -112,6 +140,90 @@ def test_worker_rejects_unavailable_or_undecryptable_managed_profile(monkeypatch
         assert "could not be decrypted" in str(exc)
     else:
         raise AssertionError("undecryptable profile should fail closed")
+
+
+def test_generic_scan_credentials_are_revalidated_and_decrypted_only_on_worker(monkeypatch):
+    target_id = uuid.uuid4()
+    profile_id = uuid.uuid4()
+    monkeypatch.setattr(worker, "db_pool", _GenericCredentialPool(target_id))
+
+    async def validate(*_args, **_kwargs):
+        return types.SimpleNamespace()
+
+    class Resolver:
+        @asynccontextmanager
+        async def resolve(self, *_args, **_kwargs):
+            profile = types.SimpleNamespace(
+                profile_id=str(profile_id),
+                current_version=2,
+                auth_kind="bearer_token",
+                principal_slot="primary",
+                target_kind="web",
+            )
+            yield types.SimpleNamespace(
+                profile=profile,
+                http_headers=lambda: types.SimpleNamespace(
+                    as_dict=lambda: {"Authorization": "Bearer worker-only-secret"},
+                ),
+                receipt_metadata=lambda: {
+                    "principal_profile_ref": str(profile_id),
+                    "principal_profile_version": 2,
+                    "secret_values_visible": False,
+                },
+            )
+
+    monkeypatch.setattr(worker, "validate_worker_credential_authority", validate)
+    monkeypatch.setattr(worker, "WorkerCredentialResolver", Resolver)
+    queued = {
+        "credential_profile_refs": [{
+            "profile_id": str(profile_id),
+            "profile_version": 2,
+            "target_kind": "web",
+            "principal_slot": "primary",
+            "scan_lane": "primary",
+            "auth_kind": "bearer_token",
+            "source": "credential_profiles",
+            "secret_values_visible": False,
+        }],
+        "credential_target_kind": "web",
+        "credential_action_name": "scan.submit",
+        "approval_receipt_id": str(uuid.uuid4()),
+        "scope_receipt_id": "scope-1",
+        "runtime_scope_guard": {
+            "environment": "production",
+            "allowed_root_domains": ["example.com"],
+        },
+    }
+
+    hydrated = asyncio.run(
+        worker._hydrate_generic_scan_credentials(queued, str(uuid.uuid4()))
+    )
+
+    assert hydrated["auth_header"] == "Bearer worker-only-secret"
+    assert "credential_profile_refs" not in hydrated
+    assert "credential_target_kind" not in hydrated
+    assert "credential_action_name" not in hydrated
+    assert hydrated["resolved_credential_profiles"][0]["secret_values_visible"] is False
+    assert "worker-only-secret" not in json.dumps(queued)
+
+
+@pytest.mark.parametrize("conflict", [
+    {"auth_header": "Bearer smuggled"},
+    {"authentication": {"auth_header": "Bearer smuggled"}},
+    {"managed_credential_profiles": [{"profile_id": str(uuid.uuid4())}]},
+])
+def test_generic_scan_worker_rejects_other_auth_paths_before_decryption(
+    monkeypatch, conflict,
+):
+    monkeypatch.setattr(worker, "db_pool", _GenericCredentialPool(uuid.uuid4()))
+    queued = {
+        "credential_profile_refs": [{"profile_id": str(uuid.uuid4())}],
+        "credential_target_kind": "web",
+        "credential_action_name": "scan.submit",
+        **conflict,
+    }
+    with pytest.raises(worker.ScanCredentialError, match="another authentication path"):
+        asyncio.run(worker._hydrate_generic_scan_credentials(queued, str(uuid.uuid4())))
 
 
 def test_asm_bola_user1_scope_preserves_second_user_comparator():

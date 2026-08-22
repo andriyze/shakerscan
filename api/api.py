@@ -425,9 +425,17 @@ import agent_text_toolcalls
 import agent_tools
 import agent_budget
 try:
-    from scan.contracts import normalize_scan_authentication, resolve_scan_contract
+    from scan.contracts import (
+        SCAN_AUTHENTICATION_KEYS,
+        normalize_scan_authentication,
+        resolve_scan_contract,
+    )
 except ModuleNotFoundError:
-    from api.scan.contracts import normalize_scan_authentication, resolve_scan_contract
+    from api.scan.contracts import (
+        SCAN_AUTHENTICATION_KEYS,
+        normalize_scan_authentication,
+        resolve_scan_contract,
+    )
 try:
     from hunt.contracts import capability_manifest, resolve_hunt_policy
     from hunt.legacy import LegacyHuntIsolationMiddleware
@@ -440,7 +448,12 @@ try:
         CredentialReferenceError,
         select_hunt_principal_reference,
     )
+    from runtime.credential_store import PostgresCredentialProfileStore
     from runtime.models import ScanPolicy, TargetBinding
+    from runtime.scan_credentials import (
+        ScanCredentialError,
+        admit_scan_credential_profiles,
+    )
     from capabilities.network import CapabilityInputError, network_capability_adapter
 except ModuleNotFoundError:
     from api.runtime.budgets import BudgetExceeded, reconcile_budget_snapshot, reserve_budget_snapshot
@@ -448,7 +461,12 @@ except ModuleNotFoundError:
         CredentialReferenceError,
         select_hunt_principal_reference,
     )
+    from api.runtime.credential_store import PostgresCredentialProfileStore
     from api.runtime.models import ScanPolicy, TargetBinding
+    from api.runtime.scan_credentials import (
+        ScanCredentialError,
+        admit_scan_credential_profiles,
+    )
     from api.capabilities.network import CapabilityInputError, network_capability_adapter
 import device_agent
 import device_capabilities
@@ -3644,6 +3662,7 @@ async def asm_dispatcher(pool: asyncpg.Pool):
 
 # Database connection pool
 db_pool: Optional[asyncpg.Pool] = None
+_generic_credential_store = PostgresCredentialProfileStore()
 
 
 async def cleanup_expired_scan_artifacts_once(
@@ -4243,10 +4262,12 @@ class ScanOptions(BaseModel):
 class ScanRequest(BaseModel):
     target: str
     name: Optional[str] = None
+    target_kind: Literal["web", "api"] = "web"
     budget_profile: Optional[Literal["fast", "balanced", "thorough", "exhaustive"]] = None
     policy: Optional[dict[str, Any]] = None
     authentication: Optional[dict[str, Any]] = None
     request_collections: list[dict[str, Any]] = Field(default_factory=list, max_length=16)
+    credential_profile_ids: list[str] = Field(default_factory=list, max_length=2)
     advanced: Optional[dict[str, Any]] = None
     approval_receipt_id: Optional[str] = None
     options: ScanOptions = Field(default_factory=ScanOptions)
@@ -4461,10 +4482,12 @@ class DeviceAgentShellConfirmRequest(BaseModel):
 
 class BatchRequest(BaseModel):
     targets: list[str] = Field(min_length=1, max_length=50)
+    target_kind: Literal["web", "api"] = "web"
     budget_profile: Optional[Literal["fast", "balanced", "thorough", "exhaustive"]] = None
     policy: Optional[dict[str, Any]] = None
     authentication: Optional[dict[str, Any]] = None
     request_collections: list[dict[str, Any]] = Field(default_factory=list, max_length=16)
+    credential_profile_ids: list[str] = Field(default_factory=list, max_length=2)
     advanced: Optional[dict[str, Any]] = None
     approval_receipt_id: Optional[str] = None
     options: ScanOptions = Field(default_factory=ScanOptions)
@@ -26362,6 +26385,17 @@ async def submit_scan(request: ScanRequest):
         authentication = normalize_scan_authentication(request.authentication)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if request.credential_profile_ids and (
+        authentication
+        or any(options_payload.get(key) not in (None, "", [], {}) for key in SCAN_AUTHENTICATION_KEYS)
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "credential_profile_ids cannot be combined with inline authentication; "
+                "use only encrypted generic profiles"
+            ),
+        )
     options_payload["authentication"] = authentication
     for key, value in authentication.items():
         if value not in (None, "", [], {}):
@@ -26454,17 +26488,36 @@ async def submit_scan(request: ScanRequest):
                 *list(options_payload.get("custom_endpoints") or []), *collection_endpoints,
             ]))[:2000]
 
+        credential_refs = await _admit_generic_scan_credential_profiles(
+            conn,
+            target_id=target_id,
+            target_kind=request.target_kind,
+            profile_ids=request.credential_profile_ids,
+        )
+        credential_action_name = (
+            f"scan.submit:{legacy_scan_type}" if legacy_scan_type else "scan.submit"
+        )
+
         approval_context = await _validate_approval_receipt_for_action(
             conn,
             approval_receipt_id,
             target_url=normalized_target,
             target_id=target_id,
-            action_name=(f"scan.submit:{legacy_scan_type}" if legacy_scan_type else "scan.submit"),
+            action_name=credential_action_name,
+            risk_tier="credential" if credential_refs else "active",
+            always_require_receipt=bool(credential_refs),
+            require_target_binding=bool(credential_refs),
+            require_expiry=bool(credential_refs),
         )
         if approval_context:
             options_payload.update(approval_context)
+        if credential_refs:
+            options_payload["credential_profile_refs"] = credential_refs
+            options_payload["credential_target_kind"] = request.target_kind
+            options_payload["credential_action_name"] = credential_action_name
 
-        options_payload = await _resolve_target_credential_profiles(conn, target_id, options_payload)
+        if not credential_refs:
+            options_payload = await _resolve_target_credential_profiles(conn, target_id, options_payload)
         options_payload, _family = _apply_scan_check_family_policy(options_payload)
         parallel_enabled, parallel_worker_count = _apply_auto_sharding_policy(
             request.options,
@@ -26490,7 +26543,11 @@ async def submit_scan(request: ScanRequest):
             conn,
             command="scan.submit",
             status="queued",
-            risk_tier="active" if scan_type in ACTIVE_ENFORCED_SCAN_TYPES else "passive",
+            risk_tier=(
+                "credential"
+                if credential_refs
+                else "active" if scan_type in ACTIVE_ENFORCED_SCAN_TYPES else "passive"
+            ),
             scan_id=scan_id,
             scope_receipt_id=options_payload.get("scope_receipt_id"),
             approval_receipt_id=options_payload.get("approval_receipt_id"),
@@ -26583,10 +26640,12 @@ async def submit_batch(request: BatchRequest):
     for target in targets:
         req = ScanRequest(
             target=target,
+            target_kind=request.target_kind,
             budget_profile=request.budget_profile,
             policy=dict(request.policy or {}),
             authentication=dict(request.authentication or {}),
             request_collections=[dict(item) for item in request.request_collections],
+            credential_profile_ids=list(request.credential_profile_ids),
             advanced=dict(request.advanced or {}),
             approval_receipt_id=request.approval_receipt_id,
             options=request.options.model_copy(deep=True),
@@ -28637,6 +28696,42 @@ async def _resolve_target_credential_profiles(
     if profile_refs:
         options_payload["managed_credential_profiles"] = profile_refs
     return options_payload
+
+
+async def _admit_generic_scan_credential_profiles(
+    conn: Any,
+    *,
+    target_id: uuid.UUID,
+    target_kind: str,
+    profile_ids: Sequence[Any],
+) -> list[dict[str, Any]]:
+    """Resolve opaque Scan inputs to immutable, content-free profile references."""
+    normalized: list[str] = []
+    for value in profile_ids:
+        try:
+            profile_id = str(uuid.UUID(str(value or "")))
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise HTTPException(
+                status_code=422, detail="credential_profile_ids contains an invalid UUID"
+            ) from exc
+        normalized.append(profile_id)
+    if not normalized:
+        return []
+    profiles = await _generic_credential_store.list_profiles(
+        conn,
+        target_kind=target_kind,
+        target_id=target_id,
+        include_inactive=True,
+    )
+    try:
+        return admit_scan_credential_profiles(
+            normalized,
+            profiles,
+            target_id=target_id,
+            target_kind=target_kind,
+        )
+    except ScanCredentialError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.get("/targets/{target_id}")
