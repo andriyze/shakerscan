@@ -12,6 +12,10 @@ from scanner.scanner_tools.http_scanner import (
     _guard_browser_interaction_request,
     browser_fetch,
 )
+from scanner.scanner_tools.request_meter import (
+    configure_request_meter,
+    install_async_client_metering,
+)
 
 
 def test_passive_browser_interactions_allow_only_read_only_methods():
@@ -126,12 +130,21 @@ def test_browser_fetch_blocks_state_change_from_semantic_tab(tmp_path):
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
+        configure_request_meter(
+            limit=100,
+            target_host="127.0.0.1",
+            mode="enforce",
+            planned=100,
+            reserved=100,
+        )
+        install_async_client_metering()
         result = asyncio.run(browser_fetch(
             f"http://127.0.0.1:{server.server_port}/",
             screenshot_dir=str(tmp_path),
             max_pages=1,
         ))
     finally:
+        configure_request_meter(limit=None, target_host=None, mode="off")
         server.shutdown()
         thread.join(timeout=5)
         server.server_close()

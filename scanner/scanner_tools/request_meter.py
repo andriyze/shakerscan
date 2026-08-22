@@ -275,7 +275,10 @@ def install_async_client_metering() -> dict[str, bool]:
                     except RequestBudgetExceeded:
                         await route.abort("blockedbyclient")
                         return
-                    await route.continue_()
+                    # A page route runs before BrowserContext routes.  Fall through
+                    # after metering so context-level scope and passive-method
+                    # guards still get the request; continue_() would bypass them.
+                    await route.fallback()
 
                 def meter_response(response):
                     get_request_meter().record_completion(
