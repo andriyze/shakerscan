@@ -18,6 +18,7 @@ from typing import Any
 
 from runtime.credential_store import PostgresCredentialProfileStore
 from runtime.credential_migration import (
+    migrate_legacy_ai_credentials,
     migrate_legacy_device_credentials,
     migrate_legacy_web_credentials,
 )
@@ -4356,8 +4357,10 @@ async def run_schema_migrations(pool) -> None:
             # Move legacy Web credential rows into the shared immutable profile store.
             # The compatibility endpoints keep both representations synchronized until
             # the old tables and callers are deleted later in the V2 migration.
-            await migrate_legacy_web_credentials(conn)
-            await migrate_legacy_device_credentials(conn)
+            async with conn.transaction():
+                await migrate_legacy_web_credentials(conn)
+                await migrate_legacy_device_credentials(conn)
+                await migrate_legacy_ai_credentials(conn)
 
             # Canonical de-dupe prevention must be present before startup completes;
             # current ON CONFLICT insert paths rely on this unique index. Keep the

@@ -451,6 +451,8 @@ try:
     from runtime.credential_store import CredentialStoreError, PostgresCredentialProfileStore
     from runtime.credential_migration import (
         LegacyCredentialMigrationError,
+        sync_legacy_ai_principal_credential,
+        sync_legacy_ai_target_credential,
         sync_legacy_device_credential,
         sync_legacy_web_credential,
         sync_legacy_web_credential_by_name,
@@ -470,6 +472,8 @@ except ModuleNotFoundError:
     from api.runtime.credential_store import CredentialStoreError, PostgresCredentialProfileStore
     from api.runtime.credential_migration import (
         LegacyCredentialMigrationError,
+        sync_legacy_ai_principal_credential,
+        sync_legacy_ai_target_credential,
         sync_legacy_device_credential,
         sync_legacy_web_credential,
         sync_legacy_web_credential_by_name,
@@ -6552,6 +6556,20 @@ def _build_ai_credential_db_record(
         "secret_preview": _mask_ai_target_secret(secret),
         "metadata_json": metadata,
     }
+
+
+async def _sync_ai_target_credential_profile(conn: Any, profile_id: Any) -> None:
+    try:
+        await sync_legacy_ai_target_credential(conn, profile_id)
+    except LegacyCredentialMigrationError as exc:
+        raise _legacy_credential_migration_http_error(exc) from exc
+
+
+async def _sync_ai_principal_credential_profile(conn: Any, profile_id: Any) -> None:
+    try:
+        await sync_legacy_ai_principal_credential(conn, profile_id)
+    except LegacyCredentialMigrationError as exc:
+        raise _legacy_credential_migration_http_error(exc) from exc
 
 
 def _sanitize_ai_credential(row: Optional[dict[str, Any]]) -> dict[str, Any]:
@@ -22862,11 +22880,12 @@ async def create_ai_target(request: AITargetCreate):
                 json.dumps(request.metadata_json or {}),
                 request.is_active,
             )
-            await conn.execute("""
+            credential_id = await conn.fetchval("""
                 INSERT INTO ai_target_credentials (
                     ai_target_id, auth_kind, header_name, secret_value,
                     secret_preview, metadata_json, rotated_at
                 ) VALUES ($1, $2, $3, $4, $5, $6, NOW())
+                RETURNING id
             """,
                 target_id,
                 credential["auth_kind"],
@@ -22875,6 +22894,7 @@ async def create_ai_target(request: AITargetCreate):
                 credential["secret_preview"],
                 json.dumps(credential["metadata_json"]),
             )
+            await _sync_ai_target_credential_profile(conn, credential_id)
 
         target = await conn.fetchrow("SELECT * FROM ai_targets WHERE id = $1", target_id)
         credential_row = await conn.fetchrow(
@@ -22969,6 +22989,25 @@ async def update_ai_target(target_id: str, request: AITargetUpdate):
                     credential["secret_preview"],
                     json.dumps(credential["metadata_json"]),
                 )
+                credential_id = await conn.fetchval(
+                    "SELECT id FROM ai_target_credentials WHERE ai_target_id=$1",
+                    uuid.UUID(target_id),
+                )
+                await _sync_ai_target_credential_profile(conn, credential_id)
+
+            if "is_active" in update_data:
+                credential_ids = await conn.fetch(
+                    "SELECT id FROM ai_target_credentials WHERE ai_target_id=$1",
+                    uuid.UUID(target_id),
+                )
+                principal_ids = await conn.fetch(
+                    "SELECT id FROM ai_target_principals WHERE ai_target_id=$1",
+                    uuid.UUID(target_id),
+                )
+                for row in credential_ids:
+                    await _sync_ai_target_credential_profile(conn, row["id"])
+                for row in principal_ids:
+                    await _sync_ai_principal_credential_profile(conn, row["id"])
 
         target = await conn.fetchrow("SELECT * FROM ai_targets WHERE id = $1", uuid.UUID(target_id))
         credential_row = await conn.fetchrow(
@@ -22982,11 +23021,26 @@ async def update_ai_target(target_id: str, request: AITargetUpdate):
 async def delete_ai_target(target_id: str):
     """Deactivate an AI Gate target."""
     async with db_pool.acquire() as conn:
-        result = await conn.execute("""
-            UPDATE ai_targets
-            SET is_active = false, updated_at = NOW()
-            WHERE id = $1
-        """, uuid.UUID(target_id))
+        async with conn.transaction():
+            target_uuid = uuid.UUID(target_id)
+            result = await conn.execute("""
+                UPDATE ai_targets
+                SET is_active = false, updated_at = NOW()
+                WHERE id = $1
+            """, target_uuid)
+            if result != "UPDATE 0":
+                credential_ids = await conn.fetch(
+                    "SELECT id FROM ai_target_credentials WHERE ai_target_id=$1",
+                    target_uuid,
+                )
+                principal_ids = await conn.fetch(
+                    "SELECT id FROM ai_target_principals WHERE ai_target_id=$1",
+                    target_uuid,
+                )
+                for row in credential_ids:
+                    await _sync_ai_target_credential_profile(conn, row["id"])
+                for row in principal_ids:
+                    await _sync_ai_principal_credential_profile(conn, row["id"])
     if result == "UPDATE 0":
         raise HTTPException(status_code=404, detail="AI target not found")
     return {"status": "deleted", "target_id": target_id}
@@ -23025,34 +23079,40 @@ async def create_ai_target_principal(target_id: str, request: AITargetPrincipalC
     credential = _build_ai_credential_db_record(request.credential)
     principal_metadata = {**(credential["metadata_json"] or {}), **(request.metadata_json or {})}
     async with db_pool.acquire() as conn:
-        target_exists = await conn.fetchval(
-            "SELECT 1 FROM ai_targets WHERE id = $1",
-            uuid.UUID(target_id),
-        )
-        if not target_exists:
-            raise HTTPException(status_code=404, detail="AI target not found")
         try:
-            principal_id = await conn.fetchval("""
-                INSERT INTO ai_target_principals (
-                    ai_target_id, label, role, tenant_id, auth_kind, header_name,
-                    secret_value, secret_preview, metadata_json, is_active, rotated_at
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
-                RETURNING id
-            """,
-                uuid.UUID(target_id),
-                label,
-                role,
-                str(request.tenant_id or "").strip() or None,
-                credential["auth_kind"],
-                credential["header_name"],
-                credential["secret_value"],
-                credential["secret_preview"],
-                json.dumps(principal_metadata),
-                request.is_active,
-            )
+            async with conn.transaction():
+                target_exists = await conn.fetchval(
+                    "SELECT 1 FROM ai_targets WHERE id = $1",
+                    uuid.UUID(target_id),
+                )
+                if not target_exists:
+                    raise HTTPException(status_code=404, detail="AI target not found")
+                principal_id = await conn.fetchval("""
+                    INSERT INTO ai_target_principals (
+                        ai_target_id, label, role, tenant_id, auth_kind, header_name,
+                        secret_value, secret_preview, metadata_json, is_active, rotated_at
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+                    RETURNING id
+                """,
+                    uuid.UUID(target_id),
+                    label,
+                    role,
+                    str(request.tenant_id or "").strip() or None,
+                    credential["auth_kind"],
+                    credential["header_name"],
+                    credential["secret_value"],
+                    credential["secret_preview"],
+                    json.dumps(principal_metadata),
+                    request.is_active,
+                )
+                await _sync_ai_principal_credential_profile(conn, principal_id)
         except Exception as exc:
+            if isinstance(exc, HTTPException):
+                raise
             if "unique" in str(exc).lower():
                 raise HTTPException(status_code=409, detail="Principal label already exists for this AI target") from exc
+            if isinstance(exc, LegacyCredentialMigrationError):
+                raise _legacy_credential_migration_http_error(exc) from exc
             raise
         row = await conn.fetchrow("SELECT * FROM ai_target_principals WHERE id = $1", principal_id)
     return {"principal": _sanitize_ai_principal(row)}
@@ -23067,69 +23127,76 @@ async def update_ai_target_principal(
     """Update a principal credential without returning its raw secret."""
     payload = request.model_dump(exclude_unset=True)
     async with db_pool.acquire() as conn:
-        existing = await conn.fetchrow(
-            "SELECT * FROM ai_target_principals WHERE id = $1 AND ai_target_id = $2",
-            uuid.UUID(principal_id),
-            uuid.UUID(target_id),
-        )
-        if not existing:
-            raise HTTPException(status_code=404, detail="AI target principal not found")
+        try:
+            async with conn.transaction():
+                principal_uuid = uuid.UUID(principal_id)
+                target_uuid = uuid.UUID(target_id)
+                existing = await conn.fetchrow(
+                    """SELECT * FROM ai_target_principals
+                       WHERE id = $1 AND ai_target_id = $2 FOR UPDATE""",
+                    principal_uuid,
+                    target_uuid,
+                )
+                if not existing:
+                    raise HTTPException(status_code=404, detail="AI target principal not found")
 
-        update_data: dict[str, Any] = {}
-        if "label" in payload and payload["label"] is not None:
-            update_data["label"] = _normalize_ai_principal_label(payload["label"])
-        if "role" in payload and payload["role"] is not None:
-            update_data["role"] = _normalize_ai_principal_role(payload["role"])
-        if "tenant_id" in payload:
-            update_data["tenant_id"] = str(payload.get("tenant_id") or "").strip() or None
-        if "metadata_json" in payload:
-            update_data["metadata_json"] = json.dumps(payload.get("metadata_json") or {})
-        if "is_active" in payload:
-            update_data["is_active"] = bool(payload["is_active"])
+                update_data: dict[str, Any] = {}
+                if "label" in payload and payload["label"] is not None:
+                    update_data["label"] = _normalize_ai_principal_label(payload["label"])
+                if "role" in payload and payload["role"] is not None:
+                    update_data["role"] = _normalize_ai_principal_role(payload["role"])
+                if "tenant_id" in payload:
+                    update_data["tenant_id"] = str(payload.get("tenant_id") or "").strip() or None
+                if "metadata_json" in payload:
+                    update_data["metadata_json"] = json.dumps(payload.get("metadata_json") or {})
+                if "is_active" in payload:
+                    update_data["is_active"] = bool(payload["is_active"])
 
-        if request.credential is not None:
-            credential = _build_ai_credential_db_record(request.credential, dict(existing))
-            update_data.update({
-                "auth_kind": credential["auth_kind"],
-                "header_name": credential["header_name"],
-                "secret_value": credential["secret_value"],
-                "secret_preview": credential["secret_preview"],
-                "metadata_json": json.dumps(
-                    {
-                        **(_decode_json_value(existing.get("metadata_json")) or {}),
-                        **(credential["metadata_json"] or {}),
-                        **(
-                            payload.get("metadata_json")
-                            if isinstance(payload.get("metadata_json"), dict)
-                            else {}
+                if request.credential is not None:
+                    credential = _build_ai_credential_db_record(request.credential, dict(existing))
+                    update_data.update({
+                        "auth_kind": credential["auth_kind"],
+                        "header_name": credential["header_name"],
+                        "secret_value": credential["secret_value"],
+                        "secret_preview": credential["secret_preview"],
+                        "metadata_json": json.dumps(
+                            {
+                                **(_decode_json_value(existing.get("metadata_json")) or {}),
+                                **(credential["metadata_json"] or {}),
+                                **(
+                                    payload.get("metadata_json")
+                                    if isinstance(payload.get("metadata_json"), dict)
+                                    else {}
+                                ),
+                            }
                         ),
-                    }
-                ),
-                "rotated_at": datetime.now(timezone.utc),
-            })
+                        "rotated_at": datetime.now(timezone.utc),
+                    })
 
-        if update_data:
-            assignments = []
-            values = []
-            for idx, (key, value) in enumerate(update_data.items(), start=1):
-                assignments.append(f"{key} = ${idx}")
-                values.append(value)
-            assignments.append("updated_at = NOW()")
-            values.extend([uuid.UUID(principal_id), uuid.UUID(target_id)])
-            await conn.execute(
-                f"""
-                UPDATE ai_target_principals
-                SET {', '.join(assignments)}
-                WHERE id = ${len(values) - 1} AND ai_target_id = ${len(values)}
-                """,
-                *values,
-            )
-
-        row = await conn.fetchrow(
-            "SELECT * FROM ai_target_principals WHERE id = $1 AND ai_target_id = $2",
-            uuid.UUID(principal_id),
-            uuid.UUID(target_id),
-        )
+                if update_data:
+                    assignments = []
+                    values = []
+                    for idx, (key, value) in enumerate(update_data.items(), start=1):
+                        assignments.append(f"{key} = ${idx}")
+                        values.append(value)
+                    assignments.append("updated_at = NOW()")
+                    values.extend([principal_uuid, target_uuid])
+                    await conn.execute(
+                        f"""
+                        UPDATE ai_target_principals
+                        SET {', '.join(assignments)}
+                        WHERE id = ${len(values) - 1} AND ai_target_id = ${len(values)}
+                        """,
+                        *values,
+                    )
+                await _sync_ai_principal_credential_profile(conn, principal_uuid)
+                row = await conn.fetchrow(
+                    "SELECT * FROM ai_target_principals WHERE id = $1 AND ai_target_id = $2",
+                    principal_uuid,
+                    target_uuid,
+                )
+        except LegacyCredentialMigrationError as exc:
+            raise _legacy_credential_migration_http_error(exc) from exc
     return {"principal": _sanitize_ai_principal(row)}
 
 
@@ -23137,14 +23204,18 @@ async def update_ai_target_principal(
 async def delete_ai_target_principal(target_id: str, principal_id: str):
     """Deactivate a principal credential."""
     async with db_pool.acquire() as conn:
-        result = await conn.execute("""
-            UPDATE ai_target_principals
-            SET is_active = false, updated_at = NOW()
-            WHERE id = $1 AND ai_target_id = $2
-        """,
-            uuid.UUID(principal_id),
-            uuid.UUID(target_id),
-        )
+        async with conn.transaction():
+            principal_uuid = uuid.UUID(principal_id)
+            result = await conn.execute("""
+                UPDATE ai_target_principals
+                SET is_active = false, updated_at = NOW()
+                WHERE id = $1 AND ai_target_id = $2
+            """,
+                principal_uuid,
+                uuid.UUID(target_id),
+            )
+            if result != "UPDATE 0":
+                await _sync_ai_principal_credential_profile(conn, principal_uuid)
     if result == "UPDATE 0":
         raise HTTPException(status_code=404, detail="AI target principal not found")
     return {"status": "deleted", "target_id": target_id, "principal_id": principal_id}

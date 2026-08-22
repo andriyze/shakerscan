@@ -98,6 +98,27 @@ class DeviceConn(FakeConn):
         return await super().fetchrow(query, *args)
 
 
+class AiConn(FakeConn):
+    def __init__(self, *, default=None, principal=None):
+        super().__init__()
+        self.ai_default = default
+        self.ai_principal = principal
+
+    async def fetchrow(self, query, *args):
+        if "FROM ai_target_credentials c" in query:
+            return self.ai_default if self.ai_default and args[0] == self.ai_default["id"] else None
+        if "FROM ai_target_principals p" in query:
+            return self.ai_principal if self.ai_principal and args[0] == self.ai_principal["id"] else None
+        return await super().fetchrow(query, *args)
+
+    async def fetch(self, query, *args):
+        if "SELECT id FROM ai_target_credentials ORDER BY" in query:
+            return [{"id": self.ai_default["id"]}] if self.ai_default else []
+        if "SELECT id FROM ai_target_principals ORDER BY" in query:
+            return [{"id": self.ai_principal["id"]}] if self.ai_principal else []
+        return await super().fetch(query, *args)
+
+
 class FakeStore:
     def __init__(self, existing=None):
         self.profile = existing
@@ -390,3 +411,153 @@ def test_device_passphrase_shape_cannot_change_under_same_migrated_identity(monk
                 DeviceConn(legacy), PROFILE_ID, store=FakeStore(existing), now=NOW,
             )
         )
+
+
+@pytest.mark.parametrize(
+    ("legacy_kind", "secret", "header_name", "metadata", "expected_kind", "expected"),
+    [
+        ("bearer", "token", None, {}, "bearer_token", {"secret": "token"}),
+        (
+            "api_key_header", "key", "X-API-Key", {}, "api_key_header",
+            {"secret": "key", "header_name": "X-API-Key"},
+        ),
+        (
+            "custom_header", "tenant", "X-Tenant", {}, "api_key_header",
+            {"secret": "tenant", "header_name": "X-Tenant"},
+        ),
+        (
+            "basic_auth", "analyst:password", None, {}, "basic_auth",
+            {"username": "analyst", "secret": "password"},
+        ),
+        ("cookie", "sid=value", None, {}, "cookie", {"secret": "sid=value"}),
+        (
+            "multi_header",
+            '[{"name":"X-Tenant","value":"blue"},{"name":"X-Key","value":"key"}]',
+            None,
+            {},
+            "custom_headers",
+            {"custom_headers": {"X-Key": "key", "X-Tenant": "blue"}},
+        ),
+        (
+            "query_param", "query-key", None, {"param_name": "access_key"},
+            "query_parameter", {"secret": "query-key", "parameter_name": "access_key"},
+        ),
+    ],
+)
+def test_legacy_ai_target_credentials_map_to_generic_contracts(
+    monkeypatch, legacy_kind, secret, header_name, metadata, expected_kind, expected,
+):
+    monkeypatch.setattr(migration, "decrypt_secret", lambda _value: secret)
+    monkeypatch.setattr(migration, "encrypt_secret", lambda value: f"enc:fernet:{value}")
+    legacy = {
+        "id": PROFILE_ID,
+        "ai_target_id": TARGET_ID,
+        "auth_kind": legacy_kind,
+        "header_name": header_name,
+        "secret_value": "enc:fernet:legacy-ai",
+        "metadata_json": metadata,
+        "target_is_active": True,
+        "created_at": NOW,
+        "rotated_at": NOW,
+    }
+    store = FakeStore()
+
+    profile = asyncio.run(
+        migration.sync_legacy_ai_target_credential(
+            AiConn(default=legacy), PROFILE_ID, store=store, now=NOW,
+        )
+    )
+
+    assert profile.target_kind == "api"
+    assert profile.target_id == str(TARGET_ID)
+    assert profile.auth_kind == expected_kind
+    assert profile.principal_slot == "service"
+    create = store.calls[0][1]
+    envelope = migration.parse_credential_secret(
+        expected_kind, create["encrypted_secret"].removeprefix("enc:fernet:")
+    )
+    for key, value in expected.items():
+        assert envelope[key] == value
+    assert create["allowed_capabilities"] == migration.LEGACY_AI_CAPABILITIES
+
+
+@pytest.mark.parametrize(
+    ("role", "expected_slot"),
+    [("victim", "primary"), ("attacker", "secondary"), ("admin", "service")],
+)
+def test_legacy_ai_principals_preserve_identity_and_derive_slot(
+    monkeypatch, role, expected_slot,
+):
+    monkeypatch.setattr(migration, "decrypt_secret", lambda _value: "principal-token")
+    monkeypatch.setattr(migration, "encrypt_secret", lambda value: f"enc:fernet:{value}")
+    legacy = {
+        "id": PROFILE_ID,
+        "ai_target_id": TARGET_ID,
+        "label": "Tenant operator",
+        "role": role,
+        "auth_kind": "bearer",
+        "header_name": None,
+        "secret_value": "enc:fernet:legacy-ai-principal",
+        "metadata_json": {},
+        "is_active": True,
+        "target_is_active": True,
+        "created_at": NOW,
+        "rotated_at": NOW,
+    }
+    store = FakeStore()
+
+    profile = asyncio.run(
+        migration.sync_legacy_ai_principal_credential(
+            AiConn(principal=legacy), PROFILE_ID, store=store, now=NOW,
+        )
+    )
+
+    assert profile.principal_slot == expected_slot
+    create = store.calls[0][1]
+    assert create["principal_label"] == "Tenant operator"
+    assert str(PROFILE_ID).replace("-", "")[:8] in create["name"]
+
+
+def test_legacy_ai_none_credentials_do_not_create_secret_profiles():
+    legacy = {
+        "id": PROFILE_ID,
+        "ai_target_id": TARGET_ID,
+        "auth_kind": "none",
+        "target_is_active": True,
+        "created_at": NOW,
+        "rotated_at": NOW,
+    }
+    store = FakeStore()
+    profile = asyncio.run(
+        migration.sync_legacy_ai_target_credential(
+            AiConn(default=legacy), PROFILE_ID, store=store, now=NOW,
+        )
+    )
+    assert profile is None
+    assert store.calls == []
+
+
+def test_legacy_ai_migration_marker_is_idempotent(monkeypatch):
+    monkeypatch.setattr(migration, "decrypt_secret", lambda _value: "token")
+    monkeypatch.setattr(migration, "encrypt_secret", lambda value: f"enc:fernet:{value}")
+    legacy = {
+        "id": PROFILE_ID,
+        "ai_target_id": TARGET_ID,
+        "auth_kind": "bearer",
+        "header_name": None,
+        "secret_value": "enc:fernet:legacy-ai",
+        "metadata_json": {},
+        "target_is_active": True,
+        "created_at": NOW,
+        "rotated_at": NOW,
+    }
+    conn = AiConn(default=legacy)
+    store = FakeStore()
+    first = asyncio.run(
+        migration.migrate_legacy_ai_credentials(conn, store=store, now=NOW)
+    )
+    second = asyncio.run(
+        migration.migrate_legacy_ai_credentials(conn, store=store, now=NOW)
+    )
+    assert first == 1
+    assert second == 0
