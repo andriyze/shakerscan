@@ -64,7 +64,7 @@ def test_browser_prepare_freezes_origin_address_digest_and_budget():
         target=_target(),
         base_url="https://app.example.test",
         args={
-            "path": "/reports?token=worker-only&view=full",
+            "path": "/reports?page=2&view=full",
             "timeout_ms": 5_100,
             "max_requests": 7,
         },
@@ -73,7 +73,7 @@ def test_browser_prepare_freezes_origin_address_digest_and_budget():
         target=_target(),
         base_url="https://app.example.test",
         args={
-            "path": "/reports?token=worker-only&view=full",
+            "path": "/reports?page=2&view=full",
             "timeout_ms": 5_100,
             "max_requests": 7,
         },
@@ -86,8 +86,8 @@ def test_browser_prepare_freezes_origin_address_digest_and_budget():
         "http_requests": 7,
         "tool_wall_seconds": 6,
     }
-    assert "worker-only" not in str(prepared.redacted_execution)
-    assert "token" in prepared.redacted_execution["path"]
+    assert "page=2" not in str(prepared.redacted_execution)
+    assert "page" in prepared.redacted_execution["path"]
 
 
 @pytest.mark.parametrize("path", [
@@ -124,6 +124,22 @@ def test_browser_prepare_rejects_untyped_or_unregistered_input(args):
             target=_target(),
             base_url="https://app.example.test",
             args=args,
+        )
+
+
+@pytest.mark.parametrize("path", [
+    "/?token=worker-only",
+    "/?access_token=worker-only",
+    "/?session=worker-only",
+    "/?q=Bearer%20worker-only",
+    "/?q=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature",
+])
+def test_browser_prepare_rejects_raw_secrets_before_queue_admission(path):
+    with pytest.raises(BrowserCapabilityInputError, match="managed credential"):
+        BrowserNavigateAdapter.prepare(
+            target=_target(),
+            base_url="https://app.example.test",
+            args={"path": path},
         )
 
 
@@ -224,7 +240,7 @@ def test_browser_execution_blocks_cross_origin_and_writes_and_redacts_evidence(m
     prepared = BrowserNavigateAdapter.prepare(
         target=_target(),
         base_url="https://app.example.test",
-        args={"path": "/start?token=worker-only", "max_requests": 10},
+        args={"path": "/start?page=2", "max_requests": 10},
     )
     heartbeats = []
 
@@ -241,7 +257,7 @@ def test_browser_execution_blocks_cross_origin_and_writes_and_redacts_evidence(m
     assert heartbeats == [True]
     assert {item[0] for item in blocked_routes} == {"GET", "POST"}
     serialized = str(result.observations) + str(result.redacted_execution)
-    for secret in ("worker-only", "outside", "hidden", "inside"):
+    for secret in ("page=2", "outside", "hidden", "inside"):
         assert secret not in serialized
     assert any(
         item.get("reason") == "cross_origin" for item in result.observations

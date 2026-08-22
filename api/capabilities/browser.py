@@ -14,9 +14,11 @@ import urllib.parse
 try:
     from hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
     from runtime.models import PreparedExecution, TargetBinding
+    from runtime.secret_material import contains_secret_material
 except ModuleNotFoundError:  # package imports in host-side tests
     from ..hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
     from ..runtime.models import PreparedExecution, TargetBinding
+    from ..runtime.secret_material import contains_secret_material
 
 
 SAFE_BROWSER_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
@@ -132,6 +134,13 @@ class BrowserNavigateAdapter:
         if parsed_path.scheme or parsed_path.netloc or parsed_path.fragment:
             raise BrowserCapabilityInputError(
                 "browser path must not contain an origin or fragment"
+            )
+        query_pairs = urllib.parse.parse_qsl(
+            parsed_path.query, keep_blank_values=True, max_num_fields=50,
+        )
+        if contains_secret_material(dict(query_pairs)) or contains_secret_material(path):
+            raise BrowserCapabilityInputError(
+                "browser input contains raw secret material; use a managed credential reference"
             )
         raw_wait_until = args.get("wait_until", "domcontentloaded")
         if not isinstance(raw_wait_until, str):
