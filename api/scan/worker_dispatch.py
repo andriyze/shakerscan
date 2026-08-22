@@ -13,6 +13,7 @@ from typing import Any, Mapping
 from .jobs import (
     ScanShardAuthority,
 )
+from .executor import NATIVE_SCAN_EXECUTION_SCHEMA
 from .worker_contract import WorkerScanAdmission, resolve_worker_scan_admission
 
 
@@ -84,8 +85,7 @@ def prepare_worker_dispatch(
             "generation": admission.plan.generation,
             "allow_state_changing_http": policy.allow_state_changing_http,
             "max_workers": budget.max_workers,
-            "backing_scan_type": admission.backing_scan_type,
-            "temporary_backing_adapter": True,
+            "executor": "native_fixed_stage",
         },
     })
     if shard_authority is not None:
@@ -115,8 +115,8 @@ def execution_result_metadata(admission: WorkerScanAdmission) -> dict[str, Any] 
     return {
         **admission.plan.canonical_dict(),
         "plan_digest": admission.plan.digest,
-        "compatibility": {
-            "backing_scan_type": admission.backing_scan_type,
-            "temporary": True,
+        "executor": {
+            "name": "native_fixed_stage",
+            "schema_version": NATIVE_SCAN_EXECUTION_SCHEMA,
         },
     }

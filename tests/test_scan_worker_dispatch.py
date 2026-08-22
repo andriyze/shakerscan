@@ -61,6 +61,8 @@ def test_canonical_dispatch_maps_plan_budget_and_families():
     assert prepared["allow_state_changing_http"] is True
     assert prepared["include_families"] == ["xss", "sqli"]
     assert prepared["_v2_worker_authority"]["plan_digest"] == admission.plan.digest
+    assert prepared["_v2_worker_authority"]["executor"] == "native_fixed_stage"
+    assert "backing_scan_type" not in prepared["_v2_worker_authority"]
 
 
 def test_caller_legacy_tuning_cannot_expand_canonical_budget():
@@ -143,6 +145,8 @@ def test_result_metadata_is_canonical_and_legacy_is_untouched():
     metadata = execution_result_metadata(admission)
     assert metadata["engine"] == "scan"
     assert metadata["plan_digest"] == plan.digest
+    assert metadata["executor"]["name"] == "native_fixed_stage"
+    assert "compatibility" not in metadata
     assert execution_result_metadata(WorkerScanAdmission(False, "standard")) is None
 
 

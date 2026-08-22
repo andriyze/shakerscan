@@ -3850,6 +3850,60 @@ def test_run_scan_maps_explicit_inventory_only_policy(monkeypatch):
     assert "--discovery-manifest-only" in captured["cmd"]
 
 
+def test_run_scan_uses_native_fixed_stage_contract_for_canonical_plan(monkeypatch):
+    from runtime.models import ScanBudget, ScanPolicy
+    from scan.execution import ScanExecutionPlan
+    from scan.executor import validate_native_scan_execution_payload
+
+    captured = {}
+
+    async def _fake_create_subprocess_exec(*cmd, **kwargs):
+        captured["cmd"] = list(cmd)
+        captured["env"] = kwargs.get("env") or {}
+        return _FakeProcess(b'{"ok": true, "findings": []}')
+
+    plan = ScanExecutionPlan(
+        policy=ScanPolicy(
+            active_testing=True,
+            allow_state_changing_http=False,
+            network_discovery=False,
+            include_families=("sqli",),
+            approval_receipt_id="approval-1",
+        ),
+        budget_profile="balanced",
+        budget=ScanBudget(1200, 5000, 2000, 200, 5000, 900, 4),
+    )
+    options = plan.option_metadata()
+    options.update({
+        "scan_compatibility": {
+            "legacy_executor_alias": "full",
+            "temporary": True,
+        },
+        "scan_type": "full",
+        "active": True,
+        "network_discovery": False,
+        "subfinder": False,
+        "asm_check_family": "sqli",
+    })
+    monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(worker, "_load_runtime_ai_settings", lambda: {})
+
+    result = asyncio.run(worker.run_scan("https://example.com", options))
+
+    assert result.get("ok") is True
+    assert "--canonical-scan" in captured["cmd"]
+    assert not {"--smart", "--full", "--deep", "--standard", "--quick"} & set(captured["cmd"])
+    assert "--active" not in captured["cmd"]
+    assert "--budget-profile" not in captured["cmd"]
+    assert not any(item.startswith("--budget-") for item in captured["cmd"])
+    execution = validate_native_scan_execution_payload(json.loads(
+        captured["env"]["SHAKERSCAN_CANONICAL_SCAN_EXECUTION"]
+    ))
+    assert execution["execution_plan_digest"] == plan.digest
+    assert execution["focused_family"] == "sqli"
+    assert result["scan_execution"]["executor"]["name"] == "native_fixed_stage"
+
+
 def test_run_scan_maps_active_worklist_budget_flag(monkeypatch):
     captured = {}
 

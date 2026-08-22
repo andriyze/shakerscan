@@ -114,6 +114,7 @@ from scan.worker_dispatch import (
     is_deterministic_dast,
     prepare_worker_dispatch,
 )
+from scan.executor import build_native_scan_execution
 from scan.jobs import (
     CanonicalScanJob,
     CanonicalScanJobError,
@@ -2700,6 +2701,7 @@ async def run_scan(
 ) -> dict:
     """Execute scanner and return results."""
     scan_admission = None
+    native_scan_execution = None
     if is_deterministic_dast(options):
         options, scan_admission = prepare_worker_dispatch(options)
         if not scan_admission.canonical and os.getenv(
@@ -2708,6 +2710,17 @@ async def run_scan(
             raise ValueError(
                 "legacy deterministic Scan execution is disabled; submit a "
                 "canonical V2 plan"
+            )
+        if scan_admission.canonical and scan_admission.plan is not None:
+            native_scan_execution = build_native_scan_execution(
+                scan_admission.plan, options,
+            )
+            options = native_scan_execution.normalize_options(options)
+            options["resolved_budget"] = resolve_scan_budget(
+                "standard",
+                scan_admission.plan.budget_profile,
+                options.get("custom_budget")
+                if isinstance(options.get("custom_budget"), dict) else None,
             )
 
     if options.get("run_kind") == "device_probe":
@@ -2825,6 +2838,9 @@ async def run_scan(
 
     cmd = ['python3', SCANNER_PATH, target]
 
+    if native_scan_execution is not None:
+        cmd.append('--canonical-scan')
+
     # Map scan_type to CLI flags (mutually exclusive presets)
     # Scan types: quick, standard, deep, full, aggressive, smart
     scan_type = (options.get('scan_type') or '').strip().lower()
@@ -2840,7 +2856,9 @@ async def run_scan(
             "Use 'deep' scan type for passive-only comprehensive scanning."
         )
 
-    if scan_type == 'smart':
+    if native_scan_execution is not None:
+        pass
+    elif scan_type == 'smart':
         cmd.append('--smart')
     elif scan_type == 'aggressive':
         cmd.append('--aggressive')
@@ -2860,71 +2878,84 @@ async def run_scan(
     # (the same option that gates retest depth) silently kept safe proofs.
     # Public scans must never get it; public+active scan types are already
     # rejected above, and the guard here is defense in depth.
-    deep_intent_exploit_level = _resolve_deep_intent_exploit_level(scan_type, options)
+    deep_intent_exploit_level = (
+        _resolve_deep_intent_exploit_level(scan_type, options)
+        if native_scan_execution is None else None
+    )
     if deep_intent_exploit_level:
         cmd.extend(['--exploit-level', deep_intent_exploit_level])
 
     # Additional flags (can be combined with scan types)
     # Pass --active when explicitly requested (even with explicit scan_type)
     # Note: full/aggressive/smart already include active tests, so skip for those
-    if options.get('active') and scan_type not in ['full', 'aggressive', 'smart']:
+    if (
+        native_scan_execution is None
+        and options.get('active')
+        and scan_type not in ['full', 'aggressive', 'smart']
+    ):
         cmd.append('--active')
 
     # Note: public is not allowed for smart/full/aggressive (validated above)
-    if options.get('public'):
+    if native_scan_execution is None and options.get('public'):
         cmd.append('--public')
     check_family = options.get('asm_check_family') or options.get('check_family')
-    if check_family:
+    if native_scan_execution is None and check_family:
         cmd.extend(['--check-family', str(check_family)])
-    if options.get('xss'):
+    if native_scan_execution is None and options.get('xss'):
         cmd.append('--xss')
-    if options.get('sqli'):
+    if native_scan_execution is None and options.get('sqli'):
         cmd.append('--sqli')
-    if options.get('deep_domxss'):
+    if native_scan_execution is None and options.get('deep_domxss'):
         cmd.append('--deep-domxss')
-    if options.get('nuclei') and scan_type not in ['full', 'aggressive', 'deep']:
+    if (
+        native_scan_execution is None
+        and options.get('nuclei')
+        and scan_type not in ['full', 'aggressive', 'deep']
+    ):
         cmd.append('--nuclei')
-    if options.get('enhanced_dns'):
+    if native_scan_execution is None and options.get('enhanced_dns'):
         cmd.append('--enhanced-dns')
-    if options.get('subfinder'):
+    if native_scan_execution is None and options.get('subfinder'):
         cmd.append('--subfinder')
-    if options.get('network_discovery'):
+    if native_scan_execution is None and options.get('network_discovery'):
         cmd.append('--network-discovery')
 
     # Client-Side Security
-    if options.get('js_dependency_scanning'):
+    if native_scan_execution is None and options.get('js_dependency_scanning'):
         cmd.append('--js-dependency-scanning')
-    if options.get('js_secret_scanning'):
+    if native_scan_execution is None and options.get('js_secret_scanning'):
         cmd.append('--js-secret-scanning')
-    if options.get('grpc_discovery'):
+    if native_scan_execution is None and options.get('grpc_discovery'):
         cmd.append('--grpc-discovery')
-    if options.get('json_link_following'):
+    if native_scan_execution is None and options.get('json_link_following'):
         cmd.append('--json-link-following')
-    if options.get('options_method_discovery'):
+    if native_scan_execution is None and options.get('options_method_discovery'):
         cmd.append('--options-method-discovery')
     if options.get('include_partial_attack_chains'):
         cmd.append('--include-partial-attack-chains')
-    if options.get('skip_global_checks'):
+    if native_scan_execution is None and options.get('skip_global_checks'):
         cmd.append('--skip-global-checks')
-    if options.get('focused_endpoints_only'):
+    if native_scan_execution is None and options.get('focused_endpoints_only'):
         cmd.append('--focused-endpoints-only')
-    if options.get('zero_rediscovery'):
+    if native_scan_execution is None and options.get('zero_rediscovery'):
         cmd.append('--zero-rediscovery')
-    if options.get('parallel_discovery') or options.get('discovery_manifest_only'):
+    if native_scan_execution is None and (
+        options.get('parallel_discovery') or options.get('discovery_manifest_only')
+    ):
         cmd.append('--discovery-manifest-only')
 
     # Smart scan tuning options
-    if options.get('no_early_stop'):
+    if native_scan_execution is None and options.get('no_early_stop'):
         cmd.append('--no-early-stop')
-    if options.get('thorough_params'):
+    if native_scan_execution is None and options.get('thorough_params'):
         cmd.append('--thorough-params')
-    if options.get('oob_callback_url'):
+    if native_scan_execution is None and options.get('oob_callback_url'):
         cmd.extend(['--oob-callback-url', options['oob_callback_url']])
-    if options.get('budget_profile'):
+    if native_scan_execution is None and options.get('budget_profile'):
         cmd.extend(['--budget-profile', str(options['budget_profile'])])
 
     custom_budget = options.get("custom_budget")
-    if isinstance(custom_budget, dict):
+    if native_scan_execution is None and isinstance(custom_budget, dict):
         custom_budget_flag_map = {
             "max_duration_minutes": "--budget-max-duration-minutes",
             "discovery_depth": "--budget-discovery-depth",
@@ -2956,17 +2987,17 @@ async def run_scan(
             cmd.extend(["--budget-max-findings-per-family", "-1" if value is None else str(value)])
 
     # Safety/performance limits
-    if options.get('smart_bola_max_endpoints'):
+    if native_scan_execution is None and options.get('smart_bola_max_endpoints'):
         cmd.extend(['--smart-bola-max-endpoints', str(options['smart_bola_max_endpoints'])])
-    if options.get('dom_xss_max_files'):
+    if native_scan_execution is None and options.get('dom_xss_max_files'):
         cmd.extend(['--dom-xss-max-files', str(options['dom_xss_max_files'])])
-    if options.get('sqli_extract_max'):
+    if native_scan_execution is None and options.get('sqli_extract_max'):
         cmd.extend(['--sqli-extract-max', str(options['sqli_extract_max'])])
     # oob_max_findings (prefer new name, fall back to deprecated oob_max_payloads)
     oob_max = options.get('oob_max_findings')
     if oob_max is None:
         oob_max = options.get('oob_max_payloads')
-    if oob_max is not None:
+    if native_scan_execution is None and oob_max is not None:
         cmd.extend(['--oob-max-findings', str(oob_max)])
 
     # AI options
@@ -3058,6 +3089,12 @@ async def run_scan(
     # Set up checkpoint file for partial result recovery
     checkpoint_file = None
     scan_env = os.environ.copy()
+    if native_scan_execution is not None:
+        scan_env["SHAKERSCAN_CANONICAL_SCAN_EXECUTION"] = json.dumps(
+            native_scan_execution.payload(),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
     if scan_ai_enabled and ai_api_key:
         scan_env["AI_API_KEY"] = ai_api_key
     # Stamp the real deployed commit (published by the API from the live checkout)
@@ -3192,14 +3229,28 @@ async def run_scan(
 
     timeout_reason: str | None = None
     cancel_reason: str | None = None
-    max_duration_minutes = DEFAULT_MAX_DURATION_MINUTES
+    if native_scan_execution is not None:
+        max_duration_minutes = max(
+            1,
+            (
+                int(native_scan_execution.payload()["execution_budget"]["max_duration_seconds"])
+                + 59
+            ) // 60,
+        )
+    else:
+        max_duration_minutes = DEFAULT_MAX_DURATION_MINUTES
     override_minutes = os.environ.get("SCAN_MAX_DURATION_MINUTES")
     if override_minutes:
         try:
-            max_duration_minutes = int(override_minutes)
+            configured_minutes = max(1, int(override_minutes))
+            max_duration_minutes = (
+                min(max_duration_minutes, configured_minutes)
+                if native_scan_execution is not None else configured_minutes
+            )
         except Exception:
-            max_duration_minutes = DEFAULT_MAX_DURATION_MINUTES
-    else:
+            if native_scan_execution is None:
+                max_duration_minutes = DEFAULT_MAX_DURATION_MINUTES
+    elif native_scan_execution is None:
         if scan_type:
             resolved_budget = options.get("resolved_budget")
             if not isinstance(resolved_budget, dict):

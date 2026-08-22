@@ -1,11 +1,20 @@
 from argparse import Namespace
 
+import pytest
+
 from scanner.scanner_tools.discovery_policy import (
     PASSIVE_DISCOVERY_HTTP_METHODS,
     enforce_discovery_manifest_safety,
     passive_http_methods_for_scan,
 )
-from scanner.scanner import build_check_family_scope
+from scanner.scanner import (
+    _apply_canonical_scan_execution,
+    _reject_canonical_cli_behavior,
+    build_check_family_scope,
+)
+from api.runtime.models import ScanBudget, ScanPolicy
+from api.scan.execution import ScanExecutionPlan
+from api.scan.executor import build_native_scan_execution
 
 
 def test_discovery_manifest_removes_every_active_authority_flag():
@@ -55,6 +64,11 @@ def test_discovery_and_public_modes_have_a_non_overridable_method_ceiling():
     assert passive_http_methods_for_scan(
         discovery_manifest_only=False, public_only=False,
     ) is None
+    assert passive_http_methods_for_scan(
+        discovery_manifest_only=False,
+        public_only=False,
+        allow_state_changing_http=False,
+    ) == PASSIVE_DISCOVERY_HTTP_METHODS
 
 
 def test_discovery_manifest_cannot_claim_active_check_families():
@@ -73,3 +87,53 @@ def test_discovery_manifest_cannot_claim_active_check_families():
     assert scope["families"] == []
     assert scope["requested_family"] is None
     assert scope["legacy_flags"] == {"xss": False, "sqli": False}
+
+
+def test_scanner_applies_native_execution_without_a_legacy_preset():
+    plan = ScanExecutionPlan(
+        policy=ScanPolicy(
+            active_testing=True,
+            allow_state_changing_http=False,
+            include_families=("sqli",),
+            approval_receipt_id="approval-1",
+        ),
+        budget_profile="balanced",
+        budget=ScanBudget(1200, 5000, 2000, 200, 5000, 900, 4),
+    )
+    execution = build_native_scan_execution(
+        plan, {"asm_check_family": "sqli"},
+    ).payload()
+    args = Namespace(
+        quick=False,
+        standard=False,
+        deep=False,
+        full=False,
+        aggressive=False,
+        smart=False,
+        complete=False,
+        nuclei=False,
+        subfinder=False,
+    )
+
+    _apply_canonical_scan_execution(args, execution)
+
+    assert args.active is True
+    assert args.check_family == "sqli"
+    assert args.vuln_auth is False
+    assert args.vuln_injection is False
+    assert args.vuln_web is False
+    assert args.network_discovery is False
+    assert args.budget_profile == "balanced"
+    assert args.budget_request_max == 5000
+    assert args.budget_max_urls == 2000
+    assert args.oob_callback_url is None
+
+
+def test_canonical_cli_rejects_parallel_behavior_and_budget_selectors():
+    with pytest.raises(SystemExit, match="derives behavior and budgets"):
+        _reject_canonical_cli_behavior(Namespace(
+            active=True,
+            budget_request_max=999999,
+            complete_tier="safe",
+            exploit_level="safe",
+        ))

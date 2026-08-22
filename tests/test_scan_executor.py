@@ -1,0 +1,160 @@
+from __future__ import annotations
+
+import copy
+import os
+import sys
+
+import pytest
+
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
+
+from runtime.models import ScanBudget, ScanPolicy
+from scan.execution import ScanExecutionPlan
+from scan.executor import (
+    NATIVE_SCAN_STAGES,
+    NativeScanExecutionError,
+    build_native_scan_execution,
+    validate_native_scan_execution_payload,
+)
+from scan.jobs import ScanShardAuthority, ScanShardBudget
+
+
+def _plan(*, active=False, network=False, include=(), exclude=()):
+    return ScanExecutionPlan(
+        policy=ScanPolicy(
+            active_testing=active,
+            allow_state_changing_http=active,
+            network_discovery=network,
+            subdomain_discovery=True,
+            include_families=include,
+            exclude_families=exclude,
+            approval_receipt_id="approval-1" if (active or network) else None,
+        ),
+        budget_profile="balanced",
+        budget=ScanBudget(1200, 5000, 2000, 200, 5000, 900, 4),
+    )
+
+
+def test_native_scan_uses_one_fixed_stage_graph_for_passive_and_active_policy():
+    passive = build_native_scan_execution(_plan(), {})
+    active = build_native_scan_execution(_plan(active=True, network=True), {})
+
+    assert [item["name"] for item in passive.stage_rows()] == list(NATIVE_SCAN_STAGES)
+    assert [item["name"] for item in active.stage_rows()] == list(NATIVE_SCAN_STAGES)
+    assert passive.stage_rows()[3]["enabled"] is False
+    assert passive.stage_rows()[5]["enabled"] is False
+    assert active.stage_rows()[3]["enabled"] is True
+    assert active.stage_rows()[5]["enabled"] is True
+    assert validate_native_scan_execution_payload(active.payload()) == active.payload()
+
+    discovery = build_native_scan_execution(
+        _plan(active=True, network=True), {"discovery_manifest_only": True},
+    )
+    assert discovery.stage_rows()[3] == {
+        "name": "discover_network",
+        "enabled": False,
+        "reason": "discovery_manifest_only",
+    }
+
+
+def test_native_scan_removes_legacy_behavior_selectors_after_admission():
+    execution = build_native_scan_execution(_plan(active=True), {
+        "scan_type": "compatibility-value",
+        "quick": True,
+        "thorough": True,
+        "exploit_depth": True,
+        "nuclei": True,
+        "oob_callback_url": "https://callback.invalid",
+        "sqli_extract_max": 999,
+        "custom_endpoints": ["GET /v1/items"],
+    })
+    normalized = execution.normalize_options({
+        "scan_type": "compatibility-value",
+        "quick": True,
+        "thorough": True,
+        "exploit_depth": True,
+        "nuclei": True,
+        "oob_callback_url": "https://callback.invalid",
+        "sqli_extract_max": 999,
+        "custom_endpoints": ["GET /v1/items"],
+    })
+
+    assert not {
+        "scan_type", "quick", "thorough", "exploit_depth", "nuclei",
+        "oob_callback_url", "sqli_extract_max",
+    } & set(normalized)
+    assert normalized["active"] is True
+    assert normalized["custom_endpoints"] == ["GET /v1/items"]
+    assert normalized["native_scan_execution"]["execution_plan_digest"] == execution.execution_plan.digest
+
+
+def test_native_scan_rejects_internal_family_assignment_outside_policy():
+    with pytest.raises(NativeScanExecutionError, match="exceeds canonical Scan policy"):
+        build_native_scan_execution(
+            _plan(active=True, include=("sqli",)),
+            {"asm_check_family": "xss"},
+        )
+
+    allowed = build_native_scan_execution(
+        _plan(active=True, include=("sqli",), exclude=("xss",)),
+        {"asm_check_family": "sqli"},
+    )
+    assert allowed.focused_family == "sqli"
+
+
+def test_native_scan_execution_tampering_fails_closed():
+    payload = build_native_scan_execution(_plan(), {}).payload()
+    changed = copy.deepcopy(payload)
+    changed["stages"][2]["enabled"] = False
+    with pytest.raises(NativeScanExecutionError, match="digest"):
+        validate_native_scan_execution_payload(changed)
+
+
+def test_native_scan_binds_shard_sub_budget_and_rejects_scope_coercion():
+    plan = _plan(active=True)
+    authority = ScanShardAuthority(
+        parent_scan_id="parent-1",
+        parent_execution_plan_digest=plan.digest,
+        options_digest="a" * 64,
+        shard_index=0,
+        shard_count=2,
+        shard_label="sqli:0",
+        sub_budget=ScanShardBudget(300, 250, 100, 0, 0, 120, 1),
+    )
+    execution = build_native_scan_execution(plan, {
+        "canonical_shard_authority": authority.payload(),
+        "asm_check_family": "sqli",
+        "skip_global_checks": True,
+        "focused_endpoints_only": True,
+        "zero_rediscovery": True,
+    })
+
+    assert execution.payload()["execution_budget"] == authority.sub_budget.payload()
+    assert execution.normalize_options({})["custom_budget"]["request_max"] == 250
+    assert validate_native_scan_execution_payload(execution.payload()) == execution.payload()
+
+    with pytest.raises(NativeScanExecutionError, match="must be a boolean"):
+        build_native_scan_execution(plan, {"skip_global_checks": "false"})
+
+
+def test_native_scan_envelope_reuses_plan_ceiling_validation():
+    payload = build_native_scan_execution(_plan(), {}).payload()
+    changed = copy.deepcopy(payload)
+    changed["execution_plan"]["budget"]["max_workers"] = 129
+    changed["execution_plan_digest"] = "0" * 64
+    core = {key: value for key, value in changed.items() if key != "execution_digest"}
+    import hashlib
+    import json
+    changed["execution_digest"] = hashlib.sha256(json.dumps(
+        core, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ).encode("utf-8")).hexdigest()
+
+    with pytest.raises(NativeScanExecutionError, match="between 1 and 128"):
+        validate_native_scan_execution_payload(changed)
+
+    changed = copy.deepcopy(payload)
+    changed["execution_plan"]["budget"]["max_http_requests"] += 1
+    changed["execution_digest"] = payload["execution_digest"]
+    with pytest.raises(NativeScanExecutionError, match="digest"):
+        validate_native_scan_execution_payload(changed)

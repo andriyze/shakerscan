@@ -19,7 +19,7 @@ import sys
 import time
 import urllib.parse
 from datetime import UTC, datetime
-from typing import Any, NamedTuple
+from typing import Any, Mapping, NamedTuple
 
 from scanner_tools.common import (
     is_in_scope_url,
@@ -117,6 +117,21 @@ except ImportError:
         from api import check_registry as _check_registry
     except ImportError:
         _check_registry = None
+
+try:
+    from scan.executor import (
+        NativeScanExecutionError,
+        validate_native_scan_execution_payload,
+    )
+except ImportError:
+    try:
+        from api.scan.executor import (
+            NativeScanExecutionError,
+            validate_native_scan_execution_payload,
+        )
+    except ImportError:
+        NativeScanExecutionError = ValueError
+        validate_native_scan_execution_payload = None
 
 REPORT_SCHEMA_VERSION = "2026-01-28"
 SCANNER_VERSION = published_scanner_version()
@@ -3908,7 +3923,8 @@ async def build_report(target: str,
                        sqli_extract_max: int=SMART_SCAN_BUDGETS.sqli_extract_max,
                        oob_max_findings: int=SMART_SCAN_BUDGETS.oob_max_findings,
                        # Active enforcement metadata
-                       active_enforced: bool=False) -> dict[str, Any]:
+                       active_enforced: bool=False,
+                       canonical_scan_execution: dict[str, Any] | None=None) -> dict[str, Any]:
 
     reset_subprocess_receipts()
 
@@ -3929,13 +3945,20 @@ async def build_report(target: str,
     focus_rules = parse_scope_rules_json(focus_rules_json, "focus")
     avoid_rules = parse_scope_rules_json(avoid_rules_json, "avoid")
     budget_scan_type = (
-        "smart" if smart_mode
+        "canonical" if canonical_scan_execution is not None
+        else "smart" if smart_mode
         else complete_tier if complete_mode and complete_tier in {"full", "aggressive"}
         else "deep" if complete_mode
         else "quick" if quick_mode
         else "standard"
     )
-    scan_mode_label = "smart" if smart_mode else ("complete" if complete_mode else ("quick" if quick_mode else "standard"))
+    scan_mode_label = (
+        "canonical" if canonical_scan_execution is not None
+        else "smart" if smart_mode
+        else "complete" if complete_mode
+        else "quick" if quick_mode
+        else "standard"
+    )
     effective_budget_profile = budget_profile
     if thorough_params and not effective_budget_profile and not custom_budget:
         effective_budget_profile = "thorough"
@@ -3960,6 +3983,14 @@ async def build_report(target: str,
         allowed_methods=passive_http_methods_for_scan(
             discovery_manifest_only=discovery_manifest_only,
             public_only=public_only,
+            allow_state_changing_http=(
+                bool(
+                    canonical_scan_execution["execution_plan"]["policy"][
+                        "allow_state_changing_http"
+                    ]
+                )
+                if canonical_scan_execution is not None else True
+            ),
         ),
     )
     request_meter_hooks = install_async_client_metering()
@@ -4244,6 +4275,7 @@ async def build_report(target: str,
                 "scanner_version": SCANNER_VERSION,
                 "input": {"target": target, "normalized_host": target_host, "port": target_port, "scheme": target_scheme},
                 "scan_mode": scan_mode_label,
+                "native_scan_execution": canonical_scan_execution,
                 "scanner_execution_plan": scanner_execution_plan,
                 "scan_config": {
                     "active_enforced": active_enforced,
@@ -4256,6 +4288,7 @@ async def build_report(target: str,
                     "focused_active_family": focused_active_family_name,
                     "check_family_scope": check_family_scope,
                     "scanner_execution_plan": scanner_execution_plan,
+                    "native_scan_execution": canonical_scan_execution,
                     "verified_findings_only": verified_findings_only,
                     "focus_rules": len(focus_rules),
                     "avoid_rules": len(avoid_rules),
@@ -4376,6 +4409,7 @@ async def build_report(target: str,
                 "target": target,
                 "completed_at": now_utc_iso(),
                 "scan_mode": scan_mode_label,
+                "native_scan_execution": canonical_scan_execution,
                 "coverage_status": coverage["status"],
                 "schema_version": REPORT_SCHEMA_VERSION,
                 "scanner_version": SCANNER_VERSION,
@@ -7176,6 +7210,7 @@ async def build_report(target: str,
         "build_fingerprint": SCANNER_BUILD_FINGERPRINT,
         "input": {"target": target, "normalized_host": target_host, "port": target_port, "scheme": target_scheme},
         "scan_mode": scan_mode_label,
+        "native_scan_execution": canonical_scan_execution,
         "scanner_execution_plan": scanner_execution_plan,
         "scan_config": {
             "active_enforced": active_enforced,
@@ -7188,6 +7223,7 @@ async def build_report(target: str,
             "focused_active_family": focused_active_family_name,
             "check_family_scope": check_family_scope,
             "scanner_execution_plan": scanner_execution_plan,
+            "native_scan_execution": canonical_scan_execution,
             "include_partial_attack_chains": include_partial_attack_chains,
             "verified_findings_only": verified_findings_only,
             "focus_rules": len(focus_rules),
@@ -13147,6 +13183,7 @@ async def build_report(target: str,
             "verified_findings_only": verified_findings_only,
             "check_family_scope": check_family_scope,
             "scanner_execution_plan": scanner_execution_plan,
+            "native_scan_execution": canonical_scan_execution,
             "focus_rules": len(focus_rules),
             "avoid_rules": len(avoid_rules),
             "auth_scenario": bool(auth_scenario),
@@ -13868,6 +13905,152 @@ def _apply_auth_config_file_args(args: Any, path: str | None) -> None:
             setattr(args, key, value)
 
 
+def _load_canonical_scan_execution(enabled: bool) -> dict[str, Any] | None:
+    if not enabled:
+        return None
+    raw = os.environ.get("SHAKERSCAN_CANONICAL_SCAN_EXECUTION")
+    if not raw:
+        raise SystemExit("--canonical-scan requires its validated execution envelope")
+    if validate_native_scan_execution_payload is None:
+        raise SystemExit("native Scan execution validator is unavailable")
+    try:
+        decoded = json.loads(raw)
+        return validate_native_scan_execution_payload(decoded)
+    except (json.JSONDecodeError, NativeScanExecutionError, TypeError, ValueError) as exc:
+        raise SystemExit(f"invalid native Scan execution envelope: {exc}") from exc
+
+
+_CANONICAL_FORBIDDEN_BOOLEAN_ARGS = (
+    "active", "xss", "sqli", "deep_domxss", "quick", "no_browser", "public",
+    "subfinder", "nuclei", "complete", "deep_discovery", "csrf_testing",
+    "idor_testing", "default_creds_testing", "rate_limiting_testing",
+    "twofa_bypass_testing", "password_reset_testing", "session_mgmt_testing",
+    "path_traversal_testing", "deserialization_testing", "file_upload_testing",
+    "open_redirect_testing", "host_header_testing", "business_logic_testing",
+    "api_security_testing", "websocket_testing", "js_dependency_scanning",
+    "js_secret_scanning", "cicd_exposure", "package_exposure",
+    "cloud_bucket_testing", "backup_file_testing", "forced_browsing",
+    "mass_assignment_testing", "bola_testing", "ssh_testing", "ip_reputation",
+    "typosquatting", "enhanced_dns", "dkim_enumeration", "zone_transfer_test",
+    "domain_intelligence", "ct_monitoring", "smtp_security", "asn_discovery",
+    "network_services", "network_discovery", "breach_check", "vendor_risk",
+    "cloud_ssrf", "kubernetes_exposure", "terraform_exposure",
+    "registry_exposure", "grpc_discovery", "json_link_following",
+    "options_method_discovery", "skip_global_checks", "focused_endpoints_only",
+    "zero_rediscovery", "discovery_manifest_only", "vuln_auth",
+    "vuln_injection", "vuln_web", "exposure_client", "exposure_infra",
+    "threat_intel", "full", "aggressive", "smart", "standard", "deep",
+    "no_early_stop", "thorough_params", "budget_disable_nuclei_early_stop",
+)
+_CANONICAL_FORBIDDEN_VALUE_ARGS = (
+    "check_family", "oob_callback_url", "budget_profile",
+    "budget_max_duration_minutes", "budget_discovery_depth", "budget_max_urls",
+    "budget_browser_max_pages", "budget_browser_max_depth",
+    "budget_api_probe_limit", "budget_param_discovery_url_limit",
+    "budget_param_discovery_max_params", "budget_phase4_max_seconds",
+    "budget_nuclei_max_targets", "budget_active_max_seconds",
+    "budget_active_max_endpoints", "budget_active_params_per_endpoint",
+    "budget_active_worklist_max", "budget_request_max",
+    "budget_max_findings_per_family", "smart_bola_max_endpoints",
+    "dom_xss_max_files", "sqli_extract_max", "oob_max_findings",
+    "oob_max_payloads_deprecated",
+)
+
+
+def _reject_canonical_cli_behavior(args: Any) -> None:
+    conflicting = [
+        name for name in _CANONICAL_FORBIDDEN_BOOLEAN_ARGS
+        if bool(getattr(args, name, False))
+    ]
+    conflicting.extend(
+        name for name in _CANONICAL_FORBIDDEN_VALUE_ARGS
+        if getattr(args, name, None) is not None
+    )
+    if str(getattr(args, "complete_tier", "safe") or "safe") != "safe":
+        conflicting.append("complete_tier")
+    if str(getattr(args, "exploit_level", "safe") or "safe") != "safe":
+        conflicting.append("exploit_level")
+    if conflicting:
+        rendered = ", ".join(f"--{name.replace('_', '-')}" for name in conflicting)
+        raise SystemExit(
+            "--canonical-scan derives behavior and budgets only from its execution "
+            f"envelope; remove: {rendered}"
+        )
+
+
+def _apply_canonical_scan_execution(args: Any, execution: Mapping[str, Any]) -> None:
+    plan = execution["execution_plan"]
+    policy = plan["policy"]
+    budget = execution["execution_budget"]
+    scope = execution["adapter_scope"]
+    discovery_only = bool(scope["discovery_manifest_only"])
+    active = bool(policy["active_testing"] and not discovery_only)
+    skip_global = bool(scope["skip_global_checks"])
+    focused_family = execution.get("focused_family")
+
+    for name in _CANONICAL_FORBIDDEN_BOOLEAN_ARGS:
+        setattr(args, name, False)
+    args.active = active
+    args.active_enforced = active
+    args.public = False
+    args.network_discovery = bool(policy["network_discovery"] and not discovery_only)
+    args.check_family = focused_family
+    args.xss = False
+    args.sqli = False
+    args.nuclei = not discovery_only and not bool(scope["focused_endpoints_only"])
+    args.vuln_auth = active and not bool(focused_family)
+    args.vuln_injection = active and not bool(focused_family)
+    args.vuln_web = active and not bool(focused_family)
+    args.exposure_client = not skip_global and not discovery_only
+    args.exposure_infra = not skip_global and not discovery_only
+    args.threat_intel = False
+    args.websocket_testing = active and not bool(focused_family)
+    args.enhanced_dns = not skip_global and not discovery_only
+    args.deep_discovery = active and not bool(scope["zero_rediscovery"])
+    args.grpc_discovery = bool(policy["network_discovery"] and not discovery_only)
+    args.json_link_following = not bool(scope["zero_rediscovery"])
+    args.options_method_discovery = not bool(scope["zero_rediscovery"])
+    args.skip_global_checks = skip_global
+    args.focused_endpoints_only = bool(scope["focused_endpoints_only"])
+    args.zero_rediscovery = bool(scope["zero_rediscovery"])
+    args.discovery_manifest_only = discovery_only
+    args.complete_tier = "safe"
+    args.exploit_level = "safe"
+    args.max_active = int(budget["max_endpoints"])
+    args.max_ports = min(65_535, int(budget["max_tcp_ports"]))
+    args.no_browser = int(budget["max_browser_actions"]) == 0
+    args.budget_profile = str(plan["budget_profile"])
+    args.budget_max_duration_minutes = max(
+        1, (int(budget["max_duration_seconds"]) + 59) // 60,
+    )
+    args.budget_discovery_depth = None
+    args.budget_max_urls = int(budget["max_endpoints"])
+    args.budget_browser_max_pages = min(
+        int(budget["max_browser_actions"]), int(budget["max_endpoints"]),
+    )
+    args.budget_browser_max_depth = None
+    args.budget_api_probe_limit = int(budget["max_endpoints"])
+    args.budget_param_discovery_url_limit = None
+    args.budget_param_discovery_max_params = None
+    args.budget_phase4_max_seconds = int(budget["max_tool_wall_seconds"])
+    args.budget_nuclei_max_targets = int(budget["max_endpoints"])
+    args.budget_active_max_seconds = (
+        int(budget["max_tool_wall_seconds"]) if active else None
+    )
+    args.budget_active_max_endpoints = int(budget["max_endpoints"]) if active else None
+    args.budget_active_params_per_endpoint = None
+    args.budget_active_worklist_max = int(budget["max_endpoints"])
+    args.budget_request_max = int(budget["max_http_requests"])
+    args.budget_max_findings_per_family = None
+    args.budget_disable_nuclei_early_stop = False
+    args.smart_bola_max_endpoints = None
+    args.dom_xss_max_files = None
+    args.sqli_extract_max = None
+    args.oob_max_findings = SMART_SCAN_BUDGETS.oob_max_findings
+    args.oob_max_payloads_deprecated = None
+    args.oob_callback_url = None
+
+
 async def cli_main():
     ap = argparse.ArgumentParser(description="Site security scanner (DNS/TLS/Headers + Browser + Discovery; optional API & active checks).")
     ap.add_argument("target", nargs="?", help="Hostname or URL (e.g., example.com or https://example.com)")
@@ -14061,6 +14244,7 @@ async def cli_main():
                     help="Skip duplicate global exposure/posture checks in a parallel child shard")
     ap.add_argument("--discovery-manifest-only", action="store_true",
                     help="Build a bounded Smart endpoint manifest without adaptive post-template refinement")
+    ap.add_argument("--canonical-scan", action="store_true", help=argparse.SUPPRESS)
 
     # Category convenience flags (enable groups of checks)
     ap.add_argument("--vuln-auth", action="store_true", help="Enable all auth/access checks (CSRF, IDOR, Rate Limiting, 2FA, Password Reset, Session, Default Creds)")
@@ -14142,6 +14326,9 @@ async def cli_main():
 
     args = ap.parse_args()
     _apply_auth_config_file_args(args, args.auth_config_file)
+    canonical_scan_execution = _load_canonical_scan_execution(args.canonical_scan)
+    if canonical_scan_execution is not None:
+        _reject_canonical_cli_behavior(args)
 
     # Handle deprecated --oob-max-payloads alias (only if new flag not explicitly set)
     if args.oob_max_findings is None and args.oob_max_payloads_deprecated is not None:
@@ -14826,6 +15013,9 @@ async def cli_main():
 
     selectors = [s.strip() for s in (args.dkim_selectors or "").split(",") if s.strip()] if args.dkim_selectors else None
 
+    if canonical_scan_execution is not None:
+        _apply_canonical_scan_execution(args, canonical_scan_execution)
+
     # ===========================================
     # Expand scan type presets (--full, --aggressive, --deep, --standard)
     # ===========================================
@@ -14953,6 +15143,8 @@ async def cli_main():
         args.active_enforced = True  # Metadata flag for reporting
     else:
         args.active_enforced = False
+    if canonical_scan_execution is not None:
+        args.active_enforced = bool(args.active)
 
     if args.network_discovery and not args.active:
         print("Error: --network-discovery requires --active (or an active scan preset).", file=sys.stderr)
@@ -15189,6 +15381,7 @@ async def cli_main():
         oob_max_findings=getattr(args, 'oob_max_findings', None) or SMART_SCAN_BUDGETS.oob_max_findings,
         # Active enforcement metadata
         active_enforced=getattr(args, 'active_enforced', False),
+        canonical_scan_execution=canonical_scan_execution,
     )
     # Optional AI review attachment (batch classification + executive summary)
     if args.ai:

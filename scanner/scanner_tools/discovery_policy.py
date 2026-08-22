@@ -10,9 +10,10 @@ PASSIVE_DISCOVERY_HTTP_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 def passive_http_methods_for_scan(
     *, discovery_manifest_only: bool, public_only: bool,
+    allow_state_changing_http: bool = True,
 ) -> frozenset[str] | None:
     """Return the non-overridable target method ceiling for passive execution."""
-    if discovery_manifest_only or public_only:
+    if discovery_manifest_only or public_only or not allow_state_changing_http:
         return PASSIVE_DISCOVERY_HTTP_METHODS
     return None
 
