@@ -1272,6 +1272,7 @@ concurrency-limited with per-tool timeouts and a global deadline.
 | `/findings` | Granular source/severity/status/domain/date filters, sorting, bulk triage, cleanup, and retest entry points |
 | `/findings/{id}` | Evidence, raw request/response, proof/retest history, notes, status, deletion, and remediation |
 | `/evidence` | Evidence-instance inventory, single-object inspection, content-free export manifests/bundles, and immutable-preview, exact-approval retention cleanup |
+| `/credentials` | Metadata-only management for encrypted, exact-target-bound Web, API, network, and device credential profiles, including principal slots, rotation, expiry, capability bounds, and deactivation |
 | `/interactive` | Browser sessions, credential profiles, principals, authorization expectations, endpoint replay, and manual findings |
 | `/schedules` | Recurring normal scans and target-scoped ASM waves; evidence cleanup is interactive-only and legacy retention schedules are disabled |
 | `/settings` | AI provider, scan execution, and automation policy settings |

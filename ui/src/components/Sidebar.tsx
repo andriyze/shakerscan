@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { usePathname } from 'next/navigation'
 import Link from 'next/link'
-import { Activity, BookOpen, Bot, Boxes, Compass, Crosshair, FileArchive, Menu, Network, PackageCheck, Radar, Router, ServerCog, ShieldAlert, ShieldCheck, TriangleAlert, Wand2, X } from 'lucide-react'
+import { Activity, BookOpen, Bot, Boxes, Compass, Crosshair, FileArchive, KeyRound, Menu, Network, PackageCheck, Radar, Router, ServerCog, ShieldAlert, ShieldCheck, TriangleAlert, Wand2, X } from 'lucide-react'
 import { buttonClasses, Toggle } from '@/components/ui'
 import { API_URL } from '@/lib/api'
 import {
@@ -56,6 +56,7 @@ const navGroups: {
           </svg>
         ),
       },
+      { href: '/credentials', label: 'Credentials', icon: <KeyRound className="w-5 h-5" /> },
       { href: '/devices', label: 'Connected Devices', icon: <Router className="w-5 h-5" /> },
       {
         href: '/findings',

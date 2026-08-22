@@ -177,7 +177,7 @@ function HuntContent() {
         ...(duration ? { max_duration_seconds: duration } : {}),
         ...(requests ? { max_http_requests: requests } : {}),
       }
-      const credentialRefs = selectedChoice.sourceKind === 'device' && sshCredentialId
+      const credentialRefs: Record<string, string> = selectedChoice.sourceKind === 'device' && sshCredentialId
         ? { ssh_credential_profile_id: sshCredentialId }
         : {}
       const created = await startHuntV2Native({
@@ -397,7 +397,7 @@ function HuntContent() {
                       ))}
                     </Select>
                     <p className="mt-1 text-xs text-gray-500">
-                      Credentials stay server-side. Remote commands still require a separate immutable-plan confirmation.
+                      Credentials stay server-side. No SSH command runs until you separately confirm the exact immutable plan.
                     </p>
                   </div>
                 </Field>
