@@ -18,7 +18,6 @@ except ModuleNotFoundError:  # package import in host-side tests
 from .execution import ScanExecutionPlan
 from .legacy import (
     LEGACY_SCAN_MAPPING,
-    compatibility_executor_alias,
     translate_legacy_scan_type,
 )
 
@@ -76,18 +75,8 @@ class ResolvedScanContract:
     budget_profile: str
     budget: ScanBudget
     execution_plan: ScanExecutionPlan
-    legacy_executor_alias: str
     legacy_scan_type: str | None = None
     deprecations: tuple[Mapping[str, Any], ...] = ()
-
-    @property
-    def execution_scan_type(self) -> str:
-        """Deprecated compatibility property for the current monolithic worker.
-
-        Canonical consumers must use ``execution_plan``. This property can be removed
-        once worker/scanner dispatch no longer accepts six legacy mode names.
-        """
-        return self.legacy_executor_alias
 
     def option_metadata(self) -> dict[str, Any]:
         metadata = self.execution_plan.option_metadata()
@@ -158,11 +147,11 @@ def resolve_scan_contract(
     approval_receipt_id: str | None = None,
     legacy_scan_type: str | None = None,
 ) -> ResolvedScanContract:
-    """Resolve one immutable V2 Scan plan plus a temporary old-worker adapter.
+    """Resolve one immutable V2 Scan plan from canonical or legacy API input.
 
     Legacy ``scan_type`` is translated exactly once at this boundary. The canonical
-    execution plan always has engine identity ``scan``; it never becomes Hunt and it
-    never embeds ``quick``, ``deep``, ``full``, ``aggressive``, or ``smart``.
+    execution plan and worker authority always have engine identity ``scan``; they
+    never embed ``quick``, ``deep``, ``full``, ``aggressive``, or ``smart``.
     """
     translation = translate_legacy_scan_type(legacy_scan_type)
     compatibility_advanced: dict[str, Any] = {}
@@ -237,9 +226,6 @@ def resolve_scan_contract(
         budget_profile=profile,
         budget=budget,
         execution_plan=execution_plan,
-        legacy_executor_alias=compatibility_executor_alias(
-            policy=resolved_policy, translation=translation
-        ),
         legacy_scan_type=(translation.legacy_scan_type if translation is not None else None),
         deprecations=tuple(deprecation_items),
     )

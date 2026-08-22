@@ -1139,7 +1139,6 @@ def test_asm_improve_queues_recon_when_inventory_is_empty(monkeypatch):
     monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
     monkeypatch.setattr(api_module.asm_inventory, "coverage_summary", fake_coverage)
     monkeypatch.setattr(api_module.asm_inventory, "claimable_count", fake_claimable)
-
     result = asyncio.run(api_module.asm_improve(target_id, api_module.AsmImproveRequest()))
 
     assert result["action"] == "recon"
@@ -1179,6 +1178,11 @@ def test_asm_improve_queues_claimable_test_batch(monkeypatch):
     monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
     monkeypatch.setattr(api_module.asm_inventory, "coverage_summary", fake_coverage)
     monkeypatch.setattr(api_module.asm_inventory, "claimable_count", fake_claimable)
+    monkeypatch.setattr(
+        api_module,
+        "_resolve_runtime_target_addresses",
+        lambda *_args, **_kwargs: asyncio.sleep(0, result=["192.0.2.10"]),
+    )
 
     result = asyncio.run(api_module.asm_improve(
         target_id,
@@ -1224,6 +1228,11 @@ def test_asm_improve_can_scope_next_batch_to_api_endpoints(monkeypatch):
     monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
     monkeypatch.setattr(api_module.asm_inventory, "coverage_summary", fake_coverage)
     monkeypatch.setattr(api_module.asm_inventory, "claimable_count", fake_claimable)
+    monkeypatch.setattr(
+        api_module,
+        "_resolve_runtime_target_addresses",
+        lambda *_args, **_kwargs: asyncio.sleep(0, result=["192.0.2.10"]),
+    )
 
     result = asyncio.run(api_module.asm_improve(
         target_id,
@@ -1369,7 +1378,11 @@ def _auto_shard_settings(enabled=True, **overrides):
 def _resolve_auto_shard_policy(options):
     scan_type = api_module.normalize_dast_scan_options(options)
     payload = api_module._build_scan_options_payload(options, scan_type)
-    enabled, worker_count = api_module._apply_auto_sharding_policy(options, payload, scan_type)
+    enabled, worker_count = api_module._apply_auto_sharding_policy(
+        options,
+        payload,
+        scan_type in api_module.ACTIVE_ENFORCED_SCAN_TYPES,
+    )
     return scan_type, payload, enabled, worker_count
 
 
@@ -1790,6 +1803,27 @@ def test_canonical_submit_clears_legacy_mode_selectors_before_worker_admission()
     assert "None if parallel_enabled" in submit
     assert "_configure_scan_plan_job(job_data, parallel_worker_count)" in submit
     assert "'queue_schema': canonical_job.schema_version" in submit
+
+
+def test_canonical_options_builder_erases_legacy_identity_and_uses_plan_budget():
+    contract = api_module.resolve_scan_contract(legacy_scan_type="smart")
+    options = api_module.ScanOptions(
+        scan_type="smart",
+        quick=True,
+        thorough=True,
+        active=True,
+        custom_budget={"request_max": 999_999},
+    )
+
+    payload = api_module._build_canonical_scan_options_payload(options, contract)
+    prepared, admission = api_module.prepare_worker_dispatch(payload)
+
+    assert admission.canonical is True
+    assert admission.plan == contract.execution_plan
+    assert not {"scan_type", "quick", "thorough"} & set(payload)
+    assert payload["custom_budget"]["request_max"] == contract.budget.max_http_requests
+    assert payload["resolved_budget"]["budget_source"] == "canonical_plan"
+    assert "scan_type" not in prepared
 
 
 def test_canonical_scan_target_binding_freezes_dns_and_both_inferred_origins(monkeypatch):

@@ -272,7 +272,29 @@ def _coverage_family_lanes(parent_options: dict[str, Any]) -> list[tuple[str, st
     return lanes
 
 
-def resolve_auto_strategy(parent_options: dict[str, Any], scan_type: str, strategy: str | None) -> str:
+def _active_testing(
+    parent_options: dict[str, Any],
+    scan_type: str | None = None,
+    *,
+    explicit: bool | None = None,
+) -> bool:
+    if explicit is not None:
+        return bool(explicit)
+    policy = parent_options.get("scan_policy")
+    if isinstance(policy, dict) and isinstance(policy.get("active_testing"), bool):
+        return bool(policy["active_testing"])
+    if isinstance(parent_options.get("active"), bool):
+        return bool(parent_options["active"])
+    return str(scan_type or "").strip().lower() in ACTIVE_SCAN_TYPES
+
+
+def resolve_auto_strategy(
+    parent_options: dict[str, Any],
+    scan_type: str | None,
+    strategy: str | None,
+    *,
+    active_testing: bool | None = None,
+) -> str:
     """Resolve the user-facing ``auto`` strategy for the async plan worker.
 
     The plan worker can run the discover-once recon required by coverage
@@ -288,7 +310,7 @@ def resolve_auto_strategy(parent_options: dict[str, Any], scan_type: str, strate
     endpoints = _normalize_endpoint_list((parent_options or {}).get("custom_endpoints"))
     if len(endpoints) >= 2:
         return "scope"
-    if (scan_type or "").strip().lower() in ACTIVE_SCAN_TYPES:
+    if _active_testing(parent_options, scan_type, explicit=active_testing):
         return "coverage"
     return "family"
 
@@ -587,8 +609,7 @@ def _coverage_runs_active_mix(parent_options: dict[str, Any]) -> bool:
     sqli_flag = bool(parent_options.get("sqli"))
     if xss_flag != sqli_flag:
         return False
-    scan_type = str(parent_options.get("scan_type") or "").strip().lower()
-    return bool(parent_options.get("active")) or scan_type in ACTIVE_SCAN_TYPES
+    return _active_testing(parent_options, parent_options.get("scan_type"))
 
 
 def _default_coverage_per_shard_cap(parent_options: dict[str, Any]) -> int:
@@ -1554,15 +1575,16 @@ def _plan_scope(
 
 def _plan_family(
     parent_options: dict[str, Any],
-    scan_type: str,
+    scan_type: str | None,
     requested: int,
     notes: list[str],
+    *,
+    active_testing: bool | None = None,
 ) -> list[ShardSpec]:
-    if scan_type not in ACTIVE_SCAN_TYPES:
+    if not _active_testing(parent_options, scan_type, explicit=active_testing):
         notes.append(
-            f"family strategy is only meaningful for active scan types "
-            f"({', '.join(sorted(ACTIVE_SCAN_TYPES))}); '{scan_type}' is passive "
-            "- running a single broad shard"
+            "family strategy is only meaningful when active testing is enabled; "
+            "this Scan is passive, so it will run one broad shard"
         )
         broad = _base_child_options(parent_options)
         return [ShardSpec(index=0, label="broad", options=broad)]
@@ -1594,7 +1616,8 @@ def _plan_family(
 def plan_shards(
     parent_options: dict[str, Any],
     *,
-    scan_type: str,
+    scan_type: str | None = None,
+    active_testing: bool | None = None,
     requested_shards: Any = "auto",
     strategy: str = "auto",
     worker_count: int = 0,
@@ -1603,7 +1626,8 @@ def plan_shards(
 
     Args:
         parent_options: the parent scan's options dict (as submitted).
-        scan_type: resolved scan type (quick/standard/deep/full/aggressive/smart).
+        scan_type: legacy-only compatibility input.
+        active_testing: canonical policy value; takes precedence over scan_type.
         requested_shards: int, numeric string, or "auto".
         strategy: "auto" | "scope" | "family" | "coverage".
         worker_count: current worker fleet size (used to auto-scale shards).
@@ -1614,7 +1638,7 @@ def plan_shards(
         notes.append(f"unknown strategy '{strategy}', defaulting to auto")
         strategy = "auto"
 
-    scan_type = (scan_type or "standard").strip().lower()
+    scan_type = (scan_type or "").strip().lower() or None
     endpoints = _normalize_endpoint_list(parent_options.get("custom_endpoints"))
 
     resolved = strategy
@@ -1667,8 +1691,17 @@ def plan_shards(
                                       parent_options, notes)
             return ParallelPlan(strategy="scope", shards=shards, notes=notes)
 
-    shards = _finalize_shards(_plan_family(parent_options, scan_type, requested, notes),
-                              parent_options, notes)
+    shards = _finalize_shards(
+        _plan_family(
+            parent_options,
+            scan_type,
+            requested,
+            notes,
+            active_testing=active_testing,
+        ),
+        parent_options,
+        notes,
+    )
     return ParallelPlan(strategy="family", shards=shards, notes=notes)
 
 

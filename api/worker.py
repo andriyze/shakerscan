@@ -14160,11 +14160,11 @@ def _canonicalize_shard_options(
 ) -> dict[str, Any]:
     """Keep planner specialization while restoring immutable parent authority fields."""
     child_options = dict(options)
+    for key in ("scan_type", "quick", "thorough"):
+        child_options.pop(key, None)
     child_options.update(parent_job.execution_plan.option_metadata())
     active = parent_job.execution_plan.policy.active_testing
-    backing_scan_type = "full" if active else "deep"
     child_options.update({
-        "scan_type": backing_scan_type,
         "active": active,
         "network_discovery": parent_job.execution_plan.policy.network_discovery,
         "subfinder": parent_job.execution_plan.policy.subdomain_discovery,
@@ -14299,9 +14299,18 @@ async def process_scan_plan_job(job_data: dict):
     parent_job_id = job_data.get('job_id', 'unknown')
     target = job_data.get('target')
     options = job_data.get('options', {}) or {}
-    scan_type = (options.get('scan_type') or 'standard').strip().lower() or 'standard'
     canonical_parent_job = _canonical_parent_scan_job(
         job_data.get("_canonical_queue_payload")
+    )
+    scan_type = (
+        "scan"
+        if canonical_parent_job is not None
+        else (options.get('scan_type') or 'standard').strip().lower() or 'standard'
+    )
+    active_testing = (
+        canonical_parent_job.execution_plan.policy.active_testing
+        if canonical_parent_job is not None
+        else None
     )
 
     r = get_redis()
@@ -14345,6 +14354,7 @@ async def process_scan_plan_job(job_data: dict):
         options,
         scan_type,
         options.get('shard_strategy') or 'auto',
+        active_testing=active_testing,
     )
     plan_stage = str(job_data.get('plan_stage') or 'start')
     canonical_subdomain_discovery = bool(
@@ -14746,6 +14756,7 @@ async def process_scan_plan_job(job_data: dict):
         plan = parallel_scan.plan_shards(
             options,
             scan_type=scan_type,
+            active_testing=active_testing,
             requested_shards=options.get('shards', 'auto'),
             strategy=requested_strategy,
             worker_count=job_data.get('parallel_worker_count') or 0,

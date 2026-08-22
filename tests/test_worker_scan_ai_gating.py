@@ -2150,7 +2150,7 @@ def test_canonical_shard_builder_emits_secret_free_v2_queue_authority():
     assert queued["type"] == worker.parallel_scan.SHARD_JOB_TYPE
     assert "options" not in queued
     assert "must-not-enter-queue" not in json.dumps(queued)
-    assert persisted["scan_type"] == "deep"
+    assert "scan_type" not in persisted
     assert persisted["canonical_shard_authority"]["sub_budget"]["max_browser_actions"] == 0
     assert persisted["canonical_shard_authority"]["sub_budget"]["max_tcp_ports"] == 0
 
@@ -3875,7 +3875,6 @@ def test_run_scan_uses_native_fixed_stage_contract_for_canonical_plan(monkeypatc
     )
     options = plan.option_metadata()
     options.update({
-        "scan_type": "full",
         "active": True,
         "network_discovery": False,
         "subfinder": False,

@@ -17,7 +17,6 @@ from .worker_validation import (
 @dataclass(frozen=True)
 class WorkerScanAdmission:
     canonical: bool
-    backing_scan_type: str
     plan: ScanExecutionPlan | None = None
     legacy_source: str | None = None
 
@@ -25,13 +24,10 @@ class WorkerScanAdmission:
         if not self.canonical or self.plan is None:
             return {}
         return {
-            "scan_type": self.backing_scan_type,
             "active": self.plan.policy.active_testing,
             "network_discovery": self.plan.policy.network_discovery,
             "subfinder": self.plan.policy.subdomain_discovery,
             "budget_profile": self.plan.budget_profile,
-            "quick": False,
-            "thorough": False,
         }
 
     def normalize_options(self, options: Mapping[str, Any]) -> dict[str, Any]:
@@ -47,7 +43,7 @@ def _legacy(options: Mapping[str, Any]) -> WorkerScanAdmission:
         raise WorkerScanContractError(
             f"scan_type must be one of: {allowed}"
         )
-    return WorkerScanAdmission(False, scan_type, legacy_source=scan_type)
+    return WorkerScanAdmission(False, legacy_source=scan_type)
 
 
 def resolve_worker_scan_admission(options: Mapping[str, Any]) -> WorkerScanAdmission:
@@ -62,11 +58,10 @@ def resolve_worker_scan_admission(options: Mapping[str, Any]) -> WorkerScanAdmis
         return _legacy(options)
 
     plan = validate_execution_plan(options)
-    backing = "full" if plan.policy.active_testing else "deep"
     submitted = str(options.get("scan_type") or "").strip().lower()
-    if submitted and submitted != backing:
+    if submitted:
         raise WorkerScanContractError(
-            "caller-controlled scan_type conflicts with canonical Scan policy"
+            "scan_type is forbidden after canonical Scan translation"
         )
     for key, expected in (
         ("active", plan.policy.active_testing),
@@ -96,4 +91,4 @@ def resolve_worker_scan_admission(options: Mapping[str, Any]) -> WorkerScanAdmis
                 "legacy_scan_type metadata conflicts with canonical Scan policy"
             )
         source = translation.legacy_scan_type
-    return WorkerScanAdmission(True, backing, plan, source)
+    return WorkerScanAdmission(True, plan=plan, legacy_source=source)

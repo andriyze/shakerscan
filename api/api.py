@@ -1924,7 +1924,9 @@ def _custom_endpoint_count(options_payload: dict[str, Any]) -> int:
     return len(seen)
 
 
-def _auto_shard_eligibility(scan_type: str, options_payload: dict[str, Any]) -> tuple[bool, str]:
+def _auto_shard_eligibility(
+    active_testing: bool, options_payload: dict[str, Any],
+) -> tuple[bool, str]:
     endpoint_count = _custom_endpoint_count(options_payload)
     if endpoint_count >= 2:
         return True, f"{endpoint_count} explicit endpoints can be split by scope"
@@ -1936,14 +1938,14 @@ def _auto_shard_eligibility(scan_type: str, options_payload: dict[str, Any]) -> 
     family = check_registry.normalize_check_family(_scan_check_family_value(options_payload))
     if family and family != "all":
         return False, f"focused {family} scan runs direct (auto-sharding would dilute the family pass)"
-    if scan_type in AUTO_SHARD_ACTIVE_SCAN_TYPES:
-        return True, f"{scan_type} scan can fan out endpoint coverage across workers"
-    return False, f"{scan_type} scan has no endpoint list and no active families to shard"
+    if active_testing:
+        return True, "active Scan can fan out endpoint coverage across workers"
+    return False, "passive Scan has no endpoint list and no active families to shard"
 
 
 def _resolve_auto_parallel_strategy(
     strategy: Any,
-    scan_type: str,
+    active_testing: bool,
     options_payload: dict[str, Any],
 ) -> str:
     """Resolve auto-sharding to the concrete strategy we will store/execute."""
@@ -1973,9 +1975,9 @@ def _resolve_auto_parallel_strategy(
     # shard keeps user1+user2 so cross-user BOLA still runs. Focused-family scans
     # keep coverage_family (they need per-family endpoint slicing).
     has_primary_auth = any(options_payload.get(k) for k in parallel_scan._PRIMARY_AUTH_KEYS)
-    if has_primary_auth and not focused and scan_type in AUTO_SHARD_ACTIVE_SCAN_TYPES:
+    if has_primary_auth and not focused and active_testing:
         return "auth_split"
-    if scan_type in AUTO_SHARD_ACTIVE_SCAN_TYPES:
+    if active_testing:
         return "coverage_family" if focused else "coverage"
     return "family"
 
@@ -2007,10 +2009,57 @@ def _build_scan_options_payload(
     return options_payload
 
 
+def _build_canonical_scan_options_payload(
+    options: Any,
+    contract: ResolvedScanContract,
+    *,
+    defer_family_preconditions: bool = False,
+) -> dict[str, Any]:
+    """Build private worker inputs without resurrecting a legacy Scan identity."""
+    options_payload = options.model_dump() if hasattr(options, "model_dump") else options.dict()
+    for key in ("scan_type", "quick", "thorough"):
+        options_payload.pop(key, None)
+    policy = contract.policy
+    budget = contract.budget
+    scanner_budget = {
+        "max_duration_minutes": max(1, (budget.max_duration_seconds + 59) // 60),
+        "request_max": budget.max_http_requests,
+        "max_urls": budget.max_endpoints,
+        "browser_max_pages": min(budget.max_browser_actions, budget.max_endpoints),
+        "api_probe_limit": budget.max_endpoints,
+        "phase4_max_seconds": budget.max_tool_wall_seconds,
+        "nuclei_max_targets": budget.max_endpoints,
+        "active_worklist_max": budget.max_endpoints,
+    }
+    if policy.active_testing:
+        scanner_budget.update({
+            "active_max_seconds": budget.max_tool_wall_seconds,
+            "active_max_endpoints": budget.max_endpoints,
+        })
+    options_payload.update({
+        "active": policy.active_testing,
+        "network_discovery": policy.network_discovery,
+        "subfinder": policy.subdomain_discovery,
+        "budget_profile": contract.budget_profile,
+        "custom_budget": dict(scanner_budget),
+        "resolved_budget": {
+            **scanner_budget,
+            "budget_profile": contract.budget_profile,
+            "budget_source": "canonical_plan",
+        },
+    })
+    options_payload, _family = _apply_scan_check_family_policy(
+        options_payload,
+        enforce_preconditions=not defer_family_preconditions,
+    )
+    options_payload.update(contract.option_metadata())
+    return options_payload
+
+
 def _apply_auto_sharding_policy(
     options: Any,
     options_payload: dict[str, Any],
-    scan_type: str,
+    active_testing: bool,
 ) -> tuple[bool, int | None]:
     """Resolve whether this scan should become a parallel parent.
 
@@ -2024,7 +2073,7 @@ def _apply_auto_sharding_policy(
                 options_payload["shards"] = "auto"
             options_payload["shard_strategy"] = _resolve_auto_parallel_strategy(
                 options_payload.get("shard_strategy"),
-                scan_type,
+                active_testing,
                 options_payload,
             )
             # Size fan-out from CURRENT (non-stale) capacity so a mixed fleet can't
@@ -2038,7 +2087,7 @@ def _apply_auto_sharding_policy(
         options_payload["parallel"] = False
         return False, None
 
-    eligible, reason = _auto_shard_eligibility(scan_type, options_payload)
+    eligible, reason = _auto_shard_eligibility(active_testing, options_payload)
     if not eligible:
         options_payload["parallel"] = False
         return False, None
@@ -2055,11 +2104,11 @@ def _apply_auto_sharding_policy(
 
     strategy = _resolve_auto_parallel_strategy(
         settings.get("auto_sharding_strategy"),
-        scan_type,
+        active_testing,
         options_payload,
     )
     max_shards = _normalize_auto_shard_count(settings.get("auto_sharding_max_shards"), default=4)
-    if _custom_endpoint_count(options_payload) < 2 and scan_type in AUTO_SHARD_ACTIVE_SCAN_TYPES:
+    if _custom_endpoint_count(options_payload) < 2 and active_testing:
         if strategy == "family":
             max_shards = min(max_shards, len(parallel_scan.FAMILY_SHARD_LABELS))
     requested_shards: Any = "auto"
@@ -3553,6 +3602,7 @@ async def run_due_schedules(pool: asyncpg.Pool):
                 continue
 
             canonical_schedule = scan_type == "scan"
+            scan_contract: ResolvedScanContract | None = None
             if canonical_schedule:
                 try:
                     scan_contract = resolve_scan_contract(
@@ -3564,27 +3614,23 @@ async def run_due_schedules(pool: asyncpg.Pool):
                 except ValueError as exc:
                     print(f"[scheduler] Skipping schedule {str(schedule_id)[:8]}: {exc}", flush=True)
                     continue
-                scan_type = scan_contract.execution_scan_type
-                scan_options["scan_type"] = scan_type
+                for key in ("scan_type", "quick", "thorough"):
+                    scan_options.pop(key, None)
                 scan_options["budget_profile"] = scan_contract.budget_profile
                 scan_options["active"] = scan_contract.policy.active_testing
                 scan_options["subfinder"] = scan_contract.policy.subdomain_discovery
-                scan_options["custom_budget"] = {
-                    "max_duration_minutes": max(1, scan_contract.budget.max_duration_seconds // 60),
-                    "request_max": scan_contract.budget.max_http_requests,
-                    "max_urls": scan_contract.budget.max_endpoints,
-                    "browser_max_pages": scan_contract.budget.max_browser_actions,
-                    "active_worklist_max": scan_contract.budget.max_endpoints,
-                    **dict(scan_options.get("custom_budget") or {}),
-                }
             else:
                 scan_options['scan_type'] = scan_type
             scan_options_model = ScanOptions(**scan_options)
-            scan_type = normalize_dast_scan_options(scan_options_model)
-            if scan_type in ACTIVE_ENFORCED_SCAN_TYPES and scan_options_model.public:
+            if canonical_schedule:
+                active_testing = scan_contract.policy.active_testing
+            else:
+                scan_type = normalize_dast_scan_options(scan_options_model)
+                active_testing = scan_type in ACTIVE_ENFORCED_SCAN_TYPES
+            if active_testing and scan_options_model.public:
                 print(
                     f"[scheduler] Skipping schedule {str(schedule_id)[:8]}: "
-                    f"public option is incompatible with '{scan_type}' scan type",
+                    "public option is incompatible with active testing",
                     flush=True,
                 )
                 next_run = calculate_next_run(
@@ -3601,44 +3647,101 @@ async def run_due_schedules(pool: asyncpg.Pool):
             # Managed credential refs are target-bound and are resolved below. Defer
             # focused-family auth preconditions until those refs are present; otherwise
             # scheduled auth/BOLA scans fail even though the target has valid profiles.
-            scan_options = _build_scan_options_payload(
-                scan_options_model,
-                scan_type,
-                defer_family_preconditions=True,
-            )
             if canonical_schedule:
-                scan_options.update(scan_contract.option_metadata())
+                scan_options = _build_canonical_scan_options_payload(
+                    scan_options_model,
+                    scan_contract,
+                    defer_family_preconditions=True,
+                )
+            else:
+                scan_options = _build_scan_options_payload(
+                    scan_options_model,
+                    scan_type,
+                    defer_family_preconditions=True,
+                )
             scan_options = await _resolve_target_credential_profiles(conn, target_id, scan_options)
             scan_options, _family = _apply_scan_check_family_policy(scan_options)
             parallel_enabled, parallel_worker_count = _apply_auto_sharding_policy(
                 scan_options_model,
                 scan_options,
-                scan_type,
+                active_testing,
             )
             scan_role = 'parent' if parallel_enabled else 'standalone'
+
+            canonical_job = None
+            if canonical_schedule:
+                scan_options["runtime_scope_guard"] = await _freeze_scan_target_binding(
+                    target_id=target_id,
+                    target_kind="web",
+                    target_url=target_url,
+                    scope_receipt_id=scan_contract.policy.scope_receipt_id,
+                    scheme_inferred=False,
+                    existing_guard=scan_options.get("runtime_scope_guard"),
+                )
+                target_guard = scan_options["runtime_scope_guard"]
+                canonical_job = CanonicalScanJob.create(
+                    job_id=job_id,
+                    scan_id=scan_id,
+                    target=TargetBinding(
+                        target_id=str(target_id),
+                        target_kind="web",
+                        canonical_host=target_guard.get("canonical_host"),
+                        allowed_origins=tuple(target_guard.get("allowed_origins") or ()),
+                        allowed_addresses=tuple(target_guard.get("allowed_addresses") or ()),
+                        allowed_root_domains=tuple(target_guard.get("allowed_root_domains") or ()),
+                        environment=str(target_guard.get("environment") or "unknown"),
+                        scope_receipt_id=scan_contract.policy.scope_receipt_id,
+                    ),
+                    execution_plan=scan_contract.execution_plan,
+                    request_collections=admitted_request_collection_job_refs(
+                        [
+                            dict(item) for item in scan_options.get("request_collections") or ()
+                            if isinstance(item, Mapping)
+                        ]
+                    ),
+                    credential_profile_ids=admitted_credential_profile_ids(
+                        [
+                            dict(item) for item in scan_options.get("credential_profile_refs") or ()
+                            if isinstance(item, Mapping)
+                        ]
+                    ),
+                )
 
             await conn.execute("""
                 INSERT INTO scans (
                     id, target_id, target_url, job_id, status, options, scan_type, scan_role,
-                    scan_generation, policy_json, budget_json, coverage_status, coverage_json
-                ) VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, $8, $9, $10, $11, $12)
+                    scan_generation, policy_json, budget_json, coverage_status, coverage_json,
+                    scan_job_payload, scan_job_digest
+                ) VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, $8, $9, $10, $11, $12,
+                          $13, $14)
             """, uuid.UUID(scan_id), target_id, target_url, job_id,
                  json.dumps(scan_options), "scan" if canonical_schedule else scan_type, scan_role,
                  "v2" if canonical_schedule else "legacy",
                  json.dumps(scan_options.get("scan_policy") or {}),
                  json.dumps(scan_options.get("resolved_scan_budget") or {}),
                  "pending" if canonical_schedule else None,
-                 json.dumps({"status": "pending", "reasons": []}) if canonical_schedule else json.dumps({}))
+                 json.dumps({"status": "pending", "reasons": []}) if canonical_schedule else json.dumps({}),
+                 json.dumps(canonical_job.payload()) if canonical_job else None,
+                 canonical_job.payload_digest if canonical_job else None)
 
-        job_data = {
-            'job_id': job_id,
-            'scan_id': scan_id,
-            'target': target_url,
-            'options': scan_options,
-            'submitted_at': utc_now_iso(),
-            'scheduled': True,
-            'schedule_id': str(schedule_id)
-        }
+        job_data = (
+            canonical_job.queue_payload(
+                placement=(
+                    scan_options.get("placement")
+                    if isinstance(scan_options.get("placement"), Mapping) else None
+                ),
+            )
+            if canonical_job is not None
+            else {
+                'job_id': job_id,
+                'scan_id': scan_id,
+                'target': target_url,
+                'options': scan_options,
+                'submitted_at': utc_now_iso(),
+                'scheduled': True,
+                'schedule_id': str(schedule_id),
+            }
+        )
         if parallel_enabled:
             _configure_scan_plan_job(job_data, parallel_worker_count)
 
@@ -27988,8 +28091,8 @@ async def submit_scan(request: ScanRequest):
     scan_id = str(uuid.uuid4())
 
     # Every new web DAST submission resolves to the V2 policy/budget contract. Explicit old
-    # scan-type/boolean inputs remain compatibility aliases and retain their execution adapter
-    # during the migration, but are persisted with deprecation metadata.
+    # scan-type/boolean inputs remain API-boundary aliases and are persisted only as
+    # deprecation metadata; they never select worker execution behavior.
     legacy_requested = bool(
         str(request.options.scan_type or "").strip()
         or request.options.quick or request.options.thorough or request.options.active
@@ -28007,60 +28110,37 @@ async def submit_scan(request: ScanRequest):
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    scan_type = scan_contract.execution_scan_type
     public_scan_type = legacy_scan_type or "scan"
-    request.options.scan_type = scan_type
+    request.options.scan_type = None
     request.options.active = scan_contract.policy.active_testing
     # quick/thorough are caller-era mode selectors, not execution flags. A V2
-    # worker derives its temporary legacy backing adapter only after validating
-    # the immutable Scan plan, so persisting either selector would make the API's
-    # own canonical job fail worker admission.
+    # worker derives behavior only from the immutable Scan plan.
     request.options.quick = False
     request.options.thorough = False
     request.options.approval_receipt_id = approval_receipt_id
     request.options.budget_profile = scan_contract.budget_profile
     request.options.subfinder = bool(scan_contract.policy.subdomain_discovery)
-    if not legacy_scan_type:
-        canonical_budget = scan_contract.budget
-        translated_budget = {
-            "max_duration_minutes": max(1, canonical_budget.max_duration_seconds // 60),
-            "request_max": canonical_budget.max_http_requests,
-            "max_urls": canonical_budget.max_endpoints,
-            "active_worklist_max": canonical_budget.max_endpoints,
-            "browser_max_pages": min(2_000, canonical_budget.max_browser_actions),
-            "active_max_seconds": min(
-                canonical_budget.max_duration_seconds, canonical_budget.max_tool_wall_seconds
-            ),
-            "active_max_endpoints": min(10_000, canonical_budget.max_endpoints),
-        }
-        request.options.custom_budget = {
-            **translated_budget,
-            **dict(request.options.custom_budget or {}),
-        }
-        request.options.shard_concurrency = min(20, canonical_budget.max_workers)
+    request.options.shard_concurrency = min(20, scan_contract.budget.max_workers)
 
-    # Validate: public option is incompatible with active-enforced scan types
+    # Validate: public mode is incompatible with active testing.
     if scan_contract.policy.active_testing and request.options.public:
         raise HTTPException(
             status_code=400,
             detail={
                 "error": "invalid_options",
-                "message": f"'public' option is incompatible with '{scan_type}' scan type. "
-                           f"{scan_type.capitalize()} scans require active testing (XSS/SQLi probes). "
-                           "Use 'deep' scan type for passive-only comprehensive scanning.",
-                "hint": f"Either remove 'public: true' or change scan_type to 'deep'"
+                "message": "'public' is incompatible with policy.active_testing=true.",
+                "hint": "Either remove 'public: true' or set policy.active_testing=false",
             }
         )
 
     # Managed credentials are resolved only after the canonical target row is
     # known. Apply registry narrowing now, but defer credential preconditions
     # until the target-bound managed-profile refs have been attached below.
-    options_payload = _build_scan_options_payload(
+    options_payload = _build_canonical_scan_options_payload(
         request.options,
-        scan_type,
+        scan_contract,
         defer_family_preconditions=True,
     )
-    options_payload.update(scan_contract.option_metadata())
     try:
         authentication = normalize_scan_authentication(request.authentication)
     except ValueError as exc:
@@ -28101,7 +28181,7 @@ async def submit_scan(request: ScanRequest):
                 "error": "worker_inventory_unavailable",
                 "message": (
                     "No local scanner worker fleet could be positively identified; refusing "
-                    f"'{scan_type}' scan with require_current_workers=true. Verify Docker socket "
+                    "active Scan with require_current_workers=true. Verify Docker socket "
                     "access and Compose project labels, then retry."
                 ),
             },
@@ -28120,7 +28200,7 @@ async def submit_scan(request: ScanRequest):
                     "message": (
                         f"{unsafe_worker_count} of {_freshness['fleet_size']} workers are not confirmed "
                         f"current ({_freshness.get('stale_count', 0)} stale, "
-                        f"{_freshness.get('pending_count', 0)} pending); refusing '{scan_type}' scan "
+                        f"{_freshness.get('pending_count', 0)} pending); refusing active Scan "
                         "with require_current_workers=true. Restart workers to deploy current code and "
                         "wait for build fingerprints, then re-submit."
                     ),
@@ -28244,7 +28324,7 @@ async def submit_scan(request: ScanRequest):
         parallel_enabled, parallel_worker_count = _apply_auto_sharding_policy(
             request.options,
             options_payload,
-            scan_type,
+            scan_contract.policy.active_testing,
         )
         if parallel_worker_count is not None:
             parallel_worker_count = min(
@@ -28322,7 +28402,7 @@ async def submit_scan(request: ScanRequest):
             risk_tier=(
                 "credential"
                 if credential_refs
-                else "active" if scan_type in ACTIVE_ENFORCED_SCAN_TYPES else "passive"
+                else "active" if scan_contract.policy.active_testing else "passive"
             ),
             scan_id=scan_id,
             scope_receipt_id=options_payload.get("scope_receipt_id"),
@@ -61939,9 +62019,10 @@ async def _canonical_asm_scan_options(
             or ""
         ).strip() or None,
     )
+    for key in ("scan_type", "quick", "thorough"):
+        options.pop(key, None)
     options.update(contract.option_metadata())
     options.update({
-        "scan_type": contract.execution_scan_type,
         "active": True,
         "network_discovery": False,
         "subfinder": False,

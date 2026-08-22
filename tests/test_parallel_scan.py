@@ -477,3 +477,25 @@ def test_reconcile_skips_cancelled_parent():
     assert enqueued is False
     assert r.pushed == []
     assert r.store[parallel_scan.merge_guard_key(pid)] == "cancelled"
+
+
+def test_canonical_parallel_planning_uses_active_policy_without_a_scan_mode():
+    options = {
+        "scan_policy": {"active_testing": True},
+        "budget_profile": "balanced",
+    }
+
+    assert parallel_scan.resolve_auto_strategy(
+        options, None, "auto", active_testing=True,
+    ) == "coverage"
+    plan = parallel_scan.plan_shards(
+        options,
+        active_testing=True,
+        requested_shards=3,
+        strategy="family",
+        worker_count=3,
+    )
+
+    assert plan.is_parallel is True
+    assert [shard.label for shard in plan.shards] == ["broad", "sqli", "xss"]
+    assert all("scan_type" not in shard.options for shard in plan.shards)

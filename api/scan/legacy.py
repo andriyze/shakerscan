@@ -1,8 +1,7 @@
-"""Legacy DAST input translation and temporary old-worker compatibility.
+"""Legacy DAST input translation at the public API boundary.
 
 Legacy names are accepted only at the API boundary. They translate to a canonical
-Scan policy/budget. ``legacy_executor_alias`` exists solely until the monolithic
-scanner/worker is replaced; it must never appear inside ``ScanExecutionPlan``.
+Scan policy/budget and never enter worker execution authority.
 """
 
 from __future__ import annotations
@@ -10,12 +9,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Mapping
-
-try:
-    from runtime.models import ScanPolicy
-except ModuleNotFoundError:  # package import in host-side tests
-    from ..runtime.models import ScanPolicy
-
 
 LEGACY_SCAN_MAPPING: Mapping[str, Mapping[str, Any]] = MappingProxyType({
     "quick": {"budget_profile": "fast", "active_testing": False},
@@ -37,11 +30,6 @@ class LegacyScanTranslation:
     budget_profile: str
     active_testing: bool
     advanced: Mapping[str, Any] = field(default_factory=dict)
-
-    @property
-    def legacy_executor_alias(self) -> str:
-        """Deprecated inspection-only original name; never use it for V2 dispatch."""
-        return self.legacy_scan_type
 
     def deprecation(self) -> Mapping[str, Any]:
         return {
@@ -68,16 +56,3 @@ def translate_legacy_scan_type(value: str | None) -> LegacyScanTranslation | Non
         active_testing=bool(mapping["active_testing"]),
         advanced=MappingProxyType(dict(mapping.get("advanced") or {})),
     )
-
-
-def compatibility_executor_alias(
-    *, policy: ScanPolicy, translation: LegacyScanTranslation | None
-) -> str:
-    """Return one temporary passive/active backing preset for every V2 Scan.
-
-    The original legacy name remains deprecation metadata only. It must not resurrect
-    six execution paths after translation. Once the monolithic scanner consumes the
-    canonical plan directly, this two-value adapter can be deleted as well.
-    """
-    _ = translation
-    return "full" if policy.active_testing else "deep"

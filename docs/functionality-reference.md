@@ -1383,11 +1383,11 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
 | Local-agent adapters | 4 | `api/command_arsenal.py` |
-| Scanner CLI flags | 160 | `scanner/scanner.py` |
+| Scanner CLI flags | 161 | `scanner/scanner.py` |
 | Scanner wrapper commands | 28 | `scanner.sh` |
 | Make targets | 14 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
-| Runtime environment keys | 355 | Python sources + Compose manifests |
+| Runtime environment keys | 357 | Python sources + Compose manifests |
 | Scanner modules | 118 | `scanner/scanner_tools/` |
 | UI pages | 39 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
@@ -1773,7 +1773,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `jwt` | active | authentication | True | medium | True | `legacy_advanced_jwt` | `jwt_probe_attempt_v1` | JWT algorithm, signature, key, and claim mutation checks with acceptance proof. |
 | `lfi` | active | server_side | True | high | False | `none` | `planned_high_risk_attempt` | File inclusion and path traversal checks. Planned and permission-gated. |
 | `mass_assignment` | active | access_control | True | medium | True | `legacy_phase4_mass_assignment` | `mass_assignment_attempt_v1` | Bounded privileged-field mutation with baseline-vs-response effect proof. |
-| `nuclei` | template | nuclei | False | low | True | `legacy_nuclei_template` | `nuclei_template` | Nuclei template checks by severity/tag. Not an ASM endpoint-test family yet. |
+| `nuclei` | template | nuclei | True | medium | True | `legacy_nuclei_template` | `nuclei_template` | Nuclei template checks by severity/tag. Not an ASM endpoint-test family yet. |
 | `rce` | active | server_side | True | high | False | `none` | `planned_high_risk_attempt` | Command/code execution checks. Planned and permission-gated. |
 | `recon` | recon | passive | False | low | True | `legacy_discovery` | `discovery` | Crawl, API/HAR/OpenAPI discovery, and passive surface refresh. |
 | `sqli` | active | injection | True | medium | True | `legacy_active_loop` | `active_endpoint_attempt_v1` | SQL injection probes and proof/extraction depth. |
@@ -1924,6 +1924,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `--budget-profile` | fast, balanced, thorough, exhaustive | Depth/time budget profile. Scan type selects checks; budget controls how hard they run. |
 | `--budget-request-max` | - | - |
 | `--business-logic-testing` | - | Detect business logic vulnerability indicators |
+| `--canonical-scan` | - | - |
 | `--check-family` | - | Run a scanner-supported active check family: all, sqli, or xss |
 | `--cicd-exposure` | - | Test for exposed CI/CD configuration files |
 | `--cloud-bucket-testing` | - | Test for publicly accessible cloud storage buckets |
@@ -2346,6 +2347,8 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_BUILD_NETWORK` | `docker-compose.yml` |
 | `SHAKERSCAN_CALIBRATION_IMPORT_ROOT` | `scripts/device_posture_calibration.py` |
 | `SHAKERSCAN_CANCEL_FILE` | `scanner/scanner_tools/cancellation.py`, `scanner/scanner_tools/common.py`, `scanner/scanner_tools/discovery.py` |
+| `SHAKERSCAN_CANONICAL_SCAN_EXECUTION` | `scanner/scanner.py` |
+| `SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS` | `scanner/scanner.py` |
 | `SHAKERSCAN_COMPOSE_PROJECT` | `api/api.py` |
 | `SHAKERSCAN_CORS_ALLOW_ORIGINS` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_CORS_ALLOW_ORIGIN_REGEX` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |

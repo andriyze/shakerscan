@@ -31,8 +31,12 @@ on:
       - tests/test_hunt_*.py
       - tests/test_*capability*.py
       - tests/test_*adapter*.py
+      - tests/test_parallel_*.py
       - tests/test_request_meter.py
       - tests/test_subprocess_receipts.py
+      - tests/test_worker_scan_ai_gating.py
+      - tests/test_api_scan_option_masking.py
+      - tests/test_api_helpers.py
       - tests/test_request_collections_v2.py
       - tests/test_budget_reservation_lifecycle.py
       - tests/test_reservation_store.py
@@ -85,8 +89,12 @@ on:
       - tests/test_hunt_*.py
       - tests/test_*capability*.py
       - tests/test_*adapter*.py
+      - tests/test_parallel_*.py
       - tests/test_request_meter.py
       - tests/test_subprocess_receipts.py
+      - tests/test_worker_scan_ai_gating.py
+      - tests/test_api_scan_option_masking.py
+      - tests/test_api_helpers.py
       - tests/test_request_collections_v2.py
       - tests/test_budget_reservation_lifecycle.py
       - tests/test_reservation_store.py
@@ -139,14 +147,16 @@ jobs:
 
       - name: Validate canonical Scan and worker contracts
         env:
-          PYTHONPATH: api
+          PYTHONPATH: api:scanner
         run: |
           python -m pytest -q -p no:cacheprovider \
             tests/test_scan_v2_contract.py \
             tests/test_scan_execution_plan.py \
             tests/test_scan_job_contract.py \
             tests/test_scan_worker_contract.py \
-            tests/test_scan_worker_dispatch.py
+            tests/test_scan_worker_dispatch.py \
+            tests/test_api_scan_option_masking.py::test_canonical_options_builder_erases_legacy_identity_and_uses_plan_budget \
+            tests/test_api_helpers.py::test_canonical_schedule_queues_scan_job_v2_without_legacy_identity
 
       - name: Validate executable Scan stages and capability dispatch
         env:
@@ -157,12 +167,15 @@ jobs:
             tests/test_scan_stage_scheduler.py \
             tests/test_scan_capability_execution.py \
             tests/test_scan_subdomain_discovery.py \
+            tests/test_parallel_scan.py \
             tests/test_capability_executor.py \
             tests/test_inline_capability_adapters.py \
             tests/test_replay_capability_adapter.py \
             tests/test_scanner_execution_adapter.py \
             tests/test_request_meter.py \
-            tests/test_subprocess_receipts.py
+            tests/test_subprocess_receipts.py \
+            tests/test_worker_scan_ai_gating.py::test_run_scan_uses_native_fixed_stage_contract_for_canonical_plan \
+            tests/test_worker_scan_ai_gating.py::test_canonical_shard_builder_emits_secret_free_v2_queue_authority
 
       - name: Validate unified Hunt capability reservations
         env:

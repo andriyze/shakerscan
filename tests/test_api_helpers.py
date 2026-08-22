@@ -2615,7 +2615,7 @@ def test_enqueue_asm_exploit_batch_fails_committed_scan_when_queue_handoff_fails
     assert persisted_options["queue_handoff_confirmed"] is False
     assert persisted_options["scan_generation"] == "v2"
     assert persisted_options["scan_engine"] == "scan"
-    assert persisted_options["scan_type"] == "full"
+    assert "scan_type" not in persisted_options
     assert persisted_options["_canonical_target_binding"]["allowed_addresses"] == [
         "192.0.2.10"
     ]
@@ -2940,6 +2940,33 @@ def test_run_due_schedules_advances_schedule_after_successful_enqueue(monkeypatc
     assert "UPDATE scans" not in executed_sql
     assert len(redis_client.rpush_calls) == 1
     assert len(redis_client.hset_calls) == 1
+
+
+def test_canonical_schedule_queues_scan_job_v2_without_legacy_identity(monkeypatch):
+    schedule = _due_schedule()
+    schedule["scan_type"] = "scan"
+    schedule["scan_options"] = {
+        "budget_profile": "fast",
+        "policy": {"active_testing": False},
+    }
+    conn = _FakeConn([schedule])
+    redis_client = _RecordingRedis()
+    monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
+    _freeze_test_asm_target(monkeypatch)
+
+    asyncio.run(api_module.run_due_schedules(_FakePool(conn)))
+
+    queued = json.loads(redis_client.rpush_calls[0][1])
+    insert = next(item for item in conn.executes if "INSERT INTO scans" in item[0])
+    persisted_options = json.loads(insert[1][4])
+    persisted_job = json.loads(insert[1][12])
+    assert queued["schema_version"] == api_module.SCAN_JOB_SCHEMA
+    assert "options" not in queued
+    assert insert[1][5] == "scan"
+    assert insert[1][7] == "v2"
+    assert persisted_job["schema_version"] == api_module.SCAN_JOB_SCHEMA
+    assert insert[1][13]
+    assert not {"scan_type", "quick", "thorough"} & set(persisted_options)
 
 
 def test_run_due_schedules_disables_legacy_retention_schedule(monkeypatch):
@@ -11060,7 +11087,11 @@ def _resolve_sharding(monkeypatch, *, worker_count=4, auto_enabled=False, **opt_
     scan_type = opt_kwargs.get("scan_type", "smart")
     options = api_module.ScanOptions(**opt_kwargs)
     payload = api_module._build_scan_options_payload(options, scan_type)
-    enabled, _count = api_module._apply_auto_sharding_policy(options, payload, scan_type)
+    enabled, _count = api_module._apply_auto_sharding_policy(
+        options,
+        payload,
+        scan_type in api_module.ACTIVE_ENFORCED_SCAN_TYPES,
+    )
     return enabled, payload
 
 

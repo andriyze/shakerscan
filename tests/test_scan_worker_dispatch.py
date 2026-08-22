@@ -30,7 +30,6 @@ def _plan(*, active: bool = False) -> ScanExecutionPlan:
 
 def _options(plan: ScanExecutionPlan) -> dict:
     metadata = plan.option_metadata()
-    metadata["scan_type"] = "full" if plan.policy.active_testing else "deep"
     metadata["active"] = plan.policy.active_testing
     metadata["network_discovery"] = plan.policy.network_discovery
     metadata["subfinder"] = plan.policy.subdomain_discovery
@@ -40,7 +39,7 @@ def _options(plan: ScanExecutionPlan) -> dict:
 def test_canonical_dispatch_maps_plan_budget_and_families():
     prepared, admission = prepare_worker_dispatch(_options(_plan(active=True)))
     assert admission.canonical is True
-    assert prepared["scan_type"] == "full"
+    assert "scan_type" not in prepared
     assert prepared["custom_budget"] == {
         "max_duration_minutes": 20,
         "request_max": 5000,
@@ -127,23 +126,25 @@ def test_canonical_shard_dispatch_allows_worker_only_credential_hydration_after_
     assert prepared["max_workers"] == 1
 
 
-def test_passive_dispatch_uses_same_engine_with_passive_backing():
+def test_passive_dispatch_uses_same_engine_without_a_backing_mode():
     prepared, admission = prepare_worker_dispatch(_options(_plan()))
     assert admission.plan.engine == "scan"
-    assert prepared["scan_type"] == "deep"
+    assert "scan_type" not in prepared
     assert prepared["active"] is False
     assert "active_max_seconds" not in prepared["custom_budget"]
 
 
 def test_result_metadata_is_canonical_and_legacy_is_untouched():
     plan = _plan()
-    admission = WorkerScanAdmission(True, "deep", plan)
+    admission = WorkerScanAdmission(True, plan=plan)
     metadata = execution_result_metadata(admission)
     assert metadata["engine"] == "scan"
     assert metadata["plan_digest"] == plan.digest
     assert metadata["executor"]["name"] == "native_fixed_stage"
     assert "compatibility" not in metadata
-    assert execution_result_metadata(WorkerScanAdmission(False, "standard")) is None
+    assert execution_result_metadata(
+        WorkerScanAdmission(False, legacy_source="standard")
+    ) is None
 
 
 def test_non_dast_run_kinds_bypass_scan_admission():

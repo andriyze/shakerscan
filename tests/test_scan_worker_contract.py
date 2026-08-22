@@ -28,34 +28,27 @@ def _options(*, active=False, network=False, subdomains=False, state_change=Fals
         },
         approval_receipt_id=approval,
     )
-    result = contract.option_metadata()
-    result["scan_type"] = contract.execution_scan_type
-    return result
+    return contract.option_metadata()
 
 
-def test_passive_canonical_job_is_admitted_as_one_scan_with_deep_backing():
+def test_passive_canonical_job_is_admitted_as_one_scan_without_a_backing_mode():
     admission = resolve_worker_scan_admission(_options())
     assert admission.canonical is True
     assert admission.plan is not None
     assert admission.plan.engine == "scan"
-    assert admission.backing_scan_type == "deep"
     assert admission.canonical_overrides() == {
-        "scan_type": "deep",
         "active": False,
         "network_discovery": False,
         "subfinder": False,
         "budget_profile": "balanced",
-        "quick": False,
-        "thorough": False,
     }
 
 
-def test_active_canonical_job_derives_full_backing_from_policy_only():
+def test_active_canonical_job_derives_worker_policy_without_a_backing_mode():
     options = _options(active=True, network=True, subdomains=True)
     admission = resolve_worker_scan_admission(options)
-    assert admission.backing_scan_type == "full"
     normalized = admission.normalize_options({**options, "custom_endpoints": ["/api"]})
-    assert normalized["scan_type"] == "full"
+    assert "scan_type" not in normalized
     assert normalized["active"] is True
     assert normalized["network_discovery"] is True
     assert normalized["subfinder"] is True
@@ -116,13 +109,24 @@ def test_flattened_snapshots_must_match_plan():
 def test_caller_cannot_reintroduce_smart_aggressive_or_quick_execution():
     active = _options(active=True)
     active["scan_type"] = "smart"
-    with pytest.raises(WorkerScanContractError, match="caller-controlled scan_type"):
+    with pytest.raises(WorkerScanContractError, match="forbidden after canonical"):
         resolve_worker_scan_admission(active)
 
     passive = _options()
     passive["quick"] = True
     with pytest.raises(WorkerScanContractError, match="quick/thorough"):
         resolve_worker_scan_admission(passive)
+
+
+@pytest.mark.parametrize(
+    "legacy_scan_type",
+    ["quick", "standard", "deep", "full", "aggressive", "smart"],
+)
+def test_canonical_worker_rejects_every_legacy_scan_identity(legacy_scan_type):
+    options = _options(active=True)
+    options["scan_type"] = legacy_scan_type
+    with pytest.raises(WorkerScanContractError, match="forbidden after canonical"):
+        resolve_worker_scan_admission(options)
 
 
 def test_unknown_plan_policy_and_budget_fields_fail_closed():
@@ -171,22 +175,20 @@ def test_public_and_flattened_legacy_flags_cannot_conflict_with_plan():
 def test_legacy_jobs_remain_isolated_and_do_not_claim_canonical_authority():
     legacy = resolve_worker_scan_admission({"scan_type": "smart"})
     assert legacy.canonical is False
-    assert legacy.backing_scan_type == "smart"
+    assert legacy.legacy_source == "smart"
     assert legacy.plan is None
     assert legacy.canonical_overrides() == {}
 
     default = resolve_worker_scan_admission({})
     assert default.canonical is False
-    assert default.backing_scan_type == "standard"
+    assert default.legacy_source == "standard"
 
 
 def test_legacy_source_metadata_must_agree_with_translated_plan():
     contract = resolve_scan_contract(legacy_scan_type="smart")
     options = contract.option_metadata()
-    options["scan_type"] = contract.execution_scan_type
     admission = resolve_worker_scan_admission(options)
     assert admission.legacy_source == "smart"
-    assert admission.backing_scan_type == "full"
 
     changed = copy.deepcopy(options)
     changed["legacy_scan_type"] = "quick"

@@ -23,7 +23,7 @@ def test_canonical_scan_defaults_to_balanced_passive_v2():
     assert contract.policy.active_testing is False
     assert contract.execution_plan.engine == "scan"
     assert contract.execution_plan.generation == "v2"
-    assert contract.execution_scan_type == "deep"  # temporary old-worker adapter only
+    assert not hasattr(contract, "execution_scan_type")
     assert contract.legacy_scan_type is None
     assert contract.deprecations == ()
 
@@ -65,7 +65,6 @@ def test_every_legacy_type_translates_to_one_scan_plan_with_deprecation(
     assert contract.policy.active_testing is active
     assert contract.execution_plan.engine == "scan"
     assert contract.execution_plan.canonical_dict()["engine"] == "scan"
-    assert contract.execution_scan_type == ("full" if active else "deep")
     assert "scan_compatibility" not in contract.option_metadata()
     assert contract.deprecations == ({
         "field": "scan_type", "value": legacy,
@@ -73,20 +72,11 @@ def test_every_legacy_type_translates_to_one_scan_plan_with_deprecation(
     },)
 
 
-def test_all_legacy_names_collapse_to_two_temporary_worker_backing_presets():
-    aliases = {
-        legacy: resolve_scan_contract(legacy_scan_type=legacy).execution_scan_type
-        for legacy in LEGACY_SCAN_MAPPING
-    }
-    assert aliases == {
-        "quick": "deep",
-        "standard": "deep",
-        "deep": "deep",
-        "full": "full",
-        "aggressive": "full",
-        "smart": "full",
-    }
-    assert set(aliases.values()) == {"deep", "full"}
+def test_legacy_names_never_create_a_worker_execution_identity():
+    for legacy in LEGACY_SCAN_MAPPING:
+        contract = resolve_scan_contract(legacy_scan_type=legacy)
+        assert not hasattr(contract, "execution_scan_type")
+        assert "scan_type" not in contract.execution_plan.canonical_dict()
 
 
 def test_smart_legacy_mapping_never_becomes_hunt_or_enters_canonical_plan():
@@ -104,7 +94,8 @@ def test_budget_profile_changes_ceilings_not_engine_or_policy_semantics():
     assert fast.policy == thorough.policy
     assert fast.budget.max_http_requests < thorough.budget.max_http_requests
     assert fast.execution_plan.engine == thorough.execution_plan.engine == "scan"
-    assert fast.execution_scan_type == thorough.execution_scan_type == "full"
+    assert not hasattr(fast, "execution_scan_type")
+    assert not hasattr(thorough, "execution_scan_type")
 
 
 def test_active_permission_changes_policy_not_scan_identity():

@@ -30,8 +30,12 @@ def test_v2_workflow_watches_runtime_scanner_and_gate_paths():
         "tests/test_hunt_*.py",
         "tests/test_*capability*.py",
         "tests/test_*adapter*.py",
+        "tests/test_parallel_*.py",
         "tests/test_request_meter.py",
         "tests/test_subprocess_receipts.py",
+        "tests/test_worker_scan_ai_gating.py",
+        "tests/test_api_scan_option_masking.py",
+        "tests/test_api_helpers.py",
     ):
         assert text.count(f"- {path}") >= 2, path
 
@@ -52,6 +56,11 @@ def test_v2_workflow_executes_new_runtime_contracts_and_release_gates():
         "tests/test_scanner_execution_adapter.py",
         "tests/test_request_meter.py",
         "tests/test_subprocess_receipts.py",
+        "tests/test_parallel_scan.py",
+        "test_canonical_options_builder_erases_legacy_identity_and_uses_plan_budget",
+        "test_canonical_schedule_queues_scan_job_v2_without_legacy_identity",
+        "test_run_scan_uses_native_fixed_stage_contract_for_canonical_plan",
+        "test_canonical_shard_builder_emits_secret_free_v2_queue_authority",
     ):
         assert test_file in text, test_file
     assert "python scripts/release_gates.py" in text
