@@ -247,6 +247,21 @@ def test_unmetered_network_tool_fails_closed_only_in_enforce_mode():
     assert meter.snapshot()["rejected_requests"] == 1
 
 
+@pytest.mark.parametrize("tool", ["tlsx", "nmap", "testssl.sh", "openssl"])
+def test_unreserved_tls_and_tcp_tools_fail_closed_in_enforce_mode(tool):
+    meter = configure_request_meter(
+        limit=10, target_host="app.test", mode="enforce", planned=10, reserved=10
+    )
+    out, error, rc = asyncio.run(common.run([
+        tool, "app.test:443",
+    ]))
+
+    assert out == ""
+    assert rc == 75
+    assert "unmetered network tool" in error
+    assert meter.snapshot()["unmetered_tool_invocations"] == 1
+
+
 def test_local_network_tool_version_probe_does_not_consume_or_reject_budget(monkeypatch):
     meter = configure_request_meter(
         limit=10, target_host="app.test", mode="enforce", planned=10, reserved=10

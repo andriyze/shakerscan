@@ -291,7 +291,7 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
             "http_requests": 93,
             "state_changing_requests": 0,
             "browser_actions": 18,
-            "tcp_ports_attempted": 0,
+            "tcp_ports_attempted": 1,
             "hosts_attempted": 49,
             "tool_wall_seconds": 55,
         }
@@ -301,6 +301,12 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
             "result": {"score": 90, "grade": "A"},
             "coverage": {"status": "complete"},
             "discovery": {"browser_crawl": {"pages_visited": 2}},
+            "tls": {
+                "canonical_runtime": {
+                    "schema_version": "canonical-tls-runtime/v1",
+                    "tcp_ports_attempted": 1,
+                },
+            },
             "request_budget": {
                 "schema_version": "request_meter_v1",
                 "mode": "enforce",
@@ -652,12 +658,12 @@ def test_network_policy_runs_two_registry_actions_with_partitioned_budget(
     assert [call["capability_name"] for call in calls] == [
         "ports.discover", "service.fingerprint",
     ]
-    assert calls[0]["capability_args"]["ports"] == [21, 22, 25, 53, 80]
+    assert calls[0]["capability_args"]["ports"] == [21, 22, 25, 53]
     assert calls[1]["capability_args"]["ports"] == [21]
     assert calls[0]["target_binding"].allowed_addresses == ("192.0.2.10",)
     assert sum(
         call["reservation_limits"]["tcp_ports_attempted"] for call in calls
-    ) == 10
+    ) == 8
     assert sum(
         call["reservation_limits"]["tool_wall_seconds"] for call in calls
     ) == 60

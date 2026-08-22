@@ -284,7 +284,8 @@ async def run(
     request_url = request_urls[-1] if request_urls else None
     unmetered_network_tools = {
         "dalfox", "ffuf", "httpx", "katana", "meg", "nikto", "nuclei",
-        "sqlmap", "xsstrike.py",
+        "nmap", "naabu", "openssl", "sqlmap", "sslyze", "subfinder",
+        "testssl", "testssl.sh", "tlsx", "xsstrike.py",
     }
     meter = get_request_meter()
     if is_http_request and meter.enforcing and request_url and "-L" in cmd:

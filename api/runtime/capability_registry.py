@@ -158,6 +158,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             None,
             {
                 "http_requests": 1,
+                "tcp_ports_attempted": 1,
                 "hosts_attempted": 1,
                 "tool_wall_seconds": 1,
             },

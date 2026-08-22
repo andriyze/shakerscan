@@ -134,6 +134,7 @@ def _budget_payload(budget: ScanBudget | ScanShardBudget) -> dict[str, int]:
 def _runtime_budget_limits(
     plan: ScanExecutionPlan,
     budget: ScanBudget | ScanShardBudget,
+    target: TargetBinding,
 ) -> dict[str, int]:
     values = _budget_payload(budget)
     state_changing = (
@@ -145,10 +146,15 @@ def _runtime_budget_limits(
         "http_requests": values["max_http_requests"],
         "state_changing_requests": state_changing,
         "browser_actions": values["max_browser_actions"],
-        # Canonical port discovery is a separately reserved worker capability.
-        # Scanner-owned unmetered TCP tools are blocked by the enforcing request
-        # meter until TLS is migrated to its own capability action.
-        "tcp_ports_attempted": 0,
+        # Canonical port discovery is separately reserved. The native baseline
+        # may use one additional TCP port for its frozen-address TLS handshake.
+        "tcp_ports_attempted": min(
+            values["max_tcp_ports"],
+            1 if any(
+                str(origin).lower().startswith("https://")
+                for origin in target.allowed_origins
+            ) else 0,
+        ),
         "hosts_attempted": values["max_endpoints"],
         "tool_wall_seconds": values["max_tool_wall_seconds"],
     }
@@ -223,7 +229,7 @@ class NativeScanExecution:
 
     def __post_init__(self) -> None:
         limits = _runtime_budget_limits(
-            self.execution_plan, self.execution_budget,
+            self.execution_plan, self.execution_budget, self.target_binding,
         )
         normalized = _normalize_runtime_budget(
             limits if self.runtime_budget is None else self.runtime_budget,

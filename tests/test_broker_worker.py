@@ -39,7 +39,7 @@ def _canonical_broker_scan_lease():
         "http_requests": 20,
         "state_changing_requests": 0,
         "browser_actions": 4,
-        "tcp_ports_attempted": 0,
+        "tcp_ports_attempted": 1,
         "hosts_attempted": 10,
         "tool_wall_seconds": 30,
     }
@@ -61,7 +61,7 @@ def _canonical_broker_scan_lease():
             "requested_budget": {
                 name: amount
                 for name, amount in runtime.items()
-                if amount > 0 and name != "tcp_ports_attempted"
+                if amount > 0
             },
         },
     }

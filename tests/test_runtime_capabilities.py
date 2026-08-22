@@ -45,11 +45,14 @@ def test_registry_is_authoritative_for_legacy_hunt_tools_and_arsenal():
 
 def test_registry_filters_target_kind_and_active_permission():
     safe_web = {spec.name for spec in CAPABILITY_REGISTRY.list(
-        target_kind="web", include_active=False
+        target_kind="web", include_active=False,
     )}
-    all_device = {spec.name for spec in CAPABILITY_REGISTRY.list(target_kind="device")}
+    all_device = {
+        spec.name for spec in CAPABILITY_REGISTRY.list(target_kind="device")
+    }
 
     assert safe_web == {
+        "scan.execute",
         "web.probe", "http.request", "subdomains.discover", "tls.inspect", "browser.navigate",
         "browser.interact",
         "collections.inspect", "collections.select", "collections.replay_safe",

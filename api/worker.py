@@ -10707,6 +10707,12 @@ async def _execute_scan_network_discovery(
     allocation = scan_network_capability_allocation(
         budget,
         available_address_count=len(target.allowed_addresses),
+        reserved_tcp_ports=(
+            1 if any(
+                str(origin).lower().startswith("https://")
+                for origin in target.allowed_origins
+            ) else 0
+        ),
     )
     addresses = tuple(
         target.allowed_addresses[:int(allocation["address_count"])]

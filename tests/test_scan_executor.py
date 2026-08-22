@@ -62,6 +62,7 @@ def test_native_scan_uses_one_fixed_stage_graph_for_passive_and_active_policy():
     assert passive.stage_rows()[5]["enabled"] is False
     assert active.stage_rows()[3]["enabled"] is True
     assert active.stage_rows()[5]["enabled"] is True
+    assert passive.payload()["runtime_budget"]["tcp_ports_attempted"] == 1
     assert validate_native_scan_execution_payload(active.payload()) == active.payload()
 
     discovery = _build(

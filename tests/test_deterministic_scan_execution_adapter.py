@@ -28,6 +28,7 @@ def test_deterministic_scan_adapter_heartbeats_and_settles_measured_usage():
         "http_requests": 20,
         "state_changing_requests": 5,
         "browser_actions": 8,
+        "tcp_ports_attempted": 1,
         "hosts_attempted": 10,
         "tool_wall_seconds": 10,
     }
@@ -43,6 +44,12 @@ def test_deterministic_scan_adapter_heartbeats_and_settles_measured_usage():
             "findings": [{"id": "one"}],
             "coverage": {"status": "complete"},
             "discovery": {"browser_crawl": {"pages_visited": 2}},
+            "tls": {
+                "canonical_runtime": {
+                    "schema_version": "canonical-tls-runtime/v1",
+                    "tcp_ports_attempted": 1,
+                },
+            },
             "request_budget": {
                 "schema_version": "request_meter_v1",
                 "mode": "enforce",
@@ -78,6 +85,7 @@ def test_deterministic_scan_adapter_heartbeats_and_settles_measured_usage():
         "http_requests": 4,
         "state_changing_requests": 1,
         "browser_actions": 2,
+        "tcp_ports_attempted": 1,
         "hosts_attempted": 1,
         "tool_wall_seconds": 1,
     }

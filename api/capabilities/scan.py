@@ -41,6 +41,8 @@ def measure_deterministic_scan_result(
     request_budget = _mapping(report.get("request_budget"))
     discovery = _mapping(report.get("discovery"))
     browser_crawl = _mapping(discovery.get("browser_crawl"))
+    tls = _mapping(report.get("tls"))
+    tls_runtime = _mapping(tls.get("canonical_runtime"))
     error = str(report.get("error") or "").strip()
     timed_out = bool(metadata.get("timed_out"))
     partial = bool(
@@ -76,6 +78,15 @@ def measure_deterministic_scan_result(
         if "hosts_attempted" in bounded_request:
             actual["hosts_attempted"] = min(
                 bounded_request["hosts_attempted"], 1,
+            )
+        if (
+            "tcp_ports_attempted" in bounded_request
+            and tls_runtime.get("schema_version")
+            == "canonical-tls-runtime/v1"
+        ):
+            actual["tcp_ports_attempted"] = min(
+                bounded_request["tcp_ports_attempted"],
+                max(0, int(tls_runtime.get("tcp_ports_attempted") or 0)),
             )
         exact_http = bool(
             request_budget.get("schema_version") == "request_meter_v1"

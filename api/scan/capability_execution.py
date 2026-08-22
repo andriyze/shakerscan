@@ -49,6 +49,7 @@ def scan_network_capability_allocation(
     budget: Mapping[str, Any],
     *,
     available_address_count: int,
+    reserved_tcp_ports: int = 0,
 ) -> dict[str, Any]:
     """Partition exact Scan ceilings across port discovery and fingerprinting."""
     addresses = int(available_address_count)
@@ -58,6 +59,8 @@ def scan_network_capability_allocation(
         )
     endpoints = _budget_integer(budget, "max_endpoints")
     ports = _budget_integer(budget, "max_tcp_ports")
+    reserve = max(0, min(ports - 1, int(reserved_tcp_ports)))
+    ports -= reserve
     wall = _budget_integer(budget, "max_tool_wall_seconds")
     can_fingerprint = endpoints >= 2 and ports >= 2 and wall >= 2
     passes = 2 if can_fingerprint else 1
@@ -75,6 +78,7 @@ def scan_network_capability_allocation(
     first_wall = max(1, wall // passes)
     result: dict[str, Any] = {
         "address_count": address_count,
+        "reserved_tcp_ports": reserve,
         "ports": selected_ports,
         "port_discovery_limits": {
             "hosts_attempted": address_count,
@@ -167,16 +171,23 @@ def prepare_scan_process_capability(
             if allow_state_changing_http else 0
         ),
         "browser_actions": remaining.get("browser_actions", 0),
-        # Network discovery is separately reserved. Scanner-owned external TCP
-        # tools remain blocked until TLS is moved behind its own capability.
-        "tcp_ports_attempted": 0,
+        # Network discovery is separately reserved. The native scanner may use
+        # one residual port for a frozen-address TLS handshake and no other
+        # canonical TCP analyzer.
+        "tcp_ports_attempted": min(
+            remaining.get("tcp_ports_attempted", 0),
+            1 if any(
+                str(origin).lower().startswith("https://")
+                for origin in target.allowed_origins
+            ) else 0,
+        ),
         "hosts_attempted": remaining.get("hosts_attempted", 0),
         "tool_wall_seconds": remaining.get("tool_wall_seconds", 0),
     }
     requested = {
         name: amount
         for name, amount in runtime_budget.items()
-        if amount > 0 and name != "tcp_ports_attempted"
+        if amount > 0
     }
     for mandatory in (
         "http_requests", "hosts_attempted", "tool_wall_seconds",

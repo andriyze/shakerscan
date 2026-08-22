@@ -185,7 +185,7 @@ def test_broker_scan_reserves_before_lease_heartbeats_and_settles_exact_http():
         "http_requests": 40,
         "state_changing_requests": 40,
         "browser_actions": 19,
-        "tcp_ports_attempted": 0,
+        "tcp_ports_attempted": 1,
         "hosts_attempted": 49,
         "tool_wall_seconds": 55,
     }
@@ -205,6 +205,12 @@ def test_broker_scan_reserves_before_lease_heartbeats_and_settles_exact_http():
         "findings": [{"id": "finding-1"}],
         "coverage": {"status": "complete"},
         "discovery": {"browser_crawl": {"pages_visited": 2}},
+        "tls": {
+            "canonical_runtime": {
+                "schema_version": "canonical-tls-runtime/v1",
+                "tcp_ports_attempted": 1,
+            },
+        },
         "request_budget": {
             "schema_version": "request_meter_v1",
             "mode": "enforce",
@@ -223,6 +229,7 @@ def test_broker_scan_reserves_before_lease_heartbeats_and_settles_exact_http():
         "http_requests": 3,
         "state_changing_requests": 1,
         "browser_actions": 2,
+        "tcp_ports_attempted": 1,
         "hosts_attempted": 1,
         # Remote elapsed time is not independently trusted.
         "tool_wall_seconds": 55,

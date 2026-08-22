@@ -9,6 +9,7 @@ import hmac
 import inspect
 import json
 import logging
+import math
 import os
 import re
 import shlex
@@ -3789,6 +3790,124 @@ def _append_endpoint_attempt_telemetry(active_block: dict[str, Any], attempts: A
     active_block["endpoint_attempt_schema_version"] = ENDPOINT_ATTEMPT_SCHEMA_V1
 
 
+async def _canonical_tls_runtime_probe(
+    execution: Mapping[str, Any],
+    *,
+    host: str,
+    port: int,
+    scheme: str,
+) -> dict[str, Any]:
+    """Run exactly one frozen-address TLS handshake for canonical Scan."""
+    runtime = execution.get("runtime_budget")
+    target_binding = execution.get("target_binding")
+    runtime = dict(runtime) if isinstance(runtime, Mapping) else {}
+    target_binding = (
+        dict(target_binding) if isinstance(target_binding, Mapping) else {}
+    )
+    tcp_limit = max(0, int(runtime.get("tcp_ports_attempted") or 0))
+    addresses = [
+        str(value)
+        for value in target_binding.get("allowed_addresses") or []
+        if str(value)
+    ]
+    base_runtime = {
+        "schema_version": "canonical-tls-runtime/v1",
+        "target_binding_digest": execution.get("target_binding_digest"),
+        "server_hostname": host,
+        "port": int(port),
+        "tcp_ports_attempted": 0,
+        "tool_wall_seconds": 0,
+    }
+    skipped = {
+        "tlsx": {"endpoints": [], "certificate": {}},
+        "ocsp": {
+            "stapled": False, "ocsp_url": None, "raw": "",
+            "skipped": True,
+        },
+        "nmap": {**NMAP_CIPHERS_SHAPE, "skipped": True},
+        "testssl": {**TESTSSL_SHAPE, "skipped": True},
+        "sslyze": {**SSLYZE_SHAPE, "skipped": True},
+    }
+    if scheme.lower() != "https":
+        base_runtime.update({"status": "not_applicable", "reason": "non_https"})
+        return {**skipped, "runtime": base_runtime}
+    if tcp_limit < 1 or not addresses:
+        base_runtime.update({
+            "status": "blocked",
+            "reason": "tcp_budget_or_frozen_address_unavailable",
+        })
+        return {**skipped, "runtime": base_runtime}
+
+    pinned_address = addresses[0]
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    context.set_alpn_protocols(["h2", "http/1.1"])
+    started = time.perf_counter()
+    writer: asyncio.StreamWriter | None = None
+    try:
+        _reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(
+                host=pinned_address,
+                port=int(port),
+                ssl=context,
+                server_hostname=host,
+            ),
+            timeout=min(
+                10,
+                max(1, int(runtime.get("tool_wall_seconds") or 1)),
+            ),
+        )
+        tls_object = writer.get_extra_info("ssl_object")
+        if tls_object is None:
+            raise ssl.SSLError("TLS handshake produced no SSL object")
+        certificate_der = tls_object.getpeercert(binary_form=True) or b""
+        cipher = tls_object.cipher()
+        endpoint = {
+            "ip": pinned_address,
+            "port": int(port),
+            "tlsversion": tls_object.version(),
+            "cipher": cipher[0] if cipher else None,
+            "alpn": tls_object.selected_alpn_protocol(),
+            "handshake_completed": True,
+        }
+        certificate = {
+            "fingerprints": {
+                "sha256": hashlib.sha256(certificate_der).hexdigest()
+            } if certificate_der else {},
+            "certificate_bytes": len(certificate_der),
+        }
+        elapsed = max(1, math.ceil(time.perf_counter() - started))
+        base_runtime.update({
+            "status": "success",
+            "pinned_address": pinned_address,
+            "tcp_ports_attempted": 1,
+            "tool_wall_seconds": elapsed,
+        })
+        return {
+            **skipped,
+            "tlsx": {"endpoints": [endpoint], "certificate": certificate},
+            "runtime": base_runtime,
+        }
+    except (OSError, ssl.SSLError, asyncio.TimeoutError) as exc:
+        elapsed = max(1, math.ceil(time.perf_counter() - started))
+        base_runtime.update({
+            "status": "failed",
+            "pinned_address": pinned_address,
+            "error": f"tls_handshake:{type(exc).__name__}",
+            "tcp_ports_attempted": 1,
+            "tool_wall_seconds": elapsed,
+        })
+        return {**skipped, "runtime": base_runtime}
+    finally:
+        if writer is not None:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except (OSError, ssl.SSLError):
+                pass
+
+
 async def build_report(target: str,
                        dkim_selectors: list[str] | None=None,
                        openapi_url: str | None=None,
@@ -4885,17 +5004,40 @@ async def build_report(target: str,
     else:
         dmarc_task  = asyncio.create_task(fetch_dmarc(host))
         dnssec_task = asyncio.create_task(check_dnssec(host))
-    tlsx_task   = asyncio.create_task(tlsx_probe(host, port))
-    ocsp_task   = asyncio.create_task(openssl_ocsp(host, port))
+    canonical_tls_task = None
+    if canonical_scan_execution is not None:
+        canonical_tls_task = asyncio.create_task(
+            _canonical_tls_runtime_probe(
+                canonical_scan_execution,
+                host=host,
+                port=port,
+                scheme=scheme,
+            )
+        )
+        tlsx_task = None
+        ocsp_task = None
+    else:
+        tlsx_task = asyncio.create_task(tlsx_probe(host, port))
+        ocsp_task = asyncio.create_task(openssl_ocsp(host, port))
 
     # Skip slow TLS scans when the scan intent is speed or exact active verification.
-    skip_slow_tls_analysis = (public_only and quick_mode) or focused_manual_active_scope
+    skip_slow_tls_analysis = (
+        canonical_scan_execution is not None
+        or (public_only and quick_mode)
+        or focused_manual_active_scope
+    )
     if skip_slow_tls_analysis:
         if focused_manual_active_scope:
             print("[smart] Focused manual active scope: skipping slow TLS analyzers", file=sys.stderr)
         # Basic TLS info only - skip deep cipher analysis. This skip fires for
         # focused scans AND public+quick mode, so carry the specific reason.
-        skip_reason = "focused_manual_active_scope" if focused_manual_active_scope else "public_quick_mode"
+        skip_reason = (
+            "canonical_frozen_tls_runtime"
+            if canonical_scan_execution is not None
+            else "focused_manual_active_scope"
+            if focused_manual_active_scope
+            else "public_quick_mode"
+        )
         nmap_task   = asyncio.create_task(_focused_async_value(focused_scope.skipped_result(NMAP_CIPHERS_SHAPE, reason=skip_reason)))
         testssl_task= asyncio.create_task(_focused_async_value(focused_scope.skipped_result(TESTSSL_SHAPE, reason=skip_reason)))
         sslyze_task = asyncio.create_task(_focused_async_value(focused_scope.skipped_result(SSLYZE_SHAPE, reason=skip_reason)))
@@ -5494,11 +5636,26 @@ async def build_report(target: str,
     dns = await dns_task
     dmarc = await dmarc_task
     dnssec = await dnssec_task
-    tlsx_data = await tlsx_task
-    ocsp = await ocsp_task
-    nmap_ = await nmap_task
-    testssl_ = await testssl_task
-    sslyze_ = await sslyze_task
+    canonical_tls_runtime: dict[str, Any] | None = None
+    if canonical_tls_task is not None:
+        canonical_tls = await canonical_tls_task
+        tlsx_data = dict(canonical_tls.get("tlsx") or {})
+        ocsp = dict(canonical_tls.get("ocsp") or {})
+        nmap_ = dict(canonical_tls.get("nmap") or {})
+        testssl_ = dict(canonical_tls.get("testssl") or {})
+        sslyze_ = dict(canonical_tls.get("sslyze") or {})
+        canonical_tls_runtime = dict(canonical_tls.get("runtime") or {})
+        # These tasks contain only bounded skipped-result values in canonical
+        # mode; await them so their lifecycle remains explicit and leak-free.
+        await asyncio.gather(nmap_task, testssl_task, sslyze_task)
+    else:
+        if tlsx_task is None or ocsp_task is None:
+            raise RuntimeError("TLS task initialization failed")
+        tlsx_data = await tlsx_task
+        ocsp = await ocsp_task
+        nmap_ = await nmap_task
+        testssl_ = await testssl_task
+        sslyze_ = await sslyze_task
     headers_main = await head_task
     http2 = await h2_task
     http3 = await h3_task
@@ -7273,6 +7430,7 @@ async def build_report(target: str,
         "tls": {
             "endpoints": tlsx_data["endpoints"],
             "certificate": cert,
+            "canonical_runtime": canonical_tls_runtime,
             "ocsp": ocsp,
             "nmap": nmap_,
             "testssl": testssl_,

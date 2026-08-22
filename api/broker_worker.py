@@ -136,7 +136,7 @@ def _broker_scan_runtime_budget(
     expected_requested = {
         name: amount
         for name, amount in normalized.items()
-        if amount > 0 and name != "tcp_ports_attempted"
+        if amount > 0
     }
     if normalized_requested != expected_requested:
         raise BrokerWorkerError(
